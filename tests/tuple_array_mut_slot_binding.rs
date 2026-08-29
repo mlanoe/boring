@@ -1,8 +1,7 @@
 // Copyright (C) 2026 Mickaël LANOË
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Regression test for a transpiler codegen gap documented in
-// docs/mut-type-modifier.md's "Known implementation bugs": owned `mut Type`
+// Regression test for a real transpiler codegen gap: owned `mut Type`
 // inside a tuple slot (`(mut Point, string) t`) or an array element
 // (`[mut Point] arr`) is correctly permission-checked by the checker/
 // interpreter (a `def` call through the mut slot/element is allowed — see
@@ -22,9 +21,10 @@
 // true for a tuple with any `mut`-qualified slot or an array/`ArrayN` with a
 // `mut`-qualified element type — and forcing `let mut` whenever it's set,
 // exactly mirroring how a plain `mut`-qualified struct binding already gets
-// `let mut` today. This is the "Transpiler honesty" invariant already stated
-// in docs/mut-type-modifier.md's "Interactions and invariants" section,
-// finally implemented as codegen rather than just a stated invariant.
+// `let mut` today. This is a "transpiler honesty" invariant — the checker's
+// per-slot permission tracking must be backed by a Rust binding that's
+// actually `mut` wherever Rust itself has no per-slot equivalent — finally
+// implemented as codegen rather than just an unenforced assumption.
 //
 // Deliberately scoped to tuples/arrays only — dict value mutation
 // (`{K = mut V}`) has a separate, worse bug (silently mutates a throwaway

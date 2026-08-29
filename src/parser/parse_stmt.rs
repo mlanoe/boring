@@ -440,7 +440,7 @@ impl Parser {
     /// Handles both the parenthesised form `(a, b)` and the bare form `a, b`.
     /// Called after the statement's own mandatory leading keyword phrase
     /// (`binding`/`var_mut`) has already been consumed — that phrase doubles as
-    /// element 0's own keyword (see docs/mut-type-modifier.md §4's grammar note:
+    /// element 0's own keyword (see docs/book.md's grammar note:
     /// "the statement's own leading keyword phrase [is] mandatory on the *first*
     /// element"). Element 1+ may each carry their own explicit `let`/`mut`/
     /// `var`(` mut`); an unmarked element defaults per §4's bare-vs-parenthesised
@@ -483,7 +483,7 @@ impl Parser {
             };
 
             // Resolve this slot's binding: its own explicit keyword, or the
-            // bare-vs-parenthesised default (docs/mut-type-modifier.md §4).
+            // bare-vs-parenthesised default (docs/book.md).
             let (elem_binding, elem_var_mut) = own_keyword.unwrap_or_else(|| {
                 if parens { (binding.clone(), var_mut) } else { (BindingKind::Let, false) }
             });

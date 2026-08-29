@@ -227,7 +227,7 @@ pub struct FieldDecl {
     /// `true` for `var`/`var mut` (the field's own name — `self.field = x` — may be
     /// reassigned to a different instance); `false` for `let`/`mut` (bare or
     /// explicit `let mut`). This is the *reassignment* axis only, independent of
-    /// content mutation — see docs/mut-type-modifier.md §3. Before that document,
+    /// content mutation — see docs/book.md. Before that document,
     /// this single flag conflated both (`var Point p` granted `self.p = x` AND
     /// `self.p.inc()`); content-mutation permission ("can `self.field.method()` be
     /// called, can a nested field be written") now comes from `ty.grants_mut()`
@@ -477,8 +477,8 @@ pub enum BindingKind {
 
 /// Whether a `let_stmt`/destructure-slot's binding keyword + type together grant
 /// content-mutation permission — `def` calls, field writes, structural
-/// collection mutation (docs/mut-type-modifier.md, Implementation checklist
-/// item 0). Used by the interpreter/transpiler wherever a `LetStmt` or
+/// collection mutation (`Type::grants_mut` is the real source of truth —
+/// see its own doc comment). Used by the interpreter/transpiler wherever a `LetStmt` or
 /// `DestructureBinding` is bound, to decide whether to also mark the binding
 /// content-mutable (separately from whether it's *rebindable*, `BindingKind::Var`).
 ///
@@ -504,13 +504,13 @@ impl BindingKind {
     /// (`Var` to allow reassignment, `Mut` because the type it always carries is
     /// `mut`-wrapped and needs `&mut self` to call through). Still correct for
     /// that one purpose — transpiler codegen deciding `let` vs `let mut` for the
-    /// *outer* Rust local — after docs/mut-type-modifier.md.
+    /// *outer* Rust local — after docs/book.md.
     ///
     /// **No longer the source of truth for "is `def`/field-write/collection-mutation
     /// allowed."** That permission now comes from whether the *resolved type*
     /// carries `mut` (`Type::grants_mut`), not from `BindingKind` alone — a plain
     /// `var Point p` (this returns `true`) does NOT permit `p.inc()` under the new
-    /// rules; only `var mut Point p` does. See docs/mut-type-modifier.md's
+    /// rules; only `var mut Point p` does. See docs/book.md's
     /// Implementation checklist item 0.
     pub fn is_mutable(&self) -> bool {
         matches!(self, BindingKind::Mut | BindingKind::Var)
@@ -600,7 +600,7 @@ pub struct LetDestructureStmt {
     pub binding: BindingKind,
     /// The group's own leading `var mut` — see `LetStmt.var_mut`'s doc. Also
     /// serves as (half of) the parenthesised form's per-element default
-    /// (docs/mut-type-modifier.md §4).
+    /// (docs/book.md).
     pub var_mut: bool,
     pub bindings: Vec<DestructureBinding>,
     pub value: Expr,
@@ -612,7 +612,7 @@ pub struct LetDestructureStmt {
 /// Use `_` as name for a wildcard slot.
 ///
 /// Each slot carries its own fully-resolved `binding`/`var_mut`, per
-/// docs/mut-type-modifier.md §4 — the parser resolves an unmarked slot's default
+/// docs/book.md — the parser resolves an unmarked slot's default
 /// (bare form → always `Let`; parenthesised form → inherits the group's own
 /// leading keyword, `LetDestructureStmt.binding`/`.var_mut`) before ever
 /// constructing this struct, so nothing downstream needs to re-derive it.
@@ -632,7 +632,7 @@ pub struct DestructureBinding {
     pub var_mut: bool,
     /// `true` when this slot was left unmarked in a *bare* (no parens) destructure
     /// immediately after a *different* slot in the same statement carried its own
-    /// explicit keyword — docs/mut-type-modifier.md §4's readability trap
+    /// explicit keyword — docs/book.md's readability trap
     /// (`mut a, b = t` reads like `b` inherits `mut`; it quietly defaults to
     /// `let` instead). Correct either way — this only drives a lint warning, not
     /// an error.
@@ -1317,7 +1317,7 @@ pub enum Type {
     /// Associated type access on a named type: `LinkedList.Index`, `Tree<T>.Node`.
     /// First element is the base type, second is the associated type name.
     AssocOf(Box<Type>, String),
-    /// `mut Type` (owned form, no `&`) — see docs/mut-type-modifier.md. A Boring-only
+    /// `mut Type` (owned form, no `&`) — see docs/book.md. A Boring-only
     /// permission with no distinct Rust type behind it: unlocks `def` calls and field
     /// writes on whatever this type nests into (a local binding, a tuple slot, a
     /// struct field, an array element, a dict value). The *borrowed* form (`mut
@@ -1383,7 +1383,7 @@ impl Type {
     /// The element/value type an index read (`arr[i]`, `dict[k]`) yields,
     /// for a collection type — `[mut Point] arr` vs plain `[Point] arr`
     /// controls whether `arr[i].method()` may call a `def` method, exactly
-    /// like a struct field's own type does (docs/mut-type-modifier.md §3).
+    /// like a struct field's own type does (docs/book.md).
     /// Strips one level of `Type::Mut` first (the *collection's own* mut,
     /// `mut [Point]`, is a different axis — structural mutation of the
     /// collection itself — and doesn't affect this). Keys/sets have no
@@ -1420,7 +1420,7 @@ impl Type {
 
     /// True if this type is a tuple with a `mut`-qualified slot, or an array/`ArrayN`
     /// with a `mut`-qualified element type — the two owned-`mut Type` positions
-    /// (docs/mut-type-modifier.md §3) that have no per-slot Rust representation at
+    /// (docs/book.md) that have no per-slot Rust representation at
     /// all. Rust has no per-tuple-element `mut` and no per-index `Vec` mutability, so
     /// the checker's per-slot permission tracking (`grants_mut`, already correct —
     /// see `tuple_slot_mut_flags`/`index_element_type`) has nothing to attach to on
@@ -1449,6 +1449,34 @@ impl Type {
             Type::Mut(inner) | Type::Optional(inner) | Type::Qualified(inner, _) => {
                 inner.nested_slot_grants_mut()
             }
+            _ => false,
+        }
+    }
+
+    /// True if a `Set` (`{T}`) appears anywhere in this type's structure with a
+    /// `mut`-qualified element type (`{mut T}`) — illegal unconditionally, per
+    /// docs/book.md: `std::collections::HashSet<T>` exposes no
+    /// mutable element access in Rust at all (no `iter_mut()`, no `get_mut()`),
+    /// because mutating an element in place could change its `Hash`/`Eq`
+    /// behavior and silently corrupt the set's buckets. Unlike
+    /// `nested_slot_grants_mut` (which tracks which slot needs a Rust-level
+    /// `let mut` for an otherwise-legal `mut` placement), this is a pure
+    /// well-formedness scan — `{mut T}` has no legal transpiler target at all,
+    /// regardless of any *outer* binding's own mutability. Recurses into every
+    /// position a `Set` could be nested (tuple slots, array/dict elements,
+    /// generic arguments, qualifiers) so `[{mut T}]`, `({mut T}, int)`, etc.
+    /// are all caught too, not just a bare `{mut T}` at the top level.
+    pub fn contains_illegal_mut_set(&self) -> bool {
+        match self {
+            Type::Set(elem) => elem.grants_mut() || elem.contains_illegal_mut_set(),
+            Type::Tuple(elems) => elems.iter().any(Type::contains_illegal_mut_set),
+            Type::Dict(k, v) => k.contains_illegal_mut_set() || v.contains_illegal_mut_set(),
+            Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _)
+                | Type::LabeledArray(inner, _) | Type::Optional(inner) | Type::Mut(inner)
+                | Type::Qualified(inner, _) | Type::Dyn(inner) | Type::Impl(inner) => {
+                inner.contains_illegal_mut_set()
+            }
+            Type::Generic(_, args) => args.iter().any(Type::contains_illegal_mut_set),
             _ => false,
         }
     }

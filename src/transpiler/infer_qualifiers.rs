@@ -760,7 +760,7 @@ impl Transpiler {
 
         // Collect private, unqualified fields with their declared inner type name.
         let target_fields: std::collections::HashMap<String, String> = s.fields.iter()
-            // `mut Point p` wraps `f.ty` in `Type::Mut` (docs/mut-type-modifier.md
+            // `mut Point p` wraps `f.ty` in `Type::Mut` (docs/book.md
             // §3) — strip it before inspecting the shape, same as everywhere else.
             .filter(|f| !matches!(f.ty.without_mut(), Type::Qualified(..)))
             .filter_map(|f| {

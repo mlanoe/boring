@@ -236,8 +236,10 @@ impl KernelTranspiler {
                 format!("{}::{}", base_name, assoc)
             }
             // `mut Type` (owned form) — kernel structs are a distinct, separate model
-            // (docs/mut-type-modifier.md's "Kernel structs" section) with no `mut`
-            // type-modifier support; erase to the inner type defensively.
+            // (docs/cuda-module.md's "Kernel struct field rules" — `let`/`mut`/`var`
+            // there are one axis, read-only vs. writable, not this proposal's
+            // reassign/content-mutate split) with no `mut` type-modifier
+            // support; erase to the inner type defensively.
             Type::Mut(inner) => self.emit_type(inner),
         }
     }

@@ -23,7 +23,7 @@ var mut c2 = Counter(0) # rebindable AND content-mutable
 ```
 
 `mut`/`var mut` attach to the **type**, not just the binding keyword (see
-[mut-type-modifier.md](docs/mut-type-modifier.md)) — this is what lets `mut`
+[book.md](docs/book.md#mut-composes-into-any-type-position)) — this is what lets `mut`
 compose into tuple slots, struct fields, array/dict elements, and borrows
 (`mut Type&`), not just a bare local. `mut` on a scalar (`mut int x`) is a
 checker error: primitives have no `def` methods for it to unlock — use `var`
@@ -71,7 +71,7 @@ struct Counter:
 ```
 
 Fields get the same `let`/`mut`/`var`/`var mut` four-way as local bindings
-(mut-type-modifier.md §3) — `mutable` (`var`) controls **reassignment**
+([book.md](docs/book.md#mutable-fields)) — `mutable` (`var`) controls **reassignment**
 (`self.field = x`), independently of **content mutation** (`self.field.method()`),
 which comes from the field's own type carrying `mut`:
 
@@ -89,7 +89,7 @@ mut o = Outer(...)      # reading/writing ANY field also needs `o` itself
 
 ## Binding × mutability (scalars)
 
-`mut` on a primitive (`int`, `uint`, `float`, `bool`) is a **checker error** — there are no `def` methods on a scalar for `mut` to unlock, and (per [mut-type-modifier.md](docs/mut-type-modifier.md) §1) `mut` never silently degrades to `var`. Use `var` for a rebindable scalar. (Retired: the historical "`mut` ≡ `var` for scalars" shortcut this section used to document.)
+`mut` on a primitive (`int`, `uint`, `float`, `bool`) is a **checker error** — there are no `def` methods on a scalar for `mut` to unlock, and (per [book.md](docs/book.md#fixed-mutable-bindings--mut)) `mut` never silently degrades to `var`. Use `var` for a rebindable scalar. (Retired: the historical "`mut` ≡ `var` for scalars" shortcut this section used to document.)
 
 ## Ownership qualifiers
 
@@ -116,11 +116,11 @@ let int'inline n = 10
 | `var` | yes | no | no longer implies `mut` |
 | `var mut` | yes | yes | only form with both |
 
-Permission comes from the **type** (`mut Type`), not the binding keyword alone — see [mut-type-modifier.md](docs/mut-type-modifier.md). This is why `'actor`/`'guard` get no exception below: `var T'actor x` alone no longer suffices for `def` calls, only `var mut T'actor x` does — the lock provides the *mechanism*, Boring's own `mut` bookkeeping still gates it, matching every other type.
+Permission comes from the **type** (`mut Type`), not the binding keyword alone — see [book.md](docs/book.md#2-variables-and-mutability). This is why `'actor`/`'guard` get no exception below: `var T'actor x` alone no longer suffices for `def` calls, only `var mut T'actor x` does — the lock provides the *mechanism*, Boring's own `mut` bookkeeping still gates it, matching every other type.
 
 Qualifier constraints: `mut 'shared` (and `var mut 'shared`) → compile error in both `boring run` and `boring build` (caught by the semantic checker) — `'shared` has no interior mutability for `mut` to unlock. `var 'guard` compiles cleanly with no warning today.
 
-Parameter passing hierarchy (`var` ≥ `mut` ≥ `let`, caller can pass down, never up) is the intended design but is **not currently enforced** — passing a `let` binding into a `var` parameter compiles and runs without error. (Unlike local bindings above, the parameter model itself is unchanged by mut-type-modifier.md — see that document's "Parameters" section.)
+Parameter passing hierarchy (`var` ≥ `mut` ≥ `let`, caller can pass down, never up) is the intended design but is **not currently enforced** — passing a `let` binding into a `var` parameter compiles and runs without error. (Unlike local bindings above, the parameter model itself is a distinct case from local bindings — see [book.md](docs/book.md#mut-vs-var-on-a-struct-parameter)'s "`mut` vs `var` on a struct parameter".)
 
 ## Enums
 
@@ -196,7 +196,7 @@ var {string=int} d = {=} # empty dict  ← NOT {} which would be an empty set
 
 Index assignment (`arr[i] = v`, `dict[k] = v`) mutates in place and requires a `var`/`mut` binding — `let` raises `cannot assign to immutable variable`. Dict assignment inserts the key if absent, updates it otherwise. Sets are **not** index-assignable (`s[i] = v` is a compile/runtime error) — use `s.add(v)` / `s.remove(v)`.
 
-`mut` on the **element/value type** (inside the brackets) is a separate axis from `mut` on the collection itself (mut-type-modifier.md §3): `[mut Point] arr` — `arr` itself can't grow/shrink/reassign entries, but every element already in it can have `def` called on it (`arr[0].move_to(...)`); `mut [Point] arr` — the reverse, structural mutation only. `{K = mut V}` is the dict analogue (value position only — keys never accept `mut`, mutating one in place would invalidate the hash table). `{mut T}` (sets) is rejected outright — `HashSet<T>` has no mutable element access in Rust (`iter_mut`/`get_mut` don't exist on it), not a Boring design choice.
+`mut` on the **element/value type** (inside the brackets) is a separate axis from `mut` on the collection itself ([book.md](docs/book.md#element-mutability--mut-t-vs-mut-t)): `[mut Point] arr` — `arr` itself can't grow/shrink/reassign entries, but every element already in it can have `def` called on it (`arr[0].move_to(...)`); `mut [Point] arr` — the reverse, structural mutation only. `{K = mut V}` is the dict analogue (value position only — keys never accept `mut`, mutating one in place would invalidate the hash table). `{mut T}` (sets) is rejected outright — `HashSet<T>` has no mutable element access in Rust (`iter_mut`/`get_mut` don't exist on it), not a Boring design choice.
 
 ```boring
 var {string=int} md = {"a" = 1}

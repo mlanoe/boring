@@ -752,7 +752,7 @@ pub struct Env {
     /// After the first assignment the name is removed from this set (init-once semantics).
     pub lazy_vars: HashSet<String>,
     /// Variables whose *content* may be mutated — `def` calls, field writes,
-    /// structural collection mutation (docs/mut-type-modifier.md). Independent
+    /// structural collection mutation (docs/book.md). Independent
     /// of `mutable` (which gates *reassignment*, `x = newval`, and still
     /// answers `true` for a plain `var` with no `mut` — see `is_mutable`'s
     /// doc): `var Point p` alone no longer implies `p.inc()` is legal, only
@@ -981,7 +981,9 @@ impl Env {
     ///
     /// **Rebindability only** — no longer the gate for `def` calls/field writes/
     /// collection mutation; see `is_content_mutable` for that (they used to be
-    /// the same flag — docs/mut-type-modifier.md's Implementation checklist item 0).
+    /// the same flag, before `mut`/`var` mutability came from the *type*
+    /// rather than the binding keyword alone — see docs/book.md's
+    /// "Variables and Mutability" chapter).
     pub fn is_mutable(&self, name: &str) -> bool {
         if self.vars.contains_key(name) {
             self.mutable.contains(name)

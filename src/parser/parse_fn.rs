@@ -505,7 +505,7 @@ impl Parser {
         // `transient` implies `var` (mutable)
         let transient = self.eat(&TokenKind::Transient);
         // Field declarations now get the same `let`/`mut`/`var`(` mut`) three-way
-        // as local bindings (docs/mut-type-modifier.md §3/checklist item 1) —
+        // as local bindings (docs/book.md) —
         // `mutable` is the *reassignment* axis (`self.field = x`) only;
         // content-mutation (`self.field.method()`) comes from wrapping `ty` in
         // `Type::Mut` below, exactly like `wrap_type_mut` does for let_stmt.

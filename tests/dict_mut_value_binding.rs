@@ -1,8 +1,9 @@
 // Copyright (C) 2026 Mickaël LANOË
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Regression test for the dict-value-mutation bug documented in
-// docs/mut-type-modifier.md's "Known implementation bugs": for a dict
+// Regression test for a real dict-value-mutation bug (see
+// docs/book.md's "Element mutability" / "Dictionaries" sections for the
+// `{K = mut V}` feature this bug was in): for a dict
 // declared `{K = mut V}`, calling a `def` (mutating) method through a
 // fetched value (`d[k].method()`) transpiled to
 // `d.get(k).cloned().expect(...).method()` — mutating a throwaway clone of

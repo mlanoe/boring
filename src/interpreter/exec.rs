@@ -178,7 +178,7 @@ impl Interpreter {
                     }
                     // Each slot's own resolved binding, not the statement's
                     // overall one — they can differ per-element
-                    // (docs/mut-type-modifier.md §4).
+                    // (docs/book.md).
                     if binding.binding.is_mutable() {
                         env.borrow_mut().define_mut(&binding.name, v);
                     } else {

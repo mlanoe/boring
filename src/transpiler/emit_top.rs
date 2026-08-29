@@ -770,7 +770,7 @@ impl Transpiler {
                 // &self even for `def` (mutating) methods — otherwise the method can't be
                 // called on non-mut vars (docs/book.md's "Enum methods — req and def").
                 // Exception: an enum with at least one variant field declared `mut Type`
-                // (docs/mut-type-modifier.md) behaves like a struct for `def` — it needs
+                // (docs/book.md) behaves like a struct for `def` — it needs
                 // real `&mut self` to reach into that field mutably through `match self:
                 // ...`; match ergonomics then binds the matched field as `&mut T`
                 // automatically, no extra codegen needed. Checked per enum TYPE, not per
@@ -2246,7 +2246,7 @@ impl Transpiler {
     /// Returns a placeholder variant that matches nothing if the type is not qualified.
     pub(crate) fn unwrap_qual(ty: &Type) -> &OwnerQual {
         // `mut T'actor` etc. wraps the whole qualified type in `Type::Mut`
-        // (docs/mut-type-modifier.md §1) — strip it first, same as every other
+        // (docs/book.md) — strip it first, same as every other
         // qualifier-dispatch helper below. `mut` itself is never an `OwnerQual`.
         if let Type::Qualified(_, q) = ty.without_mut() { q } else { &OwnerQual::Inline }
     }
@@ -2262,7 +2262,7 @@ impl Transpiler {
     }
 
     /// True if `enum_name` has at least one variant with a field declared `mut Type`
-    /// (docs/mut-type-modifier.md — an enum variant field can carry `mut` the same way a
+    /// (docs/book.md — an enum variant field can carry `mut` the same way a
     /// tuple slot or collection element can). Such an enum behaves like a struct for its
     /// own `def` methods: it gets a real `&mut self` receiver (see this file's
     /// `compute_fn_all_params`, `is_enum_self`) and its instances need `mut`/`var mut` to
@@ -2323,6 +2323,36 @@ impl Transpiler {
             }
         }
         false
+    }
+
+    /// True if a bare `def`-method call directly on local/parameter `v` would
+    /// be rejected as "not declared `mut`" by `emit_method_call_fallback`'s two
+    /// non-mut-binding diagnostics (parameter case and plain-local case) — used
+    /// to also gate one level down, `v.field.method()`/`v.field = x`, which
+    /// needs `v` ITSELF to grant `mut`, not just `field`'s own type (see the
+    /// call sites' doc comments; docs/book.md's "Known
+    /// implementation bugs" — `let o = ...; o.d.bump()` used to succeed
+    /// through a `var mut` field `d` with `o` itself a plain `let`).
+    /// `'actor`/`'guard`-backed types gate mutation through the lock itself
+    /// (handled by their own dedicated codegen paths), not through this flag,
+    /// so they're excluded here exactly like both diagnostics already exclude
+    /// them. Mirrors each branch's condition precisely; permissive (`false`)
+    /// for anything neither branch can speak to confidently, matching their
+    /// existing behavior — this never turns previously-silent code into a new
+    /// false-positive error on its own.
+    pub(crate) fn owner_var_denies_mut(&self, v: &str) -> bool {
+        if v == "self" { return false; }
+        if self.var_mutex_types.contains(v) || self.var_mutex_task_types.contains(v)
+            || self.var_rwlock_types.contains(v) || self.var_rwlock_task_types.contains(v)
+        {
+            return false;
+        }
+        if self.fn_current_params.contains_key(v) {
+            return !self.fn_current_params_mut.contains(v);
+        }
+        self.known_local_vars.contains(v)
+            && !self.content_mutable_local_vars.contains(v)
+            && self.mut_checked_local_vars.contains(v)
     }
 
     /// Extract the inner `T` from a `T'actor` or `T'actor'task` mutex type.

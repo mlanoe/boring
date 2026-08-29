@@ -48,8 +48,8 @@ impl Interpreter {
             if param.mutable {
                 fn_env.borrow_mut().define_mut(&param.name, val);
                 // Parameter `mut`/`var` still both grant full access (rebind +
-                // content mutation) — the parameter model's own three/four-way
-                // split (docs/mut-type-modifier.md's "Parameters" section) is
+                // content mutation) — the parameter model's own four-way split
+                // (docs/book.md's "`mut` vs `var` on a struct parameter") is
                 // specified but not enforced yet, deliberately out of scope
                 // here; this just keeps that existing, unchanged behavior.
                 fn_env.borrow_mut().mark_content_mutable(&param.name);

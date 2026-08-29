@@ -77,6 +77,8 @@ kernel-struct field qualifier.
 | `mut [int]'actor'unified bins` | unified DRAM, atomic access | direct | `int64_t* bins` |
 | CPU qualifiers (`'owned`, `'shared`…) | — | — | compile-time error |
 
+`mut` and `var` are pure synonyms on a kernel field, unlike everywhere else in the language — a kernel struct has exactly one method (the anonymous `def ()` body), so there's no second "call a method on what this field currently holds" operation to distinguish from "write the field" the way a regular struct field's `mut`/`var` split needs (see the language reference's [Mutable fields](book.md#mutable-fields)). Only the `let` vs. `mut`/`var` axis (read-only vs. writable) is meaningful here.
+
 ---
 
 ## CUDA C mapping

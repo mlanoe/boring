@@ -485,7 +485,7 @@ impl Transpiler {
         // parameter), prefix the corresponding loop variable(s) with `mut` —
         // required for the item's `Mut<T>`-style wrapper (or any type whose
         // field-mutation needs a mutable binding to reborrow through) to be
-        // usable in the loop body; see docs/mut-type-modifier.md's open
+        // usable in the loop body; see docs/book.md's open
         // "propagating a mut-qualified type argument through generic
         // instantiation" note.
         let pat = if s.vars.len() > 1 {

@@ -356,8 +356,9 @@ let _result = c.doubled()
 #[test]
 fn test_def_requires_var() {
     // Calling `def` on a `let` binding must be rejected — now by BOTH backends
-    // (docs/mut-type-modifier.md's Implementation checklist item 0 gave the
-    // transpiler this same enforcement, which it didn't have before). Bypasses
+    // (the transpiler gained this same enforcement, which it didn't have
+    // before — see docs/book.md's "Variables and Mutability" chapter).
+    // Bypasses
     // the shared `run()` helper (which asserts the transpile step succeeds)
     // since this test is specifically about the negative case.
     let src = r#"
@@ -386,7 +387,7 @@ c.increment()
     assert!(msg.contains("cannot call mutating method"), "unexpected error: {}", msg);
 }
 
-// ─── mut-qualified enum variant field tests (docs/mut-type-modifier.md's
+// ─── mut-qualified enum variant field tests (docs/book.md's
 // variant-field case, and docs/book.md's "Enum methods — req and def") ────────
 
 #[test]

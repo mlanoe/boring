@@ -305,7 +305,7 @@ impl Transpiler {
     ///
     /// `bound_structs` maps a bound name to its struct type name (only populated when that
     /// type is known — e.g. a variant field typed `mut Point`, see
-    /// `docs/mut-type-modifier.md`) — needed to resolve a method call's `def`/`req` status
+    /// `docs/book.md`) — needed to resolve a method call's `def`/`req` status
     /// via `method_is_req_or_task`. Names bound to a non-struct or unresolved type never
     /// need `mut` for this reason (they can still need it via direct assignment above).
     ///
@@ -1108,7 +1108,7 @@ impl Transpiler {
         }
         // Infer types for match-arm bound variables from enum variant field types, ahead of
         // mutation detection below — resolving a bound name's struct type (e.g. a variant
-        // field declared `mut Point`, docs/mut-type-modifier.md) is needed there to tell a
+        // field declared `mut Point`, docs/book.md) is needed there to tell a
         // `def` method call apart from a `req` one.
         // e.g. `Value.Int(a)` → var_types["a"] = Type::Int; `Value.Float(f)` → Type::Float64.
         let mut bound_types: Vec<(String, Type)> = Vec::new();
@@ -1170,7 +1170,7 @@ impl Transpiler {
         // an un-qualified variant field, exactly like it already does for a plain struct
         // field one level down — emit_methods.rs's "One level down" comment), and separately
         // "content-mutable" only when the variant field's declared type actually grants it
-        // (`mut Type`, docs/mut-type-modifier.md). Both scoped to this arm body and removed
+        // (`mut Type`, docs/book.md). Both scoped to this arm body and removed
         // afterward, like `bound_structs`.
         let mut bound_mut_checked: Vec<String> = Vec::new();
         for (name, ty) in &bound_types {

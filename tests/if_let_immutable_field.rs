@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Regression test for an `if let`/`elif let` field-mutation bug — the same one
-// `guard let` had until it was fixed (see `tests/guard_let_immutable_field.rs`
-// and `docs/mut-type-modifier.md`'s former "Explicitly out of scope" entry for
-// it). An `if let b = ...`/`elif let b = ...` binding has no `mut`/`var mut`
+// `guard let` had until it was fixed (see `tests/guard_let_immutable_field.rs`).
+// An `if let b = ...`/`elif let b = ...` binding has no `mut`/`var mut`
 // spelling (see `ast::CondClause::Let`, which carries no `BindingKind`), so it
 // should be exactly as immutable as a plain `let b = ...` — writing to one of
 // its fields (`b.field = x`) must be rejected by `boring build` with a clear

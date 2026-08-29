@@ -1783,7 +1783,7 @@ impl Interpreter {
                 // `arr[i].field = v` — same permission as `arr[i].method()`
                 // (see `eval_expr.rs`'s identical check): the collection's own
                 // declared element type must grant `mut` — `[mut Point] arr`
-                // vs plain `[Point] arr` (docs/mut-type-modifier.md §3).
+                // vs plain `[Point] arr` (docs/book.md).
                 if let ExprKind::Index(inner_obj, _idx) = &obj_expr.kind {
                     if let ExprKind::Var(coll_name) = &inner_obj.kind {
                         if let Some(coll_ty) = env.borrow().get_declared_type(coll_name) {
@@ -2208,7 +2208,7 @@ impl Interpreter {
     /// Matches `pattern` against `value`, collecting bound names into `bindings`.
     ///
     /// `mut_names` collects the subset of those names that are bound directly
-    /// to an enum variant field declared `mut Type` (see docs/mut-type-modifier.md
+    /// to an enum variant field declared `mut Type` (see docs/book.md
     /// for the modifier itself) — the caller should `mark_content_mutable` each
     /// one on the arm's child env once bound, so `def` methods can be called
     /// through them (mirrors how `let`/param binding already does this for a

@@ -475,7 +475,7 @@ impl Checker {
         // (both non-mutating) until it's upgraded — nothing for `mut` to unlock
         // on the weak reference itself, regardless of what the *upgraded* value
         // would allow (`T'shared'weak`, `T'actor'weak`, `T'guard'weak` alike —
-        // docs/mut-type-modifier.md's rejection table). Checked on the
+        // docs/book.md's rejection table). Checked on the
         // *outermost* qualifier only — `'weak` is always the last link in the
         // chain (`T'actor'weak`, never `T'weak'actor`).
         if matches!(ty, Type::Qualified(_, OwnerQual::Weak)) {
@@ -531,7 +531,7 @@ impl Checker {
     //
     // No `def` methods exist on a primitive — nothing for `mut` to unlock.
     // Retires the historical "`mut` ≡ `var` for scalars" shortcut
-    // (docs/mut-type-modifier.md §1): `mut int x = 0` is a checker error now,
+    // (docs/book.md): `mut int x = 0` is a checker error now,
     // not a silent downgrade to `var int x = 0`. Checked both when the type is
     // explicit and when it's only inferred from a literal initializer, mirroring
     // `check_tuple_mut_constraint` exactly.
@@ -569,6 +569,32 @@ impl Checker {
                 "cannot mark a scalar as `mut`: primitives have no `def` methods to unlock — use `var` for a rebindable scalar",
                 line, col,
             );
+        }
+    }
+
+    // ── Qualifier constraint: `{mut T}` (set element mutability) ───────────────
+    //
+    // `HashSet<T>` exposes no mutable element access in Rust at all — no
+    // `iter_mut()`, no `get_mut()` — because mutating an element in place could
+    // change its `Hash`/`Eq` behavior and silently corrupt the set's buckets
+    // (docs/book.md's "Sets — `{T}`" section documents the resulting rule —
+    // this was, for a long time, the one item in this whole area that was
+    // documented as rejected but never actually wired up). Unlike `check_tuple_mut_constraint`/
+    // `check_scalar_mut_constraint`, this does NOT gate on whether the *outer*
+    // binding itself requests `mut` (`Self::requests_mut`) — `let {mut Point}
+    // pts = {}` is illegal even though `pts` is a plain `let`, because the
+    // illegality lives on the Set's element type, wherever it's nested, not on
+    // the binding. `mut {T}` (mutable on the set itself — structural
+    // add/remove) is a different axis entirely and is unaffected.
+    fn check_set_mut_constraint(&mut self, ty: &Option<Type>, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        if let Some(ty) = ty {
+            if ty.contains_illegal_mut_set() {
+                self.error(
+                    "cannot use `mut` on a set's element type (`{mut T}`): `HashSet<T>` has no mutable element access in Rust (no `iter_mut`/`get_mut`) — `mut {T}` (mutable on the set itself, for structural add/remove) is unaffected",
+                    line, col,
+                );
+            }
         }
     }
 
@@ -785,6 +811,9 @@ impl Checker {
     // ── Struct / enum / ext ───────────────────────────────────────────────────
 
     fn check_struct(&mut self, s: &StructDecl) {
+        for f in &s.fields {
+            self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
+        }
         for m in &s.methods { self.check_fn(m); }
         for m in &s.type_methods {
             self.push_scope();
@@ -795,6 +824,11 @@ impl Checker {
     }
 
     fn check_enum(&mut self, e: &EnumDecl) {
+        for v in &e.variants {
+            for f in &v.fields {
+                self.check_set_mut_constraint(&Some(f.ty.clone()), v.line, v.col);
+            }
+        }
         for m in &e.methods { self.check_fn(m); }
         // `type def`/`type req`/`type set` factory/static methods — mirrors
         // `check_struct`'s identical loop.
@@ -818,6 +852,9 @@ impl Checker {
             if p.mutable {
                 self.check_qualifier_constraint(&BindingKind::Mut, false, &p.ty, p.line, p.col);
             }
+            // `{mut T}` is illegal regardless of whether the parameter itself
+            // is `mut` — the illegality lives on the Set's element type.
+            self.check_set_mut_constraint(&p.ty, p.line, p.col);
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
         for stmt in &f.body { self.check_stmt(stmt); }
@@ -888,6 +925,7 @@ impl Checker {
         self.check_qualifier_constraint(&s.binding, s.var_mut, &s.ty, s.line, s.col);
         self.check_tuple_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
         self.check_scalar_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
+        self.check_set_mut_constraint(&s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
@@ -945,6 +983,7 @@ impl Checker {
                 self.check_qualifier_constraint(&b.binding, b.var_mut, &b.ty, s.line, s.col);
                 self.check_tuple_mut_constraint(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
                 self.check_scalar_mut_constraint(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
+                self.check_set_mut_constraint(&b.ty, s.line, s.col);
             }
             if b.name == "_" { continue; }
             let position_resident = tuple_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
@@ -952,7 +991,7 @@ impl Checker {
             let resident_from_field = position_resident && has_explicit_resident_ty;
             if let Some(scope) = self.scopes.last_mut() {
                 // Each slot's own resolved binding, not the statement's overall
-                // one (they can now differ per-element — docs/mut-type-modifier.md
+                // one (they can now differ per-element — docs/book.md
                 // §4).
                 scope.insert(b.name.clone(), Binding {
                     kind: b.binding.clone(),
@@ -1255,7 +1294,7 @@ impl Checker {
                             assign_line, assign_col,
                         );
                     }
-                    // `mut` is never rebindable — docs/mut-type-modifier.md §1
+                    // `mut` is never rebindable — docs/book.md
                     // decided this with no exception (retiring the historical
                     // "mut ≡ var for scalars" shortcut). Previously this arm was
                     // `Mut | Var => {}`, silently allowing reassignment through a
@@ -1410,7 +1449,7 @@ mod tuple_mut_tests {
     fn mut_on_tuple_destructure_is_unaffected() {
         // `mut (a, b) = t` applies `mut` to the two extracted variables
         // individually, not to the tuple as a whole — that part is still legal.
-        // Retired by docs/mut-type-modifier.md §1 ("no exceptions"): `a`/`b` are
+        // Retired by docs/book.md ("no exceptions"): `a`/`b` are
         // `int` here, and `mut` is never rebindable regardless of type (the
         // historical "mut ≡ var for scalars" shortcut this test used to pin
         // down) — `a = 5` is now a compiler-flagged error, exactly like a plain
@@ -1435,6 +1474,57 @@ mod tuple_mut_tests {
         let src = "def main():\n    let t = (1, 2)\n    print t.0\n";
         let errs = errors_for(src);
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+}
+
+#[cfg(test)]
+mod set_mut_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    #[test]
+    fn mut_set_element_type_is_rejected_on_a_let_binding() {
+        // Illegal regardless of the outer binding's own mutability — `pts` is
+        // a plain `let` here, but the element type itself is `mut`.
+        let src = "struct Point:\n    var float x\ndef main():\n    let {mut Point} pts = {}\n    print \"ok\"\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("set") && e.contains("mut")), "expected a set/mut rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn mut_on_the_set_itself_is_unaffected() {
+        // `mut {T}`/`var mut {T}` (structural mutation of the set) is a
+        // different axis and must stay legal.
+        let src = "struct Point:\n    var float x\ndef main():\n    var mut {Point} pts = {}\n    pts.add(Point(1.0))\n    print \"ok\"\n";
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn mut_set_element_type_is_rejected_when_nested_in_an_array() {
+        let src = "struct Point:\n    var float x\ndef main():\n    let [{mut Point}] arr = []\n    print \"ok\"\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("set") && e.contains("mut")), "expected a set/mut rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn mut_set_element_type_is_rejected_on_a_struct_field() {
+        let src = "struct Point:\n    var float x\nstruct Holder:\n    {mut Point} pts\ndef main():\n    print \"ok\"\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("set") && e.contains("mut")), "expected a set/mut rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn mut_set_element_type_is_rejected_on_a_parameter() {
+        let src = "struct Point:\n    var float x\ndef takes({mut Point} pts):\n    print \"ok\"\ndef main():\n    takes({})\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("set") && e.contains("mut")), "expected a set/mut rejection, got {errs:?}");
     }
 }
 

@@ -779,7 +779,7 @@ impl Transpiler {
                 let struct_name = self.resolve_receiver_type_name(v.as_str());
                 let is_req = self.method_is_req_or_task(&struct_name, method);
                 // `'guard` (RwLock) gets no exception from the general rule —
-                // docs/mut-type-modifier.md §1: mutation goes through the lock
+                // docs/book.md: mutation goes through the lock
                 // rather than `&mut self`, but Boring still gates it on the
                 // binding, same as every other type. `var T'guard x` alone no
                 // longer suffices; only `var mut T'guard x` does. Rust's own
@@ -2016,9 +2016,9 @@ impl Transpiler {
                 && !self.var_rwlock_task_types.contains(v.as_str())
             {
                 // Same diagnostic as above, for a plain local binding rather than
-                // a parameter — docs/mut-type-modifier.md's Implementation
-                // checklist item 0: `var Point p` alone no longer grants
-                // `p.inc()`; only `mut`/`var mut` does. Rust's own borrow
+                // a parameter — `var Point p` alone no longer grants
+                // `p.inc()`; only `mut`/`var mut` does (see docs/book.md's
+                // "Variables and Mutability" chapter). Rust's own borrow
                 // checker would NOT catch this on its own (the emitted binding
                 // is `let mut` either way — see `BindingKind::is_mutable`'s
                 // doc), so this has to be a Boring-level check.
@@ -2041,7 +2041,7 @@ impl Transpiler {
         }
         // One level down: `recv.field.method()` (including `self.field.method()`)
         // needs `field`'s own declared type to grant `mut` — the reassign/
-        // content-mutate split docs/mut-type-modifier.md §3 gives struct
+        // content-mutate split docs/book.md gives struct
         // fields, independent of whatever `recv` itself allows (checked
         // above). `struct_fields` already carries each field's declared
         // `Type` (already `Type::Mut`-wrapped by the parser where
@@ -2062,18 +2062,31 @@ impl Transpiler {
                 let field_ty = self.struct_fields.get(owner.as_str())
                     .and_then(|fs| fs.iter().find(|(n, _)| n == field_name).map(|(_, t)| t.clone()));
                 if let Some(field_ty) = field_ty {
-                    if !field_ty.grants_mut() {
-                        let field_struct_name = match field_ty.without_mut() {
-                            crate::ast::Type::Named(n) => Some(n.clone()),
-                            _ => None,
-                        };
-                        if let Some(fsn) = field_struct_name {
-                            if self.struct_fields.contains_key(fsn.as_str())
-                                && !self.method_is_req_or_task(fsn.as_str(), method)
-                            {
+                    let field_struct_name = match field_ty.without_mut() {
+                        crate::ast::Type::Named(n) => Some(n.clone()),
+                        _ => None,
+                    };
+                    let method_is_mutating = field_struct_name.as_deref()
+                        .map(|fsn| self.struct_fields.contains_key(fsn) && !self.method_is_req_or_task(fsn, method))
+                        .unwrap_or(false);
+                    if method_is_mutating {
+                        if !field_ty.grants_mut() {
+                            self.push_error(obj.line, obj.col, format!(
+                                "cannot call mutating method `.{}()` on field `.{}` — its declared type doesn't grant content mutation; declare the field `mut {}`/`var mut {}`",
+                                method, field_name, field_name, field_name
+                            ));
+                        } else if let ExprKind::Var(v) = &inner_obj.kind {
+                            // The field's own type may grant `mut`, but reaching it at
+                            // all still requires the *owning* binding itself to be
+                            // `mut`/`var mut` — a real, undocumented gap: `let o = ...;
+                            // o.d.bump()` used to succeed through a `var mut` field `d`
+                            // with `o` a plain `let` (docs/book.md's
+                            // "Known implementation bugs"; mirrors the interpreter's
+                            // identical fix in `eval_expr.rs`).
+                            if self.owner_var_denies_mut(v) {
                                 self.push_error(obj.line, obj.col, format!(
-                                    "cannot call mutating method `.{}()` on field `.{}` — its declared type doesn't grant content mutation; declare the field `mut {}`/`var mut {}`",
-                                    method, field_name, field_name, field_name
+                                    "`{}` is not declared `mut` — cannot call `.{}()` through field `.{}` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`",
+                                    v, method, field_name, owner, v, owner, v
                                 ));
                             }
                         }
@@ -2085,7 +2098,7 @@ impl Transpiler {
         // One more level down: `arr[i].method()` (or `dict[k].method()`)
         // needs the collection's own declared *element*/*value* type to
         // grant `mut` — `[mut Point] arr` vs plain `[Point] arr`
-        // (docs/mut-type-modifier.md §3). Only resolved for a bare `Var`
+        // (docs/book.md). Only resolved for a bare `Var`
         // collection receiver with an explicit type in `var_types` — an
         // inferred-type collection isn't checked, matching the interpreter's
         // identical scope in `eval_expr.rs`.
@@ -3235,6 +3248,7 @@ impl Transpiler {
             optional_vars: self.optional_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),
+            struct_field_reassignable: self.struct_field_reassignable.clone(),
             struct_field_defaults: self.struct_field_defaults.clone(),
             structs_needing_default: self.structs_needing_default.clone(),
             type_sizes: self.type_sizes.clone(),

@@ -1,13 +1,13 @@
 # Binding and mutability in Boring
 
-> **Superseded for local bindings by [mut-type-modifier.md](mut-type-modifier.md).**
-> This document predates that proposal and still describes `mut`/`var` as a
-> single binding-keyword axis (`is_mutable()` true for both). Under
-> mut-type-modifier.md, mutability comes from the *type* (`mut Type`), not
-> from the keyword alone — `var Type a` is rebindable only; `var mut Type a`
-> is required for both. The tables below are updated to match; see that
-> document for the full model (destructuring, tuples, struct fields,
-> collections).
+> **Superseded for local bindings by the language reference's [Variables and
+> Mutability](book.md#2-variables-and-mutability) chapter.** This document
+> predates that model and still describes `mut`/`var` as a single
+> binding-keyword axis (`is_mutable()` true for both). Under the current
+> model, mutability comes from the *type* (`mut Type`), not from the keyword
+> alone — `var Type a` is rebindable only; `var mut Type a` is required for
+> both. The tables below are updated to match; see `book.md` for the full
+> model (destructuring, tuples, struct fields, collections).
 
 ## Concepts
 
@@ -26,7 +26,7 @@ Two orthogonal axes:
 | `var mut` | yes | yes |
 
 The progression is intentionally graduated from most rigid to most permissive.
-`var` alone no longer implies `mut` (see mut-type-modifier.md §1) — a plain
+`var` alone no longer implies `mut` (see book.md's [Rebindable bindings — `var`](book.md#rebindable-bindings--var)) — a plain
 `var Type a` is rebindable but not content-mutable; only the explicit `var
 mut Type a` combination is both. Retired: the old table's "Mutable: depends
 on qualifier" reading of `var`, which came from `var` auto-implying `mut`
@@ -57,7 +57,7 @@ They carry three kinds of information: the Rust mapping, the passing semantics b
 
 `yes` below means "parses, and grants what the row's keyword nominally
 promises" — for `mut`/`var mut`, that's content mutation (`def` calls); for
-`var`, it's rebinding only. Per mut-type-modifier.md §1, this is a **no
+`var`, it's rebinding only. Per book.md's [Fixed mutable bindings — `mut`](book.md#fixed-mutable-bindings--mut) model, this is a **no
 special case**: `'actor`/`'guard` are checked exactly like any other type,
 not given their own exception the way an earlier draft of this table did.
 

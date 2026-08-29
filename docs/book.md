@@ -1329,6 +1329,26 @@ def show(var Counter'shared c):
     # c.value = c.value + 1  # ERROR — cannot mutate through T'shared; use T'actor
 ```
 
+### `mut` vs `var` on a struct parameter
+
+`let` is implicit on every parameter with no keyword (`compute(Point a)` ≡ `compute(let Point a)`). Adding `mut` doesn't remove that implicit `let` — it only unlocks content mutation, not reseating the caller's variable:
+
+| Param form | Rebind caller (`a = X`) | Mutate content (`a.method()`) |
+|---|---|---|
+| `Point a` (no keyword) | no | no |
+| `mut Point a` (≡ `let mut Point a`) | no | yes |
+| `var Point a` | yes | no |
+| `var mut Point a` | yes | yes |
+
+```boring
+def mutate(mut Point p): p.move_to(1, 1)   # callee may mutate p's content
+def reseat(var Point p): p = Point(0, 0)   # callee may replace the caller's p
+```
+
+This is the opposite collapse direction from the bare `mut` keyword on a local binding (`mut` on a local binding ≡ `let mut`, never `var mut` — see [Fixed mutable bindings — `mut`](#fixed-mutable-bindings--mut)) — and deliberately so. For a local binding, `var` only ever affects the same scope, so folding a rebind permission into the bare `mut` shorthand is a low-stakes convenience. For a parameter, `var` grants the callee the ability to overwrite the *caller's own variable* across the call boundary — a materially bigger capability, so it must stay opt-in and spelled out explicitly, never implied by `mut` alone.
+
+**Known gap:** the "mutate content" column above is not yet enforced independently of the "rebind" column — `mut T&` and `var T&` both transpile to the same Rust `&mut T`, so a `var`-parameter callee can still call a `def` method on its parameter today, even though the table says it shouldn't be able to. Only the "rebind caller" column is actually checked (a `mut`-parameter callee reseating `a` is correctly rejected, in both `boring run` and `boring build`). Closing this — introducing `var mut T& m` as a real, checker-distinguished form — is a separate, self-contained follow-up.
+
 > For variadic parameters (`values...`), see [Advanced — Variadic parameters](#advanced--variadic-parameters).
 
 ### Function overloading
@@ -1615,6 +1635,13 @@ fn connect(host: Option<Arc<str>>) -> Arc<str> {
     let Some(host) = host else { return Arc::from("no host"); };
     Arc::<str>::from(format!("Connecting to {}", host))
 }
+```
+
+There is no `guard let mut b = …` / `guard var mut b = …` form — the unwrapped binding is always a plain `let`. To get a mutable binding out of a `guard let`/`if let`, follow up with an ordinary `var mut T c = b`:
+
+```boring
+guard let h = host else return "no host"
+var mut h2 = h        # now content-mutable / rebindable
 ```
 
 ### `match`
@@ -2626,7 +2653,7 @@ impl EColor {
 ### Enum variant fields — `mut Type`
 
 A variant field can itself carry `mut`, the same modifier a tuple slot,
-struct field, or collection element can ([mut-type-modifier.md](mut-type-modifier.md)).
+struct field, or collection element can.
 This is the one case where an enum's own `def` method is a *real* mutation,
 not just documentation intent — it needs (and gets) a genuine `&mut self`,
 and the enum instance itself needs `mut`/`var mut` to call it, exactly like a
@@ -3617,6 +3644,8 @@ print "{p.first} / {p.second}"   # 10 / hello
 ```rust
 struct Pair<T, U> { first: T, second: U }
 ```
+
+A `mut`-qualified type argument (`Container<mut Point>` for `struct Container<T>: T item`) is not yet supported — propagating a `mut`-qualified type argument through generic instantiation into the field's own permission check is separate, unimplemented design work, not a corollary of ordinary `mut Type` field support ([Mutable fields](#mutable-fields)).
 
 ### Trait constraints — `as`
 

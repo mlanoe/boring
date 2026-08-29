@@ -1920,7 +1920,13 @@ let _result = p.x
 "#;
     assert_eq!(run_src(src_ok), Value::Int(10));
 
-    // explicit `let` field: not assignable, private
+    // explicit `let` field: not assignable, private. Illegal on both
+    // backends now — `boring build`'s checker gained the matching
+    // reassignability diagnostic alongside the interpreter's (previously
+    // only `boring run` caught this at all — a real, undocumented gap).
+    // Can't go through the shared `run()` helper here since that asserts a
+    // *clean* transpile — exercise the interpreter and the transpiler
+    // separately instead.
     let src_let = r#"
 struct Pair:
     let int a
@@ -1928,10 +1934,14 @@ struct Pair:
 mut p = Pair(a= 1)
 p.a = 99
 "#;
-    let (_i, res) = run(src_let);
-    assert!(res.is_err(), "assigning to explicit-let field should error");
+    let tokens = lex(src_let).expect("lex error");
+    let program = parse(tokens).expect("parse error");
+    let mut interp = Interpreter::new();
+    assert!(interp.exec_program(&program).is_err(), "assigning to explicit-let field should error");
+    let out = transpile_with_config(&program, TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "boring build should also reject assigning to an explicit-let field");
 
-    // implicit field (no keyword): pub let — not assignable
+    // implicit field (no keyword): pub let — not assignable. Same story as above.
     let src_implicit = r#"
 struct Pair:
     int a
@@ -1939,8 +1949,54 @@ struct Pair:
 mut p = Pair(a= 1)
 p.a = 99
 "#;
-    let (_i, res) = run(src_implicit);
-    assert!(res.is_err(), "assigning to implicit pub-let field should error");
+    let tokens = lex(src_implicit).expect("lex error");
+    let program = parse(tokens).expect("parse error");
+    let mut interp = Interpreter::new();
+    assert!(interp.exec_program(&program).is_err(), "assigning to implicit pub-let field should error");
+    let out = transpile_with_config(&program, TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "boring build should also reject assigning to an implicit pub-let field");
+}
+
+#[test]
+fn test_field_access_requires_owning_binding_to_be_mut() {
+    // A field's own type can grant `mut` (`var mut Inner d`) but that alone
+    // isn't enough to call a `def` method through it — the *owning* binding
+    // (`o` in `o.d.bump()`) must itself be `mut`/`var mut` too, exactly like
+    // calling a method on `o` directly would require (CLAUDE.md's "Structs"
+    // section). This was a real gap found while finalizing
+    // docs/book.md: illegal on both backends now.
+    let src_bad = r#"
+struct Inner:
+    var float v
+    def bump(): v = v + 1.0
+
+struct Outer:
+    var mut Inner d
+
+let o = Outer(Inner(0.0))
+o.d.bump()
+"#;
+    let tokens = lex(src_bad).expect("lex error");
+    let program = parse(tokens).expect("parse error");
+    let mut interp = Interpreter::new();
+    assert!(interp.exec_program(&program).is_err(), "calling a mutating method through a field of a non-mut owner should error");
+    let out = transpile_with_config(&program, TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "boring build should also reject this");
+
+    // Same shape, but `o` is `var mut` — legal.
+    let src_ok = r#"
+struct Inner:
+    var float v
+    def bump(): v = v + 1.0
+
+struct Outer:
+    var mut Inner d
+
+var mut o = Outer(Inner(0.0))
+o.d.bump()
+let _result = o.d.v
+"#;
+    assert_eq!(run_src(src_ok), Value::Float64(1.0));
 }
 
 #[test]

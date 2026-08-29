@@ -350,6 +350,19 @@ struct Transpiler {
     pub(crate) fn_defaults: std::collections::HashMap<String, Vec<Option<String>>>,
     /// Struct name → [(field_name, field_type)] for constructor coercion.
     pub(crate) struct_fields: std::collections::HashMap<String, Vec<(String, Type)>>,
+    /// "StructName::field" → whether the field's own declaration is
+    /// reassignable (`var`/`var mut`, `true`) vs `let`/`mut` (`false`) — the
+    /// *reassignment* axis of `FieldDecl::mutable`
+    /// (docs/book.md), independent of the field's own
+    /// content-mutation permission (`Type::grants_mut`, tracked via
+    /// `struct_fields`'s `Type` half already). Used by `emit_expr_assign`'s
+    /// `o.field = x` diagnostic — `boring run`'s interpreter already rejects
+    /// writing a `let`/`mut` field from outside the struct's own methods
+    /// (`methods.rs::assign`'s "cannot assign to immutable field"); this map
+    /// lets `boring build` reject it too instead of silently transpiling an
+    /// illegal reassignment with no diagnostic at all (a real gap found while
+    /// finalizing that document — "Genuinely still unshipped").
+    pub(crate) struct_field_reassignable: std::collections::HashMap<String, bool>,
     /// "StructName::field" → the field's own declared `= expr` default (plain
     /// `struct` field declarations, not `init` param defaults — see
     /// `struct_init_defaults` for those). Consulted by the `_` fill-rest marker
@@ -563,15 +576,15 @@ struct Transpiler {
     /// `mut` param). Used to reject passing a `mut` binding to a `var` out-parameter.
     pub(crate) mut_local_vars: std::collections::HashSet<String>,
     /// Local variables whose content may be mutated — `def` calls, field writes
-    /// (docs/mut-type-modifier.md). Independent of `mut_local_vars`/
+    /// (docs/book.md). Independent of `mut_local_vars`/
     /// `immutable_local_vars` (the *rebind* axis): a plain `var Point p` is
     /// rebindable but NOT in this set; only `var mut`/bare-or-`let mut` is.
     /// Params are always included here (the parameter model's own `mut`/`var`
-    /// split isn't enforced yet — see docs/mut-type-modifier.md's "Parameters"
-    /// section — so both still grant full content access, unchanged).
+    /// split isn't enforced yet — see docs/book.md's "`mut` vs `var` on a
+    /// struct parameter" — so both still grant full content access, unchanged).
     pub(crate) content_mutable_local_vars: std::collections::HashSet<String>,
     /// Names bound by an actual `let_stmt`/destructure/parameter — i.e. the
-    /// binding forms docs/mut-type-modifier.md actually covers. `known_local_vars`
+    /// binding forms docs/book.md actually covers. `known_local_vars`
     /// also holds names from `if let`/`while let`/`match` patterns/`for` loop
     /// vars/etc., which this document does NOT touch (out of scope) and which
     /// keep their historical, permissive content-mutation behavior. The
@@ -981,6 +994,7 @@ impl Transpiler {
             optional_vars: std::collections::HashSet::new(),
             fn_defaults: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
+            struct_field_reassignable: std::collections::HashMap::new(),
             struct_field_defaults: std::collections::HashMap::new(),
             structs_needing_default: std::collections::HashSet::new(),
             type_sizes: std::collections::HashMap::new(),
@@ -2550,6 +2564,15 @@ impl Transpiler {
         self.struct_protocols.insert(s.name.clone(), s.protocols.clone());
         // Don't register method names in fn_sigs — they're only called as obj.method()
         // and would shadow top-level functions with the same name.
+        // Only `s.fields`'s own `mutable` flag is meaningful here — the
+        // body-less-init-param fallback just below has no independent
+        // reassign-vs-content-mutate split of its own (a `Param` isn't a
+        // `FieldDecl`), so those synthesized "fields" are left out of this map
+        // entirely and the `o.field = x` reassignability diagnostic simply
+        // doesn't fire for them, matching today's permissive behavior there.
+        for f in &s.fields {
+            self.struct_field_reassignable.insert(format!("{}::{}", s.name, f.name), f.mutable);
+        }
         let mut fields: Vec<(String, Type)> = s.fields.iter()
             .map(|f| (f.name.clone(), f.ty.clone()))
             .collect();
@@ -3152,7 +3175,7 @@ impl Transpiler {
                     // `method_is_req_or_task` answers correctly for enum methods too,
                     // not just struct ones. Most enums never consult this (`def`==`req`
                     // there, docs/book.md's "Enum methods" section), but an enum with a
-                    // `mut`-qualified variant field (docs/mut-type-modifier.md) now gets
+                    // `mut`-qualified variant field (docs/book.md) now gets
                     // the same non-mut-binding `def`-call diagnostic as a struct — see
                     // `enum_has_mut_field`'s callers — and that diagnostic needs to tell
                     // a real `req` getter apart from a mutating `def` on such an enum.
@@ -3970,7 +3993,7 @@ mod tests {
     #[test]
     fn test_for_loop_destructure_marks_mut_tuple_slot() {
         // `Query<(mut Position&, Velocity&)>`-shaped parameter (Bevy-ECS-style,
-        // see docs/mut-type-modifier.md's motivating example): destructuring
+        // see docs/book.md's "Advanced — Explicit borrow syntax: `T&`"): destructuring
         // its items in a `for` loop must bind the slot declared `mut T&` with
         // a Rust `mut` in the pattern — required for that item's type (e.g.
         // Bevy's `Mut<T>` change-detection wrapper) to be field-mutable, since

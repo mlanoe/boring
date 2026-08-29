@@ -788,7 +788,7 @@ impl Parser {
     /// (mutating an Rc/Arc borrow makes no sense).
     ///
     /// Used only for **parameters** (`parse_fn.rs`) — the parameter model is
-    /// intentionally left as-is by docs/mut-type-modifier.md (see its
+    /// intentionally left as-is by docs/book.md (see its
     /// "Parameters" section: full checker enforcement of a distinct `var`/`mut`
     /// parameter split is separate, future work). `var`/`mut` still both
     /// transpile to `&mut T` here, unchanged. Local bindings/destructure/field
@@ -811,7 +811,7 @@ impl Parser {
         }
     }
 
-    /// Applies a `mut` prefix to a `type` — docs/mut-type-modifier.md §§1-2.
+    /// Applies a `mut` prefix to a `type` — docs/book.md.
     /// A borrow-shaped type (`T&`, `T?&`, `T&'a`) has no distinct "mut Type&"
     /// representation beyond its already-existing mutable-borrow qualifier
     /// (`&mut T` IS the mutable form — same upgrade `apply_var_to_borrow` does

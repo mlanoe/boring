@@ -747,7 +747,7 @@ impl Interpreter {
                     // Content-mutation permission comes from the resolved *type*
                     // now, not from `is_mutable` (rebind axis) alone — a plain
                     // `var Point p` no longer suffices, `'actor`/`'guard`
-                    // included with no exception (docs/mut-type-modifier.md §1).
+                    // included with no exception (docs/book.md).
                     if is_mutating && !env.borrow().is_content_mutable(binding_name) {
                         return Err(err(
                             format!("cannot call mutating method '{}' on non-mut binding '{}' — declare it with `mut` or `var mut` to permit content mutation", method, binding_name),
@@ -766,7 +766,7 @@ impl Interpreter {
         // Enforce the same permission one level down: `recv.field.method()`
         // (including `self.field.method()`) needs `field`'s own declared type
         // to grant `mut` — the reassign/content-mutate split
-        // docs/mut-type-modifier.md §3 gives struct fields, independent of
+        // docs/book.md gives struct fields, independent of
         // whatever `recv` itself allows (checked separately, above and in
         // `methods.rs`'s `assign`, which already gates `self.field = x`
         // reassignment via `current_method_mutating` — a different, narrower
@@ -800,7 +800,7 @@ impl Interpreter {
                         }
                     };
                     if is_mutating {
-                        if let ExprKind::Var(_recv_name) = &inner_obj.kind {
+                        if let ExprKind::Var(recv_name) = &inner_obj.kind {
                             if let Ok(Value::Object(recv_rc)) = self.eval_expr(inner_obj, Rc::clone(&env)) {
                                 let recv_type = recv_rc.borrow().type_name.clone();
                                 let field_grants_mut = {
@@ -816,6 +816,24 @@ impl Interpreter {
                                         line,
                                     ));
                                 }
+                                // The field's own type may grant `mut`, but that's not
+                                // enough on its own — reaching the field at all still
+                                // requires the *owning* binding (`recv_name` in
+                                // `recv_name.field_name.method()`) to itself be
+                                // `mut`/`var mut` (CLAUDE.md's "Structs" section: "a
+                                // plain `let`/`var o` blocks every field access above
+                                // regardless of the field's own keyword"). This was a
+                                // real, undocumented gap: `let o = ...; o.d.bump()`
+                                // used to succeed through a `var mut` field `d` even
+                                // though `o` itself was never granted `mut`.
+                                // `self` is exempt, matching `methods.rs::assign`'s
+                                // identical `binding_name != "self"` exemption just above.
+                                if recv_name != "self" && !env.borrow().is_content_mutable(recv_name) {
+                                    return Err(err(
+                                        format!("cannot call mutating method '{}' through field '{}' — the owning binding '{}' is not itself declared `mut`/`var mut`", method, field_name, recv_name),
+                                        line,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -825,7 +843,7 @@ impl Interpreter {
         // One more level down: `arr[i].method()` (or `dict[k].method()`) needs
         // the collection's own declared *element*/*value* type to grant `mut`
         // — `[mut Point] arr` vs plain `[Point] arr`
-        // (docs/mut-type-modifier.md §3). Only resolved for a bare `Var`
+        // (docs/book.md). Only resolved for a bare `Var`
         // collection receiver whose declared type is known (`declared_types`
         // — set only for an explicit type annotation; an inferred-type
         // collection isn't checked here, matching this document's inferred-

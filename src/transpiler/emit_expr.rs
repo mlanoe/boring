@@ -2294,6 +2294,43 @@ impl Transpiler {
                 }
             }
         }
+        // Diagnostic: assigning to a non-reassignable (`let`/`mut`, not
+        // `var`/`var mut`) struct field from outside the struct's own
+        // methods. Independent of the owner-mut checks just above (a field
+        // can be legally *reachable* through a `mut`/`var mut` owner and
+        // still not be reassignable, if the field's own declaration is
+        // `let`/`mut` rather than `var`) — `boring run`'s interpreter
+        // already rejects this (`methods.rs::assign`'s "cannot assign to
+        // immutable field" check); this mirrors it here so `boring build`
+        // doesn't silently transpile an illegal reassignment through a
+        // `let`/`mut` field with no diagnostic at all (a real gap found
+        // while finalizing docs/book.md). `self.field = v` is
+        // untouched — every self-write path above already handles it
+        // (transient/mutex/rwlock fields) or falls through unchecked,
+        // matching today's behavior for in-method writes (mirrors
+        // `methods.rs::assign`'s own `binding_name != "self"` exemption).
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let ExprKind::Var(v) = &obj.kind {
+                if v != "self" {
+                    let owner_struct = self.var_struct_types.get(v.as_str()).cloned()
+                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                            if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
+                        }))
+                        .or_else(|| self.fn_current_params.get(v.as_str()).and_then(|ty| {
+                            if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
+                        }));
+                    if let Some(sn) = owner_struct {
+                        let key = format!("{}::{}", sn, field);
+                        if self.struct_field_reassignable.get(&key) == Some(&false) {
+                            self.push_error(obj.line, obj.col, format!(
+                                "cannot assign to field `.{}` on `{}` — declared `let`/`mut` (not reassignable); use `var`/`var mut` on the field's own declaration to allow `.{} = ...`",
+                                field, sn, field
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         // Compound assignment: `x = x op rhs` → `x op= rhs` (idiomatic Rust).
         // Detected by matching BinOp(op, lhs_copy, rhs) where lhs_copy emits the same
         // string as target — safe because the parser already desugared `x op= rhs`.

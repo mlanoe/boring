@@ -31,8 +31,8 @@ impl Parser {
         let _col = self.col();
 
         // `mut Type` / `mut Type&` — a "mut"? prefix is grammar-legal on any
-        // `type` (docs/mut-type-modifier.md's "Grammar changes required"),
-        // nested anywhere: tuple slot, generic argument, array element, dict
+        // `type` (see `spec/grammar.bnf`'s `type` production), nested
+        // anywhere: tuple slot, generic argument, array element, dict
         // value. The checker (not the parser) restricts which POSITIONS
         // actually grant the permission. The let_stmt/destructure/field_decl
         // *statement-level* leading `mut` keyword is consumed by their own
@@ -426,7 +426,7 @@ impl Parser {
                 // `&` with nothing to disambiguate against because there is no
                 // per-element name in this position at all — a tuple slot or
                 // generic argument, e.g. `(Position&, mut Velocity&)`,
-                // `Query<Position&, mut Velocity&>` (docs/mut-type-modifier.md
+                // `Query<Position&, mut Velocity&>` (docs/book.md
                 // §2's Bevy-ECS motivating case). Every other `&`-parsing arm
                 // above assumes a trailing name (`T& name`, the param/field/
                 // let_stmt convention) — there is none to assume here, so a

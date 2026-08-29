@@ -152,8 +152,9 @@ already use to converge on one canonical variant; `float` simply converges on
 `Float64` instead of getting its own variant. `Type::Float` is removed from
 the enum entirely once every site is migrated — keeping it around as a dead
 variant would reopen exactly the "which one does this code path mean"
-ambiguity this document exists to close (mirrors [mut-type-modifier.md](mut-type-modifier.md)'s
-own retirement of a shortcut once its replacement covers every case).
+ambiguity this document exists to close (mirrors the same "retire a shortcut
+once its replacement covers every case" precedent the `var`-implies-`mut`
+retirement followed — see the compiler-driven migration checklist below).
 
 The parser's `parse_type_base` (`src/parser/parse_type.rs`) gains
 `"Float32" => Type::Float32, "Float64" => Type::Float64` alongside the
@@ -490,8 +491,9 @@ pointer-width-style type like `int`/`uint`).
 1. `src/ast/mod.rs` — add `Type::Float32`, `Type::Float64`; remove
    `Type::Float` once every reference is migrated (step 2 makes the
    compiler enumerate every site that needs updating — do not pre-audit by
-   hand, same rationale as [mut-type-modifier.md](mut-type-modifier.md)'s
-   `BindingKind::is_mutable()` migration).
+   hand, same rationale as the `var`-implies-`mut` retirement's
+   `BindingKind::is_mutable()` migration: ship the stricter rule, let the
+   compiler's error list be the audit).
 2. Mechanical rename pass: every `Type::Float` → `Type::Float64` across
    `src/checker/`, `src/transpiler/` (including all four GPU backend
    dirs — `cuda/`, `rocm/`, `metal/`, `wgpu/` — and `emit_kernel.rs`,
@@ -617,8 +619,8 @@ pointer-width-style type like `int`/`uint`).
   unchanged; a checked/fallible narrowing cast would be a separate, additive
   proposal (`x as float32 checked` or similar), not assumed here.
 - **Per-field/per-element `mut float32`** — this document is orthogonal to
-  [mut-type-modifier.md](mut-type-modifier.md); `mut` on any scalar
-  (`float32` included) remains a checker error under that document's rules,
+  scalar `mut` rejection ([book.md](book.md#fixed-mutable-bindings--mut));
+  `mut` on any scalar (`float32` included) remains a checker error,
   unchanged by anything here.
 - **New float constants for `float32`** (`PI` etc. are `Value::Float64`
   today) — no product requirement surfaced for `float32`-native constants;

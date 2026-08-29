@@ -32,7 +32,7 @@ impl Transpiler {
             self.qualify_serde_derive_args(&raw)
         } else {
             let has_non_clone_field = s.fields.iter().any(|f| {
-                // `mut AtomicUsize` (docs/mut-type-modifier.md) wraps the field type in
+                // `mut AtomicUsize` (docs/book.md) wraps the field type in
                 // `Type::Mut` to unlock `.fetch_add()`-style calls in Boring's own
                 // content-mutation bookkeeping — peel it off first so a `mut`-qualified
                 // atomic field is still recognized here, same as a bare one.

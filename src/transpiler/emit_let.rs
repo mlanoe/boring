@@ -21,7 +21,7 @@ use super::helpers::*;
 /// node. Used by `try_emit_qualified_let`'s `'actor`/`'guard` branches to populate
 /// `var_struct_types` for the non-mut-binding `def`-call diagnostic
 /// (`emit_methods.rs`'s `resolve_receiver_type_name`) — struct constructors already got
-/// this before enum variant fields could carry `mut` (docs/mut-type-modifier.md); the enum
+/// this before enum variant fields could carry `mut` (docs/book.md); the enum
 /// shape needs its own case since it's a `MethodCall`, not a `Call`, and so never matched
 /// the struct-only pattern this mirrors.
 fn constructor_type_name(value: &Expr) -> Option<&str> {
@@ -1074,7 +1074,7 @@ impl Transpiler {
         // Rust binding must be `mut` for `t.0.move_to(...)`/`arr[0].move_to(...)`
         // to compile, even when the Boring binding keyword itself is a plain
         // `let`. See `Type::nested_slot_grants_mut`'s doc and the "Transpiler
-        // honesty" invariant in docs/mut-type-modifier.md.
+        // honesty" invariant in docs/book.md.
         let forces_mut = s.ty.as_ref().is_some_and(Type::nested_slot_grants_mut);
         let kw = if s.binding.is_mutable() || forces_mut { "let mut" } else { "let" };
         let vis = if s.is_pub { "pub " } else { "" };
@@ -1808,7 +1808,7 @@ impl Transpiler {
     pub(crate) fn emit_let_destructure(&mut self, s: &LetDestructureStmt) {
         // Track all bound names as known locals, and each slot's own
         // content-mutation permission — independent per-slot, may differ from
-        // the statement's overall `binding` (docs/mut-type-modifier.md §4).
+        // the statement's overall `binding` (docs/book.md).
         for b in &s.bindings {
             if b.name != "_" {
                 self.known_local_vars.insert(b.name.clone());
