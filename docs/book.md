@@ -4189,11 +4189,43 @@ attag    = { git = "...", tag = "v1.2.0" }               # git — a tag
 
 A `git` dependency is cloned into a persistent local cache the first time
 it's needed (`~/Library/Caches/boring/git-deps` on macOS, `~/.cache/boring/
-git-deps` on Linux, or `$BORING_CACHE_DIR` if set) and reused/refreshed on
-later builds — a `rev`-pinned dependency needs no network at all once its
-commit is cached; `branch`/`tag`/the default branch are re-fetched on each
-resolution (falling back to the cached copy, with a warning, if offline).
+git-deps` on Linux, or `$BORING_CACHE_DIR` if set). A `rev`-pinned
+dependency needs no network at all once its commit is cached — it's
+already exact. `branch`/`tag`/the default branch are **pinned to whatever
+commit they last resolved to** in a `boring.lock` file (auto-created next
+to `boring.toml`, analogous to `Cargo.lock`) — resolving the same project
+again reuses that exact commit, with no fetch and no drift, even if the
+upstream branch has since moved on. Run `boring update` (or `boring update
+<name>` for just one dependency) to deliberately move a `branch`/`tag`/
+default-branch dependency forward — it force-refreshes, ignoring the
+current lock entry, and rewrites `boring.lock` with whatever it lands on.
+Changing what a dependency asks for in `boring.toml` (e.g. switching
+branches) is detected automatically and invalidates its old lock entry.
 Only one of `branch`/`tag`/`rev` may be given.
+
+`boring.lock` is generated, not hand-edited — but is a plain text file
+worth committing to version control, same as `Cargo.lock`, so every clone
+of the project resolves the same commits.
+
+`boring run`/`boring build` accept two flags for stronger guarantees:
+
+- **`--locked`** — refuse to create or change a `boring.lock` entry. A
+  dependency that already has a matching lock entry is unaffected either
+  way; a brand-new dependency, or one whose `boring.toml` config changed
+  (different URL, switched branch), becomes a hard error instead of a
+  silent fresh resolve-and-write. Run `boring update` first if that's what
+  you actually want.
+- **`--offline`** — refuse any network access. Something already fully
+  resolvable from the local cache (a `rev`-pinned dependency, or a
+  `branch`/`tag`/default-branch dependency with a matching lock entry
+  whose commit is cached) still works; anything that would need a `git
+  clone`/`git fetch` is a hard error instead of an attempt.
+
+Using both together is the strictest combination — good for CI: a build
+either reproduces exactly what's committed with zero network calls, or
+fails loudly instead of silently doing something different. `boring
+update` ignores both flags — forcing a fresh resolution past the lock is
+its entire purpose.
 
 Either way, the dependency is just a plain directory with a `src/`
 convention — it doesn't need its own `boring.toml`. Import from it exactly

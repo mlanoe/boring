@@ -417,6 +417,19 @@ impl BoringToml {
     ///   this stays independently unit-testable, same convention as the `include` resolvers.
     fn resolve_deps(&self, boring_toml_dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>, String> {
         let mut resolved = std::collections::HashMap::new();
+        // A `branch`/`tag`/default-branch git dependency is pinned to the commit it last
+        // resolved to via `boring.lock` (see `git_deps::BoringLock`) — otherwise it would
+        // silently drift between builds/machines. `rev`-pinned dependencies never touch it
+        // (already exact). Loaded once per resolution and only rewritten if something in it
+        // actually changed.
+        let mut lock = crate::git_deps::BoringLock::load(boring_toml_dir);
+        // `--locked`/`--offline` (`boring run`/`boring build`) reach here via env vars, not a
+        // threaded parameter — same convention this file already uses for other cross-cutting
+        // CLI-ish settings (`BORING_PATH`, `BORING_CACHE_DIR`) rather than adding a `policy`
+        // parameter to every intermediate function between CLI parsing and here (`run_project`,
+        // `emit_rust_with_version_and_config`, `emit_cuda`/`emit_rocm`/`emit_metal`/`emit_wgpu`,
+        // ...). Set once, right after CLI parsing, by `parse_run_flags`/`parse_build_command`.
+        let policy = crate::git_deps::DepPolicy::from_env();
         for (name, raw_value) in &self.deps {
             if matches!(name.as_str(), "std" | "crate" | "boring") {
                 return Err(format!(
@@ -429,12 +442,13 @@ impl BoringToml {
                     resolved.insert(name.clone(), boring_toml_dir.join(p).join("src"));
                 }
                 DepSpec::Git { url, gitref } => {
-                    let src = crate::git_deps::resolve_git_dep(&url, &gitref)
+                    let src = crate::git_deps::resolve_git_dep_with_lock(name, &url, &gitref, &mut lock, policy)
                         .map_err(|e| format!("dep '{}': {}", name, e))?;
                     resolved.insert(name.clone(), src);
                 }
             }
         }
+        lock.save(boring_toml_dir)?;
         Ok(resolved)
     }
 
@@ -1047,6 +1061,11 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
                     process::exit(1);
                 }
             }
+            // Set once, immediately — read back via DepPolicy::from_env() (src/git_deps.rs)
+            // wherever a [deps] resolution actually happens, rather than threading a `policy`
+            // parameter through every intermediate function between here and there.
+            "--locked" => { std::env::set_var("BORING_LOCKED", "1"); }
+            "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
             "--" => {
                 // Everything after `--` is passed to the script via args() — stop parsing here.
                 break;
@@ -1066,6 +1085,86 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
         i += 1;
     }
     (gpu, file)
+}
+
+/// `boring update [<name>]` — forces a fresh resolution of one (or, with no `name`, every) git
+/// `[deps]` dependency, ignoring `boring.lock`'s existing pin, and rewrites the lock with
+/// whatever it lands on. Ordinary `boring run`/`boring build` deliberately do the opposite
+/// (`BoringToml::resolve_deps` prefers the lock over the network) — this command is the only
+/// way to deliberately move a `branch`/`tag`/default-branch dependency forward. A `rev`-pinned
+/// dependency is reported and skipped (already exact; edit `boring.toml` to change it) rather
+/// than treated as an error, and a `path` dependency named explicitly is a real error (nothing
+/// to update). Must be run from a project directory (the same `./boring.toml`-in-cwd convention
+/// `boring build`'s own project mode already uses — see `load_project_toml`).
+fn parse_update_command(args: &[String]) {
+    let name_filter: Option<&str> = match args.first() {
+        None => None,
+        Some(s) if !s.starts_with('-') => Some(s.as_str()),
+        Some(other) => {
+            eprintln!("error: unknown update flag '{other}'");
+            process::exit(1);
+        }
+    };
+
+    let (toml, toml_path) = load_project_toml();
+    let boring_toml_dir = toml_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut lock = git_deps::BoringLock::load(&boring_toml_dir);
+
+    let mut matched = name_filter.is_none();
+    let mut any_git_dep = false;
+    for (name, raw_value) in &toml.deps {
+        if let Some(filter) = name_filter {
+            if name != filter { continue; }
+        }
+        let spec = match BoringToml::parse_dep_value(raw_value) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("error: {e}"); process::exit(1); }
+        };
+        let (url, gitref) = match spec {
+            DepSpec::Git { url, gitref } => (url, gitref),
+            DepSpec::Path(_) => {
+                if name_filter.is_some() {
+                    eprintln!("error: '{name}' is a path dependency — nothing to update");
+                    process::exit(1);
+                }
+                continue;
+            }
+        };
+        matched = true;
+        any_git_dep = true;
+        match git_deps::update_git_dep(name, &url, &gitref, &mut lock) {
+            Ok(git_deps::UpdateOutcome::AlreadyExact) => {
+                println!("{name}: pinned to an exact commit in boring.toml — nothing to update");
+            }
+            Ok(git_deps::UpdateOutcome::UpToDate(sha)) => {
+                println!("{name}: already up to date ({})", &sha[..sha.len().min(12)]);
+            }
+            Ok(git_deps::UpdateOutcome::Updated(Some(old), new)) => {
+                println!("{name}: updated {} → {}", &old[..old.len().min(12)], &new[..new.len().min(12)]);
+            }
+            Ok(git_deps::UpdateOutcome::Updated(None, new)) => {
+                println!("{name}: locked at {}", &new[..new.len().min(12)]);
+            }
+            Err(e) => {
+                eprintln!("error: dep '{name}': {e}");
+                process::exit(1);
+            }
+        }
+    }
+
+    if let Some(filter) = name_filter {
+        if !matched {
+            eprintln!("error: no [deps] entry named '{filter}'");
+            process::exit(1);
+        }
+    } else if !any_git_dep {
+        println!("no git dependencies to update");
+    }
+
+    if let Err(e) = lock.save(&boring_toml_dir) {
+        eprintln!("error: {e}");
+        process::exit(1);
+    }
 }
 
 fn run() {
@@ -1106,6 +1205,9 @@ fn run() {
             let build_args = &args[2..];
             parse_build_command(build_args);
         }
+        Some("update") => {
+            parse_update_command(&args[2..]);
+        }
 
         Some(path) => run_file(path, None, &args[2..]),
         None => {
@@ -1125,6 +1227,8 @@ fn print_help() {
     eprintln!("    boring run --gpu <profile> <file.br>  Run with a GPU simulation profile");
     eprintln!("                               Built-in profiles: default, v100, a100, rtx3090, rtx4090, h100");
     eprintln!("                               Custom profile:    --gpu path/to/profile.toml");
+    eprintln!("    boring run --locked        Fail instead of creating/updating a boring.lock entry");
+    eprintln!("    boring run --offline       Never touch the network for a git [deps] dependency");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
     eprintln!("    boring build --mode managed              Use managed memory mode (Arc<Mutex> defaults)");
@@ -1135,6 +1239,8 @@ fn print_help() {
     boring build --compile                   Transpile then run cargo build in the generated project
     boring build --rust-options \"<flags>\"   Pass extra flags to cargo build (implies --compile)
                                             Example: --rust-options \"--release\"");
+    eprintln!("    boring build --locked      Fail instead of creating/updating a boring.lock entry");
+    eprintln!("    boring build --offline     Never touch the network for a git [deps] dependency");
     eprintln!("    boring build --target kernel             Emit a kernel Cargo project from boring.toml");
     eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
     eprintln!("    boring build --target cuda               Emit a CUDA Cargo project from boring.toml");
@@ -1146,6 +1252,8 @@ fn print_help() {
     eprintln!("    boring build --target wgpu               Emit a wgpu Cargo project from boring.toml (Windows/Linux/macOS)");
     eprintln!("    boring build --target wgpu <file.br>     Emit a wgpu Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
+    eprintln!("    boring update              Refresh every git [deps] dependency and re-pin boring.lock");
+    eprintln!("    boring update <name>       Refresh just that one git dependency");
 }
 
 // â”€â”€â”€ Project commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1317,6 +1425,10 @@ fn parse_build_command(build_args: &[String]) {
             "--instrument" => instrument = true,
             "--emit-rust"  => emit_rust = true,
             "--compile"    => compile = true,
+            // See parse_run_flags's matching arms for why these are env vars, not a threaded
+            // parameter — read back via DepPolicy::from_env() (src/git_deps.rs).
+            "--locked"  => { std::env::set_var("BORING_LOCKED", "1"); }
+            "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
             "--rust-options" => {
                 i += 1;
                 match build_args.get(i) {

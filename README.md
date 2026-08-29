@@ -270,20 +270,46 @@ cd examples/hello_rust && cargo run
 
 ---
 
+## Standard library and dependencies
+
+Boring ships a small first-party standard library and lets a project depend on another Boring project's source directly — no registry involved, just `boring.toml`.
+
+```boring
+use boring.collections.*             # first-party stdlib (Stack<T>, Queue<T>, ...)
+use numlib.big_uint.*                # a named project dependency (see below)
+```
+
+```toml
+# boring.toml
+[deps]
+numlib  = "../boring-numlib"                              # a sibling project, by path
+somelib = { git = "https://github.com/user/somelib" }      # ...or by git (branch/tag/rev)
+```
+
+A `git` dependency is cloned into a persistent local cache and pinned in an auto-generated `boring.lock` (commit it, same as `Cargo.lock`) so it never silently drifts between builds — run `boring update [name]` to deliberately move it forward. `boring run --locked`/`--offline` and `boring build --locked`/`--offline` turn "silently resolve/refetch" into a hard error, for CI and reproducible builds.
+
+See [`docs/book.md`](docs/book.md) §15 (Modules) for the full syntax and [`docs/cross-project-code-sharing-gap.md`](docs/cross-project-code-sharing-gap.md) for the design rationale and known limitations compared to a full package manager.
+
+---
+
 ## Repository layout
 
 ```
 boring/
 ├── src/
-│   ├── main.rs              # CLI entry point
+│   ├── main.rs              # CLI entry point + boring.toml/boring.lock handling
+│   ├── git_deps.rs          # Named git [deps] resolution (cache, boring.lock, --locked/--offline)
+│   ├── stdlib_embed.rs      # Embeds stdlib/*.br into the compiler binary
 │   ├── parser/              # Lexer + recursive-descent parser → AST
 │   ├── interpreter/         # Tree-walk interpreter (for rapid iteration)
 │   ├── validator/           # kernel.rs — pre-emission validation pass
 │   └── transpiler/
 │       ├── *.rs             # Standard backend → Rust std + tokio
 │       └── kernel/          # Kernel backend → Rust-for-Linux (no_std)
+├── stdlib/                  # First-party `use boring.<module>` standard library
 ├── docs/
 │   ├── book.md              # Full language reference
+│   ├── cross-project-code-sharing-gap.md  # Dependency system design + known limitations
 │   └── kernel-transpiler-mapping.md  # Boring → Rust-for-Linux mapping
 ├── spec/
 │   └── grammar.bnf          # Formal BNF grammar

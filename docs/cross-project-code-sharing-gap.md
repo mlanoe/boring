@@ -176,14 +176,30 @@ comparison. Roughly in priority order for Boring's actual use case
 (personal, single-author, a handful of sibling projects) — not necessarily
 implementation order:
 
-1. **Lockfile** (highest priority). Nothing today records which exact
-   commit a `branch`/`tag`/default-branch git dependency last resolved to
-   — it can silently drift between builds or machines. A minimal
-   `boring.lock` (just `name → resolved commit sha` per git dependency)
-   would fix this without needing a real dependency-resolution algorithm.
-   Would also want `boring update` (refresh the lock deliberately) and
-   `--locked`/`--offline` flags (fail instead of silently re-resolving or
-   silently falling back to a stale cache).
+1. ~~**Lockfile**~~ — **done** (2026-08-20). `boring.lock` (auto-created
+   next to `boring.toml`, `src/git_deps.rs`'s `BoringLock`) pins each
+   `branch`/`tag`/default-branch git dependency to the exact commit it
+   last resolved to — resolving again reuses that commit with zero drift
+   and zero network, even after the upstream branch moves on. A config
+   change (different URL, switched branch) is detected and invalidates the
+   stale entry automatically. `rev`-pinned dependencies never touch the
+   lock (already exact). New `boring update [name]` command force-refreshes
+   past the lock and rewrites it. See `docs/book.md` §15.
+   ~~**Still open**: `--locked`/`--offline`~~ — **done** (2026-08-20).
+   `boring run`/`boring build --locked` refuses to create or change a lock
+   entry (a brand-new or config-changed git dependency becomes a hard
+   error instead of a silent resolve-and-write); `--offline` refuses any
+   network access (only already-cached commits resolve). Implemented as
+   `git_deps::DepPolicy`, read via `DepPolicy::from_env()` from
+   `BORING_LOCKED`/`BORING_OFFLINE` — set once by `parse_run_flags`/
+   `parse_build_command` right after CLI parsing, rather than threading a
+   `policy` parameter through every intermediate function between CLI
+   parsing and `resolve_deps` (`run_project`, `emit_rust_with_version_and_
+   config`, each GPU target's `emit_cuda`/`emit_rocm`/`emit_metal`/
+   `emit_wgpu`, ...) — same convention this file already used for other
+   cross-cutting CLI-ish settings (`BORING_PATH`, `BORING_CACHE_DIR`).
+   `boring update` ignores both — forcing a fresh resolution past the lock
+   is its entire purpose.
 2. **Transitive dependencies.** `[deps]` is explicitly single-level — a
    dependency's own `[deps]` (if it has any) are never followed, same rule
    `[external_types]`/`[derives]`'s `include` already uses. Fine while no
