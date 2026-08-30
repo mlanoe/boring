@@ -20,6 +20,7 @@ pub mod desugar_labeled_array;
 pub mod interpreter;
 pub mod checker;
 mod git_deps;
+mod semver;
 pub mod stdlib_embed;
 pub mod transpiler;
 pub mod validator;
@@ -184,11 +185,16 @@ struct BoringToml {
     external_fns_includes: Vec<String>,
 }
 
-/// One `[deps]` entry's interpreted value — see `BoringToml::resolve_deps`.
+/// One `[deps]` entry's interpreted value — see `BoringToml::resolve_deps`. Both variants carry
+/// an optional `version` requirement (`"^1.2"`/`"~1.0"`/`"=1.2.3"`, parsed by `crate::semver`) —
+/// a **compatibility assertion**, not a solver input: a `path`/`git` entry already names one
+/// exact, singular target, so there is nothing to pick between. When present, `resolve_deps_into`
+/// checks it once against the target's own `[project] version` and errors out if it doesn't
+/// satisfy — see that method's doc comment.
 #[derive(Debug, PartialEq)]
 enum DepSpec {
-    Path(String),
-    Git { url: String, gitref: GitRef },
+    Path { path: String, version_req: Option<String> },
+    Git { url: String, gitref: GitRef, version_req: Option<String> },
 }
 
 /// Which ref of a `git` dependency to check out — see `git_deps::resolve_git_dep`.
@@ -202,6 +208,15 @@ enum GitRef {
     Branch(String),
     Tag(String),
     Rev(String),
+}
+
+/// Where a resolved `[deps]` entry came from — see `BoringToml::resolve_deps_into`'s doc
+/// comment for the collision policy this drives (the top-level project's own entry always
+/// wins over a transitive one with the same name).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DepOrigin {
+    TopLevel,
+    Transitive,
 }
 
 impl BoringToml {
@@ -409,19 +424,59 @@ impl BoringToml {
     /// - A `path` value resolves to `<boring_toml_dir>/<path>/src` (the dependency is just a
     ///   directory with a `src/` convention, not required to have its own `boring.toml`) —
     ///   relative to *this* `boring.toml`'s own directory, same as
-    ///   `resolve_external_types_includes`. No transitive resolution: if that directory has
-    ///   its own `boring.toml` with its own `[deps]`, those are not followed — same
-    ///   single-level rule `resolve_external_types_includes`/`resolve_derive_includes` already
-    ///   follow for `include`.
+    ///   `resolve_external_types_includes`.
+    /// - **Transitive**: if a dependency's own root directory has a `boring.toml` with its own
+    ///   `[deps]`, those are followed too (recursively) — see `resolve_deps_into`'s doc comment
+    ///   for the full walk/collision policy. This is the one place `[deps]` does NOT mirror
+    ///   `resolve_external_types_includes`/`resolve_derive_includes`'s deliberately single-level
+    ///   `include` — a project dependency graph needs real transitive resolution (B's own `.br`
+    ///   source may `use C.xxx`), where `[external_types]`'s shared-declarations `include` never
+    ///   needed more than one level.
     ///   Returns an error message (rather than exiting directly) on the first invalid entry, so
     ///   this stays independently unit-testable, same convention as the `include` resolvers.
     fn resolve_deps(&self, boring_toml_dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>, String> {
-        let mut resolved = std::collections::HashMap::new();
+        let mut resolved: std::collections::HashMap<String, (PathBuf, DepOrigin)> = std::collections::HashMap::new();
+        let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        self.resolve_deps_into(boring_toml_dir, &mut resolved, &mut visited, true)?;
+        Ok(resolved.into_iter().map(|(name, (path, _origin))| (name, path)).collect())
+    }
+
+    /// Recursive worker behind `resolve_deps` — resolves `self`'s own `[deps]` (the project
+    /// whose parsed `BoringToml` `self` is, rooted at `boring_toml_dir`) into `resolved`,
+    /// recursing into any dependency that itself has a `boring.toml` with its own `[deps]`.
+    ///
+    /// **Cycle/diamond guard**: `visited` holds the canonicalized `boring_toml_dir` of every
+    /// project already fully expanded. Checked first, unconditionally (top-level call included)
+    /// — a dependency graph with a cycle (B's `[deps]` names something resolving back to A's
+    /// own directory) or a diamond (A depends on B and C, both of which depend on D) terminates
+    /// cleanly and does D's own work at most once, regardless of how many paths reach it.
+    ///
+    /// **Collision policy** (same name, different resolved target, discovered twice — user-
+    /// confirmed, see `docs/cross-project-code-sharing-gap.md`): the *top-level* project's own
+    /// explicit `[deps]` entry always wins, however it's discovered relative to a transitive
+    /// one with the same name — a deliberate override, same spirit as a top-level manifest
+    /// pinning a version in a real package manager. Two entries where **neither** is the
+    /// top-level's own is a hard error naming both conflicting targets — there's no principled
+    /// way to pick one silently. Note this is *not* true per-dependency namespace isolation
+    /// (`use` resolution is one flat name→path map per interpreter/transpiler instance, not
+    /// scoped per source file) — a deliberate, documented simplification, not a bug.
+    fn resolve_deps_into(
+        &self,
+        boring_toml_dir: &Path,
+        resolved: &mut std::collections::HashMap<String, (PathBuf, DepOrigin)>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        is_top_level: bool,
+    ) -> Result<(), String> {
+        let canonical_dir = boring_toml_dir.canonicalize().unwrap_or_else(|_| boring_toml_dir.to_path_buf());
+        if !visited.insert(canonical_dir) {
+            return Ok(()); // already fully expanded (cycle or diamond) — nothing more to do
+        }
+
         // A `branch`/`tag`/default-branch git dependency is pinned to the commit it last
         // resolved to via `boring.lock` (see `git_deps::BoringLock`) — otherwise it would
         // silently drift between builds/machines. `rev`-pinned dependencies never touch it
-        // (already exact). Loaded once per resolution and only rewritten if something in it
-        // actually changed.
+        // (already exact). Loaded once per project directory in the graph (top-level or
+        // transitive) and only rewritten if something in it actually changed.
         let mut lock = crate::git_deps::BoringLock::load(boring_toml_dir);
         // `--locked`/`--offline` (`boring run`/`boring build`) reach here via env vars, not a
         // threaded parameter — same convention this file already uses for other cross-cutting
@@ -429,6 +484,7 @@ impl BoringToml {
         // parameter to every intermediate function between CLI parsing and here (`run_project`,
         // `emit_rust_with_version_and_config`, `emit_cuda`/`emit_rocm`/`emit_metal`/`emit_wgpu`,
         // ...). Set once, right after CLI parsing, by `parse_run_flags`/`parse_build_command`.
+        // Applies uniformly across the whole graph, transitive dependencies included.
         let policy = crate::git_deps::DepPolicy::from_env();
         for (name, raw_value) in &self.deps {
             if matches!(name.as_str(), "std" | "crate" | "boring") {
@@ -437,19 +493,99 @@ impl BoringToml {
                     name
                 ));
             }
-            match Self::parse_dep_value(raw_value)? {
-                DepSpec::Path(p) => {
-                    resolved.insert(name.clone(), boring_toml_dir.join(p).join("src"));
+            let (dep_root, src, version_req) = match Self::parse_dep_value(raw_value)? {
+                DepSpec::Path { path: p, version_req } => {
+                    let dep_root = boring_toml_dir.join(p);
+                    // Canonicalized so two different relative routes to the *same* real
+                    // directory (e.g. reached via two different dependents in a diamond) compare
+                    // equal below, instead of comparing their literal, differently-`..`-strewn
+                    // path strings as if they were different targets. Falls back to the raw
+                    // (non-canonical) join if the directory doesn't exist yet -- keeps the
+                    // existing lenient "a path dependency isn't required to exist" behavior
+                    // rather than turning a missing directory into a resolution error here.
+                    let dep_root = dep_root.canonicalize().unwrap_or(dep_root);
+                    let src = dep_root.join("src");
+                    (dep_root, src, version_req)
                 }
-                DepSpec::Git { url, gitref } => {
+                DepSpec::Git { url, gitref, version_req } => {
                     let src = crate::git_deps::resolve_git_dep_with_lock(name, &url, &gitref, &mut lock, policy)
                         .map_err(|e| format!("dep '{}': {}", name, e))?;
-                    resolved.insert(name.clone(), src);
+                    let dep_root = src.parent().unwrap_or(&src).to_path_buf();
+                    (dep_root, src, version_req)
+                }
+            };
+
+            // This entry's own `boring.toml`, if it has one — read (at most) once and shared
+            // between the version-compatibility check below and the transitive-recursion step
+            // further down, rather than reading/parsing it twice.
+            let nested_toml_path = dep_root.join("boring.toml");
+            let nested = std::fs::read_to_string(&nested_toml_path).ok().map(|text| Self::parse(&text));
+
+            // `version = "^1.2"` (see this entry's `DepSpec` doc comment): a compatibility
+            // *assertion* against whatever this one line actually resolved to — checked
+            // independently of the collision-merge below, so a transitive entry later shadowed
+            // by a top-level override still gets its own version checked against what it itself
+            // named (the honest, least-surprising semantics: each line answers for its own claim).
+            if let Some(req_str) = &version_req {
+                let Some(nested) = &nested else {
+                    return Err(format!(
+                        "dep '{}' declares version = \"{}\" but has no boring.toml to check a version against",
+                        name, req_str
+                    ));
+                };
+                let req = crate::semver::VersionReq::parse(req_str).map_err(|e| {
+                    format!("dep '{}' declares an invalid version requirement \"{}\": {}", name, req_str, e)
+                })?;
+                let actual = crate::semver::Version::parse(&nested.version).map_err(|e| {
+                    format!(
+                        "dep '{}' resolved to '{}', whose boring.toml has an invalid version \"{}\": {}",
+                        name, dep_root.display(), nested.version, e
+                    )
+                })?;
+                if !req.matches(&actual) {
+                    return Err(format!(
+                        "dep '{}' requires version {} but '{}' (resolved from '{}') declares version {}",
+                        name, req, dep_root.display(), raw_value, actual
+                    ));
+                }
+            }
+
+            let origin = if is_top_level { DepOrigin::TopLevel } else { DepOrigin::Transitive };
+            let should_recurse = match resolved.get(name) {
+                None => {
+                    resolved.insert(name.clone(), (src.clone(), origin));
+                    true
+                }
+                Some((existing_src, _)) if *existing_src == src => {
+                    false // same dependency reached a second way (diamond) — already expanded
+                }
+                Some((_, DepOrigin::TopLevel)) => {
+                    false // top-level already claimed this name — ignore the differing transitive one
+                }
+                Some((_, DepOrigin::Transitive)) if matches!(origin, DepOrigin::TopLevel) => {
+                    // The top-level project's own entry always wins, however it's discovered
+                    // relative to a transitive one already sitting under this name.
+                    resolved.insert(name.clone(), (src.clone(), DepOrigin::TopLevel));
+                    true
+                }
+                Some((existing_src, _)) => {
+                    return Err(format!(
+                        "'{}' resolves to two different targets in the dependency graph ('{}' \
+                         vs '{}') — rename one of them (there is no automatic way to pick between \
+                         two conflicting transitive dependencies)",
+                        name, existing_src.display(), src.display()
+                    ));
+                }
+            };
+
+            if should_recurse {
+                if let Some(nested) = &nested {
+                    nested.resolve_deps_into(&dep_root, resolved, visited, false)?;
                 }
             }
         }
         lock.save(boring_toml_dir)?;
-        Ok(resolved)
+        Ok(())
     }
 
     /// Parses one `[deps]` entry's raw value — either a quoted path string, or a small
@@ -467,17 +603,19 @@ impl BoringToml {
             let mut branch = None;
             let mut tag = None;
             let mut rev = None;
+            let mut version_req = None;
             for pair in stripped.split(',') {
                 let pair = pair.trim();
                 if pair.is_empty() { continue; }
                 let Some((key, value)) = pair.split_once('=') else { continue };
                 let value = value.trim().trim_matches('"').to_string();
                 match key.trim() {
-                    "path"   => path = Some(value),
-                    "git"    => git = Some(value),
-                    "branch" => branch = Some(value),
-                    "tag"    => tag = Some(value),
-                    "rev"    => rev = Some(value),
+                    "path"    => path = Some(value),
+                    "git"     => git = Some(value),
+                    "branch"  => branch = Some(value),
+                    "tag"     => tag = Some(value),
+                    "rev"     => rev = Some(value),
+                    "version" => version_req = Some(value),
                     _ => {}
                 }
             }
@@ -485,7 +623,7 @@ impl BoringToml {
                 return Err(format!("[deps] entry '{}' has both 'path' and 'git' — pick one", raw));
             }
             if let Some(p) = path {
-                return Ok(DepSpec::Path(p));
+                return Ok(DepSpec::Path { path: p, version_req });
             }
             if let Some(url) = git {
                 let gitref = match (branch, tag, rev) {
@@ -497,12 +635,12 @@ impl BoringToml {
                         "[deps] entry '{}' gives more than one of branch/tag/rev — pick one", raw
                     )),
                 };
-                return Ok(DepSpec::Git { url, gitref });
+                return Ok(DepSpec::Git { url, gitref, version_req });
             }
             return Err(format!("[deps] entry '{}' has no recognized 'path' or 'git' key", raw));
         }
         if raw.starts_with('"') {
-            return Ok(DepSpec::Path(raw.trim_matches('"').to_string()));
+            return Ok(DepSpec::Path { path: raw.trim_matches('"').to_string(), version_req: None });
         }
         Err(format!("[deps] entry '{}' is neither a quoted path nor a {{ path/git = ... }} table", raw))
     }
@@ -560,7 +698,7 @@ impl BoringToml {
 #[cfg(test)]
 mod boring_toml_tests {
     use super::{BoringToml, DepSpec, GitRef};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn dependencies_section_captured_verbatim() {
@@ -817,23 +955,38 @@ mod boring_toml_tests {
     #[test]
     fn parse_dep_value_git_defaults_to_default_ref() {
         let spec = BoringToml::parse_dep_value("{ git = \"https://example.com/x\" }").unwrap();
-        assert_eq!(spec, DepSpec::Git { url: "https://example.com/x".to_string(), gitref: GitRef::Default });
+        assert_eq!(spec, DepSpec::Git { url: "https://example.com/x".to_string(), gitref: GitRef::Default, version_req: None });
     }
 
     #[test]
     fn parse_dep_value_git_accepts_branch_tag_rev() {
         let branch = BoringToml::parse_dep_value("{ git = \"u\", branch = \"main\" }").unwrap();
-        assert_eq!(branch, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Branch("main".to_string()) });
+        assert_eq!(branch, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Branch("main".to_string()), version_req: None });
 
         let tag = BoringToml::parse_dep_value("{ git = \"u\", tag = \"v1.0\" }").unwrap();
-        assert_eq!(tag, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Tag("v1.0".to_string()) });
+        assert_eq!(tag, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Tag("v1.0".to_string()), version_req: None });
 
         let rev = BoringToml::parse_dep_value("{ git = \"u\", rev = \"abc123\" }").unwrap();
-        assert_eq!(rev, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Rev("abc123".to_string()) });
+        assert_eq!(rev, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Rev("abc123".to_string()), version_req: None });
 
         // Key order shouldn't matter.
         let reordered = BoringToml::parse_dep_value("{ rev = \"abc123\", git = \"u\" }").unwrap();
-        assert_eq!(reordered, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Rev("abc123".to_string()) });
+        assert_eq!(reordered, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Rev("abc123".to_string()), version_req: None });
+    }
+
+    #[test]
+    fn parse_dep_value_accepts_optional_version_alongside_path_or_git() {
+        let path_spec = BoringToml::parse_dep_value("{ path = \"../numlib\", version = \"^1.2\" }").unwrap();
+        assert_eq!(path_spec, DepSpec::Path { path: "../numlib".to_string(), version_req: Some("^1.2".to_string()) });
+
+        let git_spec = BoringToml::parse_dep_value("{ git = \"u\", branch = \"main\", version = \"~2.0\" }").unwrap();
+        assert_eq!(git_spec, DepSpec::Git {
+            url: "u".to_string(), gitref: GitRef::Branch("main".to_string()), version_req: Some("~2.0".to_string()),
+        });
+
+        // A bare quoted-path entry has no way to spell a version — always None.
+        let bare = BoringToml::parse_dep_value("\"../numlib\"").unwrap();
+        assert_eq!(bare, DepSpec::Path { path: "../numlib".to_string(), version_req: None });
     }
 
     #[test]
@@ -942,6 +1095,189 @@ mod boring_toml_tests {
         assert!(toml.external_fns.contains(&("Shared".to_string(), "sharedMethod".to_string(), vec!["&".to_string()])));
         assert!(toml.external_fns.contains(&("Local".to_string(), "localMethod".to_string(), vec!["&mut".to_string()])));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Transitive [deps] resolution (resolve_deps_into) ────────────────────────────────
+    // Plain path dependencies throughout (not git) -- the recursion/collision logic is
+    // identical either way, and git's own mechanics (clone/fetch/lock) already have their own
+    // dedicated coverage in git_deps.rs::tests. No `src/` directories are actually created:
+    // `resolve_deps` never checks a path dependency's `src/` exists (unlike a git dependency,
+    // which does) -- only the `boring.toml` files that drive the recursion are needed here.
+
+    /// Creates and canonicalizes a directory in one step. Assertions below compare against
+    /// these canonical paths because `resolve_deps_into` itself canonicalizes every path
+    /// dependency's root (see its own comment) — on macOS in particular, `std::env::temp_dir()`
+    /// commonly involves a symlink (`/tmp` → `/private/tmp`), so a raw, non-canonicalized
+    /// `PathBuf` built by hand here would never compare equal to what resolution returns even
+    /// when they name the exact same real directory.
+    fn make_canonical_dir(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path).unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn resolve_deps_follows_transitive_dependency_with_no_collision() {
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_chain_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let b = make_canonical_dir(&tmp.join("b"));
+        let c = make_canonical_dir(&tmp.join("c"));
+        std::fs::write(b.join("boring.toml"), "[deps]\nc = \"../c\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nb = \"../b\"\n");
+        let resolved = toml.resolve_deps(&a).unwrap();
+
+        assert_eq!(resolved.get("b"), Some(&b.join("src")));
+        assert_eq!(resolved.get("c"), Some(&c.join("src")), "B's own transitive dependency on C must be followed");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_terminates_on_a_dependency_cycle() {
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_cycle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let b = make_canonical_dir(&tmp.join("b"));
+        // B depends back on A -- a real cycle.
+        std::fs::write(b.join("boring.toml"), "[deps]\nback = \"../a\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nb = \"../b\"\n");
+        // Must terminate (not hang) and resolve both names.
+        let resolved = toml.resolve_deps(&a).unwrap();
+        assert_eq!(resolved.get("b"), Some(&b.join("src")));
+        assert_eq!(resolved.get("back"), Some(&a.join("src")));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_diamond_with_matching_targets_is_not_a_collision() {
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_diamond_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let b = make_canonical_dir(&tmp.join("b"));
+        let c = make_canonical_dir(&tmp.join("c"));
+        let d = make_canonical_dir(&tmp.join("d"));
+        // B and C both depend on the same D, under the same name -- a diamond, not a conflict.
+        std::fs::write(b.join("boring.toml"), "[deps]\nshared = \"../d\"\n").unwrap();
+        std::fs::write(c.join("boring.toml"), "[deps]\nshared = \"../d\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nb = \"../b\"\nc = \"../c\"\n");
+        let resolved = toml.resolve_deps(&a).unwrap();
+        assert_eq!(resolved.get("shared"), Some(&d.join("src")));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_diamond_with_conflicting_transitive_targets_is_an_error() {
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_diamond_conflict_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let b = make_canonical_dir(&tmp.join("b"));
+        let c = make_canonical_dir(&tmp.join("c"));
+        make_canonical_dir(&tmp.join("d1"));
+        make_canonical_dir(&tmp.join("d2"));
+        // B and C each declare "shared" for a DIFFERENT target -- neither is A's own top-level
+        // entry, so this must be a hard error, not an arbitrary silent pick.
+        std::fs::write(b.join("boring.toml"), "[deps]\nshared = \"../d1\"\n").unwrap();
+        std::fs::write(c.join("boring.toml"), "[deps]\nshared = \"../d2\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nb = \"../b\"\nc = \"../c\"\n");
+        let err = toml.resolve_deps(&a).unwrap_err();
+        assert!(err.contains("shared"), "unexpected error: {err}");
+        assert!(err.contains("two different targets"), "unexpected error: {err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_top_level_entry_overrides_a_conflicting_transitive_one() {
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_override_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let b = make_canonical_dir(&tmp.join("b"));
+        let d1 = make_canonical_dir(&tmp.join("d1"));
+        make_canonical_dir(&tmp.join("d2"));
+        // B transitively wants "shared" = d2, but A's own top-level [deps] already says d1 --
+        // A's explicit choice must win silently, no error.
+        std::fs::write(b.join("boring.toml"), "[deps]\nshared = \"../d2\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nshared = \"../d1\"\nb = \"../b\"\n");
+        let resolved = toml.resolve_deps(&a).unwrap();
+        assert_eq!(resolved.get("shared"), Some(&d1.join("src")), "the top-level project's own entry must win");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ── `version` requirement compatibility check ───────────────────────────────────────
+    // Same "plain path dependencies, no git/subprocess" fixture pattern as the transitive
+    // tests above — the version check runs identically regardless of how the target resolved.
+
+    #[test]
+    fn resolve_deps_version_requirement_satisfied_by_dependency_is_not_an_error() {
+        let tmp = std::env::temp_dir().join(format!("boring_version_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let numlib = make_canonical_dir(&tmp.join("numlib"));
+        std::fs::write(numlib.join("boring.toml"), "[project]\nname = \"numlib\"\nversion = \"1.4.0\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nnumlib = { path = \"../numlib\", version = \"^1.0\" }\n");
+        let resolved = toml.resolve_deps(&a).unwrap();
+        assert_eq!(resolved.get("numlib"), Some(&numlib.join("src")));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_version_requirement_unsatisfied_by_dependency_is_an_error() {
+        let tmp = std::env::temp_dir().join(format!("boring_version_unsatisfied_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let numlib = make_canonical_dir(&tmp.join("numlib"));
+        std::fs::write(numlib.join("boring.toml"), "[project]\nname = \"numlib\"\nversion = \"0.9.0\"\n").unwrap();
+
+        let toml = BoringToml::parse("[deps]\nnumlib = { path = \"../numlib\", version = \"^1.0\" }\n");
+        let err = toml.resolve_deps(&a).unwrap_err();
+        assert!(err.contains("numlib"), "unexpected error: {err}");
+        assert!(err.contains("^1.0"), "unexpected error: {err}");
+        assert!(err.contains("0.9.0"), "unexpected error: {err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_version_requirement_with_no_nested_boring_toml_is_an_error() {
+        let tmp = std::env::temp_dir().join(format!("boring_version_no_toml_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        // No boring.toml written for "numlib" -- just a bare directory, same as an ordinary
+        // (versionless) path dependency is allowed to be.
+        make_canonical_dir(&tmp.join("numlib"));
+
+        let toml = BoringToml::parse("[deps]\nnumlib = { path = \"../numlib\", version = \"^1.0\" }\n");
+        let err = toml.resolve_deps(&a).unwrap_err();
+        assert!(err.contains("numlib"), "unexpected error: {err}");
+        assert!(err.contains("no boring.toml"), "unexpected error: {err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_deps_without_a_version_key_is_unaffected() {
+        // No `version` key at all -- the check must not run, and a dependency with no
+        // boring.toml (or an unparseable one) must resolve exactly as before this feature.
+        let tmp = std::env::temp_dir().join(format!("boring_version_absent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = make_canonical_dir(&tmp.join("a"));
+        let numlib = make_canonical_dir(&tmp.join("numlib"));
+
+        let toml = BoringToml::parse("[deps]\nnumlib = \"../numlib\"\n");
+        let resolved = toml.resolve_deps(&a).unwrap();
+        assert_eq!(resolved.get("numlib"), Some(&numlib.join("src")));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
 
@@ -1121,8 +1457,8 @@ fn parse_update_command(args: &[String]) {
             Err(e) => { eprintln!("error: {e}"); process::exit(1); }
         };
         let (url, gitref) = match spec {
-            DepSpec::Git { url, gitref } => (url, gitref),
-            DepSpec::Path(_) => {
+            DepSpec::Git { url, gitref, .. } => (url, gitref),
+            DepSpec::Path { .. } => {
                 if name_filter.is_some() {
                     eprintln!("error: '{name}' is a path dependency — nothing to update");
                     process::exit(1);

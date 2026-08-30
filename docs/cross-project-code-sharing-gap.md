@@ -21,12 +21,13 @@ and option 3 (first-party `boring/stdlib/*.br`) below are now implemented.**
   `git = "..."` (optionally `branch`/`tag`/`rev`), cloned into a persistent
   local cache (`src/git_deps.rs`, shells out to the `git` CLI — no new
   Cargo dependency) the first time it's needed and reused/refreshed on
-  later builds, same as a real package manager's git dependency but without
-  a lockfile. See `docs/book.md` §15's "Named cross-project dependencies"
-  subsection for full syntax and `BoringToml::resolve_deps` (`src/main.rs`)
-  for the resolution rules (reserved names `std`/`crate`/`boring`; no
-  transitive resolution, same single-level rule `[external_types]`/
-  `[derives]`'s own `include` already follows). Wired into all three
+  later builds, pinned in an auto-generated `boring.lock` (see "Future
+  work" #1 below). See `docs/book.md` §15's "Named cross-project
+  dependencies" subsection for full syntax and `BoringToml::resolve_deps`
+  (`src/main.rs`) for the resolution rules (reserved names
+  `std`/`crate`/`boring`; **transitive** — a dependency's own `[deps]` are
+  followed recursively, see "Future work" #2 below for the collision
+  policy). Wired into all three
   consumers — the interpreter (`boring run`,
   `Interpreter::exec_named_dep_use`), the transpiler's std/tokio target
   (`boring build`, `emit_top.rs`'s `emit_use`/`deep_pre_scan`), and the
@@ -200,19 +201,49 @@ implementation order:
    cross-cutting CLI-ish settings (`BORING_PATH`, `BORING_CACHE_DIR`).
    `boring update` ignores both — forcing a fresh resolution past the lock
    is its entire purpose.
-2. **Transitive dependencies.** `[deps]` is explicitly single-level — a
-   dependency's own `[deps]` (if it has any) are never followed, same rule
-   `[external_types]`/`[derives]`'s `include` already uses. Fine while no
-   dependency itself depends on another Boring project; becomes a real gap
-   the day one does. Doing this properly also opens the "diamond
-   dependency" question (two deps needing the same third dep at possibly
-   different refs) — no need to solve that until transitive resolution
-   itself is needed.
-3. **Version ranges / real resolution.** No `^1.2`/`~1.0`-style semver
-   constraints or a solver — a dependency is always pinned exactly (a
-   path is what it is; `rev` is exact; `branch`/`tag` float but aren't
-   "resolved" against any other constraint). Only becomes meaningful once
-   (2) exists and two dependencies could disagree on what they need.
+2. ~~**Transitive dependencies**~~ — **done** (2026-08-30). A dependency's
+   own `boring.toml` `[deps]` (if it has one) is now followed recursively —
+   `BoringToml::resolve_deps_into` (`src/main.rs`) walks the whole graph,
+   guarding against cycles/diamonds by canonicalized project directory
+   (each project directory's own `[deps]` expanded at most once, however
+   many paths reach it). **Collision policy** (same name resolving to two
+   different targets somewhere in the graph — the "diamond dependency"
+   question this item used to defer): the *top-level* project's own
+   explicit `[deps]` entry always wins, however it's discovered relative
+   to a transitive one with the same name (a deliberate override, same
+   spirit as a top-level manifest pinning a version in a real package
+   manager); two entries where **neither** is the top-level's own is a
+   hard error naming both conflicting targets, not a silent arbitrary
+   pick. **Known limitation, not silently glossed over**: this is not true
+   per-dependency namespace isolation — `use` resolution is one flat
+   `name → path` map per interpreter/transpiler instance, not scoped per
+   source file, so two unrelated transitive dependencies that happen to
+   pick the *same* name for genuinely different things will still collide
+   (correctly reported as an error, never silently misresolved) unless the
+   top-level project's own `[deps]` disambiguates by declaring that name
+   itself. Real per-project namespace isolation would need `use`
+   resolution to know which file/module is currently being processed and
+   resolve names against *that* file's own dependency scope — a
+   substantially bigger redesign, not attempted here.
+3. ~~**Version ranges / real resolution.**~~ — **done** (2026-08-30), but
+   deliberately **not** a solver — scoped up front as a **compatibility
+   assertion**, not resolution: a `path`/`git` (`branch`/`tag`/`rev`) entry
+   already names one exact, singular target, and Boring has no registry
+   and no list of candidate versions to search over for that name, unlike
+   Cargo juggling several dependents' ranges against one shared package —
+   there is nothing to *pick between*, so there's no meaningful solver to
+   build here. An entry can now declare `version = "^1.2"`/`"~1.0"`/
+   `"=1.2.3"` (hand-rolled `src/semver.rs`, real Cargo caret/tilde
+   semantics including the 0.x-major boundary cases — no crate), checked
+   once by `resolve_deps_into` against the resolved target's own
+   `[project] version` — a clear error at resolve time if it doesn't
+   satisfy, instead of silently building against a possibly-incompatible
+   sibling project. This does **not** touch the "diamond, different
+   targets" collision policy from (2) at all — still an unconditional hard
+   error independent of version compatibility, since there's still only
+   one literal target per `[deps]` line to reconcile; version ranges have
+   nothing to do with *that* problem. See `docs/book.md` §15's `version`
+   subsection for full syntax and error shape.
 4. **A public registry** (crates.io/npm-style: resolve "name + version"
    against a central index instead of always naming a path or git URL).
    Ecosystem-scale investment that doesn't fit a single-author, sibling-

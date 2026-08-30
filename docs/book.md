@@ -4227,6 +4227,52 @@ fails loudly instead of silently doing something different. `boring
 update` ignores both flags — forcing a fresh resolution past the lock is
 its entire purpose.
 
+An entry can also declare a **`version` requirement**, checked against the
+dependency's own `[project] version`:
+
+```toml
+[deps]
+numlib  = { path = "../boring-numlib", version = "^1.2" }
+somelib = { git = "...", branch = "main", version = "~2.0" }
+```
+
+Three forms, same semantics as Cargo's: `^1.2` ("compatible with" — the
+left-most nonzero component is fixed, everything to its right may vary
+upward: `^1.2.3` matches `1.9.0` but not `2.0.0`; a `0.x` version treats
+minor as that boundary instead, and `0.0.x` treats patch as it — `^0.2.3`
+matches `0.2.9` but not `0.3.0`; `^0.0.3` matches only `0.0.3`); `~1.2`
+("patch-level only" — `~1.2.3` matches `1.2.9` but not `1.3.0`; `~1`
+with no minor given allows any `1.x.y`); `=1.2.3` (exact). A bare
+`version = "1.2.3"` with no leading symbol defaults to `^`, same as
+Cargo's own bare-version dependency shorthand.
+
+**Important — this is a compatibility *assertion*, not a version
+solver.** A `path` or `git` (`branch`/`tag`/`rev`) entry already names one
+exact, singular target — there is no registry and no list of candidate
+versions for Boring to search over and pick a "best fit" from, unlike a
+real package manager resolving several dependents' ranges against one
+shared package. `version` just declares what you expect and gets you a
+clear error at resolve time if the dependency you're actually pointing at
+doesn't declare a satisfying version, instead of silently building
+against a possibly-incompatible sibling project:
+
+```
+error: dep 'numlib' requires version ^1.0.0 but '/path/to/numlib'
+(resolved from '{ path = "../numlib", version = "^1.0" }') declares
+version 0.9.0
+```
+
+A dependency with no `boring.toml` at all (a `path` dependency isn't
+required to have one) is an error too if `version` is given — there's
+nothing to check the requirement against. Checked once per `[deps]` line
+against whatever that line itself resolved to, independent of the
+transitive collision-merge below: a transitive entry later shadowed by a
+top-level override with the same name still gets its own version checked
+against what it itself named. This does **not** change the "two different
+targets" collision policy at all — that's still an unconditional hard
+error regardless of version compatibility, since there's still only one
+literal target per `[deps]` line to reconcile.
+
 Either way, the dependency is just a plain directory with a `src/`
 convention — it doesn't need its own `boring.toml`. Import from it exactly
 like `boring.<module>`:
@@ -4253,9 +4299,15 @@ through to the usual behavior unaffected.
 **Rules:**
 - `std`, `crate`, and `boring` are reserved — a project cannot declare a
   dependency under any of those names.
-- No transitive resolution: if `numlib` itself has a `[deps]` section, it
-  is not followed — same single-level rule this section's `include` key
-  (see `[external_types]` above) already follows.
+- **Transitive**: if `numlib` itself has its own `boring.toml` `[deps]`,
+  those are followed too, recursively — so `numlib`'s own dependencies'
+  names become available to your project as well (and to `numlib`'s own
+  source). Cycles and diamonds (two dependencies sharing a third) are
+  handled — a project's `[deps]` is only ever expanded once, however many
+  paths reach it. If the *same name* resolves to two different targets
+  somewhere in the graph, your project's own top-level `[deps]` entry
+  always wins if it declares that name; otherwise it's a hard error (no
+  automatic pick — rename one side).
 - A `git` dependency needs the `git` CLI installed and on `PATH`.
 
 See `docs/cross-project-code-sharing-gap.md` for the motivation (sharing a
