@@ -480,6 +480,16 @@ mod tests {
         assert!(status.success(), "git {:?} failed in {}", args, dir.display());
     }
 
+    /// Reads a file and normalizes line endings to `\n`. On Windows, `git clone`/`checkout`
+    /// into the destination cache dir applies the *destination* repo's `core.autocrlf` (which
+    /// defaults from the machine's global git config, often `true`) regardless of how the
+    /// fixture repo itself was configured -- so a file written with literal `\n` can come back
+    /// as `\r\n` after a real clone/checkout round-trip. Tests that assert against a literal
+    /// `\n`-only string must read through this instead of `std::fs::read_to_string` directly.
+    fn read_normalized(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    }
+
     /// Sets up a local git repo (no network) with one commit under `src/`, returning its full
     /// commit sha. Used as the "remote" for `resolve_git_dep` tests — git treats a local
     /// filesystem path as a valid remote natively, no `file://` prefix needed.
@@ -692,7 +702,7 @@ mod tests {
         let mut lock = BoringLock::load(&project);
         let src1 = resolve_git_dep_with_lock("numlib", &repo_url, &gitref, &mut lock, DepPolicy::default()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(src1.join("lib.br")).unwrap(),
+            read_normalized(&src1.join("lib.br")),
             "pub struct Marker:\n    pub int value\n"
         );
         lock.save(&project).unwrap();
@@ -711,7 +721,7 @@ mod tests {
         let mut lock2 = BoringLock::load(&project);
         let src2 = resolve_git_dep_with_lock("numlib", &repo_url, &gitref, &mut lock2, DepPolicy::default()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(src2.join("lib.br")).unwrap(),
+            read_normalized(&src2.join("lib.br")),
             "pub struct Marker:\n    pub int value\n",
             "a locked branch dependency must not silently drift to the new commit"
         );
@@ -729,7 +739,7 @@ mod tests {
 
         let src3 = resolve_git_dep_with_lock("numlib", &repo_url, &gitref, &mut BoringLock::load(&project), DepPolicy::default()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(src3.join("lib.br")).unwrap(),
+            read_normalized(&src3.join("lib.br")),
             "pub struct Marker:\n    pub int value2\n",
             "after `boring update`, the lock must reflect the new commit"
         );
