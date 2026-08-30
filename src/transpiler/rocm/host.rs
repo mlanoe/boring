@@ -23,6 +23,7 @@ use crate::ast::*;
 use crate::transpiler::helpers::{
     shadow_grid_axes,
     labeled_array_grid_dim_expr, desugared_labeled_array_shadow_fields,
+    labeled_array_total_size_expr,
 };
 
 pub(super) fn emit_host_rs(
@@ -1108,9 +1109,28 @@ impl HostEmitter {
                     }
                     GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                         let elem = elem_rust_type(&field.ty);
+                        // Was hardcoded to `1` regardless of the field's actual
+                        // shape — correct only for a genuine bare scalar-shaped
+                        // buffer. A fixed-shape `LabeledArray` field left
+                        // unassigned in `init()` (e.g. matrix_mul_gpu.br's `c`:
+                        // "zero-initialized automatically — no assignment
+                        // needed") got allocated with room for exactly one
+                        // element instead of `width * height`, so the later
+                        // kernel write (and any host readback) ran off the end
+                        // of a 1-element buffer — confirmed on real gfx1032
+                        // hardware: `index out of bounds: the len is 1 but the
+                        // index is 1`. A genuinely dynamic-shape field (size
+                        // resolved from a runtime `Dimension` param, not a
+                        // compile-time axis) has no width/height available in
+                        // this unassigned-field context either, so it keeps the
+                        // previous (still wrong, but no worse) `1` fallback —
+                        // see `labeled_array_total_size_expr`'s doc.
+                        let count = field.ty.as_labeled_array()
+                            .and_then(|(_, axes)| labeled_array_total_size_expr(axes))
+                            .unwrap_or_else(|| "1".to_string());
                         self.line(&format!(
-                            "let {} = __ctx.default_stream().alloc_zeros::<{}>(1)?;",
-                            field.name, elem
+                            "let {} = boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>(({}) as usize)?;",
+                            field.name, elem, count
                         ));
                     }
                     GpuQual::Actor | GpuQual::Local => {
@@ -1131,11 +1151,29 @@ impl HostEmitter {
 
         self.line(&format!("Ok({} {{", name));
         self.indent += 1;
-        // `.default_stream()` borrows `&Arc<Self>` -- must come BEFORE the
-        // `__ctx,` shorthand below, which MOVES `__ctx` into the struct
-        // literal; Rust evaluates struct-literal field initializers in the
-        // order written.
-        self.line("__stream: __ctx.default_stream(),");
+        // `self.__stream` used to be its own independent stream (via
+        // `__ctx.default_stream()`, which always creates a brand-new HIP
+        // stream — see `HipContext::new_stream`) instead of the SAME cached
+        // per-priority stream every other kernel-instance operation (buffer
+        // uploads in `emit_init_stmt`, and `__boring_launch`'s own dispatch)
+        // uses. Two independent HIP streams have no ordering relationship to
+        // each other, so `read_{field}()`'s D2H copy — issued on
+        // `self.__stream` — could run before the kernel (dispatched on the
+        // *other* stream) had actually written its output: a silent data
+        // race, not a compile error. Confirmed on real gfx1032 hardware via
+        // `examples/vector_add_gpu.br`: compiles clean, exits 0, prints all
+        // 1000 lines — every one reading back `0` instead of `a[i]+b[i]`. A
+        // from-scratch, boring-independent HIP program (same GPU, same
+        // driver) computes the correct values, ruling out the environment —
+        // see docs/rocm-backend.md's "Known limitations" entry on this fix.
+        // Using the same cached stream everywhere (as this file's own
+        // "Streams" doc comment already describes as the intended design)
+        // makes every op on one kernel instance FIFO-ordered for free, no
+        // explicit CPU-blocking sync needed between them. `.borrows `&Arc<
+        // HipContext>` -- must still come BEFORE the `__ctx,` shorthand
+        // below, which MOVES `__ctx` into the struct literal; Rust evaluates
+        // struct-literal field initializers in the order written.
+        self.line("__stream: boring_new_stream_with_priority(&__ctx, 0)?,");
         self.line("__ctx,");
         for field in fields {
             match field.qual {
@@ -1166,9 +1204,14 @@ impl HostEmitter {
                 }
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                     let elem = elem_rust_type(&field.ty);
+                    // Same fixed-shape sizing fix as `emit_kernel_new`'s
+                    // identical arm — see its doc comment.
+                    let count = field.ty.as_labeled_array()
+                        .and_then(|(_, axes)| labeled_array_total_size_expr(axes))
+                        .unwrap_or_else(|| "1".to_string());
                     self.line(&format!(
-                        "let {} = __ctx.default_stream().alloc_zeros::<{}>(1)?;",
-                        field.name, elem
+                        "let {} = boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>(({}) as usize)?;",
+                        field.name, elem, count
                     ));
                 }
                 GpuQual::Actor => {}
@@ -1188,7 +1231,7 @@ impl HostEmitter {
         }
         self.line(&format!("Ok({} {{", name));
         self.indent += 1;
-        self.line("__stream: __ctx.default_stream(),");
+        self.line("__stream: boring_new_stream_with_priority(&__ctx, 0)?,");
         self.line("__ctx,");
         for field in fields {
             match field.qual {
@@ -1253,7 +1296,7 @@ impl HostEmitter {
                                             let n = self.expr(count);
                                             let elem = elem_rust_type(&field.ty);
                                             self.line(&format!(
-                                                "let {} = __ctx.default_stream().alloc_zeros::<{}>({} as usize)?;",
+                                                "let {} = boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>({} as usize)?;",
                                                 fname, elem, n
                                             ));
                                             return;
@@ -1262,7 +1305,7 @@ impl HostEmitter {
                                             let elem = elem_rust_type(&field.ty);
                                             let lit: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
                                             self.line(&format!(
-                                                "let {} = __ctx.default_stream().clone_htod::<{}>(&vec![{}])?;",
+                                                "let {} = boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{}>(&vec![{}])?;",
                                                 fname, elem, lit.join(", ")
                                             ));
                                             return;
@@ -1283,7 +1326,7 @@ impl HostEmitter {
                                                 let rhs_s = self.expr(rhs);
                                                 let elem = elem_rust_type(&field.ty);
                                                 self.line(&format!(
-                                                    "let {} = __ctx.default_stream().clone_htod::<{}>(&{})?;",
+                                                    "let {} = boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{}>(&{})?;",
                                                     fname, elem, rhs_s
                                                 ));
                                             }
@@ -1688,6 +1731,28 @@ impl HostEmitter {
             Stmt::Continue(_label)    => self.line("continue;"),
             Stmt::Comment(_)          => {}
             Stmt::KernelBlock(kb) => self.emit_kernel_block(&kb.body),
+            // `with buf: body` — was falling through to the `_` catch-all below,
+            // silently dropping the entire body (confirmed on real gfx1032
+            // hardware: `examples/vector_add_gpu.br` compiled and ran clean —
+            // kernel launch, readback, exit 0 — but printed nothing, because its
+            // whole result-printing loop lives inside a `with result:` block).
+            // The generic (non-GPU) `emit_with` acquires/writes-back GPU-resident
+            // vars around the body for targets that track residency (see its own
+            // doc comment); this backend has no such residency model — a `with`
+            // name here is always an already fully host-materialized local (e.g.
+            // `let result = k.result` already did the full `clone_dtoh` before
+            // this statement runs). So the correct behavior is exactly the
+            // generic emitter's own documented "no-op degradation" for
+            // unqualified names: just emit the body in its own scope, with no
+            // acquire/write-back codegen — see docs/scoped-access-blocks.md,
+            // "Cross-target behavior".
+            Stmt::With(w) => {
+                self.line("{");
+                self.indent += 1;
+                for s in &w.body { self.emit_stmt(s); }
+                self.indent -= 1;
+                self.line("}");
+            }
             _ => { self.line("/* unsupported stmt */"); }
         }
     }
@@ -1728,12 +1793,14 @@ impl HostEmitter {
         if !is_kernel { return None; }
         let kernel_type = self.var_kernel_type.get(var_name.as_str()).cloned()
             .or_else(|| Some(var_name.clone()));
+        // Same `auto_grid_field` check as `emit_boring_launch`/`ExprKind::KernelLaunch`
+        // above — must include `.as_labeled_array()` too, see that arm's doc comment.
         let auto_grid = kernel_type
             .as_ref()
             .and_then(|t| self.kernel_decls.get(t))
             .map(|decl| decl.fields.iter().any(|f|
                 matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
+                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())))
             .unwrap_or(false);
         let block = args.iter().find(|a| a.label.as_deref() == Some("block"))
             .map(|a| self.dim3_expr(&a.value))
@@ -2024,6 +2091,28 @@ impl HostEmitter {
                             return format!("({} as f32)", inner);
                         }
                     }
+                    // `int(expr)`/`uint8(expr)`/... → `expr as isize`/`expr as u8`/...
+                    // Was missing entirely here (unlike the shared/generic
+                    // transpiler's `emit_builtin_call`, which this GPU-aware host
+                    // emitter is a separate codegen path from and doesn't
+                    // delegate to) — fell through to a plain call, emitting an
+                    // invalid `uint8(b)`/etc. call to a nonexistent Rust function
+                    // (confirmed on real gfx1032 hardware via
+                    // `examples/mandelbrot_gpu.br`'s `ppm_data.map((b):
+                    // uint8(b))`: `error[E0425]: cannot find function \"uint8\"`).
+                    // No string-source special case needed here (unlike
+                    // `emit_builtin_call`'s int/uint arms) — GPU host buffers are
+                    // always numeric, never string-sourced.
+                    if matches!(name.as_str(),
+                        "int" | "uint" | "uint8" | "int8" | "int16" | "int32" | "int64" | "int128"
+                        | "uint16" | "uint32" | "uint64" | "uint128")
+                    {
+                        if let Some(arg) = args.first() {
+                            let inner = self.expr(&arg.value);
+                            let rust_ty = rust_type(&Type::Named(name.clone()));
+                            return format!("({} as {})", inner, rust_ty);
+                        }
+                    }
                 }
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
@@ -2100,11 +2189,24 @@ impl HostEmitter {
                 }
             }
             ExprKind::KernelLaunch { config, kernel } => {
+                // Must match `emit_boring_launch`'s own `auto_grid_field` check
+                // exactly (including the `.as_labeled_array()` fixed-shape
+                // case) — that function decides `__boring_launch`'s generated
+                // signature (`grid_dim: Option<(u32,u32,u32)>` vs. a bare
+                // `(u32,u32,u32)>`), and this call site decides whether to wrap
+                // the grid-dim argument in `Some(..)` to match it. Was missing
+                // the `.as_labeled_array()` half — every fixed-shape 2D/3D
+                // kernel (e.g. `[float32, width=32, height=32]`) got a bare
+                // tuple call against an `Option<...>`-typed parameter here
+                // (confirmed on real gfx1032 hardware via
+                // `examples/matrix_mul_gpu.br`: `error[E0308]: mismatched
+                // types ... expected Option<(u32, u32, u32)>, found (u32, u32,
+                // {integer})`).
                 let auto_grid = self.resolve_kernel_type(kernel)
                     .and_then(|t| self.kernel_decls.get(&t))
                     .map(|decl| decl.fields.iter().any(|f|
                         matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                        && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
+                        && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())))
                     .unwrap_or(false);
                 let k = self.expr(kernel);
                 let block = config.block.as_ref()
@@ -2330,8 +2432,15 @@ impl HostEmitter {
                 if pname != &p.name { return None; }
                 decl.fields.iter().find(|f| &f.name == fname)
             }).filter(|f| {
+                // Missing `.as_labeled_array()` meant a fixed-shape 2D/3D
+                // `'global`/`'unified` ctor param (e.g. matrix_mul_gpu.br's `a`/
+                // `b`) was never recognized as a buffer-passthrough arg, so its
+                // host `Vec<T>` never got the `clone_htod` upload this flag
+                // triggers — confirmed on real gfx1032 hardware via
+                // `examples/matrix_mul_gpu.br`: `error[E0308]: expected struct
+                // DeviceBuffer<f32>, found struct Vec<f32>`.
                 matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                    && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+                    && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())
             }).map(|f| elem_rust_type(&f.ty))
         }).collect())
     }
@@ -2394,7 +2503,22 @@ impl HostEmitter {
         match kf.qual {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 match &kf.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {
+                    // `Type::LabeledArray` (a fixed-shape multi-dim field, e.g.
+                    // `[float32, width=32, height=32]`) was missing here — its
+                    // `read_{field}()` accessor is generated unconditionally by
+                    // `emit_kernel`'s "Accessors for 'unified/'actor'unified
+                    // fields" loop (no `Type::Array`/`ArrayN` restriction there),
+                    // but this match never recognized the type to actually call
+                    // it, so `k.c` (with `c` such a field) stayed a raw
+                    // `DeviceBuffer<T>` field access. Confirmed on real gfx1032
+                    // hardware via `examples/matrix_mul_gpu.br`'s `let c =
+                    // k.c.flatten()` (`.flatten()` is a correct, unrelated
+                    // identity no-op on labeled arrays — see
+                    // `desugar_labeled_array.rs` — so `k.c` reached here
+                    // unwrapped): `error[E0608]: cannot index into a value of
+                    // type DeviceBuffer<f32>` once the `with c:` fix above
+                    // stopped silently dropping the body that indexes it.
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::LabeledArray(_, _) => {
                         Some(format!("{}.read_{}()?", obj, field))
                     }
                     _ => None,

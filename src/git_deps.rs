@@ -112,7 +112,10 @@ impl BoringLock {
     }
 
     fn parse(src: &str) -> HashMap<String, LockEntry> {
-        let mut fields: HashMap<String, (Option<String>, Option<String>, Option<String>)> = HashMap::new();
+        // (url, requested, resolved) — collected per entry name before any of the three fields
+        // is known to be present, so each starts `None` until its line is seen.
+        type PartialFields = HashMap<String, (Option<String>, Option<String>, Option<String>)>;
+        let mut fields: PartialFields = HashMap::new();
         for line in src.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') { continue; }

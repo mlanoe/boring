@@ -835,8 +835,29 @@ fn is_gpu_warp_receiver(obj: &Expr) -> bool {
 
 fn map_builtin_fn(name: &str) -> String {
     match name {
-        "int"   => "(int64_t)".into(),
-        "float" => "(double)".into(),
+        "int"   | "i64"    => "(int64_t)".into(),
+        "float" | "float64" | "f64" => "(double)".into(),
+        // `float32(x)`/`f32(x)` — was missing entirely and fell through to the
+        // `other => other.into()` passthrough below, emitting an invalid,
+        // undeclared `float32(x)` function call in the generated CUDA C
+        // (confirmed via the identical bug on the ROCm backend, this device
+        // emitter's near-verbatim clone — see rocm::device's `map_builtin_fn`
+        // for the real-hardware repro via `examples/mandelbrot_gpu.br`).
+        // Metal's own `map_builtin_fn` already carries the equivalent fix.
+        // The rest of this arm set mirrors `c_type`'s `Type::Named` cast-name
+        // table just above, for the same call-style casts (`uint8(x)`,
+        // `bool(x)`, ...) that table already resolves for `x as T`-style casts.
+        "float32" | "f32"  => "(float)".into(),
+        "uint"    | "u64"  => "(uint64_t)".into(),
+        "uint8"             => "(uint8_t)".into(),
+        "int8"              => "(int8_t)".into(),
+        "int16"             => "(int16_t)".into(),
+        "int32"             => "(int32_t)".into(),
+        "int64"             => "(int64_t)".into(),
+        "uint16"            => "(uint16_t)".into(),
+        "uint32"            => "(uint32_t)".into(),
+        "uint64"            => "(uint64_t)".into(),
+        "bool"              => "(int)".into(),
         "abs"   => "fabs".into(),
         "min"   => "min".into(),
         "max"   => "max".into(),

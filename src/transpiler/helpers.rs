@@ -153,8 +153,11 @@ fn const_expr_to_c_like_axis(axis: &crate::ast::LabeledAxis) -> String {
 /// Product of `axes`' sizes, as a string — folds to a single literal (e.g.
 /// `"480000"`) when every axis size is a literal int; falls back to a
 /// `*`-joined expression string (e.g. `"W * H"`) the moment any axis
-/// references a const-generic param.
-fn labeled_array_stride_str(axes: &[crate::ast::LabeledAxis]) -> String {
+/// references a const-generic param. `pub(crate)` (not just used internally
+/// for partial strides via `labeled_array_at_index`) so GPU-target host
+/// emitters can also call it with the *full* axes slice to get a fixed-shape
+/// field's total element count — see `labeled_array_total_size_expr`.
+pub(crate) fn labeled_array_stride_str(axes: &[crate::ast::LabeledAxis]) -> String {
     let mut product: Option<i64> = Some(1);
     for a in axes {
         let lit = a.size.as_ref().and_then(|crate::ast::ConstExpr(boxed)| match &boxed.kind {
@@ -218,6 +221,22 @@ pub(crate) fn labeled_array_grid_dim_expr(axes: &[crate::ast::LabeledAxis]) -> S
         }
     };
     format!("({}, {}, {})", axis_expr(0), axis_expr(1), axis_expr(2))
+}
+
+/// Total element count of a fixed-shape `LabeledArray`'s axes, as a Rust
+/// `usize`-valued string expression (e.g. `"1024"` or `"32 * 32"`) — for a
+/// GPU-target host emitter's default zero-fill allocation of an unassigned
+/// `'unified`/`'global`/etc. field (`c` in `examples/matrix_mul_gpu.br`: no
+/// assignment in `init()`, "zero-initialized automatically"). `None` when any
+/// axis is dynamic (`size: None`, resolved from a runtime `Dimension` param
+/// instead — see `mandelbrot_gpu.br`'s `image` field) — the caller has no
+/// width/height to compute a total from in that unassigned-field context
+/// either, so this deliberately does NOT call `labeled_array_stride_str`
+/// directly (that helper's own doc assumes fixed-shape, i.e. every axis
+/// `Some`, "by construction").
+pub(crate) fn labeled_array_total_size_expr(axes: &[crate::ast::LabeledAxis]) -> Option<String> {
+    if axes.iter().any(|a| a.size.is_none()) { return None; }
+    Some(labeled_array_stride_str(axes))
 }
 
 /// Detects a *desugared* dynamic-shape `LabeledArray` field's shadow

@@ -9,3 +9,10 @@
 # a Docker Linux image). Without this, Windows' core.autocrlf=true keeps
 # re-introducing CRLF on every checkout, silently undoing any one-off fix.
 *.sh text eol=lf
+
+# try_wrap_double_handling's fixture is read with fs.read/readBytes/readLines and its
+# .expected output hard-codes an exact byte count (33) and line count (3) for it. Windows'
+# core.autocrlf=true would otherwise turn its LF endings into CRLF on checkout, growing it
+# to 35 bytes and breaking that test with no code change involved -- pin it to LF so the
+# fixture's on-disk bytes are identical on every platform.
+tests/cases/fixtures/try_wrap_fixture.txt text eol=lf

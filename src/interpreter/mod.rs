@@ -2116,7 +2116,7 @@ thread_local! {
     /// never cross-contaminates each other's argv — `main.rs` only ever runs
     /// one script per worker thread, so this is always set before any
     /// `args()`/`raw_args()` call can observe it.
-    static PROGRAM_ARGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static PROGRAM_ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 // ─── Interpreter ─────────────────────────────────────────────────────────────
