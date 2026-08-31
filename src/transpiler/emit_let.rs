@@ -322,9 +322,21 @@ impl Transpiler {
             self.set_vars.insert(s.name.clone());
         }
         // Track HashMap/dict variables for `.get()`/`.insert()` subscript dispatch.
+        // The `ExprKind::Else` arm below covers `let existing = dict[key] else default`
+        // with NO explicit type annotation: `emit_expr.rs`'s `Else` handling recognizes
+        // this exact shape (via `expr_is_dict`) to emit `.get(..).cloned().unwrap_or_else(..)`,
+        // but that generated Rust starts with the dict receiver's own text (e.g. `outer.`),
+        // not `HashMap::`/`.collect::<HashMap`, so the string checks above never catch it —
+        // leaving `existing` out of `dict_vars` and causing e.g. a later `for k, v in existing:`
+        // to wrongly fall back to array-enumerate codegen. Reuse the same AST-shape check
+        // `emit_expr.rs` already uses to *emit* the dict-get code, here to also update this
+        // bookkeeping, instead of re-deriving dict-ness from the generated Rust string.
+        let is_dict_index_else = matches!(&s_value.kind, ExprKind::Else(inner, _)
+            if matches!(&inner.kind, ExprKind::Index(dict_obj, _) if self.expr_is_dict(dict_obj)));
         if matches!(&s.ty, Some(Type::Dict(..)))
             || val.starts_with("HashMap::")
             || val.contains(".collect::<HashMap")
+            || is_dict_index_else
         {
             self.dict_vars.insert(s.name.clone());
         }

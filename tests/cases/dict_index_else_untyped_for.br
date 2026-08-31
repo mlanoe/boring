@@ -1,0 +1,24 @@
+# Regression fixture for the `let existing = dict[key] else default` (no
+# explicit type annotation) codegen bug — see
+# tests/dict_index_else_untyped_for.rs for the full writeup. Two functions,
+# on purpose, in the same file so a future fix to one case can't silently
+# regress the other:
+#
+#   - demo_untyped: binds `existing` with no type annotation — must transpile
+#     the `for k, val in existing:` loop to plain dict `.into_iter()`, never
+#     the array-style `.enumerate()` auto-enumerate rewrite.
+#   - demo_typed: same shape, but with an explicit `{string=string}`
+#     annotation on `existing` — the control case that already worked before
+#     this fix; must keep working.
+
+pub def demo_untyped():
+    let {string={string=string}} outer = {"k" = {"a" = "1", "b" = "2"}}
+    let existing = outer["k"] else {=}
+    for k, val in existing:
+        print "{k}={val}"
+
+pub def demo_typed():
+    let {string={string=string}} outer = {"k" = {"a" = "1", "b" = "2"}}
+    let {string=string} existing = outer["k"] else {=}
+    for k, val in existing:
+        print "{k}={val}"

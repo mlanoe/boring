@@ -48,6 +48,7 @@ req mut T get():                # read-only method, returns a mutable instance
 - `req` — read-only method, callable on `let` and `var` bindings → `&self`
 - `def` — mutating method, callable on `var` bindings only → `&mut self`
 - `def mut` / `req mut` — the `mut` after the keyword applies to the **return value**, not `self`
+- Bare field access inside a method resolves to `self.field` automatically, but calling another method of the same struct does **not** — write `self.other_method(...)` explicitly, or Rust rejects the bare call with `error[E0425]: cannot find function` (see [book.md](docs/book.md#implicit-self)).
 
 ### Parameter passing
 

@@ -2252,6 +2252,40 @@ struct Box:
         width + height          # local width, self.height
 ```
 
+**Calling another method of the same struct still requires `self.`.** Implicit `self` (above) only covers *fields* — bare *method* calls inside a method body do not resolve to `self.method(...)` the way bare field access resolves to `self.field`. This mirrors Rust, where `self.field` and `self.method()` are both required, but it can be surprising coming from Python/Swift, where a bare call is often allowed:
+
+```boring
+struct Ids:
+    var [int] items = []
+
+    req bool has(int id):
+        items.contains(id)     # OK — bare field access, no self. needed
+
+    def add(int id):
+        if not has(id):        # ERROR — bare call, not resolved to self.has(id)
+            items.push(id)
+```
+
+The bare call fails to compile with a Rust error pointing at the missing receiver:
+
+```text
+error[E0425]: cannot find function `has` in this scope
+```
+
+The fix is the compiler's own suggestion — prefix the call with `self.`:
+
+```boring
+struct Ids:
+    var [int] items = []
+
+    req bool has(int id):
+        items.contains(id)
+
+    def add(int id):
+        if not self.has(id):   # fixed — explicit self.
+            items.push(id)
+```
+
 ### Properties — `req` getter + `set` setter
 
 A computed property pairs a `req` getter (no parentheses when called) with a `set` setter:
