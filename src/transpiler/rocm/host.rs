@@ -611,6 +611,10 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         let _ = kernel_names; // used by caller for code-object loading
+
+        if self.screen_var.is_some() {
+            self.emit_screen_prelude();
+        }
     }
 }
 
@@ -730,6 +734,23 @@ struct HostEmitter {
     /// real E0425. Mirrors `metal::host`'s (and `cuda::host`'s, after the
     /// same fix) identical `top_level_scalars` field/fix.
     top_level_scalars: std::collections::HashMap<String, String>,
+    /// Name of the `let screen = Screen(...)` top-level binding, if any — see
+    /// `detect_screen`. `None` means this is an ordinary compute-only program.
+    screen_var: Option<String>,
+    /// Rust expressions (already rendered, e.g. `"800"` or a top-level scalar
+    /// var name) for `Screen(Dimension(w, h), ...)`'s width/height.
+    screen_width_expr: String,
+    screen_height_expr: String,
+    /// Window title from `Screen(.., title = "...")`, defaults to `"Boring"`.
+    screen_title: String,
+    /// True while emitting statements inside a `kernel: loop:` body that is
+    /// ALSO a `Screen` render loop (see `emit_render_loop`). The winit
+    /// `run_return` closure driving that loop returns `()`, not
+    /// `Result<(), _>` like the rest of `fn main()` -- so a kernel dispatch
+    /// (normally desugared with a trailing `?`, see
+    /// `try_emit_kernel_launch_call`) must use `.expect(...)` instead while
+    /// this flag is set.
+    in_render_loop: bool,
 }
 
 /// True when `ty` is one of boring's always-by-reference parameter kinds (see
@@ -768,6 +789,403 @@ impl HostEmitter {
             resident_locals: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
             top_level_scalars: std::collections::HashMap::new(),
+            screen_var: None,
+            screen_width_expr: "800".into(),
+            screen_height_expr: "600".into(),
+            screen_title: "Boring".into(),
+            in_render_loop: false,
+        }
+    }
+
+    // ── Screen / display support ────────────────────────────────────────────────
+    //
+    // ROCm/HIP has no native presentation API (no `Surface`/`MTKView`
+    // equivalent), so a `Screen` program reads the `'surface` pixel buffer
+    // back to the host every frame (`read_<field>()`, a D2H copy already
+    // proven elsewhere in this file) and blits it into a window via
+    // `softbuffer` -- pure-CPU presentation, no GPU-graphics interop. This is
+    // a mechanical mirror of `cuda::host`'s identical Screen support (see its
+    // own doc comment for the full rationale) — same event-loop shape (winit
+    // 0.28 `run_return`), same mechanical type substitutions the rest of this
+    // file already uses (`HipContext`→`CudaContext`, `DeviceBuffer<T>`→
+    // `CudaSlice<T>`, etc.).
+    //
+    // Verified against real ROCm hardware — see `docs/rocm-backend.md`'s
+    // Screen section for the machine/GPU and what was found.
+
+    fn detect_screen(&mut self, program: &Program) {
+        for item in &program.items {
+            if let Item::Let(s) = item {
+                if let Some(val) = &s.value {
+                    if let ExprKind::Call(callee, args) = &val.kind {
+                        if let ExprKind::Var(name) = &callee.kind {
+                            if name == "Screen" {
+                                let (w, h) = args.first()
+                                    .map(|a| {
+                                        if let ExprKind::Call(c2, a2) = &a.value.kind {
+                                            if let ExprKind::Var(n) = &c2.kind {
+                                                if n == "Dimension" {
+                                                    let w = a2.first().map(|x| self.expr(&x.value)).unwrap_or_else(|| "800".into());
+                                                    let h = a2.get(1).map(|x| self.expr(&x.value)).unwrap_or_else(|| "600".into());
+                                                    return (w, h);
+                                                }
+                                            }
+                                        }
+                                        ("800".into(), "600".into())
+                                    })
+                                    .unwrap_or_else(|| ("800".into(), "600".into()));
+                                let title_expr = args.iter()
+                                    .find(|a| a.label.as_deref() == Some("title"))
+                                    .or_else(|| args.get(1))
+                                    .map(|a| self.expr(&a.value))
+                                    .unwrap_or_else(|| "\"Boring\"".into());
+                                let title_str = if title_expr.starts_with('"') && title_expr.ends_with('"') {
+                                    title_expr[1..title_expr.len()-1].to_string()
+                                } else {
+                                    "Boring".to_string()
+                                };
+                                self.screen_var = Some(s.name.clone());
+                                self.screen_width_expr = w;
+                                self.screen_height_expr = h;
+                                self.screen_title = title_str;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_screen_prelude(&mut self) {
+        self.blank();
+        // Blit the host-side pixel readback into the window's softbuffer
+        // surface. softbuffer's pixel format (`0RGB`, top byte ignored) is
+        // bit-compatible with Boring's documented `0xAARRGGBB` packing (see
+        // `docs/gpu-display.md`) -- the alpha byte is simply ignored, so no
+        // per-pixel conversion is needed here.
+        self.line("fn boring_screen_present(");
+        self.indent += 1;
+        // softbuffer 0.3's `Surface` is NOT generic over the window/display
+        // handle type (unlike softbuffer 0.4, used by the wgpu backend) --
+        // confirmed against the real crate via a real ROCm hardware build
+        // (see `docs/rocm-backend.md`'s Screen section).
+        self.line("surface: &mut softbuffer::Surface,");
+        self.line("pixels: &[u32],");
+        self.line("width: u32,");
+        self.line("height: u32,");
+        self.indent -= 1;
+        self.line(") {");
+        self.indent += 1;
+        self.line("let mut buf = match surface.buffer_mut() { Ok(b) => b, Err(_) => return };");
+        self.line("let n = ((width as usize) * (height as usize)).min(pixels.len()).min(buf.len());");
+        self.line("buf[..n].copy_from_slice(&pixels[..n]);");
+        self.line("let _ = buf.present();");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // Same key table as the Metal/CUDA backends' identical helper --
+        // keeps `screen.key(...)` string literals meaning the same thing
+        // across every backend.
+        self.line("fn boring_key_str(key: winit::event::VirtualKeyCode) -> String {");
+        self.indent += 1;
+        self.line("use winit::event::VirtualKeyCode::*;");
+        self.line("match key {");
+        self.indent += 1;
+        self.line("Escape => \"\\x1B\".into(),");
+        self.line("Space => \" \".into(),");
+        self.line("Return => \"\\r\".into(),");
+        self.line("Up => \"\\x1B[A\".into(),");
+        self.line("Down => \"\\x1B[B\".into(),");
+        self.line("Left => \"\\x1B[D\".into(),");
+        self.line("Right => \"\\x1B[C\".into(),");
+        self.line("A => \"a\".into(), B => \"b\".into(), C => \"c\".into(),");
+        self.line("D => \"d\".into(), E => \"e\".into(), F => \"f\".into(),");
+        self.line("G => \"g\".into(), H => \"h\".into(), I => \"i\".into(),");
+        self.line("J => \"j\".into(), K => \"k\".into(), L => \"l\".into(),");
+        self.line("M => \"m\".into(), N => \"n\".into(), O => \"o\".into(),");
+        self.line("P => \"p\".into(), Q => \"q\".into(), R => \"r\".into(),");
+        self.line("S => \"s\".into(), T => \"t\".into(), U => \"u\".into(),");
+        self.line("V => \"v\".into(), W => \"w\".into(), X => \"x\".into(),");
+        self.line("Y => \"y\".into(), Z => \"z\".into(),");
+        self.line("Key1 => \"1\".into(), Key2 => \"2\".into(), Key3 => \"3\".into(),");
+        self.line("Key4 => \"4\".into(), Key5 => \"5\".into(), Key6 => \"6\".into(),");
+        self.line("Key7 => \"7\".into(), Key8 => \"8\".into(), Key9 => \"9\".into(),");
+        self.line("Key0 => \"0\".into(),");
+        self.line("_ => format!(\"{:?}\", key).to_lowercase(),");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_screen_setup(&mut self) {
+        let w = self.screen_width_expr.clone();
+        let h = self.screen_height_expr.clone();
+        let title = self.screen_title.clone();
+        self.line("use winit::platform::run_return::EventLoopExtRunReturn;");
+        self.line("let mut boring_event_loop = winit::event_loop::EventLoop::new();");
+        self.line("let boring_window = winit::window::WindowBuilder::new()");
+        self.indent += 1;
+        self.line(&format!(".with_title(\"{}\")", title));
+        // `PhysicalSize`, not `LogicalSize` -- see `cuda::host`'s identical
+        // comment (found via real ROCm hardware testing on a >100%-scaled
+        // display: `LogicalSize` gets DPI-scaled into a different physical
+        // window/surface size than softbuffer's buffer, which must match the
+        // real surface's physical pixel dimensions exactly -- only the top
+        // strip of the window painted, the rest black. `PhysicalSize` is
+        // exactly `width x height` regardless of DPI.
+        self.line(&format!(".with_inner_size(winit::dpi::PhysicalSize::new({w} as u32, {h} as u32))"));
+        self.line(".build(&boring_event_loop)?;");
+        self.indent -= 1;
+        // softbuffer 0.3's `Context::new`/`Surface::new` are `unsafe fn` (the
+        // window must outlive the surface -- true here, `boring_window` lives
+        // for the rest of `fn main()`).
+        self.line("let boring_sb_context = unsafe { softbuffer::Context::new(&boring_window) }");
+        self.indent += 1;
+        self.line(".map_err(|e| format!(\"softbuffer context: {}\", e))?;");
+        self.indent -= 1;
+        self.line("let mut boring_sb_surface = unsafe { softbuffer::Surface::new(&boring_sb_context, &boring_window) }");
+        self.indent += 1;
+        self.line(".map_err(|e| format!(\"softbuffer surface: {}\", e))?;");
+        self.indent -= 1;
+        self.line("boring_sb_surface.resize(");
+        self.indent += 1;
+        self.line(&format!("std::num::NonZeroU32::new({w} as u32).ok_or(\"screen width must be nonzero\")?,"));
+        self.line(&format!("std::num::NonZeroU32::new({h} as u32).ok_or(\"screen height must be nonzero\")?,"));
+        self.indent -= 1;
+        self.line(").map_err(|e| format!(\"softbuffer resize: {}\", e))?;");
+        self.line("let mut boring_frame: isize = 0;");
+        self.line("let boring_start = std::time::Instant::now();");
+        self.line("let mut boring_keys: std::collections::HashSet<String> = Default::default();");
+        self.line(&format!("let mut boring_screen_width: isize = {w};"));
+        self.line(&format!("let mut boring_screen_height: isize = {h};"));
+        self.line("let mut boring_screen_resized = false;");
+        self.line("let mut boring_screen_closed = false;");
+    }
+
+    fn emit_render_loop(&mut self, loop_body: &[Stmt]) {
+        self.line("boring_event_loop.run_return(|__boring_event, _, __boring_cf| {");
+        self.indent += 1;
+        self.line("*__boring_cf = winit::event_loop::ControlFlow::Poll;");
+        self.line("boring_screen_resized = false;");
+        self.line("match __boring_event {");
+        self.indent += 1;
+        self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::CloseRequested, .. } => {");
+        self.indent += 1;
+        self.line("boring_screen_closed = true;");
+        self.line("*__boring_cf = winit::event_loop::ControlFlow::Exit;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::Resized(__boring_size), .. } => {");
+        self.indent += 1;
+        self.line("boring_screen_width = __boring_size.width as isize;");
+        self.line("boring_screen_height = __boring_size.height as isize;");
+        self.line("boring_screen_resized = true;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::KeyboardInput { input: __boring_ki, .. }, .. } => {");
+        self.indent += 1;
+        self.line("if let Some(__boring_key) = __boring_ki.virtual_keycode {");
+        self.indent += 1;
+        self.line("let __boring_ks = boring_key_str(__boring_key);");
+        self.line("match __boring_ki.state {");
+        self.indent += 1;
+        self.line("winit::event::ElementState::Pressed  => { boring_keys.insert(__boring_ks); }");
+        self.line("winit::event::ElementState::Released => { boring_keys.remove(&__boring_ks); }");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("winit::event::Event::MainEventsCleared => {");
+        self.indent += 1;
+        self.in_render_loop = true;
+        let stmts: Vec<Stmt> = loop_body.to_vec();
+        for stmt in &stmts {
+            self.emit_render_loop_stmt(stmt);
+        }
+        self.in_render_loop = false;
+        self.line("boring_frame += 1;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("_ => {}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("});");
+    }
+
+    fn emit_render_loop_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Break(_, _) => {
+                self.line("*__boring_cf = winit::event_loop::ControlFlow::Exit;");
+                self.line("return;");
+            }
+            Stmt::Expr(e) => {
+                // screen.present(k.field) — read the surface field back to
+                // the host (D2H, via the `read_<field>()` accessor -- see
+                // this file's widened `matches!` in the kernel-struct
+                // accessor loop) and blit it into the window.
+                if let ExprKind::MethodCall(obj, method, args) = &e.kind {
+                    let screen_var = self.screen_var.clone();
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if Some(v.as_str()) == screen_var.as_deref() && method == "present" {
+                            if let Some(pixels_arg) = args.first() {
+                                if let ExprKind::Field(kobj, kfield) = &pixels_arg.value.kind {
+                                    if let ExprKind::Var(kvar) = &kobj.kind {
+                                        let (w_expr, h_expr) = self.screen_dim_exprs_for(kvar, kfield);
+                                        let kref = self.screen_kvar_ref(kvar, false);
+                                        // `read_<field>()` returns `Vec<{elem_rust_type}>` --
+                                        // whatever the field's declared Boring element type
+                                        // maps to on the host side (`uint` -> `usize`, same as
+                                        // every other 'unified/'global field). softbuffer needs
+                                        // exactly `&[u32]` (BGRA8Unorm packing), so narrow here,
+                                        // at the presentation boundary, rather than in the
+                                        // widely-shared type-mapping helpers -- see `cuda::host`'s
+                                        // identical comment.
+                                        self.line(&format!(
+                                            "let __boring_px: Vec<u32> = {kref}.read_{kfield}().expect(\"rocm: surface readback failed\").iter().map(|&__p| __p as u32).collect();"
+                                        ));
+                                        self.line(&format!(
+                                            "boring_screen_present(&mut boring_sb_surface, &__boring_px, {w_expr}, {h_expr});"
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // A cross-kernel buffer handoff/ping-pong swap (`render.cells
+                // = step.cells_in`, `step.cells_in, step.cells_out =
+                // step.cells_out, step.cells_in` — both from
+                // examples/game_of_life.br) needs its OWN assignment codegen —
+                // see `emit_assign_target`'s doc comment (mirrors
+                // `cuda::host`'s identical fix for the same two statements).
+                if let ExprKind::Assign(lhs, rhs) = &e.kind {
+                    let l = self.emit_assign_target(lhs);
+                    let r = self.emit_assign_rhs(lhs, rhs);
+                    self.line(&format!("{l} = {r};"));
+                    return;
+                }
+                // `k(block = ...)` kernel dispatch — same desugar as the
+                // non-Screen `kernel:` block case (`emit_kernel_block`), just
+                // with `.expect(...)` instead of `?` (see `in_render_loop`'s
+                // doc).
+                if let Some(launch) = self.try_emit_kernel_launch_call(e) {
+                    self.line(&format!("{launch};"));
+                } else {
+                    self.emit_stmt(stmt);
+                }
+            }
+            // Recurse via `emit_render_loop_stmt` (not `emit_stmt`) so a
+            // `break`/kernel-field assignment/dispatch NESTED inside an `if`
+            // still gets this render loop's own translation — see
+            // `cuda::host`'s identical arm for the full rationale.
+            Stmt::If(i) => {
+                for (idx, (cond, body)) in i.branches.iter().enumerate() {
+                    let c = self.expr(cond);
+                    if idx == 0 { self.line(&format!("if {c} {{")); }
+                    else { self.line(&format!("}} else if {c} {{")); }
+                    self.indent += 1;
+                    let body_clone: Vec<Stmt> = body.to_vec();
+                    for s in &body_clone { self.emit_render_loop_stmt(s); }
+                    self.indent -= 1;
+                }
+                if let Some(else_body) = &i.else_body {
+                    self.line("} else {");
+                    self.indent += 1;
+                    let else_clone: Vec<Stmt> = else_body.to_vec();
+                    for s in &else_clone { self.emit_render_loop_stmt(s); }
+                    self.indent -= 1;
+                }
+                self.line("}");
+            }
+            other => self.emit_stmt(other),
+        }
+    }
+
+    /// A tracked kernel var's reference inside a Screen render loop. Kernel
+    /// vars there are `Option<T>`-wrapped (see the top-level `Item::Let`
+    /// loop's doc comment) so `__boring_launch`'s `mut self` (a full move)
+    /// can be taken out and put back across repeated `FnMut` closure calls —
+    /// every other access reads/writes through `.as_ref()`/`.as_mut().unwrap()`.
+    /// A no-op (bare name) outside the render loop or for a non-kernel var.
+    fn screen_kvar_ref(&self, kvar: &str, mutable: bool) -> String {
+        if self.in_render_loop && self.var_kernel_type.contains_key(kvar) {
+            if mutable { format!("{kvar}.as_mut().unwrap()") } else { format!("{kvar}.as_ref().unwrap()") }
+        } else {
+            kvar.to_string()
+        }
+    }
+
+    /// Renders an assignment *target* (LHS) as a plain Rust place expression —
+    /// mirrors `cuda::host`'s identical helper (see its doc comment).
+    fn emit_assign_target(&mut self, target: &Expr) -> String {
+        match &target.kind {
+            ExprKind::Var(name) => self.screen_kvar_ref(name, true),
+            ExprKind::Field(obj, field) => format!("{}.{}", self.emit_assign_target(obj), field),
+            ExprKind::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter().map(|e| self.emit_assign_target(e)).collect();
+                format!("({})", parts.join(", "))
+            }
+            _ => self.expr(target),
+        }
+    }
+
+    /// Mirrors `cuda::host`'s identical helper.
+    fn is_kernel_field_ref(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Field(obj, _) => matches!(&obj.kind, ExprKind::Var(v) if self.var_kernel_type.contains_key(v.as_str())),
+            ExprKind::Tuple(elems) => !elems.is_empty() && elems.iter().all(|el| self.is_kernel_field_ref(el)),
+            _ => false,
+        }
+    }
+
+    /// `DeviceBuffer<T>::clone()` is a real device-to-device `hipMemcpyDtoD`
+    /// (see this file's own doc comment / `docs/rocm-backend.md`'s
+    /// implementation notes) — mirrors `cuda::host`'s identical helper.
+    fn emit_kernel_field_value(&mut self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Field(obj, field) => {
+                if let ExprKind::Var(name) = &obj.kind {
+                    format!("{}.{}.clone()", self.screen_kvar_ref(name, false), field)
+                } else {
+                    format!("{}.clone()", self.expr(e))
+                }
+            }
+            ExprKind::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter().map(|el| self.emit_kernel_field_value(el)).collect();
+                format!("({})", parts.join(", "))
+            }
+            _ => self.expr(e),
+        }
+    }
+
+    /// Mirrors `cuda::host`'s identical helper.
+    fn emit_assign_rhs(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        if self.is_kernel_field_ref(lhs) && self.is_kernel_field_ref(rhs) {
+            self.emit_kernel_field_value(rhs)
+        } else {
+            self.expr(rhs)
+        }
+    }
+
+    /// Width/height (as `u32`-typed Rust expressions) to pass to
+    /// `boring_screen_present` for `screen.present(<kvar>.<kfield>)` — mirrors
+    /// `cuda::host`'s identical lookup.
+    fn screen_dim_exprs_for(&self, kvar: &str, kfield: &str) -> (String, String) {
+        let dim_field = self.var_kernel_type.get(kvar)
+            .and_then(|kt| self.kernel_decls.get(kt))
+            .filter(|kd| kd.fields.iter().any(|f| f.name == kfield && matches!(f.qual, GpuQual::Surface)))
+            .and_then(|kd| kd.fields.iter().find(|f| matches!(&f.ty, Type::Named(n) if n == "Dimension")))
+            .map(|f| f.name.clone());
+        let kref = self.screen_kvar_ref(kvar, false);
+        match dim_field {
+            Some(df) => (format!("{kref}.{df}.width as u32"), format!("{kref}.{df}.height as u32")),
+            None => ("boring_screen_width as u32".into(), "boring_screen_height as u32".into()),
         }
     }
 
@@ -897,6 +1315,10 @@ impl HostEmitter {
             }
         }
 
+        // Pre-pass: detect Screen before the prelude so it can add the
+        // screen-present/key helpers (see `emit_screen_prelude`).
+        self.detect_screen(program);
+
         self.line("// Generated by boring build --target rocm.");
         self.blank();
         self.emit_prelude(kernel_names);
@@ -943,9 +1365,20 @@ impl HostEmitter {
             // Bare top-level kernel construction/dispatch — see `rocm::mod`'s
             // doc comment and `top_level_touches_kernel`'s doc for why this
             // can't go through the general-pipeline splice.
+            let mut screen_setup_emitted = false;
             for item in &program.items {
                 match item {
                     Item::Let(s) => {
+                        if self.screen_var.as_deref() == Some(s.name.as_str()) {
+                            // There is no Rust `Screen` type to bind -- this
+                            // `let` instead triggers the one-time window/
+                            // softbuffer setup (see `emit_screen_setup`).
+                            if !screen_setup_emitted {
+                                self.emit_screen_setup();
+                                screen_setup_emitted = true;
+                            }
+                            continue;
+                        }
                         let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
                         let ty_ann = s.ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default();
                         if let Some(val) = &s.value {
@@ -956,7 +1389,21 @@ impl HostEmitter {
                             if is_scalar {
                                 self.top_level_scalars.insert(s.name.clone(), rhs.clone());
                             }
-                            self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
+                            // A Screen program's kernel vars are wrapped in
+                            // `Option<T>` -- see `screen_kvar_ref`'s doc
+                            // comment for why: `__boring_launch` takes `mut
+                            // self` (moves the whole kernel struct out), and
+                            // every dispatch inside the render loop happens
+                            // in a winit `run_return` closure that must stay
+                            // `FnMut` (called once per event) -- a plain
+                            // owned local can't be moved-from across
+                            // repeated closure calls, only an `Option`'s
+                            // `.take()` can.
+                            if self.screen_var.is_some() && self.var_kernel_type.contains_key(s.name.as_str()) {
+                                self.line(&format!("{} {}{} = Some({});", binding, s.name, ty_ann, rhs));
+                            } else {
+                                self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
+                            }
                         }
                     }
                     Item::Stmt(stmt) => self.emit_stmt(stmt),
@@ -1027,8 +1474,11 @@ impl HostEmitter {
         }
 
         // Accessors for 'unified/'actor'unified fields (D2H) — both are host-visible.
+        // 'surface is included too: it has no host-context counterpart, but a
+        // Screen program's `screen.present(k.pixels)` needs the exact same
+        // D2H readback every frame (see `host`'s Screen-support doc comment).
         for field in &decl.fields {
-            if matches!(field.qual, GpuQual::Unified | GpuQual::ActorUnified) {
+            if matches!(field.qual, GpuQual::Unified | GpuQual::ActorUnified | GpuQual::Surface) {
                 let elem = elem_rust_type(&field.ty);
                 self.line(&format!(
                     "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
@@ -1295,6 +1745,24 @@ impl HostEmitter {
                                         ExprKind::ArrayFill { value: _, count } | ExprKind::ArrayAlloc { count } => {
                                             let n = self.expr(count);
                                             let elem = elem_rust_type(&field.ty);
+                                            // A Screen program's 'surface buffer starts
+                                            // randomized, not zeroed -- same fixed-seed
+                                            // xorshift formula as `cuda::host`'s identical
+                                            // fix (see its doc comment), uploaded via
+                                            // `clone_htod` instead of `alloc_zeros`.
+                                            if matches!(field.qual, GpuQual::Surface) && self.screen_var.is_some() {
+                                                self.line(&format!("let {fname} = {{"));
+                                                self.indent += 1;
+                                                self.line("let mut __rng: u64 = 0x12345678ABCDEF01u64;");
+                                                self.line(&format!("let __n = ({n}) as usize;"));
+                                                self.line(&format!("let __seed: Vec<{elem}> = (0..__n).map(|_| {{ __rng ^= __rng << 13; __rng ^= __rng >> 7; __rng ^= __rng << 17; if __rng % 10 < 3 {{ 1 }} else {{ 0 }} }}).collect();"));
+                                                self.line(&format!(
+                                                    "boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{elem}>(&__seed)?"
+                                                ));
+                                                self.indent -= 1;
+                                                self.line("};");
+                                                return;
+                                            }
                                             self.line(&format!(
                                                 "let {} = boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>({} as usize)?;",
                                                 fname, elem, n
@@ -1369,6 +1837,18 @@ impl HostEmitter {
                  -> Result<KernelHandle<Self>, Box<dyn std::error::Error + Send + Sync>> {"
             );
             self.indent += 1;
+            // A `'surface` field paired with a sibling `Dimension` field
+            // needs a genuinely 2D grid — the naive 1D length-based
+            // fallback below launches only `block_dim.1` rows total
+            // (grid_dim.y stays 1), computing just the top strip of the
+            // image. Found on real ROCm hardware (RX 6600, see
+            // docs/rocm-backend.md's Screen section) — mirrors Metal's
+            // identical, already-working `dim_field` branch.
+            let dim_field = if matches!(field.qual, GpuQual::Surface) {
+                fields.iter().find(|f| matches!(&f.ty, Type::Named(n) if n == "Dimension")).map(|f| f.name.clone())
+            } else {
+                None
+            };
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
             self.indent += 1;
             if let Some((_, axes)) = field.ty.as_labeled_array() {
@@ -1376,6 +1856,9 @@ impl HostEmitter {
             } else if let Some(shadows) = desugared_labeled_array_shadow_fields(&field.name, fields) {
                 let (gx, gy, gz) = shadow_grid_axes("self", &shadows, ["block_dim.0", "block_dim.1", "block_dim.2"]);
                 self.line(&format!("({gx}, {gy}, {gz})"));
+            } else if let Some(df) = dim_field {
+                self.line(&format!("let __w = self.{}.width; let __h = self.{}.height;", df, df));
+                self.line("((__w + block_dim.0 - 1) / block_dim.0, (__h + block_dim.1 - 1) / block_dim.1, 1)");
             } else {
                 self.line(&format!("let n = self.{}.len() as u32;", field.name));
                 self.line("((n + block_dim.0 - 1) / block_dim.0, 1, 1)");
@@ -1770,11 +2253,17 @@ impl HostEmitter {
                     }
                 }
                 Stmt::Loop(l) => {
-                    self.line("loop {");
-                    self.indent += 1;
-                    for s in &l.body { self.emit_stmt(s); }
-                    self.indent -= 1;
-                    self.line("}");
+                    if self.screen_var.is_some() {
+                        // A `Screen` program's `kernel: loop:` drives the
+                        // window's event loop instead of a bare Rust `loop`.
+                        self.emit_render_loop(&l.body);
+                    } else {
+                        self.line("loop {");
+                        self.indent += 1;
+                        for s in &l.body { self.emit_stmt(s); }
+                        self.indent -= 1;
+                        self.line("}");
+                    }
                 }
                 other => self.emit_stmt(other),
             }
@@ -1836,7 +2325,21 @@ impl HostEmitter {
         // priority (see `boring_new_stream_with_priority`'s doc), so a later
         // dispatch on the same stream is already correctly ordered after this
         // one -- this just unwraps the `KernelHandle` via `.inner` directly.
-        Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.inner"))
+        // Inside a `Screen` render loop, this statement runs inside a winit
+        // `run_return` closure returning `()`, not `Result<(), _>` like the
+        // rest of `fn main()` -- a bare `?` won't compile there (see
+        // `in_render_loop`'s doc comment), so fall back to `.expect(...)`.
+        // The kernel var is also `Option<T>`-wrapped there (see the top-level
+        // `Item::Let` loop's doc comment) -- `__boring_launch` takes `mut
+        // self` (a full move), which an `FnMut` closure can only do via
+        // `.take()`+put-back, not a bare reassignment of an owned local.
+        if self.in_render_loop {
+            Some(format!(
+                "{var_name} = Some({var_name}.take().unwrap().__boring_launch({block}, {grid}, {after_arg}, {priority_arg}).expect(\"rocm: kernel dispatch failed\").inner)"
+            ))
+        } else {
+            Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.inner"))
+        }
     }
 
     fn emit_stmt_last(&mut self, stmt: &Stmt) {
@@ -1922,6 +2425,11 @@ impl HostEmitter {
             resident_locals: self.resident_locals.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
             top_level_scalars: self.top_level_scalars.clone(),
+            screen_var: self.screen_var.clone(),
+            screen_width_expr: self.screen_width_expr.clone(),
+            screen_height_expr: self.screen_height_expr.clone(),
+            screen_title: self.screen_title.clone(),
+            in_render_loop: self.in_render_loop,
         };
         let last = stmts.len().saturating_sub(1);
         for (i, st) in stmts.iter().enumerate() {
@@ -2017,6 +2525,22 @@ impl HostEmitter {
                 format!("{}[{} as usize].clone()", self.expr(arr), self.expr(idx))
             }
             ExprKind::Field(obj, field) => {
+                // `screen.<field>` (Screen program only) → the matching local
+                // state var from `emit_screen_setup`/`emit_render_loop`.
+                // Mirrors `cuda::host`'s identical Field-case mapping.
+                if let ExprKind::Var(obj_name) = &obj.kind {
+                    if self.screen_var.as_deref() == Some(obj_name.as_str()) {
+                        match field.as_str() {
+                            "frame"    => return "(boring_frame as isize)".into(),
+                            "time"     => return "boring_start.elapsed().as_secs_f64()".into(),
+                            "width"    => return "boring_screen_width".into(),
+                            "height"   => return "boring_screen_height".into(),
+                            "resized"  => return "boring_screen_resized".into(),
+                            "closed"   => return "boring_screen_closed".into(),
+                            _ => {}
+                        }
+                    }
+                }
                 if let ExprKind::Var(obj_name) = &obj.kind {
                     if let Some(read_call) = self.try_gpu_field_read(obj_name, field) {
                         return read_call;
@@ -2139,6 +2663,19 @@ impl HostEmitter {
                 call
             }
             ExprKind::MethodCall(obj, method, args) => {
+                // `screen.key(k)` / `screen.key_pressed(k)` (Screen program
+                // only) → is `k` currently held down. Mirrors `cuda::host`'s
+                // identical mapping.
+                if let ExprKind::Var(name) = &obj.kind {
+                    if self.screen_var.as_deref() == Some(name.as_str())
+                        && (method == "key" || method == "key_pressed")
+                    {
+                        if let Some(arg) = args.first() {
+                            let k = self.expr(&arg.value);
+                            return format!("boring_keys.contains({})", k);
+                        }
+                    }
+                }
                 // `GPU.all()` → iterator over all HIP devices.
                 if let ExprKind::Var(name) = &obj.kind {
                     if name == "GPU" && method == "all" {

@@ -1126,3 +1126,97 @@ kernel Scale:
     assert!(hip.contains("({ auto __old = buf[tid]; if (__old == (0)) buf[tid] = (1); __old; })"),
         "expected plain cas via a GNU statement-expression;\ngot:\n{hip}");
 }
+
+// ─── Screen / display (docs/gpu-display.md) ───────────────────────────────────
+//
+// ROCm/HIP has no native presentation API, so a `Screen` program blits the
+// `'surface` buffer to a window via `softbuffer` after a per-frame D2H
+// readback -- mechanical mirror of `cuda::host`'s identical Screen support.
+// Verified against real ROCm hardware (AMD Radeon RX 6600, gfx1032) -- see
+// `docs/rocm-backend.md`'s Screen section.
+
+#[test]
+fn screen_present_and_key() {
+    let src = r#"
+let width  = 64
+let height = 48
+let screen = Screen(Dimension(width, height), title = "Test")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float t
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+        t      = 0.0
+
+    def ():
+        pixels[0] = 0xFF000000
+
+var mut k = Plasma(Dimension(width, height))
+
+kernel:
+    loop:
+        k.t = float(screen.time)
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_hip, rs) = rocm_codegen("screen_present", src);
+
+    assert!(rs.contains("winit::platform::run_return::EventLoopExtRunReturn"), "missing run_return import;\ngot:\n{rs}");
+    assert!(rs.contains("winit::event_loop::EventLoop::new()"), "missing EventLoop::new();\ngot:\n{rs}");
+    assert!(rs.contains(".run_return(|__boring_event, _, __boring_cf|"), "missing run_return call;\ngot:\n{rs}");
+    assert!(rs.contains("winit::event_loop::ControlFlow::Exit"), "missing ControlFlow::Exit;\ngot:\n{rs}");
+
+    assert!(rs.contains("fn boring_screen_present("), "missing present helper;\ngot:\n{rs}");
+    assert!(rs.contains("softbuffer::Surface"), "missing softbuffer::Surface;\ngot:\n{rs}");
+    assert!(rs.contains("fn read_pixels(&self)"), "missing read_pixels D2H accessor;\ngot:\n{rs}");
+    assert!(rs.contains("k.as_ref().unwrap().read_pixels()"), "present call should read back via the Option-wrapped kernel var;\ngot:\n{rs}");
+    assert!(rs.contains("boring_screen_present(&mut boring_sb_surface, &__boring_px,"), "missing present call;\ngot:\n{rs}");
+
+    let escape_check = "boring_keys.contains(\"\\x1B\")";
+    assert!(rs.contains(escape_check), "missing Escape key check;\ngot:\n{rs}");
+
+    assert!(rs.contains("let mut k = Some(Plasma::new("), "kernel var must be Option-wrapped;\ngot:\n{rs}");
+    assert!(rs.contains("k = Some(k.take().unwrap().__boring_launch("), "dispatch must use take()/Some(..) inside the render loop;\ngot:\n{rs}");
+    assert!(rs.contains(".expect(\"rocm: kernel dispatch failed\")"), "render-loop dispatch must use .expect(...), not `?` (closure returns `()`);\ngot:\n{rs}");
+
+    // Real-hardware-confirmed bug fix (see docs/rocm-backend.md's Screen
+    // section): a 'surface + Dimension field pair must drive a genuinely 2D
+    // grid, not the naive 1D length-based fallback (which only computed the
+    // image's first `block_dim.1` rows).
+    assert!(rs.contains("let __w = self.dim.width; let __h = self.dim.height;"), "missing 2D dim-aware grid sizing;\ngot:\n{rs}");
+    assert!(rs.contains("(__h + block_dim.1 - 1) / block_dim.1"), "grid_dim.y must be derived from the Dimension field's height;\ngot:\n{rs}");
+}
+
+#[test]
+fn screen_cargo_toml_deps() {
+    let src = r#"
+let screen = Screen(Dimension(64, 48), title = "Test")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    let Dimension dim
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+    def ():
+        pixels[0] = 0xFF000000
+
+var mut k = Plasma(Dimension(64, 48))
+
+kernel:
+    loop:
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_, toml) = build_rs_and_toml("screen_cargo_toml", src);
+    assert!(toml.contains("winit = \"0.28\""), "missing winit dep for a Screen program;\ngot:\n{toml}");
+    assert!(toml.contains("softbuffer = \"0.3\""), "missing softbuffer dep for a Screen program;\ngot:\n{toml}");
+}

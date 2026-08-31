@@ -69,7 +69,7 @@
 // available in this dev environment) — mirrors the same caveat `metal::mod`
 // documents for lacking a macOS toolchain.
 
-use crate::ast::{Program, Item};
+use crate::ast::{Program, Item, ExprKind};
 
 mod device;
 mod host;
@@ -101,6 +101,23 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
     }).collect();
     let kernel_names_set: std::collections::HashSet<String> = kernel_names.iter().cloned().collect();
 
+    // See metal::mod's identical `has_screen` pre-pass -- a top-level
+    // `let screen = Screen(...)` marks this as a display program, which
+    // gets the same top-level-handled-by-host treatment as bare top-level
+    // kernel dispatch (see `top_level_kernel_touching` below).
+    let has_screen = program.items.iter().any(|item| {
+        if let Item::Let(s) = item {
+            if let Some(val) = &s.value {
+                if let ExprKind::Call(callee, _) = &val.kind {
+                    if let ExprKind::Var(name) = &callee.kind {
+                        return name == "Screen";
+                    }
+                }
+            }
+        }
+        false
+    });
+
     let device_hip = device::emit_device_hip(program);
 
     // See this module's doc comment for the full splice architecture.
@@ -118,7 +135,10 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
 
     // Bare top-level kernel construction/dispatch — see `cuda::mod`'s identical
     // doc comment for why this can't go through the general-pipeline splice.
-    let top_level_kernel_touching = crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
+    // A `Screen` program gets the same treatment (mirrors metal/wgpu's own
+    // `has_screen` carve-out) -- it keeps its ENTIRE top-level on this
+    // backend's own existing driver too.
+    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
 
     let renamed_program = crate::transpiler::rename_top_level_main(program, "boring_main");
     let general_config = crate::transpiler::TranspileConfig {
@@ -145,7 +165,7 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
         has_boring_main, boring_main_throws, top_level_kernel_touching,
     );
     let build_rs  = emit_build_rs();
-    let cargo_toml = emit_cargo_toml(stem, version);
+    let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
     RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors: general_out.errors }
 }
@@ -286,7 +306,13 @@ pub(crate) const BORING_HIP_ATTR_SHARED_MEM_PER_BLOCK: i32 = {shared_mem};\n\
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
 
-fn emit_cargo_toml(stem: &str, version: &str) -> String {
+fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
+    // `winit`/`softbuffer` are only needed for a `Screen` (display) program --
+    // see `host::emit_screen_setup`'s doc comment for why this specific pair
+    // (winit 0.28's `run_return` API + the matching raw-window-handle 0.5
+    // softbuffer release) was chosen. A compute-only program stays free of
+    // any graphics-crate dependency, same as today.
+    let extra_deps = if has_screen { "winit = \"0.28\"\nsoftbuffer = \"0.3\"\n" } else { "" };
     format!(
         r#"[package]
 name = "{stem}"
@@ -299,10 +325,13 @@ path = "src/main.rs"
 
 # No external GPU crate dependency -- see this module's doc comment for why:
 # host.rs hand-rolls the HIP FFI/safe-wrapper layer directly, linked against
-# libamdhip64 via build.rs.
+# libamdhip64 via build.rs. `winit`/`softbuffer` below are the sole exception,
+# added only for a `Screen` (display) program -- they're a CPU-side windowing/
+# present layer, not a GPU compute crate.
 [dependencies]
-"#,
+{extra_deps}"#,
         stem = stem,
         version = version,
+        extra_deps = extra_deps,
     )
 }

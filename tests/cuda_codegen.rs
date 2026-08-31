@@ -417,6 +417,11 @@ kernel Scale:
 "#);
     assert!(toml.contains("cudarc"),
         "Cargo.toml must depend on cudarc;\ngot:\n{toml}");
+    // Regression guard for the Screen/display feature (see
+    // `screen_present_and_key` below): a compute-only program must stay free
+    // of the windowing/present dependencies it needs.
+    assert!(!toml.contains("winit"), "winit should not be present for compute-only;\ngot:\n{toml}");
+    assert!(!toml.contains("softbuffer"), "softbuffer should not be present for compute-only;\ngot:\n{toml}");
 }
 
 // ─── 2D block / grid launch ───────────────────────────────────────────────────
@@ -1202,4 +1207,110 @@ kernel Scale:
         "expected plain swap via a GNU statement-expression;\ngot:\n{cu}");
     assert!(cu.contains("({ auto __old = buf[tid]; if (__old == (0)) buf[tid] = (1); __old; })"),
         "expected plain cas via a GNU statement-expression;\ngot:\n{cu}");
+}
+
+// ─── Screen / display (docs/gpu-display.md) ───────────────────────────────────
+//
+// CUDA has no native presentation API, so a `Screen` program blits the
+// `'surface` buffer to a window via `softbuffer` after a per-frame D2H
+// readback — see `cuda::host`'s Screen-support doc comment. These are
+// codegen-shape snapshot tests (no real GPU/window involved); real-hardware
+// validation for this feature was performed on the ROCm backend instead (see
+// `docs/rocm-backend.md`'s Screen section) — CUDA has no NVIDIA GPU available
+// in this project's dev environment (see `docs/cuda-module.md`).
+
+#[test]
+fn screen_present_and_key() {
+    let src = r#"
+let width  = 64
+let height = 48
+let screen = Screen(Dimension(width, height), title = "Test")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float t
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+        t      = 0.0
+
+    def ():
+        pixels[0] = 0xFF000000
+
+var mut k = Plasma(Dimension(width, height))
+
+kernel:
+    loop:
+        k.t = float(screen.time)
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_cu, rs) = cuda_codegen("screen_present", src);
+
+    // Window/event-loop plumbing (winit 0.28's `run_return` API).
+    assert!(rs.contains("winit::platform::run_return::EventLoopExtRunReturn"), "missing run_return import;\ngot:\n{rs}");
+    assert!(rs.contains("winit::event_loop::EventLoop::new()"), "missing EventLoop::new();\ngot:\n{rs}");
+    assert!(rs.contains(".run_return(|__boring_event, _, __boring_cf|"), "missing run_return call;\ngot:\n{rs}");
+    assert!(rs.contains("winit::event_loop::ControlFlow::Exit"), "missing ControlFlow::Exit;\ngot:\n{rs}");
+
+    // softbuffer present path.
+    assert!(rs.contains("fn boring_screen_present("), "missing present helper;\ngot:\n{rs}");
+    assert!(rs.contains("softbuffer::Surface"), "missing softbuffer::Surface;\ngot:\n{rs}");
+    assert!(rs.contains("fn read_pixels(&self)"), "missing read_pixels D2H accessor;\ngot:\n{rs}");
+    assert!(rs.contains("k.as_ref().unwrap().read_pixels()"), "present call should read back via the Option-wrapped kernel var;\ngot:\n{rs}");
+    assert!(rs.contains("boring_screen_present(&mut boring_sb_surface, &__boring_px,"), "missing present call;\ngot:\n{rs}");
+
+    // screen.key(...) + break.
+    let escape_check = "boring_keys.contains(\"\\x1B\")";
+    assert!(rs.contains(escape_check), "missing Escape key check;\ngot:\n{rs}");
+
+    // Kernel var is Option<T>-wrapped (see `screen_kvar_ref`'s doc) so
+    // `__boring_launch`'s `mut self` can be taken/put-back across the FnMut
+    // closure's repeated calls.
+    assert!(rs.contains("let mut k = Some(Plasma::new("), "kernel var must be Option-wrapped;\ngot:\n{rs}");
+    assert!(rs.contains("k = Some(k.take().unwrap().__boring_launch("), "dispatch must use take()/Some(..) inside the render loop;\ngot:\n{rs}");
+    assert!(rs.contains(".expect(\"cuda: kernel dispatch failed\")"), "render-loop dispatch must use .expect(...), not `?` (closure returns `()`);\ngot:\n{rs}");
+
+    // 'surface + Dimension field pair must drive a genuinely 2D grid, not the
+    // naive 1D length-based fallback (see `emit_boring_launch`'s dim_field fix
+    // — confirmed on real ROCm hardware to matter: the 1D fallback only
+    // computed the image's first `block_dim.1` rows).
+    assert!(rs.contains("let __w = self.dim.width; let __h = self.dim.height;"), "missing 2D dim-aware grid sizing;\ngot:\n{rs}");
+    assert!(rs.contains("(__h + block_dim.1 - 1) / block_dim.1"), "grid_dim.y must be derived from the Dimension field's height;\ngot:\n{rs}");
+
+    // `Dimension` needs cudarc's `DeviceRepr` marker to be passed as a launch arg.
+    assert!(rs.contains("unsafe impl cudarc::driver::DeviceRepr for Dimension {}"), "missing DeviceRepr impl for Dimension;\ngot:\n{rs}");
+}
+
+#[test]
+fn screen_cargo_toml_deps() {
+    let src = r#"
+let screen = Screen(Dimension(64, 48), title = "Test")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    let Dimension dim
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+    def ():
+        pixels[0] = 0xFF000000
+
+var mut k = Plasma(Dimension(64, 48))
+
+kernel:
+    loop:
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_, toml) = build_rs_and_toml("screen_cargo_toml", src);
+    assert!(toml.contains("winit = \"0.28\""), "missing winit dep for a Screen program;\ngot:\n{toml}");
+    assert!(toml.contains("softbuffer = \"0.3\""), "missing softbuffer dep for a Screen program;\ngot:\n{toml}");
+    assert!(toml.contains("cudarc"), "must still depend on cudarc;\ngot:\n{toml}");
 }

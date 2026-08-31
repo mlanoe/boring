@@ -273,18 +273,34 @@ cd examples/hello_rust &amp;&amp; cargo run</code></pre></div>
 <h3 id="the-showcase">The showcase</h3>
 <p><code>examples/hello.br</code> is a runnable tour of every language feature: bindings, functions, control flow, structs, enums, traits, error handling, closures, generics, modules, async tasks, and more. Run it or read it — it is the fastest way to see what Boring looks like.</p>
 <hr>
+<h2 id="standard-library-and-dependencies">Standard library and dependencies</h2>
+<p>Boring ships a small first-party standard library and lets a project depend on another Boring project&#x27;s source directly — no registry involved, just <code>boring.toml</code>.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">use</span> boring.collections.*             <span class="co"># first-party stdlib (Stack&lt;T&gt;, Queue&lt;T&gt;, ...)</span>
+<span class="kw">use</span> numlib.big_uint.*                <span class="co"># a named project dependency (see below)</span></code></pre></div>
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code># boring.toml
+[deps]
+numlib  = { path = &quot;../boring-numlib&quot;, version = &quot;^1.2&quot; }  # a sibling project, by path
+somelib = { git = &quot;https://github.com/user/somelib&quot; }      # ...or by git (branch/tag/rev)</code></pre></div>
+<p>A <code>git</code> dependency is cloned into a persistent local cache and pinned in an auto-generated <code>boring.lock</code> (commit it, same as <code>Cargo.lock</code>) so it never silently drifts between builds — run <code>boring update [name]</code> to deliberately move it forward. <code>boring run --locked</code>/<code>--offline</code> and <code>boring build --locked</code>/<code>--offline</code> turn &quot;silently resolve/refetch&quot; into a hard error, for CI and reproducible builds. An optional <code>version</code> requirement (<code>^</code>/<code>~</code>/<code>=</code>, Cargo semantics) is checked against the dependency&#x27;s own declared version — a compatibility assertion, not a solver (there&#x27;s still exactly one target per <code>[deps]</code> line either way).</p>
+<p>See <a href="docs/book.html">`docs/book.md`</a> §15 (Modules) for the full syntax and <a href="docs/cross-project-code-sharing-gap.html">`docs/cross-project-code-sharing-gap.md`</a> for the design rationale and known limitations compared to a full package manager.</p>
+<hr>
 <h2 id="repository-layout">Repository layout</h2>
 <div class="code-block"><pre><code>boring/
 ├── src/
-│   ├── main.rs              # CLI entry point
+│   ├── main.rs              # CLI entry point + boring.toml/boring.lock handling
+│   ├── git_deps.rs          # Named git [deps] resolution (cache, boring.lock, --locked/--offline)
+│   ├── semver.rs            # Hand-rolled version parsing/matching for [deps]&#x27;s `version` key
+│   ├── stdlib_embed.rs      # Embeds stdlib/*.br into the compiler binary
 │   ├── parser/              # Lexer + recursive-descent parser → AST
 │   ├── interpreter/         # Tree-walk interpreter (for rapid iteration)
 │   ├── validator/           # kernel.rs — pre-emission validation pass
 │   └── transpiler/
 │       ├── *.rs             # Standard backend → Rust std + tokio
 │       └── kernel/          # Kernel backend → Rust-for-Linux (no_std)
+├── stdlib/                  # First-party `use boring.&lt;module&gt;` standard library
 ├── docs/
 │   ├── book.md              # Full language reference
+│   ├── cross-project-code-sharing-gap.md  # Dependency system design + known limitations
 │   └── kernel-transpiler-mapping.md  # Boring → Rust-for-Linux mapping
 ├── spec/
 │   └── grammar.bnf          # Formal BNF grammar

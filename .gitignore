@@ -5,6 +5,7 @@ tests/cases/*_rust/
 examples/*_rust/
 examples/*_metal/
 examples/*_cuda/
+examples/*_rocm/
 stdlib/*_rust/
 # Scratch Cargo projects generated per .br file (boring build <file.br>)
 boring/interpreter/ast_rust/

@@ -92,6 +92,65 @@ kernels/main.hip  --hipcc --genco-->  code object (embedded via include_bytes!)
 
 ---
 
+## GPU display (`Screen`)
+
+For the language-level `Screen`/`'surface`/`screen.present()` reference, see
+[`gpu-module.md`](gpu-module.html) and [`gpu-display.md`](gpu-display.html).
+
+ROCm/HIP has no native presentation API, so — exactly like the CUDA backend
+(a mechanical mirror; see [`cuda-module.md`](cuda-module.html#gpu-display-screen)
+for the full writeup) — a `Screen` program reads the `'surface` pixel buffer
+back to the host every frame (`clone_dtoh`, via the same `read_<field>()`
+accessor every `'unified` field already gets) and blits it into a window via
+[`softbuffer`](https://docs.rs/softbuffer) (pure-CPU presentation, no
+GPU-graphics interop). `winit = "0.28"` + `softbuffer = "0.3"` are added to
+the generated `Cargo.toml` only when the program uses `Screen`.
+
+### Verified against real ROCm hardware
+
+Unlike the CUDA backend (no NVIDIA hardware available), this feature **was**
+verified end-to-end on the same AMD Radeon RX 6600 (`gfx1032`) as the rest of
+this backend's hardware validation (see the "Known limitations" table below):
+both `examples/plasma_metal.br` and `examples/game_of_life.br` were built
+with `boring build --target rocm`, compiled with `cargo build`
+(`BORING_ROCM_ARCH=gfx1032`), and actually run — a real window opens, shows
+live animated output (the plasma sine-wave field / an evolving Game of Life
+grid), and `screen.key("\x1B")` closes it cleanly.
+
+Two real bugs surfaced by this run (both also existed identically in
+`cuda::host`, this backend's near-verbatim clone, and were fixed there too —
+still unverified on real CUDA hardware, see `cuda-module.md`'s Screen
+section):
+
+1. **The window only showed its top `block_dim.1` rows (e.g. 16px) of the
+   image, the rest black.** A kernel's `'surface` field paired with a
+   sibling `Dimension` field needs a genuinely 2D dispatch grid — the
+   existing 1D length-based auto-grid fallback (`grid_dim.y` stuck at `1`)
+   silently computed only the first few rows. Fixed by adding a
+   `Dimension`-aware branch to `emit_boring_launch`'s grid-size inference
+   (mirrors a formula the Metal backend's `emit_boring_launch` already had —
+   Metal was never affected because its `'surface` buffers are truly
+   host-visible `MTLBuffer`s dispatched through the same MSL path
+   regardless).
+2. **The window painted correctly only in a small top-left region on a
+   display with DPI scaling above 100%.** `winit`'s `LogicalSize` (used for
+   `with_inner_size`) is scaled by the monitor's DPI factor into a
+   *different* physical window/surface size than what `softbuffer`'s
+   `resize()` was told (the kernel's own `width`/`height`, unscaled) — the
+   OS compositor requires the two to match exactly. Fixed by switching to
+   `winit::dpi::PhysicalSize`, which sidesteps DPI scaling entirely: the
+   window's inner size is exactly `width x height` physical pixels
+   regardless of the display's scale factor.
+
+### Known limitations
+
+Same as CUDA's identical list (`cuda-module.md`'s Screen section): a
+kernel-touching struct method isn't supported by the general-pipeline
+splice, and `screen.resized` is tracked but the `'surface` buffer isn't
+reallocated automatically on resize.
+
+---
+
 ## Known limitations vs CUDA
 
 | Feature | CUDA | ROCm |
@@ -100,7 +159,7 @@ kernels/main.hip  --hipcc --genco-->  code object (embedded via include_bytes!)
 | Constant-memory upload | `get_global` + `transmute_mut` + `memcpy_htod` (3 cudarc calls) | single `HipModule::upload_constant` helper — same effect, one call, since this backend controls both sides of the FFI |
 | `after =` ordering | CUDA streams + events | HIP streams + events (`hipStreamWaitEvent`) — same GPU-side, non-blocking semantics |
 | Toolchain | `nvcc` | `hipcc` |
-| Verified against real hardware | — | **yes**, as of 2026-08-30 — HIP SDK 7.2 on an AMD Radeon RX 6600 (`gfx1032`, RDNA2/Navi 23; runs natively, no `HSA_OVERRIDE_GFX_VERSION` needed despite the official HIP SDK Windows support matrix listing `gfx1032` as unsupported). `examples/vector_add_gpu.br`, `matrix_mul_gpu.br`, and `mandelbrot_gpu.br` all compile, run, and produce output numerically identical (byte-identical for `mandelbrot_gpu.br`'s output PPM) to `boring run`'s interpreter simulation. Found and fixed 6 real bugs in the process — see below and the `map_builtin_fn`/`Stmt::With`/`try_gpu_field_read`/`kernel_ctor_buffer_flags`/`auto_grid`/`__stream` doc comments in `rocm::device`/`rocm::host` (all six also existed identically in `cuda::device`/`cuda::host`, this backend's near-verbatim clone, and were fixed there too — still unverified on real CUDA hardware, none available in this project's dev environment) |
+| Verified against real hardware | — | **yes**, as of 2026-08-30 — HIP SDK 7.2 on an AMD Radeon RX 6600 (`gfx1032`, RDNA2/Navi 23; runs natively, no `HSA_OVERRIDE_GFX_VERSION` needed despite the official HIP SDK Windows support matrix listing `gfx1032` as unsupported). `examples/vector_add_gpu.br`, `matrix_mul_gpu.br`, and `mandelbrot_gpu.br` all compile, run, and produce output numerically identical (byte-identical for `mandelbrot_gpu.br`'s output PPM) to `boring run`'s interpreter simulation. Found and fixed 6 real bugs in the process — see below and the `map_builtin_fn`/`Stmt::With`/`try_gpu_field_read`/`kernel_ctor_buffer_flags`/`auto_grid`/`__stream` doc comments in `rocm::device`/`rocm::host` (all six also existed identically in `cuda::device`/`cuda::host`, this backend's near-verbatim clone, and were fixed there too — still unverified on real CUDA hardware, none available in this project's dev environment). Extended as of 2026-08-31 to the `Screen`/display feature (`examples/plasma_metal.br`, `examples/game_of_life.br`) — see the "GPU display" section above — which found 2 more real bugs (#7-8 below), also mirrored into `cuda::host`. |
 
 ### Bugs found via this hardware validation (all fixed)
 
@@ -110,6 +169,8 @@ kernels/main.hip  --hipcc --genco-->  code object (embedded via include_bytes!)
 4. **Host→GPU upload never triggered for a fixed-shape ctor parameter** — `kernel_ctor_buffer_flags` had the identical `LabeledArray`-blind-spot, so a host `Vec<f32>` was passed directly where a `DeviceBuffer<f32>` was expected (`error[E0308]`).
 5. **`__boring_launch`'s generated signature and its call site disagreed on `grid_dim`'s type** for a fixed-shape kernel — the signature (correctly) used `.as_labeled_array()` to decide `Option<(u32,u32,u32)>` vs. a bare tuple; three separate call-site `auto_grid` checks did not, and passed a bare tuple against the `Option<...>`-typed parameter (`error[E0308]`).
 6. **Silent stream-synchronization race producing wrong (near-zero) output**, not a compile error: a kernel instance's own `__stream` field (used by its `read_{field}()` readback accessor) was a brand-new, independently-created HIP stream (`__ctx.default_stream()`), with no ordering relationship to the *different* cached per-priority stream every other operation (uploads, the actual kernel dispatch) used — so a D2H readback could complete before the kernel it was reading from had. Every buffer-allocation/upload site in the constructor had the same issue. Fixed by routing all of it through the same cached-per-priority stream (`boring_new_stream_with_priority`), matching this file's own documented stream design. Also found and fixed alongside it: an unassigned fixed-shape field's default zero-fill allocation was hardcoded to a 1-element buffer regardless of its actual shape (`error: index out of bounds` at readback).
+7. **A `Screen` program's window only ever showed its top `block_dim.1` rows (e.g. 16px) of the image, the rest black** — a kernel's `'surface` field paired with a sibling `Dimension` field needs a genuinely 2D dispatch grid; the existing 1D length-based auto-grid fallback left `grid_dim.y` at `1`, so only the first few rows were ever computed. Fixed by adding a `Dimension`-aware branch to `emit_boring_launch`'s grid-size inference — the Metal backend already had the equivalent formula (its `'surface` buffers are host-visible `MTLBuffer`s dispatched through the same MSL path either way, so it was never affected).
+8. **A `Screen` window painted correctly only in a small top-left region on a >100%-DPI-scaled display** — `winit`'s `LogicalSize` (used for the window's `with_inner_size`) gets scaled by the monitor's DPI factor into a *different* physical window/surface size than what `softbuffer`'s `resize()` was told (the kernel's own unscaled `width`/`height`) — the OS compositor requires the two to match exactly. Fixed by switching to `winit::dpi::PhysicalSize`, which is exactly `width x height` physical pixels regardless of the display's scale factor.
 
 ---
 

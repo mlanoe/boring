@@ -73,7 +73,7 @@
 // construct there is a free function); detected and reported via `eprintln!`
 // rather than silently mishandled if it ever occurs.
 
-use crate::ast::{Program, Item};
+use crate::ast::{Program, Item, ExprKind};
 
 mod device;
 mod host;
@@ -107,6 +107,23 @@ pub fn transpile_cuda(program: &Program, stem: &str, version: &str) -> CudaOutpu
     }).collect();
     let kernel_names_set: std::collections::HashSet<String> = kernel_names.iter().cloned().collect();
 
+    // See metal::mod's identical `has_screen` pre-pass -- a top-level
+    // `let screen = Screen(...)` marks this as a display program, which
+    // gets the same top-level-handled-by-host treatment as bare top-level
+    // kernel dispatch (see `top_level_kernel_touching` below).
+    let has_screen = program.items.iter().any(|item| {
+        if let Item::Let(s) = item {
+            if let Some(val) = &s.value {
+                if let ExprKind::Call(callee, _) = &val.kind {
+                    if let ExprKind::Var(name) = &callee.kind {
+                        return name == "Screen";
+                    }
+                }
+            }
+        }
+        false
+    });
+
     let device_cu = device::emit_device_cu(program);
 
     // See this module's doc comment for the full splice architecture.
@@ -132,7 +149,11 @@ pub fn transpile_cuda(program: &Program, stem: &str, version: &str) -> CudaOutpu
     // which already worked for this case), and `gpu_top_level_handled_by_host`
     // tells the general pass to leave top-level alone rather than trying to
     // fold it into `boring_main` itself.
-    let top_level_kernel_touching = crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
+    // A `Screen` program keeps its ENTIRE top-level on this backend's own
+    // existing driver (mirrors metal/wgpu's own `has_screen` carve-out) --
+    // treated the same way as bare top-level kernel dispatch for the general
+    // pass's `gpu_top_level_handled_by_host` flag.
+    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
 
     let renamed_program = crate::transpiler::rename_top_level_main(program, "boring_main");
     let general_config = crate::transpiler::TranspileConfig {
@@ -166,7 +187,7 @@ pub fn transpile_cuda(program: &Program, stem: &str, version: &str) -> CudaOutpu
         has_boring_main, boring_main_throws, top_level_kernel_touching,
     );
     let build_rs  = emit_build_rs();
-    let cargo_toml = emit_cargo_toml(stem, version);
+    let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
     CudaOutput { host_rs, device_cu, kernel_names, build_rs, cargo_toml, errors: general_out.errors }
 }
@@ -208,7 +229,13 @@ fn main() {
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
 
-fn emit_cargo_toml(stem: &str, version: &str) -> String {
+fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
+    // `winit`/`softbuffer` are only needed for a `Screen` (display) program --
+    // see `host::emit_screen_setup`'s doc comment for why this specific pair
+    // (winit 0.28's `run_return` API + the matching raw-window-handle 0.5
+    // softbuffer release) was chosen. A compute-only program stays free of
+    // any graphics-crate dependency, same as today.
+    let extra_deps = if has_screen { "winit = \"0.28\"\nsoftbuffer = \"0.3\"\n" } else { "" };
     format!(
         r#"[package]
 name = "{stem}"
@@ -221,8 +248,9 @@ path = "src/main.rs"
 
 [dependencies]
 cudarc = {{ version = "0.19", features = ["driver", "nvrtc"] }}
-"#,
+{extra_deps}"#,
         stem = stem,
         version = version,
+        extra_deps = extra_deps,
     )
 }

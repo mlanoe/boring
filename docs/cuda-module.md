@@ -395,6 +395,101 @@ kernel:
 
 ---
 
+## GPU display (`Screen`)
+
+For the language-level `Screen`/`'surface`/`screen.present()` reference, see
+[`gpu-module.md`](gpu-module.html) and [`gpu-display.md`](gpu-display.html).
+This section covers only how the CUDA backend implements it.
+
+CUDA has no native presentation API (no `Surface`/`MTKView` equivalent), so a
+`Screen` program takes a **software-blit** path instead of Metal's/wgpu's
+GPU-native one: every frame, the `'surface` pixel buffer is read back to the
+host (`clone_dtoh`, the same D2H copy every `'unified` field already uses —
+`'surface` gets the identical `read_<field>()` accessor) and blitted into an
+OS window via [`softbuffer`](https://docs.rs/softbuffer) — pure-CPU pixel
+presentation, no GPU-graphics interop.
+
+```boring
+let screen = Screen(Dimension(800, 600), title = "Plasma")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    var Dimension dim
+    var float t
+    # ...
+
+var mut k = Plasma(Dimension(800, 600))
+
+kernel:
+    loop:
+        k.t = float(screen.time)
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+```
+
+### Dependencies
+
+`winit = "0.28"` + `softbuffer = "0.3"` are added to the generated
+`Cargo.toml` **only** when the program uses `Screen` — a compute-only program
+stays free of any graphics-crate dependency, same as today. This specific
+version pairing matters: winit 0.28 is the last release with the
+`EventLoopExtRunReturn::run_return` API (a plain, hand-rollable event-loop
+closure, matching this backend's existing hand-rolled statement/expression
+emitter — see this file's top-of-module doc comment on why the general
+pipeline's wgpu-shaped kernel codegen can't be reused here) and its
+`raw-window-handle 0.5`, which is what softbuffer 0.3 (not 0.4, used by the
+wgpu backend) is built against.
+
+### Pixel format
+
+Same `0xAARRGGBB` packing as every other backend (see `gpu-display.md`).
+softbuffer's own pixel format (`0RGB`, top byte ignored) is bit-compatible —
+the alpha byte is simply ignored — so the D2H-read `Vec<u32>` is blitted
+straight into the softbuffer surface with no per-pixel conversion.
+
+### Event loop / render loop shape
+
+A `Screen` program keeps its entire top-level on this backend's own custom
+emitter (mirrors bare top-level kernel dispatch's existing
+`top_level_kernel_touching` carve-out — see this module's top-of-file doc
+comment): window + softbuffer context/surface creation happens once
+(`emit_screen_setup`), and `kernel: loop:` becomes a winit `run_return` event
+loop instead of a bare Rust `loop {}`. `screen.key(k)`/`screen.time`/
+`.frame`/`.width`/`.height`/`.resized`/`.closed` map to local state variables
+maintained by the event handlers, identically to the Metal backend's
+implementation (same key-name table, so `screen.key("\x1B")` etc. mean the
+same thing across every backend).
+
+Kernel variables used inside the render loop are `Option<T>`-wrapped
+(`let mut k = Some(Plasma::new(...)?);`) — `__boring_launch` takes `mut self`
+(a full move, needed so the returned `KernelHandle` can own the right
+stream), and the winit closure driving the render loop must stay callable
+more than once (`FnMut`), which an owned local can't be moved out of and
+back into on every call; an `Option`'s `.take()`/`Some(..)` reassignment can.
+
+### Known limitations
+
+- **Not verified against real CUDA/NVIDIA hardware** — no NVIDIA GPU or CUDA
+  toolkit is available in this project's dev environment (confirmed via
+  `nvidia-smi` and a filesystem search). This feature ships as a mechanical,
+  by-symmetry port of the identical, real-hardware-verified ROCm
+  implementation (see [`rocm-backend.md`](rocm-backend.html)'s Screen
+  section) plus the codegen snapshot tests in `tests/cuda_codegen.rs` — not a
+  real build/run. If you have a CUDA toolchain and GPU, `boring build
+  --target cuda examples/plasma_metal.br` / `examples/game_of_life.br` are
+  the two example programs to try it against.
+- A kernel-touching **struct method** (as opposed to a free function) using
+  `Screen` isn't supported by the general-pipeline splice — see this
+  module's top-of-file doc comment's identical, pre-existing note for bare
+  top-level kernel dispatch.
+- Window resize is tracked (`screen.resized`, `screen.width`/`.height`) but
+  the `'surface` buffer itself is not reallocated automatically — same
+  documented limitation as every other backend (see `gpu-display.md`).
+
+---
+
 ## Multi-device
 
 ```boring
