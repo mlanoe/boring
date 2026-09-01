@@ -222,7 +222,33 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     let mut t = Transpiler::new(config);
     t.source_dir = t.config.source_dir.clone();
     t.deps = t.config.deps.clone();
-    t.emit_program(program);
+    // The `std` target (plain `boring build`, no `--target`) has no GPU runtime at
+    // all -- `BoringGpuArg<T>`, `__boring_gpu_copy_d2h`/`__boring_gpu_device`/
+    // `__boring_gpu_queue`, and kernel struct/dispatch codegen are only ever emitted
+    // by the cuda/rocm/metal/wgpu backends (see each backend's own `host.rs`).
+    // Without this check, a `kernel` struct on the `std` target silently transpiles
+    // and emits Rust referencing all of that GPU-only machinery, then fails `cargo
+    // build` with a wall of raw E0425/E0433 "cannot find function/type" errors far
+    // removed from the real cause. Fail fast here, before generating any Rust,
+    // instead — `is_gpu_target` is exactly the signal already used to tell the
+    // `std` target apart from a GPU target (see its doc comment).
+    if !t.config.is_gpu_target {
+        if let Some(k) = first_kernel_decl(&program.items) {
+            t.push_error(
+                k.line, k.col,
+                format!(
+                    "kernel `{}` requires a GPU target -- the `std` target (plain `boring build`) \
+                     has no runtime support for kernel dispatch; rebuild with \
+                     `--target cuda|rocm|metal|wgpu`",
+                    k.name,
+                ),
+            );
+        } else {
+            t.emit_program(program);
+        }
+    } else {
+        t.emit_program(program);
+    }
     let apply_single_thread_fixups = |s: String| -> String {
         s
             .replace("Arc::<str>::from", "Rc::<str>::from")
@@ -3715,6 +3741,29 @@ pub(crate) fn rename_top_level_main(program: &Program, new_name: &str) -> Progra
         item.clone()
     }).collect();
     Program { items }
+}
+
+/// First `kernel` struct declaration found in `items`, recursing into `mod`
+/// blocks (a kernel can be declared inside one). Used by `transpile_with_config`
+/// to reject kernel usage on the `std` target before generating any Rust — see
+/// its call site's doc comment for why. `Item::Kernel` presence is the complete
+/// signal for "this program needs a GPU target": every `'unified`/`'global`/etc.
+/// GPU memory qualifier only exists on a `KernelFieldDecl` (see `GpuQual`'s doc),
+/// so there is no way to write GPU-callable code without declaring a `kernel`
+/// struct first.
+fn first_kernel_decl(items: &[Item]) -> Option<&KernelDecl> {
+    for item in items {
+        match item {
+            Item::Kernel(k) => return Some(k),
+            Item::Mod(m) => {
+                if let Some(k) = first_kernel_decl(&m.items) {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Names of free functions whose body directly constructs a `kernel` instance
