@@ -458,28 +458,30 @@ impl Transpiler {
             if v == "fs" {
                 return Some(self.emit_fs_call(method, args));
             }
-            // `GPU.all()` — iterate all GPU devices. wgpu only has one real adapter
-            // (see `gpu_device_vars`'s doc comment), so this is a single-element
-            // array — matching the interpreter's own simulation-mode behavior.
+            // `GPU.all()` — iterate all real GPU adapters the system exposes
+            // (`instance.enumerate_adapters` in `wgpu::host::emit_gpu_adapter_enumeration`),
+            // not a fake single-element array — see docs/wgpu-backend.md's "`GPU` type
+            // on wgpu" (2026-09-01: real per-adapter introspection).
             if v == "GPU" && method == "all" && self.is_gpu_target {
-                return Some("vec![0usize]".to_string());
+                return Some("__boring_gpu_all()".to_string());
             }
         }
         // `g.name()`/`.totalMem()`/etc on a tracked `GPU(n)` handle (`let g = GPU(0)`,
         // or a `for g in GPU.all():` loop variable) — rewritten to the introspection
-        // helpers `wgpu::host::emit_gpu_introspection_globals` emits. `.index()` is
-        // just the stored usize itself; every other property has no per-device
-        // notion on wgpu (one real adapter total), so the index is otherwise unused.
+        // helpers `wgpu::host::emit_gpu_introspection_globals` emits, indexed by `g`
+        // itself (a plain `usize`, see `emit_expr.rs`'s `GPU(n)` handling) against the
+        // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
+        // startup. `.index()` is just the stored usize itself.
         if let ExprKind::Var(v) = &obj.kind {
             if self.gpu_device_vars.contains(v.as_str()) {
                 return Some(match method {
-                    "name"              => "__boring_gpu_name()".to_string(),
-                    "totalMem"          => "__boring_gpu_total_mem()".to_string(),
-                    "freeMem"           => "__boring_gpu_free_mem()".to_string(),
-                    "computeCapability" => "__boring_gpu_compute_capability()".to_string(),
-                    "warpSize"          => "__boring_gpu_warp_size()".to_string(),
-                    "maxThreads"        => "__boring_gpu_max_threads()".to_string(),
-                    "maxSharedMem"      => "__boring_gpu_max_shared_mem()".to_string(),
+                    "name"              => format!("__boring_gpu_name({v})"),
+                    "totalMem"          => format!("__boring_gpu_total_mem({v})"),
+                    "freeMem"           => format!("__boring_gpu_free_mem({v})"),
+                    "computeCapability" => format!("__boring_gpu_compute_capability({v})"),
+                    "warpSize"          => format!("__boring_gpu_warp_size({v})"),
+                    "maxThreads"        => format!("__boring_gpu_max_threads({v})"),
+                    "maxSharedMem"      => format!("__boring_gpu_max_shared_mem({v})"),
                     "index"             => format!("({} as i64)", v),
                     _ => format!("{}.{}({})", v, method, args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ")),
                 });

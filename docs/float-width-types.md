@@ -267,6 +267,19 @@ is a validator error: "WGSL has no 64-bit float type; use `float32`."
 already does this for `Type::Float` today — no behavior change, same
 correctness gap being closed as Metal's).
 
+**Confirmed still correct (2026-09-01), not just an unexamined default**: a
+later investigation (`docs/wgpu-backend.md`'s "Will these gaps close?")
+checked whether `wgpu::Features::SHADER_F64`-style support could turn this
+into a narrowing/feature-flag case instead of a hard error. It can't,
+reliably: WGSL's real f64 path is `naga`'s own non-standard extension
+(`enable naga_ext_f64;`), SPIR-V/Vulkan support depends on the driver
+exposing `shaderFloat64` with no portable way to probe for it ahead of
+shader compilation, and DX12 has had outright compilation failures with
+64-bit-type features. Standardization is tracked upstream
+([gpuweb/gpuweb#2805](https://github.com/gpuweb/gpuweb/issues/2805)) but
+unresolved — so the hard compile error above stays the right call, not a
+gap to close, until that changes.
+
 #### Host/device buffer narrowing in the generic `'gpu'unified` residency path — not a bug after all
 
 **An earlier revision of this section claimed `kernel_host_scalar_type`

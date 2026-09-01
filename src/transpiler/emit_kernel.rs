@@ -214,9 +214,9 @@ impl Transpiler {
     /// (`gpu_device_vars`) and emits it as a plain `usize` index. See
     /// `emit_call`'s own `"GPU"` special case (this function only adds the
     /// tracking `try_emit_gpu_device_let` needs on top of that shared emission —
-    /// see `gpu_device_vars`'s doc comment for why every index resolves to the
-    /// same single real adapter on wgpu) and `emit_methods.rs`'s method-call
-    /// rewrite for `.name()`/`.totalMem()`/etc on a tracked variable.
+    /// `n` now indexes a real, per-adapter list on wgpu, see
+    /// `wgpu::host::emit_gpu_adapter_enumeration`) and `emit_methods.rs`'s
+    /// method-call rewrite for `.name()`/`.totalMem()`/etc on a tracked variable.
     pub(crate) fn try_emit_gpu_device_let(&mut self, s: &LetStmt) -> bool {
         if !self.is_gpu_target {
             return false;

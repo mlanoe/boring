@@ -286,22 +286,48 @@ doesn't inherit any WGSL `atomic<T>` + direct-mapping risk: the `atomic<i32>`/
 
 ## `GPU` type on wgpu
 
-Implemented as a **single simulated device**, not real multi-adapter support: wgpu already only ever opens one adapter at program startup (for `device`/`queue`), so `GPU(n)` and every element of `GPU.all()` resolve to that same adapter regardless of `n` — this exists so `GPU`-introspecting source (e.g. `examples/saxpy.br`'s `let g = GPU(0); print g.name()`) is portable between the interpreter's simulation mode (also a single mock device, `Value::GpuDevice`) and `--target wgpu`, without requiring genuine multi-device selection.
+**Real per-adapter introspection (2026-09-01), dispatch still single-device.**
+At startup, `instance.enumerate_adapters(wgpu::Backends::all())` builds the
+real list of adapters the system exposes (`__BORING_GPU_ADAPTERS`,
+`src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration`) — index 0 is
+always the adapter `device`/`queue` were actually created from (the one
+`request_adapter`'s own heuristic picked), so `GPU(0)` reliably means "the
+adapter your kernels actually run on"; any other index is a real, distinct
+physical adapter if the system has one, purely for introspection. `GPU(n)`
+and `GPU.all()`'s elements resolve to genuinely different adapters when more
+than one is present — this replaces the previous single-simulated-device
+stand-in (every index resolving to the same adapter, `docs/gpu-compute-display-split.md`'s
+"category A" work).
+
+Deduplication (a physical GPU can be enumerated once per backend it's
+reachable through, e.g. Vulkan and GL on the same Linux box) compares
+`AdapterInfo` (`.get_info()`, which derives `PartialEq`/`Eq`) rather than the
+`wgpu::Adapter` handle itself — **`wgpu::Adapter` implements neither `Clone`
+nor `PartialEq`** on the pinned `wgpu = "22"` (confirmed against the real
+`wgpu-22.1.0`/`wgpu-types-22.0.0` source, not docs.rs, which can describe a
+newer release's API by default) — this is why the adapter is Arc-wrapped
+once right after creation (same convention as `device`/`queue`) rather than
+cloned.
+
+**Still not implemented**: real per-device *dispatch* — `new(g) K` (placing
+a kernel's actual GPU work on a specific non-default adapter, like CUDA's
+`CudaContext::new(idx)`/Metal's per-index `MTLDevice`). Every kernel still
+dispatches on the single global `device`/`queue` regardless of which
+`GPU(n)` it was constructed with — see "Known limitations vs CUDA" below and
+`docs/gpu-compute-display-split.md`'s "category A, part (b)".
 
 | Boring method | wgpu API | Notes |
 |---|---|---|
-| `GPU(n)` | — | a plain `usize` index; not a real device selector |
-| `GPU.all()` | — | always a single-element array, `[GPU(0)]` |
-| `.name()` | `adapter.get_info().name` | real adapter name |
+| `GPU(n)` | — | a plain `usize` index into the real enumerated adapter list |
+| `GPU.all()` | — | one element per real adapter found, `0..count` |
+| `.name()` | `adapter.get_info().name` | real, per-adapter name |
 | `.totalMem()` | — | always `0` — `wgpu::AdapterInfo` has no memory-size field on any backend (checked against `wgpu-types` 22.0.0's struct definition) |
 | `.freeMem()` | — | always `0`, same reason |
 | `.computeCapability()` | — | always `[0, 0]` — a CUDA-only concept |
 | `.warpSize()` | — | always `32` — a conservative default, not queryable via wgpu |
-| `.maxThreads()` | `limits.max_compute_invocations_per_workgroup` | real adapter limit |
-| `.maxSharedMem()` | `limits.max_compute_workgroup_storage_size` | real adapter limit, bytes per workgroup |
-| `.index()` | — | echoes back whatever index was passed to `GPU(n)`, even though it isn't a real per-device index |
-
-Real multi-device support (a distinct adapter per index, like CUDA's `CudaContext::new(idx)`/Metal's per-index `MTLDevice`) is **not implemented** — see "Known limitations vs CUDA" below.
+| `.maxThreads()` | `limits.max_compute_invocations_per_workgroup` | real, per-adapter limit |
+| `.maxSharedMem()` | `limits.max_compute_workgroup_storage_size` | real, per-adapter limit, bytes per workgroup |
+| `.index()` | — | echoes back whatever index was passed to `GPU(n)` — now a real index into the adapter list |
 
 ---
 
@@ -429,12 +455,71 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 | Feature | CUDA | wgpu |
 |---|---|---|
 | `print` in kernel | `printf` | silent no-op — WGSL has no device-side print |
-| Double precision | full support | optional feature (`SHADER_F64`); not enabled by default |
+| Double precision | full support | **hard compile error** on a `kernel` field (`float64`/`float`) — WGSL has no 64-bit float type at all, see `float-width-types.md` §6 and "Will these gaps close?" below |
 | `priority =` | `cuStreamCreateWithPriority` | no-op — wgpu has no queue priority API |
 | `freeMem()` | `cuMemGetInfo` | always 0 — wgpu does not expose free VRAM |
 | `computeCapability()` | CUDA SM version | always `[0, 0]` — not applicable |
-| Multi-device (`GPU(1)`, `new(g1) K`) | full support — distinct `CudaContext` per index | `GPU(n)` compiles and runs (see "`GPU` type on wgpu" above), but every index resolves to the same single real adapter — not real multi-device selection. `new(g1) K` (placing a kernel on a specific device) is not implemented |
+| Multi-device (`GPU(1)`, `new(g1) K`) | full support — distinct `CudaContext` per index | `GPU(n)`/`.name()`/`.maxThreads()`/etc. resolve to real, distinct physical adapters when more than one is present (see "`GPU` type on wgpu" above) — introspection only. `new(g1) K` (actually placing a kernel's *dispatch* on a specific device) is still not implemented; every kernel dispatches on the single global `device`/`queue` regardless of which `GPU(n)` it was constructed with |
 | Windows / Linux / macOS | Windows + Linux | yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu) |
+
+### Will these gaps close?
+
+wgpu (`gfx-rs/wgpu`) is actively developed — releases continuing through
+2026 (v29.x in March 2026), not a frozen compatibility shim. But the rows
+above split into two very different buckets for how likely (and how soon)
+they are to close:
+
+**Boring-side integration gaps, not wgpu gaps** — closable by Boring
+engineering alone, no upstream dependency: multi-device introspection
+(`GPU(n)`/`.name()`/etc. above) was exactly this, and is now real (real
+per-adapter enumeration, 2026-09-01 — see "`GPU` type on wgpu" above).
+`new(g1) K` real per-device *dispatch* remains in this bucket — a bigger
+task (needs a `wgpu::Device`/`wgpu::Queue` per selected adapter instead of
+today's single global pair, plus routing every kernel instance's
+buffers/dispatch through the device it was actually constructed on;
+comparable in scope to CUDA's real per-context multi-device model), but
+still just Boring's own work whenever a project needs cross-GPU placement.
+
+**Genuine WebGPU-spec-level gaps, outside wgpu's own control** — these are
+structural to the spec, not a wgpu backlog item, and unlikely to close on
+any timeline relevant to this project:
+- **Double precision**: WGSL's real f64 path is `naga`'s own **non-standard
+  extension** (`enable naga_ext_f64;`), not a stable, portable wgpu feature —
+  SPIR-V/Vulkan f64 support depends on the underlying driver actually
+  exposing `shaderFloat64` with **no portable way to probe for it** ahead of
+  shader compilation, and DX12 has had outright compilation failures with
+  64-bit-type features. Standardization is tracked upstream
+  ([gpuweb/gpuweb#2805](https://github.com/gpuweb/gpuweb/issues/2805)) but
+  unresolved. This is why `float64` stays a hard compile error on this
+  target (`float-width-types.md` §6) rather than a silent narrowing or a
+  "just enable the feature" fix — that's the right call to keep, not a gap
+  to close, until `naga_ext_f64` (or a ratified spec extension) becomes a
+  reliably portable, probeable feature upstream.
+- **Device-side `print`/debug**: no `printf` equivalent in WGSL. Under
+  active discussion upstream ([gpuweb#4704 "shaderLog"](https://github.com/gpuweb/gpuweb/issues/4704),
+  [gpuweb#4348 debugPrintfEXT request](https://github.com/gpuweb/gpuweb/issues/4348)),
+  but unratified — goes through the W3C spec process across every browser
+  vendor, not through wgpu alone. Multi-year horizon at best.
+- **Queue/stream priority**: no portable equivalent of CUDA streams'
+  priority scheduling across Vulkan/Metal/DX12. Open wgpu issues in this
+  area ([gfx-rs/wgpu#5576](https://github.com/gfx-rs/wgpu/issues/5576),
+  [#5525](https://github.com/gfx-rs/wgpu/discussions/5525)) are about
+  transfer queues and multithreading throughput, not priority — no sign of
+  movement toward a portable priority primitive, likely because it isn't one
+  across backends.
+- **`computeCapability()`-style vendor introspection**: deliberately
+  excluded — the entire point of WebGPU is a portable common denominator,
+  so a CUDA-specific versioning concept is unlikely to appear generically.
+
+Practical takeaway: a project needing debug printf, stream priority, or
+CUDA-specific device introspection has no reason to expect wgpu to close
+that gap soon and should stay on `--target cuda`/`--target rocm`. A project
+whose only real need from a GPU backend is portable compute *and*
+GPU-native display (games, visualizations) essentially never needs any of
+these — wgpu's current feature set already covers that case in full, with
+genuine GPU-native presentation today on Vulkan/DX12/Metal (see
+`gpu-display.md`) and zero CPU round-trip, unlike `--target cuda`/`rocm`'s
+software-blit display path (`clone_dtoh` + `softbuffer` every frame).
 
 ---
 

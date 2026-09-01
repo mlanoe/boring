@@ -106,10 +106,12 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     // identical derivation -- see `crate::transpiler::detect_boring_main`.
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
-    let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some());
+    let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some());
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
-    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors: general_out.errors }
+    let mut errors = general_out.errors;
+    errors.extend(host_errors);
+    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors }
 }
 
 /// Does this kernel's body use `gpu.warp.*` anywhere? WGSL subgroup builtins

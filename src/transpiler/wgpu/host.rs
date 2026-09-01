@@ -4,7 +4,14 @@
 // Rust host code emitter for the wgpu backend.
 
 use crate::ast::*;
+use crate::transpiler::TranspileError;
 
+/// Returns the generated Rust source plus any errors found while checking a
+/// `Screen` program's shape (see `HostEmitter::check_screen_program_shape`).
+/// Callers (`transpile_wgpu`) must fold these into `WgpuOutput::errors` and
+/// report/exit instead of writing out `host_rs` when non-empty -- exactly
+/// like the general pass's own `TranspileConfig`-produced errors already are
+/// (see `main.rs`'s `report_transpile_errors`).
 pub(super) fn emit_host_rs(
     program: &Program,
     kernel_names: &[String],
@@ -13,11 +20,11 @@ pub(super) fn emit_host_rs(
     has_boring_main: bool,
     boring_main_throws: bool,
     has_emulated_shader: bool,
-) -> String {
+) -> (String, Vec<TranspileError>) {
     let mut e = HostEmitter::new(program, kernel_names, effective_kernels, general_code, has_boring_main, boring_main_throws);
     e.has_emulated_shader = has_emulated_shader;
     e.emit();
-    e.out
+    (e.out, e.errors)
 }
 
 struct HostEmitter<'a> {
@@ -49,6 +56,11 @@ struct HostEmitter<'a> {
     /// the `wgpu::Features::SUBGROUP` runtime detection and dual-shader-module
     /// dispatch in `emit_pipeline_init`/wherever the shader module is created.
     has_emulated_shader: bool,
+    /// Errors found while checking a `Screen` program's shape (see
+    /// `check_screen_program_shape`/`emit_render_stmt`'s error fallbacks).
+    /// Non-empty means `out` is incomplete/wrong and must not be written out
+    /// — see `emit_host_rs`'s doc comment.
+    errors: Vec<TranspileError>,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -72,11 +84,15 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws, has_emulated_shader: false }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws, has_emulated_shader: false, errors: Vec::new() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
     fn blank(&mut self) { self.out.push('\n'); }
+
+    fn push_error(&mut self, line: usize, col: usize, msg: impl Into<String>) {
+        self.errors.push(TranspileError::at(msg, line, col));
+    }
 
     fn emit(&mut self) {
         self.emit_header();
@@ -85,7 +101,93 @@ impl<'a> HostEmitter<'a> {
         self.emit_device_queue_globals();
         self.out.push_str(self.general_code);
         self.blank();
+        if self.has_screen {
+            self.check_screen_program_shape();
+        }
         self.emit_main();
+    }
+
+    /// Every top-level item of a `Screen` program is either transpiled by the
+    /// general pass (fn/struct/enum/kernel/mod/use declarations — untouched by
+    /// `TranspileConfig::gpu_top_level_handled_by_host`) or must be recognized
+    /// by `emit_screen_main`'s own hardcoded shape-matchers (`Screen(...)`/
+    /// kernel-constructor `let`s, scalar-literal `let`s, and the `kernel: loop:`
+    /// render block) — the general pass unconditionally skips every other
+    /// top-level `Stmt`/non-static `Let` for a `Screen` program (see
+    /// `emit_program_items`'s `host_owns_top_level` branches), on the
+    /// assumption that this emitter owns them instead. Historically it didn't:
+    /// anything outside that narrow whitelist (a bare `print`, a `for` loop, a
+    /// `let` with an array/string/GPU-introspection initializer, extra
+    /// statements in a `kernel:` block beside its `loop:`) was silently
+    /// dropped from the generated Rust with no diagnostic at all — confirmed
+    /// against a real generated project. This walks the same top-level items
+    /// `emit_screen_main` will (or won't) recognize and reports every one that
+    /// falls outside that whitelist, so the build fails loudly instead of
+    /// quietly losing code.
+    fn check_screen_program_shape(&mut self) {
+        let items = self.program.items.clone();
+        for item in &items {
+            match item {
+                Item::Let(s) if s.is_static => {} // real `const`, emitted by the general pass.
+                Item::Let(s) if !self.is_recognized_screen_let(s) => {
+                    self.push_error(s.line, s.col, format!(
+                        "wgpu target: top-level `let {}` is not supported inside a Screen program -- \
+                         only a `Screen(...)`/kernel-constructor call or an int/float/bool literal \
+                         initializer is recognized at the top level here",
+                        s.name
+                    ));
+                }
+                Item::Let(_) => {} // recognized shape — emit_screen_main handles it.
+                Item::Stmt(stmt) => self.check_screen_top_level_stmt(stmt),
+                // Fn/Struct/Enum/Kernel/Mod/Use/Alias/Trait/Ext: fully handled by the
+                // general pass regardless of `host_owns_top_level` -- nothing to check.
+                _ => {}
+            }
+        }
+    }
+
+    /// Mirrors exactly what `emit_screen_main`'s `scalar_fields`/`kernel_fields`
+    /// filters (and `extract_screen_info`) accept for a top-level `let`.
+    fn is_recognized_screen_let(&self, s: &LetStmt) -> bool {
+        let Some(val) = &s.value else { return false; };
+        match &val.kind {
+            ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n)
+                if n == "Screen" || self.kernel_names.contains(n)),
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            _ => false,
+        }
+    }
+
+    /// A top-level statement is only recognized as the `kernel:` render block
+    /// (`find_render_loop_body`/`emit_render_stmt` own its `loop:` body) —
+    /// anything else at the top level, and any statement inside a `kernel:`
+    /// block that isn't its single `loop:`, is unrecognized.
+    fn check_screen_top_level_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::KernelBlock(block) => {
+                let mut seen_loop = false;
+                for inner in &block.body {
+                    if matches!(inner, Stmt::Loop(_)) {
+                        if seen_loop {
+                            let (l, c) = stmt_line_col(inner);
+                            self.push_error(l, c,
+                                "wgpu target: only one `loop:` is supported inside a Screen `kernel:` block");
+                        }
+                        seen_loop = true;
+                    } else {
+                        let (l, c) = stmt_line_col(inner);
+                        self.push_error(l, c,
+                            "wgpu target: statement not supported inside a Screen `kernel:` block outside its `loop:` body");
+                    }
+                }
+            }
+            _ => {
+                let (l, c) = stmt_line_col(stmt);
+                self.push_error(l, c,
+                    "wgpu target: top-level statement is not supported inside a Screen program -- \
+                     only a `kernel: loop: ...` render block is recognized here");
+            }
+        }
     }
 
     /// Global GPU device/queue, set once by `async_main()` before any kernel-touching
@@ -104,25 +206,71 @@ impl<'a> HostEmitter<'a> {
 
     /// Backing storage + accessors for the `GPU` type (`GPU(n)`, `GPU.all()`,
     /// `.name()`/`.totalMem()`/etc — see `emit_expr.rs`'s `gpu_device_vars`
-    /// handling). wgpu only ever has one real adapter here (the one already
-    /// selected for `device`/`queue` above) — there is no genuine multi-device
-    /// support on this backend (see docs/wgpu-backend.md), so every `GPU(n)`
-    /// resolves to this same adapter regardless of `n`, matching the
-    /// interpreter's own simulation-mode behavior (a single mock device).
+    /// handling). Real per-adapter introspection (2026-09-01): the full list of
+    /// adapters the system actually exposes is enumerated once at startup
+    /// (`instance.enumerate_adapters`, see `emit_main`/`emit_screen_main`) and
+    /// `GPU(n)` indexes into it directly, index 0 always being the adapter
+    /// `device`/`queue` were actually created from. This is introspection
+    /// only, same scope as CUDA/ROCm's own docs describe for the analogous
+    /// case — `new(g) K` (placing a kernel's actual dispatch on a specific
+    /// non-default adapter) is still not implemented on this backend; every
+    /// kernel still dispatches on the single global `device`/`queue`
+    /// regardless of which `GPU(n)` it was constructed with. See
+    /// docs/wgpu-backend.md's "`GPU` type on wgpu" section.
     fn emit_gpu_introspection_globals(&mut self) {
-        self.line("static __BORING_GPU_ADAPTER: std::sync::OnceLock<std::sync::Arc<wgpu::Adapter>> = std::sync::OnceLock::new();");
-        self.line("fn __boring_gpu_adapter() -> std::sync::Arc<wgpu::Adapter> { std::sync::Arc::clone(__BORING_GPU_ADAPTER.get().expect(\"GPU adapter not initialized\")) }");
-        self.line("fn __boring_gpu_name() -> String { __boring_gpu_adapter().get_info().name }");
+        self.line("static __BORING_GPU_ADAPTERS: std::sync::OnceLock<Vec<std::sync::Arc<wgpu::Adapter>>> = std::sync::OnceLock::new();");
+        self.line("fn __boring_gpu_adapter(idx: usize) -> std::sync::Arc<wgpu::Adapter> {");
+        self.line("    let adapters = __BORING_GPU_ADAPTERS.get().expect(\"GPU adapters not initialized\");");
+        self.line("    adapters.get(idx).map(std::sync::Arc::clone)");
+        self.line("        .unwrap_or_else(|| panic!(\"GPU({}) out of range -- {} adapter(s) found\", idx, adapters.len()))");
+        self.line("}");
+        self.line("fn __boring_gpu_all() -> Vec<usize> {");
+        self.line("    (0..__BORING_GPU_ADAPTERS.get().map(|a| a.len()).unwrap_or(0)).collect()");
+        self.line("}");
+        self.line("fn __boring_gpu_name(idx: usize) -> String { __boring_gpu_adapter(idx).get_info().name }");
         // wgpu's AdapterInfo has no memory-size fields on any backend -- there is
         // no real value to report, so these match the interpreter's/CUDA docs'
         // own "not available" convention (0) rather than fabricating a number.
-        self.line("fn __boring_gpu_total_mem() -> i64 { 0 }");
-        self.line("fn __boring_gpu_free_mem() -> i64 { 0 }");
-        self.line("fn __boring_gpu_compute_capability() -> Vec<i64> { vec![0, 0] }"); // CUDA-only concept
-        self.line("fn __boring_gpu_warp_size() -> i64 { 32 }"); // conservative default, not queryable via wgpu
-        self.line("fn __boring_gpu_max_threads() -> i64 { __boring_gpu_adapter().limits().max_compute_invocations_per_workgroup as i64 }");
-        self.line("fn __boring_gpu_max_shared_mem() -> i64 { __boring_gpu_adapter().limits().max_compute_workgroup_storage_size as i64 }");
+        self.line("fn __boring_gpu_total_mem(_idx: usize) -> i64 { 0 }");
+        self.line("fn __boring_gpu_free_mem(_idx: usize) -> i64 { 0 }");
+        self.line("fn __boring_gpu_compute_capability(_idx: usize) -> Vec<i64> { vec![0, 0] }"); // CUDA-only concept
+        self.line("fn __boring_gpu_warp_size(_idx: usize) -> i64 { 32 }"); // conservative default, not queryable via wgpu
+        self.line("fn __boring_gpu_max_threads(idx: usize) -> i64 { __boring_gpu_adapter(idx).limits().max_compute_invocations_per_workgroup as i64 }");
+        self.line("fn __boring_gpu_max_shared_mem(idx: usize) -> i64 { __boring_gpu_adapter(idx).limits().max_compute_workgroup_storage_size as i64 }");
         self.blank();
+    }
+
+    /// Builds the introspection adapter list for `__BORING_GPU_ADAPTERS`: the
+    /// adapter actually selected for `device`/`queue` goes first (so `GPU(0)`
+    /// always means "the adapter your kernels actually run on"), followed by
+    /// any other physical adapter `enumerate_adapters` finds.
+    ///
+    /// `primary_var` must already be a `std::sync::Arc<wgpu::Adapter>` binding
+    /// (matching the existing `device`/`queue` convention of wrapping right
+    /// after creation) — **`wgpu::Adapter` itself implements neither `Clone`
+    /// nor `PartialEq`** (confirmed against the real pinned `wgpu = "22"`
+    /// source, `wgpu-22.1.0/src/lib.rs`'s `pub struct Adapter` only derives
+    /// `Debug` — an earlier version of this function assumed otherwise from
+    /// docs.rs for a newer wgpu release and failed a real `cargo check` with
+    /// E0599/E0369 the moment it was tried against the actual generated
+    /// project). Arc-wrapping the primary adapter once at the top lets this
+    /// function `Arc::clone` it cheaply into the list while the caller's own
+    /// `primary_var` binding stays valid afterward (needed in
+    /// `emit_screen_main`, where `adapter` is later moved into the `__App`
+    /// struct literal). Dedup compares `AdapterInfo` (`.get_info()`) instead,
+    /// which *does* derive `PartialEq`/`Eq` (`wgpu-types-22.0.0/src/lib.rs`) —
+    /// a real physical GPU can otherwise appear twice if the platform exposes
+    /// it through more than one backend (e.g. Vulkan and GL on the same Linux
+    /// box).
+    fn emit_gpu_adapter_enumeration(&mut self, primary_var: &str) {
+        self.line(&format!("    let __boring_primary_info = {primary_var}.get_info();"));
+        self.line(&format!("    let mut __boring_gpu_adapters: Vec<std::sync::Arc<wgpu::Adapter>> = vec![std::sync::Arc::clone(&{primary_var})];"));
+        self.line("    for __boring_other in instance.enumerate_adapters(wgpu::Backends::all()) {");
+        self.line("        if __boring_other.get_info() != __boring_primary_info {");
+        self.line("            __boring_gpu_adapters.push(std::sync::Arc::new(__boring_other));");
+        self.line("        }");
+        self.line("    }");
+        self.line("    let _ = __BORING_GPU_ADAPTERS.set(__boring_gpu_adapters);");
     }
 
     fn emit_header(&mut self) {
@@ -881,7 +1029,11 @@ impl<'a> HostEmitter<'a> {
             self.line("    let queue = std::sync::Arc::new(queue);");
             self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
             self.line("    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));");
-            self.line("    let _ = __BORING_GPU_ADAPTER.set(std::sync::Arc::new(adapter));");
+            // `wgpu::Adapter` has no `Clone` of its own -- Arc-wrap it here (same
+            // convention as device/queue above) so `emit_gpu_adapter_enumeration`
+            // can cheaply `Arc::clone` it into the introspection list below.
+            self.line("    let adapter = std::sync::Arc::new(adapter);");
+            self.emit_gpu_adapter_enumeration("adapter");
             self.blank();
             if self.has_boring_main {
                 if self.boring_main_throws {
@@ -954,7 +1106,10 @@ impl<'a> HostEmitter<'a> {
         // ── __App struct ──────────────────────────────────────────────────────
         self.line("struct __App {");
         self.line("    instance: wgpu::Instance,");
-        self.line("    adapter:  wgpu::Adapter,");
+        // Arc-wrapped, not a bare `wgpu::Adapter` -- `wgpu::Adapter` has no `Clone`
+        // of its own, and the introspection list (`__BORING_GPU_ADAPTERS`) needs a
+        // second, cheap owner of the same adapter alongside this struct field's own.
+        self.line("    adapter:  std::sync::Arc<wgpu::Adapter>,");
         self.line("    device:   std::sync::Arc<wgpu::Device>,");
         self.line("    queue:    std::sync::Arc<wgpu::Queue>,");
         for (name, _val) in &scalar_fields {
@@ -1122,11 +1277,27 @@ impl<'a> HostEmitter<'a> {
         self.line("    let queue  = std::sync::Arc::new(queue);");
         self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
         self.line("    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));");
-        // Note: __BORING_GPU_ADAPTER is intentionally NOT set here, unlike the
-        // non-Screen async_main path -- `adapter` (plain wgpu::Adapter, not Clone)
-        // is still owned by the `__App` struct literal below, and this path has no
-        // existing example that calls GPU(n)/.name()/etc from Screen-based code.
-        // GPU introspection is unsupported inside a Screen program for now.
+        // `wgpu::Adapter` has no `Clone` of its own -- Arc-wrap it here (same
+        // convention as device/queue above, and the `__App.adapter` field is typed
+        // `Arc<wgpu::Adapter>` to match) so it can be `Arc::clone`d into the
+        // introspection list below AND still moved into the `__App` struct literal
+        // further down. This path used to skip GPU introspection entirely ("GPU
+        // introspection is unsupported inside a Screen program"). Populating the
+        // adapters global here removes the panic a `GPU(n)` call anywhere reachable
+        // would have hit against an uninitialized `OnceLock`. `emit_screen_main`'s
+        // own top-level (`scalar_fields`/`kernel_fields` above) and render-loop
+        // (`emit_render_stmt`) emitters are still narrow, hardcoded shape-matchers,
+        // not a splice into the general per-statement pipeline the way a plain
+        // `def` function's body is -- but a bare `let g = GPU(0)` / `print`
+        // statement at a Screen program's top level, or inside the render loop, no
+        // longer vanishes silently: `check_screen_program_shape` (called from
+        // `emit()`) and `emit_render_stmt`'s own error fallback both reject anything
+        // outside the recognized whitelist with a `TranspileError` instead, so
+        // `boring build` fails loudly (see `emit_host_rs`'s doc comment) rather than
+        // quietly losing code. `emit_gpu_adapter_enumeration` is the same call the
+        // non-Screen async_main path makes.
+        self.line("    let adapter = std::sync::Arc::new(adapter);");
+        self.emit_gpu_adapter_enumeration("adapter");
         for (name, val) in &scalar_fields {
             self.line(&format!("    let {name}: i64 = {val};"));
         }
@@ -1255,14 +1426,41 @@ impl<'a> HostEmitter<'a> {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_field_assign(e) {
                     self.line(&format!("{indent}{s}"));
+                } else {
+                    self.push_error(e.line, e.col,
+                        "wgpu target: expression not supported inside a Screen render loop");
                 }
             }
             Stmt::If(if_stmt) => {
                 if let Some(s) = self.try_emit_screen_key_if(if_stmt) {
                     self.line(&format!("{indent}{s}"));
+                } else {
+                    self.push_error(if_stmt.line, if_stmt.col,
+                        "wgpu target: `if` inside a Screen render loop only supports \
+                         `if screen.key(\"...\"):  break` (a single, break-only branch)");
                 }
             }
-            _ => {}
+            // A bare, unconditional `break` (no enclosing `if`) means "stop after this
+            // frame" -- there's no real Rust `loop` here to `break` out of (each frame
+            // is one `WindowEvent::RedrawRequested` callback, driven by winit's own
+            // event loop, not a Boring-generated loop construct), so this maps to the
+            // same `event_loop.exit()` call `if screen.key(...): break` uses. Previously
+            // this fell through the old catch-all `_ => {}` silently -- the loop simply
+            // never stopped, which is exactly the kind of quiet miscompile this checker
+            // now catches everywhere else; support it for real instead of erroring.
+            Stmt::Break(_, None) => {
+                let exit_call = if self.in_method { "event_loop.exit();" } else { "elwt.exit();" };
+                self.line(&format!("{indent}{exit_call}"));
+            }
+            Stmt::Break(line, Some(_)) => {
+                self.push_error(*line, 0,
+                    "wgpu target: `break` with a value is not supported inside a Screen render loop");
+            }
+            other => {
+                let (l, c) = stmt_line_col(other);
+                self.push_error(l, c,
+                    "wgpu target: statement not supported inside a Screen render loop");
+            }
         }
     }
 
@@ -1526,6 +1724,46 @@ impl<'a> HostEmitter<'a> {
 }
 
 //â"€â"€ Free helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+
+/// Best-effort `(line, col)` for an arbitrary `Stmt`, used to attribute an
+/// "unsupported statement" error (see `check_screen_top_level_stmt`/
+/// `emit_render_stmt`) to real source text. Covers every shape that can
+/// plausibly appear at a Screen program's top level or inside its render
+/// loop; anything else (e.g. `Stmt::Comment`, which carries no position)
+/// falls back to `(0, 0)`, matching `SourceError::at_line`'s own convention
+/// for "position unknown" (`report_transpile_errors` still prints the
+/// message, just without a caret).
+fn stmt_line_col(stmt: &Stmt) -> (usize, usize) {
+    match stmt {
+        Stmt::Let(s) => (s.line, s.col),
+        Stmt::LetDestructure(s) => (s.line, s.col),
+        Stmt::Return(s) => (s.line, s.col),
+        Stmt::Break(line, _) => (*line, 0),
+        Stmt::Continue(line) => (*line, 0),
+        Stmt::Throw(s) => (s.line, s.col),
+        Stmt::If(s) => (s.line, s.col),
+        Stmt::IfLet(s) => (s.line, s.col),
+        Stmt::Match(s) => (s.line, s.col),
+        Stmt::While(s) => (s.line, s.col),
+        Stmt::WhileLet(s) => (s.line, s.col),
+        Stmt::DoWhile(s) => (s.line, s.col),
+        Stmt::Loop(s) => (s.line, s.col),
+        Stmt::Wait(e, line) => (*line, e.col),
+        Stmt::For(s) => (s.line, s.col),
+        Stmt::Guard(s) => (s.line, s.col),
+        Stmt::Try(s) => (s.line, s.col),
+        Stmt::Expr(e) => (e.line, e.col),
+        Stmt::Fn(s) => (s.line, s.col),
+        Stmt::Struct(s) => (s.line, s.col),
+        Stmt::Enum(s) => (s.line, s.col),
+        Stmt::Mod(s) => (s.line, s.col),
+        Stmt::Alias(s) => (s.line, s.col),
+        Stmt::Yield(e, line) => (*line, e.col),
+        Stmt::KernelBlock(s) => (s.line, s.col),
+        Stmt::With(s) => (s.line, s.col),
+        Stmt::Defer(_) | Stmt::Comment(_) => (0, 0),
+    }
+}
 
 /// Emit a simple scalar expression as a Rust literal for use as a kernel field default.
 fn emit_scalar_default(expr: &Expr) -> String {

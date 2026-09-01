@@ -55,6 +55,39 @@ fn wgpu_codegen(test_name: &str, src: &str) -> (String, String) {
     (wgsl, rs)
 }
 
+/// Like `run_wgpu`, but for a source expected to fail `boring build --target wgpu`
+/// itself (before any Rust is even written out) -- returns stderr instead of the
+/// generated files. Mirrors `gpu_kernel_std_target.rs`'s identical "expect a clean
+/// diagnostic, not silent success or a raw generated-project compile error" pattern.
+fn run_wgpu_expect_failure(test_name: &str, src: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join(test_name);
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, src).unwrap();
+
+    let result = Command::new(bin)
+        .args(["build", "--target", "wgpu"])
+        .arg(&br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("[{test_name}] failed to invoke boring: {e}"));
+
+    assert!(
+        !result.status.success(),
+        "[{test_name}] expected `boring build --target wgpu` to fail, but it succeeded"
+    );
+    // No project directory should have been written -- errors are collected and
+    // reported (see `main.rs`'s wgpu branch) before any file is created.
+    assert!(
+        !tmp.join("test_wgpu").exists(),
+        "[{test_name}] expected no test_wgpu/ project dir on a rejected program"
+    );
+    String::from_utf8_lossy(&result.stderr).into_owned()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -458,6 +491,61 @@ kernel:
     assert!(rs.contains("EventLoop::new()"), "event loop created");
     assert!(rs.contains("event_loop.run_app(&mut app)"), "run_app used");
     assert!(rs.contains("NamedKey::Escape"), "Escape named key in key handler");
+}
+
+#[test]
+fn test_screen_program_gpu_adapters_global_now_populated() {
+    // A `Screen` program used to leave `__BORING_GPU_ADAPTER`/`__BORING_GPU_ADAPTERS`
+    // entirely unset ("GPU introspection is unsupported inside a Screen program"):
+    // any GPU introspection call reachable from a Screen program would have hit a
+    // guaranteed runtime panic against an uninitialized `OnceLock`, uncaught by any
+    // test. Real per-adapter introspection (2026-09-01) closes this the same way as
+    // the non-Screen path: `adapter` is Arc-wrapped once (`wgpu::Adapter` has no
+    // `Clone` of its own, confirmed against the real pinned `wgpu = "22"` source) so
+    // it can be shared between the introspection list and the `__App` struct's own
+    // `adapter` field, which is moved into the struct literal further down.
+    //
+    // A bare `let g = GPU(0)` / `print` statement at a Screen program's top level, or
+    // inside the render loop, used to be silently dropped by `emit_screen_main`'s own
+    // narrow, hardcoded shape-matchers, confirmed against a real generated project --
+    // that gap is now closed (see `check_screen_program_shape`'s and
+    // `emit_render_stmt`'s error fallbacks below, and
+    // `wgpu_screen_unsupported_top_level_statement_is_rejected_not_dropped` /
+    // `wgpu_screen_unsupported_render_loop_statement_is_rejected_not_dropped`) --
+    // this test only verifies the adapters global itself is populated and available.
+    let src = r#"
+let screen = Screen(Dimension(800, 600), title = "Test")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+
+    def ():
+        pixels[0] = 0xFF000000
+
+var mut k = Plasma(Dimension(800, 600))
+
+kernel:
+    loop:
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_wgsl, rs) = wgpu_codegen("screen_gpu_adapters_populated", src);
+
+    assert!(rs.contains("adapter:  std::sync::Arc<wgpu::Adapter>,"), "App.adapter field should be Arc-wrapped:\n{rs}");
+    assert!(rs.contains("let adapter = std::sync::Arc::new(adapter);"), "adapter should be Arc-wrapped once in fn main():\n{rs}");
+    assert!(rs.contains("let _ = __BORING_GPU_ADAPTERS.set("), "Screen path must populate the adapters global, unlike before:\n{rs}");
+    assert!(rs.contains("instance.enumerate_adapters(wgpu::Backends::all())"), "Screen path should enumerate real adapters:\n{rs}");
+    // `adapter` must still reach the later `__App` struct literal unmoved-out --
+    // i.e. still present as a bare field name in the literal, not consumed
+    // entirely by the introspection list above it.
+    assert!(rs.contains("instance, adapter, device, queue,"), "adapter must still be available for the __App struct literal:\n{rs}");
 }
 
 // ── `with` GPU-residency materialization (docs/scoped-access-blocks.md) ────────
@@ -1030,22 +1118,24 @@ print g.index()
     let (_wgsl, rs) = wgpu_codegen("gpu_device_properties", src);
 
     assert!(rs.contains("let g = ((0) as usize);"), "GPU(0) should emit a plain usize:\n{rs}");
-    assert!(rs.contains("__boring_gpu_name()"), "missing .name() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_total_mem()"), "missing .totalMem() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_free_mem()"), "missing .freeMem() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_compute_capability()"), "missing .computeCapability() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_warp_size()"), "missing .warpSize() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_max_threads()"), "missing .maxThreads() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_max_shared_mem()"), "missing .maxSharedMem() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_name(g)"), "missing .name() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_total_mem(g)"), "missing .totalMem() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_free_mem(g)"), "missing .freeMem() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_compute_capability(g)"), "missing .computeCapability() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_warp_size(g)"), "missing .warpSize() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_max_threads(g)"), "missing .maxThreads() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_max_shared_mem(g)"), "missing .maxSharedMem() rewrite:\n{rs}");
     assert!(rs.contains("(g as i64)"), "missing .index() rewrite:\n{rs}");
-    // Backing globals/helpers must actually be emitted.
-    assert!(rs.contains("static __BORING_GPU_ADAPTER"), "missing adapter global:\n{rs}");
-    assert!(rs.contains("fn __boring_gpu_name() -> String { __boring_gpu_adapter().get_info().name }"), "missing name() helper body:\n{rs}");
-    assert!(rs.contains("let _ = __BORING_GPU_ADAPTER.set("), "adapter global is never populated:\n{rs}");
+    // Backing globals/helpers must actually be emitted, and index real adapters
+    // (2026-09-01: real per-adapter introspection, not a single simulated device).
+    assert!(rs.contains("static __BORING_GPU_ADAPTERS"), "missing adapters global:\n{rs}");
+    assert!(rs.contains("fn __boring_gpu_name(idx: usize) -> String { __boring_gpu_adapter(idx).get_info().name }"), "missing name() helper body:\n{rs}");
+    assert!(rs.contains("let _ = __BORING_GPU_ADAPTERS.set("), "adapters global is never populated:\n{rs}");
+    assert!(rs.contains("instance.enumerate_adapters(wgpu::Backends::all())"), "adapter list should come from a real enumeration, not a fake single device:\n{rs}");
 }
 
 #[test]
-fn test_gpu_all_returns_single_device_and_loop_var_gets_properties() {
+fn test_gpu_all_enumerates_real_adapters_and_loop_var_gets_properties() {
     let src = r#"
 for g in GPU.all():
     print g.name()
@@ -1053,8 +1143,12 @@ for g in GPU.all():
 "#;
     let (_wgsl, rs) = wgpu_codegen("gpu_all_loop", src);
 
-    assert!(rs.contains("for g in vec![0usize].into_iter()"), "GPU.all() should be a single-element usize vec:\n{rs}");
-    assert!(rs.contains("__boring_gpu_name()"), "loop var should get the .name() rewrite:\n{rs}");
+    // GPU.all() now reflects however many real adapters enumerate_adapters()
+    // actually finds, not a hardcoded single-element vec — see
+    // docs/wgpu-backend.md's "GPU type on wgpu" (2026-09-01).
+    assert!(rs.contains("for g in __boring_gpu_all().into_iter()"), "GPU.all() should enumerate the real adapter list:\n{rs}");
+    assert!(rs.contains("fn __boring_gpu_all() -> Vec<usize>"), "missing __boring_gpu_all() helper:\n{rs}");
+    assert!(rs.contains("__boring_gpu_name(g)"), "loop var should get the .name() rewrite, indexed by g:\n{rs}");
     assert!(rs.contains("(g as i64)"), "loop var should get the .index() rewrite:\n{rs}");
 }
 
@@ -1590,4 +1684,162 @@ kernel:
         "expected bare float(...) to cast to f64, matching `var float t`'s f64 host field;\ngot:\n{rs}");
     assert!(!rs.contains("__start_time.elapsed().as_secs_f32() as f32);"),
         "must not narrow a bare float(...) scalar-field assignment to f32;\ngot:\n{rs}");
+}
+
+#[test]
+fn wgpu_screen_unsupported_top_level_statement_is_rejected_not_dropped() {
+    // Before this fix, a bare top-level statement in a `Screen` program (here: a
+    // `print` call) was silently dropped from the generated Rust -- the general
+    // pass skips every top-level `Stmt`/non-static `Let` for a `Screen` program
+    // (`emit_program_items`'s `host_owns_top_level`), on the assumption that
+    // `emit_screen_main` handles it instead, but `emit_screen_main` never even
+    // looked at anything besides its own hardcoded `let`/`kernel:` shapes. `boring
+    // build` used to exit 0 with the `print` simply absent from `main.rs`.
+    // `check_screen_program_shape` now rejects it up front instead.
+    let src = r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "test")
+
+print "this line has nowhere to go on the wgpu Screen backend"
+
+kernel T:
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        pass
+
+var mut k = T(Dimension(width, height))
+kernel:
+    loop:
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let stderr = run_wgpu_expect_failure("screen_unsupported_top_level_print", src);
+    assert!(
+        stderr.contains("wgpu target") && stderr.contains("top-level statement"),
+        "expected a clear diagnostic naming the unsupported top-level statement, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn wgpu_screen_unsupported_top_level_let_is_rejected_not_dropped() {
+    // Same gap, `Let` side: a top-level `let` whose initializer isn't a
+    // `Screen(...)`/kernel-constructor call or a scalar literal (here, real GPU
+    // introspection: `let g = GPU(0)`) used to vanish from the generated Rust
+    // with no diagnostic, confirmed against a real generated project (see
+    // `test_screen_program_gpu_adapters_global_now_populated`'s original doc
+    // comment). It's rejected up front now instead.
+    let src = r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "test")
+let g = GPU(0)
+
+kernel T:
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        pass
+
+var mut k = T(Dimension(width, height))
+kernel:
+    loop:
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let stderr = run_wgpu_expect_failure("screen_unsupported_top_level_gpu_let", src);
+    assert!(
+        stderr.contains("wgpu target") && stderr.contains("let g"),
+        "expected a clear diagnostic naming the unsupported `let g`, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn wgpu_screen_unsupported_render_loop_statement_is_rejected_not_dropped() {
+    // Before this fix, any render-loop-body statement outside the five hardcoded
+    // shapes `emit_render_stmt` recognizes (`screen.present`, a `block=` dispatch,
+    // a field swap, a field assignment, `if screen.key(...): break`) fell through
+    // its catch-all `_ => {}` and simply never appeared in the generated Rust --
+    // here, a `print` call inside the loop body.
+    let src = r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "test")
+
+kernel T:
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        pass
+
+var mut k = T(Dimension(width, height))
+kernel:
+    loop:
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        print "frame"
+        if screen.key("\x1B"):
+            break
+"#;
+    let stderr = run_wgpu_expect_failure("screen_unsupported_render_loop_print", src);
+    assert!(
+        stderr.contains("wgpu target") && stderr.contains("render loop"),
+        "expected a clear diagnostic naming the unsupported render-loop statement, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn wgpu_screen_render_loop_unconditional_break_now_supported() {
+    // A bare, unconditional `break` (no enclosing `if`) inside the render loop
+    // used to be silently dropped too (same catch-all as above) -- the loop never
+    // actually stopped. There's no real Rust `loop` to `break` out of here (each
+    // frame is a `WindowEvent::RedrawRequested` callback driven by winit), so this
+    // now maps to the same `event_loop.exit()` call `if screen.key(...): break`
+    // already uses, instead of erroring or vanishing.
+    let src = r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "test")
+
+kernel T:
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        pass
+
+var mut k = T(Dimension(width, height))
+kernel:
+    loop:
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        break
+"#;
+    let (_wgsl, rs) = wgpu_codegen("screen_unconditional_break", src);
+    assert!(rs.contains("event_loop.exit();"),
+        "expected a bare `break` to translate to an unconditional event_loop.exit();\ngot:\n{rs}");
 }

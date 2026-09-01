@@ -10,16 +10,34 @@
 // See the LICENSE file at the project root for the full text.
 
 use super::*;
+use crate::ast::Item;
 use crate::lexer::lex;
 use crate::parser::parse;
 use crate::transpiler::{transpile_with_config, TranspileConfig, TranspileMode, ThreadingMode};
 
+/// Kernel dispatch requires an explicit GPU target (`--target cuda|rocm|metal|wgpu`)
+/// -- transpiling a kernel-bearing fixture to the plain `std` target is now a real,
+/// correct error (see the transpiler's kernel-target validation), not a regression.
+/// Recurse into `mod` blocks too, since a kernel can be declared inside one.
+fn items_have_kernel(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Kernel(_) => true,
+        Item::Mod(m) => items_have_kernel(&m.items),
+        _ => false,
+    })
+}
+
 fn transpile_check(src: &str) {
     use TranspileMode::*;
     use ThreadingMode::*;
+    let tokens = lex(src).expect("lex error");
+    let program = parse(tokens).expect("parse error");
+    if items_have_kernel(&program.items) {
+        // No GPU target to transpile against here -- the interpreter path below
+        // still exercises the fixture, just not this std-target cleanliness check.
+        return;
+    }
     for (mode, threading) in [(Strict, Multi), (Strict, Single), (Managed, Multi), (Managed, Single)] {
-        let tokens = lex(src).expect("lex error");
-        let program = parse(tokens).expect("parse error");
         let cfg = TranspileConfig { mode, threading, ..TranspileConfig::default() };
         let out = transpile_with_config(&program, cfg);
         assert!(

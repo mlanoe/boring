@@ -2621,14 +2621,17 @@ impl Transpiler {
 
     pub(crate) fn emit_call(&self, callee: &Expr, args: &[Arg]) -> String {
         if let ExprKind::Var(name) = &callee.kind {
-            // `GPU(n)` — a device handle. wgpu only ever has one real adapter (see
-            // `wgpu::host::emit_gpu_introspection_globals`), so every index resolves
-            // to it; this exists purely so `let g = GPU(0); print g.name()`-style
-            // source (see examples/saxpy.br) is portable between the interpreter's
-            // simulation and --target wgpu, matching how CUDA/Metal already support
-            // multi-device `GPU(n)` for real. Must be checked before the `is_type`
-            // constructor branch below — "GPU" is capitalized like a type name, but
-            // no `struct GPU` exists to construct.
+            // `GPU(n)` — a device handle. Emitted as a plain `usize` index into the
+            // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
+            // startup (`instance.enumerate_adapters`) — `n` genuinely selects a
+            // different physical adapter for `.name()`/`.maxThreads()`/etc when more
+            // than one is present (2026-09-01). This is still introspection only:
+            // every kernel still dispatches on the single global `device`/`queue`
+            // regardless of which `GPU(n)` it was constructed with — `new(g) K`
+            // (placing actual kernel *dispatch* on a specific adapter) is not
+            // implemented, unlike CUDA/Metal's real per-device dispatch. Must be
+            // checked before the `is_type` constructor branch below — "GPU" is
+            // capitalized like a type name, but no `struct GPU` exists to construct.
             if name == "GPU" && self.is_gpu_target {
                 let idx = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0".into());
                 return format!("(({}) as usize)", idx);
