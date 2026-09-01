@@ -207,6 +207,36 @@ fn cross_project_dep() {
     assert_eq!(actual.trim_end(), "21\n42");
 }
 
+// Real, multi-file `use` bug found migrating whisper-boring's
+// examples/transcribe.br: a top-level `let` constant from a module reached
+// transitively (`use model`, which itself does `use audio`) before being
+// `use`d directly (`use audio`, right after) used to stay undefined in the
+// importing file's scope. See tests/cases/use_transitive_const/main.br's own
+// doc comment and exec_use's `loaded_modules` cache comment in
+// src/interpreter/mod.rs for the fix. Uses `run_case`'s flat-file convention
+// indirectly via a real file path (like `cross_project_dep` above) since the
+// bug only reproduces with real sibling files on disk, not the stdin-piped
+// single-file form `interp_test!` uses.
+#[test]
+fn use_transitive_then_direct_const() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/use_transitive_const/main.br");
+
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        output.status.success(),
+        "use_transitive_then_direct_const exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "16000\n0.5\n2");
+}
+
 interp_test!(ownership);
 interp_test!(let_pattern);
 interp_test!(result_compat);

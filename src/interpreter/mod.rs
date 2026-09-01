@@ -2129,7 +2129,23 @@ pub struct Interpreter {
     pub enums: HashMap<String, EnumDecl>,  // enum declarations keyed by name
     pub aliases: HashMap<String, Type>,   // user-defined + built-in type aliases
     pub search_paths: Vec<PathBuf>,
-    pub loaded: HashSet<PathBuf>,
+    /// Paths (or synthetic stdlib-module paths) currently being loaded — used only to
+    /// break circular `use` cycles. Distinct from `loaded_modules` below: a path sits in
+    /// here only for the duration of its own load, then moves out once loaded (or, on a
+    /// cycle, is found still present and the recursive `use` is silently skipped, same as
+    /// the old single-`HashSet` guard this replaced).
+    loaded: HashSet<PathBuf>,
+    /// Cache of every module fully loaded so far, keyed by canonical (or synthetic) path:
+    /// its parsed+desugared `Program` and the `module_env` its items were executed into.
+    /// A `use` of an already-cached module must still re-run `bind_module_items` into the
+    /// *current* importing scope (only the parse+exec of the module's own body is skipped)
+    /// — otherwise a module reached transitively (e.g. `use model` which itself does
+    /// `use audio`) and then imported again directly in the same or a different file never
+    /// gets (re-)bound into that second importer's scope, silently hiding its top-level
+    /// `let` constants (functions/structs happen to often be visible some other way, but
+    /// constants have no such fallback). See `exec_use`/`exec_boring_stdlib_use`/
+    /// `exec_named_dep_use`, which all share this cache.
+    loaded_modules: HashMap<PathBuf, (Rc<Program>, EnvRef)>,
     /// Named dependencies on other Boring projects, declared in the current project's
     /// `boring.toml` `[deps]` section (see `docs/cross-project-code-sharing-gap.md`) and
     /// resolved by `main.rs::run_file` before `exec_program` runs. Maps a dependency name
@@ -2287,6 +2303,7 @@ impl Interpreter {
             aliases,
             search_paths: Vec::new(),
             loaded: HashSet::new(),
+            loaded_modules: HashMap::new(),
             deps: HashMap::new(),
             task_context: true,  // top-level is implicitly task context
             kernel_context: false,
@@ -2327,6 +2344,7 @@ impl Interpreter {
             aliases,
             search_paths: Vec::new(),
             loaded: HashSet::new(),
+            loaded_modules: HashMap::new(),
             deps: HashMap::new(),
             task_context: false,
             kernel_context: false,
@@ -2532,10 +2550,24 @@ impl Interpreter {
             None => return Ok(()),
         };
 
-        // Circular / duplicate import guard
         let canonical = abs.canonicalize().map_err(|e| {
             err(format!("cannot resolve '{}': {}", abs.display(), e), decl.line)
         })?;
+        // Already fully loaded (whether reached directly before, or only transitively via
+        // another module's own `use`) — reuse the cached program/env rather than re-parsing
+        // and re-executing it, but still (re-)bind its items into *this* importer's scope.
+        // Skipping that bind step here is exactly the bug this cache exists to avoid: it
+        // used to return early with no binding at all, which happened to leave functions/
+        // structs visible via other paths but silently hid top-level `let` constants when
+        // the same module was imported transitively before being imported directly.
+        if let Some((program, module_env)) = self.loaded_modules.get(&canonical) {
+            let program = Rc::clone(program);
+            let module_env = Rc::clone(module_env);
+            return Self::bind_module_items(&program, decl, module_env, env, &decl.path.join("."));
+        }
+        // Circular import guard — breaks the cycle the same way the old single-`HashSet`
+        // guard did: a `use` reached again while its own module is still mid-load is
+        // silently skipped (no binding), since that module's items aren't fully executed yet.
         if self.loaded.contains(&canonical) {
             return Ok(());
         }
@@ -2576,6 +2608,9 @@ impl Interpreter {
         for item in &program.items {
             self.exec_item(item, Rc::clone(&module_env))?;
         }
+        self.loaded.remove(&canonical);
+        let program = Rc::new(program);
+        self.loaded_modules.insert(canonical, (Rc::clone(&program), Rc::clone(&module_env)));
         Self::bind_module_items(&program, decl, module_env, env, &decl.path.join("."))
     }
 
@@ -2642,9 +2677,15 @@ impl Interpreter {
             return Err(err(format!("unknown boring stdlib module '{module}'"), decl.line));
         };
 
-        // Circular / duplicate import guard — same `loaded` set real files use,
-        // keyed on a synthetic path since there's no real file to canonicalize.
+        // Same cache `exec_use` shares — keyed on a synthetic path since there's no real
+        // file to canonicalize. See its comment: an already-loaded module still needs
+        // (re-)binding into *this* importer's scope even when its own load is skipped.
         let synthetic = crate::stdlib_embed::synthetic_path(module);
+        if let Some((program, module_env)) = self.loaded_modules.get(&synthetic) {
+            let program = Rc::clone(program);
+            let module_env = Rc::clone(module_env);
+            return Self::bind_module_items(&program, decl, module_env, env, &format!("boring.{module}"));
+        }
         if self.loaded.contains(&synthetic) {
             return Ok(());
         }
@@ -2664,6 +2705,9 @@ impl Interpreter {
         for item in &program.items {
             self.exec_item(item, Rc::clone(&module_env))?;
         }
+        self.loaded.remove(&synthetic);
+        let program = Rc::new(program);
+        self.loaded_modules.insert(synthetic, (Rc::clone(&program), Rc::clone(&module_env)));
         Self::bind_module_items(&program, decl, module_env, env, &format!("boring.{module}"))
     }
 
@@ -2689,6 +2733,13 @@ impl Interpreter {
         let canonical = abs.canonicalize().map_err(|e| {
             err(format!("cannot resolve '{}': {}", abs.display(), e), decl.line)
         })?;
+        // Same cache `exec_use` shares — see its comment: an already-loaded module still
+        // needs (re-)binding into *this* importer's scope even when its own load is skipped.
+        if let Some((program, module_env)) = self.loaded_modules.get(&canonical) {
+            let program = Rc::clone(program);
+            let module_env = Rc::clone(module_env);
+            return Self::bind_module_items(&program, decl, module_env, env, &format!("{}.{}", dep_name, decl.path[1..].join(".")));
+        }
         if self.loaded.contains(&canonical) {
             return Ok(());
         }
@@ -2711,6 +2762,9 @@ impl Interpreter {
         for item in &program.items {
             self.exec_item(item, Rc::clone(&module_env))?;
         }
+        self.loaded.remove(&canonical);
+        let program = Rc::new(program);
+        self.loaded_modules.insert(canonical, (Rc::clone(&program), Rc::clone(&module_env)));
         Self::bind_module_items(&program, decl, module_env, env, &format!("{}.{}", dep_name, decl.path[1..].join(".")))
     }
 

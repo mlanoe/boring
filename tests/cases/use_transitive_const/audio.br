@@ -1,0 +1,9 @@
+# Sibling module for the `use_transitive_then_direct_const` regression test
+# (tests/run.rs). Declares both a top-level `let` constant and a `pub` function
+# so the test can tell the two apart -- see main.br's doc comment for the bug
+# this pins down.
+
+let int SAMPLE_RATE = 16000
+
+pub float hz_to_mel(float hz):
+    hz / 2.0

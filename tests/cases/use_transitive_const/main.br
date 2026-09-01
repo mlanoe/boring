@@ -1,0 +1,25 @@
+# Regression test for a real interpreter bug found migrating whisper-boring's
+# examples/transcribe.br: a top-level `let` constant from a module reached
+# *transitively* (here, `audio.br` via `model.br`'s own `use audio`) before
+# being `use`d *directly* by this file used to stay invisible in this file's
+# scope -- "undefined variable 'SAMPLE_RATE'" -- even though `use audio` sits
+# right here below. The duplicate-import guard in `exec_use` (src/interpreter/
+# mod.rs) treated an already-loaded module as fully handled and skipped
+# re-running `bind_module_items` for the *second* (direct) `use`, so nothing
+# from that module ever got bound into *this* file's scope -- it only ever
+# landed in `model.br`'s own scope from the first (transitive) load.
+#
+# `hz_to_mel` (a `pub` function from the same file) happened to still resolve
+# in the broken behavior in some shapes reported in the wild, but this
+# minimal repro shows both a function and the constant fail the same way --
+# the fix (a `loaded_modules` cache that still rebinds on a repeat `use`,
+# see exec_use's comment) covers both uniformly. Import order matters here:
+# `use model` (transitive) must come BEFORE `use audio` (direct) to exercise
+# the bug.
+use model
+use audio
+
+def main():
+    print SAMPLE_RATE
+    print hz_to_mel(1.0)
+    print process(2.0)

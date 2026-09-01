@@ -1,0 +1,7 @@
+# Sibling module that reaches `audio.br` transitively, before `main.br` also
+# `use`s it directly -- see main.br's doc comment.
+
+use audio
+
+pub float process(float hz):
+    hz_to_mel(hz) + 1.0
