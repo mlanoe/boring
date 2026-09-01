@@ -1,0 +1,51 @@
+# Regression fixture for a dict-of-*array* `let existing = dict[key] else default`
+# binding wrongly being classified as dict-shaped by the `is_dict_index_else`
+# tracking added in commit 27e8432 ("fix(transpiler): track dict_vars for
+# untyped dict[key] else default lets") — see
+# tests/dict_index_else_array_value.rs for the full writeup.
+#
+# That fix only meant to cover the dict-of-*dict* case (a nested `{K={K2=V2}}`
+# dict, exercised by tests/cases/dict_index_else_untyped_for.br), but its
+# `is_dict_index_else` check only proved the *container* being indexed
+# (`table`) was itself a dict — never that the dict's own VALUE type was also
+# a dict. A dict-of-array field (`{K=[V]}`) is just as "container is a dict"
+# as a dict-of-dict field, so `table[key] else []` (yielding a plain `[V]`)
+# was wrongly added to `dict_vars` too, making every later index into the
+# result (`xs[idx]`) emit broken dict-style `.get(&idx).cloned()...` codegen
+# instead of ordinary Vec/slice indexing.
+#
+# Four shapes, on purpose, so a future change to this tracking can't silently
+# regress any one of them while fixing another:
+#   - demo_untyped_local: local `let existing = table[key] else []`, no type
+#     annotation.
+#   - demo_typed_local: same, but with an explicit `[int]` annotation — the
+#     bug report showed the annotation was *also* being overridden by the
+#     syntactic-shape heuristic, which must never happen.
+#   - Wrapper.get: the actual reported shape — a dict-of-array *struct field*
+#     read with `else default`, then indexed in a `req` method.
+#   - demo_dict_of_dict_still_works: the original dict-of-dict case commit
+#     27e8432 fixed must keep working — indexing the nested dict's *value*
+#     (not the outer level) must still use dict-style `.get(...)`.
+
+pub def demo_untyped_local():
+    let {string=[int]} table = {"a" = [1, 2, 3]}
+    let xs = table["a"] else []
+    print "{xs[1]}"
+
+pub def demo_typed_local():
+    let {string=[int]} table = {"a" = [1, 2, 3]}
+    let [int] xs = table["a"] else []
+    print "{xs[1]}"
+
+pub struct Wrapper as Debug, Clone:
+    {string=[int]} table
+
+    req int get(string key, int idx):
+        let [int] xs = table[key] else []
+        xs[idx]
+
+pub def demo_dict_of_dict_still_works():
+    let {string={string=int}} outer = {"k" = {"a" = 1, "b" = 2}}
+    let inner = outer["k"] else {=}
+    let v = inner["a"] else 0
+    print "{v}"

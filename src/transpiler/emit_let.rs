@@ -331,8 +331,28 @@ impl Transpiler {
         // to wrongly fall back to array-enumerate codegen. Reuse the same AST-shape check
         // `emit_expr.rs` already uses to *emit* the dict-get code, here to also update this
         // bookkeeping, instead of re-deriving dict-ness from the generated Rust string.
+        //
+        // `self.expr_is_dict(dict_obj)` alone only proves the *container* being indexed
+        // (`dict_obj`, e.g. `outer` in `outer[key]`) is a dict — it says nothing about
+        // the dict's own VALUE type, which is what `existing`/`dims` actually holds after
+        // the index+else. A dict-of-array field (`{string=[T]} table`) is just as
+        // `expr_is_dict`-true as a dict-of-dict field, but `table[key] else []` yields a
+        // plain `[T]`, not a dict — wrongly adding it to `dict_vars` made every later
+        // index into it (`dims[idx]`) emit dict-style `.get(&idx).cloned()...` codegen
+        // instead of ordinary Vec/slice indexing, which doesn't even compile (`&idx` is
+        // `&isize`, not `usize`). Resolve `dict_obj`'s own declared type and check its
+        // *value* type (`index_element_type`) is itself `Dict(..)` — the actual
+        // dict-of-dict shape this tracking exists for — before trusting the heuristic.
+        // An explicit array/set type annotation on the local always wins regardless: it's
+        // unambiguous and must never be second-guessed by this syntactic-shape heuristic.
         let is_dict_index_else = matches!(&s_value.kind, ExprKind::Else(inner, _)
-            if matches!(&inner.kind, ExprKind::Index(dict_obj, _) if self.expr_is_dict(dict_obj)));
+            if matches!(&inner.kind, ExprKind::Index(dict_obj, _)
+                if self.expr_is_dict(dict_obj)
+                    && self.resolve_expr_declared_type(dict_obj)
+                        .and_then(|t| t.without_mut().index_element_type().cloned())
+                        .is_some_and(|vt| matches!(vt.without_mut(), Type::Dict(..)))));
+        let is_dict_index_else = is_dict_index_else
+            && !matches!(&s.ty, Some(Type::Array(_)) | Some(Type::Set(_)));
         if matches!(&s.ty, Some(Type::Dict(..)))
             || val.starts_with("HashMap::")
             || val.contains(".collect::<HashMap")
