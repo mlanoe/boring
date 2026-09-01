@@ -42,12 +42,20 @@ jobs:
       - name: Cache generated Rust projects
         uses: actions/cache@v5
         with:
-          path: tests/cases/*_rust/target
+          path: target/transpile-cases
           key: ${{ runner.os }}-transpile-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-transpile-
 
+      # IMPORTANT: --test-threads=1 is mandatory here, not a style choice -- see the
+      # header comment in tests/transpile.rs. Every generated project's inner `cargo
+      # run`/`cargo build` is pointed at one shared CARGO_TARGET_DIR
+      # (target/transpile-cases) to avoid duplicating tokio/serde's build output ~400+
+      # times over. Running this suite with the default multi-threaded runner races
+      # concurrent `cargo run` invocations against that shared dir (observed: one
+      # test's stdout came back containing a different test's output) and can degrade
+      # into a multi-hour+ stall from piled-up build-lock contention.
       - name: Run integration tests (transpiler)
-        run: cargo test --test transpile
+        run: cargo test --test transpile -- --test-threads=1
 
   clippy:
     name: Clippy

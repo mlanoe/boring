@@ -493,6 +493,24 @@ transpile_test!(struct_custom_remove_call_site);
 // `want_raw_dict_get` flag threaded through emit_stmt.rs/emit_flow.rs/
 // emit_let.rs/emit_expr.rs.
 transpile_test!(dict_index_optional_return);
+// `if let bound = dict[key]:` with NO `else` clause, where the dict-index
+// expression is written directly as the `if let` scrutinee -- not routed
+// through a `T?`-declared local or a `T?`-returning method first (unlike
+// dict_index_optional_return.br above), and the enclosing method/function's
+// own return type is NOT itself Optional. `emit_cond_clauses`
+// (src/transpiler/emit_match.rs) always wraps its scrutinee in a `Some(...)`
+// pattern but never set the `want_raw_dict_get` flag before emitting it, so
+// `emit_expr_index`'s dict-access branch fell through to its default
+// panic-on-missing-key `.get(key).cloned().expect("dict key not found")`
+// suffix -- which already unwraps `Option<V>` to `V` before this function
+// wraps it in `Some(...)`. That produced `if let Some(found) =
+// by_name.get(&*key).cloned().expect("dict key not found") { ... }`: doesn't
+// type-check (`Some(_)` can't match a bare non-Option value), and even
+// setting that aside, `.expect()` panics on a missing key instead of falling
+// through past the `if let` -- defeating the entire point of using `if let`
+// over a plain `let` here. See tests/cases/if_let_dict_index_no_else.br's own
+// doc comment.
+transpile_test!(if_let_dict_index_no_else);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
 // whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`

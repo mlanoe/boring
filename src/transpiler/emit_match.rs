@@ -275,7 +275,27 @@ impl Transpiler {
                 if let Some(checked) = self.try_emit_checked_int_cast_as_option(expr) {
                     return format!("let Some({}) = {}", name, checked);
                 }
+                // `if let found = dict[key]:` (no `else`): the scrutinee is a bare
+                // dict-index tail flowing directly into this `Some(...)` pattern, exactly
+                // the same shape `emit_let.rs`'s bare `let T? x = dict[key]` case and
+                // `emit_flow.rs`'s `return dict[key]` case already handle via
+                // `want_raw_dict_get`. Without setting it here too, `emit_expr_index`'s
+                // dict-access branch defaults to its panic-on-missing-key
+                // `.get(...).cloned().expect("dict key not found")` suffix — which already
+                // unwraps the `Option<V>` to `V` before this function wraps it in
+                // `Some(...)` below, so the emitted `if let Some(found) = ...expect(...)`
+                // both fails to type-check (`Some(_)` can't match a non-Option) and, even
+                // if it somehow could, panics on a missing key instead of falling through
+                // to `else`/the statement after the `if let` — defeating the entire point
+                // of using `if let` over a plain `let` here.
+                let is_dict_index = matches!(&expr.kind, ExprKind::Index(dict_obj, _) if self.expr_is_dict(dict_obj));
+                if is_dict_index {
+                    self.want_raw_dict_get.set(true);
+                }
                 let expr_s = self.emit_expr(expr);
+                if is_dict_index {
+                    self.want_raw_dict_get.set(false);
+                }
                 // Auto-clone: actor fields and general field accesses must be cloned
                 // to avoid moving out of the struct.
                 let expr_s = if self.expr_yields_actor(expr)

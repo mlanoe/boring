@@ -1,0 +1,43 @@
+# Regression test: `if let bound = dict[key]:` with NO `else` clause, where the
+# dict-index expression is written DIRECTLY as the `if let` scrutinee (not
+# routed through a `T?`-declared local or a `T?`-returning method first, unlike
+# tests/cases/dict_index_optional_return.br's coverage) -- and the enclosing
+# method's own return type is NOT itself Optional. `emit_cond_clauses`
+# (src/transpiler/emit_match.rs) always wraps the scrutinee in a `Some(...)`
+# pattern, but never set the `want_raw_dict_get` flag before calling
+# `emit_expr` on it -- so `emit_expr_index`'s dict-access branch fell through
+# to its default panic-on-missing-key `.get(key).cloned().expect("dict key not
+# found")` suffix, which already unwraps the `Option<V>` to `V` before this
+# function wraps it in `Some(...)`. That produced
+# `if let Some(found) = by_name.get(&*key).cloned().expect("dict key not
+# found") { ... }` -- doesn't type-check (`Some(_)` can't match a bare,
+# non-Option value), and even setting that aside, `.expect()` panics on a
+# missing key instead of falling through past the `if let` -- defeating the
+# entire point of using `if let` over a plain `let` here.
+#
+# Two shapes covered, both against a present and a missing key: a plain local
+# dict var, and an implicit self dict-field (bare name, no `self.` prefix) --
+# mirroring how `emit_expr_index`'s dict-access branch has two separate arms
+# (plain `Var` receiver vs. `self.field`) that each independently need
+# `want_raw_dict_get` honored.
+struct Lookup:
+    var mut {string=string} by_id
+
+    req string find_by_id(string key):
+        if let found = by_id[key]:
+            return found
+        return "not found"
+
+req string find(string key):
+    let {string=string} by_name = {"a" = "1", "b" = "2"}
+    if let found = by_name[key]:
+        return found
+    return "not found"
+
+def main():
+    print find("a")
+    print find("zzz")
+
+    let l = Lookup(by_id = {"x" = "9"})
+    print l.find_by_id("x")
+    print l.find_by_id("zzz")
