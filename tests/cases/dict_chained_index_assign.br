@@ -1,0 +1,27 @@
+# Regression fixture for index-*assignment* into a dict-of-dicts — see
+# tests/dict_chained_index_assign.rs for the full writeup. Two methods,
+# on purpose, in the same struct so a future fix to one shape can't silently
+# regress the other:
+#
+#   - set_via_local: copies the inner dict out into a local (`by_var`, bound
+#     from `local_table[calling_instance_id] else {=}`), mutates the local
+#     with a plain single-index assignment, then writes it back. Already
+#     fixed by the `dict_vars` untyped-else-binding tracking fix — the
+#     control case that must keep working.
+#   - set_direct: assigns straight through the chained double index,
+#     `local_table[calling_instance_id][id] = v`, with no intermediate
+#     local. Requires `calling_instance_id` to already be present in
+#     `local_table` (matches the tree-walk interpreter's `assign`, which
+#     reads-then-reassigns the outer key and errors if it's absent, rather
+#     than auto-vivifying an empty inner dict).
+
+pub struct Vars:
+    var {string={string=string}} local_table = {=}
+
+    pub def set_via_local(string calling_instance_id, string id, string v):
+        var {string=string} by_var = local_table[calling_instance_id] else {=}
+        by_var[id] = v
+        local_table[calling_instance_id] = by_var
+
+    pub def set_direct(string calling_instance_id, string id, string v):
+        local_table[calling_instance_id][id] = v

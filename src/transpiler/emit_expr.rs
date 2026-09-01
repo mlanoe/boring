@@ -2454,6 +2454,30 @@ impl Transpiler {
                     }
                 }
             }
+            // Chained double-index assignment on a dict-of-dicts, with no
+            // intermediate local: `local_table[k1][k2] = v`. Here `dict_obj`
+            // (`local_table[k1]`) is itself an `Index` expr, not `Var`/`Field`,
+            // so none of the branches above match and this used to fall through
+            // to the generic array-index LHS codegen further down — `(k2) as usize`
+            // array indexing, which doesn't type-check against a real `HashMap`
+            // value. `expr_is_dict(dict_obj)` (now `Index`-aware, see its own doc
+            // comment) recognizes `local_table[k1]` as dict-shaped via
+            // `local_table`'s declared `{K1={K2=V}}` type; emitting `dict_obj`
+            // itself under `in_lhs_assign` reuses `emit_expr_index`'s existing
+            // `.get_mut(..).expect("dict key not found")` place-expression path
+            // (the same one already used for `d[k].method()`/`d[k] += rhs`) to
+            // get a mutable handle on the inner dict, then `.insert()`s into it.
+            // Mirrors the interpreter's `assign`'s recursive `ExprKind::Index`
+            // semantics: panics if the outer key is absent rather than silently
+            // auto-vivifying an empty inner dict.
+            if matches!(&dict_obj.kind, ExprKind::Index(..)) && self.expr_is_dict(dict_obj) {
+                self.in_lhs_assign.set(true);
+                let place_s = self.emit_expr(dict_obj);
+                self.in_lhs_assign.set(false);
+                let key_owned = self.emit_dict_key_owned(key);
+                let val_s = self.emit_expr_owned(value);
+                return format!("{}.insert({}, {})", place_s, key_owned, val_s);
+            }
         }
         // emit_expr_owned wraps string literals in Arc::from; falls through for other types
         // For index LHS (arr[i] = v), emit without .clone() since we're writing not reading.

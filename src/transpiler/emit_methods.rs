@@ -358,6 +358,18 @@ impl Transpiler {
                     .iter().find(|(fname, _)| fname == field_name)?;
                 Some(fty.clone())
             }
+            // `outer[key]`'s declared type is `outer`'s own declared element/value
+            // type (`index_element_type` — array element or dict value, one level
+            // stripped). Recurses through `resolve_expr_declared_type` on `obj` so a
+            // chained `outer[k1][k2]` (dict-of-dicts) resolves too — needed by
+            // `expr_is_dict` to recognize a nested dict index as itself dict-shaped
+            // for double-index assignment codegen (`local_table[k1][k2] = v`).
+            ExprKind::Index(obj, _) => {
+                self.resolve_expr_declared_type(obj)?
+                    .without_mut()
+                    .index_element_type()
+                    .cloned()
+            }
             _ => None,
         }
     }
@@ -3123,6 +3135,19 @@ impl Transpiler {
                 } else {
                     false
                 }
+            }
+            // Chained/nested dict index (`outer[k1]` inside `outer[k1][k2]`, a
+            // dict-of-dicts): dict-shaped iff the *base* being indexed has a
+            // declared dict value type. Needed so double-index assignment
+            // (`local_table[k1][k2] = v`) can recognize `local_table[k1]` itself
+            // as a dict target — see `emit_expr_assign`'s chained dict-subscript
+            // branch, which falls through to broken array-index LHS codegen
+            // without this (docs/dict-index-optional-return-bug.md's sibling bug).
+            ExprKind::Index(obj, _) => {
+                self.resolve_expr_declared_type(obj)
+                    .and_then(|t| t.without_mut().index_element_type().cloned())
+                    .map(|elem_ty| matches!(elem_ty.without_mut(), Type::Dict(..)))
+                    .unwrap_or(false)
             }
             _ => false,
         }
