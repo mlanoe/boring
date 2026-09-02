@@ -872,6 +872,23 @@ impl Transpiler {
         }
     }
 
+    /// Best-effort, purely syntactic check that `expr` is definitely numeric
+    /// (int or float) — used by `emit_expr_cast`'s `src_is_numeric_else` check
+    /// to tell whether the default of an `expr else default` combo being cast
+    /// (`(expr else default) as T`) is itself numeric, since the Else's own
+    /// underlying Option type isn't otherwise tracked at this call site.
+    /// Not a full type-inference pass — just the same "shape of the operand"
+    /// heuristic every other branch in `emit_expr_cast` already relies on.
+    fn is_definitely_numeric_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) => true,
+            ExprKind::UnaryOp(_, inner) => self.is_definitely_numeric_expr(inner),
+            ExprKind::Var(v) => self.var_types.get(v.as_str())
+                .map(is_known_numeric_scalar_type).unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// `e as ty` — user-defined `into_type()` conversions, newtype wrap/unwrap,
     /// Optional-type parse, numeric/bool/string coercions, and the `'actor` wrap.
     fn emit_expr_cast(&self, e: &Expr, ty: &Type) -> String {
@@ -1044,6 +1061,25 @@ impl Transpiler {
             return format!("({} as {})", src, dst);
         }
         if src_is_numeric_index && is_fixed_int_ty {
+            return format!("({} as {})", src, dst);
+        }
+        // `(expr else default) as T` — e.g. `(t.value else 1.0) as float32` where
+        // `t.value` is `float?`. `src` above already went through the ordinary
+        // `ExprKind::Else` codegen and is a correct, already-numeric Rust
+        // expression (`t.value.unwrap_or_else(|| 1.0)`). But `ExprKind::Else`
+        // isn't a Var/BinOp/Call/UnaryOp/MethodCall/Index/literal, so without
+        // this check it falls through every branch above *and* every branch
+        // below all the way to the string-parsing fallback near the bottom of
+        // this function, which wrongly appends `.trim().parse::<f64>()` after
+        // an already-numeric value — that doesn't compile (`no method named
+        // 'trim' found for type 'f64'`). The Else's own `default` operand is
+        // used to decide numeric-ness (a numeric literal/known-numeric-var
+        // default only type-checks in Rust against a numeric Option in the
+        // first place), the same shape-based heuristic every other branch
+        // here already uses for its own source expression.
+        let src_is_numeric_else = matches!(&e.kind,
+            ExprKind::Else(_, default) if self.is_definitely_numeric_expr(default));
+        if src_is_numeric_else && (is_float_ty || is_fixed_int_ty) {
             return format!("({} as {})", src, dst);
         }
 

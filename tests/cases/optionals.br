@@ -185,3 +185,24 @@ print oelcheck(nil, nil)
 let int? oelA = nil
 let int? oelB = 7
 if let v = oelA: print "a={v}" elif let v = oelB: print "b={v}" else: print "none"
+
+# `(expr else default) as T` as a single expression — this used to mis-transpile
+# into string-parsing codegen (`.trim().parse::<T>()`) instead of a plain numeric
+# `as` cast, because the transpiler's cast codegen didn't recognize an `else`
+# expression as a numeric source. See docs/ (transpiler cast-of-else regression).
+struct OcastThing:
+    float? value
+    int?   ivalue
+
+def float32 ocast_get_f32(OcastThing t):
+    (t.value else 1.0) as float32
+
+def int ocast_get_int(OcastThing t):
+    (t.ivalue else 0) as int
+
+let ocastPresent = OcastThing(3.7, 9)
+let ocastNil     = OcastThing(nil, nil)
+print "{ocast_get_f32(ocastPresent)}"
+print "{ocast_get_f32(ocastNil)}"
+print "{ocast_get_int(ocastPresent)}"
+print "{ocast_get_int(ocastNil)}"
