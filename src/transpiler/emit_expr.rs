@@ -2582,9 +2582,34 @@ impl Transpiler {
         } else {
             rhs_s
         };
-        // When assigning to an optional var, wrap non-optional RHS in Some().
-        // Needed for `var Expr? x = nil; x = throws_call()?` → `x = Some(throws_call()?)`.
-        let rhs_s = if let ExprKind::Var(v) = &target.kind {
+        // When assigning to an optional-typed target, wrap non-optional RHS in Some().
+        // Covers three target shapes:
+        //  - a local `var T? x` variable: `x = throws_call()?` → `x = Some(throws_call()?)`.
+        //  - an explicit struct field write `obj.field = v` where `field` is declared
+        //    `T?` on `obj`'s struct type (any owner: `self`, a `var`/`mut` param, a
+        //    local binding — not just `self`).
+        //  - the same field write via implicit self (`field = v` inside one of the
+        //    struct's own methods, with no explicit `self.` prefix).
+        // Without this, a plain-value assignment to a `T?` field transpiled to a bare
+        // `obj.field = v;` / `self.field = v;`, which fails to type-check against the
+        // field's real `Option<T>` Rust type — the same auto-wrap a `T?`-returning
+        // function's own tail expression already gets, just missing here. See
+        // docs/optional-field-assign-no-some-wrap-bug.md.
+        let target_field_ty: Option<Type> = match &target.kind {
+            ExprKind::Field(obj, field) => self.resolve_struct_name(obj)
+                .and_then(|sn| self.struct_fields.get(sn.as_str()).cloned())
+                .and_then(|fields| fields.into_iter().find(|(n, _)| n == field).map(|(_, ty)| ty)),
+            ExprKind::Var(name) if name != "self" && !self.known_local_vars.contains(name.as_str()) => {
+                self.self_type.as_ref()
+                    .and_then(|sn| self.struct_fields.get(sn.as_str()).cloned())
+                    .and_then(|fields| fields.into_iter().find(|(n, _)| n == name).map(|(_, ty)| ty))
+            }
+            _ => None,
+        };
+        let target_is_optional_field = matches!(target_field_ty.as_ref().map(Type::without_mut), Some(Type::Optional(_)));
+        let target_is_optional_var = matches!(&target.kind, ExprKind::Var(v)
+            if self.optional_vars.contains(v.as_str()));
+        let rhs_s = if target_is_optional_var || target_is_optional_field {
             let rhs_already_opt = rhs_s.starts_with("Some(")
                 || rhs_s == "None"
                 || is_try_optional(value)
@@ -2603,10 +2628,10 @@ impl Transpiler {
                 // `id = items[1].as_str()` where `as_str()` already returns `string?`.
                 // See docs/option-return-double-some-wrap-bug.md.
                 || self.expr_is_declared_optional(value);
-            if self.optional_vars.contains(v.as_str()) && !rhs_already_opt {
-                format!("Some({})", rhs_s)
-            } else {
+            if rhs_already_opt {
                 rhs_s
+            } else {
+                format!("Some({})", rhs_s)
             }
         } else {
             rhs_s

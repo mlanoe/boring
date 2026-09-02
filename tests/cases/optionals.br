@@ -206,3 +206,30 @@ print "{ocast_get_f32(ocastPresent)}"
 print "{ocast_get_f32(ocastNil)}"
 print "{ocast_get_int(ocastPresent)}"
 print "{ocast_get_int(ocastNil)}"
+
+# Direct assignment to a `T?` struct field with a plain (non-Optional-shaped)
+# value — not routed through a `T?`-returning function's own tail expression,
+# which already auto-wraps correctly. Covers both an explicit non-self owner
+# (a `var` struct parameter) and implicit self inside one of the struct's own
+# methods — both used to transpile to a bare `f.size = 3.5;` / `self.size =
+# 3.5;`, which fails to type-check against the field's real `Option<T>` Rust
+# type. See docs/optional-field-assign-no-some-wrap-bug.md.
+struct OptDirect:
+    var float? size
+
+def set_opt_direct(var OptDirect f):
+    f.size = 3.5
+
+var OptDirect od = OptDirect(size = nil)
+set_opt_direct(od)
+print "{od.size else -1.0}"
+
+struct OptDirectSelf:
+    var float? size
+
+    def bump():
+        size = 9.25
+
+mut OptDirectSelf ods = OptDirectSelf(size = nil)
+ods.bump()
+print "{ods.size else -1.0}"
