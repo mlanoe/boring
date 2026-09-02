@@ -1,0 +1,22 @@
+enum Shape as Introspect:
+    Circle(float radius)
+    Rect(float width, float height)
+    Point
+
+    req string kind():
+        "shape"
+
+def describe(Shape s) throws:
+    let info = s.introspect()
+    print "type: {info.typeName}  variant: {info.variantName} (#{info.variantIndex})"
+    for f in info.fields:
+        let v = f.get(s)
+        print "    {f.name} = {v:?}"
+    for m in info.methods:
+        let r = m.request(s, [])
+        print "    {m.name}() = {r:?}"
+
+def main() throws:
+    describe(Shape.Circle(2.0))
+    describe(Shape.Rect(3.0, 4.0))
+    describe(Shape.Point)

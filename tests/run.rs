@@ -151,6 +151,7 @@ interp_test!(channels);
 interp_test!(protocols);
 interp_test!(optionals);
 interp_test!(enums);
+interp_test!(for_loop_enum_array_camel_case_method);
 interp_test!(streams);
 interp_test!(newtypes);
 interp_test!(guard);
@@ -167,6 +168,16 @@ interp_test!(inline_loops);
 interp_test!(format);
 interp_test!(loops);
 interp_test!(traits);
+// docs/book.md's "Type-level methods in traits" example -- `boring run` (this
+// interpreter path) is only the semantic baseline; tests/transpile.rs's registration
+// of the same case is what actually guards the bug (a real `cargo build`). See
+// tests/cases/trait_type_level_methods.br's own doc comment.
+interp_test!(trait_type_level_methods);
+// docs/book.md's "Traits as types" (dynamic dispatch, `[Trait]`/bare-trait-param).
+// `boring run` (this interpreter path) already worked; tests/transpile.rs's
+// registration of the same case is what actually guards the bug (a real
+// `cargo build`). See tests/cases/trait_dynamic_dispatch.br's own doc comment.
+interp_test!(trait_dynamic_dispatch);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);
 interp_test!(scalar_catch);
@@ -347,6 +358,18 @@ interp_test!(dict_index_optional_return);
 // regression coverage) -- kept here anyway so the runtime *values* stay
 // pinned down too. See tests/cases/dict_string_key_index.br's own doc comment.
 interp_test!(dict_string_key_index);
+// `local_var.dict_field[key]` read through a struct-typed local OTHER than
+// `self` (here a `for`-loop-bound value). The interpreter (this test) never
+// caught the underlying bug -- it was `--emit-rust`-only codegen (see
+// tests/transpile.rs's registration for the real regression coverage) --
+// kept here anyway so the runtime values stay pinned down too. See
+// tests/cases/dict_field_via_non_self_local.br's own doc comment.
+interp_test!(dict_field_via_non_self_local);
+// A top-level call-site borrow drop from a stale `inferred_qualifiers` name
+// collision. The interpreter (this test) never caught this either -- it was
+// a `--emit-rust`-only codegen bug (see tests/transpile.rs). See
+// tests/cases/top_level_call_inferred_qualifier_leak.br's own doc comment.
+interp_test!(top_level_call_inferred_qualifier_leak);
 // A `var StructType` parameter must mutate the caller's variable directly
 // (docs/CLAUDE.md: "changes are visible at the call site"), not a throwaway
 // clone of it. The interpreter (this test) never caught this either -- it

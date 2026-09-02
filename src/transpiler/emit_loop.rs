@@ -432,7 +432,34 @@ impl Transpiler {
         // out of `&self`, and (for a `{K=V}` dict) `.iter().cloned()` doesn't even compile
         // — `Iterator::cloned` only applies when the item is a plain `&T`, not a HashMap's
         // `(&K, &V)` pair — so dict fields get their own owned-pair path below.
-        let self_field_ty = self.resolve_self_field_type(&s.iterable).map(|t| t.without_mut().clone());
+        //
+        // Same problem, same fix, for a field reached through an ARBITRARY local variable
+        // (`for x in some_var.field:`), not just `self` — `resolve_self_field_type` only
+        // ever recognizes `self.field`/bare `field`, so it falls through to `None` here and
+        // the catch-all `.into_iter()` below moves the field out. That was merely wasteful
+        // (not a compile error) as long as `some_var` was bound to an owned struct value —
+        // but the very first Boring-source-visible variable bound to a *reference*-shaped
+        // struct (`let info = w.introspect()`, `&'static IntrospectInfo` — see
+        // `emit_introspect_struct_impl`'s doc comment) turned it into a real E0507 ("cannot
+        // move out of ... which is behind a shared reference"), since Boring's own type
+        // system doesn't distinguish "owned struct local" from "reference-to-struct local"
+        // (structs are always treated as reference-like to the user) — so this gap was
+        // always latent, just never observable until a reference-returning method existed.
+        // `resolve_iterable_type` (emit_loop.rs, used elsewhere in this function already)
+        // already resolves a field access on ANY expression, not just `self` — reuse it as
+        // the fallback, but ONLY for the `Field(..)` shape specifically: `resolve_iterable_type`
+        // ALSO resolves a bare `Var` (by design, for the auto-enumerate detection above), and
+        // falling back to it unconditionally here would preempt the match arms further below
+        // that already give bare local variables their own, more precisely differentiated
+        // handling (the `[Trait]`/`JoinHandle` exceptions in particular — neither is `Clone`,
+        // so routing them through this `.iter().cloned()` path instead would be a real
+        // regression, not just a missed optimization).
+        let self_field_ty = self.resolve_self_field_type(&s.iterable)
+            .or_else(|| match &s.iterable.kind {
+                ExprKind::Field(..) => self.resolve_iterable_type(&s.iterable),
+                _ => None,
+            })
+            .map(|t| t.without_mut().clone());
         let is_borrowed_collection_field = self_field_ty.as_ref()
             .is_some_and(|t| matches!(t, Type::Dict(..) | Type::Array(_) | Type::Set(_)));
         let iter_expr = match &s.iterable.kind {
@@ -461,6 +488,19 @@ impl Transpiler {
             // `tokio::task::JoinHandle<T>`, which isn't `Clone`; `.iter().cloned()`
             // is a hard compile error there (E0277). `into_iter()` is always safe for
             // this idiom since the array is never reused after awaiting every handle.
+            // Exception: `[Trait]` (dynamic dispatch, `Vec<Box<dyn Trait>>` — see
+            // docs/book.md "Traits as types") — `Box<dyn Trait>` isn't `Clone` either
+            // (no object-safe blanket impl), same non-`Clone` problem as `JoinHandle<T>`
+            // above, but `.into_iter()` would consume the collection — borrow instead
+            // (`&{iter}`) so the loop var is `&Box<dyn Trait>` (auto-derefs to `&dyn
+            // Trait` for method calls) and the source collection stays reusable.
+            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str())
+                && (s.vars.len() <= 1 || needs_auto_enumerate)
+                && matches!(self.resolve_iterable_type(&s.iterable),
+                    Some(Type::Array(elem)) if matches!(elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) =>
+            {
+                format!("&{}", iter)
+            }
             ExprKind::Var(v) if self.known_local_vars.contains(v.as_str())
                 && (s.vars.len() <= 1 || needs_auto_enumerate)
                 && !s.vars.first().is_some_and(|lv| {

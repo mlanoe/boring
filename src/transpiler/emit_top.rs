@@ -762,8 +762,16 @@ impl Transpiler {
         match self_ty {
             Some(_) => {
                 // For struct methods, use &mut self (def) or &self (req/task).
-                // Task methods are called via Arc<Self> which provides &Self only (no DerefMut).
-                // The T'actor Arc<Mutex<T>> wrapping is handled at call sites via .lock().await.
+                // External `task fn` declarations (`task T.method()`, `f.qualifier = Some(_)`)
+                // are called via Arc<Self> — either directly (`'shared`, "Task methods — self
+                // must be T'shared") or through `task w.method()` spawn — which provides &Self
+                // only (no DerefMut), so those always take &self even when mutating.
+                // Inline struct methods (`task void method():` etc. declared in the struct
+                // body, `f.qualifier = None`) are NOT required to go through Arc<Self> — they
+                // may be called as a plain `w.method().await` on an ordinary `mut`/`var mut`
+                // binding, same as any other async method — so a mutating one gets &mut self
+                // like `def` does. The T'actor Arc<Mutex<T>> wrapping is handled at call sites
+                // via .lock().await regardless of the self-reference chosen here.
                 // Exception: inside a trait impl block, mutating task methods must match the
                 // trait signature (which uses &mut self), since calls go through .lock().await.
                 // Enum methods: by default enums have no mutable fields, so always use
@@ -798,7 +806,9 @@ impl Transpiler {
                         ));
                     }
                 }
-                let self_s = if f.mutating && (!f.task || self.inside_trait_impl) && !is_enum_self {
+                let self_s = if f.mutating && !is_enum_self
+                    && (!f.task || f.qualifier.is_none() || self.inside_trait_impl)
+                {
                     "&mut self"
                 } else {
                     "&self"
@@ -1156,7 +1166,13 @@ impl Transpiler {
         }
 
         // Visibility + async keyword + fn
-        let vis = if f.is_pub { "pub " } else { "" };
+        // Rust forbids explicit visibility qualifiers on trait-impl items (E0449: "trait items
+        // always share the visibility of their trait") -- suppress `pub` when this method is
+        // being emitted into an `impl Trait for Struct {}` block (`inside_trait_impl`, set by
+        // the `proto_impl_names` loop in `emit_struct`). Methods marked `pub` in Boring source
+        // still emit `pub` normally everywhere else (the plain `impl Struct {}` block, free
+        // functions, ...).
+        let vis = if f.is_pub && !self.inside_trait_impl { "pub " } else { "" };
         let async_kw = if is_async { "async " } else { "" };
 
         // Type parameters — add Clone bound so Vec<T>[i].clone() works.
@@ -1741,7 +1757,8 @@ impl Transpiler {
         // `mut` is added only when explicitly declared in Boring (`mut T param` or `var T param`).
         // FnMut closure params also need `mut` so the closure can be called.
         // Struct params do NOT get `mut` automatically — the developer must declare `mut`.
-        let name = if p.mutable || is_fnmut { format!("mut {}", p.name) } else { p.name.clone() };
+        let escaped_name = escape_rust_keyword(&p.name);
+        let name = if p.mutable || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
         match &p.ty {
             Some(ty) if p.variadic => format!("{}: Vec<{}>", name, self.emit_type(ty)),
             Some(ty) => {
@@ -1764,10 +1781,15 @@ impl Transpiler {
                 } else {
                     ty
                 };
-                // If the param type is a known trait name, emit `impl TraitName`.
+                // A bare trait name in parameter position means dynamic dispatch, same as
+                // return/local/field position (docs/book.md "Traits as types"): the value
+                // is heap-allocated, `Box<dyn TraitName>` — not `impl TraitName` (static
+                // dispatch/monomorphization is the distinct `<TraitName>` shorthand,
+                // parsed into its own `Type::Impl` AST node and handled separately below,
+                // never reaching this `Type::Named` branch).
                 let ty_s = if let crate::ast::Type::Named(n) = effective_ty {
                     if self.trait_method_names.contains_key(n.as_str()) {
-                        format!("impl {}", normalize_type_name(n, self.use_rc_str()))
+                        format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()))
                     } else {
                         self.emit_type(effective_ty)
                     }

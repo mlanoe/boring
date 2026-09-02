@@ -1,0 +1,56 @@
+# Regression test: a top-level (main-body) call site passing a struct-typed
+# local -- specifically a struct-ELEMENT array (`[Item]`) here, though a bare
+# struct local hits the same bug -- must still get auto-borrowed (`&local`),
+# same as the identical call from inside an ordinary function body already
+# did correctly.
+#
+# Root cause: `Transpiler::inferred_qualifiers` (a `HashMap<String, OwnerQual>`
+# keyed by bare variable/parameter NAME, src/transpiler/mod.rs) is populated by
+# `infer_qualifiers()` for each real function/method body in turn, but is never
+# saved/restored around that per-function pass the way essentially every other
+# per-function map is (`var_types`, `fn_current_params`, `resident_call_vars`,
+# ...) -- see `emit_fn`'s (src/transpiler/emit_top.rs) many `std::mem::take`/
+# restore pairs, none of which cover `inferred_qualifiers`. So after the LAST
+# real function/method is transpiled, the map is simply left holding whatever
+# THAT function computed for ITS OWN parameters.
+#
+# The synthesized top-level `fn main()` (leftover top-level statements, built
+# by `Transpiler::emit_program_items`, src/transpiler/mod.rs) never ran
+# `infer_qualifiers` over its own locals at all before this fix -- unlike a
+# real function body, which always reruns it (implicitly clearing it) via
+# `emit_body`. `emit_args_coerced`'s (src/transpiler/emit_methods.rs) call-site
+# borrow decision consults `inferred_qualifiers.get(var_name)` BEFORE falling
+# back to the variable's own declared type -- so if a top-level local happens
+# to share a bare NAME with some other already-emitted function's own
+# auto-ref-inferred `Borrow`/`BorrowMut` parameter (a natural collision:
+# `items`, here, matches `check_all`'s own `[Item] items` parameter), the
+# stale entry wins, and the required `&`/`&mut` is silently dropped at EVERY
+# top-level call site using that name -- confirmed via a real `cargo build`
+# E0308 ("expected `&Vec<Item>`, found `Vec<Item>`") on the emitted Rust.
+# Reproduces identically for a struct-element array, a bare struct local, and
+# a primitive-element array -- name collision is the only thing that matters,
+# not the collection's element type.
+#
+# Fixed by re-running `infer_qualifiers` over the synthesized `main()`'s own
+# top-level statements (`Item::Let` + `Item::Stmt`, combined into `Stmt`s)
+# right before emitting them, exactly mirroring what `emit_body` already does
+# first for every real function body -- this discards whatever the last
+# function left behind and computes `items`'s OWN (correct) qualifier from how
+# it's actually used at top level, instead of reusing someone else's.
+#
+# Only caught by `cargo run` on the emitted Rust (this test), never by
+# `boring run`'s untyped interpreter (also registered in tests/run.rs, since
+# the interpreter has always evaluated this correctly).
+
+struct Item:
+    int id
+
+def check_all([Item] items):
+    for item in items:
+        print "{item.id}"
+
+var mut [Item] items = []
+items.push(Item(id = 1))
+items.push(Item(id = 2))
+check_all(items)
+check_all(items)

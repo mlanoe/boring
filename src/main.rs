@@ -142,9 +142,15 @@ struct BoringToml {
     /// split here into `(type, method)` pairs — project-declared supplement to
     /// `KNOWN_EXTERNAL_CONST_FNS`. Threaded into `TranspileConfig::external_const_fns`.
     external_const_fns: Vec<(String, String)>,
+    /// `[external_types]` `optional_fields = [...]` entries, each written `"Type::field"` and
+    /// split here into `(type, field)` pairs, same first-`::`-split convention as `const_fns`
+    /// — project-declared supplement to `KNOWN_EXTERNAL_OPTIONAL_FIELDS`. Threaded into
+    /// `TranspileConfig::external_optional_fields`.
+    external_optional_fields: Vec<(String, String)>,
     /// `[external_types]` `include = [...]` entries — paths (relative to this `boring.toml`'s
     /// own directory) to other files with their own `[external_types]` section, folded into
-    /// `external_tuple_structs`/`external_const_fns` above by `resolve_external_types_includes`.
+    /// `external_tuple_structs`/`external_const_fns`/`external_optional_fields` above by
+    /// `resolve_external_types_includes`.
     /// Lets several sibling projects (e.g. multiple Bevy games) share one canonical
     /// declarations file instead of each repeating the same entries. Consumed and drained by
     /// `resolve_external_types_includes` — empty again once `load_project_toml` returns.
@@ -244,6 +250,7 @@ impl BoringToml {
         let mut dependencies = Vec::new();
         let mut external_tuple_structs = Vec::new();
         let mut external_const_fns = Vec::new();
+        let mut external_optional_fields = Vec::new();
         let mut external_types_includes = Vec::new();
         let mut derive_traits = Vec::new();
         let mut derive_includes = Vec::new();
@@ -307,6 +314,11 @@ impl BoringToml {
                         .into_iter()
                         .filter_map(|entry| entry.split_once("::").map(|(t, m)| (t.to_string(), m.to_string())))
                         .collect();
+                } else if let Some(rest) = line.strip_prefix("optional_fields") {
+                    external_optional_fields = Self::extract_array(rest)
+                        .into_iter()
+                        .filter_map(|entry| entry.split_once("::").map(|(t, f)| (t.to_string(), f.to_string())))
+                        .collect();
                 } else if let Some(rest) = line.strip_prefix("include") {
                     external_types_includes = Self::extract_array(rest);
                 }
@@ -326,7 +338,7 @@ impl BoringToml {
         }
         BoringToml {
             name, version, main, dependencies,
-            external_tuple_structs, external_const_fns, external_types_includes,
+            external_tuple_structs, external_const_fns, external_optional_fields, external_types_includes,
             derive_traits, derive_includes, deps,
             external_fns, external_fns_includes,
         }
@@ -365,6 +377,7 @@ impl BoringToml {
             let included = Self::parse(&included_src);
             self.external_tuple_structs.extend(included.external_tuple_structs);
             self.external_const_fns.extend(included.external_const_fns);
+            self.external_optional_fields.extend(included.external_optional_fields);
         }
         Ok(())
     }
@@ -745,6 +758,28 @@ mod boring_toml_tests {
         let toml = BoringToml::parse(src);
         assert!(toml.external_tuple_structs.is_empty());
         assert!(toml.external_const_fns.is_empty());
+        assert!(toml.external_optional_fields.is_empty());
+    }
+
+    #[test]
+    fn external_types_section_parses_optional_fields() {
+        // Same "Type::field" shape and first-`::`-split convention as `const_fns` — see
+        // `TranspileConfig::external_optional_fields`'s doc comment.
+        let src = "[external_types]\noptional_fields = [\"Sprite::custom_size\", \"Transform::translation\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_optional_fields, vec![
+            ("Sprite".to_string(), "custom_size".to_string()),
+            ("Transform".to_string(), "translation".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn external_types_optional_fields_without_double_colon_are_skipped() {
+        // Same "malformed entry is dropped rather than a hard parse error" convention as
+        // `const_fns` above.
+        let src = "[external_types]\noptional_fields = [\"NotAPair\", \"Sprite::custom_size\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_optional_fields, vec![("Sprite".to_string(), "custom_size".to_string())]);
     }
 
     #[test]
@@ -774,7 +809,7 @@ mod boring_toml_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("shared_external_types.toml"),
-            "[external_types]\ntuple_structs = [\"Shared1\", \"Shared2\"]\nconst_fns = [\"Vec3::new\"]\n",
+            "[external_types]\ntuple_structs = [\"Shared1\", \"Shared2\"]\nconst_fns = [\"Vec3::new\"]\noptional_fields = [\"Sprite::custom_size\"]\n",
         ).unwrap();
 
         let mut toml = BoringToml::parse(
@@ -784,6 +819,7 @@ mod boring_toml_tests {
 
         assert_eq!(toml.external_tuple_structs, vec!["LocalOnly".to_string(), "Shared1".to_string(), "Shared2".to_string()]);
         assert_eq!(toml.external_const_fns, vec![("Vec3".to_string(), "new".to_string())]);
+        assert_eq!(toml.external_optional_fields, vec![("Sprite".to_string(), "custom_size".to_string())]);
         // Drained after resolving — calling again is a no-op, not a double-fold.
         assert!(toml.external_types_includes.is_empty());
 
@@ -1652,6 +1688,7 @@ fn build_project_with_config(config: transpiler::TranspileConfig) {
     let config = transpiler::TranspileConfig {
         external_tuple_structs: toml.external_tuple_structs.clone(),
         external_const_fns: toml.external_const_fns.clone(),
+        external_optional_fields: toml.external_optional_fields.clone(),
         known_derives: toml.derive_traits.clone(),
         external_fns: toml.external_fns.clone(),
         ..config
@@ -1876,7 +1913,7 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
+    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
 
     if emit_rust {
         match file {
@@ -1907,6 +1944,7 @@ fn parse_build_command(build_args: &[String]) {
                             transpiler::TranspileConfig {
                                 external_tuple_structs: toml.external_tuple_structs.clone(),
                                 external_const_fns: toml.external_const_fns.clone(),
+                                external_optional_fields: toml.external_optional_fields.clone(),
                                 known_derives: toml.derive_traits.clone(),
                                 external_fns: toml.external_fns.clone(),
                                 ..config
@@ -1931,6 +1969,7 @@ fn parse_build_command(build_args: &[String]) {
                 let config = transpiler::TranspileConfig {
                     external_tuple_structs: toml.external_tuple_structs.clone(),
                     external_const_fns: toml.external_const_fns.clone(),
+                    external_optional_fields: toml.external_optional_fields.clone(),
                     known_derives: toml.derive_traits.clone(),
                     external_fns: toml.external_fns.clone(),
                     ..config

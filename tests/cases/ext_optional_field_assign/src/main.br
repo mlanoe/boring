@@ -1,0 +1,22 @@
+# Regression test for `emit_expr_assign`'s "does this field need a Some(...) wrap" check
+# (src/transpiler/emit_expr.rs) on a field of an EXTERNAL type -- a real Rust struct Boring
+# never parsed a `struct` declaration for. `ext_geom.Sprite` (tests/cases/fixtures/ext_geom)
+# stands in for Bevy's own `bevy_sprite::Sprite { custom_size: Option<Vec2>, .. }`, the real
+# motivating case (see `Transpiler::KNOWN_EXTERNAL_OPTIONAL_FIELDS` in src/transpiler/mod.rs):
+# a plain-value assignment to `sprite.custom_size` used to stay a bare
+# `sprite.custom_size = v;` instead of `sprite.custom_size = Some(v);`, since
+# `struct_fields` (this transpiler's field-type table used by the original, Boring-struct-
+# only fix in e0247ff) only ever gets an entry for a Boring-*declared* struct -- confirmed
+# by a real `boring build` + `cargo build` against `perso/scratch-boring`'s own
+# `sync_costume_from_looks_states`. `Sprite`/`custom_size` is one of this compiler's
+# built-in `KNOWN_EXTERNAL_OPTIONAL_FIELDS` entries, so this test exercises that table
+# directly -- no `boring.toml [external_types] optional_fields` supplement needed here.
+use ext_geom.Sprite
+use ext_geom.Point2
+use ext_geom.Color
+
+def main():
+    var mut Sprite s = Sprite(color = Color.srgb(0.1, 0.2, 0.3), _)
+    s.custom_size = Point2.new(10.0, 20.0)
+    let size = s.custom_size.unwrap()
+    print "{size.x} {size.y}"

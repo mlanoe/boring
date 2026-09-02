@@ -1,0 +1,29 @@
+# docs/book.md's own "Type-level methods in traits" example (`## 10. Traits and
+# Extensions`) -- a trait's `type def`/`type req` (no-`self`, associated-function-style)
+# members were only ever emitted into the plain `impl Dog {}` block, never into the
+# `impl Factory for Dog {}` block that `struct Dog as Factory:` generates. `boring run`
+# (this interpreter path) and the transpiler's own diagnostics both stayed silent about
+# it -- only a real `cargo build` on the generated project caught it, with E0046 ("not
+# all trait items implemented, missing: `create`, `type_name`"). See
+# `trait_type_method_names` in src/transpiler/mod.rs / emit_struct.rs's
+# `proto_impl_names` loop for the fix. Also registered in tests/transpile.rs -- that's
+# the side that actually guards this (a real `rustc` build), this interpreter run is
+# just the semantic baseline it's pinned against.
+
+trait Factory:
+    type def Self create()
+    type req string type_name()
+
+struct Dog as Factory:
+    string name
+
+    pub type def Dog create():
+        Dog(name = "Rex")
+
+    pub type req string type_name():
+        "Dog"
+
+def main():
+    let d = Dog.create()
+    print d.name
+    print Dog.type_name()

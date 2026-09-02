@@ -1,0 +1,19 @@
+struct Point as Introspect:
+    float x
+    float y
+    string label
+    bool active
+
+    req string describe():
+        "Point({x}, {y})"
+
+def main() throws:
+    let p = Point(x = 1.5, y = 2.5, label = "origin", active = true)
+    let info = p.introspect()
+    print "type: {info.typeName}"
+    for f in info.fields:
+        let v = f.get(p)
+        print "  {f.name} = {v:?}"
+    for m in info.methods:
+        let r = m.request(p, [])
+        print "  {m.name}() = {r:?}"

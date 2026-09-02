@@ -1,0 +1,26 @@
+# Regression fixture for the `let x = struct_val.dict_field.clone()` (no
+# explicit type annotation) codegen bug — see
+# tests/dict_field_clone_untyped_for.rs for the full writeup. Two functions,
+# on purpose, in the same file so a future fix to one case can't silently
+# regress the other:
+#
+#   - demo_untyped: binds `instance_types` with no type annotation — must
+#     transpile the `for id, origin_name in instance_types:` loop to plain
+#     dict `.into_iter()`, never the array-style `.enumerate()`
+#     auto-enumerate rewrite.
+#   - demo_typed: same shape, but with an explicit `{string=string}`
+#     annotation on `instance_types` — the control case that already worked
+#     before this fix (the documented workaround), must keep working.
+
+struct Holder:
+    var mut {string=string} table
+
+pub def demo_untyped(Holder h):
+    let instance_types = h.table.clone()
+    for id, origin_name in instance_types:
+        print "{id} -> {origin_name}"
+
+pub def demo_typed(Holder h):
+    let {string=string} instance_types = h.table.clone()
+    for id, origin_name in instance_types:
+        print "{id} -> {origin_name}"

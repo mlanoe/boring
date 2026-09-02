@@ -294,6 +294,7 @@ transpile_test!(throws_untyped_enum_catch);
 transpile_test!(protocols);
 transpile_test!(optionals);
 transpile_test!(enums);
+transpile_test!(for_loop_enum_array_camel_case_method);
 transpile_test!(newtypes);
 transpile_test!(guard);
 transpile_test!(with_stmt);
@@ -306,6 +307,26 @@ transpile_test!(tuples);
 transpile_test!(format);
 transpile_test!(loops);
 transpile_test!(traits);
+
+// docs/book.md's own "Type-level methods in traits" example -- a trait's `type
+// def`/`type req` members weren't routed into `impl Trait for Struct {}`, only ever
+// into the plain `impl Struct {}`, so `cargo build` failed with E0046 even though
+// `boring build`'s own diagnostics stayed silent. This is the real `rustc`-build guard
+// (tests/run.rs's registration of the same case is only the interpreter baseline it's
+// pinned against). See tests/cases/trait_type_level_methods.br's own doc comment.
+transpile_test!(trait_type_level_methods);
+
+// docs/book.md's "Traits as types" (dynamic dispatch, `[Trait]`/bare-trait-param
+// -> `Box<dyn Trait>`) -- was broken end-to-end for every case except a method's
+// own return type when only one concrete type is ever returned: a `[Trait]` array
+// literal's elements were never boxed (E0308), iterating it used `.iter().cloned()`
+// (E0277: `Box<dyn Trait>` isn't `Clone`), a bare trait-typed parameter transpiled
+// to invalid/wrong-dispatch Rust, and a trait-typed receiver's camelCase method
+// calls got mangled to snake_case. This is the real `rustc`-build guard (tests/run.rs's
+// registration of the same case is only the interpreter baseline it's pinned
+// against, which already worked). See tests/cases/trait_dynamic_dispatch.br's own
+// doc comment.
+transpile_test!(trait_dynamic_dispatch);
 transpile_test!(numeric);
 transpile_test!(uint_int_cross_eq);
 transpile_test!(float_width_cross_eq);
@@ -524,6 +545,31 @@ transpile_test!(if_let_dict_index_no_else);
 // only `cargo run` (this test), not `boring run`, catches. See tests/cases/
 // dict_string_key_index.br's own doc comment.
 transpile_test!(dict_string_key_index);
+// `local_var.dict_field[key]` read through a struct-typed local OTHER than
+// `self` -- a `for`-loop-bound value here, the shape that actually surfaced
+// this downstream (scratch-boring's `check_touching_object_hats`). The
+// dict-index-through-a-struct-field branch in `emit_expr_index`
+// (src/transpiler/emit_expr.rs) only ever resolved the field's struct type
+// for the literal receiver `self`; any other local fell through to the
+// generic Vec-style `(key) as usize` numeric-index codegen, invalid against
+// a `HashMap<Arc<str>, _>` key (E0308/E0605). Fixed by delegating to
+// `expr_is_dict` (src/transpiler/emit_methods.rs), which already resolves a
+// non-self local's struct type generically via `var_struct_types`/
+// `var_struct_type`. See tests/cases/dict_field_via_non_self_local.br's own
+// doc comment.
+transpile_test!(dict_field_via_non_self_local);
+
+// A top-level (main-body) call site passing a struct-typed local (a struct-
+// element array here) whose bare NAME collides with some other already-
+// emitted function's own auto-ref-inferred `Borrow`/`BorrowMut` parameter
+// silently dropped the required `&`/`&mut` at the call site (E0308) --
+// `Transpiler::inferred_qualifiers` (keyed by bare variable name) is never
+// reset for the synthesized top-level `main()`, unlike every real function
+// body (which reruns `infer_qualifiers`, clearing it, via `emit_body`).
+// Found while writing `dict_field_via_non_self_local` just above, which
+// exercises the same top-level call shape. See tests/cases/
+// top_level_call_inferred_qualifier_leak.br's own doc comment.
+transpile_test!(top_level_call_inferred_qualifier_leak);
 // A `var StructType` parameter (docs/CLAUDE.md: "passes `&mut T`; changes are
 // visible at the call site") actually cloned the argument before taking the
 // `&mut` reference -- `&mut v.clone()` borrows a throwaway temporary, so the
@@ -706,3 +752,26 @@ transpile_test!(enum_derive_no_debug);
 // tests/run.rs -- the interpreter's output is the semantic baseline this pins
 // the compiled output against.
 transpile_test!(self_field_loop_match_borrow);
+
+// Follow-up to e0247ff ("assigning a plain value to a T? struct field misses Some()
+// wrap"): that fix's `target_field_ty` resolution (`emit_expr_assign` in
+// src/transpiler/emit_expr.rs) only ever consulted `struct_fields`, which exists solely
+// for a Boring-*declared* struct -- a field on an EXTERNAL type (a real Rust struct
+// Boring never parsed a `struct` for, e.g. Bevy's own `Sprite { custom_size:
+// Option<Vec2>, .. }`) still transpiled a plain-value assignment as a bare
+// `sprite.custom_size = v;` instead of `sprite.custom_size = Some(v);` -- confirmed by a
+// real `boring build` + `cargo build` against `perso/scratch-boring`'s own
+// `sync_costume_from_looks_states`. Fixed by `Transpiler::KNOWN_EXTERNAL_OPTIONAL_FIELDS`/
+// `is_known_external_optional_field` (src/transpiler/mod.rs), consulted alongside
+// `target_field_ty` in `emit_expr_assign`, plus a `resolve_struct_name` fix needed to
+// even reach it: a `var mut Sprite s = ...`-style binding's own `s.ty` is
+// `Type::Mut(Named("Sprite"))`, not a bare `Named`, so `resolve_struct_name`'s `var_types`
+// fallback missed it before stripping `Type::Mut` via `without_mut()`. `Sprite`/
+// `custom_size` is a built-in whitelist entry (see that const's doc comment for the
+// real-Bevy-source audit), also configurable per-project via `boring.toml`
+// `[external_types]`'s new `optional_fields` array. See tests/cases/
+// ext_optional_field_assign/src/main.br's own doc comment. Needs project mode/a real
+// `cargo run` for the same reason as `ext_const_promotion` above (a real
+// `[dependencies]` path crate) -- `boring run`'s interpreter has no `Option<T>`-vs-`T`
+// Rust type distinction to ever hit this bug.
+transpile_project_test!(ext_optional_field_assign);

@@ -1,0 +1,10 @@
+struct Vec2 as Introspect:
+    init(pub float x, pub float y)
+
+def main() throws:
+    let v = Vec2(x = 1.0, y = 2.0)
+    let info = v.introspect()
+    print "type: {info.typeName}"
+    for f in info.fields:
+        let fv = f.get(v)
+        print "  {f.name} = {fv:?}"

@@ -48,6 +48,10 @@ tests/cases/ext_res_field/src/main_rust/
 tests/cases/ext_res_field/src/main_rust_single/
 tests/cases/ext_res_field/src/main_rust_managed/
 tests/cases/ext_res_field/src/main_rust_managed_single/
+tests/cases/ext_optional_field_assign/src/main_rust/
+tests/cases/ext_optional_field_assign/src/main_rust_single/
+tests/cases/ext_optional_field_assign/src/main_rust_managed/
+tests/cases/ext_optional_field_assign/src/main_rust_managed_single/
 # Same as ext_const_promotion above, for tests/transpile.rs's `ext_res_remove` case
 # (tests/cases/ext_res_remove, ResMut<T>-wrapped struct `remove()` call-site fix,
 # follow-up to ext_res_field above).

@@ -1,0 +1,15 @@
+struct Counter:
+    var int value = 0
+    def inc():
+        value += 1
+
+def bump(int ref) throws:
+    print "param {ref}"
+
+def main() throws:
+    let ref = 5
+    mut move = Counter(0)
+    move.inc()
+    move.inc()
+    print "{ref} {move.value}"
+    bump(ref)

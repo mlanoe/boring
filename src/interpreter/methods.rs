@@ -463,6 +463,32 @@ impl Interpreter {
             }
         }
 
+        // `Introspect` (v2, handle-based) — read-only/write-through structural reflection
+        // for `as Introspect` types. Interpreter mirror of the transpiler's synthesized
+        // `impl Introspect for X` (src/transpiler/emit_struct.rs,
+        // `emit_introspect_struct_impl`/`emit_introspect_enum_impl`), but dynamically
+        // typed: `introspect()` builds a real `IntrospectInfo`/`Field`/`Method` VALUE
+        // (`Value::Object` — see `try_introspect_method`) rather than a Rust struct, and
+        // the six reflection-handle methods below dispatch on the RECEIVER's runtime
+        // `type_name` being `"Field"`/`"Method"` (`try_introspect_handle_call`) — there is
+        // no compile-time "is this struct/enum type Introspect-conforming" check to gate
+        // on the way the transpiler's `struct_fields`/`struct_protocols` tables allow;
+        // both checked narrowly (exact method name, and — for `introspect` — the
+        // receiver's own declared `protocols` containing `"Introspect"`) so a plain method
+        // sharing one of these names on some unrelated type is unaffected.
+        if method == "introspect" {
+            if let Some(result) = self.try_introspect_method(&obj) {
+                return result;
+            }
+        }
+        const INTROSPECT_HANDLE_METHODS: &[&str] =
+            &["get", "set", "request", "modify", "call"];
+        if INTROSPECT_HANDLE_METHODS.contains(&method) {
+            if let Some(result) = self.try_introspect_handle_call(&obj, method, &args, line) {
+                return result;
+            }
+        }
+
         // Struct method dispatch
         match obj.clone() {
             Value::Object(inner_rc) => {
@@ -591,6 +617,362 @@ impl Interpreter {
             other => {
                 Err(err(format!("no method '{}' on {}", method, other.type_name()), line))
             }
+        }
+    }
+
+    /// `introspect()` interception for a struct/enum instance — see this trait's call site
+    /// in `call_method` above. Returns `None` whenever `obj` isn't a struct/enum instance at
+    /// all, or its type's declared `protocols` don't list `"Introspect"` — the caller falls
+    /// through to ordinary method dispatch in that case.
+    ///
+    /// v2 design (handle-based, see `boring_introspect_trait_design` memo's "FINAL v2
+    /// design"): builds a real `IntrospectInfo`/`Field`/`Method` VALUE (`Value::Object`,
+    /// via the shared `make_object` helper) rather than a Rust struct — no `FieldValue`
+    /// tagged union is needed here, unlike the transpiler's Rust-facing design
+    /// (`src/transpiler/mod.rs`'s `emit_introspect_prelude` doc comment): the interpreter's
+    /// one dynamic `Value` type already covers every field value shape directly. `get()`/
+    /// `request()`/etc. (handled by `try_introspect_handle_call` below) return the raw
+    /// `Value` directly rather than a `FieldValue`-wrapped one — a deliberate, documented
+    /// asymmetry with `boring build`'s output (same asymmetry v1 already accepted for
+    /// `getField`), meaning a `.br` script using `FieldValue.Int(...)` literal construction
+    /// to build `request()`/`modify()` call arguments (needed under `boring build`) is
+    /// NOT portable to `boring run` as-is — under the interpreter, pass plain values
+    /// directly (`m.request(instance, [5])`, not `[FieldValue.Int(5)]`).
+    ///
+    /// Each `Field`/`Method` object carries two hidden bookkeeping fields alongside the
+    /// five/four documented ones — `__ownerType` (the struct/enum name, needed by the
+    /// type-level `get()`/`call()` forms, which have no instance to derive it from) and
+    /// `__kind` (`"instance"` or `"type"`, mirroring the transpiler's `FieldAccess`/
+    /// `MethodAccess::Instance`/`Type` split) — read back by `try_introspect_handle_call`.
+    /// These never leak into the documented API: `Field`/`Method` aren't themselves
+    /// `Introspect`-conforming, so nothing ever reflects on *them*.
+    ///
+    /// Scope note, matching the transpiler exactly: enum variant fields have no `var`/`mut`
+    /// mechanism in Boring at all (`VariantField` carries only a name/type, no mutability
+    /// flag), so `isMutable`/`isRebindable` are always `false` for an enum field's `Field`
+    /// entry — there is no Boring-source syntax that would grant either permission. Type-
+    /// level (`type let`/`type def`/`type req`) members are struct-only here too — there is
+    /// no `EnumDecl::type_vars` at all, and (see `EnumDecl::type_methods`'s own doc
+    /// comment) the language's `type_methods` support for enums is itself still a
+    /// pre-existing, Introspect-unrelated gap. `type var` (mutable type-level fields) and
+    /// `TypeMethodKind::Set` are excluded too, matching the transpiler's own deferred scope.
+    fn try_introspect_method(&self, obj: &Value) -> Option<Eval> {
+        use crate::ast::TypeMethodKind;
+        let field_obj = |name: &str, is_pub: bool, is_instance: bool, is_mutable: bool,
+                          is_rebindable: bool, owner_type: &str, kind: &str| -> Value {
+            make_object("Field".to_string(), vec![
+                ("name".to_string(), Value::Str(name.to_string())),
+                ("isPublic".to_string(), Value::Bool(is_pub)),
+                ("isInstance".to_string(), Value::Bool(is_instance)),
+                ("isMutable".to_string(), Value::Bool(is_mutable)),
+                ("isRebindable".to_string(), Value::Bool(is_rebindable)),
+                ("__ownerType".to_string(), Value::Str(owner_type.to_string())),
+                ("__kind".to_string(), Value::Str(kind.to_string())),
+            ])
+        };
+        // `is_callable`/`method_kind` are the interpreter's mirror of the transpiler's
+        // `introspect_method_is_callable`/`MethodKind` — much narrower here, since the
+        // interpreter is dynamically typed and `call_fn` already handles variadic/
+        // defaulted params and `throws` propagation generically (no `FieldValue`
+        // marshaling boundary to hit). The only real exclusion is `task`/`stream`: a
+        // genuinely different call shape (real cooperative scheduling / a collected
+        // stream) that `request`/`modify` don't attempt, matching the transpiler's own
+        // scope cut — deliberate PARITY between the two backends, not a technical
+        // necessity on this dynamically-typed side (`call_fn` could technically run
+        // either kind synchronously).
+        let method_kind_value = |is_task: bool, is_stream: bool| -> Value {
+            let variant = if is_task { "Task" } else if is_stream { "Stream" } else { "Plain" };
+            Value::EnumVariant { type_name: "MethodKind".to_string(), variant: variant.to_string(), fields: vec![] }
+        };
+        let method_obj = |name: &str, is_pub: bool, is_instance: bool, is_mutable: bool,
+                           is_task: bool, is_stream: bool, throws: bool,
+                           owner_type: &str, kind: &str| -> Value {
+            make_object("Method".to_string(), vec![
+                ("name".to_string(), Value::Str(name.to_string())),
+                ("isPublic".to_string(), Value::Bool(is_pub)),
+                ("isInstance".to_string(), Value::Bool(is_instance)),
+                ("isMutable".to_string(), Value::Bool(is_mutable)),
+                ("isCallable".to_string(), Value::Bool(!is_task && !is_stream)),
+                ("isThrowing".to_string(), Value::Bool(throws)),
+                ("kind".to_string(), method_kind_value(is_task, is_stream)),
+                ("__ownerType".to_string(), Value::Str(owner_type.to_string())),
+                ("__kind".to_string(), Value::Str(kind.to_string())),
+            ])
+        };
+        match obj {
+            Value::Object(inner_rc) => {
+                let (type_name, fields) = {
+                    let inner = inner_rc.borrow();
+                    (inner.type_name.clone(), inner.fields.clone())
+                };
+                let Some(Value::Struct { decl, .. }) = self.global.borrow().get(&type_name) else { return None; };
+                if !decl.protocols.iter().any(|p| p == "Introspect") { return None; }
+                let mut all_fields: Vec<Value> = fields.iter().map(|(name, _)| {
+                    let fd = decl.fields.iter().find(|f| &f.name == name);
+                    field_obj(name,
+                        fd.map(|f| f.is_pub).unwrap_or(true),
+                        true,
+                        fd.map(|f| f.ty.grants_mut()).unwrap_or(false),
+                        fd.map(|f| f.mutable).unwrap_or(false),
+                        &type_name, "instance")
+                }).collect();
+                let mut all_methods: Vec<Value> = decl.methods.iter()
+                    .filter(|m| !m.is_native)
+                    .map(|m| method_obj(&m.name, m.is_pub, true, m.mutating, m.task, m.stream, m.throws, &type_name, "instance"))
+                    .collect();
+                // Type-level `type let` fields / `type def`/`type req` methods — struct
+                // only, `type let` only (no `type var`), `Def`/`Req` only (no `Set`).
+                // `TypeMethod` has no `stream` concept at all (only `task`).
+                for tv in &decl.type_vars {
+                    if tv.mutable { continue; }
+                    all_fields.push(field_obj(&tv.name, tv.is_pub, false, false, false, &type_name, "type"));
+                }
+                for tm in &decl.type_methods {
+                    if matches!(tm.kind, TypeMethodKind::Set) { continue; }
+                    all_methods.push(method_obj(&tm.name, tm.is_pub, false,
+                        matches!(tm.kind, TypeMethodKind::Def), tm.task, false, tm.throws, &type_name, "type"));
+                }
+                // A struct has no variants of its own — treated as its own single,
+                // permanent "variant", mirroring `emit_introspect_struct_impl`.
+                Some(Ok(make_object("IntrospectInfo".to_string(), vec![
+                    ("typeName".to_string(), Value::Str(type_name.clone())),
+                    ("variantName".to_string(), Value::Str(type_name.clone())),
+                    ("variantIndex".to_string(), Value::Int(0)),
+                    ("fields".to_string(), Value::Array(Rc::new(all_fields))),
+                    ("methods".to_string(), Value::Array(Rc::new(all_methods))),
+                ])))
+            }
+            Value::EnumVariant { type_name, variant, .. } => {
+                let Some(Value::EnumNamespace { protocols, methods, .. }) = self.global.borrow().get(type_name) else { return None; };
+                if !protocols.iter().any(|p| p == "Introspect") { return None; }
+                // Only NAMED variant fields are exposed — same rule as
+                // `emit_introspect_enum_impl` (no string to look an unnamed positional
+                // field up by). `self.enums` (keyed by enum name) holds the declared
+                // `EnumVariant`/`VariantField` list this needs.
+                let decl_variant = self.enums.get(type_name)
+                    .and_then(|d| d.variants.iter().find(|v| &v.name == variant));
+                let variant_index = self.enums.get(type_name)
+                    .and_then(|d| d.variants.iter().position(|v| &v.name == variant))
+                    .unwrap_or(0);
+                let field_objs: Vec<Value> = decl_variant
+                    .map(|v| v.fields.iter().filter_map(|f| f.name.as_deref())
+                        .map(|fname| field_obj(fname, true, true, false, false, type_name, "instance"))
+                        .collect())
+                    .unwrap_or_default();
+                let method_objs: Vec<Value> = methods.iter().filter(|m| !m.is_native)
+                    .map(|m| method_obj(&m.name, m.is_pub, true, m.mutating, m.task, m.stream, m.throws, type_name, "instance"))
+                    .collect();
+                Some(Ok(make_object("IntrospectInfo".to_string(), vec![
+                    ("typeName".to_string(), Value::Str(type_name.clone())),
+                    ("variantName".to_string(), Value::Str(variant.clone())),
+                    ("variantIndex".to_string(), Value::Int(variant_index as i64)),
+                    ("fields".to_string(), Value::Array(Rc::new(field_objs))),
+                    ("methods".to_string(), Value::Array(Rc::new(method_objs))),
+                ])))
+            }
+            _ => None,
+        }
+    }
+
+    /// Intercepts the five reflection-handle method calls (`get`/`set` on a
+    /// `Field`, `request`/`modify`/`call` on a `Method`) — dynamically-typed counterpart
+    /// to the transpiler's `try_emit_introspect_handle_call` (emit_methods.rs). Returns
+    /// `None` (decline, fall through to ordinary dispatch) whenever `obj` isn't a `Field`/
+    /// `Method` value — `Field`/`Method` are never registered as a `Value::Struct`/
+    /// `EnumNamespace` global the way a real Boring-declared type would be, so nothing
+    /// else in the interpreter could handle these five names on such a receiver anyway.
+    /// There is no `getMut` — dropped post-ship on both backends (see the design memo):
+    /// never a real capability even under `boring build`, since a scalar field can't be
+    /// `mut`-qualified in Boring at all, and every other field type fell back to an opaque
+    /// handle Boring source couldn't consume anyway.
+    ///
+    /// Field/method resolution is fully dynamic here (re-derived from the `instance`
+    /// argument's own runtime type on every call for `get`/`set`/`request`/`modify`)
+    /// rather than trusting the `Field`/`Method` value's own hidden `__ownerType` bookkeeping
+    /// for the instance-scoped forms — natural in a dynamically-typed runtime, and slightly
+    /// more permissive than the transpiler's static downcast-or-throw (a `Field` handle
+    /// obtained from one instance can validly be used against another same-shaped instance
+    /// here without a "wrong instance type" error, since there is no static type to check
+    /// against — only the field/method actually being present on the instance matters).
+    /// The type-level forms (`get()`/`call()` with no instance) still need `__ownerType`,
+    /// since there is no instance argument to derive a type from at all.
+    fn try_introspect_handle_call(&mut self, obj: &Value, method: &str, args: &[Value], line: usize) -> Option<Eval> {
+        let Value::Object(inner_rc) = obj else { return None; };
+        let (recv_type, handle_fields) = {
+            let inner = inner_rc.borrow();
+            (inner.type_name.clone(), inner.fields.clone())
+        };
+        if recv_type != "Field" && recv_type != "Method" { return None; }
+        let str_field = |name: &str| -> String {
+            handle_fields.iter().find(|(n, _)| n == name)
+                .and_then(|(_, v)| if let Value::Str(s) = v { Some(s.clone()) } else { None })
+                .unwrap_or_default()
+        };
+        let bool_field = |name: &str| -> bool {
+            handle_fields.iter().find(|(n, _)| n == name)
+                .and_then(|(_, v)| if let Value::Bool(b) = v { Some(*b) } else { None })
+                .unwrap_or(false)
+        };
+        let name = str_field("name");
+        let owner_type = str_field("__ownerType");
+        let is_instance = str_field("__kind") == "instance";
+        Some(match (recv_type.as_str(), method, is_instance) {
+            ("Field", "get", true)     => self.introspect_field_get(args, &name, line),
+            ("Field", "get", false)    => self.introspect_type_field_get(&owner_type, &name, line),
+            ("Field", "set", true)     => self.introspect_field_set(args, &name, bool_field("isRebindable"), line),
+            ("Field", "set", false)    => self.introspect_type_field_set(&owner_type, &name, bool_field("isRebindable"), args, line),
+            ("Method", "request", _)   => self.introspect_method_request(args, &name, line),
+            ("Method", "modify", _)    => self.introspect_method_modify(args, &name, line),
+            ("Method", "call", _)      => self.introspect_type_method_call(&owner_type, &name, args, line),
+            _ => Err(err(format!("no method '{}' on {}", method, recv_type), line)),
+        })
+    }
+
+    fn introspect_field_get(&self, args: &[Value], field_name: &str, line: usize) -> Eval {
+        let instance = args.first().ok_or_else(|| err("get() requires an instance argument", line))?;
+        match instance {
+            Value::Object(inner_rc) => {
+                let inner = inner_rc.borrow();
+                inner.fields.iter().find(|(n, _)| n == field_name).map(|(_, v)| v.clone())
+                    .ok_or_else(|| err(format!("no field '{}' on instance", field_name), line))
+            }
+            Value::EnumVariant { type_name, variant, fields } => {
+                let idx = self.enums.get(type_name)
+                    .and_then(|d| d.variants.iter().find(|v| &v.name == variant))
+                    .and_then(|v| v.fields.iter().position(|f| f.name.as_deref() == Some(field_name)));
+                idx.and_then(|i| fields.get(i).cloned())
+                    .ok_or_else(|| err(format!("field '{}' is not present on the current runtime variant", field_name), line))
+            }
+            _ => Err(err("get() requires a struct/enum instance argument", line)),
+        }
+    }
+
+    fn introspect_type_field_get(&self, owner_type: &str, field_name: &str, line: usize) -> Eval {
+        let key = format!("{}::{}", owner_type, field_name);
+        self.type_var_store.get(&key).cloned()
+            .ok_or_else(|| err(format!("no type-level field '{}' on '{}'", field_name, owner_type), line))
+    }
+
+    fn introspect_field_set(&self, args: &[Value], field_name: &str, is_rebindable: bool, line: usize) -> Eval {
+        if !is_rebindable {
+            return Err(err(format!("field '{}' is not rebindable", field_name), line));
+        }
+        let instance = args.first().ok_or_else(|| err("set() requires an instance argument", line))?;
+        let value = args.get(1).cloned().unwrap_or(Value::Nil);
+        match instance {
+            Value::Object(inner_rc) => {
+                let mut inner = inner_rc.borrow_mut();
+                match inner.fields.iter_mut().find(|(n, _)| n == field_name) {
+                    Some(slot) => { slot.1 = value; Ok(Value::Void) }
+                    None => Err(err(format!("no field '{}' on instance", field_name), line)),
+                }
+            }
+            // Never reached today — `isRebindable` is always `false` for an enum field's
+            // `Field` entry (see `try_introspect_method`'s doc comment), so this arm exists
+            // only for a defensive, clear message if that ever changes.
+            _ => Err(err("set() on an enum instance is not supported — enum variant data has no var/mut mechanism", line)),
+        }
+    }
+
+    fn introspect_type_field_set(&mut self, owner_type: &str, field_name: &str, is_rebindable: bool, args: &[Value], line: usize) -> Eval {
+        let _ = args;
+        let _ = is_rebindable;
+        // `type var` fields are excluded from reflection entirely (see
+        // `try_introspect_method`'s doc comment) — `isRebindable` is always `false` for a
+        // type-level `Field`, so this is unreachable via the documented API; kept as a
+        // clear, defensive error rather than a silent no-op.
+        Err(err(format!("type-level field '{}::{}' is not rebindable — 'type var' reflection is not supported yet", owner_type, field_name), line))
+    }
+
+    fn introspect_method_request(&mut self, args: &[Value], method_name: &str, line: usize) -> Eval {
+        let instance = args.first().cloned().ok_or_else(|| err("request() requires an instance argument", line))?;
+        let call_args = Self::introspect_unpack_call_args(args.get(1));
+        let (fn_decl, captured) = self.introspect_resolve_instance_method(&instance, method_name, line)?;
+        Self::introspect_check_callable(&fn_decl, line)?;
+        if fn_decl.mutating {
+            return Err(err(format!("method '{}' requires mutable access — use modify()", method_name), line));
+        }
+        let fn_env = Env::child(captured);
+        fn_env.borrow_mut().define_mut("self", instance);
+        self.call_fn(&fn_decl, fn_env, call_args, line, false)
+    }
+
+    fn introspect_method_modify(&mut self, args: &[Value], method_name: &str, line: usize) -> Eval {
+        let instance = args.first().cloned().ok_or_else(|| err("modify() requires an instance argument", line))?;
+        let call_args = Self::introspect_unpack_call_args(args.get(1));
+        let (fn_decl, captured) = self.introspect_resolve_instance_method(&instance, method_name, line)?;
+        Self::introspect_check_callable(&fn_decl, line)?;
+        let fn_env = Env::child(captured);
+        fn_env.borrow_mut().define_mut("self", instance);
+        self.call_fn(&fn_decl, fn_env, call_args, line, false)
+    }
+
+    /// `request`/`modify`/type-level `call()`'s shared "is this actually callable"
+    /// gate — mirrors the transpiler's `Method.isCallable`/`MethodAccess`'s
+    /// `Some`/`None` slot (see `emit_introspect_prelude`'s doc comment): `task`/`stream`
+    /// methods are excluded, deliberately for PARITY with the transpiler backend (see
+    /// `try_introspect_method`'s doc comment on `is_callable`/`method_kind`), not because
+    /// `call_fn` itself couldn't run either kind of body here.
+    fn introspect_check_callable(fn_decl: &FnDecl, line: usize) -> Result<(), Signal> {
+        if fn_decl.task || fn_decl.stream {
+            return Err(err(format!(
+                "method '{}' is not callable via reflection — task/stream methods cannot be invoked this way",
+                fn_decl.name
+            ), line));
+        }
+        Ok(())
+    }
+
+    fn introspect_type_method_call(&mut self, owner_type: &str, method_name: &str, args: &[Value], line: usize) -> Eval {
+        let call_args = Self::introspect_unpack_call_args(args.first());
+        let Some(Value::Struct { decl, captured }) = self.global.borrow().get(owner_type) else {
+            return Err(err(format!("unknown type '{}'", owner_type), line));
+        };
+        let Some(tm) = decl.type_methods.iter().find(|m| m.name == method_name).cloned() else {
+            return Err(err(format!("no type method '{}' on '{}'", method_name, owner_type), line));
+        };
+        if tm.task {
+            return Err(err(format!(
+                "method '{}' is not callable via reflection — task methods cannot be invoked this way",
+                tm.name
+            ), line));
+        }
+        self.call_type_method(owner_type, &tm, call_args, captured, line)
+    }
+
+    /// `request`/`modify`'s second argument and `call`'s first argument are each a Boring
+    /// `[...]` array of call arguments — unwrap the `Value::Array`, or treat anything else
+    /// (missing, wrong shape) as "no arguments" rather than erroring, matching the
+    /// permissive style already used elsewhere in this file for optional trailing args.
+    fn introspect_unpack_call_args(v: Option<&Value>) -> Vec<Value> {
+        match v {
+            Some(Value::Array(arr)) => (**arr).clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Resolves `method_name` against `instance`'s own runtime type (a struct `Value::Object`
+    /// or an enum `Value::EnumVariant`) — shared by `introspect_method_request`/`_modify`.
+    fn introspect_resolve_instance_method(&self, instance: &Value, method_name: &str, line: usize) -> Result<(FnDecl, EnvRef), Signal> {
+        match instance {
+            Value::Object(inner_rc) => {
+                let type_name = inner_rc.borrow().type_name.clone();
+                let Some(Value::Struct { decl, captured }) = self.global.borrow().get(&type_name) else {
+                    return Err(err(format!("wrong instance type for method '{}'", method_name), line));
+                };
+                decl.methods.iter().find(|m| m.name == method_name).cloned()
+                    .map(|fd| (fd, captured))
+                    .ok_or_else(|| err(format!("no method '{}' on type '{}'", method_name, type_name), line))
+            }
+            Value::EnumVariant { type_name, .. } => {
+                let Some(Value::EnumNamespace { methods, captured, .. }) = self.global.borrow().get(type_name) else {
+                    return Err(err(format!("wrong instance type for method '{}'", method_name), line));
+                };
+                methods.iter().find(|m| m.name == method_name).cloned()
+                    .map(|fd| (fd, captured))
+                    .ok_or_else(|| err(format!("no method '{}' on enum '{}'", method_name, type_name), line))
+            }
+            _ => Err(err("request()/modify() require a struct/enum instance argument", line)),
         }
     }
 

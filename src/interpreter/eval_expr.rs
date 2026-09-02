@@ -716,7 +716,20 @@ impl Interpreter {
         }
         // Enforce: mutating method cannot be called on an immutable (let) binding
         // Built-in non-mutating methods (e.g. `upgrade`) bypass this check.
-        const BUILTIN_NON_MUTATING: &[&str] = &["upgrade", "clone"];
+        // `introspect` is the v2 `Introspect` trait's one read-only method (see
+        // `Interpreter::try_introspect_method` in methods.rs) — like `clone`/`upgrade`,
+        // this name is checked unconditionally here regardless of whether the receiver's
+        // type actually declares `as Introspect`, matching the same approximation already
+        // accepted for `clone`/`upgrade` (a type that happens to declare its own mutating
+        // method named exactly `introspect` would be mis-flagged as read-only by this
+        // diagnostic only — same accepted tradeoff). The five reflection-handle methods
+        // (`get`/`set`/`request`/`modify`/`call`, called on a `Field`/`Method`
+        // value, not on the original struct/enum) don't need an entry here at all — see
+        // `try_introspect_handle_call`'s doc comment: `Field`/`Method` are never
+        // registered as a `Value::Struct` global, so the `else` branch below already
+        // treats them as an opaque external-style receiver (`is_mutating = false`)
+        // without needing this allowlist.
+        const BUILTIN_NON_MUTATING: &[&str] = &["upgrade", "clone", "introspect"];
         if let ExprKind::Var(binding_name) = &obj_expr.kind {
             if !BUILTIN_NON_MUTATING.contains(&method) {
                 if let Value::Object(inner_rc) = &obj {

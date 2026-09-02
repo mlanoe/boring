@@ -3184,6 +3184,409 @@ shapes: Vec<Box<dyn Drawable>>,
 
 For **static dispatch** (no heap allocation, function determines the concrete type), use the `<Trait>` shorthand — see [Generics — trait shorthand](#trait-shorthand----trait).
 
+### Introspect — read-only reflection
+
+`Introspect` is a built-in trait — no `trait Introspect:` declaration needed — that gives a struct or enum Java-`java.lang.reflect`-style access to its own shape at runtime: one `introspect()` call returns a descriptor object exposing `Field`/`Method` **handles**, which you then call to read (and, where the language permits it, write) the underlying data. Declare `Introspect` in the header, and the compiler synthesizes the whole `impl` for you from the type's own field/method list:
+
+```boring
+struct Point as Introspect:
+    float x
+    float y
+    string label
+    bool active
+
+    req string describe():
+        "Point({x}, {y})"
+
+def main() throws:
+    let p = Point(x = 1.5, y = 2.5, label = "origin", active = true)
+    let info = p.introspect()
+    print "type: {info.typeName}"
+    for f in info.fields:
+        let v = f.get(p)
+        print "  {f.name} = {v:?}"
+    for m in info.methods:
+        let r = m.request(p, [])
+        print "  {m.name}() = {r:?}"
+# type: Point
+#   x = Float(1.5)
+#   y = Float(2.5)
+#   label = Str("origin")
+#   active = Bool(true)
+#   describe() = Str("Point(1.5, 2.5)")
+```
+
+`introspect()` returns an `IntrospectInfo`:
+
+```boring
+struct IntrospectInfo:
+    string typeName
+    string variantName    # struct: == typeName ; enum: current runtime variant's name
+    uint variantIndex      # struct: 0 ; enum: current runtime variant's index
+    [Field] fields          # struct: all fields ; enum: current variant's NAMED fields only
+    [Method] methods        # scoped to the WHOLE type, never per-variant
+```
+
+Each `Field`/`Method` is a small handle, resolved once and reusable against any matching instance:
+
+```boring
+struct Field:
+    string name
+    bool isPublic
+    bool isInstance     # false = type-level (`type let`/`type var`) — see below
+    bool isMutable        # informational — `mut`/`var mut` on the field's own type; gates nothing (see note below)
+    bool isRebindable     # `var`/`var mut` on the field — gates set()
+
+    req FieldValue get(Introspect instance) throws
+    req void set(mut Introspect instance, FieldValue value) throws   # throws if !isRebindable
+
+struct Method:
+    string name
+    bool isPublic
+    bool isInstance      # false = type-level (`type def`/`type req`) — see below
+    bool isMutable          # informational: true = backed by `def` (mutating)
+    bool isCallable         # false = task/stream, or a variadic/defaulted/non-reflectable-
+                             # typed parameter — request()/modify()/call() throw a clear
+                             # "not callable via reflection" error rather than being generated
+                             # a call body that could never work — see "Method visibility" below
+    bool isThrowing          # informational: true = the underlying method is `throws`-declared
+    MethodKind kind          # Plain | Task | Stream — see below
+
+    req FieldValue request(Introspect instance, [FieldValue] args) throws   # req-backed
+    req FieldValue modify(mut Introspect instance, [FieldValue] args) throws # def-backed
+```
+
+`MethodKind` is a small built-in enum, always available (no declaration needed, same as `Error`):
+
+```boring
+enum MethodKind:
+    Plain
+    Task
+    Stream
+```
+
+`get(instance)`/`request(instance, args)` above are what the first example already used. `set`/`modify` add write access — see "Mutation" below. All five `throws` — call sites need a `throws` (or `try`) context, same as any other throwing call, so `def main() throws:` above isn't incidental.
+
+> **Design note** — `request`/`modify` are two separate methods (not one `call()` overloaded on mutability) precisely so a `req`-backed `Method` can be called by ANY caller (`request`, taking just `&`-access) while a `def`-backed one needs `modify` (`&mut`-access) — calling `request` on a `def`-backed method throws at runtime ("requires mutable access — use modify()"); calling `modify` on a `req`-backed one works fine (a mutable reference always reborrows as a shared one).
+
+`get`/`request`/`modify` all resolve leaf values through `FieldValue`, a small type-erased tagged union:
+
+| `FieldValue` variant | Holds |
+|---|---|
+| `Int(isize)` | any integer type (`int`, `uint`, `int8`..`int128`, `uint8`..`uint128`) |
+| `Float(f64)` | `float32` or `float64`/`float` |
+| `Bool(bool)` | `bool` |
+| `Str(...)` | `string` — holds `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) |
+| `Nested(Introspect)` | an `'inline`/`'owned`/`'shared` field whose OWN type also declares `as Introspect` — a real, recursively-introspectable value, not a Debug string. See "Recursive reflection" below. |
+| `Actor(Introspect)` / `Guard(Introspect)` | same, for an `'actor`/`'guard`-qualified field — shape visible, but recursing further is a degraded, cleanly-failing case. See "Recursive reflection" below. |
+| `Other(String)` | anything else (a nested struct/enum whose type DOESN'T declare `as Introspect`, a collection, `T?`, …) — the field's own `{:?}` (Debug) rendering |
+
+#### Method visibility — `info.methods` is exhaustive except `native`
+
+Every method appears in `info.methods` — **`native`** (its body is runtime-implemented, nothing Boring-level to call) is the only true exclusion. This includes `task`/`stream` methods and methods with a variadic/defaulted/non-`FieldValue`-representable-typed parameter (a nested struct, a collection, …) — shapes that used to be silently excluded outright. Whether a real call body actually exists for a given `Method` is a separate question, answered by `isCallable`:
+
+- **`kind: Task`/`Stream`** — a genuinely different call shape (a `Future`/an iterator of values, not one synchronous `FieldValue`) that `request`/`modify` don't attempt. Always `isCallable: false`.
+- **A variadic, defaulted, or non-primitive-typed parameter** — `Other`'s Debug string can't be reconstructed back into an arbitrary concrete type (see the `FieldValue` table above), and there's no argument-count-with-defaults resolution attempted. Always `isCallable: false`.
+- **Everything else — including `throws`-declared methods — is `isCallable: true`.** `throws` used to be excluded too; it no longer is (see below). The return type is never a reason to exclude a method (like a field, it always has a `FieldValue` to fall back to, via `Other`).
+
+Calling `request`/`modify`/`call` on an `isCallable: false` `Method` throws a clear `"method '<name>' is not callable via reflection — ..."` error — never a silent wrong result, a panic, or a mis-dispatch to the wrong call shape.
+
+> **`throws` methods are genuinely callable, not just visible.** `request`/`modify` on a `throws`-backed `Method` actually calls the underlying method and propagates any thrown error as a real error from `request`/`modify` itself — catchable with `try`/`try?`, same as calling the method directly would be. (Under `boring run`, an `isCallable: false` call is a hard interpreter error instead, not a language-level `throw` — see the callout further below.)
+
+> **Note** — struct/enum method bodies can't be declared `stream` in Boring today (only top-level functions can) — a pre-existing, Introspect-unrelated parser gap. `MethodKind.Stream` exists and is wired end-to-end on both backends, ready for whenever that gap closes; in practice every `Method` you see today reports `kind: Plain` or `kind: Task`.
+
+> **Limitation — literal `FieldValue` arguments.** Building `request`/`modify`/`set` call arguments (`FieldValue.Str("hi")`) with a string LITERAL directly runs into an auto-promotion mismatch: a literal argument to any Boring-declared-type call is auto-promoted to `Arc<str>`/`Rc<str>`, which doesn't always line up cleanly with what the receiving parameter expects. Route the value through a variable first when in doubt.
+>
+> **`boring run` — skip `FieldValue` entirely for arguments.** Every example below that constructs a `FieldValue.Int(...)`/`FieldValue.Str(...)` value to pass into `set`/`modify`/`call` is `boring build`-only for that construction — `FieldValue` is a transpiler-only Rust type (see `emit_introspect_prelude`) with no interpreter equivalent, so `FieldValue.Int(100)` is an "undefined variable" error under `boring run`. The interpreter's `get`/`request`/etc. work with plain runtime values directly instead (`f.set(instance, 100)`, `m.request(instance, [5])` — no wrapper), matching how `get()`'s *return* value is already a plain value there too (see "On enums" and the phases covered by `src/interpreter/tests.rs`'s `test_introspect_struct_set_and_request`).
+>
+> **`boring run` — an `isCallable: false` call is a hard error, not a catchable `throw`.** Under `boring build`, `request`/`modify`/`call` on a non-callable `Method` returns a real `IntrospectError` through the normal `Result`/`?` machinery — catchable with `try`/`try?` like any other thrown error. The interpreter's equivalent check raises a genuine interpreter runtime error instead (the same kind raised for e.g. "no field '…' on instance"), which **cannot** be caught with `try`/`try?`/`catch` — it stops the program. A `throws`-method's own thrown error, in contrast, propagates as a normal catchable throw on both backends (see the example below).
+
+Example — a `task` method's `Method` entry, and a `throws` method actually being called:
+
+```boring
+struct Widget as Introspect:
+    var int count
+
+    task req int fetchCount():
+        count
+
+    req int risky(int x) throws:
+        guard x != 0 else throw Error.InvalidInput
+        100 / x
+
+def main() throws:
+    let w = Widget(count = 5)
+    let info = w.introspect()
+    for m in info.methods:
+        if m.name == "fetchCount":
+            print "{m.name}: kind={m.kind == MethodKind.Task}, isCallable={m.isCallable}"
+        if m.name == "risky":
+            let ok = m.request(w, [FieldValue.Int(5)])
+            print "risky(5) = {ok:?}"
+            let bad = try? m.request(w, [FieldValue.Int(0)])
+            print "risky(0) threw: {bad == nil}"
+# fetchCount: kind=true, isCallable=false
+# risky(5) = Int(20)
+# risky(0) threw: true
+```
+
+(`FieldValue.Int(...)` above is `boring build`-only, per the callout above — under `boring run`, pass `[5]`/`[0]` directly instead; both were verified with a real `cargo build`+run and `boring run` before being written here.)
+
+**Rust equivalent** (abridged — see `src/transpiler/mod.rs`'s `emit_introspect_prelude` for the full generated prelude)
+```rust
+enum FieldValue { Int(isize), Float(f64), Bool(bool), Str(Arc<str>), Other(String) }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MethodKind { Plain, Task, Stream }
+trait Introspect: std::any::Any {
+    fn introspect(&self) -> &'static IntrospectInfo;
+}
+struct Field { name: Arc<str>, isPublic: bool, isInstance: bool, isMutable: bool, isRebindable: bool, /* .. */ }
+impl Field {
+    fn get(&self, instance: &dyn Introspect) -> Result<FieldValue, IntrospectError> { /* .. */ }
+}
+struct Method { name: Arc<str>, isPublic: bool, isInstance: bool, isMutable: bool, isCallable: bool, isThrowing: bool, kind: MethodKind, /* .. */ }
+impl Introspect for Point {
+    fn introspect(&self) -> &'static IntrospectInfo {
+        static INFO: std::sync::OnceLock<IntrospectInfo> = std::sync::OnceLock::new();
+        INFO.get_or_init(|| IntrospectInfo {
+            typeName: Arc::from("Point"),
+            fields: vec![Field { name: Arc::from("x"), /* .. */ }, /* .. */],
+            methods: vec![/* .. */],
+            ..
+        })
+    }
+}
+```
+Each `Field`/`Method` carries a plain Rust `fn` pointer, wrapped in `Option` (`None` when `isCallable`/a setter isn't available — no closures either way, nothing to capture, one named free function per field/method) that downcasts the `&dyn Introspect`/`&mut dyn Introspect` it's given back to the concrete type via `std::any::Any` before touching the real field/method — this is what lets a `Field`/`Method` resolved from one instance be called against any other instance of the same type.
+
+> **`introspect()` is computed once per type, not per call.** The `IntrospectInfo` returned isn't rebuilt on every `.introspect()` — it's backed by a per-type `static` (`OnceLock`, one entry for a struct; a `OnceLock<Vec<IntrospectInfo>>` indexed by `variantIndex()` for an enum, since fields vary by variant but nothing about *how* to compute them depends on which instance is asking). This is transparent to Boring source — `let info = w.introspect(); info.fields` behaves identically whether the underlying Rust value is owned or `&'static` — Boring already treats every struct-typed value as reference-like (see the parameter-passing rules). (Same pattern the transpiler already uses for `GPU(n)`'s real adapter enumeration — see `src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration` — a static computed once, not a language-level feature.)
+
+#### Mutation — `set`/`modify`
+
+`set()` writes a whole new value into a rebindable (`var`/`var mut`) field; `modify()` calls a mutating (`def`-backed) method. Both work identically under `boring build` and `boring run`.
+
+```boring
+struct Counter as Introspect:
+    var int value = 0
+    let string label = "c"
+
+    def bump(int by):
+        value = value + by
+
+def main() throws:
+    mut c = Counter(value = 10, label = "hits")
+    let info = c.introspect()
+
+    for f in info.fields:
+        if f.name == "value":
+            f.set(c, FieldValue.Int(100))
+
+    print "after set: value={c.value}"     # 100
+
+    for m in info.methods:
+        if m.name == "bump":
+            let r = m.modify(c, [FieldValue.Int(1)])
+            print "bump() = {r:?}"
+
+    print "after modify: value={c.value}"  # 101
+```
+
+#### Recursive reflection — `Nested`/`Actor`/`Guard`
+
+`get()` on a field whose OWN type also declares `as Introspect` doesn't fall back to `Other`'s Debug string — it returns a real, recursively-introspectable value: `Nested` for `'inline`/`'owned`/`'shared`, `Actor`/`Guard` for `'actor`/`'guard` (separate tags, identical payload shape — the split is purely for provenance, telling you which qualifier the field had). Every one of these wraps an `Introspect` value you can call `.introspect()` on again, just like the original instance:
+
+```boring
+struct Inner as Introspect:
+    int value
+    string label
+
+struct Outer as Introspect:
+    Inner inline_inner
+    Inner'owned owned_inner
+    Inner'shared shared_inner
+
+def main() throws:
+    let o = Outer(
+        inline_inner = Inner(value = 1, label = "a"),
+        owned_inner = Inner(value = 2, label = "b"),
+        shared_inner = Inner(value = 3, label = "c"),
+    )
+    let info = o.introspect()
+    for f in info.fields:
+        match f.get(o):
+            Nested(inner_obj):
+                let inner_info = inner_obj.introspect()
+                print "{f.name}: type={inner_info.typeName}"
+                for inner_f in inner_info.fields:
+                    print "    {inner_f.name} = {inner_f.get(inner_obj):?}"
+            _:
+                pass
+# inline_inner: type=Inner
+#     value = Int(1)
+#     label = Str("a")
+# owned_inner: type=Inner
+#     value = Int(2)
+#     label = Str("b")
+# shared_inner: type=Inner
+#     value = Int(3)
+#     label = Str("c")
+```
+
+`'actor`/`'guard` fields work the same way for the FIRST level — `inner_obj.introspect()` shows the nested value's shape — but a `Field`/`Method` obtained from THAT `introspect()` call, used again against the same `inner_obj`, fails cleanly rather than working: `RefCell`/`Mutex`/`RwLock`'s own `Introspect` impl deliberately does not delegate the internal downcast hook through the lock (the same borrow-checker wall that killed an earlier `getMut()` design for this feature — a lock guard's lifetime is independent of `&self`'s, so a reference borrowed from a temporary guard can never be handed back). This is a real, permanent limitation, not a bug:
+
+```boring
+struct Counter as Introspect:
+    int n
+
+struct Holder as Introspect:
+    Counter'actor locked
+
+def main() throws:
+    let h = Holder(locked = Counter(n = 1))
+    let info = h.introspect()
+    match info.fields[0].get(h):
+        Actor(inner_obj):
+            let inner_info = inner_obj.introspect()       # works — shows the shape
+            print "type: {inner_info.typeName}"
+            let failed = try? inner_info.fields[0].get(inner_obj)
+            print "recursing into a field failed cleanly: {failed == nil}"
+        _:
+            pass
+# type: Counter
+# recursing into a field failed cleanly: true
+```
+
+Both examples are `boring build`-verified (real `cargo build`+run); see [`examples/introspect_nested_demo.br`](../examples/introspect_nested_demo.br) for the combined version (all five qualifiers on one struct).
+
+> **Qualifying rules.** A field gets `Nested`/`Actor`/`Guard` only when its own type declares `as Introspect` — anything else still falls back to `Other`, exactly as before. `'inline`/`'owned` additionally require the target type to be `Clone` (the default for a plain struct — see [Mutable fields](#mutable-fields) — unless it holds a non-`Clone` field like an atomic, or an explicit `@derive(...)` omits `Clone`); `'shared`/`'actor`/`'guard` need no such check — cloning there only ever bumps a handle's refcount, never clones the wrapped value itself.
+>
+> **Scope, this round** — read-only: `get()` produces `Nested`/`Actor`/`Guard`, but `set()` on a nested-Introspect-typed field is not attempted (same as any other `Other`-falling-back field). Struct fields only — an enum's own variant fields (`Circle(Point center)`) keep falling back to `Other`; a `type let` field of a struct gets the same treatment as an ordinary field for free (it goes through the identical codegen path).
+>
+> **`boring run`** — needs no special handling at all: the interpreter's one dynamic `Value` type already represents every struct instance the same way regardless of qualifier, so `get()` on a nested field just returns the live nested value directly — calling `.introspect()` on it recurses for free. The one asymmetry: there is no `FieldValue`-style tagging to `match` against under the interpreter (`Nested(x)`/`Actor(x)`/`Guard(x)` patterns never match — `get()`'s return value isn't wrapped at all), so a `match` written for the transpiler backend always falls through to `_` under `boring run`; use the returned value directly instead (`let v = f.get(o); let vi = v.introspect()`, no `match` needed).
+
+#### On enums
+
+An enum's field set depends on which variant a given value actually is, so `introspect()`'s `variantName`/`variantIndex`/`fields` all answer per the runtime variant — `methods`, in contrast, is the same list regardless of variant (an enum's methods don't vary by variant, only its fields do):
+
+```boring
+enum Shape as Introspect:
+    Circle(float radius)
+    Rect(float width, float height)
+    Point
+
+    req string kind():
+        "shape"
+
+def describe(Shape s) throws:
+    let info = s.introspect()
+    print "{info.variantName} (#{info.variantIndex})"
+    for f in info.fields:
+        print "  {f.name} = {f.get(s):?}"
+    for m in info.methods:
+        print "  {m.name}() = {m.request(s, []):?}"
+
+describe(Shape.Circle(2.0))
+# Circle (#0)
+#   radius = Float(2.0)
+#   kind() = Str("shape")
+
+describe(Shape.Point)
+# Point (#2)
+#   kind() = Str("shape")
+```
+
+Only **named** variant fields (`Circle(float radius)`, not a bare positional `Circle(float)`) are reachable — a field with no name has no string to look it up by. Enum variant fields never expose `set()` (`isRebindable` is always `false`): unlike a struct field, `VariantField` has no `var`/`mut` mechanism at all in Boring — there is no source syntax (`shape.radius = x`) that would grant this permission in the first place.
+
+A struct has no variants of its own — it's treated as its own single, permanent "variant": `introspect().variantName` returns its type name and `variantIndex` is always `0`. This is what lets a struct and an enum share one uniform interface.
+
+#### Type-level members
+
+`type let`/`type def`/`type req` members (see [Type-level members](#type-level-members--type) above) fold into the SAME `Field`/`Method` structs as ordinary instance members — `isInstance: false` marks them, and `get`/`set` (on `Field`) drop the `instance` argument entirely (an arity-differing overload — Boring's documented overloading resolves by parameter *count*, and `type let`/`type var` state is global/shared, not owned by any particular instance, so there's no instance to pass):
+
+```boring
+struct MathBox as Introspect:
+    float x
+
+    pub type let int maxItems = 10
+
+    pub type req int square(int n):
+        n * n
+
+def main() throws:
+    let m = MathBox(x = 1.0)
+    let info = m.introspect()
+    for f in info.fields:
+        if !f.isInstance:
+            let v = f.get()
+            print "type field {f.name} = {v:?}"
+    for meth in info.methods:
+        if !meth.isInstance:
+            let r = meth.call([FieldValue.Int(6)])
+            print "type method {meth.name}(6) = {r:?}"
+# type field maxItems = Int(10)
+# type method square(6) = Int(36)
+```
+
+Type-level methods use `call(args)` — no `request`/`modify` split, since there's no caller-privilege boundary to gate on instance mutability (there's no instance) the way `request`/`modify` gate on `Introspect instance` vs `mut Introspect instance`.
+
+> **Scope** — type-level reflection covers **structs only**, and only `type let` (read-only) fields, not `type var` (a mutable type-level field lowers to a module-level lock, and wiring `set` through that lock isn't implemented yet). Enums have no `type_vars` at all in Boring today, and the transpiler doesn't yet emit `type_methods` for enums regardless of `Introspect` — both pre-existing, Introspect-unrelated gaps.
+
+#### Dynamic dispatch
+
+`Introspect` never has a member that returns `Self`, so — unlike the `Factory` trait above, whose `type def Self create()` has no `self` receiver and is only ever called statically (`Point.create()`), safely returning `Self` — it stays **object-safe**. A bare `Introspect` in type position means `Box<dyn Introspect>` (see [Traits as types](#traits-as-types) above), so a collection of values whose concrete types differ can still all be inspected uniformly:
+
+```boring
+struct Point as Introspect:
+    float x
+    float y
+    string label
+
+enum Shape as Introspect:
+    Circle(float radius)
+    Rect(float width, float height)
+    Point
+
+def main() throws:
+    let [Introspect] items = [Point(x = 1.0, y = 2.0, label = "a"), Shape.Circle(3.0)]
+    for item in items:
+        print item.introspect().typeName
+# Point
+# Shape
+```
+
+**Rust equivalent**
+```rust
+let items: Vec<Box<dyn Introspect>> = vec![
+    Box::new(Point { x: 1.0, y: 2.0, label: Arc::from("a") }),
+    Box::new(Shape::Circle(3.0)),
+];
+for item in &items {
+    println!("{}", item.introspect().typeName);
+}
+```
+
+> **`boring build` only** — the `[Introspect] items = [...]` heterogeneous-array-literal form above needs the transpiler's trait-array-literal boxing machinery, which the interpreter (`boring run`) doesn't implement. The core reflection calls (`get`/`set`/`request`/`modify`/`call`, struct and enum) work identically under both backends — see the callout above for the one exception (`FieldValue.X(...)`-literal call arguments).
+
+> **Note** — `Introspect` has no way to construct a new instance; adding one would mean returning `Self`, which a `dyn Introspect` value can't do. Pair it with [`Factory`](#type-level-methods-in-traits) (above) when you need both — its `type def`/`type req` members have no `self` receiver, so they're only ever called statically and can safely return `Self`:
+
+```boring
+trait Factory:
+    type def Self create()
+
+struct Point as Introspect, Factory:
+    float x
+    float y
+
+    pub type def Point create():
+        Point(x = 0.0, y = 0.0)
+
+def main() throws:
+    let p = Point.create()
+    print p.introspect().typeName   # Point
+```
+
+> **Note** — `Introspect` is not a real derive macro (there's no proc macro backing it — the compiler synthesizes the `impl` directly from the struct's/enum's own declared fields/methods). Declare it in the header (`struct X as Introspect:` / `enum X as Introspect:`); `@derive(Introspect)` is rejected with a clear error pointing back here.
+
 ---
 
 ## 11. Error Handling

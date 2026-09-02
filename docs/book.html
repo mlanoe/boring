@@ -1352,6 +1352,28 @@ mc2.<span class="fn">get</span>()   <span class="co"># ok — req works on any b
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">scaled</span>(<span class="kt">int</span> factor):
         <span class="kw">let</span> width = factor * <span class="nb">2</span>  <span class="co"># local — shadows self.width</span>
         width + height          <span class="co"># local width, self.height</span></code></pre></div>
+<p><strong>Calling another method of the same struct still requires <code>self.</code>.</strong> Implicit <code>self</code> (above) only covers <em>fields</em> — bare <em>method</em> calls inside a method body do not resolve to <code>self.method(...)</code> the way bare field access resolves to <code>self.field</code>. This mirrors Rust, where <code>self.field</code> and <code>self.method()</code> are both required, but it can be surprising coming from Python/Swift, where a bare call is often allowed:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Ids:
+    <span class="kw">var</span> [<span class="kt">int</span>] items = []
+
+    <span class="kw">req</span> <span class="kt">bool</span> <span class="fn">has</span>(<span class="kt">int</span> id):
+        items.<span class="fn">contains</span>(id)     <span class="co"># OK — bare field access, no self. needed</span>
+
+    <span class="kw">def</span> <span class="fn">add</span>(<span class="kt">int</span> id):
+        <span class="kw">if</span> <span class="kw">not</span> <span class="fn">has</span>(id):        <span class="co"># ERROR — bare call, not resolved to self.has(id)</span>
+            items.<span class="fn">push</span>(id)</code></pre></div>
+<p>The bare call fails to compile with a Rust error pointing at the missing receiver:</p>
+<div class="code-block" data-lang="text"><span class="lang-label">text</span><pre><code>error[E0425]: cannot find function `has` in this scope</code></pre></div>
+<p>The fix is the compiler&#x27;s own suggestion — prefix the call with <code>self.</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Ids:
+    <span class="kw">var</span> [<span class="kt">int</span>] items = []
+
+    <span class="kw">req</span> <span class="kt">bool</span> <span class="fn">has</span>(<span class="kt">int</span> id):
+        items.<span class="fn">contains</span>(id)
+
+    <span class="kw">def</span> <span class="fn">add</span>(<span class="kt">int</span> id):
+        <span class="kw">if</span> <span class="kw">not</span> <span class="kw">self</span>.<span class="fn">has</span>(id):   <span class="co"># fixed — explicit self.</span>
+            items.<span class="fn">push</span>(id)</code></pre></div>
 <h3 id="properties--req-getter--set-setter">Properties — <code>req</code> getter + <code>set</code> setter</h3>
 <p>A computed property pairs a <code>req</code> getter (no parentheses when called) with a <code>set</code> setter:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Temperature:
@@ -1926,6 +1948,310 @@ print c.<span class="fn">next</span>()                  <span class="co"># 11</s
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">clone_shape</span>(&amp;<span class="kw">self</span>) -&gt; <span class="kw">Box</span>&lt;<span class="kw">dyn</span> <span class="kt">Drawable</span>&gt; { … }
 shapes: <span class="kw">Vec</span>&lt;<span class="kw">Box</span>&lt;<span class="kw">dyn</span> <span class="kt">Drawable</span>&gt;&gt;,</code></pre></div>
 <p>For <strong>static dispatch</strong> (no heap allocation, function determines the concrete type), use the <code>&lt;Trait&gt;</code> shorthand — see <a href="#trait-shorthand----trait">Generics — trait shorthand</a>.</p>
+<h3 id="introspect--read-only-reflection">Introspect — read-only reflection</h3>
+<p><code>Introspect</code> is a built-in trait — no <code>trait Introspect:</code> declaration needed — that gives a struct or enum Java-<code>java.lang.reflect</code>-style access to its own shape at runtime: one <code>introspect()</code> call returns a descriptor object exposing <code>Field</code>/<code>Method</code> <strong>handles</strong>, which you then call to read (and, where the language permits it, write) the underlying data. Declare <code>Introspect</code> in the header, and the compiler synthesizes the whole <code>impl</code> for you from the type&#x27;s own field/method list:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point <span class="kw">as</span> Introspect:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+    <span class="kt">string</span> label
+    <span class="kt">bool</span> active
+
+    <span class="kw">req</span> <span class="kt">string</span> <span class="fn">describe</span>():
+        <span class="s">"Point(<span class="si">{x}</span>, <span class="si">{y}</span>)"</span>
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> p = <span class="fn">Point</span>(x = <span class="nb">1.5</span>, y = <span class="nb">2.5</span>, label = <span class="s">"origin"</span>, active = <span class="kw">true</span>)
+    <span class="kw">let</span> info = p.<span class="fn">introspect</span>()
+    print <span class="s">"type: <span class="si">{info.typeName}</span>"</span>
+    <span class="kw">for</span> f <span class="kw">in</span> info.fields:
+        <span class="kw">let</span> v = f.<span class="fn">get</span>(p)
+        print <span class="s">"  <span class="si">{f.name}</span> = <span class="si">{v:?}</span>"</span>
+    <span class="kw">for</span> m <span class="kw">in</span> info.methods:
+        <span class="kw">let</span> r = m.<span class="fn">request</span>(p, [])
+        print <span class="s">"  <span class="si">{m.name}</span>() = <span class="si">{r:?}</span>"</span>
+<span class="co"># type: Point</span>
+<span class="co">#   x = Float(1.5)</span>
+<span class="co">#   y = Float(2.5)</span>
+<span class="co">#   label = Str(&quot;origin&quot;)</span>
+<span class="co">#   active = Bool(true)</span>
+<span class="co">#   describe() = Str(&quot;Point(1.5, 2.5)&quot;)</span></code></pre></div>
+<p><code>introspect()</code> returns an <code>IntrospectInfo</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> IntrospectInfo:
+    <span class="kt">string</span> typeName
+    <span class="kt">string</span> variantName    <span class="co"># struct: == typeName ; enum: current runtime variant&#x27;s name</span>
+    <span class="kt">uint</span> variantIndex      <span class="co"># struct: 0 ; enum: current runtime variant&#x27;s index</span>
+    [Field] fields          <span class="co"># struct: all fields ; enum: current variant&#x27;s NAMED fields only</span>
+    [Method] methods        <span class="co"># scoped to the WHOLE type, never per-variant</span></code></pre></div>
+<p>Each <code>Field</code>/<code>Method</code> is a small handle, resolved once and reusable against any matching instance:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Field:
+    <span class="kt">string</span> name
+    <span class="kt">bool</span> isPublic
+    <span class="kt">bool</span> isInstance     <span class="co"># false = type-level (`type let`/`type var`) — see below</span>
+    <span class="kt">bool</span> isMutable        <span class="co"># informational — `mut`/`var mut` on the field&#x27;s own type; gates nothing (see note below)</span>
+    <span class="kt">bool</span> isRebindable     <span class="co"># `var`/`var mut` on the field — gates set()</span>
+
+    <span class="kw">req</span> FieldValue <span class="fn">get</span>(Introspect instance) <span class="kw">throws</span>
+    <span class="kw">req</span> <span class="kw">void</span> <span class="kw">set</span>(<span class="kw">mut</span> Introspect instance, FieldValue value) <span class="kw">throws</span>   <span class="co"># throws if !isRebindable</span>
+
+<span class="kw">struct</span> Method:
+    <span class="kt">string</span> name
+    <span class="kt">bool</span> isPublic
+    <span class="kt">bool</span> isInstance      <span class="co"># false = type-level (`type def`/`type req`) — see below</span>
+    <span class="kt">bool</span> isMutable          <span class="co"># informational: true = backed by `def` (mutating)</span>
+    <span class="kt">bool</span> isCallable         <span class="co"># false = task/stream, or a variadic/defaulted/non-reflectable-</span>
+                             <span class="co"># typed parameter — request()/modify()/call() throw a clear</span>
+                             <span class="co"># &quot;not callable via reflection&quot; error rather than being generated</span>
+                             <span class="co"># a call body that could never work — see &quot;Method visibility&quot; below</span>
+    <span class="kt">bool</span> isThrowing          <span class="co"># informational: true = the underlying method is `throws`-declared</span>
+    MethodKind kind          <span class="co"># Plain | Task | Stream — see below</span>
+
+    <span class="kw">req</span> FieldValue <span class="fn">request</span>(Introspect instance, [FieldValue] args) <span class="kw">throws</span>   <span class="co"># req-backed</span>
+    <span class="kw">req</span> FieldValue <span class="fn">modify</span>(<span class="kw">mut</span> Introspect instance, [FieldValue] args) <span class="kw">throws</span> <span class="co"># def-backed</span></code></pre></div>
+<p><code>MethodKind</code> is a small built-in enum, always available (no declaration needed, same as <code>Error</code>):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> MethodKind:
+    Plain
+    Task
+    Stream</code></pre></div>
+<p><code>get(instance)</code>/<code>request(instance, args)</code> above are what the first example already used. <code>set</code>/<code>modify</code> add write access — see &quot;Mutation&quot; below. All five <code>throws</code> — call sites need a <code>throws</code> (or <code>try</code>) context, same as any other throwing call, so <code>def main() throws:</code> above isn&#x27;t incidental.</p>
+<blockquote><strong>Design note</strong> — <code>request</code>/<code>modify</code> are two separate methods (not one <code>call()</code> overloaded on mutability) precisely so a <code>req</code>-backed <code>Method</code> can be called by ANY caller (<code>request</code>, taking just <code>&amp;</code>-access) while a <code>def</code>-backed one needs <code>modify</code> (<code>&amp;mut</code>-access) — calling <code>request</code> on a <code>def</code>-backed method throws at runtime (&quot;requires mutable access — use modify()&quot;); calling <code>modify</code> on a <code>req</code>-backed one works fine (a mutable reference always reborrows as a shared one).</blockquote>
+<p><code>get</code>/<code>request</code>/<code>modify</code> all resolve leaf values through <code>FieldValue</code>, a small type-erased tagged union:</p>
+<table><thead><tr><th><code>FieldValue</code> variant</th><th>Holds</th></tr></thead><tbody><tr><td><code>Int(isize)</code></td><td>any integer type (<code>int</code>, <code>uint</code>, <code>int8</code>..<code>int128</code>, <code>uint8</code>..<code>uint128</code>)</td></tr><tr><td><code>Float(f64)</code></td><td><code>float32</code> or <code>float64</code>/<code>float</code></td></tr><tr><td><code>Bool(bool)</code></td><td><code>bool</code></td></tr><tr><td><code>Str(...)</code></td><td><code>string</code> — holds <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread)</td></tr><tr><td><code>Nested(Introspect)</code></td><td>an <code>&#x27;inline</code>/<code>&#x27;owned</code>/<code>&#x27;shared</code> field whose OWN type also declares <code>as Introspect</code> — a real, recursively-introspectable value, not a Debug string. See &quot;Recursive reflection&quot; below.</td></tr><tr><td><code>Actor(Introspect)</code> / <code>Guard(Introspect)</code></td><td>same, for an <code>&#x27;actor</code>/<code>&#x27;guard</code>-qualified field — shape visible, but recursing further is a degraded, cleanly-failing case. See &quot;Recursive reflection&quot; below.</td></tr><tr><td><code>Other(String)</code></td><td>anything else (a nested struct/enum whose type DOESN&#x27;T declare <code>as Introspect</code>, a collection, <code>T?</code>, …) — the field&#x27;s own <code>{:?}</code> (Debug) rendering</td></tr></tbody></table>
+<h4 id="method-visibility--infomethods-is-exhaustive-except-native">Method visibility — <code>info.methods</code> is exhaustive except <code>native</code></h4>
+<p>Every method appears in <code>info.methods</code> — <strong><code>native</code></strong> (its body is runtime-implemented, nothing Boring-level to call) is the only true exclusion. This includes <code>task</code>/<code>stream</code> methods and methods with a variadic/defaulted/non-<code>FieldValue</code>-representable-typed parameter (a nested struct, a collection, …) — shapes that used to be silently excluded outright. Whether a real call body actually exists for a given <code>Method</code> is a separate question, answered by <code>isCallable</code>:</p>
+<ul><li><strong><code>kind: Task</code>/<code>Stream</code></strong> — a genuinely different call shape (a <code>Future</code>/an iterator of values, not one synchronous <code>FieldValue</code>) that <code>request</code>/<code>modify</code> don&#x27;t attempt. Always <code>isCallable: false</code>.</li><li><strong>A variadic, defaulted, or non-primitive-typed parameter</strong> — <code>Other</code>&#x27;s Debug string can&#x27;t be reconstructed back into an arbitrary concrete type (see the <code>FieldValue</code> table above), and there&#x27;s no argument-count-with-defaults resolution attempted. Always <code>isCallable: false</code>.</li><li><strong>Everything else — including <code>throws</code>-declared methods — is <code>isCallable: true</code>.</strong> <code>throws</code> used to be excluded too; it no longer is (see below). The return type is never a reason to exclude a method (like a field, it always has a <code>FieldValue</code> to fall back to, via <code>Other</code>).</li></ul>
+<p>Calling <code>request</code>/<code>modify</code>/<code>call</code> on an <code>isCallable: false</code> <code>Method</code> throws a clear <code>&quot;method &#x27;&lt;name&gt;&#x27; is not callable via reflection — ...&quot;</code> error — never a silent wrong result, a panic, or a mis-dispatch to the wrong call shape.</p>
+<blockquote><strong><code>throws</code> methods are genuinely callable, not just visible.</strong> <code>request</code>/<code>modify</code> on a <code>throws</code>-backed <code>Method</code> actually calls the underlying method and propagates any thrown error as a real error from <code>request</code>/<code>modify</code> itself — catchable with <code>try</code>/<code>try?</code>, same as calling the method directly would be. (Under <code>boring run</code>, an <code>isCallable: false</code> call is a hard interpreter error instead, not a language-level <code>throw</code> — see the callout further below.)</blockquote>
+<blockquote><strong>Note</strong> — struct/enum method bodies can&#x27;t be declared <code>stream</code> in Boring today (only top-level functions can) — a pre-existing, Introspect-unrelated parser gap. <code>MethodKind.Stream</code> exists and is wired end-to-end on both backends, ready for whenever that gap closes; in practice every <code>Method</code> you see today reports <code>kind: Plain</code> or <code>kind: Task</code>.</blockquote>
+<blockquote><strong>Limitation — literal <code>FieldValue</code> arguments.</strong> Building <code>request</code>/<code>modify</code>/<code>set</code> call arguments (<code>FieldValue.Str(&quot;hi&quot;)</code>) with a string LITERAL directly runs into an auto-promotion mismatch: a literal argument to any Boring-declared-type call is auto-promoted to <code>Arc&lt;str&gt;</code>/<code>Rc&lt;str&gt;</code>, which doesn&#x27;t always line up cleanly with what the receiving parameter expects. Route the value through a variable first when in doubt.  <strong><code>boring run</code> — skip <code>FieldValue</code> entirely for arguments.</strong> Every example below that constructs a <code>FieldValue.Int(...)</code>/<code>FieldValue.Str(...)</code> value to pass into <code>set</code>/<code>modify</code>/<code>call</code> is <code>boring build</code>-only for that construction — <code>FieldValue</code> is a transpiler-only Rust type (see <code>emit_introspect_prelude</code>) with no interpreter equivalent, so <code>FieldValue.Int(100)</code> is an &quot;undefined variable&quot; error under <code>boring run</code>. The interpreter&#x27;s <code>get</code>/<code>request</code>/etc. work with plain runtime values directly instead (<code>f.set(instance, 100)</code>, <code>m.request(instance, [5])</code> — no wrapper), matching how <code>get()</code>&#x27;s <em>return</em> value is already a plain value there too (see &quot;On enums&quot; and the phases covered by <code>src/interpreter/tests.rs</code>&#x27;s <code>test_introspect_struct_set_and_request</code>).  <strong><code>boring run</code> — an <code>isCallable: false</code> call is a hard error, not a catchable <code>throw</code>.</strong> Under <code>boring build</code>, <code>request</code>/<code>modify</code>/<code>call</code> on a non-callable <code>Method</code> returns a real <code>IntrospectError</code> through the normal <code>Result</code>/<code>?</code> machinery — catchable with <code>try</code>/<code>try?</code> like any other thrown error. The interpreter&#x27;s equivalent check raises a genuine interpreter runtime error instead (the same kind raised for e.g. &quot;no field &#x27;…&#x27; on instance&quot;), which <strong>cannot</strong> be caught with <code>try</code>/<code>try?</code>/<code>catch</code> — it stops the program. A <code>throws</code>-method&#x27;s own thrown error, in contrast, propagates as a normal catchable throw on both backends (see the example below).</blockquote>
+<p>Example — a <code>task</code> method&#x27;s <code>Method</code> entry, and a <code>throws</code> method actually being called:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Widget <span class="kw">as</span> Introspect:
+    <span class="kw">var</span> <span class="kt">int</span> count
+
+    <span class="kw">task</span> <span class="kw">req</span> <span class="kt">int</span> <span class="fn">fetchCount</span>():
+        count
+
+    <span class="kw">req</span> <span class="kt">int</span> <span class="fn">risky</span>(<span class="kt">int</span> x) <span class="kw">throws</span>:
+        <span class="kw">guard</span> x != <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> Error.InvalidInput
+        <span class="nb">100</span> / x
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> w = <span class="fn">Widget</span>(count = <span class="nb">5</span>)
+    <span class="kw">let</span> info = w.<span class="fn">introspect</span>()
+    <span class="kw">for</span> m <span class="kw">in</span> info.methods:
+        <span class="kw">if</span> m.name == <span class="s">"fetchCount"</span>:
+            print <span class="s">"<span class="si">{m.name}</span>: kind=<span class="si">{m.kind == MethodKind.Task}</span>, isCallable=<span class="si">{m.isCallable}</span>"</span>
+        <span class="kw">if</span> m.name == <span class="s">"risky"</span>:
+            <span class="kw">let</span> ok = m.<span class="fn">request</span>(w, [FieldValue.<span class="fn">Int</span>(<span class="nb">5</span>)])
+            print <span class="s">"risky(5) = <span class="si">{ok:?}</span>"</span>
+            <span class="kw">let</span> bad = <span class="kw">try</span>? m.<span class="fn">request</span>(w, [FieldValue.<span class="fn">Int</span>(<span class="nb">0</span>)])
+            print <span class="s">"risky(0) threw: <span class="si">{bad == nil}</span>"</span>
+<span class="co"># fetchCount: kind=true, isCallable=false</span>
+<span class="co"># risky(5) = Int(20)</span>
+<span class="co"># risky(0) threw: true</span></code></pre></div>
+<p>(<code>FieldValue.Int(...)</code> above is <code>boring build</code>-only, per the callout above — under <code>boring run</code>, pass <code>[5]</code>/<code>[0]</code> directly instead; both were verified with a real <code>cargo build</code>+run and <code>boring run</code> before being written here.)</p>
+<p><strong>Rust equivalent</strong> (abridged — see <code>src/transpiler/mod.rs</code>&#x27;s <code>emit_introspect_prelude</code> for the full generated prelude)</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">enum</span> <span class="kt">FieldValue</span> { <span class="fn">Int</span>(isize), <span class="fn">Float</span>(f64), <span class="fn">Bool</span>(bool), <span class="fn">Str</span>(<span class="kw">Arc</span>&lt;str&gt;), <span class="fn">Other</span>(<span class="kt">String</span>) }
+<span class="at">#[derive(Debug, Clone, Copy, PartialEq, Eq)]</span>
+<span class="kw">enum</span> <span class="kt">MethodKind</span> { <span class="kt">Plain</span>, <span class="kt">Task</span>, <span class="kt">Stream</span> }
+<span class="kw">trait</span> <span class="kt">Introspect</span>: std::any::<span class="kt">Any</span> {
+    <span class="kw">fn</span> <span class="fn">introspect</span>(&amp;<span class="kw">self</span>) -&gt; &amp;<span class="lf">&#x27;static</span> <span class="kt">IntrospectInfo</span>;
+}
+<span class="kw">struct</span> <span class="kt">Field</span> { name: <span class="kw">Arc</span>&lt;str&gt;, isPublic: bool, isInstance: bool, isMutable: bool, isRebindable: bool, /* .. */ }
+<span class="kw">impl</span> <span class="kt">Field</span> {
+    <span class="kw">fn</span> <span class="fn">get</span>(&amp;<span class="kw">self</span>, instance: &amp;<span class="kw">dyn</span> <span class="kt">Introspect</span>) -&gt; <span class="kw">Result</span>&lt;<span class="kt">FieldValue</span>, <span class="kt">IntrospectError</span>&gt; { /* .. */ }
+}
+<span class="kw">struct</span> <span class="kt">Method</span> { name: <span class="kw">Arc</span>&lt;str&gt;, isPublic: bool, isInstance: bool, isMutable: bool, isCallable: bool, isThrowing: bool, kind: <span class="kt">MethodKind</span>, /* .. */ }
+<span class="kw">impl</span> <span class="kt">Introspect</span> <span class="kw">for</span> <span class="kt">Point</span> {
+    <span class="kw">fn</span> <span class="fn">introspect</span>(&amp;<span class="kw">self</span>) -&gt; &amp;<span class="lf">&#x27;static</span> <span class="kt">IntrospectInfo</span> {
+        <span class="kw">static</span> <span class="kt">INFO</span>: std::sync::<span class="kt">OnceLock</span>&lt;<span class="kt">IntrospectInfo</span>&gt; = std::sync::<span class="kt">OnceLock</span>::<span class="fn">new</span>();
+        <span class="kt">INFO</span>.<span class="fn">get_or_init</span>(|| <span class="kt">IntrospectInfo</span> {
+            typeName: <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;Point&quot;</span>),
+            fields: <span class="fm">vec!</span>[<span class="kt">Field</span> { name: <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;x&quot;</span>), /* .. */ }, /* .. */],
+            methods: <span class="fm">vec!</span>[/* .. */],
+            ..
+        })
+    }
+}</code></pre></div>
+<p>Each <code>Field</code>/<code>Method</code> carries a plain Rust <code>fn</code> pointer, wrapped in <code>Option</code> (<code>None</code> when <code>isCallable</code>/a setter isn&#x27;t available — no closures either way, nothing to capture, one named free function per field/method) that downcasts the <code>&amp;dyn Introspect</code>/<code>&amp;mut dyn Introspect</code> it&#x27;s given back to the concrete type via <code>std::any::Any</code> before touching the real field/method — this is what lets a <code>Field</code>/<code>Method</code> resolved from one instance be called against any other instance of the same type.</p>
+<blockquote><strong><code>introspect()</code> is computed once per type, not per call.</strong> The <code>IntrospectInfo</code> returned isn&#x27;t rebuilt on every <code>.introspect()</code> — it&#x27;s backed by a per-type <code>static</code> (<code>OnceLock</code>, one entry for a struct; a <code>OnceLock&lt;Vec&lt;IntrospectInfo&gt;&gt;</code> indexed by <code>variantIndex()</code> for an enum, since fields vary by variant but nothing about <em>how</em> to compute them depends on which instance is asking). This is transparent to Boring source — <code>let info = w.introspect(); info.fields</code> behaves identically whether the underlying Rust value is owned or <code>&amp;&#x27;static</code> — Boring already treats every struct-typed value as reference-like (see the parameter-passing rules). (Same pattern the transpiler already uses for <code>GPU(n)</code>&#x27;s real adapter enumeration — see <code>src/transpiler/wgpu/host.rs</code>&#x27;s <code>emit_gpu_adapter_enumeration</code> — a static computed once, not a language-level feature.)</blockquote>
+<h4 id="mutation--setmodify">Mutation — <code>set</code>/<code>modify</code></h4>
+<p><code>set()</code> writes a whole new value into a rebindable (<code>var</code>/<code>var mut</code>) field; <code>modify()</code> calls a mutating (<code>def</code>-backed) method. Both work identically under <code>boring build</code> and <code>boring run</code>.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter <span class="kw">as</span> Introspect:
+    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+    <span class="kw">let</span> <span class="kt">string</span> label = <span class="s">"c"</span>
+
+    <span class="kw">def</span> <span class="fn">bump</span>(<span class="kt">int</span> by):
+        value = value + by
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">mut</span> c = <span class="fn">Counter</span>(value = <span class="nb">10</span>, label = <span class="s">"hits"</span>)
+    <span class="kw">let</span> info = c.<span class="fn">introspect</span>()
+
+    <span class="kw">for</span> f <span class="kw">in</span> info.fields:
+        <span class="kw">if</span> f.name == <span class="s">"value"</span>:
+            f.<span class="kw">set</span>(c, FieldValue.<span class="fn">Int</span>(<span class="nb">100</span>))
+
+    print <span class="s">"after set: value=<span class="si">{c.value}</span>"</span>     <span class="co"># 100</span>
+
+    <span class="kw">for</span> m <span class="kw">in</span> info.methods:
+        <span class="kw">if</span> m.name == <span class="s">"bump"</span>:
+            <span class="kw">let</span> r = m.<span class="fn">modify</span>(c, [FieldValue.<span class="fn">Int</span>(<span class="nb">1</span>)])
+            print <span class="s">"bump() = <span class="si">{r:?}</span>"</span>
+
+    print <span class="s">"after modify: value=<span class="si">{c.value}</span>"</span>  <span class="co"># 101</span></code></pre></div>
+<h4 id="recursive-reflection--nestedactorguard">Recursive reflection — <code>Nested</code>/<code>Actor</code>/<code>Guard</code></h4>
+<p><code>get()</code> on a field whose OWN type also declares <code>as Introspect</code> doesn&#x27;t fall back to <code>Other</code>&#x27;s Debug string — it returns a real, recursively-introspectable value: <code>Nested</code> for <code>&#x27;inline</code>/<code>&#x27;owned</code>/<code>&#x27;shared</code>, <code>Actor</code>/<code>Guard</code> for <code>&#x27;actor</code>/<code>&#x27;guard</code> (separate tags, identical payload shape — the split is purely for provenance, telling you which qualifier the field had). Every one of these wraps an <code>Introspect</code> value you can call <code>.introspect()</code> on again, just like the original instance:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Inner <span class="kw">as</span> Introspect:
+    <span class="kt">int</span> value
+    <span class="kt">string</span> label
+
+<span class="kw">struct</span> Outer <span class="kw">as</span> Introspect:
+    Inner inline_inner
+    Inner<span class="lf">&#x27;owned</span> owned_inner
+    Inner<span class="lf">&#x27;shared</span> shared_inner
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> o = <span class="fn">Outer</span>(
+        inline_inner = <span class="fn">Inner</span>(value = <span class="nb">1</span>, label = <span class="s">"a"</span>),
+        owned_inner = <span class="fn">Inner</span>(value = <span class="nb">2</span>, label = <span class="s">"b"</span>),
+        shared_inner = <span class="fn">Inner</span>(value = <span class="nb">3</span>, label = <span class="s">"c"</span>),
+    )
+    <span class="kw">let</span> info = o.<span class="fn">introspect</span>()
+    <span class="kw">for</span> f <span class="kw">in</span> info.fields:
+        <span class="kw">match</span> f.<span class="fn">get</span>(o):
+            <span class="fn">Nested</span>(inner_obj):
+                <span class="kw">let</span> inner_info = inner_obj.<span class="fn">introspect</span>()
+                print <span class="s">"<span class="si">{f.name}</span>: type=<span class="si">{inner_info.typeName}</span>"</span>
+                <span class="kw">for</span> inner_f <span class="kw">in</span> inner_info.fields:
+                    print <span class="s">"    <span class="si">{inner_f.name}</span> = <span class="si">{inner_f.get(inner_obj):?}</span>"</span>
+            _:
+                <span class="kw">pass</span>
+<span class="co"># inline_inner: type=Inner</span>
+<span class="co">#     value = Int(1)</span>
+<span class="co">#     label = Str(&quot;a&quot;)</span>
+<span class="co"># owned_inner: type=Inner</span>
+<span class="co">#     value = Int(2)</span>
+<span class="co">#     label = Str(&quot;b&quot;)</span>
+<span class="co"># shared_inner: type=Inner</span>
+<span class="co">#     value = Int(3)</span>
+<span class="co">#     label = Str(&quot;c&quot;)</span></code></pre></div>
+<p><code>&#x27;actor</code>/<code>&#x27;guard</code> fields work the same way for the FIRST level — <code>inner_obj.introspect()</code> shows the nested value&#x27;s shape — but a <code>Field</code>/<code>Method</code> obtained from THAT <code>introspect()</code> call, used again against the same <code>inner_obj</code>, fails cleanly rather than working: <code>RefCell</code>/<code>Mutex</code>/<code>RwLock</code>&#x27;s own <code>Introspect</code> impl deliberately does not delegate the internal downcast hook through the lock (the same borrow-checker wall that killed an earlier <code>getMut()</code> design for this feature — a lock guard&#x27;s lifetime is independent of <code>&amp;self</code>&#x27;s, so a reference borrowed from a temporary guard can never be handed back). This is a real, permanent limitation, not a bug:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter <span class="kw">as</span> Introspect:
+    <span class="kt">int</span> n
+
+<span class="kw">struct</span> Holder <span class="kw">as</span> Introspect:
+    Counter<span class="lf">&#x27;actor</span> locked
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> h = <span class="fn">Holder</span>(locked = <span class="fn">Counter</span>(n = <span class="nb">1</span>))
+    <span class="kw">let</span> info = h.<span class="fn">introspect</span>()
+    <span class="kw">match</span> info.fields[<span class="nb">0</span>].<span class="fn">get</span>(h):
+        <span class="fn">Actor</span>(inner_obj):
+            <span class="kw">let</span> inner_info = inner_obj.<span class="fn">introspect</span>()       <span class="co"># works — shows the shape</span>
+            print <span class="s">"type: <span class="si">{inner_info.typeName}</span>"</span>
+            <span class="kw">let</span> failed = <span class="kw">try</span>? inner_info.fields[<span class="nb">0</span>].<span class="fn">get</span>(inner_obj)
+            print <span class="s">"recursing into a field failed cleanly: <span class="si">{failed == nil}</span>"</span>
+        _:
+            <span class="kw">pass</span>
+<span class="co"># type: Counter</span>
+<span class="co"># recursing into a field failed cleanly: true</span></code></pre></div>
+<p>Both examples are <code>boring build</code>-verified (real <code>cargo build</code>+run); see <a href="../examples/introspect_nested_demo.br">`examples/introspect_nested_demo.br`</a> for the combined version (all five qualifiers on one struct).</p>
+<blockquote><strong>Qualifying rules.</strong> A field gets <code>Nested</code>/<code>Actor</code>/<code>Guard</code> only when its own type declares <code>as Introspect</code> — anything else still falls back to <code>Other</code>, exactly as before. <code>&#x27;inline</code>/<code>&#x27;owned</code> additionally require the target type to be <code>Clone</code> (the default for a plain struct — see <a href="#mutable-fields">Mutable fields</a> — unless it holds a non-<code>Clone</code> field like an atomic, or an explicit <code>@derive(...)</code> omits <code>Clone</code>); <code>&#x27;shared</code>/<code>&#x27;actor</code>/<code>&#x27;guard</code> need no such check — cloning there only ever bumps a handle&#x27;s refcount, never clones the wrapped value itself.  <strong>Scope, this round</strong> — read-only: <code>get()</code> produces <code>Nested</code>/<code>Actor</code>/<code>Guard</code>, but <code>set()</code> on a nested-Introspect-typed field is not attempted (same as any other <code>Other</code>-falling-back field). Struct fields only — an enum&#x27;s own variant fields (<code>Circle(Point center)</code>) keep falling back to <code>Other</code>; a <code>type let</code> field of a struct gets the same treatment as an ordinary field for free (it goes through the identical codegen path).  <strong><code>boring run</code></strong> — needs no special handling at all: the interpreter&#x27;s one dynamic <code>Value</code> type already represents every struct instance the same way regardless of qualifier, so <code>get()</code> on a nested field just returns the live nested value directly — calling <code>.introspect()</code> on it recurses for free. The one asymmetry: there is no <code>FieldValue</code>-style tagging to <code>match</code> against under the interpreter (<code>Nested(x)</code>/<code>Actor(x)</code>/<code>Guard(x)</code> patterns never match — <code>get()</code>&#x27;s return value isn&#x27;t wrapped at all), so a <code>match</code> written for the transpiler backend always falls through to <code>_</code> under <code>boring run</code>; use the returned value directly instead (<code>let v = f.get(o); let vi = v.introspect()</code>, no <code>match</code> needed).</blockquote>
+<h4 id="on-enums">On enums</h4>
+<p>An enum&#x27;s field set depends on which variant a given value actually is, so <code>introspect()</code>&#x27;s <code>variantName</code>/<code>variantIndex</code>/<code>fields</code> all answer per the runtime variant — <code>methods</code>, in contrast, is the same list regardless of variant (an enum&#x27;s methods don&#x27;t vary by variant, only its fields do):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> Shape <span class="kw">as</span> Introspect:
+    <span class="fn">Circle</span>(<span class="kt">float</span> radius)
+    <span class="fn">Rect</span>(<span class="kt">float</span> width, <span class="kt">float</span> height)
+    Point
+
+    <span class="kw">req</span> <span class="kt">string</span> <span class="fn">kind</span>():
+        <span class="s">"shape"</span>
+
+<span class="kw">def</span> <span class="fn">describe</span>(Shape s) <span class="kw">throws</span>:
+    <span class="kw">let</span> info = s.<span class="fn">introspect</span>()
+    print <span class="s">"<span class="si">{info.variantName}</span> (#<span class="si">{info.variantIndex}</span>)"</span>
+    <span class="kw">for</span> f <span class="kw">in</span> info.fields:
+        print <span class="s">"  <span class="si">{f.name}</span> = <span class="si">{f.get(s):?}</span>"</span>
+    <span class="kw">for</span> m <span class="kw">in</span> info.methods:
+        print <span class="s">"  <span class="si">{m.name}</span>() = <span class="si">{m.request(s, []):?}</span>"</span>
+
+<span class="fn">describe</span>(Shape.<span class="fn">Circle</span>(<span class="nb">2.0</span>))
+<span class="co"># Circle (#0)</span>
+<span class="co">#   radius = Float(2.0)</span>
+<span class="co">#   kind() = Str(&quot;shape&quot;)</span>
+
+<span class="fn">describe</span>(Shape.Point)
+<span class="co"># Point (#2)</span>
+<span class="co">#   kind() = Str(&quot;shape&quot;)</span></code></pre></div>
+<p>Only <strong>named</strong> variant fields (<code>Circle(float radius)</code>, not a bare positional <code>Circle(float)</code>) are reachable — a field with no name has no string to look it up by. Enum variant fields never expose <code>set()</code> (<code>isRebindable</code> is always <code>false</code>): unlike a struct field, <code>VariantField</code> has no <code>var</code>/<code>mut</code> mechanism at all in Boring — there is no source syntax (<code>shape.radius = x</code>) that would grant this permission in the first place.</p>
+<p>A struct has no variants of its own — it&#x27;s treated as its own single, permanent &quot;variant&quot;: <code>introspect().variantName</code> returns its type name and <code>variantIndex</code> is always <code>0</code>. This is what lets a struct and an enum share one uniform interface.</p>
+<h4 id="type-level-members">Type-level members</h4>
+<p><code>type let</code>/<code>type def</code>/<code>type req</code> members (see <a href="#type-level-members--type">Type-level members</a> above) fold into the SAME <code>Field</code>/<code>Method</code> structs as ordinary instance members — <code>isInstance: false</code> marks them, and <code>get</code>/<code>set</code> (on <code>Field</code>) drop the <code>instance</code> argument entirely (an arity-differing overload — Boring&#x27;s documented overloading resolves by parameter <em>count</em>, and <code>type let</code>/<code>type var</code> state is global/shared, not owned by any particular instance, so there&#x27;s no instance to pass):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> MathBox <span class="kw">as</span> Introspect:
+    <span class="kt">float</span> x
+
+    <span class="kw">pub</span> <span class="kw">type</span> <span class="kw">let</span> <span class="kt">int</span> maxItems = <span class="nb">10</span>
+
+    <span class="kw">pub</span> <span class="kw">type</span> <span class="kw">req</span> <span class="kt">int</span> <span class="fn">square</span>(<span class="kt">int</span> n):
+        n * n
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> m = <span class="fn">MathBox</span>(x = <span class="nb">1.0</span>)
+    <span class="kw">let</span> info = m.<span class="fn">introspect</span>()
+    <span class="kw">for</span> f <span class="kw">in</span> info.fields:
+        <span class="kw">if</span> !f.isInstance:
+            <span class="kw">let</span> v = f.<span class="fn">get</span>()
+            print <span class="s">"type field <span class="si">{f.name}</span> = <span class="si">{v:?}</span>"</span>
+    <span class="kw">for</span> meth <span class="kw">in</span> info.methods:
+        <span class="kw">if</span> !meth.isInstance:
+            <span class="kw">let</span> r = meth.<span class="fn">call</span>([FieldValue.<span class="fn">Int</span>(<span class="nb">6</span>)])
+            print <span class="s">"type method <span class="si">{meth.name}</span>(6) = <span class="si">{r:?}</span>"</span>
+<span class="co"># type field maxItems = Int(10)</span>
+<span class="co"># type method square(6) = Int(36)</span></code></pre></div>
+<p>Type-level methods use <code>call(args)</code> — no <code>request</code>/<code>modify</code> split, since there&#x27;s no caller-privilege boundary to gate on instance mutability (there&#x27;s no instance) the way <code>request</code>/<code>modify</code> gate on <code>Introspect instance</code> vs <code>mut Introspect instance</code>.</p>
+<blockquote><strong>Scope</strong> — type-level reflection covers <strong>structs only</strong>, and only <code>type let</code> (read-only) fields, not <code>type var</code> (a mutable type-level field lowers to a module-level lock, and wiring <code>set</code> through that lock isn&#x27;t implemented yet). Enums have no <code>type_vars</code> at all in Boring today, and the transpiler doesn&#x27;t yet emit <code>type_methods</code> for enums regardless of <code>Introspect</code> — both pre-existing, Introspect-unrelated gaps.</blockquote>
+<h4 id="dynamic-dispatch">Dynamic dispatch</h4>
+<p><code>Introspect</code> never has a member that returns <code>Self</code>, so — unlike the <code>Factory</code> trait above, whose <code>type def Self create()</code> has no <code>self</code> receiver and is only ever called statically (<code>Point.create()</code>), safely returning <code>Self</code> — it stays <strong>object-safe</strong>. A bare <code>Introspect</code> in type position means <code>Box&lt;dyn Introspect&gt;</code> (see <a href="#traits-as-types">Traits as types</a> above), so a collection of values whose concrete types differ can still all be inspected uniformly:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point <span class="kw">as</span> Introspect:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+    <span class="kt">string</span> label
+
+<span class="kw">enum</span> Shape <span class="kw">as</span> Introspect:
+    <span class="fn">Circle</span>(<span class="kt">float</span> radius)
+    <span class="fn">Rect</span>(<span class="kt">float</span> width, <span class="kt">float</span> height)
+    Point
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> [Introspect] items = [<span class="fn">Point</span>(x = <span class="nb">1.0</span>, y = <span class="nb">2.0</span>, label = <span class="s">"a"</span>), Shape.<span class="fn">Circle</span>(<span class="nb">3.0</span>)]
+    <span class="kw">for</span> item <span class="kw">in</span> items:
+        print item.<span class="fn">introspect</span>().typeName
+<span class="co"># Point</span>
+<span class="co"># Shape</span></code></pre></div>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> items: <span class="kw">Vec</span>&lt;<span class="kw">Box</span>&lt;<span class="kw">dyn</span> <span class="kt">Introspect</span>&gt;&gt; = <span class="fm">vec!</span>[
+    <span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Point</span> { x: <span class="nb">1.0</span>, y: <span class="nb">2.0</span>, label: <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;a&quot;</span>) }),
+    <span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Shape</span>::<span class="fn">Circle</span>(<span class="nb">3.0</span>)),
+];
+<span class="kw">for</span> item <span class="kw">in</span> &amp;items {
+    <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, item.<span class="fn">introspect</span>().typeName);
+}</code></pre></div>
+<blockquote><strong><code>boring build</code> only</strong> — the <code>[Introspect] items = [...]</code> heterogeneous-array-literal form above needs the transpiler&#x27;s trait-array-literal boxing machinery, which the interpreter (<code>boring run</code>) doesn&#x27;t implement. The core reflection calls (<code>get</code>/<code>set</code>/<code>request</code>/<code>modify</code>/<code>call</code>, struct and enum) work identically under both backends — see the callout above for the one exception (<code>FieldValue.X(...)</code>-literal call arguments).</blockquote>
+<blockquote><strong>Note</strong> — <code>Introspect</code> has no way to construct a new instance; adding one would mean returning <code>Self</code>, which a <code>dyn Introspect</code> value can&#x27;t do. Pair it with <a href="#type-level-methods-in-traits">`Factory`</a> (above) when you need both — its <code>type def</code>/<code>type req</code> members have no <code>self</code> receiver, so they&#x27;re only ever called statically and can safely return <code>Self</code>:</blockquote>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">trait</span> Factory:
+    <span class="kw">type</span> <span class="kw">def</span> <span class="kt">Self</span> <span class="fn">create</span>()
+
+<span class="kw">struct</span> Point <span class="kw">as</span> Introspect, Factory:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+
+    <span class="kw">pub</span> <span class="kw">type</span> <span class="kw">def</span> Point <span class="fn">create</span>():
+        <span class="fn">Point</span>(x = <span class="nb">0.0</span>, y = <span class="nb">0.0</span>)
+
+<span class="kw">def</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> p = Point.<span class="fn">create</span>()
+    print p.<span class="fn">introspect</span>().typeName   <span class="co"># Point</span></code></pre></div>
+<blockquote><strong>Note</strong> — <code>Introspect</code> is not a real derive macro (there&#x27;s no proc macro backing it — the compiler synthesizes the <code>impl</code> directly from the struct&#x27;s/enum&#x27;s own declared fields/methods). Declare it in the header (<code>struct X as Introspect:</code> / <code>enum X as Introspect:</code>); <code>@derive(Introspect)</code> is rejected with a clear error pointing back here.</blockquote>
 <hr>
 <h2 id="11-error-handling">11. Error Handling</h2>
 <h3 id="standard-error-enum--error">Standard error enum — <code>Error</code></h3>

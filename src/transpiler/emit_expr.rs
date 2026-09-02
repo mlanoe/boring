@@ -1359,39 +1359,45 @@ impl Transpiler {
             }
             return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s, key_ref);
         }
-        // self.field[key] where field is a dict-type struct field (HashMap): use dict-style access.
-        // Detect by checking if the index key is a string-typed var or the field type is Dict.
-        if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
-            if let ExprKind::Var(v) = &inner_obj.kind {
-                if v == "self" {
-                    let is_dict_field = self.self_type.as_deref()
-                        .and_then(|t| self.struct_fields.get(t))
-                        .and_then(|fields| fields.iter().find(|(fname, _)| fname == field_name))
-                        .map(|(_, fty)| matches!(fty.without_mut(), crate::ast::Type::Dict(..)))
-                        .unwrap_or(false);
-                    let idx_is_string = match &idx.kind {
-                        ExprKind::Var(v) => {
-                            let vt = self.var_types.get(v.as_str());
-                            matches!(vt, Some(crate::ast::Type::Str))
-                            || matches!(vt, Some(crate::ast::Type::Named(n)) if n == "string" || n == "str")
-                            || self.string_vars.contains(v.as_str())
-                        }
-                        ExprKind::Str(_) => true,
-                        _ => false,
-                    };
-                    if is_dict_field || idx_is_string {
-                        let obj_s2 = self.emit_expr(obj);
-                        let key_ref = self.emit_dict_key_borrow(idx);
-                        // Same throwaway-clone hazard as the plain dict-var case above.
-                        if self.in_lhs_assign.get() {
-                            return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_s2, key_ref);
-                        }
-                        // See the `want_raw_dict_get` branch above (plain dict-var case).
-                        if self.want_raw_dict_get.get() {
-                            return format!("{}.get({}).cloned()", obj_s2, key_ref);
-                        }
-                        return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s2, key_ref);
+        // obj.field[key] where field is a dict-type struct field (HashMap): use dict-style access.
+        // `obj` here can be `self` (inside a method) OR any other local struct-typed
+        // var (e.g. a loop-bound value like `for hat in hats: ... hat.field[key]`)
+        // — `expr_is_dict`'s own `Field(obj, field_name)` arm already resolves the
+        // struct type generically via `var_struct_types`/`var_struct_type` for a
+        // non-self var, the same way `self_type`+`struct_fields` resolves it for
+        // self, so delegate to it instead of duplicating a self-only lookup here.
+        // Before this used a `v == "self"` gate, `local_var.dict_field[key]` fell
+        // through to the generic numeric-index codegen below (an `as usize` cast +
+        // raw `[]` indexing), which doesn't type-check against a `HashMap` key at
+        // all — see docs/dict-index-optional-return-bug.md.
+        if let ExprKind::Field(inner_obj, _field_name) = &obj.kind {
+            if matches!(&inner_obj.kind, ExprKind::Var(_)) {
+                let is_dict_field = self.expr_is_dict(obj);
+                // Fallback for when the struct type couldn't be resolved: a
+                // string-shaped index key only ever makes sense against a dict
+                // (arrays require an integer index), so treat it as one too.
+                let idx_is_string = match &idx.kind {
+                    ExprKind::Var(v) => {
+                        let vt = self.var_types.get(v.as_str());
+                        matches!(vt, Some(crate::ast::Type::Str))
+                        || matches!(vt, Some(crate::ast::Type::Named(n)) if n == "string" || n == "str")
+                        || self.string_vars.contains(v.as_str())
                     }
+                    ExprKind::Str(_) => true,
+                    _ => false,
+                };
+                if is_dict_field || idx_is_string {
+                    let obj_s2 = self.emit_expr(obj);
+                    let key_ref = self.emit_dict_key_borrow(idx);
+                    // Same throwaway-clone hazard as the plain dict-var case above.
+                    if self.in_lhs_assign.get() {
+                        return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_s2, key_ref);
+                    }
+                    // See the `want_raw_dict_get` branch above (plain dict-var case).
+                    if self.want_raw_dict_get.get() {
+                        return format!("{}.get({}).cloned()", obj_s2, key_ref);
+                    }
+                    return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s2, key_ref);
                 }
             }
         }
@@ -2606,7 +2612,23 @@ impl Transpiler {
             }
             _ => None,
         };
-        let target_is_optional_field = matches!(target_field_ty.as_ref().map(Type::without_mut), Some(Type::Optional(_)));
+        // External types (a real Rust struct Boring never parsed a `struct` declaration for,
+        // e.g. Bevy's `Sprite`) never get an entry in `struct_fields` above, so
+        // `target_field_ty` is always `None` for one of their fields even when the real field
+        // type is `Option<T>` — there's no `Type` to recover since Boring never saw a
+        // declaration to record one from. `is_known_external_optional_field` tracks such
+        // fields by name only (a hand-verified whitelist, same shape as
+        // `is_known_external_tuple_struct`), so fold that in separately alongside the
+        // Boring-struct-field `Type::Optional` check below. See
+        // docs/optional-field-assign-no-some-wrap-bug.md.
+        let target_is_external_optional_field = match &target.kind {
+            ExprKind::Field(obj, field) => self.resolve_struct_name(obj)
+                .map(|sn| self.is_known_external_optional_field(sn.as_str(), field.as_str()))
+                .unwrap_or(false),
+            _ => false,
+        };
+        let target_is_optional_field = target_is_external_optional_field
+            || matches!(target_field_ty.as_ref().map(Type::without_mut), Some(Type::Optional(_)));
         let target_is_optional_var = matches!(&target.kind, ExprKind::Var(v)
             if self.optional_vars.contains(v.as_str()));
         let rhs_s = if target_is_optional_var || target_is_optional_field {
@@ -3619,8 +3641,16 @@ impl Transpiler {
     /// `var_struct_types` / `var_types` fallback already used by field-access
     /// emission elsewhere in this file (e.g. `field_is_arc` above).
     pub(crate) fn resolve_struct_name(&self, e: &Expr) -> Option<String> {
+        // `without_mut()` first — a `var mut Sprite s = ...`-style binding's own `s.ty` is
+        // `Type::Mut(Named("Sprite"))`, not a bare `Named`/`Qualified` (see `Type::Mut`'s doc
+        // comment); without stripping it here, `var_types.get(v).and_then(named)` below always
+        // missed for any `mut`-qualified struct-typed local, including an external type never
+        // registered in `var_struct_types` (that map is populated by a constructor-call
+        // heuristic gated on `is_known_user_type`, which an external type like Bevy's `Sprite`
+        // never passes) — the only way such a var's type name reaches this function at all is
+        // through this `var_types` fallback.
         let named = |t: &Type| -> Option<String> {
-            match t {
+            match t.without_mut() {
                 Type::Named(n) => Some(n.clone()),
                 Type::Qualified(inner, _) => match inner.as_ref() {
                     Type::Named(n) => Some(n.clone()),

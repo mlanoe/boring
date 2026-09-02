@@ -22,6 +22,15 @@ impl Transpiler {
             .iter()
             .cloned()
             .partition(|p| self.is_known_derivable_trait(p));
+        // `Introspect` is neither a real `#[derive(...)]` macro nor a custom trait whose
+        // methods the user wrote by hand — its `impl` body is synthesized directly from
+        // `s.fields` (see `emit_introspect_struct_impl`), so it's pulled out of
+        // `proto_impl_names` before that loop (further down) re-emits user-written methods
+        // for every remaining header protocol.
+        let (has_introspect, proto_impl_names): (Vec<String>, Vec<String>) = proto_impl_names
+            .into_iter()
+            .partition(|p| p == "Introspect");
+        let has_introspect = !has_introspect.is_empty();
         let mut derive_names: Vec<String> = if has_derive {
             // Merge every explicit `@derive(...)` attr's args verbatim (preserves user order),
             // then qualify any bare Serialize/Deserialize — see `qualify_serde_derive_args`.
@@ -29,7 +38,7 @@ impl Transpiler {
                 .filter(|a| a.name == "derive")
                 .flat_map(|a| a.args.iter().cloned())
                 .collect();
-            self.qualify_serde_derive_args(&raw)
+            self.qualify_serde_derive_args(&raw, s.line, s.col)
         } else {
             let has_non_clone_field = s.fields.iter().any(|f| {
                 // `mut AtomicUsize` (docs/book.md) wraps the field type in
@@ -111,6 +120,18 @@ impl Transpiler {
                 }
             } else if let Some(inner) = Self::mutex_inner(&f.ty) {
                 self.emit_mutex_type(inner)
+            } else if let Some(inner) = Self::rwlock_inner(&f.ty) {
+                // Explicit `T'guard`/`T'guard'task` field — mirrors the `mutex_inner` branch
+                // just above (which already correctly handles the analogous `T'actor`/
+                // `T'actor'task` case). Without this, an EXPLICITLY `'guard`-qualified field
+                // fell through to the `struct_rwlock_fields.contains(&rec_key)` branch below
+                // — which ALSO matches an explicit qualifier, not just an inferred one (see
+                // its own registration in `pre_scan_struct_item`) — and called
+                // `emit_guard_type(&f.ty)` with `f.ty` STILL carrying its own `'guard`
+                // qualifier, double-wrapping the field as `Arc<RwLock<Arc<RwLock<T>>>>`
+                // (confirmed via a real `cargo build`, reproduces with zero Introspect
+                // involvement — a plain `struct Outer: Inner'guard g` already hit this).
+                self.emit_guard_type(inner)
             } else {
                 let rec_key = format!("{}::{}", s.name, f.name);
                 // Inferred actor/guard qualifier (from method/ext-block usage, no explicit
@@ -370,6 +391,22 @@ impl Transpiler {
                         self.blank();
                     }
                 }
+                // Same split for type-level (`type def`/`type req`, no `self`) members: a
+                // trait can require these via `type_signatures` (see "Type-level methods in
+                // traits" in book.md), and the struct's matching `type_methods` must land in
+                // this `impl Trait for Struct {}` block too -- they are ALSO always emitted
+                // unconditionally into the plain `impl Struct {}` block above (that pass is
+                // unfiltered by trait membership), which is fine: Rust allows an inherent
+                // associated fn and a trait's fn of the same name to coexist on one type
+                // (inherent resolution wins), so this is additive, not a conflict.
+                let known_type: Option<std::collections::HashSet<String>> =
+                    self.trait_type_method_names.get(proto.as_str()).cloned();
+                for tm in &s.type_methods {
+                    if known_type.as_ref().is_none_or(|names| names.contains(&tm.name)) {
+                        self.emit_type_method(tm, &s.name);
+                        self.blank();
+                    }
+                }
                 self.inside_trait_impl = prev_in_trait;
                 self.current_trait_assoc_names = prev_assoc_names;
                 self.indent -= 1;
@@ -377,11 +414,17 @@ impl Transpiler {
             }
         }
 
+        if has_introspect {
+            self.emit_introspect_struct_impl(s);
+        }
+
         // Implicit trait conformance: if the struct has all methods required by a trait
         // (and hasn't already declared `as Trait`), auto-emit `impl Trait for Struct`.
         {
             let struct_method_names: std::collections::HashSet<String> =
                 s.methods.iter().map(|m| m.name.clone()).collect();
+            let struct_type_method_names: std::collections::HashSet<String> =
+                s.type_methods.iter().map(|m| m.name.clone()).collect();
             let already_conforms: std::collections::HashSet<String> =
                 s.protocols.iter().cloned().collect();
             // Clone to avoid borrow conflict with emit_fn (which borrows self mutably).
@@ -393,18 +436,29 @@ impl Transpiler {
                     self.trait_method_names.get(trait_name.as_str())
                         .cloned()
                         .unwrap_or_default();
-                if required.is_empty() { continue; }
+                // Type-level (`type def`/`type req`) requirements -- see `trait_type_method_names`.
+                let required_type: std::collections::HashSet<String> =
+                    self.trait_type_method_names.get(trait_name.as_str())
+                        .cloned()
+                        .unwrap_or_default();
+                if required.is_empty() && required_type.is_empty() { continue; }
                 // Don't auto-generate if all the required methods are already claimed by
                 // some explicit protocol impl — that would create duplicate method impls.
                 let already_covered = already_conforms.iter().any(|explicit_proto| {
                     let explicit_required = self.trait_method_names.get(explicit_proto.as_str())
                         .cloned()
                         .unwrap_or_default();
+                    let explicit_required_type = self.trait_type_method_names.get(explicit_proto.as_str())
+                        .cloned()
+                        .unwrap_or_default();
                     required.iter().all(|m| explicit_required.contains(m))
+                        && required_type.iter().all(|m| explicit_required_type.contains(m))
                 });
                 if already_covered { continue; }
-                // Check that the struct has every method the trait requires.
-                if required.iter().all(|m| struct_method_names.contains(m)) {
+                // Check that the struct has every (instance + type-level) member the trait requires.
+                if required.iter().all(|m| struct_method_names.contains(m))
+                    && required_type.iter().all(|m| struct_type_method_names.contains(m))
+                {
                     self.blank();
                     self.line(&format!("impl{} {} for {}{} {{", tp, trait_name, s.name, tp_use));
                     self.indent += 1;
@@ -413,6 +467,12 @@ impl Transpiler {
                     for f in &s.methods {
                         if required.contains(&f.name) {
                             self.emit_fn(f, Some(&s.name));
+                            self.blank();
+                        }
+                    }
+                    for tm in &s.type_methods {
+                        if required_type.contains(&tm.name) {
+                            self.emit_type_method(tm, &s.name);
                             self.blank();
                         }
                     }
@@ -704,7 +764,13 @@ impl Transpiler {
 
     pub(crate) fn emit_type_method(&mut self, tm: &TypeMethod, type_name: &str) {
         use crate::ast::TypeMethodKind;
-        let vis = if tm.is_pub { "pub " } else { "" };
+        // Rust forbids explicit visibility qualifiers on trait-impl items (E0449: "trait items
+        // always share the visibility of their trait") -- suppress `pub` when this type method
+        // is being emitted into an `impl Trait for Struct {}` block (see the `proto_impl_names`
+        // loop in `emit_struct`, which sets `inside_trait_impl` around this call). The same
+        // method is still emitted `pub` in the plain `impl Struct {}` block it also always
+        // lands in.
+        let vis = if tm.is_pub && !self.inside_trait_impl { "pub " } else { "" };
         let (fn_name, params_s) = match tm.kind {
             TypeMethodKind::Set => {
                 let p = tm.params.first().map(|p| {
@@ -888,13 +954,839 @@ impl Transpiler {
     /// Also flips `uses_serde` (Cargo.toml gets the `serde` dependency) on any qualifying
     /// name, not just when this file also happens to call `json()`/`fromJson()` — e.g. a
     /// struct declared in one file and (de)serialized from another.
-    fn qualify_serde_derive_args(&self, args: &[String]) -> Vec<String> {
-        args.iter().map(|a| match a.as_str() {
-            "Serialize" => { self.uses_serde.set(true); "serde::Serialize".to_string() }
-            "Deserialize" => { self.uses_serde.set(true); "serde::Deserialize".to_string() }
-            "serde::Serialize" | "serde::Deserialize" => { self.uses_serde.set(true); a.clone() }
-            _ => a.clone(),
+    ///
+    /// Also rejects `Introspect` here — the natural first mistake for anyone used to
+    /// `@derive(Debug, Clone, ...)` is to reach for `@derive(Introspect)` too, but
+    /// `Introspect`'s `impl` body is transpiler-synthesized (`emit_introspect_struct_impl`/
+    /// `emit_introspect_enum_impl`), not a real proc-macro derive — left unqualified, it
+    /// would silently emit `#[derive(Introspect)]`, which fails downstream with a confusing
+    /// "cannot find derive macro `Introspect`" from rustc instead of a clear Boring-level
+    /// error pointing at the fix (`as Introspect` in the header).
+    fn qualify_serde_derive_args(&self, args: &[String], line: usize, col: usize) -> Vec<String> {
+        args.iter().filter_map(|a| match a.as_str() {
+            "Serialize" => { self.uses_serde.set(true); Some("serde::Serialize".to_string()) }
+            "Deserialize" => { self.uses_serde.set(true); Some("serde::Deserialize".to_string()) }
+            "serde::Serialize" | "serde::Deserialize" => { self.uses_serde.set(true); Some(a.clone()) }
+            "Introspect" => {
+                self.push_error(line, col,
+                    "'Introspect' cannot be added via '@derive(...)' — it is not a real \
+                     derive macro (its impl is synthesized by the compiler, not a proc macro). \
+                     Declare it in the header instead: 'struct X as Introspect:' / \
+                     'enum X as Introspect:'");
+                None
+            }
+            _ => Some(a.clone()),
         }).collect()
+    }
+
+    /// Resolves a Boring field/param type to the Rust primitive type name it maps to, or
+    /// `None` when it isn't one of the plain scalars/string `FieldValue` can
+    /// represent (a nested struct/enum, a collection, `Option`, an actor/guard wrapper, a
+    /// generic type-param, ...). Shared by every introspect codegen helper below — both the
+    /// "produce a `FieldValue`" direction (`introspect_field_value_expr`, always total —
+    /// falls back to `Other`/Debug for a `None` here) and the "consume a `FieldValue`"
+    /// direction (`introspect_extract_expr`, genuinely partial — a `None` here means the
+    /// field/param can't be round-tripped, so the caller must leave it out of the reflected
+    /// `Field`/`Method` entirely rather than emit a setter/unpacker that would always fail).
+    ///
+    /// Primitive Boring type keywords (`int`, `float`, `bool`, `string`, ...) parse as
+    /// `Type::Named("int")` etc, NOT the dedicated `Type::Int`/`Type::Float64`/... variants
+    /// (those are reserved for the capitalized spellings, `Int`/`Float`/...) — see
+    /// `parse_type_base`. Resolved through `normalize_type_name` (the same helper
+    /// `emit_type`/`emit_field_type` use) to get the actual Rust primitive name regardless of
+    /// which spelling/form was used, rather than duplicating that whole alias table here.
+    fn introspect_resolve_ty(&self, ty: &Type) -> Option<String> {
+        let mut ty = ty;
+        while let Type::Mut(inner) = ty { ty = inner; }
+        match ty {
+            Type::Named(n) => {
+                let r = normalize_type_name(n, self.use_rc_str());
+                match r.as_str() {
+                    "isize" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+                    | "u8" | "u16" | "u32" | "u64" | "u128"
+                    | "f32" | "f64" | "bool" | "Rc<str>" | "Arc<str>" => Some(r),
+                    _ => None,
+                }
+            }
+            Type::Int => Some("isize".to_string()),
+            Type::Uint => Some("usize".to_string()),
+            Type::Int8 => Some("i8".to_string()),
+            Type::Int16 => Some("i16".to_string()),
+            Type::Int32 => Some("i32".to_string()),
+            Type::Int64 => Some("i64".to_string()),
+            Type::Int128 => Some("i128".to_string()),
+            Type::Uint8 => Some("u8".to_string()),
+            Type::Uint16 => Some("u16".to_string()),
+            Type::Uint32 => Some("u32".to_string()),
+            Type::Uint64 => Some("u64".to_string()),
+            Type::Uint128 => Some("u128".to_string()),
+            Type::Float32 => Some("f32".to_string()),
+            Type::Float64 => Some("f64".to_string()),
+            Type::Bool => Some("bool".to_string()),
+            Type::Str => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Resolves a Boring field type to its `FieldValue` constructor expression, given the Rust
+    /// expression string that reads the field's value. Shared by `emit_introspect_struct_impl`
+    /// (`access` = `"s.x"`, a direct place through a downcast reference — no deref needed even
+    /// for a scalar) and `emit_introspect_enum_impl` (`access` = a match-arm-bound variable
+    /// name — e.g. `"f0"` — which, under Rust's default match ergonomics, binds as `&T` when
+    /// matching through `&self`, so `is_ref_binding` must be `true` there to insert the `*` a
+    /// scalar/bool cast needs; `Str`'s `.clone()` and `Other`'s `{:?}` work unchanged either
+    /// way). Always total — a type `introspect_resolve_ty` doesn't recognize falls back to
+    /// `FieldValue::Other`, Debug-formatted (needs no per-kind unwrapping logic: `{:?}` already
+    /// works uniformly as long as the wrapped value itself is `Debug`, which every Boring
+    /// struct/enum already derives by default).
+    fn introspect_field_value_expr(&self, ty: &Type, access: &str, is_ref_binding: bool, allow_nested: bool) -> String {
+        let resolved = self.introspect_resolve_ty(ty);
+        let deref = if is_ref_binding { "*" } else { "" };
+        match resolved.as_deref() {
+            Some("isize") | Some("usize")
+            | Some("i8") | Some("i16") | Some("i32") | Some("i64") | Some("i128")
+            | Some("u8") | Some("u16") | Some("u32") | Some("u64") | Some("u128")
+                => format!("FieldValue::Int({}{} as isize)", deref, access),
+            Some("f32") | Some("f64")
+                => format!("FieldValue::Float({}{} as f64)", deref, access),
+            Some("bool")
+                => format!("FieldValue::Bool({}{})", deref, access),
+            Some("Rc<str>") | Some("Arc<str>")
+                => format!("FieldValue::Str({}.clone())", access),
+            _ => {
+                // `allow_nested` restricts `Nested`/`Actor`/`Guard` detection to the two
+                // call sites that reach a real struct FIELD (instance or type-level `type
+                // let`) — see `introspect_nested_field_value_expr`'s doc comment for why
+                // this is a separate flag from `is_ref_binding` (both struct fields and
+                // method-return-value conversions call this fn with `is_ref_binding:
+                // false`, but only fields are in scope for this iteration).
+                if allow_nested {
+                    if let Some(expr) = self.introspect_nested_field_value_expr(ty, access, is_ref_binding) {
+                        return expr;
+                    }
+                }
+                format!("FieldValue::Other(format!(\"{{:?}}\", {}))", access)
+            }
+        }
+    }
+
+    /// Detects whether a struct/type-level FIELD's own declared type qualifies for
+    /// `FieldValue::Nested`/`Actor`/`Guard` instead of the `Other`/Debug fallback — see
+    /// the `boring_introspect_trait_design` memo's "`Nested`/`Actor`/`Guard` FieldValue
+    /// variants" section for the full design. `None` means "keep falling back to
+    /// `Other`", exactly today's behavior — this check is purely additive.
+    ///
+    /// Only reachable via `introspect_field_value_expr`'s `allow_nested` flag, which is
+    /// `true` only at the two call sites that resolve a real FIELD (`s.field` for an
+    /// instance field, `Type::CONST` for a `type let`) — never for a method's return
+    /// value, and never for an enum variant field (out of scope this round, see the
+    /// design memo's scope note).
+    ///
+    /// A field qualifies only when its own type is itself a struct/enum that declares
+    /// `as Introspect` in its header (checked via `struct_protocols`, which — see
+    /// `pre_scan`/`pre_scan_struct_item` — is populated for both structs AND enums,
+    /// despite the field's name predating enum support). For the `'inline`/`'owned`
+    /// qualifiers (→ `FieldValue::Nested`, `T`/`Box<T>` in Rust) the target type must
+    /// ALSO be `Clone` (`Box::new(access.clone())`/`access.clone()` needs `T: Clone` —
+    /// checked via `struct_derives_clone`, or `all_enum_types` since every enum always
+    /// derives `Clone`, see `emit_enum`). `'shared`/`'actor`/`'actor'task`/`'guard`/
+    /// `'guard'task` need NO such check — `access.clone()` there only ever clones the
+    /// OUTER handle (`Rc`/`Arc`, a cheap refcount bump — `impl<T: ?Sized> Clone for
+    /// Rc<T>`/`Arc<T>` has no `T: Clone` bound at all), never `T` itself; the blanket
+    /// `Rc<T>`/`Arc<T>` (strong) and `RefCell<T>`/`Mutex<T>`/`RwLock<T>`/tokio
+    /// equivalents (weak) delegate impls in `emit_introspect_prelude` make the
+    /// resulting `Box<Rc<RefCell<T>>>`-shaped value coerce to `Box<dyn Introspect>`
+    /// with no `T: Clone` bound anywhere in the chain.
+    fn introspect_nested_field_value_expr(&self, ty: &Type, access: &str, is_ref_binding: bool) -> Option<String> {
+        let mut ty = ty;
+        while let Type::Mut(inner) = ty { ty = inner; }
+        let deref = if is_ref_binding { "*" } else { "" };
+
+        // (FieldValue variant tag, the qualifier's inner type, whether the constructor
+        // needs an explicit `Box::new(...)` wrapper — `'owned` doesn't, its `access` is
+        // already a `Box<T>` that coerces directly — and whether `T: Clone` is required).
+        let (variant, inner_ty, needs_box_new, needs_clone): (&str, &Type, bool, bool) = match ty {
+            // Bare `Point` (no qualifier written) — struct fields are always inline in
+            // the parent's own allocation by default (see `emit_field_type`'s doc), same
+            // Rust shape as an explicit `'inline`.
+            Type::Named(_) => ("Nested", ty, true, true),
+            Type::Qualified(inner, OwnerQual::Inline) => ("Nested", inner.as_ref(), true, true),
+            Type::Qualified(inner, OwnerQual::Owned) => ("Nested", inner.as_ref(), false, true),
+            Type::Qualified(inner, OwnerQual::Shared) => ("Nested", inner.as_ref(), true, false),
+            Type::Qualified(inner, OwnerQual::Actor | OwnerQual::ActorTask) => ("Actor", inner.as_ref(), true, false),
+            Type::Qualified(inner, OwnerQual::Guard | OwnerQual::GuardTask) => ("Guard", inner.as_ref(), true, false),
+            _ => return None,
+        };
+        let type_name = match inner_ty {
+            Type::Named(n) => n.as_str(),
+            _ => return None,
+        };
+        let implements_introspect = self.struct_protocols.get(type_name)
+            .map(|protocols| protocols.iter().any(|p| p == "Introspect"))
+            .unwrap_or(false);
+        if !implements_introspect { return None; }
+        if needs_clone {
+            let is_clone = self.all_enum_types.contains(type_name)
+                || self.struct_derives_clone.contains(type_name);
+            if !is_clone { return None; }
+        }
+        let cloned = format!("{}{}.clone()", deref, access);
+        let payload = if needs_box_new { format!("Box::new({})", cloned) } else { cloned };
+        Some(format!("FieldValue::{}({})", variant, payload))
+    }
+
+    /// The reverse of `introspect_field_value_expr`: given a Rust expression evaluating to
+    /// `&FieldValue` and the *target* Boring type, produces a Rust match-expression that
+    /// extracts a concrete value of that type — or `None` when the type isn't one of the
+    /// typed `FieldValue` variants (genuinely partial, unlike the two helpers above: a
+    /// `FieldValue::Other(String)` only ever holds an already-flattened Debug string, so there
+    /// is no way to reconstruct an arbitrary field/param type from it). Callers use `None` to
+    /// mean "leave this field's setter / this method out of `introspect()`'s reflected list
+    /// entirely" rather than emit code that would always fail at runtime.
+    fn introspect_extract_expr(&self, ty: &Type, src: &str, label: &str) -> Option<String> {
+        let resolved = self.introspect_resolve_ty(ty)?;
+        Some(match resolved.as_str() {
+            "isize" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "u8" | "u16" | "u32" | "u64" | "u128" => format!(
+                "match {src} {{ FieldValue::Int(v) => *v as {resolved}, _ => return Err(\"wrong argument type for '{label}': expected an integer\".into()) }}"
+            ),
+            "f32" | "f64" => format!(
+                "match {src} {{ FieldValue::Float(v) => *v as {resolved}, _ => return Err(\"wrong argument type for '{label}': expected a float\".into()) }}"
+            ),
+            "bool" => format!(
+                "match {src} {{ FieldValue::Bool(v) => *v, _ => return Err(\"wrong argument type for '{label}': expected a bool\".into()) }}"
+            ),
+            "Rc<str>" | "Arc<str>" => format!(
+                "match {src} {{ FieldValue::Str(v) => v.clone(), _ => return Err(\"wrong argument type for '{label}': expected a string\".into()) }}"
+            ),
+            _ => return None,
+        })
+    }
+
+    /// True when `m` should appear in `introspect()`'s `methods` list AT ALL — per the
+    /// "Method visibility expansion" (see the `boring_introspect_trait_design` memo),
+    /// `native` (body is runtime-implemented, nothing Boring-level to call) is the ONLY
+    /// true exclusion; `m.qualifier.is_some()` (a `def Type.method()` ext-style method,
+    /// structurally not a plain method of the type whose `s.methods`/`e.methods` list is
+    /// being walked) is excluded too, defensively, though it should never actually appear
+    /// there. Every other shape — `task`/`stream`/`throws`/variadic/defaulted/non-typed-
+    /// param methods — is now visible; whether a real call body exists for it is a
+    /// SEPARATE question, answered by `introspect_method_is_callable` below.
+    fn introspect_method_is_visible(&self, m: &FnDecl) -> bool {
+        if m.is_native { return false; }
+        if m.qualifier.is_some() { return false; }
+        true
+    }
+
+    /// True when a real, working call body can be generated for `m`'s `request`/`modify`
+    /// entry — this is the EXACT predicate that gates both `Method.isCallable` and whether
+    /// `MethodAccess`'s dispatch slot is `Some`/`None` (built from this same check at the
+    /// same call site in `build_introspect_methods`, so the two can never disagree, same
+    /// discipline as the `isRebindable`/setter-availability fix). `task`/`stream` are
+    /// excluded — invoking either is a genuinely different call shape (a `Future`/an
+    /// iterator of `FieldValue`s, not one synchronous value) that `request`/`modify` don't
+    /// attempt this iteration. A non-primitive PARAMETER type is excluded too — see
+    /// `introspect_extract_expr`'s doc comment for why (no way to round-trip an arbitrary
+    /// type back out of a `[FieldValue]` args array) — likewise variadic/defaulted params
+    /// (no argument-count-with-defaults resolution attempted). `throws` is NOT excluded —
+    /// genuinely callable now (the generated body propagates the underlying `Result` via
+    /// `?`, since a `throws` method's real Rust return type, `Result<T, Box<dyn
+    /// std::error::Error + Send + Sync>>`, is exactly `IntrospectError`'s alias target, no
+    /// conversion needed). The return type is never a reason to exclude a method —
+    /// `introspect_field_value_expr` is total (falls back to `Other`/Debug).
+    fn introspect_method_is_callable(&self, m: &FnDecl) -> bool {
+        if !self.introspect_method_is_visible(m) { return false; }
+        if m.task || m.stream { return false; }
+        for p in &m.params {
+            if p.variadic || p.default.is_some() { return false; }
+            match &p.ty {
+                Some(ty) => if self.introspect_resolve_ty(ty).is_none() { return false; },
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// The `MethodKind` for `m` — `Task`/`Stream` when it's declared that way, `Plain`
+    /// otherwise (including `throws` methods, which are orthogonal to this tag).
+    pub(crate) fn introspect_method_kind_expr(m: &FnDecl) -> &'static str {
+        if m.task { "MethodKind::Task" }
+        else if m.stream { "MethodKind::Stream" }
+        else { "MethodKind::Plain" }
+    }
+
+    /// Builds the free dispatch functions (one per reflectable method) for `methods`, and
+    /// returns `(entry_literals, fn_item_texts)` — the `Method { ... }` entry-literal strings
+    /// (in the same order) to place inside `introspect()`'s `methods: vec![...]`, and the raw
+    /// Rust free-fn item text for each, to be emitted by the caller *after* the enclosing
+    /// `impl Introspect for ... { fn introspect() { ... } }` block has been closed (this
+    /// function does not emit anything itself — it only builds strings — precisely so a caller
+    /// assembling `introspect()`'s body doesn't interleave top-level `fn` items into the middle
+    /// of that body's own text stream). Shared verbatim by the struct and enum paths — an
+    /// enum's methods are scoped to the WHOLE type regardless of variant (see
+    /// `emit_introspect_enum_impl`'s doc comment), so the codegen is identical to a struct's:
+    /// downcast `&dyn Introspect`/`&mut dyn Introspect` back to the concrete (possibly generic)
+    /// type, unpack `args: &[FieldValue]` positionally, call the real method, re-wrap the
+    /// return value.
+    fn build_introspect_methods(
+        &self, type_name: &str, methods: &[FnDecl], tp_impl: &str, tp_use: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let str_ty = if self.use_rc_str() { "Rc" } else { "Arc" };
+        let mut entries = Vec::new();
+        let mut fns: Vec<String> = Vec::new();
+        for m in methods {
+            if !self.introspect_method_is_visible(m) { continue; }
+            let is_callable = self.introspect_method_is_callable(m);
+            let tpg = if tp_impl.is_empty() { String::new() } else { format!("::{}", tp_use) };
+            let fn_ref = if is_callable {
+                let fn_name = format!("__introspectCall_{}_{}", type_name, m.name);
+                let mut body: Vec<String> = Vec::new();
+                let instance_ty = if m.mutating { "&mut dyn Introspect" } else { "&dyn Introspect" };
+                let (as_any, downcast) = if m.mutating {
+                    ("__introspectAsAnyMut", "downcast_mut")
+                } else {
+                    ("__introspectAsAny", "downcast_ref")
+                };
+                body.push(format!(
+                    "let s = instance.{as_any}().{downcast}::<{type_name}{tp_use}>().ok_or(\"wrong instance type for method '{}'\")?;",
+                    m.name
+                ));
+                body.push(format!(
+                    "if args.len() != {} {{ return Err(\"wrong argument count for method '{}'\".into()); }}",
+                    m.params.len(), m.name
+                ));
+                let mut arg_names = Vec::new();
+                for (i, p) in m.params.iter().enumerate() {
+                    let ty = p.ty.as_ref().expect("checked callable");
+                    let extracted = self.introspect_extract_expr(ty, &format!("&args[{}]", i), &p.name)
+                        .expect("checked callable");
+                    let an = format!("a{}", i);
+                    body.push(format!("let {} = {};", an, extracted));
+                    arg_names.push(an);
+                }
+                // `throws` methods are genuinely callable now: their real Rust return
+                // type is `Result<T, Box<dyn std::error::Error + Send + Sync>>` — exactly
+                // `IntrospectError`'s alias target — so `?` propagates the underlying
+                // error with no conversion needed.
+                let call_expr = format!("s.{}({})", m.name, arg_names.join(", "));
+                let call_expr = if m.throws { format!("{}?", call_expr) } else { call_expr };
+                match &m.return_ty {
+                    Some(rty) if !matches!(rty, Type::Void) => {
+                        body.push(format!("let r = {};", call_expr));
+                        body.push(format!("Ok({})", self.introspect_field_value_expr(rty, "r", false, false)));
+                    }
+                    _ => {
+                        body.push(format!("{};", call_expr));
+                        body.push("Ok(FieldValue::Other(\"()\".to_string()))".to_string());
+                    }
+                }
+                fns.push(format!(
+                    "#[allow(non_snake_case)]\nfn {fn_name}{tp_impl}({instance_arg}: {instance_ty}, args: &[FieldValue]) -> Result<FieldValue, IntrospectError> {{\n    {body}\n}}",
+                    fn_name = fn_name, tp_impl = tp_impl, instance_arg = "instance", instance_ty = instance_ty,
+                    body = body.join("\n    "),
+                ));
+                format!("Some({}{})", fn_name, tpg)
+            } else {
+                "None".to_string()
+            };
+            let access = if m.mutating {
+                format!("MethodAccess::InstanceDef({})", fn_ref)
+            } else {
+                format!("MethodAccess::InstanceReq({})", fn_ref)
+            };
+            entries.push(format!(
+                "Method {{ name: {str_ty}::from(\"{}\"), isPublic: {}, isInstance: true, isMutable: {}, isCallable: {}, isThrowing: {}, kind: {}, access: {} }}",
+                m.name, m.is_pub, m.mutating, is_callable, m.throws, Self::introspect_method_kind_expr(m), access,
+            ));
+        }
+        (entries, fns)
+    }
+
+    /// Builds type-level (`type let`/`type def`/`type req`) `Field`/`Method` reflection
+    /// entries — the no-`instance` overloads (see `emit_introspect_prelude`'s
+    /// `FieldAccess`/`MethodAccess::Type` doc). STRUCT-ONLY (there is no
+    /// `EnumDecl::type_vars` at all, and the transpiler does not yet emit `type_methods`
+    /// for enums regardless — see `EnumDecl::type_methods`'s own doc comment; an
+    /// out-of-scope pre-existing gap, not something this feature works around) and
+    /// NON-GENERIC-ONLY (a `type let`/`type def` inside `impl<T> Struct<T>` has no single
+    /// T-independent Rust item to reference from a plain, non-generic `fn() -> ...`
+    /// pointer — the call site gates this by only calling here when `s.type_params` is
+    /// empty). Also `type let` only, never `type var` — a mutable type-level var lowers to
+    /// a module-level `static ... Mutex<...>` (see `emit_type_var_const`), and wiring
+    /// `getStatic`/`setStatic` through a lock is deferred, not attempted here (documented
+    /// gap; there is no `getMutStatic` — `getMut()` was dropped entirely, see the design
+    /// memo). `type set` type-methods are skipped too (a property-setter-
+    /// shaped type method, distinct from a plain callable — same "not attempted yet"
+    /// reason, see `introspect_type_method_is_visible`).
+    fn build_introspect_type_members(
+        &self, type_name: &str, type_vars: &[TypeVar], type_methods: &[TypeMethod],
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let str_ty = if self.use_rc_str() { "Rc" } else { "Arc" };
+        let mut field_entries = Vec::new();
+        let mut method_entries = Vec::new();
+        let mut fns: Vec<String> = Vec::new();
+
+        for tv in type_vars {
+            if tv.mutable { continue; } // `type var` — deferred, see doc comment above
+            let Some(ty) = &tv.ty else { continue };
+            let const_ref = format!("{}::{}", type_name, tv.name.to_uppercase());
+            let fn_name = format!("__introspectGetStatic_{}_{}", type_name, tv.name);
+            fns.push(format!(
+                "#[allow(non_snake_case)]\nfn {fn_name}() -> Result<FieldValue, IntrospectError> {{\n    Ok({})\n}}",
+                self.introspect_field_value_expr(ty, &const_ref, false, true),
+            ));
+            field_entries.push(format!(
+                "Field {{ name: {str_ty}::from(\"{}\"), isPublic: {}, isInstance: false, isMutable: false, isRebindable: false, access: FieldAccess::Type {{ getter: {fn_name}, setter: None }} }}",
+                tv.name, tv.is_pub,
+            ));
+        }
+
+        for tm in type_methods {
+            if !self.introspect_type_method_is_visible(tm) { continue; }
+            let is_callable = self.introspect_type_method_is_callable(tm);
+            let fn_ref = if is_callable {
+                let fn_name = format!("__introspectCallStatic_{}_{}", type_name, tm.name);
+                let mut body: Vec<String> = Vec::new();
+                body.push(format!(
+                    "if args.len() != {} {{ return Err(\"wrong argument count for method '{}'\".into()); }}",
+                    tm.params.len(), tm.name,
+                ));
+                let mut arg_names = Vec::new();
+                for (i, p) in tm.params.iter().enumerate() {
+                    let ty = p.ty.as_ref().expect("checked callable");
+                    let extracted = self.introspect_extract_expr(ty, &format!("&args[{}]", i), &p.name)
+                        .expect("checked callable");
+                    let an = format!("a{}", i);
+                    body.push(format!("let {} = {};", an, extracted));
+                    arg_names.push(an);
+                }
+                // Same `throws` handling as the instance-scoped path above — the real
+                // Rust return type already matches `IntrospectError`, so `?` alone works.
+                let call_expr = format!("{}::{}({})", type_name, tm.name, arg_names.join(", "));
+                let call_expr = if tm.throws { format!("{}?", call_expr) } else { call_expr };
+                match &tm.return_ty {
+                    Some(rty) if !matches!(rty, Type::Void) => {
+                        body.push(format!("let r = {};", call_expr));
+                        body.push(format!("Ok({})", self.introspect_field_value_expr(rty, "r", false, false)));
+                    }
+                    _ => {
+                        body.push(format!("{};", call_expr));
+                        body.push("Ok(FieldValue::Other(\"()\".to_string()))".to_string());
+                    }
+                }
+                fns.push(format!(
+                    "#[allow(non_snake_case)]\nfn {fn_name}(args: &[FieldValue]) -> Result<FieldValue, IntrospectError> {{\n    {}\n}}",
+                    body.join("\n    "),
+                ));
+                format!("Some({})", fn_name)
+            } else {
+                "None".to_string()
+            };
+            let kind = if tm.task { "MethodKind::Task" } else { "MethodKind::Plain" };
+            method_entries.push(format!(
+                "Method {{ name: {str_ty}::from(\"{}\"), isPublic: {}, isInstance: false, isMutable: {}, isCallable: {}, isThrowing: {}, kind: {}, access: MethodAccess::Type({}) }}",
+                tm.name, tm.is_pub, matches!(tm.kind, crate::ast::TypeMethodKind::Def), is_callable, tm.throws, kind, fn_ref,
+            ));
+        }
+
+        (field_entries, method_entries, fns)
+    }
+
+    /// True when `m` should appear in `introspect()`'s type-level `methods` at all —
+    /// `TypeMethodKind::Set` is excluded outright (a property-setter-shaped type method,
+    /// structurally closer to `Field.set()` than to a plain callable — not attempted here,
+    /// see `build_introspect_type_members`'s doc comment); every other `type def`/`type
+    /// req` (including `task`/`throws`) is visible. `TypeMethod` has no `native` concept
+    /// at all (no runtime-implemented type-level members), so unlike the instance-method
+    /// version there is no other exclusion.
+    fn introspect_type_method_is_visible(&self, m: &TypeMethod) -> bool {
+        !matches!(m.kind, crate::ast::TypeMethodKind::Set)
+    }
+
+    /// True when a real call body can be generated for `m`'s type-level `call()` entry —
+    /// same discipline as `introspect_method_is_callable`: this exact check gates both
+    /// `Method.isCallable` and whether `MethodAccess::Type`'s slot is `Some`/`None`.
+    /// `task` is excluded (different call shape, same reasoning as the instance-method
+    /// case); `throws` is NOT excluded — genuinely callable, same `?`-propagation as the
+    /// instance-scoped path (see `build_introspect_type_members`).
+    fn introspect_type_method_is_callable(&self, m: &TypeMethod) -> bool {
+        if !self.introspect_type_method_is_visible(m) { return false; }
+        if m.task { return false; }
+        for p in &m.params {
+            if p.variadic || p.default.is_some() { return false; }
+            match &p.ty {
+                Some(ty) => if self.introspect_resolve_ty(ty).is_none() { return false; },
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Emits the free-fn item texts `build_introspect_methods` built, each preceded by a
+    /// blank line — call only after the enclosing `impl Introspect for ...` block is closed.
+    fn emit_introspect_method_fns(&mut self, fns: &[String]) {
+        for f in fns {
+            self.blank();
+            self.out.push_str(f);
+            self.out.push('\n');
+        }
+    }
+
+    /// Synthesizes `impl Introspect for {StructName} { ... }` from the struct's field/method
+    /// list — see `emit_introspect_prelude`'s doc comment for why this can't be a
+    /// `#[derive(...)]`, and the module-level `boring_introspect_trait_design` memo for the
+    /// overall v2 handle-based design this implements.
+    ///
+    /// Covers both ways a struct's fields reach the generated Rust struct: the `struct X:
+    /// <fields>` block form (`s.fields`, used directly), and the no-body-`init` form (`struct
+    /// X: init(int a, int b):` with an empty body — see the "Fields from init (no-body form)"
+    /// pass in `emit_struct` above, which emits each such init's params as the struct's own
+    /// Rust fields when `s.fields` itself is empty). `introspect_fields` below normalizes both
+    /// into one list so the rest of this function doesn't care which form produced them.
+    ///
+    /// Each field gets one generated free getter function (always emitted — `get()`/
+    /// `introspect_field_value_expr` is total), plus a setter only when the field is
+    /// reassignable (`f.mutable`) AND its type round-trips through `FieldValue`
+    /// (`introspect_extract_expr`). `isMutable` (from `ty.grants_mut()`) is reported on
+    /// `Field` as informational metadata only — there is no `getMut()`/write-in-place form
+    /// (dropped post-ship: a scalar field can never be `mut`-qualified in Boring at all, so
+    /// the only fields it could ever apply to are non-scalar and would need an opaque,
+    /// Boring-source-unconsumable handle regardless — see the design memo). Methods are
+    /// handled by the shared `emit_introspect_methods` helper.
+    pub(crate) fn emit_introspect_struct_impl(&mut self, s: &StructDecl) {
+        // Bounded impl type params, same pattern as the auto-Display impl above: a generic
+        // field with a bare type-param type (`T`) hits the `Other` fallback, which needs
+        // `T: Debug` (`Clone` alone isn't enough) — plus `'static`, required here (unlike
+        // Display) because `Introspect: std::any::Any` needs `Self: 'static`, which for a
+        // generic impl only holds when every type param is itself bounded `'static`.
+        let tp_impl = if s.type_params.is_empty() {
+            String::new()
+        } else {
+            let bounded: Vec<String> = s.type_params.iter()
+                .map(|p| if p.starts_with('\'') { p.clone() }
+                         else if p.starts_with('$') { emit_generic_param(p) }
+                         else { format!("{}: Clone + std::fmt::Debug + 'static", p) })
+                .collect();
+            format!("<{}>", bounded.join(", "))
+        };
+        let tp_use = type_params_use_str(&s.type_params);
+
+        let introspect_fields: Vec<(String, Type)> = if !s.fields.is_empty() {
+            s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect()
+        } else {
+            let mut fields = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for init in &s.inits {
+                if init.body.is_empty() {
+                    for p in &init.params {
+                        if seen.insert(p.name.clone()) {
+                            let ty = p.ty.clone().unwrap_or_else(|| Type::Named("_unknown".to_string()));
+                            fields.push((p.name.clone(), ty));
+                        }
+                    }
+                }
+            }
+            fields
+        };
+        // Field-level pub/mutable/rebindable metadata only exists on the `s.fields` block
+        // form (`FieldDecl`) — a no-body-init-derived "field" has no such bookkeeping (see
+        // `pre_scan_struct_item`'s identical limitation), so those default to
+        // `isPublic: true, isMutable: false, isRebindable: false` (permissive read, no
+        // write-through), matching how the plain Rust field emission above already treats
+        // init-only fields as always `pub`.
+        let field_meta = |name: &str| -> (bool, bool, bool) {
+            s.fields.iter().find(|f| f.name == name)
+                .map(|f| (f.is_pub, f.ty.grants_mut(), f.mutable))
+                .unwrap_or((true, false, false))
+        };
+
+        let str_ty = if self.use_rc_str() { "Rc" } else { "Arc" };
+        // Turbofish suffix for referencing a generic free fn as a value from inside
+        // `impl<T: ...> Introspect for StructName<T>` — e.g. `__introspectGet_Foo_x::<T>`.
+        let tpg = if tp_impl.is_empty() { String::new() } else { format!("::{}", tp_use) };
+
+        self.blank();
+        self.line("#[allow(non_snake_case)]");
+        self.line(&format!("impl{} Introspect for {}{} {{", tp_impl, s.name, tp_use));
+        self.indent += 1;
+        self.line("fn __introspectAsAny(&self) -> &dyn std::any::Any { self }");
+        self.line("fn __introspectAsAnyMut(&mut self) -> &mut dyn std::any::Any { self }");
+        // Backed by a per-type `OnceLock`, not rebuilt on every call — `IntrospectInfo`'s own
+        // structural data (names, fn pointers, booleans) never depends on any particular
+        // instance, so computing the `Vec<Field>`/`Vec<Method>` once and handing back a
+        // `&'static` reference from then on avoids reallocating both vecs (plus cloning every
+        // Field/Method name string) on every `.introspect()` call. Mirrors the `GPU(n)`
+        // adapter-enumeration precedent (`src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration`)
+        // — a static `OnceLock`, not a Boring-language feature, since Boring already treats
+        // every struct-typed value as reference-like (see the parameter-passing rules), this
+        // is transparent to Boring source: `let info = w.introspect()` behaves identically
+        // whether the Rust-level return is owned or `&'static`.
+        self.line("fn introspect(&self) -> &'static IntrospectInfo {");
+        self.indent += 1;
+        self.line("static INFO: std::sync::OnceLock<IntrospectInfo> = std::sync::OnceLock::new();");
+        self.line("INFO.get_or_init(|| IntrospectInfo {");
+        self.indent += 1;
+        self.line(&format!("typeName: {str_ty}::from(\"{}\"),", s.name));
+        self.line(&format!("variantName: {str_ty}::from(\"{}\"),", s.name));
+        self.line("variantIndex: 0,");
+        let mut field_entries: Vec<String> = Vec::new();
+        for (fname, fty) in &introspect_fields {
+            let (is_pub, grants_mut, rebindable) = field_meta(fname);
+            // `isRebindable` must promise exactly what `set()` can deliver, not just echo the
+            // language-level `var`/`mut` qualifier: a `var`-qualified field whose type doesn't
+            // round-trip through `FieldValue` (anything falling back to `Other`/Debug — see
+            // `introspect_extract_expr`'s doc comment) gets no setter fn generated at all, so
+            // reporting `isRebindable: true` for it would be a lie `set()` immediately
+            // contradicts at runtime ("has no setter"). Gate the *reported flag* on the same
+            // condition that gates *emitting the setter fn*, so the two can never disagree.
+            let has_setter = rebindable && self.introspect_extract_expr(fty, "&value", fname).is_some();
+            let setter = if has_setter {
+                format!("Some(__introspectSet_{}_{}{})", s.name, fname, tpg)
+            } else { "None".to_string() };
+            field_entries.push(format!(
+                "Field {{ name: {str_ty}::from(\"{fname}\"), isPublic: {is_pub}, isInstance: true, isMutable: {grants_mut}, isRebindable: {has_setter}, access: FieldAccess::Instance {{ getter: __introspectGet_{sname}_{fname}{tpg}, setter: {setter} }} }}",
+                sname = s.name,
+            ));
+        }
+        let (method_entries, method_fns) = self.build_introspect_methods(&s.name, &s.methods, &tp_impl, &tp_use);
+        let mut method_entries = method_entries;
+        // Type-level (`type let`/`type def`/`type req`) members — see
+        // `build_introspect_type_members`'s doc comment for the scope this covers
+        // (struct only, non-generic only, `type let` only — no `type var`/`type set`).
+        let (type_field_entries, type_method_entries, type_member_fns) = if s.type_params.is_empty() {
+            self.build_introspect_type_members(&s.name, &s.type_vars, &s.type_methods)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        field_entries.extend(type_field_entries);
+        method_entries.extend(type_method_entries);
+        if field_entries.is_empty() {
+            self.line("fields: vec![],");
+        } else {
+            self.line("fields: vec![");
+            self.indent += 1;
+            for e in &field_entries { self.line(&format!("{},", e)); }
+            self.indent -= 1;
+            self.line("],");
+        }
+        if method_entries.is_empty() {
+            self.line("methods: vec![],");
+        } else {
+            self.line("methods: vec![");
+            self.indent += 1;
+            for e in &method_entries { self.line(&format!("{},", e)); }
+            self.indent -= 1;
+            self.line("],");
+        }
+        self.indent -= 1;
+        self.line("})");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+
+        // Free getter/setter functions — one per field. `get()` is always emitted (total);
+        // `set` only when the field is rebindable.
+        for (fname, fty) in &introspect_fields {
+            let (_, _, rebindable) = field_meta(fname);
+            self.blank();
+            self.line("#[allow(non_snake_case)]");
+            self.line(&format!(
+                "fn __introspectGet_{}_{}{}(instance: &dyn Introspect) -> Result<FieldValue, IntrospectError> {{",
+                s.name, fname, tp_impl,
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "let s = instance.__introspectAsAny().downcast_ref::<{}{}>().ok_or(\"wrong instance type for field '{}'\")?;",
+                s.name, tp_use, fname,
+            ));
+            self.line(&format!("Ok({})", self.introspect_field_value_expr(fty, &format!("s.{}", fname), false, true)));
+            self.indent -= 1;
+            self.line("}");
+
+            if rebindable {
+                if let Some(extracted) = self.introspect_extract_expr(fty, "&value", fname) {
+                    self.blank();
+                    self.line("#[allow(non_snake_case)]");
+                    self.line(&format!(
+                        "fn __introspectSet_{}_{}{}(instance: &mut dyn Introspect, value: FieldValue) -> Result<(), IntrospectError> {{",
+                        s.name, fname, tp_impl,
+                    ));
+                    self.indent += 1;
+                    self.line(&format!(
+                        "let s = instance.__introspectAsAnyMut().downcast_mut::<{}{}>().ok_or(\"wrong instance type for field '{}'\")?;",
+                        s.name, tp_use, fname,
+                    ));
+                    self.line(&format!("s.{} = {};", fname, extracted));
+                    self.line("Ok(())");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        }
+        self.emit_introspect_method_fns(&method_fns);
+        self.emit_introspect_method_fns(&type_member_fns);
+        self.blank();
+    }
+
+    /// Synthesizes `impl Introspect for {EnumName}` from `e.variants`/`e.methods`. Mirrors
+    /// `emit_introspect_struct_impl`'s reasoning, with one structural difference per the v2
+    /// design: `introspect()`'s `fields` are scoped to the CURRENT runtime variant (only its
+    /// named fields — same rule v1 used), matched once inside `introspect()` itself, while
+    /// `methods` is the same list regardless of variant (an enum's methods don't vary by
+    /// variant, only its fields do) — handled by the shared `emit_introspect_methods` helper,
+    /// identical to the struct path.
+    ///
+    /// Only NAMED variant fields (`VariantField.name.is_some()`) are exposed — a purely
+    /// positional field (no name in the Boring source) has no string to key a `Field` by, so
+    /// it's bound (to stay pattern-exhaustive) but otherwise ignored, same as v1. Rust always
+    /// emits enum variants tuple-style regardless of whether the Boring source named its
+    /// fields, so a named field's position — not its name — is what the generated Rust
+    /// pattern actually binds; the name is Boring-side-only bookkeeping (`VariantField.name`)
+    /// recovered here at transpile time.
+    ///
+    /// Per-field getter free functions are generated once per (variant, field) pair — keyed
+    /// `__introspectGet_{Enum}_{Variant}_{field}` — since, unlike a struct, the downcast+match
+    /// needed to reach the field is itself variant-specific. No setter (enum variant fields
+    /// have no `var`/`mut` mechanism, see below) and no getMut (dropped entirely, see the
+    /// design memo — never provided a real capability, see `emit_introspect_struct_impl`'s
+    /// doc comment for why).
+    pub(crate) fn emit_introspect_enum_impl(&mut self, e: &EnumDecl) {
+        let tp_impl = if e.type_params.is_empty() {
+            String::new()
+        } else {
+            let bounded: Vec<String> = e.type_params.iter()
+                .map(|p| if p.starts_with('\'') { p.clone() }
+                         else if p.starts_with('$') { emit_generic_param(p) }
+                         else { format!("{}: Clone + std::fmt::Debug + 'static", p) })
+                .collect();
+            format!("<{}>", bounded.join(", "))
+        };
+        let tp_use = type_params_use_str(&e.type_params);
+        let str_ty = if self.use_rc_str() { "Rc" } else { "Arc" };
+
+        let bindings_for = |v: &EnumVariant| -> Vec<String> {
+            v.fields.iter().enumerate()
+                .map(|(idx, f)| if f.name.is_some() { format!("f{}", idx) } else { "_".to_string() })
+                .collect()
+        };
+        let pat_for = |v: &EnumVariant| -> String {
+            if v.fields.is_empty() { format!("{}::{}", e.name, v.name) }
+            else { format!("{}::{}({})", e.name, v.name, bindings_for(v).join(", ")) }
+        };
+
+        self.blank();
+        self.line("#[allow(non_snake_case)]");
+        self.line(&format!("impl{} Introspect for {}{} {{", tp_impl, e.name, tp_use));
+        self.indent += 1;
+        self.line("fn __introspectAsAny(&self) -> &dyn std::any::Any { self }");
+        self.line("fn __introspectAsAnyMut(&mut self) -> &mut dyn std::any::Any { self }");
+        // Backed by a per-type `OnceLock<Vec<IntrospectInfo>>` (one entry per variant), not
+        // rebuilt on every call — see `emit_introspect_struct_impl`'s doc comment for the full
+        // rationale. Every variant's structural data (names, fn pointers, booleans) is
+        // computed once regardless of which instance/variant is asking; only the final "which
+        // entry is THIS instance" step actually needs to look at `self`.
+        self.line("fn introspect(&self) -> &'static IntrospectInfo {");
+        self.indent += 1;
+        self.line("static VARIANTS: std::sync::OnceLock<Vec<IntrospectInfo>> = std::sync::OnceLock::new();");
+        self.line("let variants = VARIANTS.get_or_init(|| {");
+        self.indent += 1;
+        let (method_entries, method_fns) = self.build_introspect_methods(&e.name, &e.methods, &tp_impl, &tp_use);
+        if method_entries.is_empty() {
+            self.line("let __methods: Vec<Method> = vec![];");
+        } else {
+            self.line("let __methods: Vec<Method> = vec![");
+            self.indent += 1;
+            for m in &method_entries { self.line(&format!("{},", m)); }
+            self.indent -= 1;
+            self.line("];");
+        }
+        self.line("vec![");
+        self.indent += 1;
+        for (i, v) in e.variants.iter().enumerate() {
+            let named_fields: Vec<(usize, &str, &Type)> = v.fields.iter().enumerate()
+                .filter_map(|(idx, f)| f.name.as_deref().map(|n| (idx, n, &f.ty)))
+                .collect();
+            let fields_expr = if named_fields.is_empty() {
+                "vec![]".to_string()
+            } else {
+                // Enum variant fields have no `var`/`mut` mechanism at all in Boring —
+                // `VariantField` carries only a name/type, no mutability flag (unlike a
+                // struct's `FieldDecl`) — so `isRebindable` is always `false` and no setter
+                // is ever generated: there is no Boring-source syntax (`shape.radius = x`)
+                // that would grant this permission in the first place. `isMutable` still
+                // follows the field's own type (`grants_mut()`) as informational metadata,
+                // same as a struct field, but gates nothing (no `getMut()` exists).
+                let entries: Vec<String> = named_fields.iter().map(|(idx, fname, fty)| {
+                    let _ = idx;
+                    format!(
+                        "Field {{ name: {str_ty}::from(\"{fname}\"), isPublic: true, isInstance: true, isMutable: {gm}, isRebindable: false, access: FieldAccess::Instance {{ getter: __introspectGet_{ename}_{vname}_{fname}{tpg}, setter: None }} }}",
+                        ename = e.name, vname = v.name, gm = fty.grants_mut(),
+                        tpg = if tp_impl.is_empty() { String::new() } else { format!("::{}", tp_use) },
+                    )
+                }).collect();
+                format!("vec![{}]", entries.join(", "))
+            };
+            self.line(&format!(
+                "IntrospectInfo {{ typeName: {str_ty}::from(\"{ename}\"), variantName: {str_ty}::from(\"{vname}\"), variantIndex: {i}, fields: {fields_expr}, methods: __methods.clone() }},",
+                ename = e.name, vname = v.name,
+            ));
+        }
+        self.indent -= 1;
+        self.line("]");
+        self.indent -= 1;
+        self.line("});");
+        self.line("let __idx: usize = match self {");
+        self.indent += 1;
+        for (i, v) in e.variants.iter().enumerate() {
+            self.line(&format!("{} => {},", pat_for(v), i));
+        }
+        self.indent -= 1;
+        self.line("};");
+        self.line("&variants[__idx]");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.emit_introspect_method_fns(&method_fns);
+        self.blank();
+
+        // Per-(variant, field) getter free functions (no setter — see the doc comment above).
+        for v in &e.variants {
+            let named_fields: Vec<(usize, &str, &Type)> = v.fields.iter().enumerate()
+                .filter_map(|(idx, f)| f.name.as_deref().map(|n| (idx, n, &f.ty)))
+                .collect();
+            for (idx, fname, fty) in named_fields {
+                let bindings = bindings_for(v);
+                let bind_var = &bindings[idx];
+                self.blank();
+                self.line("#[allow(non_snake_case)]");
+                self.line(&format!(
+                    "fn __introspectGet_{}_{}_{}{}(instance: &dyn Introspect) -> Result<FieldValue, IntrospectError> {{",
+                    e.name, v.name, fname, tp_impl,
+                ));
+                self.indent += 1;
+                self.line(&format!(
+                    "let s = instance.__introspectAsAny().downcast_ref::<{}{}>().ok_or(\"wrong instance type for field '{}'\")?;",
+                    e.name, tp_use, fname,
+                ));
+                self.line("match s {");
+                self.indent += 1;
+                self.line(&format!("{} => Ok({}),", pat_for(v), self.introspect_field_value_expr(fty, bind_var, true, false)));
+                self.line("_ => Err(\"field is not present on the current runtime variant\".into()),");
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+
+                // No setter free-fn for enum fields — see the doc comment above where
+                // `isRebindable`/`setter` are hardcoded `false`/`None`: there is no
+                // Boring-source mechanism that grants field reassignment on enum
+                // variant data at all, so a setter here would never be referenced.
+            }
+        }
+        self.blank();
     }
 
     // ── Enums ─────────────────────────────────────────────────────────────────
@@ -976,6 +1868,12 @@ impl Transpiler {
             .iter()
             .cloned()
             .partition(|p| self.is_known_derivable_trait(p));
+        // Same "Introspect" carve-out as the struct path — see the comment at that
+        // partition site (`emit_struct`) for why.
+        let (has_introspect, proto_impl_names): (Vec<String>, Vec<String>) = proto_impl_names
+            .into_iter()
+            .partition(|p| p == "Introspect");
+        let has_introspect = !has_introspect.is_empty();
         let mut emitted_derives: std::collections::HashSet<String> = std::collections::HashSet::new();
         if !has_clone_derive {
             let thiserror_will_add_debug = has_variant_error_attr && !has_debug_derive;
@@ -1008,7 +1906,7 @@ impl Transpiler {
             // the struct path — enums have no equivalent `derive_names` merge step of their
             // own, so this attr is otherwise emitted completely verbatim.
             let args_s = if attr.name == "derive" {
-                let qualified = self.qualify_serde_derive_args(&attr.args);
+                let qualified = self.qualify_serde_derive_args(&attr.args, attr.line, attr.col);
                 if qualified.is_empty() { String::new() } else { format!("({})", qualified.join(", ")) }
             } else if attr.args.is_empty() {
                 String::new()
@@ -1267,6 +2165,11 @@ impl Transpiler {
             self.indent -= 1;
             self.line("}");
         }
+
+        if has_introspect {
+            self.emit_introspect_enum_impl(e);
+        }
+
         // Implicit trait conformance for enums: if the enum has all methods required by a trait
         // (and hasn't already declared `as Trait`), auto-emit `impl Trait for Enum`.
         // This mirrors the same logic in emit_struct for structural conformance.

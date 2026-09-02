@@ -69,7 +69,8 @@ impl Transpiler {
                     }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
-                self.line(&format!("{} {}: {} = {};", kw, s.name, mutex_ty, init));
+                let name = escape_rust_keyword(&s.name);
+                self.line(&format!("{} {}: {} = {};", kw, name, mutex_ty, init));
                 return true;
             }
         }
@@ -99,7 +100,8 @@ impl Transpiler {
                     }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
-                self.line(&format!("{} {}: {} = {};", kw, s.name, rwlock_ty, init));
+                let name = escape_rust_keyword(&s.name);
+                self.line(&format!("{} {}: {} = {};", kw, name, rwlock_ty, init));
                 return true;
             }
         }
@@ -112,6 +114,7 @@ impl Transpiler {
                 let raw_val = self.emit_let_value(Some(inner.as_ref()), s_value);
                 let init = self.wrap_managed(&raw_val);
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+                let name = escape_rust_keyword(&s.name);
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Multi => {
                         self.managed_mutex_vars.insert(s.name.clone());
@@ -121,12 +124,12 @@ impl Transpiler {
                         self.managed_refcell_vars.insert(s.name.clone());
                     }
                 }
-                self.line(&format!("{} {}: {} = {};", kw, s.name, managed_ty, init));
+                self.line(&format!("{} {}: {} = {};", kw, name, managed_ty, init));
                 // Emit a lock guard so multi-field accesses in a single expression
                 // don't deadlock (two separate .lock().unwrap() on the same Mutex).
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
                     let shadow = format!("__{}_mg", s.name);
-                    self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, s.name));
+                    self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, name));
                     self.managed_mutex_vars.remove(&s.name);
                     self.managed_param_shadows.insert(s.name.clone(), shadow);
                 }
@@ -190,8 +193,27 @@ impl Transpiler {
         } else if val == "None" {
             // Cast that produces None (e.g. `42 as bool`) — add type annotation.
             ": Option<()>".to_string()
-        } else if let Some(inferred_qual) = self.inferred_qualifiers.get(&s.name).cloned() {
+        } else if let Some(inferred_qual) = (!self.rc_identity_vars.contains(&s.name))
+            .then(|| self.inferred_qualifiers.get(&s.name).cloned())
+            .flatten()
+        {
             // Priority 5: use-site qualifier inference — apply the inferred qualifier.
+            //
+            // Skipped entirely for an `rc_identity_vars` binding (used in an `x is y`
+            // reference-identity comparison, see the dedicated `rc_identity_vars` branch
+            // below): that branch always wraps the initializer in `Rc::new(...)`/`.clone()`
+            // regardless of what qualifier this pass infers, so an explicit `: T`
+            // annotation computed here (e.g. `: CDog` for a plain `let cda =
+            // CDog(name = "Rex")` inferred to the `Stack`/'inline candidate) would fight
+            // the `Rc<T>`-shaped value and fail to compile (E0308 "expected `CDog`, found
+            // `Rc<CDog>`") — leaving no annotation here lets Rust infer `Rc<CDog>` from
+            // the RHS instead, matching what this var actually needs. Only reachable for
+            // TOP-LEVEL `let`s in practice: this exact collision surfaced when top-level
+            // statements started running through `infer_qualifiers` too (see
+            // `Transpiler::emit_program_items`'s own doc comment) — a real function-body
+            // rc_identity var was never annotated from this branch either, but for a
+            // different reason (its usage signals already resolved to `Shared`/`Actor`
+            // there, never landing on `Stack` in the first place).
             // Handles bare T, T', T?, and T'? initialisers.
             // Only a call to a Boring-declared struct (`self.struct_fields` — populated
             // from actual `struct` decls) is a valid target here: `emit_type` on a
@@ -201,6 +223,15 @@ impl Transpiler {
             // emitting the invalid `let mut reader: BufReader = BufReader::new(file);`
             // before this guard — E0107, missing generics — instead of leaving the type
             // to Rust's own inference, which handles it fine with no annotation at all).
+            //
+            // The same E0107 trap applies to a Boring-declared struct that is itself
+            // generic (`struct Container<T>: ...`): `self.struct_fields` knows the field
+            // types but not what `T` was instantiated as at this call site, so
+            // `crate::ast::Type::Named(type_name)` below would emit a bare `Container`
+            // with no `<...>` — missing generics again, just from our own struct instead
+            // of an external one. `self.generic_struct_names` (populated from
+            // `StructDecl::type_params`) excludes those the same way, falling back to no
+            // annotation and letting Rust infer the full `Container<i64>` from the RHS.
             let type_name_opt = match &s_value.kind {
                 // some(Counter(0)) — must come before the generic Call arm
                 ExprKind::Call(callee, args)
@@ -211,6 +242,7 @@ impl Transpiler {
                             if let ExprKind::Var(n) = &inner.kind {
                                 if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                                     && self.struct_fields.contains_key(n.as_str())
+                                    && !self.generic_struct_names.contains(n.as_str())
                                 {
                                     Some((n.clone(), true))
                                 } else { None }
@@ -223,6 +255,7 @@ impl Transpiler {
                     if let ExprKind::Var(n) = &callee.kind {
                         if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                             && self.struct_fields.contains_key(n.as_str())
+                            && !self.generic_struct_names.contains(n.as_str())
                         {
                             Some((n.clone(), false))
                         } else { None }
@@ -353,10 +386,27 @@ impl Transpiler {
                         .is_some_and(|vt| matches!(vt.without_mut(), Type::Dict(..)))));
         let is_dict_index_else = is_dict_index_else
             && !matches!(&s.ty, Some(Type::Array(_)) | Some(Type::Set(_)));
+        // `let x = some_struct.dict_field.clone()` — a plain `.clone()` method call on a
+        // dict-typed receiver, with NO explicit type annotation. The string checks above
+        // (`HashMap::`/`.collect::<HashMap`) never catch this shape: the emitted Rust for
+        // a field-access clone starts with the receiver's own text (e.g.
+        // `self.instance_types.clone()`), not one of those literal prefixes. Left
+        // untracked, `x` falls out of `dict_vars`, and a later 2-variable-destructuring
+        // `for k, v in x:` wrongly takes the array/Vec enumerate codegen path instead of
+        // dict iteration — invalid Rust (`.iter().cloned().enumerate()` on a
+        // `HashMap` iterator, E0271/E0599). Resolve the *receiver's* (pre-`.clone()`)
+        // declared type via `resolve_expr_declared_type` — the same helper the
+        // `is_dict_index_else` heuristic above already relies on — rather than
+        // re-deriving dict-ness from the generated Rust string.
+        let is_clone_of_dict = matches!(&s_value.kind, ExprKind::MethodCall(recv, method, _)
+            if method == "clone"
+                && self.resolve_expr_declared_type(recv)
+                    .is_some_and(|t| matches!(t.without_mut(), Type::Dict(..))));
         if matches!(&s.ty, Some(Type::Dict(..)))
             || val.starts_with("HashMap::")
             || val.contains(".collect::<HashMap")
             || is_dict_index_else
+            || is_clone_of_dict
         {
             self.dict_vars.insert(s.name.clone());
         }
@@ -452,17 +502,18 @@ impl Transpiler {
                         } else {
                             let clones: String = arc_captures.iter()
                                 .map(|v| {
+                                    let ev = escape_rust_keyword(v);
                                     if self.rc_vars.contains(v.as_str()) {
-                                        format!("let {} = Rc::clone(&{});", v, v)
+                                        format!("let {} = Rc::clone(&{});", ev, ev)
                                     } else {
-                                        format!("let {} = Arc::clone(&{});", v, v)
+                                        format!("let {} = Arc::clone(&{});", ev, ev)
                                     }
                                 })
                                 .collect::<Vec<_>>()
                                 .join(" ");
                             format!("{}({{ {} async move {} }})", spawn_fn, clones, inner_s)
                         };
-                        self.line(&format!("{} {} = {};", kw, s.name, spawn_s));
+                        self.line(&format!("{} {} = {};", kw, escape_rust_keyword(&s.name), spawn_s));
                         return true;
                     }
                 }
@@ -533,6 +584,61 @@ impl Transpiler {
                     && self.is_known_user_type(type_name.as_str()) {
                         self.var_struct_types.insert(s.name.clone(), type_name.clone());
                     }
+            }
+        }
+        // Track the struct/enum type of `let x = recv.method()` when `recv`'s own struct
+        // type is known and `method`'s declared return type is itself a known struct/enum
+        // (`struct_method_return_types`, keyed "RecvType::method") — mirrors the identical
+        // `ExprKind::Call`/`GenericCall` tracking just above (constructor calls), but for an
+        // ordinary instance method call. Without this, `let info = p.introspect()` (or any
+        // other struct-returning method call) leaves `info` with no inferable type at all,
+        // breaking every downstream consumer that needs it: field access (`info.fields`),
+        // `for`-loop/array element-type inference over a returned collection field, and
+        // `try_emit_introspect_handle_call`'s own receiver-type resolution for
+        // `f.get(...)`/`m.request(...)`. Scoped to a bare-`Var` receiver only (the common
+        // case, including `p.introspect()`) — a chained/nested receiver isn't resolved here.
+        if s.ty.is_none() {
+            if let ExprKind::MethodCall(recv, method, _) = &s_value.kind {
+                if let Some(recv_ty) = self.resolve_expr_struct_type(recv) {
+                    if let Some(ret_ty) = self.struct_method_return_types
+                        .get(&format!("{}::{}", recv_ty, method)).cloned()
+                    {
+                        match &ret_ty {
+                            Type::Named(n) if self.is_known_user_type(n.as_str()) => {
+                                self.var_struct_types.insert(s.name.clone(), n.clone());
+                            }
+                            Type::Array(_) | Type::Dict(..) | Type::Set(_) => {
+                                self.var_types.insert(s.name.clone(), ret_ty.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        // Track element type for an un-annotated array-literal `let`, e.g.
+        // `let shapes = [Shape.Circle(2.0), Shape.Point]` or `let pts = [Point(1,2)]`,
+        // by inspecting the first element's own constructor shape (same
+        // `constructor_type_name` used above for `'actor`/`'guard` bindings, covering
+        // both a struct call `TypeName(args)` and an enum variant `TypeName.Variant(args)`).
+        // With an explicit `[T]` annotation this is handled by the `s.ty` branch below
+        // (which always inserts into `var_types`), but a bare `let` never reaches it, so
+        // `var_types["shapes"]` stayed empty — `emit_for`'s single-loop-var element-type
+        // detection (which reads `var_types` for a `Var` iterable) then couldn't recognize
+        // the loop variable as a known user (struct or enum) type, and the loop var's
+        // method calls fell through to the generic `map_method` fallback, which
+        // `camel_to_snake`s the method name unconditionally — wrongly rewriting a
+        // user-defined camelCase method (e.g. `s.describeMe()` → `s.describe_me()`, E0599
+        // at cargo build) even though the exact same call through a `let`/param binding of
+        // that type was correctly preserved.
+        if s.ty.is_none() {
+            if let ExprKind::Array(elems) = &s_value.kind {
+                if let Some(type_name) = elems.first().and_then(constructor_type_name) {
+                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && self.is_known_user_type(type_name) {
+                            self.var_types.insert(s.name.clone(), Type::Array(Box::new(Type::Named(type_name.to_string()))));
+                        }
+                }
             }
         }
         // Track element type for `let x = arr[i]` when arr has a known Array type.
@@ -1021,10 +1127,10 @@ impl Transpiler {
                 self.lazy_var_types.insert(s.name.clone(), ty.clone());
                 let inner_ty = self.emit_type(ty);
                 let once_cell = format!("std::cell::OnceCell::<{}>::new()", inner_ty);
-                self.line(&format!("let {} = {};", s.name, once_cell));
+                self.line(&format!("let {} = {};", escape_rust_keyword(&s.name), once_cell));
             } else {
                 // No type annotation — emit without the turbofish
-                self.line(&format!("let {} = std::cell::OnceCell::new();", s.name));
+                self.line(&format!("let {} = std::cell::OnceCell::new();", escape_rust_keyword(&s.name)));
             }
             return;
         }
@@ -1061,10 +1167,11 @@ impl Transpiler {
         if s.value.is_none() {
             let forces_mut = s.ty.as_ref().is_some_and(Type::nested_slot_grants_mut);
             let kw = if s.binding.is_mutable() || forces_mut { "let mut" } else { "let" };
+            let name = escape_rust_keyword(&s.name);
             if let Some(ty) = &s.ty {
-                self.line(&format!("{} {}: {};", kw, s.name, self.emit_type(ty)));
+                self.line(&format!("{} {}: {};", kw, name, self.emit_type(ty)));
             } else {
-                self.line(&format!("{} {};", kw, s.name));
+                self.line(&format!("{} {};", kw, name));
             }
             return;
         }
@@ -1133,22 +1240,23 @@ impl Transpiler {
 
             if is_struct_ctor {
                 let rc_val = format!("Rc::new({})", val);
-                self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, rc_val));
+                self.line(&format!("{}{} {}{} = {};", vis, kw, escape_rust_keyword(&s.name), ty, rc_val));
                 self.var_types.insert(s.name.clone(), Type::Named(format!("Rc<{}>", val)));
                 return;
             } else if is_rc_var_ref {
                 // Clone the Rc (shares pointer), not a deep clone.
-                let src_var = if let ExprKind::Var(v) = &s_value.kind { v.clone() } else { val.clone() };
+                let src_var = if let ExprKind::Var(v) = &s_value.kind { escape_rust_keyword(v) } else { val.clone() };
                 let rc_val = format!("{}.clone()", src_var);
-                self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, rc_val));
+                self.line(&format!("{}{} {}{} = {};", vis, kw, escape_rust_keyword(&s.name), ty, rc_val));
                 self.var_types.insert(s.name.clone(), Type::Named("Rc<ref>".to_string()));
                 return;
             }
         }
+        let escaped_name = escape_rust_keyword(&s.name);
         if s.is_static {
-            self.line(&format!("{}static {}: {} = {};", vis, s.name, ty.trim_start_matches(": ").trim(), val));
+            self.line(&format!("{}static {}: {} = {};", vis, escaped_name, ty.trim_start_matches(": ").trim(), val));
         } else {
-            self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, val));
+            self.line(&format!("{}{} {}{} = {};", vis, kw, escaped_name, ty, val));
             // Emit a lock guard shadow for managed mutex locals in multi-thread mode to
             // avoid deadlock when multiple fields are accessed in the same expression
             // (two separate .lock().unwrap() calls hold the guard simultaneously).
@@ -1159,7 +1267,7 @@ impl Transpiler {
                 && !self.managed_mutex_fn_return_vars.contains(&s.name)
             {
                 let shadow = format!("__{}_mg", s.name);
-                self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, s.name));
+                self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, escaped_name));
                 self.managed_mutex_vars.remove(&s.name);
                 self.managed_param_shadows.insert(s.name.clone(), shadow);
             }
@@ -1429,6 +1537,27 @@ impl Transpiler {
         }
     }
 
+    /// Emits `value` for a slot declared with a bare trait type (dynamic dispatch —
+    /// `Box<dyn Trait>`, see docs/book.md "Traits as types"), boxing it unless it's
+    /// already known to produce a `Box<dyn Trait>` value: a variable whose own declared
+    /// type is the same trait (already boxed by this same rule at its own `let`), or an
+    /// expression that already emitted a `Box::new(...)` wrapper.
+    fn box_if_trait_typed(&self, value: &Expr, trait_name: &str) -> String {
+        if let ExprKind::Var(v) = &value.kind {
+            if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
+                if n.as_str() == trait_name {
+                    return self.emit_expr_owned(value);
+                }
+            }
+        }
+        let emitted = self.emit_expr_owned(value);
+        if emitted.starts_with("Box::new(") {
+            emitted
+        } else {
+            format!("Box::new({})", emitted)
+        }
+    }
+
     pub(crate) fn emit_let_value(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
         // Implicit Arc::clone for auto-ref parameters assigned to an owned context.
         // e.g. `counter = c` where `c: Counter'actor` (emitted as &Arc<Mutex<Counter>>)
@@ -1523,6 +1652,30 @@ impl Transpiler {
                     }
                     _ => self.emit_expr(value),
                 }
+            }
+            // [Trait] (dynamic dispatch): box each element into `Box<dyn Trait>` so the
+            // literal matches the `Vec<Box<dyn Trait>>` type `emit_type` already produces
+            // for the declared local/field/param — see docs/book.md "Traits as types".
+            Some(Type::Array(elem_ty)) if matches!(elem_ty.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) => {
+                let trait_name = match elem_ty.as_ref() {
+                    Type::Named(n) => n.as_str(),
+                    _ => unreachable!(),
+                };
+                match &value.kind {
+                    ExprKind::Array(elems) => {
+                        let es: Vec<String> = elems.iter()
+                            .map(|e| self.box_if_trait_typed(e, trait_name))
+                            .collect();
+                        format!("vec![{}]", es.join(", "))
+                    }
+                    _ => self.emit_expr(value),
+                }
+            }
+            // Bare trait-typed slot (dynamic dispatch): `Box<dyn Trait>` — box the
+            // constructed value unless it's already known to be trait-boxed (e.g. a
+            // variable that is itself declared with this trait type).
+            Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()) => {
+                self.box_if_trait_typed(value, n.as_str())
             }
             // {string} Set field: emit typed HashSet::new() for empty set literals.
             Some(Type::Dict(..)) => {

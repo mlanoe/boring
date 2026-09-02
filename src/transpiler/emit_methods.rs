@@ -183,6 +183,13 @@ impl Transpiler {
     /// actually declared.
     pub(crate) fn is_known_user_type(&self, name: &str) -> bool {
         self.struct_fields.contains_key(name) || self.all_enum_types.contains(name)
+            // A bare trait name in type position (dynamic dispatch, `Box<dyn Trait>` —
+            // see docs/book.md "Traits as types"): its receiver's members are its own
+            // declared trait methods, same as a concrete struct/enum, so it needs the
+            // same "dispatch through my own declared members" treatment — otherwise a
+            // trait-typed receiver's method calls fall through to the generic
+            // camelCase→snake_case fallback instead of being preserved verbatim.
+            || self.trait_method_names.contains_key(name)
     }
 
     /// Resolves whether `obj`'s receiver type is a known user struct/enum — i.e. whether the
@@ -1891,7 +1898,113 @@ impl Transpiler {
         None
     }
 
+    /// Intercepts the five reflection-handle method calls — `get`/`set` on a
+    /// `Field`, `request`/`modify`/`call` on a `Method` — directly, bypassing the generic
+    /// per-struct method-call/coercion pipeline entirely. `Field`/`Method` are hand-
+    /// registered pseudo-structs (`Transpiler::new`'s `struct_fields` seeding), never real
+    /// Boring `struct ...:` declarations with real `FnDecl` bodies, so there is no per-
+    /// struct method table for these five to be found in anyway — this is the ONE place
+    /// that knows how to emit them, mirroring v1's `emit_introspect_struct_impl` being the
+    /// one place that knew how to synthesize the old flat API's methods. There is no
+    /// `getMut` — dropped post-ship, see the design memo (never a real capability: a
+    /// scalar field can't be `mut`-qualified in Boring at all, and every other field type
+    /// would have fallen back to an opaque, Boring-source-unconsumable handle anyway).
+    ///
+    /// Each of the five has exactly one Rust-level signature EXCEPT `get`/`set`,
+    /// which fold an instance-scoped and a type-level form into the same Boring-source
+    /// name via arity (argument COUNT, not any declared overload — there is none) — see
+    /// `emit_introspect_prelude`'s `FieldAccess`/`MethodAccess` doc comment for the full
+    /// reasoning. The instance argument is wrapped in an explicit `&`/`&mut` here, computed
+    /// directly rather than routed through the generic struct-argument coercion pipeline
+    /// (`emit_args_coerced`), which only auto-references for known `fn_sigs`/struct-method
+    /// signatures — neither of which exists for these hand-rolled Rust methods.
+    ///
+    /// A trailing `?` is appended whenever the call site is itself a `throws`/`try`
+    /// context (`self.in_throws || self.in_try_body`) — every one of these five is
+    /// `throws` per the language design (docs/book.md), so the calling Boring function
+    /// must itself be a `throws` context (or wrap the call in `try`), same requirement as
+    /// any other throwing call. Unlike a real user-declared `throws` method, the Boring
+    /// checker does not yet verify this specifically for these five (a known, documented
+    /// gap — misuse surfaces as a raw rustc "the `?` operator can only be used in a
+    /// function that returns `Result`" instead of a Boring-level diagnostic).
+    ///
+    /// Checking `in_throws`/`in_try_body` (rather than always appending `?`, as this used
+    /// to do unconditionally) matters for `try? expr` specifically: `ExprKind::TryElse`
+    /// (emit_expr.rs) emits its inner expression through a sub-transpiler with both flags
+    /// cleared, expecting back a raw `Result<T, E>` so it can append its own `.ok()` —
+    /// always appending `?` here regardless of context produced `expr?.ok()`, calling
+    /// `.ok()` on the already-unwrapped `FieldValue` (a real compile error), the same
+    /// "double-handling" class of bug already fixed once for `fromJson`/`fs.*` (see
+    /// docs/try-wrap-double-handling-bug.md).
+    /// True when `expr` (an `instance` argument to `get`/`set`/`request`/`modify`) is
+    /// ALREADY a Rust reference — so `try_emit_introspect_handle_call` must NOT wrap it
+    /// in another `&`/`&mut`. Covers two shapes: `self` (always `&Self`/`&mut Self`
+    /// inside a method body), and a bare `Var` naming the CURRENT function's own
+    /// parameter, when that parameter's Boring-level type is a struct/enum/trait name
+    /// with no explicit qualifier (Boring's default auto-ref convention — see
+    /// `emit_param`, emit_top.rs — always emits such a parameter as `&T` in Rust, never
+    /// an owned `T`) or an explicit `'actor`/`'guard`(`'task`) qualifier (`emit_param`
+    /// wraps those in `&` explicitly too) or an explicit borrow (`T&`). Anything else
+    /// (a `let`/`var` LOCAL binding, a field access, a method-call result, an `'owned`/
+    /// `'shared`-qualified param, …) is conservatively treated as NOT already a
+    /// reference — `&(...)` around it is correct/needed, matching this function's
+    /// original, simpler behavior before this check existed.
+    fn introspect_instance_arg_is_already_ref(&self, expr: &Expr) -> bool {
+        let ExprKind::Var(name) = &expr.kind else { return false };
+        if name == "self" { return true; }
+        let Some(ty) = self.fn_current_params.get(name.as_str()) else { return false };
+        let mut ty = ty;
+        while let Type::Mut(inner) = ty { ty = inner; }
+        match ty {
+            Type::Named(n) => self.is_known_user_type(n.as_str()),
+            Type::Qualified(_, OwnerQual::Borrow) => true,
+            Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask
+                | OwnerQual::Guard | OwnerQual::GuardTask) => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn try_emit_introspect_handle_call(&self, recv: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let recv_ty = self.resolve_expr_struct_type(recv)?;
+        if recv_ty != "Field" && recv_ty != "Method" { return None; }
+        let recv_s = self.emit_expr(recv);
+        let a = |i: usize| self.emit_expr(&args[i].value);
+        // The `instance` argument (`get`/`set`/`request`/`modify`'s first arg) is wrapped
+        // in an explicit `&`/`&mut` UNLESS the expression is already reference-typed —
+        // see `introspect_instance_arg_is_already_ref`'s doc comment for why this check
+        // exists (a real regression found via `examples/introspect_enum_demo.br`: a
+        // struct/enum-typed function PARAMETER is already `&T` by Boring's own default
+        // auto-ref convention, and wrapping it again gives `&&T`, which does NOT coerce
+        // to `&dyn Introspect` — confirmed a hard `cargo build` error, not just a lint).
+        let inst = |i: usize, mutable: bool| {
+            let e = a(i);
+            if self.introspect_instance_arg_is_already_ref(&args[i].value) {
+                e
+            } else if mutable {
+                format!("&mut ({})", e)
+            } else {
+                format!("&({})", e)
+            }
+        };
+        let out = match (recv_ty.as_str(), method, args.len()) {
+            ("Field", "get", 1)      => format!("{}.get({})", recv_s, inst(0, false)),
+            ("Field", "get", 0)      => format!("{}.getStatic()", recv_s),
+            ("Field", "set", 2)      => format!("{}.set({}, {})", recv_s, inst(0, true), self.emit_expr_owned(&args[1].value)),
+            ("Field", "set", 1)      => format!("{}.setStatic({})", recv_s, self.emit_expr_owned(&args[0].value)),
+            ("Method", "request", 2) => format!("{}.request({}, &({}))", recv_s, inst(0, false), a(1)),
+            ("Method", "modify", 2)  => format!("{}.modify({}, &({}))", recv_s, inst(0, true), a(1)),
+            ("Method", "call", 1)    => format!("{}.call(&({}))", recv_s, a(0)),
+            _ => return None,
+        };
+        if self.in_throws || self.in_try_body {
+            Some(format!("{}?", out))
+        } else {
+            Some(out)
+        }
+    }
+
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        if let Some(r) = self.try_emit_introspect_handle_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_clone_and_task_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_channel_method(obj, method, args) { return r; }
@@ -2261,6 +2374,19 @@ impl Transpiler {
             args.iter().enumerate().map(|(i, a)| {
                 if matches!(&a.value.kind, ExprKind::DotIdent(_)) {
                     if let Some(Some(param_ty)) = struct_method_param_types.get(i) {
+                        return self.emit_let_value(Some(param_ty), &a.value);
+                    }
+                }
+                // Bare trait-typed param (dynamic dispatch, `Box<dyn Trait>` — see
+                // docs/book.md "Traits as types"): route through `emit_let_value` so
+                // a struct/enum literal (or other) argument gets boxed to match the
+                // method's own `Box<dyn Trait>` parameter — mirrors what
+                // `emit_args_coerced` already does for plain (non-method) function
+                // calls. Without this, `obj.method(Circle(...))` against a `def
+                // method(Drawable item)` left the argument unboxed (E0308: expected
+                // `Box<dyn Drawable>`, found `Circle`).
+                if let Some(Some(param_ty @ Type::Named(n))) = struct_method_param_types.get(i) {
+                    if self.trait_method_names.contains_key(n.as_str()) {
                         return self.emit_let_value(Some(param_ty), &a.value);
                     }
                 }
@@ -2662,6 +2788,11 @@ impl Transpiler {
                     && !emitted.starts_with("Arc::")
                     && !emitted.starts_with("Rc::")
                     && !emitted.starts_with("Vec::")
+                    // A bare trait-typed param (`Box<dyn Trait>` — see docs/book.md "Traits
+                    // as types") already went through `emit_let.rs`'s `box_if_trait_typed`,
+                    // which produced a fresh `Box::new(...)` — same "fresh owned value,
+                    // don't clone further" reasoning as the Arc::/Rc::/Vec:: cases above.
+                    && !emitted.starts_with("Box::new(")
                     && !emitted.starts_with("{ let __g")
                     && !param_ty_is_copy(param_ty)
                     && !param_rebindable
@@ -3275,6 +3406,7 @@ impl Transpiler {
             optional_vars: self.optional_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),
+            generic_struct_names: self.generic_struct_names.clone(),
             struct_field_reassignable: self.struct_field_reassignable.clone(),
             struct_field_defaults: self.struct_field_defaults.clone(),
             structs_needing_default: self.structs_needing_default.clone(),
@@ -3319,6 +3451,7 @@ impl Transpiler {
             struct_rwlock_task_fields: self.struct_rwlock_task_fields.clone(),
             struct_req_methods: self.struct_req_methods.clone(),
             struct_protocols: self.struct_protocols.clone(),
+            struct_derives_clone: self.struct_derives_clone.clone(),
             trait_default_mutating: self.trait_default_mutating.clone(),
             fn_var_params: self.fn_var_params.clone(),
             with_open_names: self.with_open_names.clone(),
@@ -3328,6 +3461,7 @@ impl Transpiler {
             fn_declared_void: self.fn_declared_void,
             suppress_ok_wrap: false,
             trait_method_names: self.trait_method_names.clone(),
+            trait_type_method_names: self.trait_type_method_names.clone(),
             user_conv_targets: self.user_conv_targets.clone(),
             string_arc_vars: self.string_arc_vars.clone(),
             impl_type_params: self.impl_type_params.clone(),
@@ -3390,6 +3524,7 @@ impl Transpiler {
             in_cancellable_fn: self.in_cancellable_fn,
             uses_tokio_util: std::rc::Rc::clone(&self.uses_tokio_util),
             uses_serde: std::rc::Rc::clone(&self.uses_serde),
+            uses_introspect: std::rc::Rc::clone(&self.uses_introspect),
             fn_overload_decls: self.fn_overload_decls.clone(),
             overloaded_fn_names: self.overloaded_fn_names.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),

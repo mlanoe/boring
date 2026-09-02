@@ -1,0 +1,14 @@
+enum Shape:
+    Circle(float radius)
+    Point
+
+    req string describeMe():
+        "shape"
+
+def main():
+    let c = Shape.Circle(2.0)
+    print c.describeMe()
+
+    let shapes = [Shape.Circle(2.0), Shape.Point]
+    for s in shapes:
+        print s.describeMe()

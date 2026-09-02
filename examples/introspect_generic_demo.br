@@ -1,0 +1,11 @@
+struct Container<T> as Introspect:
+    T value
+    int tag
+
+def main() throws:
+    let c = Container(value = 42, tag = 1)
+    let info = c.introspect()
+    print "type: {info.typeName}"
+    for f in info.fields:
+        let v = f.get(c)
+        print "  {f.name} = {v:?}"

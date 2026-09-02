@@ -498,7 +498,17 @@ impl Transpiler {
                 if let ExprKind::Var(var_name) = &obj.kind {
                     if anonymous_vars.contains(var_name.as_str()) {
                         let is_req = if let Some(struct_name) = var_struct_types.get(var_name.as_str()) {
-                            self.struct_req_methods.contains(&format!("{}::{}", struct_name, method))
+                            // `method_is_req_or_task` also consults `trait_default_mutating`
+                            // (via `struct_protocols`) on top of `struct_req_methods` — needed
+                            // for a header-only-declared trait's methods (a user `trait ... :
+                            // req/def`, or the built-in `Introspect`, see its doc comment in
+                            // `mod.rs`), which never populate `struct_req_methods` themselves.
+                            // Using the narrower `struct_req_methods`-only check here (as this
+                            // used to) reported a false "not declared mut" diagnostic for such
+                            // methods even though `emit_top.rs`'s own req/def gate — the one
+                            // that actually decides whether transpilation fails — already knew
+                            // better; this call keeps both checks in sync.
+                            self.method_is_req_or_task(struct_name, method)
                         } else {
                             // Not a user struct — check whether it's a bare array/dict/set
                             // param. Built-in collection methods are read-only unless listed

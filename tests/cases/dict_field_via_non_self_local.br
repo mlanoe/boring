@@ -1,0 +1,51 @@
+# Regression test: `local_var.dict_field[key]` read (via `else`) where
+# `local_var` is a struct-typed local OTHER than `self` -- specifically a
+# loop-bound `for` variable, the shape that actually surfaced this bug
+# downstream (scratch-boring's `check_touching_object_hats`).
+#
+# `emit_expr_index`'s dict-index-through-a-struct-field branch (src/
+# transpiler/emit_expr.rs) only ever recognized `self.dict_field[key]` --
+# its `is_dict_field` check resolved `struct_fields` solely for the literal
+# receiver `self`, via `self_type`. Any OTHER local (a function parameter,
+# or here a `for`-loop-bound struct value) fell through that check entirely
+# and hit the generic Vec-style numeric-index codegen at the bottom of the
+# function, producing invalid Rust for a `{K=V}` (HashMap) field:
+#
+#   item.flags.get((key.clone()) as usize).cloned().unwrap_or_else(|| false)
+#
+# instead of the correct
+#
+#   item.flags.get(&key.clone()).cloned().unwrap_or_else(|| false)
+#
+# -- fails to compile (E0308 "expected `&_`, found `usize`" for an int key,
+# E0605 "non-primitive cast" for a `string`/`Arc<str>` key like this one).
+# Only caught by `cargo run` on the emitted Rust (this test), never by
+# `boring run`'s untyped interpreter (also registered in tests/run.rs, since
+# the interpreter has always evaluated this correctly).
+#
+# Fixed by reusing `expr_is_dict` (src/transpiler/emit_methods.rs) for the
+# whole `Field(inner_obj, field_name)` case generically -- it already resolves
+# a non-self local's struct type via `var_struct_types`/`var_struct_type` for
+# its own `ExprKind::Field` arm -- instead of a `self`-only lookup.
+#
+# The array is passed directly from the top-level body (`check_all(items, ...)`,
+# not from inside a wrapping function) on purpose -- this is also the exact
+# shape of a SEPARATE bug found while first writing this test (a top-level
+# call site failed to borrow a struct-element array local at all) and now
+# fixed alongside it; see tests/cases/top_level_call_inferred_qualifier_leak.br
+# for that bug's own dedicated regression test.
+
+struct Item:
+    {string=bool} flags
+
+def check_all([Item] items, string key):
+    for item in items:
+        let was_true = item.flags[key] else false
+        print "{was_true}"
+
+var mut [Item] items = []
+items.push(Item(flags = {"a" = true}))
+items.push(Item(flags = {"b" = false}))
+check_all(items, "a")
+check_all(items, "b")
+check_all(items, "z")

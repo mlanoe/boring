@@ -40,6 +40,9 @@ pub struct Shape {
 // Exercises the `const` promotion path (not the `static ... LazyLock` fallback `Point2`
 // above exercises) for a top-level `let` used at the exact struct-literal field-value
 // position that motivated this whole fixture: `Sprite { color: PADDLE_COLOR, .. }`.
+// `Default` lets `Sprite`'s own `#[derive(Default)]` below cover it as part of
+// `..Default::default()`.
+#[derive(Default)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
@@ -52,10 +55,17 @@ impl Color {
     }
 }
 
-// Stands in for Bevy's `Sprite { color: Color, .. }` -- the container whose field takes
-// the external `Color` type directly.
+// Stands in for Bevy's `Sprite { color: Color, custom_size: Option<Vec2>, .. }` -- the
+// container whose field takes the external `Color` type directly, plus `custom_size`,
+// mirroring the real `bevy_sprite::Sprite::custom_size: Option<Vec2>` field that motivates
+// `Transpiler::KNOWN_EXTERNAL_OPTIONAL_FIELDS` (src/transpiler/mod.rs) -- see
+// tests/cases/ext_optional_field_assign/src/main.br for the Boring-side exercise of
+// assigning a plain `Point2` value to it (must transpile to `Some(...)`, not a bare
+// value, or this fixture's own `cargo build` fails with E0308).
+#[derive(Default)]
 pub struct Sprite {
     pub color: Color,
+    pub custom_size: Option<Point2>,
 }
 
 // `FontSize` mirrors `bevy_text::FontSize` (real shape:

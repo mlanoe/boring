@@ -49,7 +49,7 @@ def paddle_scale():
     print "{PADDLE_SIZE.y}"
 
 def make_sprite():
-    let s = Sprite(color = PADDLE_COLOR)
+    let s = Sprite(color = PADDLE_COLOR, _)
     print "{s.color.r}"
 
 def make_shape():

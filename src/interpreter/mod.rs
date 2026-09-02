@@ -2412,6 +2412,40 @@ impl Interpreter {
         }
     }
 
+    /// Build the AST for the synthetic `MethodKind` enum (`Plain`/`Task`/`Stream`, unit
+    /// variants only) — `Method.kind`'s type, part of the Introspect "Method visibility
+    /// expansion" (see the `boring_introspect_trait_design` memo). Mirrors
+    /// `builtin_error_enum_decl` immediately above exactly: a real, programmatically-built
+    /// `EnumDecl` registered via `exec_item` the same way any user-declared enum would be,
+    /// so `MethodKind.Plain` construction, `==`, and `match` all work under `boring run`
+    /// with no special-casing anywhere else in the interpreter.
+    fn builtin_method_kind_enum_decl() -> EnumDecl {
+        EnumDecl {
+            name: "MethodKind".to_string(),
+            is_pub: true,
+            is_native: false,
+            type_params: vec![],
+            protocols: vec![],
+            variants: ["Plain", "Task", "Stream"]
+                .iter()
+                .map(|name| EnumVariant {
+                    name: name.to_string(),
+                    fields: vec![],
+                    attrs: vec![],
+                    line: 0,
+                    col: 0,
+                })
+                .collect(),
+            methods: vec![],
+            setters: vec![],
+            conversions: vec![],
+            type_methods: vec![],
+            attrs: vec![],
+            line: 0,
+            col: 0,
+        }
+    }
+
     pub fn exec_program(&mut self, program: &Program) -> Result<(), RuntimeError> {
         // Make `user_args` (set by `main.rs::run_file` before calling here) visible
         // to the `args()`/`raw_args()` builtins — see `PROGRAM_ARGS`'s doc comment.
@@ -2421,6 +2455,11 @@ impl Interpreter {
         // resolves regardless of where/whether the user declares their own enums.
         let builtin_error = Self::builtin_error_enum_decl();
         if let Err(Signal::Error(e)) = self.exec_item(&Item::Enum(builtin_error), Rc::clone(&self.global)) {
+            return Err(e);
+        }
+        // Same for `MethodKind` (`Method.kind`'s type — see `builtin_method_kind_enum_decl`).
+        let builtin_method_kind = Self::builtin_method_kind_enum_decl();
+        if let Err(Signal::Error(e)) = self.exec_item(&Item::Enum(builtin_method_kind), Rc::clone(&self.global)) {
             return Err(e);
         }
 

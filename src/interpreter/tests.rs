@@ -2082,6 +2082,243 @@ let _result = d.label
     assert_eq!(run_src(src), Value::Str("sud".into()));
 }
 
+#[test]
+fn test_introspect_struct_get_field() {
+    // Interpreter mirror of the transpiler's v2 `emit_introspect_struct_impl` (see
+    // src/transpiler/mod.rs's `introspect_struct_impl_synthesizes_typed_field_lookup`) —
+    // `introspect()` returns a real `IntrospectInfo`/`Field` value (`Value::Object`), and
+    // `Field.get(instance)` returns the raw runtime `Value` directly (no `FieldValue`
+    // tagged union; the interpreter has only one dynamic value type — see
+    // `Interpreter::try_introspect_method`'s doc comment). A plain `let` binding (no
+    // `mut`) must be able to call `introspect()`/`get()` — read-only, registered via
+    // `BUILTIN_NON_MUTATING` in eval_expr.rs (`introspect`; `get`/`request`/etc. need no
+    // entry there at all, see `try_introspect_handle_call`'s doc comment).
+    let src = "
+struct Point as Introspect:
+    var int x
+    let string label
+
+let p = Point(x = 1, label = \"hi\")
+let info = p.introspect()
+let _type_name = info.typeName
+let _field0 = info.fields[0]
+let _field1 = info.fields[1]
+let _x_name = _field0.name
+let _x_rebindable = _field0.isRebindable
+let _label_rebindable = _field1.isRebindable
+let _x = _field0.get(p)
+let _label = _field1.get(p)
+";
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_type_name"), Value::Str("Point".to_string()));
+    assert_eq!(get_var(&interp, "_x_name"), Value::Str("x".to_string()));
+    assert_eq!(get_var(&interp, "_x_rebindable"), Value::Bool(true), "`var int x` grants set()");
+    assert_eq!(get_var(&interp, "_label_rebindable"), Value::Bool(false), "`let string label` does not");
+    assert_eq!(get_var(&interp, "_x"), Value::Int(1));
+    assert_eq!(get_var(&interp, "_label"), Value::Str("hi".to_string()));
+}
+
+#[test]
+fn test_introspect_nested_field_recurses_with_no_field_value_wrapper() {
+    // Interpreter mirror of the transpiler's new `FieldValue::Nested`/`Actor`/`Guard`
+    // variants (see `boring_introspect_trait_design` memo's "Nested/Actor/Guard
+    // FieldValue variants" section and `introspect_nested_field_value_expr`,
+    // emit_struct.rs) — but the interpreter needs NO new code at all for this: every
+    // struct instance is already an `Rc<RefCell<ObjectInner>>`-backed `Value::Object`
+    // regardless of the field's Boring-level qualifier ('inline/'owned/'shared/'actor/
+    // 'guard all look identical at runtime here), so `Field.get(instance)` on a
+    // nested-struct-typed field already just returns that same live object value —
+    // calling `.introspect()` on it recurses through the ordinary `Value::Object` arm
+    // of `try_introspect_method` for free. Confirmed here rather than assumed.
+    let src = "
+struct Inner as Introspect:
+    int value
+    string label
+
+struct Outer as Introspect:
+    Inner inner
+
+let o = Outer(inner = Inner(value = 42, label = \"hi\"))
+let info = o.introspect()
+let field0 = info.fields[0]
+let nested = field0.get(o)
+let nested_info = nested.introspect()
+let _nested_type_name = nested_info.typeName
+let nested_field0 = nested_info.fields[0]
+let _nested_value = nested_field0.get(nested)
+";
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_nested_type_name"), Value::Str("Inner".to_string()));
+    assert_eq!(get_var(&interp, "_nested_value"), Value::Int(42));
+}
+
+#[test]
+fn test_introspect_struct_set_and_request() {
+    // `Field.set(instance, value)` mutates the live instance (Rc<RefCell<ObjectInner>>
+    // sharing means no write-back plumbing is needed — see `introspect_field_set`'s doc
+    // comment) and `Method.request(instance, args)` calls a `req` method dynamically.
+    let src = "
+struct Counter as Introspect:
+    var int value
+
+    req int doubled():
+        value * 2
+
+mut c = Counter(value = 10)
+let info = c.introspect()
+for f in info.fields:
+    if f.name == \"value\":
+        f.set(c, 41)
+let _after_set = c.value
+var _doubled = 0
+for m in info.methods:
+    if m.name == \"doubled\":
+        _doubled = m.request(c, [])
+";
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_after_set"), Value::Int(41));
+    assert_eq!(get_var(&interp, "_doubled"), Value::Int(82));
+}
+
+#[test]
+fn test_introspect_enum_variant_dispatch() {
+    // Interpreter mirror of `emit_introspect_enum_impl` — `introspect()`'s `variantName`/
+    // `variantIndex` answer per the enum instance's actual runtime variant
+    // (`Value::EnumVariant`), and its `fields` list only contains NAMED variant fields
+    // (looked up via `self.enums`, since the instance's own `fields: Vec<Value>` is
+    // positional-only) scoped to the CURRENT variant, while `methods` is the same list
+    // regardless of variant.
+    let src = "
+enum Shape as Introspect:
+    Circle(float radius)
+    Origin
+
+    req string kind():
+        \"shape\"
+
+let c = Shape.Circle(2.0)
+let ci = c.introspect()
+let _variant = ci.variantName
+let _idx = ci.variantIndex
+let _radius = ci.fields[0].get(c)
+let _kind = ci.methods[0].request(c, [])
+
+let o = Shape.Origin
+let oi = o.introspect()
+let _origin_variant = oi.variantName
+let _origin_idx = oi.variantIndex
+let _origin_num_fields = oi.fields.length
+";
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_variant"), Value::Str("Circle".to_string()));
+    assert_eq!(get_var(&interp, "_idx"), Value::Int(0));
+    assert_eq!(get_var(&interp, "_radius"), Value::Float64(2.0));
+    assert_eq!(get_var(&interp, "_kind"), Value::Str("shape".to_string()));
+    assert_eq!(get_var(&interp, "_origin_variant"), Value::Str("Origin".to_string()));
+    assert_eq!(get_var(&interp, "_origin_idx"), Value::Int(1));
+    assert_eq!(get_var(&interp, "_origin_num_fields"), Value::Int(0),
+        "a unit variant has no named fields");
+}
+
+#[test]
+fn test_introspect_method_visibility_expansion_kind_and_callable() {
+    // Interpreter mirror of the transpiler's "Method visibility expansion" — `info.methods`
+    // is exhaustive except `native` (unchanged from before: the interpreter's own
+    // `try_introspect_method` already filtered only `!m.is_native`, so task/stream/
+    // throws/variadic methods were already visible there before this change; what's new
+    // is the `isCallable`/`kind` fields themselves). `task`/`stream` methods report
+    // `isCallable: false` and `kind: MethodKind.Task`/`.Stream` — deliberately for
+    // PARITY with the transpiler backend (`call_fn` could technically run either kind
+    // here, since the interpreter has no `FieldValue` marshaling boundary).
+    let src = "
+struct Widget as Introspect:
+    var int count
+
+    req int doubled():
+        count * 2
+
+    task req int fetchCount():
+        count
+
+let w = Widget(count = 5)
+let info = w.introspect()
+var _doubled_kind_is_plain = false
+var _doubled_callable = false
+var _fetch_kind_is_task = false
+var _fetch_callable = true
+for m in info.methods:
+    if m.name == \"doubled\":
+        _doubled_kind_is_plain = (m.kind == MethodKind.Plain)
+        _doubled_callable = m.isCallable
+    if m.name == \"fetchCount\":
+        _fetch_kind_is_task = (m.kind == MethodKind.Task)
+        _fetch_callable = m.isCallable
+";
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_doubled_kind_is_plain"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "_doubled_callable"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "_fetch_kind_is_task"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "_fetch_callable"), Value::Bool(false));
+}
+
+#[test]
+fn test_introspect_task_method_request_throws_clear_error() {
+    // Calling `request()` on a `task`-kind (`isCallable: false`) method must be a clear,
+    // dedicated error — not a silent wrong result and not some unrelated panic/mis-dispatch.
+    let src = "
+struct Widget as Introspect:
+    var int count
+
+    task req int fetchCount():
+        count
+
+let w = Widget(count = 5)
+let info = w.introspect()
+for m in info.methods:
+    if m.name == \"fetchCount\":
+        let _r = m.request(w, [])
+";
+    let (_interp, res) = run(src);
+    let err = res.unwrap_err();
+    assert!(err.message.contains("not callable"), "unexpected error: {}", err.message);
+}
+
+#[test]
+fn test_introspect_throws_method_genuinely_callable_via_request() {
+    // A `throws` method is genuinely callable (not just visible) — `request()` calls it
+    // for real and a thrown error propagates as a real interpreter Signal::Throw,
+    // catchable with `try?` (unlike the `task`/`stream` "not callable" case above, which
+    // is a hard interpreter error, not a language-level throw).
+    let src = "
+struct Widget as Introspect:
+    var int count
+
+    req int risky(int x) throws:
+        guard x != 0 else throw Error.InvalidInput
+        100 / x
+
+let w = Widget(count = 5)
+let info = w.introspect()
+var _ok_result = 0
+var _threw = false
+for m in info.methods:
+    if m.name == \"risky\":
+        _ok_result = m.request(w, [5])
+        let bad = try? m.request(w, [0])
+        _threw = (bad == nil)
+";
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_ok_result"), Value::Int(20));
+    assert_eq!(get_var(&interp, "_threw"), Value::Bool(true),
+        "a thrown error from a genuinely-callable throws method must be catchable via try?");
+}
+
 
 mod tests_part2;
 mod tests_part3;

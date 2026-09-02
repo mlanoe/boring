@@ -1,0 +1,48 @@
+struct Inner as Introspect:
+    int value
+    string label
+
+struct Outer as Introspect:
+    Inner inline_inner
+    Inner'owned owned_inner
+    Inner'shared shared_inner
+    Inner'actor actor_inner
+    Inner'guard guard_inner
+
+def main() throws:
+    let o = Outer(
+        inline_inner = Inner(value = 1, label = "a"),
+        owned_inner = Inner(value = 2, label = "b"),
+        shared_inner = Inner(value = 3, label = "c"),
+        actor_inner = Inner(value = 4, label = "d"),
+        guard_inner = Inner(value = 5, label = "e"),
+    )
+    let info = o.introspect()
+    for f in info.fields:
+        let v = f.get(o)
+        match v:
+            Nested(inner_obj):
+                # 'inline / 'owned / 'shared — a real, recursively-introspectable value.
+                let inner_info = inner_obj.introspect()
+                print "{f.name}: Nested -> type={inner_info.typeName}"
+                for inner_f in inner_info.fields:
+                    let iv = inner_f.get(inner_obj)
+                    print "    {inner_f.name} = {iv:?}"
+            Actor(inner_obj):
+                # 'actor — the shape is visible, but recursing into a FIELD of it
+                # fails cleanly (not a panic): the wrapper's own __introspectAsAny
+                # deliberately does not delegate through the lock.
+                let inner_info = inner_obj.introspect()
+                print "{f.name}: Actor -> type={inner_info.typeName}"
+                for inner_f in inner_info.fields:
+                    let iv = try? inner_f.get(inner_obj)
+                    print "    {inner_f.name}: recursion failed cleanly = {iv == nil}"
+            Guard(inner_obj):
+                # 'guard — same degraded behavior as 'actor.
+                let inner_info = inner_obj.introspect()
+                print "{f.name}: Guard -> type={inner_info.typeName}"
+                for inner_f in inner_info.fields:
+                    let iv = try? inner_f.get(inner_obj)
+                    print "    {inner_f.name}: recursion failed cleanly = {iv == nil}"
+            _:
+                print "{f.name} = {v:?}"
