@@ -1,0 +1,26 @@
+struct Point as Introspect:
+    float x
+    string label
+
+enum Shape as Introspect:
+    Circle(float radius)
+    Empty
+
+def main() throws:
+    let p = Point(x = 1.5, label = "origin")
+    let info = p.introspect()
+    print "{info.typeName}"
+    for f in info.fields:
+        let v = f.get(p)
+        print "{f.name}={v:?}"
+
+    let c = Shape.Circle(2.0)
+    let cinfo = c.introspect()
+    print "{cinfo.typeName}.{cinfo.variantName}"
+    for f in cinfo.fields:
+        let v = f.get(c)
+        print "{f.name}={v:?}"
+
+    let e = Shape.Empty
+    let einfo = e.introspect()
+    print "{einfo.typeName}.{einfo.variantName}"

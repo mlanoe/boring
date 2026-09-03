@@ -1511,20 +1511,34 @@ impl Transpiler {
         self.indent += 1;
         self.line("fn __introspectAsAny(&self) -> &dyn std::any::Any { self }");
         self.line("fn __introspectAsAnyMut(&mut self) -> &mut dyn std::any::Any { self }");
-        // Backed by a per-type `OnceLock`, not rebuilt on every call — `IntrospectInfo`'s own
+        // Backed by a per-type cache, not rebuilt on every call — `IntrospectInfo`'s own
         // structural data (names, fn pointers, booleans) never depends on any particular
         // instance, so computing the `Vec<Field>`/`Vec<Method>` once and handing back a
         // `&'static` reference from then on avoids reallocating both vecs (plus cloning every
         // Field/Method name string) on every `.introspect()` call. Mirrors the `GPU(n)`
         // adapter-enumeration precedent (`src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration`)
-        // — a static `OnceLock`, not a Boring-language feature, since Boring already treats
+        // — a static cache, not a Boring-language feature, since Boring already treats
         // every struct-typed value as reference-like (see the parameter-passing rules), this
         // is transparent to Boring source: `let info = w.introspect()` behaves identically
         // whether the Rust-level return is owned or `&'static`.
+        //
+        // Multi (`Arc<str>` fields, `Sync`): a plain `static OnceLock<IntrospectInfo>` works
+        // directly — `static` items are checked for `Sync` unconditionally, and `Arc<str>` is.
+        // Single (`Rc<str>` fields, `!Sync`): `Rc<...>`-bearing `IntrospectInfo` can never
+        // live in a `static OnceLock` (E0277 — `static` needs `Sync` regardless of whether the
+        // Boring program ever actually crosses a thread). Use a `thread_local!` `OnceCell`
+        // instead — per-thread, so no `Sync` bound at all — holding a `Box::leak`ed (i.e.
+        // deliberately, permanently leaked, matching the `static` case's "never freed for the
+        // process's lifetime" behavior) `&'static IntrospectInfo` computed once per thread.
         self.line("fn introspect(&self) -> &'static IntrospectInfo {");
         self.indent += 1;
-        self.line("static INFO: std::sync::OnceLock<IntrospectInfo> = std::sync::OnceLock::new();");
-        self.line("INFO.get_or_init(|| IntrospectInfo {");
+        if self.use_rc_str() {
+            self.line("thread_local! { static INFO: std::cell::OnceCell<&'static IntrospectInfo> = std::cell::OnceCell::new(); }");
+            self.line("INFO.with(|cell| *cell.get_or_init(|| Box::leak(Box::new(IntrospectInfo {");
+        } else {
+            self.line("static INFO: std::sync::OnceLock<IntrospectInfo> = std::sync::OnceLock::new();");
+            self.line("INFO.get_or_init(|| IntrospectInfo {");
+        }
         self.indent += 1;
         self.line(&format!("typeName: {str_ty}::from(\"{}\"),", s.name));
         self.line(&format!("variantName: {str_ty}::from(\"{}\"),", s.name));
@@ -1579,7 +1593,11 @@ impl Transpiler {
             self.line("],");
         }
         self.indent -= 1;
-        self.line("})");
+        if self.use_rc_str() {
+            self.line("}))))");
+        } else {
+            self.line("})");
+        }
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -1689,8 +1707,18 @@ impl Transpiler {
         // entry is THIS instance" step actually needs to look at `self`.
         self.line("fn introspect(&self) -> &'static IntrospectInfo {");
         self.indent += 1;
-        self.line("static VARIANTS: std::sync::OnceLock<Vec<IntrospectInfo>> = std::sync::OnceLock::new();");
-        self.line("let variants = VARIANTS.get_or_init(|| {");
+        // See `emit_introspect_struct_impl`'s doc comment for the Single/Multi split: a
+        // `Vec<IntrospectInfo>` holding `Rc<str>` fields (Single) is `!Sync` and can't live in
+        // a `static OnceLock`, so it goes through a `thread_local!` `OnceCell` holding a
+        // `Box::leak`ed `&'static Vec<IntrospectInfo>` instead — same "compute once, return
+        // `&'static`" contract, no `Sync` bound required.
+        if self.use_rc_str() {
+            self.line("thread_local! { static VARIANTS: std::cell::OnceCell<&'static Vec<IntrospectInfo>> = std::cell::OnceCell::new(); }");
+            self.line("let variants = VARIANTS.with(|cell| *cell.get_or_init(|| {");
+        } else {
+            self.line("static VARIANTS: std::sync::OnceLock<Vec<IntrospectInfo>> = std::sync::OnceLock::new();");
+            self.line("let variants = VARIANTS.get_or_init(|| {");
+        }
         self.indent += 1;
         let (method_entries, method_fns) = self.build_introspect_methods(&e.name, &e.methods, &tp_impl, &tp_use);
         if method_entries.is_empty() {
@@ -1702,7 +1730,11 @@ impl Transpiler {
             self.indent -= 1;
             self.line("];");
         }
-        self.line("vec![");
+        if self.use_rc_str() {
+            self.line("Box::leak(Box::new(vec![");
+        } else {
+            self.line("vec![");
+        }
         self.indent += 1;
         for (i, v) in e.variants.iter().enumerate() {
             let named_fields: Vec<(usize, &str, &Type)> = v.fields.iter().enumerate()
@@ -1734,9 +1766,17 @@ impl Transpiler {
             ));
         }
         self.indent -= 1;
-        self.line("]");
+        if self.use_rc_str() {
+            self.line("]))");
+        } else {
+            self.line("]");
+        }
         self.indent -= 1;
-        self.line("});");
+        if self.use_rc_str() {
+            self.line("}));");
+        } else {
+            self.line("});");
+        }
         self.line("let __idx: usize = match self {");
         self.indent += 1;
         for (i, v) in e.variants.iter().enumerate() {

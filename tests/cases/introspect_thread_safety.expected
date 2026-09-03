@@ -1,0 +1,6 @@
+Point
+x=Float(1.5)
+label=Str("origin")
+Shape.Circle
+radius=Float(2.0)
+Shape.Empty

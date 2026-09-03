@@ -775,3 +775,16 @@ transpile_test!(self_field_loop_match_borrow);
 // `[dependencies]` path crate) -- `boring run`'s interpreter has no `Option<T>`-vs-`T`
 // Rust type distinction to ever hit this bug.
 transpile_project_test!(ext_optional_field_assign);
+
+// Regression: `emit_introspect_struct_impl`/`emit_introspect_enum_impl` cached
+// `introspect()`'s per-type `IntrospectInfo` behind a plain `static
+// std::sync::OnceLock<...>` unconditionally -- under `--threading single`,
+// `IntrospectInfo.typeName`/`variantName` are `Rc<str>` (not `Sync`), and `static` items
+// are checked for `Sync` regardless of whether the Boring program itself ever crosses a
+// thread, so this failed a real `cargo build` with E0277 ("`Rc<str>` cannot be shared
+// between threads safely") even though the identical source compiled fine under
+// `--threading multi` (`Arc<str>`, which is `Sync`). Fixed by switching to a
+// `thread_local!` `OnceCell<&'static ...>` (no `Sync` bound needed) under Single -- see
+// `emit_introspect_struct_impl`'s doc comment. `strict_single`/`managed_single` here are
+// exactly the two combos that used to fail to compile.
+transpile_test!(introspect_thread_safety);
