@@ -9,23 +9,34 @@
 //   3. Compares stdout to the same `<case>.expected` used by the interpreter tests
 //
 // Run with:
-//   cargo test --test transpile -- --test-threads=1
+//   cargo test --test transpile
 //
 // The first run compiles all generated Rust projects from scratch (slow).
 // Subsequent runs reuse the cargo build cache (fast, < 2s per test).
 //
-// IMPORTANT: always pass `--test-threads=1`. Every generated project's inner `cargo
-// run`/`cargo build` is pointed at one shared build directory (see `shared_target_dir`
-// below) to avoid duplicating tokio/serde's build output per fixture. Cargo's own
-// locking on that shared dir serializes concurrent builds anyway, so the default
-// multi-threaded test runner buys no real parallelism -- it just piles up N test
-// threads all queued on the same build lock. Measured: with the default thread count
-// this queuing degraded into an effective multi-hour stall (one thread parked over 60s
-// on a single build, the whole run ultimately killed after 10+ hours); run serially,
-// the full 416-test suite passes in ~5 minutes.
+// Every generated project's inner `cargo run`/`cargo build` is pointed at one shared
+// build directory (see `shared_target_dir` below) to avoid duplicating tokio/serde's
+// build output per fixture -- a per-test target dir once blew past 40GB on a full cold
+// run and filled the disk outright. Every test's full emit-build-run sequence is
+// serialized from inside this test binary itself (see `TRANSPILE_TEST_LOCK` below), so
+// the default multi-threaded test runner is safe to use: only one test's generated
+// project is ever being built/run at a time regardless of `--test-threads`. Passing
+// `--test-threads=1` explicitly still works and behaves the same -- it's just no longer
+// required for correctness. (Historical note: before `TRANSPILE_TEST_LOCK` existed,
+// relying on cargo's own file locking to serialize the shared dir was observed to
+// sometimes deadlock outright under real parallel load -- test processes parked at 0%
+// CPU indefinitely, several stuck on "Blocking waiting for file lock on package cache"
+// with no forward progress -- rather than just queue up slowly. A narrower fix that
+// locked only the `cargo` step (leaving the `boring build` emit step unlocked/concurrent)
+// avoided the deadlock but traded it for a *worse*, silent failure mode: two tests
+// sharing the same generated package name (`main`, in project mode) would each report
+// success but with the other's actual stdout, because nothing stopped one test's
+// unlocked emit step from racing a different test's locked build+run. Locking the whole
+// sequence removes that overlap window too.)
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 // Every generated fixture project used to get its own `target/` dir (each one pulling in
 // tokio and/or serde as real dependencies, ~100-300MB apiece) -- across 400+ tests that
@@ -39,7 +50,37 @@ fn shared_target_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("transpile-cases")
 }
 
+// Cargo's own locking on `shared_target_dir()` is supposed to just serialize concurrent
+// builds against it (slower, but safe). Under real parallel load (the default multi-
+// threaded `cargo test` runner spawning many of these inner `cargo build`/`cargo run`
+// commands at once) that has been observed to deadlock outright instead: processes parked
+// at 0% CPU indefinitely, several stuck on "Blocking waiting for file lock on package
+// cache" with no forward progress, well past what a slow-but-serial build would ever take.
+// Passing `--test-threads=1` (see the module doc above) avoids it by construction -- only
+// ever one full test (emit + build + run) is in flight at a time -- but that depends on
+// every invocation remembering the flag.
+//
+// Take the same property unconditionally, from inside the test binary itself, with an
+// in-process mutex held across a *whole* test's emit-build-run sequence (not just the
+// `cargo` step). Locking only the `cargo` step was tried first and is NOT enough: every
+// generated project (in project mode especially) shares the same package name (`main`)
+// in the same `CARGO_TARGET_DIR`, so letting one test's unlocked `boring build` emit step
+// run concurrently with a *different* test's locked build+run was enough, on its own, to
+// corrupt results -- two tests would each report running successfully but with the
+// other's actual output (e.g. `ext_const_promotion` and `ext_enum_const_promotion`
+// swapping stdout wholesale), reproducing consistently under `cargo test`'s default
+// parallelism even with the `cargo`-step-only lock in place. Serializing the entire test
+// body removes that overlap window entirely -- exactly as if every test ran under
+// `--test-threads=1`, just automatic. This keeps the shared directory (and its disk
+// savings) exactly as-is; it only removes the concurrency that triggers either failure
+// mode.
+static TRANSPILE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &str) {
+    // Held for this whole function -- see `TRANSPILE_TEST_LOCK`'s doc comment above for why
+    // the `cargo` step alone isn't enough to lock.
+    let _guard = TRANSPILE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let bin = env!("CARGO_BIN_EXE_boring");
     let case_dir = Path::new("tests/cases");
     let br_file       = case_dir.join(format!("{}.br", name));
@@ -198,6 +239,10 @@ fn _keep_run_transpile_case(name: &str) { run_transpile_case(name); }
 // into an external/opaque type (tests/cases/fixtures/ext_geom stands in for something
 // like `bevy`/`glam`) -- has to go through that path instead.
 fn run_transpile_project_case(name: &str, mode_str: &str, threading_str: &str) {
+    // Held for this whole function -- see `TRANSPILE_TEST_LOCK`'s doc comment above for why
+    // the `cargo` step alone isn't enough to lock.
+    let _guard = TRANSPILE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let bin = env!("CARGO_BIN_EXE_boring");
     let project_dir = Path::new("tests/cases").join(name);
     let expected_file = Path::new("tests/cases").join(format!("{}.expected", name));
