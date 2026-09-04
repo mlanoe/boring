@@ -818,6 +818,22 @@ struct Transpiler {
     pub(crate) modules: Vec<(String, String)>,
     /// True once the standard prelude has been emitted — prevents re-emission for inlined files.
     pub(crate) prelude_emitted: bool,
+    /// True once `pre_scan`'s hardcoded builtin-enum seeding (`Error`/`MethodKind`/
+    /// `FieldValue`) has run. `pre_scan` itself runs once per `.br` file in a multi-file
+    /// build (once during `deep_pre_scan`'s forward-reference walk, and again per file
+    /// when `inline_boring_use`/`inline_boring_stdlib_use` emit that file's own Rust via
+    /// a nested `emit_program` call) — but the builtin seeding must run exactly ONCE for
+    /// the whole build, not once per call. Without this guard, every later file's
+    /// `pre_scan` re-inserts `FieldValue`'s variant names (`Int`/`Float`/`Bool`/`Str`/...)
+    /// into `enum_variants` unconditionally, clobbering an EARLIER file's own enum that
+    /// happens to share a variant name (e.g. a self-hosted interpreter's own `Value`
+    /// enum, which also has `Int`/`Str`/... variants) — even though that earlier file's
+    /// registration is what should win. A file that always fully qualifies its bare
+    /// construction (`Value.Int(x)`) never hits this path (that goes through a separate,
+    /// unambiguous resolution), but any file using the bare-variant shorthand (`Int(x)`)
+    /// for a variant name that collides with `FieldValue`'s does, and picks up the wrong
+    /// enum. See the `interpreter_build_test_regression` test for a minimal repro.
+    pub(crate) builtins_seeded: bool,
     /// Function signatures already emitted — shared across all inlined files to deduplicate.
     pub(crate) emitted_fn_sigs: std::collections::HashSet<String>,
     /// True when the program calls any of the log-level builtins (error/warn/info/debug/trace).
@@ -1250,6 +1266,7 @@ impl Transpiler {
             loaded: std::collections::HashSet::new(),
             modules: Vec::new(),
             prelude_emitted: false,
+            builtins_seeded: false,
             emitted_fn_sigs: std::collections::HashSet::new(),
             uses_log: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_thiserror: std::rc::Rc::new(std::cell::Cell::new(false)),
@@ -3384,70 +3401,88 @@ impl Transpiler {
         // to decide whether to add `Default` to a struct's derive list.
         helpers::collect_default_rest_targets(&program.items, &mut self.structs_needing_default);
 
-        // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
-        self.typed_error_enums.insert("Error".to_string());
-        for variant in &["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"] {
-            self.enum_variants.insert(variant.to_string(), "Error".to_string());
-            let key = format!("Error::{}", variant);
-            self.enum_variant_fields.insert(key.clone(), vec![]);
-            self.enum_variant_field_types.insert(key, vec![]);
-        }
+        // Pre-populate the built-in `Error`/`MethodKind`/`FieldValue` enums so they're
+        // always available without a user declaration — but only ONCE per build, not
+        // once per call. `pre_scan` runs once per `.br` file in a multi-file build (once
+        // during `deep_pre_scan`'s forward-reference walk, and again per file when
+        // `inline_boring_use`/`inline_boring_stdlib_use` emit that file's own Rust via a
+        // nested `emit_program` call), and `enum_variants` accumulates cumulatively
+        // across all those calls. Re-running this seeding on every call would
+        // unconditionally re-insert `FieldValue`'s variant names (`Int`/`Float`/`Bool`/
+        // `Str`/...), clobbering an EARLIER file's own enum that happens to share a
+        // variant name (e.g. a self-hosted interpreter's own `Value` enum, which also has
+        // `Int`/`Str`/... variants) even though that earlier file's registration is the
+        // one that should win. Guarding it to run once preserves the "available from the
+        // very first pre_scan call" guarantee these enums need, without the later
+        // clobbering.
+        if !self.builtins_seeded {
+            self.builtins_seeded = true;
 
-        // Pre-populate the synthetic `MethodKind` enum (`Plain`/`Task`/`Stream`, no data on
-        // any variant) — `Method.kind`'s type, part of the "Method visibility expansion" of
-        // the v2 Introspect design (see the `boring_introspect_trait_design` memo). Follows
-        // the `Error` seeding immediately above exactly: `enum_variants` (variant name → enum
-        // type name) is what drives both the `.Variant` shorthand (`emit_expr.rs`'s
-        // `ExprKind::DotIdent`) and the full `EnumName.Variant` construction path
-        // (`emit_expr_field`'s `enum_variant_fields.contains_key` check), and
-        // `enum_variant_fields`/`enum_variant_field_types` (both empty — every variant here
-        // is a unit variant) are what a `match MethodKind_value: Plain: ... Task: ...`
-        // pattern needs to know each arm binds zero fields. Also, unlike `Error`,
-        // `all_enum_types`/`user_types` are seeded too — `MethodKind` is used as a real
-        // `Method.kind` FIELD TYPE (not just constructed/thrown), and `is_known_user_type`
-        // (emit_methods.rs), consulted for method-call-casing/dispatch decisions on a
-        // `MethodKind`-typed receiver, checks `all_enum_types` directly.
-        self.all_enum_types.insert("MethodKind".to_string());
-        self.user_types.insert("MethodKind".to_string());
-        for variant in &["Plain", "Task", "Stream"] {
-            self.enum_variants.insert(variant.to_string(), "MethodKind".to_string());
-            let key = format!("MethodKind::{}", variant);
-            self.enum_variant_fields.insert(key.clone(), vec![]);
-            self.enum_variant_field_types.insert(key, vec![]);
-        }
+            // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
+            self.typed_error_enums.insert("Error".to_string());
+            for variant in &["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"] {
+                self.enum_variants.insert(variant.to_string(), "Error".to_string());
+                let key = format!("Error::{}", variant);
+                self.enum_variant_fields.insert(key.clone(), vec![]);
+                self.enum_variant_field_types.insert(key, vec![]);
+            }
 
-        // Pre-populate `FieldValue`'s own variant shape (`Int`/`Float`/`Bool`/`Str`/
-        // `Other`/`Nested`/`Actor`/`Guard`, see `emit_introspect_prelude`) into the same
-        // registries `Error`/`MethodKind` use above. Needed so `match v: Nested(x): ...`
-        // against a `FieldValue` value (as returned by `Field.get()`/`Method.request()`/
-        // etc.) resolves to a properly-QUALIFIED `FieldValue::Nested(x)` pattern in the
-        // generated Rust — `emit_match.rs`'s `emit_pattern` qualifies a bare variant name
-        // via exactly these two maps, and without an entry here it falls back to an
-        // unqualified `Nested(x)`, which doesn't compile (E0531 "cannot find tuple
-        // struct or tuple variant"). Previously never hit: every existing example only
-        // ever *constructed* (`FieldValue.Int(5)`, a generic `Type.Variant(args)` →
-        // `Type::Variant(args)` pass-through that needs no registration at all) or
-        // Debug-printed (`{v:?}`) a `FieldValue`, never destructured one via `match`.
-        // Field types below are for downstream binding-type inference on the matched
-        // variable (e.g. so a `Nested`/`Actor`/`Guard` binding is known trait-typed —
-        // `Box<dyn Introspect>` — and further `.introspect()`/`.get()` calls on it
-        // dispatch correctly); `Other`'s payload is approximated as `string` (it's
-        // really a raw Rust `String`, not `Rc`/`Arc<str>`) since no existing or new
-        // example destructures it — low risk, and easy to correct later if one does.
-        for (variant, field_ty) in [
-            ("Int", Type::Int),
-            ("Float", Type::Float64),
-            ("Bool", Type::Bool),
-            ("Str", Type::Named("string".to_string())),
-            ("Other", Type::Named("string".to_string())),
-            ("Nested", Type::Named("Introspect".to_string())),
-            ("Actor", Type::Named("Introspect".to_string())),
-            ("Guard", Type::Named("Introspect".to_string())),
-        ] {
-            self.enum_variants.insert(variant.to_string(), "FieldValue".to_string());
-            let key = format!("FieldValue::{}", variant);
-            self.enum_variant_fields.insert(key.clone(), vec![None]);
-            self.enum_variant_field_types.insert(key, vec![field_ty]);
+            // Pre-populate the synthetic `MethodKind` enum (`Plain`/`Task`/`Stream`, no data on
+            // any variant) — `Method.kind`'s type, part of the "Method visibility expansion" of
+            // the v2 Introspect design (see the `boring_introspect_trait_design` memo). Follows
+            // the `Error` seeding immediately above exactly: `enum_variants` (variant name → enum
+            // type name) is what drives both the `.Variant` shorthand (`emit_expr.rs`'s
+            // `ExprKind::DotIdent`) and the full `EnumName.Variant` construction path
+            // (`emit_expr_field`'s `enum_variant_fields.contains_key` check), and
+            // `enum_variant_fields`/`enum_variant_field_types` (both empty — every variant here
+            // is a unit variant) are what a `match MethodKind_value: Plain: ... Task: ...`
+            // pattern needs to know each arm binds zero fields. Also, unlike `Error`,
+            // `all_enum_types`/`user_types` are seeded too — `MethodKind` is used as a real
+            // `Method.kind` FIELD TYPE (not just constructed/thrown), and `is_known_user_type`
+            // (emit_methods.rs), consulted for method-call-casing/dispatch decisions on a
+            // `MethodKind`-typed receiver, checks `all_enum_types` directly.
+            self.all_enum_types.insert("MethodKind".to_string());
+            self.user_types.insert("MethodKind".to_string());
+            for variant in &["Plain", "Task", "Stream"] {
+                self.enum_variants.insert(variant.to_string(), "MethodKind".to_string());
+                let key = format!("MethodKind::{}", variant);
+                self.enum_variant_fields.insert(key.clone(), vec![]);
+                self.enum_variant_field_types.insert(key, vec![]);
+            }
+
+            // Pre-populate `FieldValue`'s own variant shape (`Int`/`Float`/`Bool`/`Str`/
+            // `Other`/`Nested`/`Actor`/`Guard`, see `emit_introspect_prelude`) into the same
+            // registries `Error`/`MethodKind` use above. Needed so `match v: Nested(x): ...`
+            // against a `FieldValue` value (as returned by `Field.get()`/`Method.request()`/
+            // etc.) resolves to a properly-QUALIFIED `FieldValue::Nested(x)` pattern in the
+            // generated Rust — `emit_match.rs`'s `emit_pattern` qualifies a bare variant name
+            // via exactly these two maps, and without an entry here it falls back to an
+            // unqualified `Nested(x)`, which doesn't compile (E0531 "cannot find tuple
+            // struct or tuple variant"). Previously never hit: every existing example only
+            // ever *constructed* (`FieldValue.Int(5)`, a generic `Type.Variant(args)` →
+            // `Type::Variant(args)` pass-through that needs no registration at all) or
+            // Debug-printed (`{v:?}`) a `FieldValue`, never destructured one via `match`.
+            // Field types below are for downstream binding-type inference on the matched
+            // variable (e.g. so a `Nested`/`Actor`/`Guard` binding is known trait-typed —
+            // `Box<dyn Introspect>` — and further `.introspect()`/`.get()` calls on it
+            // dispatch correctly); `Other`'s payload is approximated as `string` (it's
+            // really a raw Rust `String`, not `Rc`/`Arc<str>`) since no existing or new
+            // example destructures it — low risk, and easy to correct later if one does.
+            for (variant, field_ty) in [
+                ("Int", Type::Int),
+                ("Float", Type::Float64),
+                ("Bool", Type::Bool),
+                ("Str", Type::Named("string".to_string())),
+                ("Other", Type::Named("string".to_string())),
+                ("Nested", Type::Named("Introspect".to_string())),
+                ("Actor", Type::Named("Introspect".to_string())),
+                ("Guard", Type::Named("Introspect".to_string())),
+            ] {
+                self.enum_variants.insert(variant.to_string(), "FieldValue".to_string());
+                let key = format!("FieldValue::{}", variant);
+                self.enum_variant_fields.insert(key.clone(), vec![None]);
+                self.enum_variant_field_types.insert(key, vec![field_ty]);
+            }
         }
 
         // ── Collect user-defined type names (for managed mode wrapping) ────────

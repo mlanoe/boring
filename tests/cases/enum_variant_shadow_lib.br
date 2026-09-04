@@ -1,0 +1,11 @@
+# Sibling `.br` file for the `enum_variant_shadow` regression test. Declares a `Value`
+# enum whose variant names (`Int`/`Str`) collide with the transpiler's own built-in
+# `FieldValue` enum (see `src/transpiler/mod.rs`'s `pre_scan`, the `Int`/`Float`/`Bool`/
+# `Str`/`Other`/`Nested`/`Actor`/`Guard` seeding). Imported by enum_variant_shadow.br via
+# a plain local `use enum_variant_shadow_lib`, exactly like cross_file_use_lib.br/
+# cross_file_use_main.br above -- this is what puts `Value`'s own enum declaration in a
+# DIFFERENT file's `pre_scan` pass than the file that constructs it.
+
+enum Value:
+    Int(int n)
+    Str(string s)

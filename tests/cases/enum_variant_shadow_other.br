@@ -1,0 +1,12 @@
+# Second sibling `.br` file for the `enum_variant_shadow` regression test — imported
+# AFTER enum_variant_shadow_lib.br by enum_variant_shadow.br's own `use` list. Declares
+# no enum of its own; its only job is to occupy the "last file `deep_pre_scan` visits
+# that does NOT redeclare the colliding `Int` variant" slot; see
+# enum_variant_shadow.br's own doc comment for why that ordering is what actually
+# reproduces the bug (`deep_pre_scan` walks every `use`d file's own `pre_scan` in
+# sequence, and each call used to unconditionally re-seed the built-in `FieldValue`
+# enum's variant names before that file's own enum declarations, if any, got a chance
+# to override them back).
+
+def noop():
+    nil

@@ -3593,6 +3593,7 @@ impl Transpiler {
             deps: self.deps.clone(),
             loaded: self.loaded.clone(),
             prelude_emitted: self.prelude_emitted,
+            builtins_seeded: self.builtins_seeded,
             emitted_fn_sigs: self.emitted_fn_sigs.clone(),
             fn_current_params: std::collections::HashMap::new(),
             fn_current_param_lines: std::collections::HashMap::new(),

@@ -844,3 +844,11 @@ transpile_test!(introspect_thread_safety);
 // by accident of the same lookahead gap landing on the qualifier word itself. See
 // tests/cases/qualifier_group_param.br's own doc comment.
 transpile_test!(qualifier_group_param);
+
+// Regression: `pre_scan`'s built-in `Error`/`MethodKind`/`FieldValue` enum seeding used
+// to run unconditionally on every call, and in a multi-file build `pre_scan` runs once
+// per `.br` file -- so a later file's call would re-clobber an earlier file's own enum
+// registration for a colliding variant name (e.g. a user `Value` enum's `Int`/`Str`
+// variants vs. `FieldValue`'s own). See enum_variant_shadow.br's own doc comment and
+// src/transpiler/mod.rs's `pre_scan`/`builtins_seeded`.
+transpile_test!(enum_variant_shadow);

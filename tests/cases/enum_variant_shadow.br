@@ -1,0 +1,34 @@
+# Regression: `pre_scan`'s hardcoded seeding of the built-in `Error`/`MethodKind`/
+# `FieldValue` enums into `enum_variants` (variant name -> enum name, used to resolve a
+# BARE enum-variant construction like `Int(5)` without an `EnumName.` prefix) used to run
+# unconditionally on every `pre_scan` call. `deep_pre_scan` (src/transpiler/emit_top.rs)
+# walks every `use`d file's own `pre_scan` in sequence, purely to pick up
+# forward-references before any code is emitted -- and each such call used to re-insert
+# `FieldValue`'s variant names (`Int`, `Str`, ...) FIRST, before that file's own enum
+# declarations (if any) got a chance to register over them again. So whichever `use`d
+# file is visited LAST without itself redeclaring a colliding variant name "wins" and
+# leaves the wrong mapping in place for every file emitted afterwards -- including this
+# one. `enum_variant_shadow_lib.br` (used first, below) declares a `Value` enum whose
+# `Int`/`Str` variants collide with `FieldValue`'s own; `enum_variant_shadow_other.br`
+# (used second) declares no enum, so its `pre_scan` call is exactly the "last write" that
+# used to clobber `Value`'s registration back to `FieldValue` before this file's own body
+# -- which constructs `Int`/`Str` via the bare shorthand, never `Value.Int(...)` -- got
+# transpiled. That used to emit `FieldValue::Int(...)`/`FieldValue::Str(...)`, a type
+# that doesn't even exist unless the program also uses `as Introspect`, failing `cargo
+# build` with E0433 ("cannot find type `FieldValue`"). Confirmed via a real `boring
+# build` on the self-hosted interpreter (boring/interpreter/exec.br's own `Value` enum,
+# hit by the exact same collision, in the exact same "declared in an earlier sibling
+# file, constructed bare in a later one" shape). See src/transpiler/mod.rs's `pre_scan`/
+# `builtins_seeded` for the fix.
+
+use enum_variant_shadow_lib
+use enum_variant_shadow_other
+
+def describe(Value v):
+    match v:
+        Int(n): print "int {n}"
+        Str(s): print "str {s}"
+
+def main():
+    describe(Int(5))
+    describe(Str("hi"))
