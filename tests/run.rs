@@ -442,6 +442,11 @@ interp_test!(try_wrap_double_handling);
 // semantic baseline `transpile_test!` below is pinned against.
 interp_test!(self_field_loop_match_borrow);
 
+// Regression: named qualifier groups ('one/'many/'mut/'req) on a function
+// parameter -- see tests/cases/qualifier_group_param.br's doc comment and the
+// matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
+interp_test!(qualifier_group_param);
+
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
 // `use boring.<module>` for an unrecognized module name is a hard error,

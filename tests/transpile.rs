@@ -833,3 +833,14 @@ transpile_project_test!(ext_optional_field_assign);
 // `emit_introspect_struct_impl`'s doc comment. `strict_single`/`managed_single` here are
 // exactly the two combos that used to fail to compile.
 transpile_test!(introspect_thread_safety);
+
+// Regression: named qualifier groups ('one/'many/'mut/'req, docs/qualifiers.md's
+// "Qualifier unions and groups" section) on a function parameter -- their only
+// documented use site. 'mut and 'req are reserved keywords (TokenKind::Mut /
+// TokenKind::Req), not TokenKind::Ident, so both the tick-lookahead in
+// is_type_start_before_ident and the qualifier match in parse_type_qualifier missed
+// them (Ident-only qualifier words), failing every param of the form `T'mut name` /
+// `T'req name` with "expected RParen, got Tick". 'one/'many happened to parse already,
+// by accident of the same lookahead gap landing on the qualifier word itself. See
+// tests/cases/qualifier_group_param.br's own doc comment.
+transpile_test!(qualifier_group_param);

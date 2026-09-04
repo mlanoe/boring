@@ -1,0 +1,28 @@
+# Regression test: named qualifier groups ('one, 'many, 'mut, 'req — see
+# docs/qualifiers.md's "Qualifier unions and groups" section) used on a
+# function parameter. Their only documented use site ("Scope: parameters
+# only") failed to parse at all for 'mut and 'req — both are reserved
+# keywords (TokenKind::Mut / TokenKind::Req), not TokenKind::Ident, so the
+# tick-lookahead in is_type_start_before_ident and the qualifier match in
+# parse_type_qualifier both missed them (they only handled Ident-based
+# qualifier words). 'one and 'many happened to work already, by accident of
+# the same lookahead gap. See docs/qualifier-group-param-parse-bug.md.
+struct Config:
+    int value
+
+req show_one(Config'one cfg):
+    print "one: {cfg.value}"
+
+req show_many(Config'many cfg):
+    print "many: {cfg.value}"
+
+req show_mut(Config'mut cfg):
+    print "mut: {cfg.value}"
+
+req show_req(Config'req cfg):
+    print "req: {cfg.value}"
+
+show_one(Config(1))
+show_many(Config(2))
+show_mut(Config(3))
+show_req(Config(4))

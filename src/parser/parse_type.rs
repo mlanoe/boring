@@ -506,12 +506,9 @@ impl Parser {
                 // Named qualifier groups — sugar for qualifier unions.
                 "one"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned]) }
                 "many" => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]) }
-                "mut"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
-                // 'req` = "always immutable" — 'static is immutable too (no interior
-                // mutability, mut 'static is rejected) and, if anything, more
-                // restrictive than 'shared (no refcount at all). See
-                // docs/qualifiers.md's qualifier-groups table.
-                "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Static]) }
+                // `'mut` and `'req` are handled below as `TokenKind::Mut` /
+                // `TokenKind::Req` — `mut` and `req` are both reserved keywords,
+                // never lexed as `Ident`, so a string arm here would be dead code.
                 // Bare tick with no recognized qualifier word after it is no longer
                 // supported — `T'` used to silently default to `'owned` (don't consume
                 // the following ident, e.g. the variable name in `let BigData' backup`).
@@ -528,6 +525,16 @@ impl Parser {
             // group like 'one/'many/'mut/'req (see OwnerQual::Union's doc comment) —
             // it must keep narrowing by usage on local variables too, not just parameters.
             TokenKind::New => { self.advance(); OwnerQual::Union(OwnerQual::NEW_MEMBERS.to_vec()) }
+            // `T'mut` — `mut` is a reserved keyword, not an ident: qualifier-group
+            // sugar for "any qualifier with interior mutability" (see
+            // docs/qualifiers.md's qualifier-groups table).
+            TokenKind::Mut => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
+            // `T'req` — `req` is a reserved keyword, not an ident: qualifier-group
+            // sugar for "always immutable" — 'static is immutable too (no interior
+            // mutability, mut 'static is rejected) and, if anything, more
+            // restrictive than 'shared (no refcount at all). See
+            // docs/qualifiers.md's qualifier-groups table.
+            TokenKind::Req => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Static]) }
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>
             TokenKind::Guard => {
                 self.advance();

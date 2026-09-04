@@ -1025,6 +1025,14 @@ impl Parser {
                             // `'static` — no chained sub-qualifier (no `'static'task`/
                             // `'static'weak`), just skip past it like `'new`.
                             TokenKind::Static => { i += 1; }
+                            // `'mut` / `'req` — named qualifier groups (parameters only,
+                            // see docs/qualifiers.md). Both `mut` and `req` are reserved
+                            // keywords, not `Ident`s, so they need their own arms here —
+                            // unlike `'one`/`'many`, which are plain idents and already
+                            // fall through to the trailing-ident check below. No chained
+                            // sub-qualifier, just skip past like `'new`/`'static`.
+                            TokenKind::Mut => { i += 1; }
+                            TokenKind::Req => { i += 1; }
                             _ => {}
                         }
                     }
@@ -1151,6 +1159,10 @@ impl Parser {
                             // `'static` — no chained sub-qualifier (no `'static'task`/
                             // `'static'weak`), just skip past it like `'new`.
                             TokenKind::Static => { i += 1; }
+                            // `'mut` / `'req` — named qualifier groups (parameters only,
+                            // see docs/qualifiers.md); mirrors the named-type arm above.
+                            TokenKind::Mut => { i += 1; }
+                            TokenKind::Req => { i += 1; }
                             _ => {}
                         }
                     }
