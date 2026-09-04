@@ -1084,7 +1084,7 @@ struct Counter:
     pub int value = 0
     task int inc(): self.value + 1
 
-let c = Counter()
+mut c = Counter()
 let _result = c.inc()
 "#;
     assert_eq!(run_src(src), Value::Int(1));

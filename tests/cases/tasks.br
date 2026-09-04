@@ -90,5 +90,5 @@ struct TCounter:
     pub int value = 0
     task int inc(): self.value + 1
 
-let tcc = TCounter()
+mut tcc = TCounter()
 print tcc.inc()

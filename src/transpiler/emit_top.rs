@@ -2414,17 +2414,32 @@ impl Transpiler {
     }
 
     /// True if calling `method` on a `struct_name` receiver is known NOT to
-    /// require content-mutation permission (a `req` method, or a `task`
-    /// method — see `struct_task_methods`'s callers). Checks the struct's own
-    /// body first (`struct_req_methods`/`struct_task_methods`); if the method
-    /// isn't there at all, it may be an un-overridden trait default dispatched
-    /// through the trait's own Rust default impl (see `trait_default_mutating`'s
-    /// doc) — check every trait the struct conforms to before giving up.
-    /// Returns `false` (assume mutating — the conservative default) only when
-    /// none of these positively say otherwise.
+    /// require content-mutation permission (a `req` method — `struct_req_methods`
+    /// already includes `task req` methods, since it's populated from `!m.mutating`
+    /// regardless of `m.task`). Checks the struct's own body first
+    /// (`struct_req_methods`); if the method isn't there at all, it may be an
+    /// un-overridden trait default dispatched through the trait's own Rust
+    /// default impl (see `trait_default_mutating`'s doc) — check every trait the
+    /// struct conforms to before giving up. Returns `false` (assume mutating —
+    /// the conservative default) only when none of these positively say
+    /// otherwise.
+    ///
+    /// Deliberately does NOT also treat `struct_task_methods` membership as
+    /// exempt: that set tracks *inline* `task` methods declared in the struct
+    /// body (mod.rs's `struct_task_methods.insert` loop), used elsewhere purely
+    /// to disambiguate `'actor'task`/`'guard'task` qualifier inference. An
+    /// inline `task` method that is mutating (explicit `task def`, or the
+    /// shorthand `task R f(...):` which defaults to `def`) still compiles to a
+    /// real `&mut self` (see `emit_fn_sig`'s `self_s` — only an *external*,
+    /// qualifier-based `task T.method()` dispatched through `Arc<Self>` avoids
+    /// `&mut self`), so it needs exactly the same caller-side `mut`-binding gate
+    /// as a plain `def` method. Blanket-exempting every `struct_task_methods`
+    /// entry here used to let a mutating inline `task` method be called on a
+    /// plain, non-`mut` local without complaint, then fail at the generated-Rust
+    /// stage with "cannot borrow as mutable" instead.
     pub(crate) fn method_is_req_or_task(&self, struct_name: &str, method: &str) -> bool {
         let key = format!("{}::{}", struct_name, method);
-        if self.struct_req_methods.contains(&key) || self.struct_task_methods.contains(&key) {
+        if self.struct_req_methods.contains(&key) {
             return true;
         }
         if let Some(protocols) = self.struct_protocols.get(struct_name) {
