@@ -1,0 +1,10 @@
+struct Config:
+    int value
+
+req show(Config'req cfg):
+    print "value: {cfg.value}"
+
+let Config'static GLOBAL = Config(value = 7)
+
+def main():
+    show(GLOBAL)

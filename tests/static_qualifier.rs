@@ -160,6 +160,21 @@ fn generic_struct_static_field_independent_of_type_param_build_and_run() {
     assert_build_and_run("static_generic_ok.br", &[], "default", "1");
 }
 
+// ── Positive: 'req accepts a 'static argument ──────────────────────────────
+
+#[test]
+fn req_group_accepts_static_argument_build_and_run() {
+    // `'req` = {'shared, 'static}. With no disambiguating signal in `show`'s
+    // body, group resolution falls back to its first member ('shared) —
+    // documented, existing behavior for every qualifier group, not specific
+    // to 'static — so this compiles down to an Arc-wrapped clone of the
+    // global rather than a zero-cost &'static passthrough. Confirms the
+    // group extension actually works end to end now that a separate,
+    // pre-existing parser bug (qualifier groups unparseable on function
+    // parameters) has been fixed elsewhere.
+    assert_build_and_run("static_req_group.br", &[], "default", "value: 7");
+}
+
 // ── Negative: provenance gate ───────────────────────────────────────────────
 
 #[test]
