@@ -150,6 +150,15 @@ struct Checker {
     /// other error is pushed). See `check_kernel_dispatch_only`'s doc for why this
     /// exists.
     kernel_dispatch_only: bool,
+    /// `'static` provenance gate (docs/qualifiers.md's `'static` section): `true` while checking a
+    /// top-level `let` (`check_item`'s `Item::Let` arm never touches this field, so it
+    /// keeps whatever value `check_fn` last restored it to — see that field's own
+    /// default below) or the body of `fn main()`. `false` everywhere else. A
+    /// `T'static NAME = Ctor(...)` constructor-call initializer is only legal while
+    /// this is `true` — see `check_let_stmt`'s use of it. Saved/restored around each
+    /// `check_fn` call so a nested `fn` (via `Stmt::Fn`) doesn't inherit `main`'s
+    /// authorization.
+    in_authorized_static_site: bool,
 }
 
 impl Checker {
@@ -165,6 +174,10 @@ impl Checker {
             fn_returns_resident_tuple: HashMap::new(),
             fn_param_types: HashMap::new(),
             kernel_dispatch_only: false,
+            // Top-level `let`s are checked directly from `check_item`, never through
+            // `check_fn` — this default is what makes them authorized without either
+            // arm needing to set it explicitly.
+            in_authorized_static_site: true,
         }
     }
 
@@ -471,6 +484,15 @@ impl Checker {
                 line, col,
             );
         }
+        // `'static` (`&'static T`) has exactly as little interior mutability as
+        // `'shared` (`Rc`/`Arc<T>`) — a bare reference, nothing for `mut` to unlock.
+        // See docs/qualifiers.md's `'static` section, "No interior mutability".
+        if self.type_has_static(ty) {
+            self.error(
+                "cannot combine `mut` with `'static`: a &'static reference has no interior mutability to unlock",
+                line, col,
+            );
+        }
         // A `'weak` reference has no operations besides `.upgrade()`/`.clone()`
         // (both non-mutating) until it's upgraded — nothing for `mut` to unlock
         // on the weak reference itself, regardless of what the *upgraded* value
@@ -492,6 +514,86 @@ impl Checker {
             Type::Qualified(inner, _) => self.type_has_shared(inner),
             Type::Optional(inner) | Type::Array(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
                 self.type_has_shared(inner)
+            }
+            _ => false,
+        }
+    }
+
+    // ── `'static` provenance gate ────────────────────────────────────────────
+    //
+    // docs/qualifiers.md's `'static` section: a `T'static NAME = Ctor(...)` constructor-call
+    // initializer is legal only at top level or inside `main` (tracked via
+    // `in_authorized_static_site`, set in `check_fn`) — the two authorized
+    // construction sites this check covers (the third, `type let`, is implicit and
+    // has no `'static` annotation to check here at all). Anywhere else, the
+    // initializer must already be a reference to an existing 'static-typed value
+    // (a bare name, not a fresh construction) — never verified beyond "not a
+    // constructor call" today (confirming the referenced name is itself genuinely
+    // 'static-typed would need a real expression-type-inference pass this checker
+    // doesn't have; a real gap, not silently assumed correct).
+    fn check_static_provenance(&mut self, ty: &Option<Type>, value: Option<&Expr>, line: usize, col: usize) {
+        let Some(Type::Qualified(_, OwnerQual::Static)) = ty else { return };
+        let Some(value) = value else { return };
+        if self.in_authorized_static_site { return; }
+        if Self::is_constructor_call_expr(value) {
+            self.error(
+                "cannot construct a 'static instance here — 'static values may only be constructed at top level or inside `main`",
+                line, col,
+            );
+        }
+    }
+
+    /// The provenance gate's other half: `check_static_provenance` only covers a
+    /// `let`'s own initializer — it says nothing about passing an *existing*,
+    /// non-`'static` value into a call argument whose parameter demands `'static`.
+    /// A local `Config`, or `self.field`, or a fresh `Config(...)` written inline
+    /// as the argument, all produce real `cargo build` failures (or worse, would
+    /// be unsound if they somehow compiled) once the callee treats the parameter
+    /// as genuinely program-lifetime. Only a bare `Var` whose own declared type is
+    /// already `'static` is accepted — a `self.field`, a method-call result, or
+    /// any other expression this checker can't statically type as `'static` is
+    /// rejected rather than risked (conservative by design: nothing depends on
+    /// `'static` yet, so erring towards rejecting an as-yet-unrecognized-but-valid
+    /// pattern is the safer default than silently letting an unsound one through).
+    fn check_static_arg_provenance(&mut self, target_ty: Option<&Type>, arg: &Expr, line: usize, col: usize) {
+        if !matches!(target_ty, Some(Type::Qualified(_, OwnerQual::Static))) { return; }
+        let is_provably_static = match &arg.kind {
+            ExprKind::Var(name) => matches!(
+                self.lookup(name).and_then(|b| b.ty.as_ref()),
+                Some(Type::Qualified(_, OwnerQual::Static))
+            ),
+            _ => false,
+        };
+        if !is_provably_static {
+            self.error(
+                "cannot pass a non-'static value where 'static is expected — the argument must \
+                 already be a 'static-typed binding (a name whose own type is T'static), not a \
+                 local value, a fresh construction, or a field read",
+                line, col,
+            );
+        }
+    }
+
+    /// Best-effort recognition of "this expression constructs a fresh instance" —
+    /// a call whose callee is a capitalized name (`Config(...)`, `Point.new(...)`).
+    /// Mirrors the same heuristic `top_level_let_external_call` (transpiler side)
+    /// and this file's own `top_level_let_is_string_literal`-style checks use for
+    /// "is this initializer a constructor call" — mirrors, not literally reuses,
+    /// since checker and transpiler are separate passes.
+    fn is_constructor_call_expr(value: &Expr) -> bool {
+        match &value.kind {
+            ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)),
+            ExprKind::MethodCall(obj, _, _) => matches!(&obj.kind, ExprKind::Var(n) if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)),
+            _ => false,
+        }
+    }
+
+    fn type_has_static(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Qualified(_, OwnerQual::Static) => true,
+            Type::Qualified(inner, _) => self.type_has_static(inner),
+            Type::Optional(inner) | Type::Array(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
+                self.type_has_static(inner)
             }
             _ => false,
         }
@@ -848,6 +950,11 @@ impl Checker {
 
     fn check_fn(&mut self, f: &FnDecl) {
         self.push_scope();
+        // `'static` provenance gate — authorized inside `main`'s body only, never a
+        // nested fn (including one declared inside `main` via `Stmt::Fn`, which would
+        // otherwise wrongly inherit the saved `true` below through this same call).
+        let prev_static_site = self.in_authorized_static_site;
+        self.in_authorized_static_site = f.name == "main";
         for p in &f.params {
             if p.mutable {
                 self.check_qualifier_constraint(&BindingKind::Mut, false, &p.ty, p.line, p.col);
@@ -858,6 +965,7 @@ impl Checker {
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
         for stmt in &f.body { self.check_stmt(stmt); }
+        self.in_authorized_static_site = prev_static_site;
         self.pop_scope();
     }
 
@@ -922,6 +1030,7 @@ impl Checker {
     }
 
     fn check_let_stmt(&mut self, s: &LetStmt) {
+        self.check_static_provenance(&s.ty, s.value.as_ref(), s.line, s.col);
         self.check_qualifier_constraint(&s.binding, s.var_mut, &s.ty, s.line, s.col);
         self.check_tuple_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
         self.check_scalar_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
@@ -1150,11 +1259,12 @@ impl Checker {
                             let target_ty: Option<Type> = self.fn_param_types.get(fn_name.as_str())
                                 .and_then(|types| types.get(i))
                                 .and_then(|t| t.clone());
-                            if let Some(target_ty) = target_ty {
+                            if let Some(target_ty) = &target_ty {
                                 if let Some(source_ty) = self.static_labeled_array_type(&a.value) {
-                                    self.check_label_compat(&a.value, &source_ty, &target_ty, expr.line, expr.col);
+                                    self.check_label_compat(&a.value, &source_ty, target_ty, expr.line, expr.col);
                                 }
                             }
+                            self.check_static_arg_provenance(target_ty.as_ref(), &a.value, expr.line, expr.col);
                         }
                     }
                 }

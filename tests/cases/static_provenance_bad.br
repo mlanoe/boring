@@ -1,0 +1,6 @@
+struct Config:
+    int value
+
+req make_bad():
+    let Config'static cfg = Config(value = 1)
+    print "{cfg.value}"

@@ -1,0 +1,10 @@
+struct Logger:
+    int id
+
+struct Display<T>:
+    T value
+
+    pub type let Logger shared_logger = Logger(id = 1)
+
+def main():
+    print "{Display.shared_logger.id}"

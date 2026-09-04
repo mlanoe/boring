@@ -1960,6 +1960,7 @@ impl Transpiler {
             Type::Qualified(_, OwnerQual::Borrow) => true,
             Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask
                 | OwnerQual::Guard | OwnerQual::GuardTask) => true,
+            Type::Qualified(_, OwnerQual::Static) => true,
             _ => false,
         }
     }
@@ -2926,7 +2927,45 @@ impl Transpiler {
                                 emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                             }
                         }
+                        // Arg is already `&'static T` — pass through without adding another &.
+                        // Rust's deref coercion happens to paper over the double-reference in
+                        // many concrete-type contexts, but not universally (trait objects,
+                        // generics) — see docs/qualifiers.md's `'static` section, and
+                        // `introspect_instance_arg_is_already_ref` below for a case where an
+                        // identical double-`&` bug was a hard error.
+                        Some(Type::Qualified(_, OwnerQual::Static)) => {
+                            if let ExprKind::Var(vname) = &a.value.kind {
+                                vname.clone()
+                            } else {
+                                emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
+                            }
+                        }
                         _ => format!("{}{}", ref_prefix, emitted),
+                    }
+                // T'static param: the argument must already be a 'static-typed reference —
+                // either another 'static-typed binding/param (pass through unchanged, same
+                // "already a reference" reasoning as the Borrow/BorrowMut branch above), or
+                // a bare reference to a promoted top-level `static NAME: LazyLock<T>` global
+                // (its own Rust type is `LazyLock<T>`, not `T` — take a reference and let
+                // Rust's deref coercion produce `&'static T` at this exact call site, per
+                // docs/qualifiers.md's `'static` section). The checker's
+                // `check_static_arg_provenance` (src/checker/mod.rs) enforces the provenance
+                // requirement ahead of this point, so a value reaching this branch is already
+                // known-'static.
+                } else if matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Static))) {
+                    // Two distinct Rust shapes share the same Boring-level `'static`
+                    // type — see `static_backing_names`'s doc comment. A backing
+                    // `static NAME: LazyLock<T>` item needs `&` (a bare value, not yet
+                    // a reference); anything else already IS `&'static T` (a parameter,
+                    // or a local aliasing an existing 'static value) and passes through
+                    // unchanged.
+                    let is_backing_static = matches!(&a.value.kind, ExprKind::Var(vname) if self.static_backing_names.contains(vname.as_str()));
+                    if is_backing_static {
+                        format!("&{}", emitted)
+                    } else if let ExprKind::Var(vname) = &a.value.kind {
+                        vname.clone()
+                    } else {
+                        emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                     }
                 // Qualified smart-pointer params ('shared/'actor/'guard/'weak) are passed by
                 // owned value — emit_let_value already handles Rc::clone / Arc::clone.
@@ -3435,6 +3474,7 @@ impl Transpiler {
             in_init_body: self.in_init_body,
             struct_type_var_names: self.struct_type_var_names.clone(),
             struct_type_mut_var_names: self.struct_type_mut_var_names.clone(),
+            struct_type_static_var_names: self.struct_type_static_var_names.clone(),
             struct_type_method_sigs: self.struct_type_method_sigs.clone(),
             struct_getters: self.struct_getters.clone(),
             enum_field_getters: self.enum_field_getters.clone(),
@@ -3582,6 +3622,8 @@ impl Transpiler {
             current_fn_gpu_arg_param_names: self.current_fn_gpu_arg_param_names.clone(),
             gpu_device_vars: self.gpu_device_vars.clone(),
             is_gpu_target: self.is_gpu_target,
+            currently_in_main: self.currently_in_main,
+            static_backing_names: self.static_backing_names.clone(),
             user_top_level_names: self.user_top_level_names.clone(),
             gpu_main_emitted: std::cell::Cell::new(false),
             gpu_top_level_const_names: self.gpu_top_level_const_names.clone(),

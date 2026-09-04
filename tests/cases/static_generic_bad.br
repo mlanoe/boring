@@ -1,0 +1,4 @@
+struct Wrapper<T>:
+    T value
+
+    pub type let T default = value

@@ -1,0 +1,15 @@
+struct Point:
+    float x
+    float y
+
+    init(float x, float y):
+        self.x = x
+        self.y = y
+
+struct Config:
+    int value
+
+    pub type let Point origin = Point(1.0, 2.0)
+
+def main():
+    print "{Config.origin.x}, {Config.origin.y}"

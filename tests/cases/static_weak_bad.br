@@ -1,0 +1,4 @@
+struct Config:
+    int value
+
+let Config'static'weak cfg = Config(value = 1)

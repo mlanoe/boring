@@ -1129,6 +1129,16 @@ pub enum OwnerQual {
     /// By default structs are heap-allocated (`Box<T>`); `'inline` opts out of that.
     /// The interpreter treats this identically to `Owned` at runtime (no difference).
     Inline,
+    /// `T'static` → `&'static T` in Rust. No `Rc`/`Arc`, no refcount — a bare reference to a
+    /// constant, program-lifetime instance that is never freed and never has more than one
+    /// logical owner. Distinct from `OwnerQual::Lifetime` (an arbitrary named lifetime with
+    /// zero Boring-level checking) even though both emit `&'<name> T`: `'static` additionally
+    /// carries a provenance requirement (the value must trace back to one of three authorized
+    /// construction sites — top-level `let`, inside `main`, or an implicit `type let` field),
+    /// a `Sync` requirement independent of `--threading`, and a `mut`/`'weak` prohibition. See
+    /// `docs/qualifiers.md`'s `'static` section for the full design. The interpreter treats this like a plain
+    /// borrow at runtime (no runtime enforcement, matching every other qualifier).
+    Static,
     /// Explicit lifetime annotation for Rust transpilation: `string'a` → `&'a str`.
     /// The interpreter treats this identically to a plain borrow (no runtime enforcement).
     Lifetime(String),
@@ -1171,7 +1181,8 @@ pub enum OwnerQual {
     /// At the Rust emission level this is a plain generic (no wrapping); the Boring compiler
     /// validates that every call site provides one of the listed qualifiers.
     /// Also used for the named groups: `'one` (`Inline|Owned`), `'many`
-    /// (`Shared|Actor|Guard`), `'mut` (`Inline|Owned|Actor|Guard`), `'req` (`Shared`).
+    /// (`Shared|Actor|Guard`), `'mut` (`Inline|Owned|Actor|Guard`), `'req`
+    /// (`Shared|Static`).
     ///
     /// `'new` (the candidate-set pseudo-qualifier written as `T'new`, or implied by
     /// `new Ctor()` on a `let` RHS) is ALSO represented as a `Union` — specifically
@@ -1535,6 +1546,7 @@ impl Type {
             Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask) => true,
             Type::Qualified(_, OwnerQual::Weak)       => false, // Weak<T> — non-owning, conservative
             Type::Qualified(_, OwnerQual::Lifetime(_)) => true, // borrow — task-safe for transpilation
+            Type::Qualified(_, OwnerQual::Static) => true, // &'static T outlives any task, unconditionally safe
             Type::Qualified(_, OwnerQual::BorrowShared) => true, // &Arc<T> / &Rc<T> — threading-aware borrow
             Type::Qualified(_, OwnerQual::BorrowOwned)  => false,
             Type::Qualified(_, OwnerQual::BorrowOption | OwnerQual::BorrowOptionMut) => false,

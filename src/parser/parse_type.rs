@@ -507,7 +507,11 @@ impl Parser {
                 "one"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned]) }
                 "many" => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]) }
                 "mut"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
-                "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
+                // 'req` = "always immutable" — 'static is immutable too (no interior
+                // mutability, mut 'static is rejected) and, if anything, more
+                // restrictive than 'shared (no refcount at all). See
+                // docs/qualifiers.md's qualifier-groups table.
+                "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Static]) }
                 // Bare tick with no recognized qualifier word after it is no longer
                 // supported — `T'` used to silently default to `'owned` (don't consume
                 // the following ident, e.g. the variable name in `let BigData' backup`).
@@ -542,6 +546,12 @@ impl Parser {
             }
             // `T'task` — alias for `T'actor'task`: Arc<tokio::sync::Mutex<T>>
             TokenKind::Task => { self.advance(); OwnerQual::ActorTask }
+            // `T'static` — `static` is a reserved keyword, not an ident: &'static T. No
+            // chained sub-qualifier (unlike 'actor/'guard) — 'static'weak is explicitly
+            // rejected just below rather than silently mis-parsed. See
+            // docs/qualifiers.md's `'static` section for the full design (provenance gate,
+            // authorized construction sites, Sync requirement — all enforced by the checker, not here).
+            TokenKind::Static => { self.advance(); OwnerQual::Static }
             // Truly bare tick — nothing recognizable follows `'` at all. Same rule as
             // the ident catch-all above: no longer supported, `'new` is the replacement.
             _ => return Err(ParseError::Generic {
@@ -601,6 +611,18 @@ impl Parser {
             }
         }
         let qualified = Type::Qualified(Box::new(ty), qual.clone());
+        // `T'static'weak` is invalid — 'weak' exists to detect deallocation, and nothing
+        // 'static is ever deallocated. Rejected explicitly here (rather than left to
+        // mis-parse as a dangling, unconsumed `'weak`) for a clear, targeted message.
+        if matches!(qual, OwnerQual::Static) && self.check(&TokenKind::Tick) {
+            let after_tick = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+            if matches!(after_tick, Some(TokenKind::Ident(ref s)) if s == "weak") {
+                return Err(ParseError::Generic {
+                    msg: "'static'weak is invalid — 'weak' detects deallocation, but a 'static value is never deallocated".into(),
+                    line: self.line(), col: self.col(), len: self.tok_len(),
+                });
+            }
+        }
         // `T'shared'weak`, `T'actor'weak` — weak ref on any ref-counted type.
         // `'weak` is a second-level qualifier: Qualified(Qualified(T, Shared|Actor|Guard), Weak).
         if matches!(qual, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)

@@ -1,0 +1,9 @@
+struct Config:
+    int value
+
+req show(Config'static cfg):
+    print "{cfg.value}"
+
+def main():
+    let c = Config(value = 1)
+    show(c)

@@ -1,0 +1,13 @@
+struct Config:
+    int value
+
+let Config'static GLOBAL_CONFIG = Config(value = 42)
+
+req show(Config'static cfg):
+    print "value: {cfg.value}"
+
+def main():
+    print "direct field: {GLOBAL_CONFIG.value}"
+    show(GLOBAL_CONFIG)
+    let Config'static local_cfg = Config(value = 99)
+    show(local_cfg)

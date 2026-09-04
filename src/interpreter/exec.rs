@@ -1178,6 +1178,7 @@ impl Interpreter {
                     OwnerQual::Weak         => "'weak".to_string(),
                     OwnerQual::Inline       => "'inline".to_string(),
                     OwnerQual::Lifetime(lt) => format!("'{}", lt),
+                    OwnerQual::Static       => "'static".to_string(),
                     OwnerQual::BorrowShared => "&shared".to_string(),
                     OwnerQual::BorrowOwned  => "&owned".to_string(),
                     OwnerQual::BorrowOption    => "?&".to_string(),

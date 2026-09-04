@@ -487,10 +487,17 @@ struct Transpiler {
     pub(crate) in_type_setter: bool,
     /// True while emitting an `init` body — `self` must be emitted as `__self`.
     pub(crate) in_init_body: bool,
-    /// "StructName::var_name" → present if it's an immutable `type let`.
+    /// "StructName::var_name" → present if it's an immutable, *scalar* `type let`
+    /// (plain `const` — see `emit_struct::type_is_scalar_primitive`).
     pub(crate) struct_type_var_names: std::collections::HashSet<String>,
     /// "StructName::var_name" → present if it's a mutable `type var`.
     pub(crate) struct_type_mut_var_names: std::collections::HashSet<String>,
+    /// "StructName::var_name" → present if it's an immutable, *non-scalar* `type
+    /// let` — implicitly `'static` (docs/qualifiers.md), emitted as a
+    /// module-level `static NAME: LazyLock<T>` (mangled `{STRUCT}_{FIELD}`, see
+    /// `emit_struct.rs`'s "Module-level statics" loop), read as `&{mangled}`
+    /// rather than the plain-`const` path `struct_type_var_names` implies.
+    pub(crate) struct_type_static_var_names: std::collections::HashSet<String>,
     /// StructName → { method_name → TypeMethodKind } for type method dispatch.
     pub(crate) struct_type_method_sigs: std::collections::HashMap<String, std::collections::HashMap<String, TypeMethodKind>>,
     /// "StructName::getter_name" → present for `req` (property getter) methods.
@@ -1013,6 +1020,23 @@ struct Transpiler {
     /// Mirrors `TranspileConfig::is_gpu_target` for quick access. See that field's doc
     /// comment — this is NOT the same as `!kernel_decls.is_empty()`.
     pub(crate) is_gpu_target: bool,
+    /// `true` while emitting the body of `main` (either a user `def main():` or the
+    /// synthesized bare-statement one). A `T'static` `let` inside that body is
+    /// hoisted to a module-level `static` before the body is emitted (mirroring a
+    /// top-level `T'static let`) — `Stmt::Let`'s handling in `emit_stmt.rs` checks
+    /// this flag to skip re-emitting it as an ordinary local. See
+    /// docs/qualifiers.md's `'static` section, "Authorized construction sites".
+    pub(crate) currently_in_main: bool,
+    /// Names of every `static NAME: LazyLock<T> = ...;` this file emitted for a
+    /// `T'static` binding (`emit_static_qualified_let_item`'s only caller-visible
+    /// side effect besides the emitted line itself) — top-level and `main`-scope
+    /// alike. Its Rust type is `LazyLock<T>`, a VALUE, not `T'static`'s usual
+    /// `&'static T` — unlike a `Config'static cfg` function parameter (whose Rust
+    /// type genuinely IS `&'static Config`, already a reference), reading one of
+    /// these names needs an explicit `&` to produce `&'static T` via deref coercion.
+    /// Consulted in `emit_methods.rs`'s call-argument dispatch to tell these two
+    /// shapes apart under the same Boring-level `Qualified(_, Static)` type.
+    pub(crate) static_backing_names: std::collections::HashSet<String>,
     /// Set when `emit_program_items` synthesizes a `fn boring_main()` wrapper for
     /// GPU-target top-level statements/non-const `let`s (see `emit_program_items`).
     /// Reported back via `TranspileOutput::gpu_main_emitted` so
@@ -1095,6 +1119,7 @@ impl Transpiler {
             in_init_body: false,
             struct_type_var_names: std::collections::HashSet::new(),
             struct_type_mut_var_names: std::collections::HashSet::new(),
+            struct_type_static_var_names: std::collections::HashSet::new(),
             struct_type_method_sigs: std::collections::HashMap::new(),
             struct_getters: std::collections::HashSet::new(),
             enum_field_getters: std::collections::HashSet::new(),
@@ -1289,6 +1314,8 @@ impl Transpiler {
             gpu_device_vars: std::collections::HashSet::new(),
             user_top_level_names: std::collections::HashSet::new(),
             is_gpu_target,
+            currently_in_main: false,
+            static_backing_names: std::collections::HashSet::new(),
             gpu_main_emitted: std::cell::Cell::new(false),
             gpu_top_level_const_names: std::collections::HashSet::new(),
         };
@@ -2000,8 +2027,10 @@ impl Transpiler {
             match item {
                 Item::Stmt(_) if host_owns_top_level => {}
                 Item::Stmt(_) => stmts.push(item),
-                Item::Let(s) if s.is_static => {
-                    // Top-level `static let` → emit as `const` at module scope.
+                Item::Let(s) if s.is_static || self.let_type_is_static(s) => {
+                    // Top-level `static let` (keyword) or `T'static` (qualifier) →
+                    // always promoted to module scope, regardless of in-file usage or
+                    // `pub` — see `let_type_is_static`'s doc comment.
                     self.emit_item(item);
                     self.blank();
                 }
@@ -2364,6 +2393,19 @@ impl Transpiler {
         self.top_level_let_is_const_safe(s)
             || self.top_level_let_external_call(s).is_some()
             || self.top_level_let_is_string_literal(s)
+    }
+
+    /// Whether a top-level (or `main`-scope) `let`'s declared type is explicitly
+    /// `T'static` — one of the two authorized `'static` construction sites documented
+    /// in docs/qualifiers.md's `'static` section (the third, `type let`, is handled separately in
+    /// `emit_struct.rs` since `'static` is implicit there, never written). Unlike every
+    /// other promotion predicate above, this one always promotes regardless of
+    /// const-safety, in-file usage, or `pub` — the qualifier itself is the caller's
+    /// explicit declaration of intent, matching how `s.is_static` (the `static let`
+    /// keyword) is already treated unconditionally in `emit_program_items` and
+    /// `emit_item`'s `Item::Let` arm.
+    fn let_type_is_static(&self, s: &LetStmt) -> bool {
+        matches!(s.ty, Some(Type::Qualified(_, OwnerQual::Static)))
     }
 
     /// Hand-verified external associated functions that ARE `const fn` in their defining
@@ -2912,8 +2954,15 @@ impl Transpiler {
             let key = format!("{}::{}", s.name, tv.name);
             if tv.mutable {
                 self.struct_type_mut_var_names.insert(key);
-            } else {
+            } else if tv.ty.as_ref().map(Self::type_is_scalar_primitive).unwrap_or(false) {
                 self.struct_type_var_names.insert(key);
+            } else {
+                // Non-scalar `type let` — implicitly 'static (never annotated), emitted
+                // as a module-level `static ... LazyLock<T>` by `emit_struct.rs`'s
+                // "Module-level statics" loop, not the plain `const` the (still-scalar-
+                // only) `struct_type_var_names` set implies. See docs/qualifiers.md's
+                // `'static` section.
+                self.struct_type_static_var_names.insert(key);
             }
         }
         let mut method_map = std::collections::HashMap::new();
@@ -3444,6 +3493,20 @@ impl Transpiler {
                 }
                 if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_promotable(s) {
                     const_let_candidates.insert(s.name.clone());
+                }
+                // A `T'static NAME = Ctor(...)` global is emitted as `static NAME:
+                // LazyLock<T> = ...` (see `emit_item`'s `Item::Let` arm) — its Boring-level
+                // type is `T'static`, so every read site (call argument, field access on
+                // another 'static-typed binding, etc.) needs to resolve `NAME`'s type as
+                // `Qualified(T, Static)`, not the bare struct type. Registering it in
+                // `var_types` here lets the existing "already a reference" dispatch in
+                // `emit_methods.rs` (which falls back to `var_types` when a variable isn't
+                // in one of its dedicated registries) recognize it automatically — no
+                // separate registry needed.
+                if let Some(ty) = &s.ty {
+                    if self.let_type_is_static(s) {
+                        self.var_types.insert(s.name.clone(), ty.clone());
+                    }
                 }
             }
         }

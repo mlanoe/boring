@@ -491,16 +491,42 @@ impl Transpiler {
             }
         }
 
-        // Module-level statics for `type var` fields
+        // Module-level statics for `type var`/non-scalar `type let` fields. Named
+        // `{STRUCT}_{FIELD}` (struct-name-prefixed), not just `{FIELD}` — two
+        // structs with a same-named field (e.g. both called `default`) would
+        // otherwise collide on the same Rust static name, a pre-existing bug fixed
+        // here as part of generalizing this path for `type let`'s implicit
+        // `'static` (docs/qualifiers.md's `'static` section).
         for tv in &s.type_vars {
+            let is_scalar = tv.ty.as_ref().map(Self::type_is_scalar_primitive).unwrap_or(false);
+            if !tv.mutable && is_scalar { continue; } // unchanged plain `const`, handled above
+            let mangled = format!("{}_{}", s.name.to_uppercase(), tv.name.to_uppercase());
+            let vis = if tv.is_pub { "pub " } else { "" };
+            let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".to_string());
+            let val_s = self.emit_let_value(tv.ty.as_ref(), &tv.default);
+            self.blank();
             if tv.mutable {
-                let vis = if tv.is_pub { "pub " } else { "" };
-                let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".to_string());
-                let val_s = self.emit_let_value(tv.ty.as_ref(), &tv.default);
-                self.blank();
                 self.line(&format!(
                     "{}static {}: std::sync::Mutex<{}> = std::sync::Mutex::new({});",
-                    vis, tv.name.to_uppercase(), ty_s, val_s
+                    vis, mangled, ty_s, val_s
+                ));
+            } else {
+                // `type let`, non-scalar → implicitly 'static (never annotated — see
+                // `emit_type_var_const`'s doc comment). A Rust static/LazyLock cannot be
+                // generic — reject rather than silently emit an invalid `impl<T>`-scoped
+                // item (docs/qualifiers.md's `'static` section, "Generic structs").
+                if !s.type_params.is_empty() && tv.ty.as_ref().map(|t| Self::type_mentions_type_params(t, &s.type_params)).unwrap_or(false) {
+                    self.push_error(tv.line, tv.col, format!(
+                        "type let '{}' cannot depend on {}'s own generic type parameter — a Rust \
+                         static/LazyLock cannot be generic, so there is no single instance to share \
+                         across every instantiation of {}<{}>",
+                        tv.name, s.name, s.name, s.type_params.join(", ")
+                    ));
+                    continue;
+                }
+                self.line(&format!(
+                    "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
+                    vis, mangled, ty_s, val_s
                 ));
             }
         }
@@ -748,17 +774,80 @@ impl Transpiler {
         self.blank();
     }
 
+    /// Whether `ty` is a primitive scalar — mirrors the `is_scalar` heuristic
+    /// `top_level_let_is_const_safe` (`mod.rs`) uses for top-level `let`s. A
+    /// `type let` field of one of these types keeps the existing plain-`const`
+    /// emission unconditionally; anything else (struct/array/dict/etc.) is where
+    /// `type let`'s `const` emission was unconditionally wrong for a non-const-safe
+    /// initializer — see `emit_type_var_const`'s doc comment.
+    pub(crate) fn type_is_scalar_primitive(ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool => true,
+            Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
+            Type::Named(n) => matches!(n.as_str(),
+                "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
+                | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint16" | "uint32" | "uint64" | "uint128"
+                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"),
+            Type::Optional(inner) | Type::Qualified(inner, _) => Self::type_is_scalar_primitive(inner),
+            _ => false,
+        }
+    }
+
+    /// Whether `ty` mentions any of `params` (a struct's own generic type
+    /// parameters), directly or nested inside a generic argument/collection/
+    /// qualifier — used to reject a `type let` field whose type depends on the
+    /// struct's own `T`, since a Rust `static`/`LazyLock` cannot be generic (see
+    /// docs/qualifiers.md's `'static` section, "Generic structs").
+    fn type_mentions_type_params(ty: &Type, params: &[String]) -> bool {
+        match ty {
+            Type::Named(n) => params.iter().any(|p| p == n),
+            Type::TypeParam(n) => params.iter().any(|p| p == n),
+            Type::Optional(inner) | Type::Array(inner) | Type::ArrayN(inner, _)
+                | Type::ArrayNExpr(inner, _) | Type::Set(inner) | Type::Qualified(inner, _)
+                | Type::Dyn(inner) | Type::Impl(inner) =>
+                Self::type_mentions_type_params(inner, params),
+            Type::Dict(k, v) => Self::type_mentions_type_params(k, params) || Self::type_mentions_type_params(v, params),
+            Type::Tuple(elems) => elems.iter().any(|t| Self::type_mentions_type_params(t, params)),
+            Type::Generic(_, args) => args.iter().any(|t| Self::type_mentions_type_params(t, params)),
+            _ => false,
+        }
+    }
+
+    /// `type let`/`type var` — the class-scoped member forms
+    /// (`docs/book.md`'s "Type-level members"). `type let` is always implicitly
+    /// `'static` (docs/qualifiers.md's `'static` section) — there is no
+    /// annotation to write or check, only a representation choice:
+    ///
+    /// - Primitive scalar type -> plain `const` inside `impl` (unchanged, already
+    ///   correct — a scalar constant has no reference semantics to speak of).
+    /// - Everything else -> emitted as a marker comment here; the real module-level
+    ///   `static NAME: LazyLock<T>` is emitted by the loop just below
+    ///   (`emit_struct`'s "Module-level statics" section), the same place `type
+    ///   var`'s `Mutex`-wrapped statics already live, because Rust forbids a
+    ///   `static` item inside `impl`. This replaces the previous unconditional
+    ///   `const` emission for `type let`, which silently produced invalid Rust
+    ///   the moment the constructor had a real `init` body (`Config::new(...)`
+    ///   is never `const fn`) — a pre-existing bug documented and now fixed as
+    ///   part of the `'static` qualifier work.
     pub(crate) fn emit_type_var_const(&mut self, tv: &TypeVar) {
         let vis = if tv.is_pub { "pub " } else { "" };
         let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".to_string());
         let val_s = self.emit_let_value(tv.ty.as_ref(), &tv.default);
+        let is_scalar = tv.ty.as_ref().map(Self::type_is_scalar_primitive).unwrap_or(false);
         if tv.mutable {
             // type var is emitted as a module-level static Mutex — see below impl block.
             // We emit a marker comment here so the impl block is clean.
-            self.line(&format!("// type var {}: {} = {} — see static {} below", tv.name, ty_s, val_s, tv.name.to_uppercase()));
-        } else {
-            // type let → associated const
+            self.line(&format!("// type var {}: {} = {} — see static below", tv.name, ty_s, val_s));
+        } else if is_scalar {
+            // type let (scalar) → associated const, unchanged.
             self.line(&format!("{}const {}: {} = {};", vis, tv.name.to_uppercase(), ty_s, val_s));
+        } else {
+            // type let (non-scalar, implicitly 'static) → module-level LazyLock static,
+            // see below impl block.
+            self.line(&format!("// type let {}: {} = {} — see static below", tv.name, ty_s, val_s));
         }
     }
 

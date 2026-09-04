@@ -5947,7 +5947,112 @@ All ownership qualifiers:
 | `T'shared'weak`    | `std::sync::Weak<T>`                  | `Weak<T>`             | Weak ref to `T'shared`                |
 | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`           | `Weak<RefCell<T>>`    | Weak ref to `T'actor`                 |
 | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`          | `Weak<RefCell<T>>`    | Weak ref to `T'guard`                 |
+| `T'static`         | `&'static T`                          | `&'static T`          | Constant global instance, no refcount — see below |
 | `T?`               | `Option<T>`                           | `Option<T>`           | Optional value                        |
+
+### `'static` — constant global instances
+
+`T'static` is different in kind from every other qualifier above: it
+doesn't wrap a freshly constructed value in some form of indirection — it
+names a value that is constructed exactly **once**, lives for the entire
+program, and is referenced everywhere as a bare `&'static T`. No `Rc`/
+`Arc`, no refcount, no heap allocation for the reference itself.
+
+```boring
+let Config'static APP_CONFIG = Config(debug = false)   # top level
+
+req show(Config'static cfg):
+    print "debug: {cfg.debug}"
+
+show(APP_CONFIG)
+```
+
+**Rust equivalent**
+```rust
+static APP_CONFIG: std::sync::LazyLock<Config> =
+    std::sync::LazyLock::new(|| Config { debug: false });
+
+fn show(cfg: &'static Config) { println!("debug: {}", cfg.debug); }
+
+show(&APP_CONFIG);
+```
+
+A `T'static` value can only be **constructed** at one of three sites:
+
+- **Top level** — `let T'static NAME = Ctor(...)`.
+- **Inside `main`** — the identical form, hoisted to the same module-level
+  `static` before `main`'s body runs.
+- **A `type let` field** — always implicitly `'static`, never annotated:
+  `type let T NAME = Ctor(...)` on a struct (see §20, "Type-level
+  members"). This is the only site where the qualifier is never written —
+  a `type let` field has no other possible interpretation, since it names
+  exactly one instance per struct declaration.
+
+Anywhere else, a `T'static` binding's initializer must already be a
+reference to an existing `'static` value (a bare name, not a constructor
+call) — attempting to construct a fresh instance outside these three
+sites is a compile error:
+
+```boring
+req make():
+    let Config'static cfg = Config(debug = false)  # error: cannot construct
+                                                     # a 'static instance here
+```
+
+This extends to call arguments too — passing a value that isn't itself
+already `'static`-typed into a parameter that demands `'static` is
+rejected the same way:
+
+```boring
+req show(Config'static cfg): ...
+
+def main():
+    let c = Config(debug = false)
+    show(c)   # error: cannot pass a non-'static value where 'static is expected
+```
+
+**No interior mutability.** `mut 'static` is a compile error, exactly like
+`mut 'shared` — a bare `&'static T` has nothing for `mut` to unlock.
+
+**`Sync` requirement, independent of `--threading`.** A Rust
+`static`/`LazyLock<T>` requires `T: Sync` regardless of the threading
+flag. A `'static` value that nests a `'shared`/`'actor`/`'guard`/`'weak`
+field is rejected under `--threading single` specifically — those
+qualifiers collapse to non-`Sync` `Rc`/`RefCell` in single-thread mode
+(unlike `--threading multi`, where they're already `Arc`-based and
+`Sync`, so nesting one is fine):
+
+```boring
+struct Outer:
+    Inner'shared inner
+
+let Outer'static G = Outer(inner = Inner())
+# --threading single: error, 'shared collapses to Rc<T>, not Sync
+# --threading multi:  fine, 'shared is Arc<T>, Sync
+```
+
+**Generic structs.** A `type let` field whose type does **not** depend on
+the struct's own type parameter becomes a genuine cross-instantiation
+singleton — one static, shared regardless of how many concrete
+instantiations of the generic struct exist. A field whose type **does**
+depend on the type parameter is rejected outright: a Rust `static` cannot
+be generic, so there is no single instance to share across
+instantiations.
+
+```boring
+struct Display<T>:
+    T value
+    type let Logger shared_logger = Logger()   # OK — one instance, any T
+    type let T default = value                 # error — depends on T
+```
+
+`'req` accepts `'static` in addition to `'shared` (both are always
+immutable, and `'static` is, if anything, more restrictive):
+
+```boring
+def process(Counter'req c):   # accepts 'shared or 'static
+    print c.value
+```
 
 ### Qualifier groups — parameter constraints
 
@@ -5963,7 +6068,7 @@ def process(Counter'mut c):   # 'mut → accepts 'inline, 'owned, 'actor, 'guard
 | `T'one` | `'inline`, `'owned` — single-owner forms |
 | `T'many` | `'shared`, `'actor`, `'guard` — shared-owner forms |
 | `T'mut` | `'inline`, `'owned`, `'actor`, `'guard` — any mutable form |
-| `T'req` | `'shared` — always immutable |
+| `T'req` | `'shared`, `'static` — always immutable |
 
 Pipe-separated unions are also valid: `T'inline|owned` accepts only `'inline` or `'owned`.
 

@@ -1,0 +1,4 @@
+struct Config:
+    int value
+
+mut Config'static cfg = Config(value = 1)

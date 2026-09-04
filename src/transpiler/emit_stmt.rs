@@ -5,6 +5,20 @@ use super::helpers::*;
 impl Transpiler {
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
+            // A `T'static` local inside `main` was already hoisted to a module-level
+            // `static` before this function's body started emitting (see `emit_item`'s
+            // `Item::Fn` arm) — skip it here, it would otherwise re-emit as an invalid
+            // local (`let name: &'static T = Ctor(...)`, a type mismatch) shadowing the
+            // real static of the same name. See docs/qualifiers.md's `'static` section.
+            Stmt::Let(s) if self.currently_in_main && self.let_type_is_static(s) => {
+                // Register the type for later statements in this same body that
+                // reference `s.name` (e.g. a call-site argument) — `emit_let` would
+                // normally do this as a side effect, but it's never called here. See
+                // the "already a reference" dispatch this feeds in `emit_methods.rs`.
+                if let Some(ty) = &s.ty {
+                    self.var_types.insert(s.name.clone(), ty.clone());
+                }
+            }
             Stmt::Let(s)            => { self.emit_let(s, false); self.maybe_emit_str_index_cache(&s.name); }
             Stmt::LetDestructure(s) => self.emit_let_destructure(s),
             Stmt::Return(s)         => self.emit_return(s),

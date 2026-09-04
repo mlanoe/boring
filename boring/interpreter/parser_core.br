@@ -2778,6 +2778,14 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
         if p.eat(TokenKind.Question):
             return Type.Optional(qualified)
         return qualified
+    # Handle `static` as a keyword token (T'static -> &'static T). No chained
+    # sub-qualifier — 'static'weak is invalid and not accepted here, mirroring
+    # the host compiler's parser (see docs/qualifiers.md's 'static section).
+    if p.eat(TokenKind.Static):
+        let qualified = Type.Qualified(base, OwnerQual.Static)
+        if p.eat(TokenKind.Question):
+            return Type.Optional(qualified)
+        return qualified
     # Bare tick with no qualifier (e.g. `EColorB'`) — treat as just the base type
     if not parser_check(p, "Ident"):
         return base

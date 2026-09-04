@@ -19,6 +19,24 @@ impl Transpiler {
                     self.line("}");
                     self.blank();
                     self.self_type = prev_self;
+                } else if f.name == "main" {
+                    // Hoist every `T'static` local in `main`'s body to a module-level
+                    // static BEFORE emitting the function itself — `Stmt::Let`'s handling
+                    // (emit_stmt.rs) skips re-emitting these as ordinary locals once
+                    // `currently_in_main` is set, since the value now lives at module
+                    // scope under the same name and resolves there via ordinary Rust
+                    // scoping. See docs/qualifiers.md's `'static` section, "Authorized
+                    // construction sites" — `main`-scope is promoted identically to top-level.
+                    for stmt in &f.body {
+                        if let Stmt::Let(s) = stmt {
+                            if self.let_type_is_static(s) {
+                                self.emit_static_qualified_let_item(s, "");
+                            }
+                        }
+                    }
+                    self.currently_in_main = true;
+                    self.emit_fn(f, None);
+                    self.currently_in_main = false;
                 } else {
                     self.emit_fn(f, None);
                 }
@@ -43,7 +61,7 @@ impl Transpiler {
                 // nor `is_gpu_target` true, so if its condition ever admits a case this one
                 // doesn't, the `else` branch below silently emits an invalid local `pub
                 // let` (or drops the item) instead of a module-level item.
-                if s.is_static || self.is_gpu_target || s.is_pub || self.global_lets_used_elsewhere.contains(&s.name) {
+                if s.is_static || self.let_type_is_static(s) || self.is_gpu_target || s.is_pub || self.global_lets_used_elsewhere.contains(&s.name) {
                     // Non-GPU only: a call into an external/opaque type (`Color.srgb(...)`,
                     // `Vec2.new(...)`) or a plain string literal (`top_level_let_is_string_literal`)
                     // that isn't itself scalar-safe -- `top_level_let_is_const_safe` still declines
@@ -113,6 +131,8 @@ impl Transpiler {
                             "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
                             vis, s.name, rust_ty, val_str
                         ));
+                    } else if self.let_type_is_static(s) {
+                        self.emit_static_qualified_let_item(s, &vis);
                     } else {
                         // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
                         // where the compiler can infer it. Without an explicit boring type
@@ -176,6 +196,78 @@ impl Transpiler {
                     ));
                 }
             }
+        }
+    }
+
+    /// Emits a `T'static NAME = Ctor(...)` binding as a module-level
+    /// `static NAME: LazyLock<T> = LazyLock::new(|| Ctor(...));`. Shared by two
+    /// callers: a top-level `Item::Let` (via `emit_item` above) and a `main`-scope
+    /// `let` (via `emit_fn`'s pre-scan, since a `main`-scope `T'static` binding is
+    /// promoted to the exact same module-level item — see docs/qualifiers.md's
+    /// `'static` section, "Authorized construction sites", which treats the two
+    /// identically).
+    /// Always takes the `LazyLock` form rather than trying to prove const-safety
+    /// first (a `const` for the provably-safe subset is a valid future optimization,
+    /// not attempted yet). Name emitted verbatim (not uppercased) — matches the
+    /// external-call/string-literal convention in `emit_item`'s `Item::Let` arm, not
+    /// the bare-scalar branch there, since nothing rewrites read sites to an
+    /// uppercased name for this case.
+    pub(crate) fn emit_static_qualified_let_item(&mut self, s: &LetStmt, vis: &str) {
+        let Type::Qualified(inner_ty, OwnerQual::Static) = s.ty.as_ref().expect("caller guarantees let_type_is_static") else {
+            unreachable!("caller guarantees a Qualified(_, Static) type")
+        };
+        if let Some(reason) = self.static_sync_violation(inner_ty, &mut std::collections::HashSet::new()) {
+            self.push_error(s.line, s.col, format!(
+                "'{}' cannot be 'static under --threading single — {} is not thread-safe \
+                 (Rc/RefCell) in this mode; use a static-safe form or build with --threading multi",
+                s.name, reason
+            ));
+        }
+        let rust_ty = self.emit_type(inner_ty);
+        let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
+        self.line(&format!(
+            "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
+            vis, s.name, rust_ty, val_str
+        ));
+        self.static_backing_names.insert(s.name.clone());
+    }
+
+    /// The `'static` `Sync` gate (docs/qualifiers.md's `'static` section, "`Sync`
+    /// requirement, independent of `--threading`"): a Rust `static`/`LazyLock<T>` requires
+    /// `T: Sync` regardless of the project's `--threading` flag. Under
+    /// `ThreadingMode::Multi` every qualifier already resolves to an `Arc`/`Mutex`/
+    /// `RwLock`-based form, all `Sync` — nothing to check. Under `Single`,
+    /// `'shared`/`'weak` map to `Rc`/`Weak` and `'actor`/`'guard` both collapse to
+    /// `Rc<RefCell<T>>` (`docs/qualifiers.md:577-590`) — none of those are `Sync`.
+    /// Recurses into named struct fields (`self.struct_fields`) so a violation
+    /// nested inside another struct is still caught, not just one at the outermost
+    /// qualifier — `seen` guards against infinite recursion on a cyclic struct
+    /// definition. Returns `Some(reason)` naming the first violation found, else
+    /// `None`.
+    fn static_sync_violation(&self, ty: &Type, seen: &mut std::collections::HashSet<String>) -> Option<String> {
+        if !matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+            return None;
+        }
+        match ty {
+            Type::Qualified(inner, OwnerQual::Shared) =>
+                Some(format!("a nested 'shared value ({})", self.emit_type(inner))),
+            Type::Qualified(inner, OwnerQual::Actor | OwnerQual::ActorTask) =>
+                Some(format!("a nested 'actor value ({})", self.emit_type(inner))),
+            Type::Qualified(inner, OwnerQual::Guard | OwnerQual::GuardTask) =>
+                Some(format!("a nested 'guard value ({})", self.emit_type(inner))),
+            Type::Qualified(inner, OwnerQual::Weak) =>
+                Some(format!("a nested 'weak value ({})", self.emit_type(inner))),
+            Type::Qualified(inner, _) => self.static_sync_violation(inner, seen),
+            Type::Optional(inner) | Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) | Type::Set(inner) =>
+                self.static_sync_violation(inner, seen),
+            Type::Dict(k, v) => self.static_sync_violation(k, seen).or_else(|| self.static_sync_violation(v, seen)),
+            Type::Tuple(elems) => elems.iter().find_map(|t| self.static_sync_violation(t, seen)),
+            Type::Named(n) => {
+                if !seen.insert(n.clone()) { return None; }
+                self.struct_fields.get(n.as_str())
+                    .and_then(|fields| fields.iter().find_map(|(_, fty)| self.static_sync_violation(fty, seen)))
+            }
+            _ => None,
         }
     }
 
@@ -2932,6 +3024,16 @@ impl Transpiler {
                         || matches!(**inner, Type::Named(ref n) if n == "str");
                     if is_str_slice { format!("&'{} str", lt) }
                     else { format!("&'{} {}", lt, self.emit_type(inner)) }
+                }
+                // T'static → &'static T. See docs/qualifiers.md's `'static` section
+                // (provenance gate, authorized construction sites, Sync requirement) — this
+                // arm only handles the emitted Rust *type*; the checker enforces legality
+                // and the `static`/`LazyLock` backing is emitted at the declaration site.
+                OwnerQual::Static => {
+                    let is_str_slice = matches!(**inner, Type::Str)
+                        || matches!(**inner, Type::Named(ref n) if n == "str");
+                    if is_str_slice { "&'static str".to_string() }
+                    else { format!("&'static {}", self.emit_type(inner)) }
                 }
                 // 'new pseudo-qualifier (Union([Owned, Shared, Actor, Guard]) — replaces the
                 // old dedicated OwnerQual::New variant): a struct field's resolved qualifier

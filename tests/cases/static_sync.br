@@ -1,0 +1,10 @@
+struct Inner:
+    int value
+
+struct Outer:
+    Inner'shared inner
+
+let Outer'static GLOBAL = Outer(inner = Inner(value = 1))
+
+def main():
+    print "{GLOBAL.inner.value}"

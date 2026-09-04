@@ -1022,6 +1022,9 @@ impl Parser {
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
                             TokenKind::New => { i += 1; }
+                            // `'static` — no chained sub-qualifier (no `'static'task`/
+                            // `'static'weak`), just skip past it like `'new`.
+                            TokenKind::Static => { i += 1; }
                             _ => {}
                         }
                     }
@@ -1145,6 +1148,9 @@ impl Parser {
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
                             TokenKind::New => { i += 1; }
+                            // `'static` — no chained sub-qualifier (no `'static'task`/
+                            // `'static'weak`), just skip past it like `'new`.
+                            TokenKind::Static => { i += 1; }
                             _ => {}
                         }
                     }

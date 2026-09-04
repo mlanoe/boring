@@ -28,8 +28,152 @@ Qualifiers are resolved at transpile time. The interpreter ignores them (all val
 | `'guard` | `Arc<std::sync::RwLock<T>>` | `Rc<RefCell<T>>` | interior mutability | reader-writer, sync |
 | `'guard'task` | `Arc<tokio::sync::RwLock<T>>` | `Rc<RefCell<T>>` | interior mutability | async context |
 | `'weak` | `Weak<T>` / `sync::Weak<T>` | `Rc::Weak<T>` | no | non-owning, inferred from RHS |
+| `'static` | `&'static T` | `&'static T` | no | constant global instance, no refcount — see below |
 
 `'actor'task` is an alias for `'task`. Both produce the tokio async lock.
+
+### `'static` — constant global instances
+
+Unlike every other qualifier above, `'static` doesn't wrap a freshly
+constructed value in some form of indirection — it names an instance that
+is constructed exactly **once**, lives for the entire program, and is
+referenced everywhere as a bare `&'static T`. No `Rc`/`Arc`, no refcount,
+no heap allocation for the reference itself.
+
+```boring
+let Config'static APP_CONFIG = Config(debug = false)   # top level
+
+req show(Config'static cfg):
+    print "debug: {cfg.debug}"
+
+show(APP_CONFIG)
+```
+
+**Rust equivalent**
+```rust
+static APP_CONFIG: std::sync::LazyLock<Config> =
+    std::sync::LazyLock::new(|| Config { debug: false });
+
+fn show(cfg: &'static Config) { println!("debug: {}", cfg.debug); }
+
+show(&APP_CONFIG);
+```
+
+#### Authorized construction sites
+
+A `T'static` value can only be **constructed** at one of three sites —
+anywhere else, its initializer must already be a reference to an
+existing `'static` value, never a constructor call:
+
+| Site | Form | Notes |
+|---|---|---|
+| Top level | `let T'static NAME = Ctor(...)` | promoted to a module-level `static`/`LazyLock<T>` |
+| Inside `main` | same form, in `main`'s body | hoisted to the same module-level `static` before `main` runs |
+| A `type let` field | `type let T NAME = Ctor(...)` on a struct | `'static` is implicit here — **never annotated**, see below |
+
+```boring
+req make():
+    let Config'static cfg = Config(debug = false)  # error: cannot construct
+                                                     # a 'static instance here
+```
+
+A `type let` field has no other possible interpretation — it names
+exactly one instance per struct declaration, so there is no scenario
+where it should be `'shared`/`'actor`/`'guard` instead. The existing
+syntax is unchanged; the qualifier is simply never written:
+
+```boring
+struct Config:
+    pub type let Point origin = Point(1.0, 2.0)   # implicitly 'static
+```
+
+This only matters for non-primitive `type let` fields — a scalar (`type
+let int MAX = 100`) keeps its existing plain `const` form; `'static`
+only materializes for struct/array/dict-typed fields.
+
+#### Provenance also applies to call arguments
+
+Passing a value that isn't itself already `'static`-typed into a
+parameter that demands `'static` is rejected the same way as an illegal
+construction:
+
+```boring
+req show(Config'static cfg): ...
+
+def main():
+    let c = Config(debug = false)
+    show(c)   # error: cannot pass a non-'static value where 'static is
+              # expected — the argument must already be a 'static-typed
+              # binding, not a local value, a fresh construction, or a
+              # field read
+```
+
+#### No interior mutability
+
+`mut 'static` (and `var mut 'static`) is a compile error, exactly like
+`mut 'shared` — a bare `&'static T` has nothing for `mut` to unlock. Only
+`let T'static` is meaningful. `T'static'weak` is rejected too — `'weak`
+exists to detect deallocation, and nothing `'static` is ever deallocated.
+
+#### `Sync` requirement, independent of `--threading`
+
+A Rust `static`/`LazyLock<T>` requires `T: Sync` regardless of
+`--threading single|multi`. A `'static` value that nests a
+`'shared`/`'actor`/`'guard`/`'weak` field is rejected under `--threading
+single` specifically — those qualifiers collapse to non-`Sync`
+`Rc`/`RefCell` in single-thread mode (fine under `--threading multi`,
+where they're already `Arc`-based and `Sync`):
+
+```boring
+struct Outer:
+    Inner'shared inner
+
+let Outer'static G = Outer(inner = Inner())
+# --threading single: error, 'shared collapses to Rc<T>, not Sync
+# --threading multi:  fine, 'shared is Arc<T>, Sync
+```
+
+#### Generic structs
+
+A `type let` field whose type does **not** depend on the struct's own
+type parameter becomes a genuine cross-instantiation singleton — one
+static, shared regardless of how many concrete instantiations exist. A
+field whose type **does** depend on the type parameter is rejected: a
+Rust `static` cannot be generic, so there is no single instance to share
+across instantiations.
+
+```boring
+struct Display<T>:
+    T value
+    type let Logger shared_logger = Logger()   # OK — one instance, any T
+    type let T default = value                 # error — depends on T
+```
+
+#### Converting `'static` into `'shared`/`'actor`/`'guard`
+
+There's no special mechanism for this — `'shared c = expr` / `'actor c =
+expr` / `'guard c = expr` already accept any expression producing a `T`,
+so going from `'static` to one of these is just ordinary construction
+whose initializer happens to read the global:
+
+```boring
+let Counter'shared c = GLOBAL.clone()   # one allocation + clone, like any other 'shared construction
+```
+
+This has a real cost (`T: Clone`, one heap allocation) and is never
+inserted implicitly. For `'actor`/`'guard`, this seeds a **new,
+independent** mutable instance from the global's current value — it does
+not make the global itself mutable.
+
+#### `'static` vs. GPU memory qualifiers
+
+`'static` is a host-side qualifier with no relationship to the GPU
+`kernel struct` qualifiers (`'const`, `'local`, `'global`, `'unified`,
+etc. — see the GPU module docs) — those describe device memory hierarchy,
+a completely different axis, and none of them are ever backed by a Rust
+`static`. `--target kernel` (the unrelated `no_std` Rust-for-Linux driver
+target) does support `'static`, since plain Rust `static` items work
+fine there.
 
 ---
 
@@ -385,6 +529,8 @@ error: cannot pass 'actor argument to `mut Counter&` in async function `f` — h
 
 Boring's qualifier inference works from usage signals — in most programs you never write qualifiers. The zero-annotation goal: qualifier-free Boring code emits the same Rust as hand-annotated code.
 
+`'static` is deliberately **not** part of this system — it's never a candidate for a bare `T`, never joins the fallback chain, and is never inferred from usage. Every other qualifier here answers "how should this freshly-constructed value be stored?", a question inference can answer from usage signals alone; `'static` answers "does this value have a proven lineage back to an authorized construction site?" — a provenance question, checked directly (see the qualifier table above) rather than folded into constraint elimination.
+
 ### Constraint elimination
 
 Each unqualified local variable starts with a candidate set of all possible qualifiers. Every usage signal narrows the set by eliminating incompatible qualifiers. When exactly one candidate remains it is chosen. When none remain the constraints are contradictory and a compile error is reported. When several remain a size-based fallback resolves the tie.
@@ -560,7 +706,7 @@ Named qualifier groups expand to the corresponding member sets:
 | `'one` | `'inline`, `'owned` |
 | `'many` | `'shared`, `'actor`, `'guard` |
 | `'mut` | `'inline`, `'owned`, `'actor`, `'guard` |
-| `'req` | `'shared` |
+| `'req` | `'shared`, `'static` |
 
 **Scope: parameters only.** Qualifier groups are not useful on local variables — the inference starting set already covers the same information.
 

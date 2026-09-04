@@ -1788,12 +1788,19 @@ impl Transpiler {
             if !is_top_level_let_value && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                 let key = format!("{}::{}", type_name, field);
                 if self.struct_type_var_names.contains(&key) {
-                    // type let → associated const (UPPER_CASE in Rust)
+                    // type let (scalar) → associated const (UPPER_CASE in Rust)
                     return format!("{}::{}", type_name, field.to_uppercase());
                 }
+                if self.struct_type_static_var_names.contains(&key) {
+                    // type let (non-scalar) → implicitly 'static — module-level
+                    // LazyLock static, mangled `{STRUCT}_{FIELD}` (see emit_struct.rs's
+                    // "Module-level statics" loop); read as a bare reference, no lock.
+                    return format!("&{}_{}", type_name.to_uppercase(), field.to_uppercase());
+                }
                 if self.struct_type_mut_var_names.contains(&key) {
-                    // type var → module-level static Mutex: read via lock(), recover from poisoning
-                    return format!("*{}.lock().unwrap_or_else(|e| e.into_inner())", field.to_uppercase());
+                    // type var → module-level static Mutex: read via lock(), recover from
+                    // poisoning. Mangled `{STRUCT}_{FIELD}`, same reasoning as above.
+                    return format!("*{}_{}.lock().unwrap_or_else(|e| e.into_inner())", type_name.to_uppercase(), field.to_uppercase());
                 }
                 // Fieldless enum variant (no args): CalcError.DivByZero → CalcError::DivByZero
                 if self.enum_variant_fields.contains_key(&key) {

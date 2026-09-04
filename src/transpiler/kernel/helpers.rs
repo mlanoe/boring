@@ -201,6 +201,11 @@ impl KernelTranspiler {
                 OwnerQual::Lifetime(lt) => {
                     format!("&'{} {}", lt, self.emit_type(inner))
                 }
+                // T'static → &'static T. `no_std` supports `static` items natively — this
+                // target needs and supports 'static, unlike the GPU `kernel struct` case
+                // (see docs/qualifiers.md's `'static` section). Explicit arm rather than the wildcard
+                // fallback below, which would otherwise silently drop the lifetime.
+                OwnerQual::Static => format!("&'static {}", self.emit_type(inner)),
                 // Qualifier union — emit as plain inner type (Boring-level constraint only).
                 OwnerQual::Union(_) => self.emit_type(inner),
                 _ => format!("&{}", self.emit_type(inner)),
