@@ -2081,6 +2081,8 @@ req string format_value(Interpreter interp, Value val, string spec):
         Value.Float64(fv):
             if type_char == "e":
                 raw = float_to_scientific(fv, precision)
+            elif type_char == "?":
+                raw = float_debug_str(fv)
             elif precision >= 0:
                 raw = float_to_fixed(fv, precision)
             else:
@@ -2091,6 +2093,8 @@ req string format_value(Interpreter interp, Value val, string spec):
             let fv = fv32 as float64
             if type_char == "e":
                 raw = float_to_scientific(fv, precision)
+            elif type_char == "?":
+                raw = float_debug_str(fv)
             elif precision >= 0:
                 raw = float_to_fixed(fv, precision)
             else:
@@ -2137,6 +2141,18 @@ req string int_to_hex(int n):
     if n < 0:
         result = "-" + result
     result
+
+# Rust's `{:?}` (Debug) on a float is identical to `{}` (Display) except it
+# always keeps a decimal point — a whole-number float like `2.0` displays as
+# "2" but debugs as "2.0". Plain `"{f}"` interpolation here transpiles to
+# Rust's own Display, which drops the trailing `.0` the same way, so `{:?}`
+# needs this explicit fixup rather than falling through to the same string.
+req string float_debug_str(float f):
+    let s = "{f}"
+    if s.contains("."):
+        s
+    else:
+        s + ".0"
 
 req string float_to_fixed(float f, int prec):
     if prec == 0:

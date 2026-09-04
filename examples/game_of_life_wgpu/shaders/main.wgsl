@@ -7,8 +7,8 @@ struct Dimension {
 
 // ─── kernel Step ───
 
-@group(0) @binding(0) var<storage, read_write> cells_in: array<u32>;
-@group(0) @binding(1) var<storage, read_write> cells_out: array<u32>;
+@group(0) @binding(0) var<storage, read_write> step_cells_in: array<u32>;
+@group(0) @binding(1) var<storage, read_write> step_cells_out: array<u32>;
 struct StepParams {
     dim_w: i32,
     dim_h: i32,
@@ -29,31 +29,35 @@ fn Step_main(
     let row = ((i32(bp_bid.y) * i32(bp_bdim.y)) + i32(bp_tid.y));
     if (((col < dim.width) && (row < dim.height))) {
         var n: i32 = 0;
-        var dy: i32 = -1;
-        loop {
-            if !(dy < 2) { break; }
-            var dx: i32 = -1;
+        {
+            var dy: i32 = (-1);
             loop {
-                if !(dx < 2) { break; }
-                if (((dx == 0) && (dy == 0))) {
-                    continue;
+                if !(dy < 2) { break; }
+                {
+                    var dx: i32 = (-1);
+                    loop {
+                        if !(dx < 2) { break; }
+                        if (((dx == 0) && (dy == 0))) {
+                            continue;
+                        }
+                        let nx = (((i32(col) + dx) + i32(dim.width)) % i32(dim.width));
+                        let ny = (((i32(row) + dy) + i32(dim.height)) % i32(dim.height));
+                        n = (n + i32(step_cells_in[u32(((ny * dim.width) + nx))]));
+                        dx = dx + 1;
+                    }
                 }
-                let nx = u32((((i32(col) + dx) + i32(dim.width)) % i32(dim.width)));
-                let ny = u32((((i32(row) + dy) + i32(dim.height)) % i32(dim.height)));
-                n = (n + i32(cells_in[u32(((ny * dim.width) + nx))]));
-                dx = dx + 1;
+                dy = dy + 1;
             }
-            dy = dy + 1;
         }
-        let alive = cells_in[u32(((row * dim.width) + col))];
-        cells_out[u32(((row * dim.width) + col))] = select(u32((n == 3)), u32(((n == 2) || (n == 3))), (alive == 1));
+        let alive = step_cells_in[u32(((row * dim.width) + col))];
+        step_cells_out[u32(((row * dim.width) + col))] = select(u32((n == 3)), u32(((n == 2) || (n == 3))), (alive == 1));
     }
 }
 
 // ─── kernel Render ───
 
-@group(0) @binding(0) var<storage, read> cells: array<u32>;
-@group(0) @binding(1) var<storage, read_write> pixels: array<u32>;
+@group(0) @binding(0) var<storage, read> render_cells: array<u32>;
+@group(0) @binding(1) var<storage, read_write> render_pixels: array<u32>;
 struct RenderParams {
     dim_w: i32,
     dim_h: i32,
@@ -73,8 +77,8 @@ fn Render_main(
     let col = ((i32(bp_bid.x) * i32(bp_bdim.x)) + i32(bp_tid.x));
     let row = ((i32(bp_bid.y) * i32(bp_bdim.y)) + i32(bp_tid.y));
     if (((col < dim.width) && (row < dim.height))) {
-        let alive = cells[u32(((row * dim.width) + col))];
-        pixels[u32(((row * dim.width) + col))] = select(4279308561u, 4278255360u, (alive == 1));
+        let alive = render_cells[u32(((row * dim.width) + col))];
+        render_pixels[u32(((row * dim.width) + col))] = select(4279308561u, 4278255360u, (alive == 1));
     }
 }
 

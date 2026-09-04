@@ -5431,8 +5431,10 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         // fix, unwired call site (found via the `Tree.from_str(text, opt)` real-crate repro
         // — `resvg.render(...)`, a free function, already worked; this one silently didn't).
         let src = "def main():\n    var int a = 1\n    var int b = 2\n    Widget.build(a, b)\n";
-        let mut config = TranspileConfig::default();
-        config.external_fns = vec![("Widget".to_string(), "build".to_string(), vec!["".to_string(), "&mut".to_string()])];
+        let config = TranspileConfig {
+            external_fns: vec![("Widget".to_string(), "build".to_string(), vec!["".to_string(), "&mut".to_string()])],
+            ..Default::default()
+        };
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("Widget::build(a, &mut b)"),
             "static Type.method(args) call should apply project-declared arg borrows, got:\n{}", code);
@@ -5449,8 +5451,10 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         // `mem.swap`/`replace`/`take` (identical Boring-source/Rust spellings already) —
         // only surfaced via the `ZipFile::readToEnd` (→ `read_to_end`) real-crate repro.
         let src = "def main():\n    var int a = 1\n    var int b = 2\n    Widget.buildThing(a, b)\n";
-        let mut config = TranspileConfig::default();
-        config.external_fns = vec![("Widget".to_string(), "buildThing".to_string(), vec!["".to_string(), "&mut".to_string()])];
+        let config = TranspileConfig {
+            external_fns: vec![("Widget".to_string(), "buildThing".to_string(), vec!["".to_string(), "&mut".to_string()])],
+            ..Default::default()
+        };
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("Widget::build_thing(a, &mut b)"),
             "camelCase TOML method name should still match the snake_case Rust call site, got:\n{}", code);
@@ -5464,9 +5468,11 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         // src/main.rs — this test exercises the *consuming* end of that fix, the TOML
         // parsing side has its own dedicated unit tests in main.rs).
         let src = "def main():\n    var int a = 1\n    var int b = 2\n    var int c = 3\n    Lib.call3(a, b, c)\n";
-        let mut config = TranspileConfig::default();
-        config.external_fns = vec![("Lib".to_string(), "call3".to_string(),
-            vec!["&".to_string(), "".to_string(), "&mut".to_string()])];
+        let config = TranspileConfig {
+            external_fns: vec![("Lib".to_string(), "call3".to_string(),
+                vec!["&".to_string(), "".to_string(), "&mut".to_string()])],
+            ..Default::default()
+        };
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("Lib::call3(&a, b, &mut c)"),
             "middle by-value arg must stay unprefixed, first/last keep their own borrows, got:\n{}", code);

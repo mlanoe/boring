@@ -52,6 +52,25 @@ enum WarpMode { Real, Emulated }
 /// the existing host-side `__boring_gpu_warp_size` mock).
 const EMULATED_WARP_SIZE: u32 = 32;
 
+/// WGSL reserves every identifier starting with `__` (confirmed via a real
+/// naga parse: "Identifier starts with a reserved prefix"). Buffer-qualified
+/// fields are already routed through `current_buffer_renames`'s
+/// `{kernel}_{field}` scheme, which never collides with this, but a bare
+/// field name emitted verbatim — a params-uniform struct member/local unpack,
+/// or a `'sync` fixed-array workgroup declaration — can still be one of a
+/// few internally `__`-prefixed names: a labeled dynamic-shape array's
+/// desugared shadow axes (`desugar_labeled_array.rs`'s `__name_axisN`) being
+/// the one that actually reaches this backend. Reuses the existing `bp_`
+/// (single underscore) convention this file already applies elsewhere (see
+/// `try_emit_plain_index_method_stmt`'s discard-target rename) rather than
+/// introducing a second one.
+fn wgsl_safe_ident(name: &str) -> String {
+    match name.strip_prefix("__") {
+        Some(rest) => format!("bp_{rest}"),
+        None => name.to_string(),
+    }
+}
+
 struct DeviceEmitter {
     out: String,
     indent: usize,
@@ -280,13 +299,13 @@ impl DeviceEmitter {
             if matches!(f.qual, GpuQual::Actor) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                        f.name, wgsl_scalar(inner), n));
+                        wgsl_safe_ident(&f.name), wgsl_scalar(inner), n));
                 } else if let Some((elem, _)) = f.ty.as_labeled_array() {
                     // See cuda::device's identical `labeled_array_len()` note:
                     // `None` (a const-generic axis) isn't handled here yet.
                     if let Some(len) = f.ty.labeled_array_len() {
                         self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                            f.name, wgsl_scalar(elem), len));
+                            wgsl_safe_ident(&f.name), wgsl_scalar(elem), len));
                     }
                 }
             }
@@ -337,21 +356,22 @@ impl DeviceEmitter {
         self.indent += 1;
         for f in &decl.fields {
             if is_params_field(f) {
+                let name = wgsl_safe_ident(&f.name);
                 match &f.ty {
                     Type::Named(n) if n == "Dimension" => {
-                        self.line(&format!("{}_w: i32,", f.name));
-                        self.line(&format!("{}_h: i32,", f.name));
+                        self.line(&format!("{name}_w: i32,"));
+                        self.line(&format!("{name}_h: i32,"));
                     }
                     Type::ArrayN(inner, n) => {
-                        self.line(&format!("{}: array<{}, {}>,", f.name, wgsl_scalar(inner), n));
+                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_scalar(inner), n));
                     }
                     ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
                         let (elem, _) = ty.as_labeled_array().unwrap();
                         let len = ty.labeled_array_len().unwrap();
-                        self.line(&format!("{}: array<{}, {}>,", f.name, wgsl_scalar(elem), len));
+                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_scalar(elem), len));
                     }
                     _ => {
-                        self.line(&format!("{}: {},", f.name, wgsl_scalar(&f.ty)));
+                        self.line(&format!("{}: {},", name, wgsl_scalar(&f.ty)));
                     }
                 }
             }
@@ -428,17 +448,16 @@ impl DeviceEmitter {
             let pvar = format!("{}_params", decl.name.to_lowercase());
             for f in &decl.fields {
                 if is_params_field(f) {
+                    let name = wgsl_safe_ident(&f.name);
                     match &f.ty {
                         Type::Named(n) if n == "Dimension" => {
-                            self.line(&format!("let {}: Dimension = Dimension({pvar}.{}_w, {pvar}.{}_h);",
-                                f.name, f.name, f.name));
+                            self.line(&format!("let {name}: Dimension = Dimension({pvar}.{name}_w, {pvar}.{name}_h);"));
                         }
                         Type::ArrayN(_, _) => {
                             // Fixed arrays are accessed as {pvar}.field[i] directly.
                         }
                         _ => {
-                            self.line(&format!("let {}: {} = {pvar}.{};",
-                                f.name, wgsl_scalar(&f.ty), f.name));
+                            self.line(&format!("let {name}: {} = {pvar}.{name};", wgsl_scalar(&f.ty)));
                         }
                     }
                 }
@@ -953,8 +972,11 @@ impl DeviceEmitter {
                     // miscompiled `alpha * x[i] + y[i]` to always use the top-level
                     // literal instead of the runtime parameter -- no compile error,
                     // just a wrong-value bug (confirmed via `boring build --target
-                    // wgpu examples/saxpy.br`).
-                    name.clone()
+                    // wgpu examples/saxpy.br`). The unpacked local's own name is
+                    // WGSL-sanitized (see `wgsl_safe_ident`) for fields whose Boring
+                    // name is `__`-prefixed (e.g. a desugared labeled-array shadow
+                    // axis) -- reference it under the same sanitized spelling.
+                    wgsl_safe_ident(name)
                 } else {
                     self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
                 }
@@ -1407,9 +1429,16 @@ fn collect_shuffle_types_expr(e: &Expr, fields: &[KernelFieldDecl], out: &mut st
 
 fn map_builtin_fn(name: &str) -> String {
     match name {
-        "int"   => "i32".into(),
-        "uint"  => "u32".into(),
-        "float" => "f32".into(),
+        "int"     => "i32".into(),
+        "uint"    => "u32".into(),
+        "float"   => "f32".into(),
+        // `float32(...)` casts: same f32 target as the bare `float` cast above —
+        // WGSL has only one float width. `float64(...)` has no representation at
+        // all here (see `wgsl_unsupported_f64`'s doc comment) — emit the same
+        // clean compile-error comment the type-level check already produces,
+        // instead of passing the call through verbatim as invalid WGSL.
+        "float32" => "f32".into(),
+        "float64" => wgsl_unsupported_f64("f32"),
         "abs"   => "abs".into(),
         "min"   => "min".into(),
         "max"   => "max".into(),

@@ -708,6 +708,13 @@ impl BoringToml {
     }
 }
 
+// `BoringToml` parsing (a large, self-contained concern) is tested right next to its
+// own impl block rather than at file end, unlike the interpreter/parser/transpiler's
+// convention of one trailing `mod tests` — moving this ~600-line module past the
+// ~1700 lines of CLI/project-scaffolding code that follow it would separate it from
+// what it tests for no real benefit, so this one lint is deliberately suppressed
+// rather than "fixed" by relocation.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod boring_toml_tests {
     use super::{BoringToml, DepSpec, GitRef};

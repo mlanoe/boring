@@ -7,9 +7,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.9.6] — 2026-09-05 *(cargo test: 1685/1685 passing across 27 suites · clippy: clean · self-hosted interpreter functional: 78/78 × 4 modes)*
+
+### Added
+
+- **`'static` qualifier** (`T'static → &'static T`) — a constant global instance with no refcount at all, more restrictive than `'shared`. Provenance-gated: only a genuinely `'static`-lived value (a top-level `let`/`const`, a `type let`/`type var` singleton, or another already-`'static` value) can be assigned into one — enforced by the checker, not just the parser. `'req` (the "always immutable, read-only-callable" qualifier group) now includes `'static` alongside `'shared`. See `docs/qualifiers.md`.
+- **`Introspect` built-in trait** — no `trait Introspect:` declaration needed; gives any struct or enum Java-`getClass()`-style read-only reflection at runtime (`typeName()`, `fieldNames()`, and friends) via `as Introspect`.
+- **Real per-adapter `GPU(n)` introspection on `--target wgpu`** — `GPU(n)`/`GPU.all()`/`.name()`/`.maxThreads()`/`.maxSharedMem()`/`.index()` now resolve against a real adapter list from `instance.enumerate_adapters(...)` instead of simulating a single device.
+- **`Screen`/`screen.present()` on `--target cuda` and `--target rocm`** — neither has a native presentation API, so both take a software-blit path (device-to-host readback + `softbuffer` window presentation, winit 0.28 event loop) — the same rendering surface `--target wgpu`/`--target metal` already had.
+- **`boring.toml [dependencies]` is now transitively resolved** — a dependency's own `[dependencies]` are followed too, not just the top level, so a `use` reaching a dependency-of-a-dependency now resolves. **`boring.lock`** pins every git dependency's resolved commit (same idea as `Cargo.lock`) so a branch/tag/default-branch dependency no longer silently drifts between builds; `boring update [name]` deliberately moves it forward, and `--locked`/`--offline` turn "silently resolve/refetch" into a hard error.
+- **Real `use` module-import resolution in the self-hosted (Boring-in-Boring) interpreter** — previously every `use` form except the unrelated `use X as Y` type-alias shorthand was parsed but silently discarded at exec time.
+- **Real `json(v)` serializer and `fromJson<T>()`** in the tree-walk interpreter — both were stubs (`json(v)` printed the interpreter's own `Value` debug repr, not JSON; `fromJson<T>()` returned its string argument unparsed for every `T`), so `boring run` and `boring build` disagreed for any program that serializes. Fixed enum `Display` to match `Debug` as part of the same fix.
+- **`@derive(Serialize/Deserialize)` now actually compiles**, plus field renaming support for camelCase JSON keys against snake_case Boring fields.
+
 ### Changed
 
 - **BREAKING: `args()` now follows the C/Python argv[0] convention** — `args()[0]` is the program name (the `.br` script path under `boring run`, the binary's own invoked path under a `boring build` binary — so it reflects renames/symlinks/aliases), and `args()[1..]` are the program's real arguments. Previously `args()[0]` was already the first real argument (the program name was silently excluded in every mode). `raw_args()` is aligned the same way, for consistency. Every existing `args()`/`raw_args()` call site needs its indices shifted by one (or its loop changed to skip index 0) — see `docs/book.md`'s "Global functions" entry for the exact new contract.
+- **`'stack`/`'heap` renamed to `'inline`/`'owned`**, bare tick (`T'`) retired in favor of explicit `'new` — the old names implied a literal memory region ownership qualifiers never actually guaranteed.
+- **`'mut`/`'req` qualifier groups are now recognized on parameters**, not just local bindings — a parser gap fixed this cycle (`'mut` → any qualifier with interior mutability; `'req` → always-immutable, now including `'static`).
+- **Built-in enum variants are now seeded once per build, not once per file** — a performance fix with no behavior change for correct programs.
+
+### Fixed
+
+Beyond the many individual transpiler/interpreter correctness fixes landed this cycle (dict-of-dict chained assignment, `T?`-returning methods double-wrapping or mis-handling `else default`, struct/enum field mutation checks in `guard`/`if let`/`elif let`, `try`/`try?` prefix parsing inside those same clauses, tuple/array mutable slot bindings, numeric `as` casts on `expr else default`, and more — see the commit log for the full list), this release's examples-verification pass (regenerating and `naga`-validating every `--target wgpu` example from scratch) turned up and fixed:
+
+- **`float32` values ignored `:.Nf` precision and crashed on `:e`/`:E`** in the tree-walk interpreter's `apply_format` — `to_float` didn't match `Value::Float32`, so a `float32`-typed value silently fell through to string-precision truncation (`"{x:.4f}"` on `2.4424f32` printed `"2.44"` instead of `"2.4424"`) and threw a hard error on `:e`/`:E`. Fixed by adding the missing match arm.
+- **`{v:?}` dropped the trailing `.0` on whole-number floats** (both `float32` and `float64`) in the same interpreter, and independently in the self-hosted (Boring-in-Boring) interpreter's own `format_value` — neither had a real Debug-style branch for `?`, both fell back to plain Display. Fixed in the native interpreter by routing through the existing `debug_repr` helper, and in the self-hosted interpreter with a new `float_debug_str` helper.
+- **wgpu: a leading `#` comment (or any top-level comment) before/around a `Screen` program failed the whole build**, one spurious error per comment line — a bare comment parses as a real top-level `Stmt::Comment` (never stripped by the lexer), which the Screen-program shape validator didn't special-case, unlike every other backend's kernel-body statement emitter. Broke regenerating `examples/game_of_life_wgpu` and `examples/plasma_metal_wgpu` outright.
+- **wgpu: `float32(...)` casts inside a kernel body emitted invalid WGSL** — the builtin-function name mapping had a `float` → `f32` arm but no `float32` arm, so the call passed through unmapped. `float64(...)` now also produces the same clean compile-error comment the type-level check already gives instead of passing through as invalid WGSL.
+- **wgpu: a labeled dynamic-shape array's desugared shadow-axis fields (`__name_axis0`/`__name_axis1`/...) used a `__`-prefixed name**, which WGSL specifically reserves — confirmed via a real `naga` parse (`Identifier starts with a reserved prefix`). Broke `examples/mandelbrot_gpu_wgpu` both as previously checked in and as freshly regenerated (two distinct instances of the same root cause). Fixed by sanitizing any `__`-prefixed field name reaching WGSL codegen to the existing `bp_`-prefixed convention this backend already uses elsewhere, applied consistently across the params-uniform struct, its unpacking locals, and kernel-body variable references.
+
+All six `--target wgpu` examples (`saxpy`, `vector_add_gpu`, `matrix_mul_gpu`, `mandelbrot_gpu`, `game_of_life`, `plasma_metal`) now regenerate cleanly, `cargo build` cleanly, and their emitted WGSL parses cleanly under a real `naga` parser — not just `cargo build`, which never actually parses the embedded shader text.
+
+### Spec
+
+- **`spec/grammar.bnf`** brought back in sync with this cycle's parser changes, none of which had been reflected yet: added `'static` to the ownership-qualifier comment block and production; added the previously-promised-but-never-written "caller-facing qualifier groups" section (`'one`/`'many`/`'mut`/`'req`); added `const` to `owner_qual`; added the missing `type_member_decl` production for `type let`/`type var` singleton fields; added `type` to the reserved-keywords list; and fixed two stale `T'task → Arc<T>` mappings (long predating this cycle) that should have read `Arc<Mutex<T>>` (`T'task` is an alias for `T'actor'task`, not a read-only-sharing qualifier).
+- **`linguist/Boring.tmLanguage.json`**: the `ownership-qualifier` regex now matches `'static` and `'const` (previously fell through to a two-scope fallback instead of highlighting as one qualifier token); `builtin-types` now matches `never`. `linguist/samples/*.br` re-verified against the current parser/interpreter — no drift found.
+- Removed `docs/mut-type-modifier.html`, a stale generated file with no corresponding `.md` source (content was folded into `book.md` in an earlier cycle).
 
 ---
 

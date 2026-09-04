@@ -132,7 +132,7 @@ impl Transpiler {
                             vis, s.name, rust_ty, val_str
                         ));
                     } else if self.let_type_is_static(s) {
-                        self.emit_static_qualified_let_item(s, &vis);
+                        self.emit_static_qualified_let_item(s, vis);
                     } else {
                         // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
                         // where the compiler can infer it. Without an explicit boring type

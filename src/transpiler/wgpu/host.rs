@@ -164,9 +164,22 @@ impl<'a> HostEmitter<'a> {
     /// block that isn't its single `loop:`, is unrecognized.
     fn check_screen_top_level_stmt(&mut self, stmt: &Stmt) {
         match stmt {
+            // A bare `#` comment line parses as a real top-level `Stmt::Comment`
+            // (see parse_stmt.rs/parser/mod.rs's `parse_item`), not something the
+            // lexer strips — inert, never actual code, so it must never trip this
+            // shape check. Every other backend's kernel-body statement emitter
+            // already special-cases `Stmt::Comment` the same way (device.rs,
+            // cuda/device.rs, metal/device.rs); this top-level Screen-program
+            // check was the one place that didn't, so a header comment (or any
+            // top-level comment) before/around a Screen program's recognized
+            // shape failed the whole build with one spurious error per line.
+            Stmt::Comment(_) => {}
             Stmt::KernelBlock(block) => {
                 let mut seen_loop = false;
                 for inner in &block.body {
+                    if matches!(inner, Stmt::Comment(_)) {
+                        continue;
+                    }
                     if matches!(inner, Stmt::Loop(_)) {
                         if seen_loop {
                             let (l, c) = stmt_line_col(inner);

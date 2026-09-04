@@ -28,3 +28,9 @@ print p.age
 
 let d = { "key" = "val" }
 print d["key"]
+
+let float32 f32val = 12.324
+print "{f32val:.4f}"
+let float32 f32whole = 2.0
+print "{f32whole:?}"
+print "{f32val:.2e}"

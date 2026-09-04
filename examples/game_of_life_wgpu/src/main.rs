@@ -9,6 +9,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+static __BORING_SHADER_MODULE: std::sync::OnceLock<wgpu::ShaderModule> = std::sync::OnceLock::new();
+
+static STEP_PIPELINE: std::sync::OnceLock<std::sync::Arc<wgpu::ComputePipeline>> = std::sync::OnceLock::new();
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct StepParams {
@@ -19,11 +23,11 @@ struct StepParams {
 struct Step {
     device: std::sync::Arc<wgpu::Device>,
     queue: std::sync::Arc<wgpu::Queue>,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: std::sync::Arc<wgpu::ComputePipeline>,
     bind_group: wgpu::BindGroup,
-    cells_in_buf: wgpu::Buffer,
+    cells_in_buf: std::sync::Arc<wgpu::Buffer>,
     cells_in: Vec<u32>,
-    cells_out_buf: wgpu::Buffer,
+    cells_out_buf: std::sync::Arc<wgpu::Buffer>,
     cells_out: Vec<u32>,
     dim: (i32, i32),
     params_buf: wgpu::Buffer,
@@ -31,23 +35,19 @@ struct Step {
 
 impl Step {
     fn new(width: i32, height: i32, device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/main.wgsl").into()),
-        });
 
-        let cells_in_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let cells_in_buf = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: ((width * height) as usize * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let cells_out_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        }));
+        let cells_out_buf = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: ((width * height) as usize * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: std::mem::size_of::<StepParams>() as u64,
@@ -55,14 +55,22 @@ impl Step {
             mapped_at_creation: false,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &shader,
-            entry_point: "Step_main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let pipeline = STEP_PIPELINE.get_or_init(|| {
+            let shader = __BORING_SHADER_MODULE.get_or_init(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/main.wgsl").into()),
+                })
+            });
+            std::sync::Arc::new(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: shader,
+                entry_point: "Step_main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            }))
+        }).clone();
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -88,7 +96,21 @@ impl Step {
         }
     }
 
-    fn dispatch(&self, gx: u32, gy: u32, gz: u32) {
+    fn rebuild_bind_group(&mut self) {
+        let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
+        entries.push(wgpu::BindGroupEntry { binding: 0, resource: self.cells_in_buf.as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry { binding: 1, resource: self.cells_out_buf.as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry { binding: 2, resource: self.params_buf.as_entire_binding() });
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+    }
+
+    fn dispatch(&self, gx: u32, gy: u32, gz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let params = StepParams {
             dim_w: self.dim.0,
             dim_h: self.dim.1,
@@ -103,9 +125,19 @@ impl Step {
             cpass.dispatch_workgroups(gx, gy, gz);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
+        if pollster::block_on(self.device.pop_error_scope()).is_some() {
+            let _ = pollster::block_on(self.device.pop_error_scope());
+            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::LaunchError) as Box<dyn BoringVal + Send + Sync>)));
+        }
+        if pollster::block_on(self.device.pop_error_scope()).is_some() {
+            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::OutOfMemory) as Box<dyn BoringVal + Send + Sync>)));
+        }
+        Ok(())
     }
 
 }
+
+static RENDER_PIPELINE: std::sync::OnceLock<std::sync::Arc<wgpu::ComputePipeline>> = std::sync::OnceLock::new();
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -117,11 +149,11 @@ struct RenderParams {
 struct Render {
     device: std::sync::Arc<wgpu::Device>,
     queue: std::sync::Arc<wgpu::Queue>,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: std::sync::Arc<wgpu::ComputePipeline>,
     bind_group: wgpu::BindGroup,
-    cells_buf: wgpu::Buffer,
+    cells_buf: std::sync::Arc<wgpu::Buffer>,
     cells: Vec<u32>,
-    pixels_buf: wgpu::Buffer,
+    pixels_buf: std::sync::Arc<wgpu::Buffer>,
     pixels: Vec<u32>,
     dim: (i32, i32),
     params_buf: wgpu::Buffer,
@@ -129,23 +161,19 @@ struct Render {
 
 impl Render {
     fn new(width: i32, height: i32, device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/main.wgsl").into()),
-        });
 
-        let cells_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let cells_buf = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: ((width * height) as usize * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let pixels_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        }));
+        let pixels_buf = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: ((width * height) as usize * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: std::mem::size_of::<RenderParams>() as u64,
@@ -153,14 +181,22 @@ impl Render {
             mapped_at_creation: false,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &shader,
-            entry_point: "Render_main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let pipeline = RENDER_PIPELINE.get_or_init(|| {
+            let shader = __BORING_SHADER_MODULE.get_or_init(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/main.wgsl").into()),
+                })
+            });
+            std::sync::Arc::new(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: shader,
+                entry_point: "Render_main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            }))
+        }).clone();
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -186,7 +222,21 @@ impl Render {
         }
     }
 
-    fn dispatch(&self, gx: u32, gy: u32, gz: u32) {
+    fn rebuild_bind_group(&mut self) {
+        let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
+        entries.push(wgpu::BindGroupEntry { binding: 0, resource: self.cells_buf.as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry { binding: 1, resource: self.pixels_buf.as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry { binding: 2, resource: self.params_buf.as_entire_binding() });
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+    }
+
+    fn dispatch(&self, gx: u32, gy: u32, gz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let params = RenderParams {
             dim_w: self.dim.0,
             dim_h: self.dim.1,
@@ -201,17 +251,52 @@ impl Render {
             cpass.dispatch_workgroups(gx, gy, gz);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
+        if pollster::block_on(self.device.pop_error_scope()).is_some() {
+            let _ = pollster::block_on(self.device.pop_error_scope());
+            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::LaunchError) as Box<dyn BoringVal + Send + Sync>)));
+        }
+        if pollster::block_on(self.device.pop_error_scope()).is_some() {
+            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::OutOfMemory) as Box<dyn BoringVal + Send + Sync>)));
+        }
+        Ok(())
     }
 
 }
 
+#[allow(dead_code)]
+#[derive(Clone)]
+enum BoringGpuArg<T> {
+    Resident(std::sync::Arc<wgpu::Buffer>, usize),
+    Host(Vec<T>),
+}
+
+#[allow(dead_code)]
+impl<T> BoringGpuArg<T> {
+    fn len(&self) -> usize {
+        match self {
+            BoringGpuArg::Resident(_, len) => *len,
+            BoringGpuArg::Host(v) => v.len(),
+        }
+    }
+}
+
+thread_local! {
+    static __BORING_STAGING_POOL: std::cell::RefCell<Vec<wgpu::Buffer>> = std::cell::RefCell::new(Vec::new());
+}
+
 fn __boring_gpu_copy_d2h<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> Vec<T> {
     let size = src.size();
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+    let staging = __BORING_STAGING_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        match pool.iter().position(|b| b.size() == size) {
+            Some(i) => pool.swap_remove(i),
+            None => device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        }
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     encoder.copy_buffer_to_buffer(src, 0, &staging, 0, size);
@@ -224,6 +309,7 @@ fn __boring_gpu_copy_d2h<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::
     rx.recv().unwrap().unwrap();
     let data = bytemuck::cast_slice(&staging.slice(..).get_mapped_range()).to_vec();
     staging.unmap();
+    __BORING_STAGING_POOL.with(|pool| pool.borrow_mut().push(staging));
     data
 }
 
@@ -240,6 +326,20 @@ fn __boring_gpu_copy_h2d(device: &wgpu::Device, queue: &wgpu::Queue, src: &[u8],
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     encoder.copy_buffer_to_buffer(&staging, 0, dst, 0, size);
     queue.submit(std::iter::once(encoder.finish()));
+}
+
+fn __boring_gpu_copy_d2d(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> std::sync::Arc<wgpu::Buffer> {
+    let size = src.size();
+    let dst = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_buffer_to_buffer(src, 0, &dst, 0, size);
+    queue.submit(std::iter::once(encoder.finish()));
+    std::sync::Arc::new(dst)
 }
 
 fn __boring_present_buffer(device: &wgpu::Device, queue: &wgpu::Queue, surface: &wgpu::Surface, pipeline: &wgpu::RenderPipeline, bind_group: &wgpu::BindGroup) {
@@ -264,9 +364,265 @@ fn __boring_present_buffer(device: &wgpu::Device, queue: &wgpu::Queue, surface: 
     output.present();
 }
 
+static __BORING_GPU_DEVICE: std::sync::OnceLock<std::sync::Arc<wgpu::Device>> = std::sync::OnceLock::new();
+static __BORING_GPU_QUEUE: std::sync::OnceLock<std::sync::Arc<wgpu::Queue>> = std::sync::OnceLock::new();
+fn __boring_gpu_device() -> std::sync::Arc<wgpu::Device> { std::sync::Arc::clone(__BORING_GPU_DEVICE.get().expect("GPU device not initialized")) }
+fn __boring_gpu_queue() -> std::sync::Arc<wgpu::Queue> { std::sync::Arc::clone(__BORING_GPU_QUEUE.get().expect("GPU queue not initialized")) }
+
+static __BORING_GPU_ADAPTERS: std::sync::OnceLock<Vec<std::sync::Arc<wgpu::Adapter>>> = std::sync::OnceLock::new();
+fn __boring_gpu_adapter(idx: usize) -> std::sync::Arc<wgpu::Adapter> {
+    let adapters = __BORING_GPU_ADAPTERS.get().expect("GPU adapters not initialized");
+    adapters.get(idx).map(std::sync::Arc::clone)
+        .unwrap_or_else(|| panic!("GPU({}) out of range -- {} adapter(s) found", idx, adapters.len()))
+}
+fn __boring_gpu_all() -> Vec<usize> {
+    (0..__BORING_GPU_ADAPTERS.get().map(|a| a.len()).unwrap_or(0)).collect()
+}
+fn __boring_gpu_name(idx: usize) -> String { __boring_gpu_adapter(idx).get_info().name }
+fn __boring_gpu_total_mem(_idx: usize) -> i64 { 0 }
+fn __boring_gpu_free_mem(_idx: usize) -> i64 { 0 }
+fn __boring_gpu_compute_capability(_idx: usize) -> Vec<i64> { vec![0, 0] }
+fn __boring_gpu_warp_size(_idx: usize) -> i64 { 32 }
+fn __boring_gpu_max_threads(idx: usize) -> i64 { __boring_gpu_adapter(idx).limits().max_compute_invocations_per_workgroup as i64 }
+fn __boring_gpu_max_shared_mem(idx: usize) -> i64 { __boring_gpu_adapter(idx).limits().max_compute_workgroup_storage_size as i64 }
+
+// Generated by boring build
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::sync::{Mutex, RwLock};
+use std::f64::consts::{PI, E, TAU};
+use std::time::Duration;
+
+trait BoringArrayIndex {
+    type Item: Clone;
+    fn first_index(&self) -> Option<usize>;
+    fn next_index(&self, i: Option<usize>) -> Option<usize>;
+    fn remove_at(&self, i: Option<usize>) -> Vec<Self::Item>;
+    fn get_at(&self, i: Option<usize>) -> Self::Item;
+}
+impl<T: Clone> BoringArrayIndex for Vec<T> {
+    type Item = T;
+    fn first_index(&self) -> Option<usize> {
+        if self.is_empty() { None } else { Some(0) }
+    }
+    fn next_index(&self, i: Option<usize>) -> Option<usize> {
+        i.and_then(|i| if i + 1 < self.len() { Some(i + 1) } else { None })
+    }
+    fn remove_at(&self, i: Option<usize>) -> Vec<T> {
+        let mut v = self.clone();
+        if let Some(i) = i { if i < v.len() { v.remove(i); } }
+        v
+    }
+    fn get_at(&self, i: Option<usize>) -> T {
+        self[i.expect("get_at called with no index (empty collection or exhausted cursor)")].clone()
+    }
+}
+trait BoringDictIndex<K: Clone + Eq + std::hash::Hash, V: Clone> {
+    fn first_index(&self) -> Option<K>;
+    fn next_index(&self, k: K) -> Option<K>;
+    fn remove_at(&self, k: Option<K>) -> Self where Self: Sized;
+}
+impl<K: Clone + Eq + std::hash::Hash, V: Clone> BoringDictIndex<K, V> for HashMap<K, V> {
+    fn first_index(&self) -> Option<K> { self.keys().next().cloned() }
+    fn next_index(&self, k: K) -> Option<K> {
+        let keys: Vec<_> = self.keys().collect();
+        let pos = keys.iter().position(|kk| *kk == &k);
+        pos.and_then(|p| keys.get(p + 1)).map(|kk| (*kk).clone())
+    }
+    fn remove_at(&self, k: Option<K>) -> Self { let mut m = self.clone(); if let Some(k) = k { m.remove(&k); } m }
+}
+trait BoringSetIndex {
+    type Item: Clone;
+    fn first_index(&self) -> Option<usize>;
+    fn next_index(&self, i: Option<usize>) -> Option<usize>;
+    fn remove_at(&self, i: Option<usize>) -> Self where Self: Sized;
+    fn get_at(&self, i: Option<usize>) -> Self::Item;
+}
+impl<T: Clone + Eq + std::hash::Hash> BoringSetIndex for HashSet<T> {
+    type Item = T;
+    fn first_index(&self) -> Option<usize> {
+        if self.is_empty() { None } else { Some(0) }
+    }
+    fn next_index(&self, i: Option<usize>) -> Option<usize> {
+        i.and_then(|i| if i + 1 < self.len() { Some(i + 1) } else { None })
+    }
+    fn remove_at(&self, i: Option<usize>) -> Self {
+        let elem = i.and_then(|i| self.iter().nth(i).cloned());
+        let mut s = self.clone();
+        if let Some(e) = elem { s.remove(&e); }
+        s
+    }
+    fn get_at(&self, i: Option<usize>) -> T {
+        let i = i.expect("get_at called with no index (empty collection or exhausted cursor)");
+        self.iter().nth(i).cloned().expect("get_at index out of range")
+    }
+}
+
+// BoringFmt — displays Vec<T: Display> as [a, b, c] (no debug quotes on strings).
+struct BoringFmt<'a, T: std::fmt::Display>(pub &'a [T]);
+impl<'a, T: std::fmt::Display> std::fmt::Display for BoringFmt<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "[")?;
+        for (i, v) in self.0.iter().enumerate() {
+            if i > 0 { write!(f, ", ")?; }
+            write!(f, "{}", v)?;
+        }
+        write!(f, "]")
+    }
+}
+
+// BoringVal — bridge trait that gives BoringError::Other both Display and Any (downcast).
+// Every user-defined error enum automatically satisfies the blanket impl below.
+trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+impl<T: std::fmt::Display + std::any::Any + Send + Sync + 'static> BoringVal for T {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+}
+impl std::fmt::Debug for dyn BoringVal + Send + Sync {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "BoringVal({})", self)
+    }
+}
+
+// BoringError — typed exception wrapper so `catch String:` / `catch Int:` / `catch MyError:` can dispatch.
+// `Other(TypeId, error)` identifies the thrown type uniquely across modules via std::any::TypeId::of::<T>(),
+// which requires no instance — fully collision-free even when two modules define identically-named types.
+//
+// `Scalar(ScalarKind, u128)` is the fixed-width numeric family's own path —
+// int8..int128, uint8..uint128, and float32 — kept OUT of `Other` on purpose
+// (docs/float-width-types.md §7): the compiler already knows, statically,
+// that a thrown value here is exactly one of eleven small Copy kinds, so
+// paying for a heap allocation + `dyn Any` downcast the way `Other` does for
+// arbitrary user enums/structs would be pure overhead. The raw bits are
+// reinterpreted per `kind` in `Display` below and at each `catch` arm —
+// sign/zero-extended into the shared `u128` slot on the way in, truncated (or
+// bit-reinterpreted, for float32) back to the exact original type on the way
+// out; this round-trips exactly, it never touches `Other`'s TypeId machinery
+// at all. `float`/`float64` deliberately stay on their own pre-existing
+// `BoringError::Float(f64)` fast path instead of joining `Scalar` — unlike
+// the other eleven kinds, they already had a dedicated, no-allocation
+// representation before this family existed, and giving them a second,
+// parallel one here would only create two disjoint representations for the
+// same type with no single `catch` spelling reliably catching both (a literal
+// float throw and a `float64`-typed variable throw would land in different
+// variants). `Other` still exists, narrowed to what only it can do: genuine
+// user-defined enums/structs the compiler can't enumerate in advance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32 }
+impl BoringError {
+    fn scalar_i8(v: i8) -> Self { BoringError::Scalar(ScalarKind::Int8, v as i128 as u128) }
+    fn scalar_i16(v: i16) -> Self { BoringError::Scalar(ScalarKind::Int16, v as i128 as u128) }
+    fn scalar_i32(v: i32) -> Self { BoringError::Scalar(ScalarKind::Int32, v as i128 as u128) }
+    fn scalar_i64(v: i64) -> Self { BoringError::Scalar(ScalarKind::Int64, v as i128 as u128) }
+    fn scalar_i128(v: i128) -> Self { BoringError::Scalar(ScalarKind::Int128, v as u128) }
+    fn scalar_u8(v: u8) -> Self { BoringError::Scalar(ScalarKind::Uint8, v as u128) }
+    fn scalar_u16(v: u16) -> Self { BoringError::Scalar(ScalarKind::Uint16, v as u128) }
+    fn scalar_u32(v: u32) -> Self { BoringError::Scalar(ScalarKind::Uint32, v as u128) }
+    fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }
+    fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }
+    fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }
+}
+#[derive(Debug)]
+enum BoringError {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(&'static str),
+    String(Arc<str>),
+    Scalar(ScalarKind, u128),
+    Other(std::any::TypeId, std::boxed::Box<dyn BoringVal + Send + Sync>),
+}
+impl std::fmt::Display for BoringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            BoringError::Int(n)         => write!(f, "{}", n),
+            BoringError::Float(n)       => write!(f, "{}", n),
+            BoringError::Bool(b)        => write!(f, "{}", b),
+            BoringError::Str(s)         => write!(f, "{}", s),
+            BoringError::String(s)      => write!(f, "{}", s),
+            BoringError::Scalar(k, bits) => match k {
+                ScalarKind::Int8    => write!(f, "{}", *bits as i128 as i8),
+                ScalarKind::Int16   => write!(f, "{}", *bits as i128 as i16),
+                ScalarKind::Int32   => write!(f, "{}", *bits as i128 as i32),
+                ScalarKind::Int64   => write!(f, "{}", *bits as i128 as i64),
+                ScalarKind::Int128  => write!(f, "{}", *bits as i128),
+                ScalarKind::Uint8   => write!(f, "{}", *bits as u8),
+                ScalarKind::Uint16  => write!(f, "{}", *bits as u16),
+                ScalarKind::Uint32  => write!(f, "{}", *bits as u32),
+                ScalarKind::Uint64  => write!(f, "{}", *bits as u64),
+                ScalarKind::Uint128 => write!(f, "{}", *bits),
+                ScalarKind::Float32 => write!(f, "{}", f32::from_bits(*bits as u32)),
+            },
+            BoringError::Other(_, e)    => write!(f, "{}", e),
+        }
+    }
+}
+impl std::error::Error for BoringError {}
+
+// Boring standard error enum — always available without import.
+// Use `throw Error.Expired` / `catch Error:` / `match err: Error.Expired: ...`
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum Error {
+    Expired,
+    Cancelled,
+    NotFound,
+    InvalidInput,
+    OutOfBounds,
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::Expired      => write!(f, "timeout expired"),
+            Error::Cancelled    => write!(f, "task cancelled"),
+            Error::NotFound     => write!(f, "not found"),
+            Error::InvalidInput => write!(f, "invalid input"),
+            Error::OutOfBounds  => write!(f, "index out of bounds"),
+        }
+    }
+}
+impl std::error::Error for Error {}
+
+// Boring GPU error enum — thrown by kernel dispatch on a device-side
+// failure. Always available without import. Currently wired up on the
+// wgpu target only (its host codegen shares this same general pipeline);
+// cuda/rocm/metal report GPU failures as plain string-message errors
+// instead of this typed enum -- see `docs/gpu-module.md`'s error-handling
+// notes for why (their host transpilers don't share this prelude).
+// Use `catch GpuError.OutOfMemory:` / `match err: GpuError.Timeout: ...`
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum GpuError {
+    LaunchError,
+    OutOfMemory,
+    IllegalAccess,
+    StackOverflow,
+    Timeout,
+    DeviceLost,
+}
+impl std::fmt::Display for GpuError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            GpuError::LaunchError   => write!(f, "GPU kernel launch failed"),
+            GpuError::OutOfMemory   => write!(f, "GPU out of memory"),
+            GpuError::IllegalAccess => write!(f, "GPU illegal memory access"),
+            GpuError::StackOverflow => write!(f, "GPU stack overflow"),
+            GpuError::Timeout       => write!(f, "GPU operation timed out"),
+            GpuError::DeviceLost    => write!(f, "GPU device lost"),
+        }
+    }
+}
+impl std::error::Error for GpuError {}
+
+
+
+
 struct __App {
     instance: wgpu::Instance,
-    adapter:  wgpu::Adapter,
+    adapter:  std::sync::Arc<wgpu::Adapter>,
     device:   std::sync::Arc<wgpu::Device>,
     queue:    std::sync::Arc<wgpu::Queue>,
     width: i64,
@@ -274,6 +630,7 @@ struct __App {
     step: Step,
     render: Render,
     __keys: std::collections::HashSet<String>,
+    __start_time: std::time::Instant,
     window: Option<std::sync::Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     __blit_pipeline: Option<wgpu::RenderPipeline>,
@@ -379,7 +736,7 @@ struct BlitVOut { @builtin(position) pos: vec4<f32> }
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.step.dispatch((800 + 16 - 1) / 16, (600 + 16 - 1) / 16, 1);
+                self.step.dispatch((800 + 16 - 1) / 16, (600 + 16 - 1) / 16, 1).expect("wgpu: kernel dispatch rejected");
                 std::mem::swap(&mut self.step.cells_in_buf, &mut self.step.cells_out_buf);
                 self.render.bind_group = self.render.device.create_bind_group(&wgpu::BindGroupDescriptor {
     label: None,
@@ -390,7 +747,7 @@ struct BlitVOut { @builtin(position) pos: vec4<f32> }
                 wgpu::BindGroupEntry { binding: 2, resource: self.render.params_buf.as_entire_binding() },
     ],
 });
-                self.render.dispatch((800 + 16 - 1) / 16, (600 + 16 - 1) / 16, 1);
+                self.render.dispatch((800 + 16 - 1) / 16, (600 + 16 - 1) / 16, 1).expect("wgpu: kernel dispatch rejected");
                 __boring_present_buffer(&self.device, &self.queue, self.surface.as_ref().unwrap(), self.__blit_pipeline.as_ref().unwrap(), self.__blit_bg.as_ref().unwrap());
                 if self.__keys.contains("Escape") { event_loop.exit(); }
                 // screen.key("\"r\"") -- no action
@@ -411,8 +768,21 @@ fn main() {
             .await.expect("Failed to create device");
         (instance, adapter, device, queue)
     });
+    device.poll(wgpu::MaintainBase::Wait);
+    device.on_uncaptured_error(Box::new(|e| eprintln!("boring: uncaptured GPU error: {}", e)));
     let device = std::sync::Arc::new(device);
     let queue  = std::sync::Arc::new(queue);
+    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));
+    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));
+    let adapter = std::sync::Arc::new(adapter);
+    let __boring_primary_info = adapter.get_info();
+    let mut __boring_gpu_adapters: Vec<std::sync::Arc<wgpu::Adapter>> = vec![std::sync::Arc::clone(&adapter)];
+    for __boring_other in instance.enumerate_adapters(wgpu::Backends::all()) {
+        if __boring_other.get_info() != __boring_primary_info {
+            __boring_gpu_adapters.push(std::sync::Arc::new(__boring_other));
+        }
+    }
+    let _ = __BORING_GPU_ADAPTERS.set(__boring_gpu_adapters);
     let width: i64 = 800;
     let height: i64 = 600;
     let step = Step::new(width as i32, height as i32, std::sync::Arc::clone(&device), std::sync::Arc::clone(&queue));
@@ -448,6 +818,7 @@ fn main() {
         step,
         render,
         __keys: Default::default(),
+        __start_time: std::time::Instant::now(),
         window: None, surface: None,
         __blit_pipeline: None, __blit_bg: None, __blit_dim_buf: None,
     };

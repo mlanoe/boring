@@ -221,6 +221,7 @@ struct_member   ::= field_decl
                   | as_decl
                   | assoc_type_decl   # associated type (e.g. `type Output = int`)
                   | type_method_sig   # type-level method signature (e.g. `type def name():`)
+                  | type_member_decl  # type-level singleton field (e.g. `type let NAME = ...`)
 
 # No keyword → public immutable field (neither reassignable nor content-mutable).
 # `let` → private immutable, same as no keyword otherwise. `var` → private,
@@ -321,6 +322,15 @@ type_method_sig ::= "type" ("def" | "req") type? IDENT "(" param_list? ")" modif
 # `type Output = int`    — concrete default
 # `type Display as string` — associated type with an explicit alias name
 assoc_type_decl ::= "type" IDENT ("=" type | "as" type)? NEWLINE
+
+# Type-level singleton member — one shared instance per type, not per-instance
+# storage. `type let` is immutable; `type var` is reassignable (same `mut`-vs-`var`
+# axis as any other binding). The type before NAME is optional (inferred from
+# the default expression when omitted). A `type let`/`type var` field is always
+# implicitly `'static` — see docs/qualifiers.md's `'static` section.
+#   type let NAME = expr
+#   type var TYPE NAME = expr
+type_member_decl ::= "type" ("let" | "var") type? IDENT "=" expr NEWLINE
 
 fn_signature    ::= ("def" | "req") type? IDENT "(" param_list? ")" modifier* NEWLINE
 
@@ -975,6 +985,10 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   T'actor         →  Arc<Mutex<T>>      shared mutable; all accesses auto-locked
 #   T'guard         →  Arc<RwLock<T>>     concurrent reads, exclusive writes
 #   T'weak          →  Weak<T>            non-owning; .upgrade() → T'shared?
+#   T'static        →  &'static T          constant global instance, no refcount;
+#                                          provenance-gated (see docs/qualifiers.md
+#                                          §"'static") — no chained sub-qualifier
+#                                          (T'static'weak is rejected, unlike 'actor/'guard)
 #
 # Built-in type aliases (use these instead of explicit qualifiers):
 #   str    →  String'const  →  &str
@@ -985,13 +999,36 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   float32 → Float32'copy  →  f32
 #   bool   →  Bool'copy     →  bool
 #
-owner_qual      ::= "owned" | "inline" | "copy" | "shared" | "actor" | "guard" | "weak"
+owner_qual      ::= "owned" | "inline" | "copy" | "const" | "shared" | "actor" | "guard" | "weak"
                   | owner_qual "|" owner_qual   # qualifier union: T'inline|owned (resolved at inference time)
                   # NOTE: bare tick (no qualifier after `'`) is a parse error — write
                   # the qualifier explicitly, e.g. T'new for "any indirection, inferred".
-                  # "new" and "guard" are reserved keyword tokens, not part of this
-                  # ident-string list, but are valid in this position — see T'new/T'guard
-                  # above and borrow_qual below for the equivalent "guard" case.
+                  # "new", "guard", and "static" are reserved keyword tokens, not part of
+                  # this ident-string list, but are valid in this position — see
+                  # T'new/T'guard/T'static above and borrow_qual below for the equivalent
+                  # "guard" case.
+
+# ─── Caller-facing qualifier groups ───────────────────────────────────────────
+#
+# Sugar for a qualifier union, written as a single reserved word after `'` —
+# resolved to one concrete member by per-usage inference, same as an explicit
+# union (T'inline|owned). Distinct from T'new (also a candidate-set qualifier,
+# but not a caller-facing acceptance group — see the T'new note above).
+# See docs/qualifiers.md's qualifier-groups table for the full design.
+#
+#   T'one   →  T'inline|owned                    any single-owner storage
+#   T'many  →  T'shared|actor|guard              any shared/concurrent storage
+#   T'mut   →  T'inline|owned|actor|guard         any qualifier with interior mutability
+#   T'req   →  T'shared|static                    always immutable, read-only-callable
+#                                                  ('static included: no interior
+#                                                  mutability, more restrictive than
+#                                                  'shared — no refcount at all)
+#
+# "one"/"many" are ordinary idents (part of owner_qual's ident-string list is NOT
+# how these parse — they're recognized ad hoc before falling through to owner_qual).
+# "mut" and "req" are reserved keyword tokens (TokenKind::Mut / TokenKind::Req),
+# never lexed as Ident — see the owner_qual note above for the equivalent case.
+qualifier_group ::= "one" | "many" | "mut" | "req"
 
 # ─── Borrow qualifiers ────────────────────────────────────────────────────────
 #
@@ -1121,7 +1158,8 @@ type_list       ::= type ("," type)*
 #
 # Two ownership patterns for shared data across tasks:
 #
-#   T'task    →  Arc<T>               read-only sharing across tasks
+#   T'task    →  Arc<Mutex<T>>        alias for T'actor'task; shared MUTABLE state
+#                                     across tasks, lock held across `.await`
 #   T'actor   →  Arc<Mutex<T>>        shared MUTABLE state across tasks
 #   T'guard   →  Arc<RwLock<T>>       concurrent reads, exclusive writes
 #
@@ -1257,7 +1295,7 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # kernel,
 # Note: `select` was removed in 0.3.0 — use Future.done() polling instead.
 # true, false, nil, is,
-# native, stream, yield, static, void, pass, mod,
+# native, stream, yield, static, void, pass, mod, type,
 # any  # deprecated — use bare Trait or <Trait> instead
 
 # ─── Emission targets and build flags ───────────────────────────────────────
@@ -1313,7 +1351,7 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   channel<T, N>       tokio::sync::mpsc(N)     ring buffer + Mutex + CondVar
 #   stream<N> def       futures::Stream          KernelChan<T,N> + Work item
 #   wait(dur)           tokio::time::sleep       kernel::delay::coarse_sleep
-#   T'task              Arc<T>                   kernel::sync::Arc
+#   T'task              Arc<Mutex<T>>            kernel::sync::Mutex   (alias for T'actor'task)
 #   T'actor             Arc<Mutex<T>>            kernel::sync::Mutex
 #   T'guard             Arc<RwLock<T>>           kernel::sync::RwLock
 #   print!              println!                 pr_info!

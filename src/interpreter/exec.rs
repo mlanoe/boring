@@ -1600,6 +1600,7 @@ impl Interpreter {
         let to_float = |v: &Value| -> Result<f64, Signal> {
             match v {
                 Value::Float64(f) => Ok(*f),
+                Value::Float32(f) => Ok(*f as f64),
                 Value::Int(n)   => Ok(*n as f64),
                 Value::Uint(n)  => Ok(*n as f64),
                 _ => Err(err(format!("format '{spec}' requires a number"), line)),
@@ -1639,11 +1640,9 @@ impl Interpreter {
                 format!("{:.prec$E}", f)
             }
             '?' => {
-                // debug repr: strings get quotes, others use Display
-                match &val {
-                    Value::Str(s) => format!("{s:?}"),
-                    other => format!("{other}"),
-                }
+                // debug repr: strings get quotes, floats keep a trailing `.0`, etc.
+                // (matches Rust's derived Debug — see `debug_repr` in interpreter/mod.rs)
+                debug_repr(&val)
             }
             // default Display — with optional precision for floats
             _ => {

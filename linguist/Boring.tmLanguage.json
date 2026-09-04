@@ -189,15 +189,15 @@
 
     "builtin-types": {
       "name": "storage.type.boring",
-      "match": "\\b(int|uint|float|float32|float64|bool|string|str|int8|int16|int32|int64|int128|uint8|uint16|uint32|uint64|uint128|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)\\b"
+      "match": "\\b(int|uint|float|float32|float64|bool|string|str|never|int8|int16|int32|int64|int128|uint8|uint16|uint32|uint64|uint128|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)\\b"
     },
 
     "ownership-qualifier": {
       "patterns": [
         {
-          "comment": "qualified: 'owned, 'new, 'inline, 'shared, 'actor, 'guard, 'weak, 'copy; GPU: 'sync, 'unified, 'global, 'local, 'const; borrow: &option",
+          "comment": "qualified: 'owned, 'new, 'inline, 'shared, 'actor, 'guard, 'weak, 'copy, 'static; GPU: 'sync, 'unified, 'global, 'local, 'const; borrow: &option",
           "name": "storage.modifier.ownership.boring",
-          "match": "'(?:owned|new|inline|shared|actor|guard|weak|copy|sync|unified|global|local)\\b|&(?:owned|inline|shared|actor|guard|option|weak)\\b"
+          "match": "'(?:owned|new|inline|shared|actor|guard|weak|copy|const|static|sync|unified|global|local)\\b|&(?:owned|inline|shared|actor|guard|option|weak)\\b"
         },
         {
           "comment": "bare tick before identifier or opening paren — ownership inferred from RHS",
