@@ -1,0 +1,23 @@
+# Minimal stand-in "sibling Boring project" for the `cross_project_dep_monomorphize`
+# transpiler/interpreter/emit-rust test (tests/cases/cross_project_dep_monomorphize/)
+# -- exercises Boring-side monomorphization (src/transpiler/monomorphize.rs) across
+# `boring.toml`'s `[deps]` mechanism, the same way tests/cases/fixtures/dep_numlib's
+# `big_uint.br` exercises plain cross-project `use` (without monomorphization).
+#
+# `Wrapper<T>` here is the exact same shape as tests/cases/monomorphize_struct.br /
+# monomorphize_cross_file_lib.br: a `type let T` field whose type depends on the
+# struct's own type parameter T (a Rust static/LazyLock cannot be generic, so the
+# generic copy of this struct would hard-error on this field per
+# `src/transpiler/emit_struct.rs`'s existing check -- only a concretely-specialized
+# clone gets a correctly-typed static). Declared in a DEPENDENCY project this time
+# (reached via `[deps] wrapperlib = "../fixtures/dep_monomorphize"` from
+# tests/cases/cross_project_dep_monomorphize/boring.toml), proving monomorphize.rs's
+# whole-reachable-file-graph collection (its own module doc comment) extends across
+# a `[deps]` project boundary, not just a same-project `use`.
+pub struct Wrapper<T>:
+    pub T value
+
+    pub type let T default = "none"
+
+    req T get():
+        value

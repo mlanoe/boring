@@ -4082,7 +4082,74 @@ print "{p.first} / {p.second}"   # 10 / hello
 struct Pair<T, U> { first: T, second: U }
 ```
 
-A `mut`-qualified type argument (`Container<mut Point>` for `struct Container<T>: T item`) is not yet supported — propagating a `mut`-qualified type argument through generic instantiation into the field's own permission check is separate, unimplemented design work, not a corollary of ordinary `mut Type` field support ([Mutable fields](#mutable-fields)).
+A `mut`-qualified type argument (`Container<mut Point>` for `struct Container<T>: T item`) propagating into the field's own permission check is still unimplemented for the *inferred* (no-turbofish) generic-instantiation path — that remains separate, unimplemented design work, not a corollary of ordinary `mut Type` field support ([Mutable fields](#mutable-fields)). It IS handled for an explicit, fully-concrete turbofish construction site (`Container<mut Point>(...)`): the Boring-side monomorphizer (`src/transpiler/monomorphize.rs`) specializes a non-generic clone with `T` substituted by the concrete `mut Point` directly as the field's own type, so `c.item.move_to(...)` compiles through ordinary `mut Type` field support on that specialized copy — see `tests/cases/monomorphize_mut_arg.br`.
+
+### Turbofish monomorphization
+
+An explicit, fully-concrete turbofish call site — `Struct<T>(...)`, `fn<T>(...)`, or `obj.method<T>(...)` — gets a specialized, non-generic Rust clone alongside the existing, unmodified `impl<T: Clone> ...` generic-emission path (which every other, non-turbofish use of the same generic still flows through unchanged). This works same-file or cross-file (across `use` and `[deps]` boundaries) with no extra re-parse.
+
+```boring
+def T identity(T x):
+    x
+
+print identity<int>(42)      # → identity_int(42), a specialized non-generic clone
+print identity(42)           # unaffected — still ordinary inferred generic Rust
+```
+
+**Generic method calls** — `obj.method<T>(...)` — extend this to a method that introduces its own type parameter, separate from anything its declaring struct declares:
+
+```boring
+struct Box<T>:
+    var T value
+
+    def U describe<U>(U extra):
+        extra
+
+mut b = Box<int>(5)
+print b.describe<string>("hello")   # → b.describe_string("hello")
+```
+
+Resolution here is deliberately **name-only** — the receiver's own resolved type is never tracked. A method call site is specialized only when its bare method name (`describe` above) is unique among every generic method reachable from the whole file graph; if two or more declarations anywhere declare a method with the same name and its own type parameter, the call site is left as ordinary generic Rust (`obj.method::<T>(args)`) instead — a safe, silent fallback, not an error.
+
+This same name-uniqueness rule covers a method's declaring item regardless of whether it's a `struct`, an `ext` block, or an `enum` — a method with its own type parameter declared inside an `ext TypeName:` block, or directly on an `enum`, is specialized exactly like a struct method:
+
+```boring
+struct Wrapper:
+    var int value = 0
+
+ext Wrapper:
+    def U convert<U>(U x):
+        x
+
+mut w = Wrapper(5)
+print w.convert<int>(42)   # → w.convert_int(42)
+
+enum Shape:
+    Circle(float radius)
+
+    def U convert2<U>(U x):
+        x
+
+let s = Shape.Circle(1.0)
+print s.convert2<int>(42)  # → s.convert2_int(42)
+```
+
+The ambiguity check spans all three kinds together: a struct's own-generic `convert<T>` and an unrelated `ext` block's own-generic `convert<T>` sharing the same bare name anywhere in the reachable file graph makes `convert` ambiguous, and every call site naming it — on either type — falls back to ordinary generic Rust, exactly as if two structs had collided.
+
+**Optional chaining** — `obj?.method<T>(...)` — is also supported, with the same name-uniqueness restriction and the same silent-fallback behavior on an ambiguous method name:
+
+```boring
+struct OConverter:
+    var int value = 0
+
+    def T2 convert<T2>(T2 x):
+        x
+
+let OConverter'owned? c = OConverter(5)
+print c?.convert<int>(42)   # → c.clone().map(|mut __v| __v.convert_int(42))
+```
+
+The short-circuit (nil-propagating) semantics of `?.` are preserved exactly — only the method name resolved by the turbofish gets swapped for its specialized clone.
 
 ### Trait constraints — `as`
 

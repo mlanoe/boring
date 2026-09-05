@@ -1,0 +1,7 @@
+[project]
+name = "cross_project_dep_monomorphize"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+wrapperlib = "../fixtures/dep_monomorphize"

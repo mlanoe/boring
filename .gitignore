@@ -78,5 +78,12 @@ tests/cases/cross_project_dep/src/main_rust/
 tests/cases/cross_project_dep/src/main_rust_single/
 tests/cases/cross_project_dep/src/main_rust_managed/
 tests/cases/cross_project_dep/src/main_rust_managed_single/
+
+# Same as above, for the cross_project_dep_monomorphize fixture (tests/cases/
+# fixtures/dep_monomorphize).
+tests/cases/cross_project_dep_monomorphize/src/main_rust/
+tests/cases/cross_project_dep_monomorphize/src/main_rust_single/
+tests/cases/cross_project_dep_monomorphize/src/main_rust_managed/
+tests/cases/cross_project_dep_monomorphize/src/main_rust_managed_single/
 Cargo.lock
 .claude/worktrees/

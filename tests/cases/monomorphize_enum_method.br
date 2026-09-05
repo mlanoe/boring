@@ -1,0 +1,17 @@
+# Boring-side monomorphization: extends the same generic-method turbofish
+# support (`obj.method<T>(...)`) to a method declared directly on an ENUM.
+# The enum method introduces its own type param (`U`), separate from
+# anything the enum itself declares -- the transpiler now specializes a
+# non-generic `convert_int` clone of the method, appended into the enum's
+# own `methods` list, alongside the still-generic `convert<U>` (unused here,
+# but must still be valid Rust).
+enum Shape:
+    Circle(float radius)
+    Square(float side)
+
+    def U convert<U>(U x):
+        x
+
+let s = Shape.Circle(1.0)
+let r = s.convert<int>(42)
+print r

@@ -1,0 +1,34 @@
+# Regression test: `struct.field as T` and `list[idx] as T` — a cast whose
+# operand is *exactly* a bare field or index access (nothing else wrapping it)
+# used to fall through to the string-parse fallback in emit_expr_cast, even
+# when the field/element type is statically known to be numeric. Only the
+# bare form was affected — `(expr * struct.field) as T` already worked, since
+# it took the BinOp/Call/UnaryOp "expression" path instead.
+
+struct Box:
+    float32 width
+
+# Bare field access on a for-loop variable bound to a struct.
+let [Box] boxes = [Box(3.0), Box(7.5)]
+for b in boxes:
+    print b.width as int
+
+struct Holder:
+    var [uint8] bytes
+
+    # Bare index access on an implicit `self` field inside a method.
+    req float32 first_scaled():
+        (bytes[0] as float32) / 255.0
+
+let h = Holder(bytes = [255, 0, 0])
+print h.first_scaled()
+
+# Bare index access on a plain local list variable.
+let [int] arr = [10, 20, 30]
+print arr[1] as float
+
+# Bare field access wrapped in a compound expression still worked before this
+# fix — kept here to prove the fix doesn't disturb that path.
+let b2 = Box(4.0)
+let scaled = (2.0 * b2.width) as int
+print scaled

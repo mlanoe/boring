@@ -516,6 +516,18 @@ impl Transpiler {
                 // generic — reject rather than silently emit an invalid `impl<T>`-scoped
                 // item (docs/qualifiers.md's `'static` section, "Generic structs").
                 if !s.type_params.is_empty() && tv.ty.as_ref().map(|t| Self::type_mentions_type_params(t, &s.type_params)).unwrap_or(false) {
+                    // A concrete Boring-side specialization exists for this struct
+                    // (`monomorphize::monomorphize_program` found ≥1 fully-concrete
+                    // turbofish construction site) — that specialized copy has empty
+                    // `type_params`, so `type_mentions_type_params` naturally returns
+                    // false for it and it gets its own concrete, correctly-typed static
+                    // through this same path, unaffected. The *generic* (unspecialized)
+                    // copy still can't have a generic static, so just silently omit this
+                    // one static from it rather than hard-erroring — there is no longer
+                    // "zero concrete instantiations anywhere" to justify the error.
+                    if self.struct_has_specialization.contains(&s.name) {
+                        continue;
+                    }
                     self.push_error(tv.line, tv.col, format!(
                         "type let '{}' cannot depend on {}'s own generic type parameter — a Rust \
                          static/LazyLock cannot be generic, so there is no single instance to share \

@@ -138,3 +138,116 @@ fn test_generic_type_arg_lifetime_only() {
         panic!("expected Struct item");
     }
 }
+
+#[test]
+fn test_generic_method_call_turbofish() {
+    // `obj.method<T>(args)` — turbofish on a method call parses as
+    // GenericCall(Field(obj, "method"), [T], args), not a mis-chained comparison.
+    let src = "let r = obj.method<int>(5)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        match &let_stmt.value.as_ref().unwrap().kind {
+            ast::ExprKind::GenericCall(callee, type_args, args) => {
+                match &callee.kind {
+                    ast::ExprKind::Field(recv, method) => {
+                        assert!(matches!(&recv.kind, ast::ExprKind::Var(n) if n == "obj"));
+                        assert_eq!(method, "method");
+                    }
+                    other => panic!("expected Field callee, got {:?}", other),
+                }
+                assert_eq!(type_args.len(), 1);
+                assert!(matches!(&type_args[0], ast::Type::Named(s) if s == "int"));
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected GenericCall, got {:?}", other),
+        }
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_method_call_lt_comparison_not_turbofish() {
+    // Non-regression: `obj.method < x` is a real less-than comparison, not
+    // mis-parsed as the start of a turbofish (no matching `>(` follows).
+    let src = "let r = obj.method < 5";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        match &let_stmt.value.as_ref().unwrap().kind {
+            ast::ExprKind::BinOp(op, lhs, _rhs) => {
+                assert_eq!(op, &ast::BinOp::Lt);
+                assert!(matches!(&lhs.kind, ast::ExprKind::Field(..)));
+            }
+            other => panic!("expected BinOp(Lt, Field(...), ...), got {:?}", other),
+        }
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_optional_generic_method_call_turbofish() {
+    // `obj?.method<T>(args)` — turbofish on an optional-chained method call
+    // parses as GenericCall(OptionalField(obj, "method"), [T], args), not a
+    // mis-chained comparison.
+    let src = "let r = obj?.method<int>(5)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        match &let_stmt.value.as_ref().unwrap().kind {
+            ast::ExprKind::GenericCall(callee, type_args, args) => {
+                match &callee.kind {
+                    ast::ExprKind::OptionalField(recv, method) => {
+                        assert!(matches!(&recv.kind, ast::ExprKind::Var(n) if n == "obj"));
+                        assert_eq!(method, "method");
+                    }
+                    other => panic!("expected OptionalField callee, got {:?}", other),
+                }
+                assert_eq!(type_args.len(), 1);
+                assert!(matches!(&type_args[0], ast::Type::Named(s) if s == "int"));
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected GenericCall, got {:?}", other),
+        }
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_optional_method_call_lt_comparison_not_turbofish() {
+    // Non-regression: `obj?.method < x` is a real less-than comparison, not
+    // mis-parsed as the start of a turbofish (no matching `>(` follows).
+    let src = "let r = obj?.method < 5";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        match &let_stmt.value.as_ref().unwrap().kind {
+            ast::ExprKind::BinOp(op, lhs, _rhs) => {
+                assert_eq!(op, &ast::BinOp::Lt);
+                assert!(matches!(&lhs.kind, ast::ExprKind::OptionalField(..)));
+            }
+            other => panic!("expected BinOp(Lt, OptionalField(...), ...), got {:?}", other),
+        }
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_method_call_lt_gt_chain_not_turbofish() {
+    // Non-regression from the design doc: a chained comparison across two
+    // method-call fields must still parse as comparisons, not a turbofish,
+    // even though it superficially resembles `<...>`.
+    let src = "let r = a.b < c and a.b > 0";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        // Just confirm it parses at all and is not a GenericCall.
+        assert!(!matches!(&let_stmt.value.as_ref().unwrap().kind, ast::ExprKind::GenericCall(..)));
+    } else {
+        panic!("expected Let item");
+    }
+}

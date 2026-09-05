@@ -1,0 +1,25 @@
+# Boring-side monomorphization (V1 extension): a generic METHOD call via
+# explicit turbofish through OPTIONAL CHAINING (`obj?.method<T>(...)`) on a
+# non-generic struct. The method itself introduces its own type param (`T2`)
+# separate from anything the struct declares (the struct has none at all
+# here) -- the transpiler specializes a non-generic `convert_int` clone of
+# the method, alongside the still-generic `convert<T2>` (unused here, but
+# must still be valid Rust). Mirrors `monomorphize_method.br`, but the call
+# site goes through `?.` (optional chaining) on an `Optional<OConverter>`
+# binding instead of a plain, non-optional `OConverter` binding. (Named
+# `OConverter`, not `Box`, to avoid colliding with Rust's own `Box<T>` once
+# wrapped by the `'owned?` qualifier below -- `Option<Box<Box>>` would be a
+# real generic-arity error, unrelated to this feature.)
+struct OConverter:
+    var int value = 0
+
+    def T2 convert<T2>(T2 x):
+        x
+
+let OConverter'owned? bopt = OConverter(5)
+let r = bopt?.convert<int>(42)
+print "{r else -1}"
+
+let OConverter'owned? bnone = nil
+let r2 = bnone?.convert<int>(0)
+print "{r2 else -1}"

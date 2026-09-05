@@ -218,6 +218,39 @@ fn cross_project_dep() {
     assert_eq!(actual.trim_end(), "21\n42");
 }
 
+// [deps]-based cross-project MONOMORPHIZATION: extends `cross_project_dep` above --
+// `Wrapper<T>` (a generic struct with a `type let T` field depending on its own type
+// param, per src/transpiler/monomorphize.rs's module doc comment) is declared in the
+// DEPENDENCY project (tests/cases/fixtures/dep_monomorphize/src/wrapper.br), reached via
+// tests/cases/cross_project_dep_monomorphize/boring.toml's own `[deps]` section, while
+// the concrete turbofish construction site (`Wrapper<string>(...)`) lives in the
+// CONSUMING project's src/main.br. Proves the whole-reachable-file-graph
+// generic-instantiation collection extends across a `[deps]` project boundary, not just
+// a same-project `use` (already covered by `monomorphize_cross_file_main`/
+// `monomorphize_cross_file_lib`). Paired with tests/transpile.rs's
+// `transpile_project_test!(cross_project_dep_monomorphize)` and
+// tests/emit_rust_modules.rs's
+// `emit_rust_includes_deps_cross_project_monomorphized_module`.
+#[test]
+fn cross_project_dep_monomorphize() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/cross_project_dep_monomorphize/src/main.br");
+
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        output.status.success(),
+        "cross_project_dep_monomorphize exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "hi\nhi");
+}
+
 // Real, multi-file `use` bug found migrating whisper-boring's
 // examples/transcribe.br: a top-level `let` constant from a module reached
 // transitively (`use model`, which itself does `use audio`) before being
@@ -303,6 +336,40 @@ interp_test!(float32_struct_method_math);
 // variable computed from an unannotated arithmetic expression, in an ordinary
 // (non-method) function — see tests/cases/float32_local_var_math.br's doc comment.
 interp_test!(float32_local_var_math);
+// Generic METHOD call via turbofish (`obj.method<T>(...)`, V1 monomorphization
+// extension -- src/transpiler/monomorphize.rs's module doc comment). The
+// interpreter erases type args for every generic call (see
+// `eval_expr_generic_call`'s doc comment) and dispatches straight to
+// `eval_expr_method_call` -- this proves that new `ExprKind::Field` callee arm
+// actually calls the method (not a field-access error) rather than just
+// compiling. Also covered on the transpiler side (both mode/threading
+// combos) by `transpile_test!(monomorphize_method)` in tests/transpile.rs,
+// which reuses the same fixture file.
+interp_test!(monomorphize_method);
+// Same interpreter-path proof, for a generic method (`describe<U>`) declared
+// on an ALSO-generic struct (`Box<T>`) -- the struct's own `T` and the
+// method's own separate `U` are both erased in the interpreter, so this only
+// exercises dispatch, not specialization (that's `transpile.rs`'s job via
+// `transpile_test!(monomorphize_method_on_generic_struct)`, same fixture file).
+interp_test!(monomorphize_method_on_generic_struct);
+// Same interpreter-path proof, for the OPTIONAL-CHAINED generic method call
+// (`obj?.method<T>(...)`) -- the interpreter erases type args and dispatches
+// via `eval_expr_optional_method_call`, proving the new `ExprKind::OptionalField`
+// callee arm in `eval_expr_generic_call` short-circuits to nil / calls the
+// method correctly, not just that it compiles. Also covered on the
+// transpiler side by `transpile_test!(monomorphize_optional_method)` in
+// tests/transpile.rs, which reuses the same fixture file.
+interp_test!(monomorphize_optional_method);
+// Same interpreter-path proof, for a generic method declared inside an `ext`
+// block rather than directly on the struct's own body -- the interpreter
+// erases type args and dispatches via `eval_expr_method_call` same as any
+// other method call, so this only exercises dispatch (specialization is
+// `transpile.rs`'s job via `transpile_test!(monomorphize_ext_method)`, same
+// fixture file).
+interp_test!(monomorphize_ext_method);
+// Same interpreter-path proof, for a generic method declared directly on an
+// enum.
+interp_test!(monomorphize_enum_method);
 interp_test!(top_level_const);
 interp_test!(pub_top_level_const);
 interp_test!(pub_top_level_const_unused);
@@ -446,6 +513,7 @@ interp_test!(self_field_loop_match_borrow);
 // parameter -- see tests/cases/qualifier_group_param.br's doc comment and the
 // matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
 interp_test!(qualifier_group_param);
+interp_test!(cast_bare_field_index);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

@@ -1,0 +1,28 @@
+# [deps]-based cross-project monomorphization: extends `cross_project_dep` (plain
+# cross-project `use`, no monomorphization) the same way `monomorphize_cross_file_main.br`
+# extends `cross_file_use_main.br` (plain same-project cross-file `use`) -- adds a
+# turbofish-triggered generic specialization on top.
+#
+# `Wrapper<T>` (with a `type let T` field depending on its own type parameter -- see
+# tests/cases/fixtures/dep_monomorphize/src/wrapper.br's own doc comment and
+# src/transpiler/monomorphize.rs's module doc comment) is declared in the DEPENDENCY
+# project, resolved via this project's own `boring.toml` `[deps] wrapperlib =
+# "../fixtures/dep_monomorphize"`. The concrete turbofish construction site
+# (`Wrapper<string>(...)`) lives HERE, in the CONSUMING project -- a different file,
+# and a different `[deps]` project, than the one declaring `Wrapper<T>`. The
+# transpiler specializes a non-generic `Wrapper_string` clone into the DECLARING
+# file's own emitted module and rewrites this call site to a plain call on that
+# specialized name, proving monomorphization's whole-reachable-file-graph collection
+# extends across a `[deps]` project boundary, not just a same-project `use`.
+#
+# Registered as `interp_test!`-style `#[test] fn cross_project_dep_monomorphize`
+# (tests/run.rs, `boring run` against this same src/main.br),
+# `transpile_project_test!(cross_project_dep_monomorphize)` (tests/transpile.rs,
+# project-mode `boring build` + a real `cargo run`), and
+# `emit_rust_includes_deps_cross_project_monomorphized_module` (tests/emit_rust_modules.rs,
+# `--emit-rust` + real `rustc`).
+use wrapperlib.wrapper.*
+
+let w = Wrapper<string>("hi")
+print w.value
+print w.get()

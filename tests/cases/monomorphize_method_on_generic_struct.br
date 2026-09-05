@@ -1,0 +1,24 @@
+# Boring-side monomorphization (V1 extension): a generic struct (`Box<T>`)
+# that ALSO has a concrete turbofish construction site elsewhere in this file
+# (`Box<int>(...)`), combined with a method (`describe<U>`) that introduces
+# its OWN separate type param `U` -- distinct from the struct's own `T` --
+# called via its own turbofish (`b.describe<string>(...)`). Verifies both
+# struct-level and method-level specialization compose: the specialized
+# `Box_int` struct clone must carry the specialized `describe_string` method
+# clone too (appended to the original generic `Box<T>` BEFORE the struct-level
+# clone is made, so the clone-and-substitute machinery carries it along).
+#
+# `describe<U>` deliberately just passes `extra` straight through (no string
+# interpolation of a T/U-typed value) -- interpolating a still-generic type
+# param needs its own `Display` bound the transpiler doesn't infer today (a
+# pre-existing, unrelated gap), which would make the still-generic `Box<T>`
+# copy fail to compile even though nothing calls it directly in this file.
+struct Box<T>:
+    var T value
+
+    def U describe<U>(U extra):
+        extra
+
+mut b = Box<int>(5)
+print b.value
+print b.describe<string>("hello")

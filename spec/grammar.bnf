@@ -729,7 +729,9 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                                                                              #   properties (`a.width`, `a.height`)
                   | "?." IDENT                                               # optional chaining — field
                   | "." IDENT "(" arg_list? ")"                             # method call
+                  | "." IDENT "<" type_list ">" "(" arg_list? ")"          # generic method call: obj.method<T>(args)
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
+                  | "?." IDENT "<" type_list ">" "(" arg_list? ")"        # optional chaining — generic method call: obj?.method<T>(args)
                   | "[" expr "]"                                             # index
                   | "[" IDENT "=" expr ("," IDENT "=" expr)* ","? "]"        # labeled index (2+ axes; see array-multidim-types.md):
                                                                              #   a[width = w, height = h] — every arg mandatorily

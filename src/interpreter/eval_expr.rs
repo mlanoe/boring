@@ -1117,6 +1117,21 @@ impl Interpreter {
     /// plus the handful of builtins that need type info at the *call syntax* level
     /// (`channel<T>`/`oneshot<T>`/etc., `timeout<T>`, `fromJson<T>`), mirroring the
     /// untyped forms `eval_expr_call` already handles.
+    /// `obj?.method(args)` — short-circuits to `Nil` if `obj` is `Nil`, otherwise
+    /// calls `method` on it (same as `eval_expr_method_call` minus the special-cased
+    /// namespaces/fast paths there, since an optional receiver is always a plain value).
+    fn eval_expr_optional_method_call(&mut self, obj_expr: &Expr, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+        match obj {
+            Value::Nil => Ok(Value::Nil),
+            other => {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                let mut _out = None;
+                self.call_method(other, method, arg_vals, line, &mut _out)
+            }
+        }
+    }
+
     fn eval_expr_generic_call(&mut self, callee: &Expr, type_args: &[Type], args: &[Arg], env: EnvRef, line: usize) -> Eval {
         // In the interpreter, type args are erased — just evaluate as a regular call.
         // Special built-ins that need type info (like `channel`) return a pair of arrays
@@ -1160,6 +1175,16 @@ impl Interpreter {
                 let target_ty = target_ty.clone();
                 return Ok(self.eval_from_json(&src, &target_ty, &env, line));
             }
+        }
+        if let ExprKind::Field(recv, method) = &callee.kind {
+            // Generic method call `obj.method<T>(args)` — type args are erased in
+            // the interpreter, same philosophy as every other generic call here.
+            return self.eval_expr_method_call(recv, method, args, env, line);
+        }
+        if let ExprKind::OptionalField(recv, method) = &callee.kind {
+            // Generic optional-chained method call `obj?.method<T>(args)` — type
+            // args are erased, same as the plain `.method<T>(args)` case above.
+            return self.eval_expr_optional_method_call(recv, method, args, env, line);
         }
         // Generic call with no special handling: evaluate callee and call it.
         let callee_val = self.eval_expr(callee, Rc::clone(&env))?;
@@ -1433,17 +1458,8 @@ impl Interpreter {
                 }
             }
 
-            ExprKind::OptionalMethodCall(obj_expr, method, args) => {
-                let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
-                match obj {
-                    Value::Nil => Ok(Value::Nil),
-                    other => {
-                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        let mut _out = None;
-                        self.call_method(other, method, arg_vals, line, &mut _out)
-                    }
-                }
-            }
+            ExprKind::OptionalMethodCall(obj_expr, method, args) =>
+                self.eval_expr_optional_method_call(obj_expr, method, args, env, line),
 
 
             ExprKind::Array(elems) => {

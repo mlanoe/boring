@@ -389,6 +389,18 @@ transpile_test!(boring_stdlib_collections);
 // exercises the generated Rust — same reason `ext_tuple_construct` needs project
 // mode. Paired with tests/run.rs's `cross_project_dep` test for the `boring run` side.
 transpile_project_test!(cross_project_dep);
+// [deps]-based cross-project MONOMORPHIZATION: extends `cross_project_dep` above with a
+// turbofish-triggered generic specialization (src/transpiler/monomorphize.rs) whose
+// generic struct declaration (`Wrapper<T>`, with a `type let T` field depending on its
+// own type param -- the same shape `monomorphize_cross_file_main`/`monomorphize_struct`
+// exercise same-project) lives in a DEPENDENCY project
+// (tests/cases/fixtures/dep_monomorphize) reached via
+// tests/cases/cross_project_dep_monomorphize/boring.toml's own `[deps]` section, while
+// the concrete turbofish call site lives in the CONSUMING project's src/main.br. Paired
+// with tests/run.rs's `cross_project_dep_monomorphize` for the `boring run` side and
+// tests/emit_rust_modules.rs's `emit_rust_includes_deps_cross_project_monomorphized_module`
+// for the `--emit-rust` side.
+transpile_project_test!(cross_project_dep_monomorphize);
 transpile_test!(ownership);
 transpile_test!(tasks);
 transpile_test!(channels);
@@ -646,6 +658,13 @@ transpile_test!(try_prefix_in_cond_clause_noparen);
 // was inserted AND the already-Option-shaped result wasn't double-wrapped in
 // Some(...) (which fails to type-check against `Option<isize>`).
 transpile_test!(option_owned_methods);
+// Regression test: a cast whose operand is *exactly* a bare struct-field or
+// list-index access (nothing else wrapping it) used to transpile as a
+// string-parse (`.trim().parse::<T>()`) instead of a numeric `as T` cast,
+// even when the field/element type is statically known to be numeric —
+// `error[E0599]: no method named 'trim' found for type 'f32'` and friends.
+// `(expr * struct.field) as T` already worked; only the bare form was broken.
+transpile_test!(cast_bare_field_index);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 
@@ -852,3 +871,76 @@ transpile_test!(qualifier_group_param);
 // variants vs. `FieldValue`'s own). See enum_variant_shadow.br's own doc comment and
 // src/transpiler/mod.rs's `pre_scan`/`builtins_seeded`.
 transpile_test!(enum_variant_shadow);
+
+// Boring-side monomorphization (V1, docs task): a fully-concrete turbofish
+// construction/call site (`Struct<T>(...)` / `fn<T>(...)`) for a user-defined
+// generic struct/free-fn now gets a specialized, non-generic Rust clone
+// alongside the existing (unmodified) `impl<T: Clone> ...` generic-emission
+// path -- see `src/transpiler/monomorphize.rs`'s module doc comment.
+//
+// `monomorphize_struct`: a generic struct's `type let` field depends on its
+// own type parameter (the exact shape `static_generic_bad.br`/
+// `tests/static_qualifier.rs` rejects when NO concrete instantiation exists
+// anywhere) -- but this file has one (`Wrapper<string>(...)`), so it now
+// compiles: the generic copy silently omits that one static, the specialized
+// `Wrapper_string` copy gets its own concrete one instead.
+transpile_test!(monomorphize_struct);
+// `monomorphize_fn`: a free generic function called via turbofish at two
+// different concrete instantiations (int, string) in the same file.
+transpile_test!(monomorphize_fn);
+// `monomorphize_mut_arg`: a generic struct instantiated with a `mut`-qualified
+// concrete type argument (`Container<mut Point>(...)`) -- the docs/book.md
+// "Generic structs" known gap (propagating `mut` through generic
+// instantiation into the field's own permission check). The specialized
+// clone substitutes `T` with the concrete `mut Point` directly, so
+// `c.item.move_to(...)` compiles through ordinary (non-generic) `mut Type`
+// field support.
+transpile_test!(monomorphize_mut_arg);
+// `monomorphize_cross_file_main` (+ `monomorphize_cross_file_lib.br`, `use`d by
+// it): the cross-file extension of `monomorphize_struct` above -- `Wrapper<T>`'s
+// decl (with the same "`type let` depends on T" shape) lives in
+// `monomorphize_cross_file_lib.br`, while the turbofish construction site
+// (`Wrapper<string>(...)`) lives in this, a DIFFERENT file that `use`s it. Proves
+// monomorphization now folds the whole reachable `use` graph's generic decls and
+// turbofish call sites together (via `deep_pre_scan`), not just one file's own
+// items -- see `src/transpiler/monomorphize.rs`'s module doc comment. Project-mode
+// `boring build` (what this macro drives) already writes each `use`d file's Rust
+// as its own `include!`d module, so this also exercises that the specialized
+// `Wrapper_string` clone lands in `monomorphize_cross_file_lib.br`'s own module
+// (the declaring file) rather than duplicated into every caller.
+transpile_test!(monomorphize_cross_file_main);
+// `monomorphize_method`: a generic METHOD call via explicit turbofish
+// (`obj.method<T>(...)`) on a NON-generic struct -- the method itself
+// introduces its own type param, separate from anything the struct declares
+// (V1 method-monomorphization extension; see `src/transpiler/monomorphize.rs`'s
+// module doc comment). Resolution is name-only (no receiver-type tracking):
+// the method's bare name must be unique among every reachable generic method.
+transpile_test!(monomorphize_method);
+// `monomorphize_method_on_generic_struct`: composes struct-level and
+// method-level specialization -- a generic struct (`Box<T>`) with its own
+// concrete turbofish construction site AND a method with its own separate
+// type param (`U`, distinct from the struct's `T`) called via its own
+// turbofish. The specialized method clone is appended to the struct BEFORE
+// struct-level specialization runs, so it's carried along into the
+// specialized struct clone too.
+transpile_test!(monomorphize_method_on_generic_struct);
+// `monomorphize_optional_method`: same generic-method-turbofish shape as
+// `monomorphize_method` above, but called through OPTIONAL CHAINING
+// (`obj?.method<T>(...)`) on an `Optional<Box>` binding instead of a plain
+// `Box` binding -- exercises the `?.method<T>(...)` parser/transpiler/
+// monomorphize extension (candidate collection recognizes an `OptionalField`
+// callee, and the rewrite produces `OptionalMethodCall` instead of a plain
+// `MethodCall`, preserving the nil short-circuit).
+transpile_test!(monomorphize_optional_method);
+// `monomorphize_ext_method`: same generic-method-turbofish shape as
+// `monomorphize_method` above, but the method is declared inside an `ext`
+// block (`ext Wrapper: def convert<U>(...): ...`) rather than directly on
+// the struct's own body -- proves the registration/append widening to
+// `Item::Ext` (see `src/transpiler/monomorphize.rs`'s `MethodOwnerKind`)
+// resolves and specializes correctly, appending the clone into the SAME
+// `ext` block rather than the struct's own `methods` list.
+transpile_test!(monomorphize_ext_method);
+// `monomorphize_enum_method`: same generic-method-turbofish shape again, but
+// the method is declared directly on an `enum` -- proves the registration/
+// append widening to `Item::Enum` resolves and specializes correctly.
+transpile_test!(monomorphize_enum_method);

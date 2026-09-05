@@ -377,6 +377,76 @@ impl Transpiler {
     pub(crate) fn deep_pre_scan(&mut self, program: &crate::ast::Program, visited: &mut std::collections::HashSet<std::path::PathBuf>) {
         self.pre_scan(program);
         self.pre_infer_fn_qualifiers(program);
+        // Cross-file monomorphization (see `monomorphize.rs`'s module doc comment):
+        // fold two more things into this same recursive walk over every reachable
+        // file, so the whole file graph's generic decls and turbofish call sites end
+        // up visible to each other without any extra re-parse. By the time the
+        // OUTERMOST `deep_pre_scan` call returns, both are fully populated for the
+        // entire reachable graph regardless of visit order.
+        for item in &program.items {
+            match item {
+                crate::ast::Item::Struct(s) => {
+                    if !s.type_params.is_empty() {
+                        self.global_generic_structs.entry(s.name.clone()).or_insert_with(|| s.clone());
+                    }
+                    // Generic-method registry (`obj.method<T>(...)`): ANY struct
+                    // (generic or not) may declare a method with its own, separate
+                    // type param — see `global_generic_methods`'s doc comment.
+                    for m in &s.methods {
+                        let own_type_params: Vec<String> = m.type_params.iter()
+                            .filter(|p| !s.type_params.contains(p))
+                            .cloned()
+                            .collect();
+                        if !own_type_params.is_empty() {
+                            self.global_generic_methods.entry(m.name.clone())
+                                .or_default()
+                                .push((s.name.clone(), monomorphize::MethodOwnerKind::Struct, own_type_params, m.clone()));
+                        }
+                    }
+                }
+                // Free functions only — mirrors `monomorphize_program`'s own local
+                // scan (see that module for why the qualifier exclusion is defensive
+                // rather than load-bearing).
+                crate::ast::Item::Fn(f) if !f.type_params.is_empty() && f.qualifier.is_none() => {
+                    self.global_generic_fns.entry(f.name.clone()).or_insert_with(|| f.clone());
+                }
+                // Same generic-method registry as the struct arm above, for an
+                // `ext TypeName: def m<U>(...): ...` block's own methods — the
+                // "owner name" is the ext block's extended type name
+                // (`ExtDecl::type_name`) rather than a struct's own `name`.
+                crate::ast::Item::Ext(ext) => {
+                    for m in &ext.methods {
+                        let own_type_params: Vec<String> = m.type_params.iter()
+                            .filter(|p| !ext.type_params.contains(p))
+                            .cloned()
+                            .collect();
+                        if !own_type_params.is_empty() {
+                            self.global_generic_methods.entry(m.name.clone())
+                                .or_default()
+                                .push((ext.type_name.clone(), monomorphize::MethodOwnerKind::Ext, own_type_params, m.clone()));
+                        }
+                    }
+                }
+                // Same generic-method registry, for an enum's own methods.
+                crate::ast::Item::Enum(en) => {
+                    for m in &en.methods {
+                        let own_type_params: Vec<String> = m.type_params.iter()
+                            .filter(|p| !en.type_params.contains(p))
+                            .cloned()
+                            .collect();
+                        if !own_type_params.is_empty() {
+                            self.global_generic_methods.entry(m.name.clone())
+                                .or_default()
+                                .push((en.name.clone(), monomorphize::MethodOwnerKind::Enum, own_type_params, m.clone()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let candidates = monomorphize::collect_candidate_calls(program);
+        self.pending_generic_call_candidates.extend(candidates.free);
+        self.pending_method_call_candidates.extend(candidates.methods);
         for item in &program.items {
             if let crate::ast::Item::Use(u) = item {
                 // `use boring.<module>` — pre-scan the embedded stdlib source the same way

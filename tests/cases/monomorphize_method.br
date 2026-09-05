@@ -1,0 +1,15 @@
+# Boring-side monomorphization (V1 extension): a generic METHOD call via
+# explicit turbofish (`obj.method<T>(...)`) on a NON-generic struct. The
+# method itself introduces its own type param (`T2`) separate from anything
+# the struct declares (the struct has none at all here) -- the transpiler now
+# specializes a non-generic `convert_int` clone of the method, alongside the
+# still-generic `convert<T2>` (unused here, but must still be valid Rust).
+struct Box:
+    var int value = 0
+
+    def T2 convert<T2>(T2 x):
+        x
+
+mut b = Box(5)
+let r = b.convert<int>(42)
+print r

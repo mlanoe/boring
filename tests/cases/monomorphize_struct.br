@@ -1,0 +1,15 @@
+# Boring-side monomorphization (V1): a generic struct whose `type let` field
+# depends on its own type parameter T (the exact shape `static_generic_bad.br`
+# forbids for the generic copy — a Rust static/LazyLock cannot be generic) —
+# but this file DOES have a concrete turbofish construction site
+# (`Wrapper<string>(...)`), so the transpiler now specializes a non-generic
+# `Wrapper_string` clone. The generic `Wrapper<T>` copy silently omits the
+# problematic static (no hard error); the specialized copy gets its own
+# concrete, correctly-typed static through the ordinary (non-generic) path.
+struct Wrapper<T>:
+    T value
+
+    pub type let T default = "none"
+
+let w = Wrapper<string>("hi")
+print w.value

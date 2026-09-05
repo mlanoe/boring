@@ -115,3 +115,46 @@ fn emit_rust_includes_deps_cross_project_module() {
     let actual = emit_and_run(br_file, out_dir);
     assert_eq!(actual.trim_end(), "21\n42");
 }
+
+/// Cross-file monomorphization (extends `emit_rust_includes_local_cross_file_use_module`
+/// above): `Wrapper<T>` is declared in `monomorphize_cross_file_lib.br`, and specialized
+/// via a turbofish construction site (`Wrapper<string>(...)`) in
+/// `monomorphize_cross_file_main.br`, a DIFFERENT file that `use`s it. Proves the
+/// specialized `Wrapper_string` clone (emitted once, into the declaring file's own
+/// module) and the rewritten call site (a bare, unprefixed identifier — see
+/// `src/transpiler/monomorphize.rs`'s module doc comment for why no prefix is needed)
+/// both actually land in the flattened `--emit-rust` output and real-compile with rustc,
+/// not just under project-mode `boring build` (already covered by
+/// `tests/transpile.rs`'s `transpile_test!(monomorphize_cross_file_main)`).
+#[test]
+fn emit_rust_includes_cross_file_monomorphized_module() {
+    let br_file = Path::new("tests/cases/monomorphize_cross_file_main.br");
+    let out_dir = Path::new("tests/cases/monomorphize_cross_file_emit_rust_rust");
+
+    let actual = emit_and_run(br_file, out_dir);
+    assert_eq!(actual.trim_end(), "hi");
+}
+
+/// [deps]-based cross-project monomorphization (extends
+/// `emit_rust_includes_deps_cross_project_module` above the same way
+/// `emit_rust_includes_cross_file_monomorphized_module` extends
+/// `emit_rust_includes_local_cross_file_use_module`): `Wrapper<T>` -- a generic struct
+/// with a `type let T` field depending on its own type parameter, per
+/// `src/transpiler/monomorphize.rs`'s module doc comment -- is declared in the
+/// DEPENDENCY project (`tests/cases/fixtures/dep_monomorphize/src/wrapper.br`), resolved
+/// via `tests/cases/cross_project_dep_monomorphize/boring.toml`'s own `[deps]` section,
+/// while the concrete turbofish construction site (`Wrapper<string>(...)`) lives in the
+/// CONSUMING project's `src/main.br`, a different file in a different `[deps]` project.
+/// Proves the specialized `Wrapper_string` clone and the rewritten call site both
+/// actually land in the flattened `--emit-rust` output and real-compile with rustc, not
+/// just under project-mode `boring build` (already covered by
+/// `tests/transpile.rs`'s `transpile_project_test!(cross_project_dep_monomorphize)`) or
+/// `boring run` (`tests/run.rs`'s `cross_project_dep_monomorphize`).
+#[test]
+fn emit_rust_includes_deps_cross_project_monomorphized_module() {
+    let br_file = Path::new("tests/cases/cross_project_dep_monomorphize/src/main.br");
+    let out_dir = Path::new("tests/cases/cross_project_dep_monomorphize_emit_rust_rust");
+
+    let actual = emit_and_run(br_file, out_dir);
+    assert_eq!(actual.trim_end(), "hi\nhi");
+}

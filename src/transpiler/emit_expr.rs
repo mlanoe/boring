@@ -450,34 +450,7 @@ impl Transpiler {
                     format!("{}.as_ref().map(|__v| __v.{}.clone())", obj_s, field)
                 }
             }
-            ExprKind::OptionalMethodCall(obj, method, args) => {
-                // Use emit_expr_owned so string literals are coerced to Arc<str> (not &str).
-                // Without this, opt?.push("hello") would pass &str where Arc<str> is expected.
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                let obj_s = self.emit_expr(obj);
-                let shadow_name_mc = if let ExprKind::Var(v) = &obj.kind {
-                    self.managed_param_shadows.get(v.as_str()).cloned()
-                } else { None };
-                let is_managed_mutex = shadow_name_mc.is_none() && if let ExprKind::Var(v) = &obj.kind {
-                    self.managed_mutex_vars.contains(v.as_str())
-                } else { false };
-                let is_managed_refcell = if let ExprKind::Var(v) = &obj.kind {
-                    self.managed_refcell_vars.contains(v.as_str())
-                } else { false };
-                if let Some(shadow) = shadow_name_mc {
-                    format!("{}.clone().map(|mut __v| __v.{}({}))", shadow, method, args_s.join(", "))
-                } else if is_managed_mutex {
-                    // Arc<std::sync::Mutex<T>> — use .lock().unwrap()
-                    format!("{}.clone().map(|__v| __v.lock().unwrap().{}({}))", obj_s, method, args_s.join(", "))
-                } else if is_managed_refcell {
-                    // RefCell<T> — use .borrow_mut() for method calls
-                    format!("{}.clone().map(|__v| __v.borrow_mut().{}({}))", obj_s, method, args_s.join(", "))
-                } else {
-                    // Use .clone().map(|mut __v| ...) so that &mut self methods can be called.
-                    // Cloning Option<Box<T>> gives an owned value, and `mut __v` allows &mut deref.
-                    format!("{}.clone().map(|mut __v| __v.{}({}))", obj_s, method, args_s.join(", "))
-                }
-            }
+            ExprKind::OptionalMethodCall(obj, method, args) => self.emit_optional_method_call(obj, method, args, ""),
 
             ExprKind::Closure(params, _ret_ty, body, throws, task) =>
                 self.emit_expr_closure(params, body, *throws, *task),
@@ -889,6 +862,66 @@ impl Transpiler {
         }
     }
 
+    /// Resolves the struct type name that `e` evaluates to, when known statically —
+    /// a variable bound to a struct (`for src in structs:`, a `let`/`var` of struct
+    /// type), the implicit `self`, or a struct-typed field reached through one of
+    /// those. Used to look up field types for a bare `obj.field` cast operand.
+    fn resolve_struct_name_of(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+            ExprKind::Var(v) => {
+                self.var_struct_types.get(v.as_str()).cloned()
+                    .or_else(|| self.var_struct_type.get(v.as_str()).cloned())
+                    .or_else(|| match self.var_types.get(v.as_str()) {
+                        Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str()) => Some(n.clone()),
+                        _ => None,
+                    })
+            }
+            ExprKind::Field(inner, field_name) => {
+                let struct_name = self.resolve_struct_name_of(inner)?;
+                let fields = self.struct_fields.get(struct_name.as_str())?;
+                let (_, fty) = fields.iter().find(|(f, _)| f == field_name)?;
+                match fty.without_mut() {
+                    Type::Named(n) if self.struct_fields.contains_key(n.as_str()) => Some(n.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves the Boring type of `e` when it is a bare variable (including an
+    /// implicit `self.field` reference to a field not shadowed by a local), a
+    /// field access, or an index access — the forms a cast operand can take that
+    /// aren't already covered by `var_types`/literal/expression checks below.
+    /// Returns `None` when the type can't be determined statically.
+    fn resolve_field_or_index_type(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Var(v) => {
+                if !self.known_local_vars.contains(v.as_str()) {
+                    if let Some(struct_name) = &self.self_type {
+                        if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == v) {
+                                return Some(fty.clone());
+                            }
+                        }
+                    }
+                }
+                self.var_types.get(v.as_str()).cloned()
+            }
+            ExprKind::Field(obj, field_name) => {
+                let struct_name = self.resolve_struct_name_of(obj)?;
+                let fields = self.struct_fields.get(struct_name.as_str())?;
+                fields.iter().find(|(f, _)| f == field_name).map(|(_, t)| t.clone())
+            }
+            ExprKind::Index(base, _) | ExprKind::LabeledIndex(base, _) => {
+                let base_ty = self.resolve_field_or_index_type(base)?;
+                base_ty.index_element_type().cloned()
+            }
+            _ => None,
+        }
+    }
+
     /// `e as ty` — user-defined `into_type()` conversions, newtype wrap/unwrap,
     /// Optional-type parse, numeric/bool/string coercions, and the `'actor` wrap.
     fn emit_expr_cast(&self, e: &Expr, ty: &Type) -> String {
@@ -1034,33 +1067,26 @@ impl Transpiler {
         if src_var_is_numeric && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
         }
-        // Indexing into a known-numeric-element array/dict (`bytes[16] as uint32`,
+        // Known-numeric bare field/index access (`struct.field as T`, `bytes[16] as uint32`,
         // `scores[k] as uint32`) → same numeric path as the bare-variable case above.
-        // `ExprKind::Index` isn't a Var/BinOp/Call/UnaryOp/MethodCall, so without this
-        // check it falls through every branch above and every branch below all the way
-        // to the string-parsing fallback near the bottom of this function, which wrongly
-        // emits `.trim().parse::<T>()` on an already-numeric element — that fails to
-        // compile with `no method named 'trim' found for type 'u8'` (or whatever the
-        // element type is) since `.trim()` only exists on strings.
-        let src_is_numeric_index = matches!(&e.kind, ExprKind::Index(base, _) if match &base.kind {
-            ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
-                Some(Type::Array(elem)) | Some(Type::ArrayN(elem, _)) | Some(Type::Dict(_, elem)) => {
-                    let elem = match elem.as_ref() {
-                        // `[mut uint8]`/`{K = mut V}` — unwrap the permission marker to
-                        // get at the underlying numeric type.
-                        Type::Mut(inner) => inner.as_ref(),
-                        other => other,
-                    };
-                    is_known_numeric_scalar_type(elem)
-                }
-                _ => false,
-            },
-            _ => false,
-        });
-        if src_is_numeric_index && is_float_ty {
+        // Neither `ExprKind::Field` nor `ExprKind::Index` is a Var/BinOp/Call/UnaryOp/
+        // MethodCall, so without this check they fall through every branch above and
+        // every branch below all the way to the string-parsing fallback near the bottom
+        // of this function, which wrongly emits `.trim().parse::<T>()` on an
+        // already-numeric field/element — that fails to compile with `no method named
+        // 'trim' found for type 'u8'` (or whatever the field/element type is) since
+        // `.trim()` only exists on strings. `resolve_field_or_index_type` covers plain
+        // local variables, struct/self fields (including the implicit `self.field`
+        // form), and index bases reached through either of those (`self.bytes[i]`,
+        // `holder.bytes[i]`) — a superset of a bare `ExprKind::Index(Var, _)` base.
+        let src_is_known_numeric_access = matches!(&e.kind, ExprKind::Field(_, _) | ExprKind::Index(_, _) | ExprKind::LabeledIndex(_, _))
+            && self.resolve_field_or_index_type(e)
+                .map(|t| is_known_numeric_scalar_type(t.without_mut()))
+                .unwrap_or(false);
+        if src_is_known_numeric_access && is_float_ty {
             return format!("({} as {})", src, dst);
         }
-        if src_is_numeric_index && is_fixed_int_ty {
+        if src_is_known_numeric_access && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
         }
         // `(expr else default) as T` — e.g. `(t.value else 1.0) as float32` where
@@ -2973,6 +2999,39 @@ impl Transpiler {
         format!("{}({})", callee_s, args_s)
     }
 
+    /// Emits `obj?.method(args)` (turbofish == "") or `obj?.method<T>(args)`
+    /// (turbofish == "::<T>") — same 4 branches (shadow-param / managed-mutex /
+    /// managed-refcell / plain) as the original inlined `OptionalMethodCall` arm,
+    /// just with `turbofish` spliced between `method` and the arg list.
+    pub(crate) fn emit_optional_method_call(&self, obj: &Expr, method: &str, args: &[Arg], turbofish: &str) -> String {
+        // Use emit_expr_owned so string literals are coerced to Arc<str> (not &str).
+        // Without this, opt?.push("hello") would pass &str where Arc<str> is expected.
+        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+        let obj_s = self.emit_expr(obj);
+        let shadow_name_mc = if let ExprKind::Var(v) = &obj.kind {
+            self.managed_param_shadows.get(v.as_str()).cloned()
+        } else { None };
+        let is_managed_mutex = shadow_name_mc.is_none() && if let ExprKind::Var(v) = &obj.kind {
+            self.managed_mutex_vars.contains(v.as_str())
+        } else { false };
+        let is_managed_refcell = if let ExprKind::Var(v) = &obj.kind {
+            self.managed_refcell_vars.contains(v.as_str())
+        } else { false };
+        if let Some(shadow) = shadow_name_mc {
+            format!("{}.clone().map(|mut __v| __v.{}{}({}))", shadow, method, turbofish, args_s.join(", "))
+        } else if is_managed_mutex {
+            // Arc<std::sync::Mutex<T>> — use .lock().unwrap()
+            format!("{}.clone().map(|__v| __v.lock().unwrap().{}{}({}))", obj_s, method, turbofish, args_s.join(", "))
+        } else if is_managed_refcell {
+            // RefCell<T> — use .borrow_mut() for method calls
+            format!("{}.clone().map(|__v| __v.borrow_mut().{}{}({}))", obj_s, method, turbofish, args_s.join(", "))
+        } else {
+            // Use .clone().map(|mut __v| ...) so that &mut self methods can be called.
+            // Cloning Option<Box<T>> gives an owned value, and `mut __v` allows &mut deref.
+            format!("{}.clone().map(|mut __v| __v.{}{}({}))", obj_s, method, turbofish, args_s.join(", "))
+        }
+    }
+
     pub(crate) fn emit_generic_call(&self, callee: &Expr, type_args: &[Type], args: &[Arg]) -> String {
         if let ExprKind::Var(name) = &callee.kind {
             match name.as_str() {
@@ -3110,6 +3169,14 @@ impl Transpiler {
             let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
             format!("{}::<{}>({})", name, ty_args_s.join(", "), args_s.join(", "))
+        } else if let ExprKind::OptionalField(obj, method) = &callee.kind {
+            // `obj?.method<T>(args)` — the plain-`Field` fallback below (whole-string
+            // append of `::<T>(args)`) would be WRONG here: OptionalMethodCall emits a
+            // `.clone().map(|mut __v| __v.method(args))` closure shape, so the turbofish
+            // must be spliced onto the inner method call, not appended after the chain.
+            let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
+            let turbofish = format!("::<{}>", ty_args_s.join(", "));
+            self.emit_optional_method_call(obj, method, args, &turbofish)
         } else {
             let callee_s = self.emit_expr(callee);
             let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();

@@ -675,6 +675,24 @@ impl Parser {
                     } else {
                         self.expect_ident_or_keyword()?
                     };
+                    // Generic method call: `obj.method<T1, T2>(args)`.
+                    // Same disambiguation heuristic as the bare-identifier generic-call
+                    // case in `parse_primary` — reused as-is so `obj.method < x` (a real
+                    // less-than comparison) keeps parsing as a comparison, unaffected.
+                    if self.check(&TokenKind::Lt) && self.is_generic_call_ahead(self.pos) {
+                        self.advance(); // consume '<'
+                        let mut type_args: Vec<Type> = Vec::new();
+                        type_args.push(self.parse_type()?);
+                        while self.eat(&TokenKind::Comma) {
+                            if self.check(&TokenKind::Gt) { break; }
+                            type_args.push(self.parse_type()?);
+                        }
+                        self.expect(&TokenKind::Gt)?;
+                        let callee = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.tok_len() };
+                        let args = if self.check(&TokenKind::LParen) { self.parse_call_args()? } else { vec![] };
+                        expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.tok_len() };
+                        continue;
+                    }
                     // Check for trailing closure FIRST (before regular call args),
                     // since `(x):` looks like an LParen but is actually a closure param list.
                     if self.peek_is_trailing_closure() {
@@ -716,6 +734,24 @@ impl Parser {
                     // Optional chaining: ?.field or ?.method(args)
                     self.advance();
                     let field = self.expect_ident_or_keyword()?;
+                    // Generic method call: `obj?.method<T1, T2>(args)`.
+                    // Same disambiguation heuristic as the `.method<T>` case above —
+                    // reused as-is so `obj?.method < x` (a real less-than comparison)
+                    // keeps parsing as a comparison, unaffected.
+                    if self.check(&TokenKind::Lt) && self.is_generic_call_ahead(self.pos) {
+                        self.advance(); // consume '<'
+                        let mut type_args: Vec<Type> = Vec::new();
+                        type_args.push(self.parse_type()?);
+                        while self.eat(&TokenKind::Comma) {
+                            if self.check(&TokenKind::Gt) { break; }
+                            type_args.push(self.parse_type()?);
+                        }
+                        self.expect(&TokenKind::Gt)?;
+                        let callee = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line, col, len: self.tok_len() };
+                        let args = if self.check(&TokenKind::LParen) { self.parse_call_args()? } else { vec![] };
+                        expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.tok_len() };
+                        continue;
+                    }
                     if self.peek_is_trailing_closure() {
                         let args = self.parse_trailing_closure(vec![])?;
                         seen_trailing_closure = true;

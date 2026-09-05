@@ -1,0 +1,18 @@
+# Boring-side monomorphization: extends the same generic-method turbofish
+# support (`obj.method<T>(...)`) to a method declared inside an `ext` block
+# (rather than directly on the struct's own body), on a NON-generic struct.
+# The ext-block method introduces its own type param (`U`), separate from
+# anything the struct or the ext block itself declares -- the transpiler now
+# specializes a non-generic `convert_int` clone of the method, appended into
+# the SAME `ext Wrapper:` block, alongside the still-generic `convert<U>`
+# (unused here, but must still be valid Rust).
+struct Wrapper:
+    var int value = 0
+
+ext Wrapper:
+    def U convert<U>(U x):
+        x
+
+mut w = Wrapper(5)
+let r = w.convert<int>(42)
+print r

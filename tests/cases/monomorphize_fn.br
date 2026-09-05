@@ -1,0 +1,12 @@
+# Boring-side monomorphization (V1): a free generic function called via
+# explicit turbofish with fully-concrete type arguments at two different
+# instantiations (int, string). Each site gets its own specialized,
+# non-generic clone (`identity_int`, `identity_string`); the plain, still-
+# generic `identity<T>` keeps compiling too (unused here, but must still be
+# emitted as valid Rust — no other, non-turbofish call site touches it in
+# this file).
+def T identity(T x):
+    x
+
+print identity<int>(42)
+print identity<string>("hi")

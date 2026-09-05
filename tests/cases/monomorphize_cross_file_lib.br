@@ -1,0 +1,12 @@
+# Cross-file monomorphization: a generic struct whose `type let` field depends on
+# its own type parameter T (the same shape monomorphize_struct.br exercises
+# same-file — a Rust static/LazyLock cannot be generic) declared HERE. This file
+# has no turbofish call site of its own; the concrete instantiation is driven
+# entirely by monomorphize_cross_file_main.br's `use`d call site
+# (`Wrapper<string>(...)`) — proving the whole-reachable-file-graph collection
+# described in src/transpiler/monomorphize.rs's module doc comment: the decl and
+# the turbofish call site live in two different files.
+struct Wrapper<T>:
+    T value
+
+    pub type let T default = "none"

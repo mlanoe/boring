@@ -27,6 +27,7 @@ mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
 mod infer_qualifiers;
+pub(crate) mod monomorphize;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
 pub mod kernel;
@@ -393,6 +394,68 @@ struct Transpiler {
     /// generic struct is missing-generics (E0107) in Rust, so those call sites must fall back
     /// to no annotation and let Rust's own inference fill in the type argument instead.
     pub(crate) generic_struct_names: std::collections::HashSet<String>,
+    /// Names of generic structs for which at least one fully-concrete turbofish
+    /// construction site was found and specialized (`monomorphize::monomorphize_program`).
+    /// Consulted by `emit_struct`'s "module-level statics" loop (docs/qualifiers.md's
+    /// `'static` section) to decide whether a `type let` field depending on the
+    /// struct's own type parameter is a hard error (no concrete specialization exists
+    /// anywhere → no single instance could ever be typed) or should just be silently
+    /// omitted from the generic (unspecialized) copy, since each specialized copy gets
+    /// its own concrete, correctly-typed static via the ordinary path.
+    pub(crate) struct_has_specialization: std::collections::HashSet<String>,
+    /// Cross-file monomorphization (V1 extension): full clones of every generic
+    /// struct/free-fn declaration found anywhere in the reachable file graph
+    /// (populated once, during `deep_pre_scan`'s existing recursive walk — see
+    /// `monomorphize.rs`'s module doc comment). Keyed by base (unmangled) name.
+    pub(crate) global_generic_structs: std::collections::HashMap<String, StructDecl>,
+    /// Same as `global_generic_structs`, for free generic functions.
+    pub(crate) global_generic_fns: std::collections::HashMap<String, FnDecl>,
+    /// Every turbofish (`ExprKind::GenericCall`) call site found anywhere in the
+    /// reachable file graph during `deep_pre_scan`, recorded unconditionally (before
+    /// it's known whether the callee resolves to a known generic decl at all) —
+    /// filtered against `global_generic_structs`/`global_generic_fns` exactly once,
+    /// after the whole graph has been walked, to build `global_instantiations`.
+    pub(crate) pending_generic_call_candidates: Vec<monomorphize::CandidateCall>,
+    /// The final, fully-resolved/deduped/mangled cross-file instantiation map,
+    /// computed once (right after the outermost `deep_pre_scan` call returns, before
+    /// any real per-file emission begins) from `pending_generic_call_candidates`
+    /// filtered against `global_generic_structs`/`global_generic_fns`. Consulted by
+    /// every file's own `monomorphize_program` call — same-file or cross-file, a
+    /// call site anywhere gets rewritten once this is populated.
+    pub(crate) global_instantiations: monomorphize::InstantiationMap,
+    /// Generic-method monomorphization (`obj.method<T>(...)`): every method found
+    /// anywhere in the reachable file graph whose OWN `type_params` contains at
+    /// least one name not already present on its declaring struct/ext/enum's own
+    /// `type_params` — i.e. a method that introduces a genuinely separate type
+    /// parameter of its own, not one merely auto-inferred from the enclosing
+    /// generic struct's own `T` (see `monomorphize.rs`'s module doc comment).
+    /// Covers all three declaring-item kinds (`StructDecl`, `ExtDecl`, `EnumDecl`)
+    /// in the SAME registry. Keyed by the BARE method name (not by owner) —
+    /// resolution at a turbofish method-call site never tracks the receiver's
+    /// resolved type, so a name with more than one entry here — combined across
+    /// all three kinds — is left unspecialized (safe fallback to ordinary generic
+    /// Rust emission), and only a name with exactly one entry is specialized.
+    /// Populated once during `deep_pre_scan`, mirroring
+    /// `global_generic_structs`/`global_generic_fns`. Each entry is
+    /// `(owner_name, owner_kind, own_type_params, method_decl)` — `owner_kind`
+    /// (`monomorphize::MethodOwnerKind`) says which of the three item kinds
+    /// `owner_name` refers to, and `own_type_params` is precomputed once at
+    /// registration (the method's `type_params` filtered down to just the names
+    /// NOT already on the declaring item's own `type_params`, in declared order)
+    /// so every later consumer (instantiation-map building, method-append) uses
+    /// the exact same filtered/ordered list rather than recomputing it against a
+    /// possibly different snapshot.
+    pub(crate) global_generic_methods: std::collections::HashMap<String, Vec<(String, monomorphize::MethodOwnerKind, Vec<String>, FnDecl)>>,
+    /// Every turbofish method-call (`obj.method<T>(...)`, parsed as
+    /// `GenericCall(Field(receiver, method), type_args, args)`) site found anywhere
+    /// in the reachable file graph during `deep_pre_scan`, recorded unconditionally
+    /// — mirrors `pending_generic_call_candidates` for the method-call shape.
+    pub(crate) pending_method_call_candidates: Vec<monomorphize::MethodCandidateCall>,
+    /// The final, fully-resolved/deduped/mangled method instantiation map, computed
+    /// once alongside `global_instantiations` from `pending_method_call_candidates`
+    /// filtered against `global_generic_methods` (unique-name-match only — see that
+    /// field's doc comment). Keyed by bare method name.
+    pub(crate) global_method_instantiations: monomorphize::MethodInstantiationMap,
     /// "StructName::field" → whether the field's own declaration is
     /// reassignable (`var`/`var mut`, `true`) vs `let`/`mut` (`false`) — the
     /// *reassignment* axis of `FieldDecl::mutable`
@@ -1107,6 +1170,14 @@ impl Transpiler {
             fn_defaults: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
             generic_struct_names: std::collections::HashSet::new(),
+            struct_has_specialization: std::collections::HashSet::new(),
+            global_generic_structs: std::collections::HashMap::new(),
+            global_generic_fns: std::collections::HashMap::new(),
+            pending_generic_call_candidates: Vec::new(),
+            global_instantiations: monomorphize::InstantiationMap::new(),
+            global_generic_methods: std::collections::HashMap::new(),
+            pending_method_call_candidates: Vec::new(),
+            global_method_instantiations: monomorphize::MethodInstantiationMap::new(),
             struct_field_reassignable: std::collections::HashMap::new(),
             struct_field_defaults: std::collections::HashMap::new(),
             structs_needing_default: std::collections::HashSet::new(),
@@ -1625,6 +1696,59 @@ impl Transpiler {
     // ── Program ───────────────────────────────────────────────────────────────
 
     fn emit_program(&mut self, program: &Program) {
+        // Cross-file monomorphization global setup — runs exactly ONCE, on the very
+        // first (outermost/entry) call to `emit_program`, BEFORE this file's own
+        // monomorphization gate immediately below, so even the entry file's own
+        // turbofish call sites already see a cross-file-complete map. Reuses
+        // `deep_pre_scan`'s existing recursive walk of every reachable file (entry +
+        // every `use`d file, local and `[deps]`) — that walk now also folds in
+        // global generic-decl collection and raw turbofish candidate gathering (see
+        // `emit_top::deep_pre_scan` and `monomorphize.rs`'s module doc comment), so
+        // no extra re-parse is needed. Runs on the RAW (not-yet-monomorphized)
+        // `program` parameter — safe, since `deep_pre_scan`'s own forward-reference
+        // pre-scan doesn't care whether a call site is still `GenericCall` or
+        // already rewritten to `Call`, and monomorphization never adds/removes the
+        // `Item::Use` entries its recursion inspects.
+        if !self.prelude_emitted {
+            let mut visited = std::collections::HashSet::new();
+            let prev_dir = self.source_dir.clone();
+            self.deep_pre_scan(program, &mut visited);
+            self.source_dir = prev_dir;
+            self.global_instantiations = monomorphize::build_instantiation_map(
+                &self.pending_generic_call_candidates,
+                &self.global_generic_structs,
+                &self.global_generic_fns,
+            );
+            self.global_method_instantiations = monomorphize::build_method_instantiation_map(
+                &self.pending_method_call_candidates,
+                &self.global_generic_methods,
+            );
+        }
+
+        // Boring-side monomorphization: specialize fully-concrete turbofish
+        // struct/fn construction sites — same-file OR cross-file (see
+        // `monomorphize.rs`'s module doc comment for the full design) — before
+        // anything else below runs. Shadows the `&Program` parameter with an
+        // owned, possibly-rewritten clone so every real call site of
+        // `emit_program` (the entry file in `transpile_with_config`, and each
+        // `use`d file in `inline_boring_use`/`inline_boring_stdlib_use`) gets this
+        // for free with no signature change — GPU targets (cuda/metal/rocm/wgpu)
+        // have their own, separate `emit_program` methods and are untouched. The
+        // cheap top-level/syntactic scan skips the clone entirely for the common
+        // case of a file with no generic struct/fn AND no turbofish call site at
+        // all — the latter needed so a file that merely CALLS a cross-file generic
+        // (but declares none itself) still gets its call sites rewritten.
+        let owned_program;
+        let program: &Program = if monomorphize::program_declares_generics(program)
+            || monomorphize::program_contains_generic_call(program)
+        {
+            let mut cloned = program.clone();
+            self.monomorphize_program(&mut cloned);
+            owned_program = cloned;
+            &owned_program
+        } else {
+            program
+        };
         // Interprocedural GPU residency (docs/scoped-access-blocks.md), transitive
         // parameter case: needs the whole program's call graph in one shot for its
         // fixed point, so it runs once here rather than folding into `pre_scan`,
@@ -1652,15 +1776,11 @@ impl Transpiler {
         // Standard prelude — emitted once only (skipped for inlined `use` files).
         if self.prelude_emitted { return self.emit_program_items(program, false); }
 
-        // Deep pre-scan: before emitting anything, recursively pre-scan all reachable `use` files.
-        // This ensures fn_throws / fn_sigs / struct_fields are populated for all files before any
-        // code is emitted, so forward references across file boundaries resolve correctly.
-        {
-            let mut visited = std::collections::HashSet::new();
-            let prev_dir = self.source_dir.clone();
-            self.deep_pre_scan(program, &mut visited);
-            self.source_dir = prev_dir;
-        }
+        // Deep pre-scan already ran at the very top of this function (before the
+        // monomorphization gate above) for this, the outermost/entry call — see the
+        // comment there. `fn_throws`/`fn_sigs`/`struct_fields` are populated for
+        // every reachable file before any code is emitted, so forward references
+        // across file boundaries resolve correctly, same as before.
         self.prelude_emitted = true;
         self.line("// Generated by boring build");
         self.line("use std::collections::{HashMap, HashSet};");

@@ -1,0 +1,25 @@
+# Boring-side monomorphization (V1): a generic struct instantiated at a
+# turbofish call site with a `mut`-qualified concrete type argument
+# (`Container<mut Point>(...)`) — the specific gap noted in docs/book.md
+# ("Generic structs" section): propagating a `mut`-qualified type argument
+# through generic instantiation into the field's own permission check was
+# previously unimplemented. The specialized clone (`Container_mut_Point`)
+# substitutes `T` with the concrete `mut Point` directly as `item`'s field
+# type, so `c.item.move_to(...)` (a mutating method call through the field)
+# now compiles — ordinary `mut Type` field support, just reached through a
+# specialized (post-substitution), no-longer-generic struct.
+struct Point:
+    var float x
+    var float y
+
+    def move_to(float nx, float ny):
+        self.x = nx
+        self.y = ny
+
+struct Container<T>:
+    T item
+
+mut c = Container<mut Point>(Point(1.0, 2.0))
+c.item.move_to(3.0, 4.0)
+print c.item.x
+print c.item.y
