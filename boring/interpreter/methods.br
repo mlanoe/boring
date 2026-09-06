@@ -993,6 +993,11 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Set(result)
                 "toArray":
                     Value.Array(elements)
+                # union/intersection/difference are all O(n·m): each calls
+                # `.contains()` (a linear scan) once per element of `elements`.
+                # Inherent to Set being a plain `[Value]`, not a hash table —
+                # see value.br's `Value.Set` doc comment / docs/interpreter-
+                # port-plan.md §8.3.
                 "union":
                     let other_val = args[0] else Value.Set([])
                     let other = match other_val:

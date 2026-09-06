@@ -211,6 +211,16 @@ Tested by `tests/cases/use_modules/` (real multi-file resolution: whole/selectiv
 
 **Transpiler gap found along the way, fixed 2026-08-25:** `set.add(...)` only transpiled to Rust's `HashSet::insert` when the receiver was a bare local variable the transpiler tracked as set-typed (`receiver_is_set_var` in `src/transpiler/emit_methods.rs`); it didn't extend to a struct field reached as `x.field.add(...)` from outside the struct, nor to a bare field name inside one of the struct's own methods. `loaded_modules` was changed from `{string}` to `[string]` (`.contains()`/`.push()`, which don't need that tracking) as a workaround at the time. Since fixed by mirroring `expr_is_dict`'s struct-field resolution into `expr_is_set` (and reusing both helpers at the four `receiver_is_set`/`receiver_is_dict_var` call sites) — see `tests/cases/struct_set_field_methods.br`. `loaded_modules`'s `[string]` workaround was left in place (no need to revert a working, equally-valid representation).
 
+### 8.3 `Dict`/`Set` are O(n), not a real hash map (no trivial fix)
+
+`Value::Dict`/`Value::Set` (`value.br`) are backed by a plain `[(Value, Value)]`/`[Value]` — every lookup, insert, `.contains()`, and removal is a linear scan (`eval.br`/`methods.br`), not the O(1)-amortized hash-table access the real transpiled Rust (`HashMap`/`HashSet`) gives a Boring `{K=V}`/`{T}`. `Set.union`/`.intersection`/`.difference` (`methods.br`) each call `.contains()` inside a loop over the other operand, making them O(n·m) rather than O(n+m).
+
+**Impact:** negligible for the small, fixed-size collections this interpreter's own test fixtures use; would matter for any real Boring program doing dict/set-heavy work with more than a few dozen entries.
+
+**Why there's no trivial fix:** a real hash table needs a hash function over an arbitrary `Value` (including the recursive/tagged variants — `Object`, `EnumVariant`, `LabeledArray`, ...) plus a bucket/probing scheme, and Boring itself exposes no hash-map primitive independent of `{K=V}` — that syntax *is* the language's only hash-map, and it's backed by a real Rust `HashMap` purely because the transpiler lowers it directly to one; the tree-walking interpreter (this file) has no equivalent to fall back on and would have to build a hash table for `Value` completely from scratch (a real `Hash`/`Eq` impl over a dynamically-typed, recursive value type) to close this gap. Out of scope for anything short of a dedicated task.
+
+**Workaround:** none needed today — flagged here so a future contributor doesn't assume `Dict`/`Set` scale the way their transpiled Rust counterparts do.
+
 ### Summary table
 
 | Gap | Impact | Has workaround | Action |
@@ -218,6 +228,7 @@ Tested by `tests/cases/use_modules/` (real multi-file resolution: whole/selectiv
 | `VecDeque<T>` | Low | Yes (`[T]` + remove(0)) | Nice-to-have — add to `stdlib/collections.br` |
 | `use boring.*` / `[deps]` | Medium (only affects programs relying on first-party stdlib or named cross-project deps) | No — fails fast (`boring.*`) or silently no-ops (`[deps]`, same as unresolvable `std.*`/`crate.*`) | Would need embedded stdlib source and `boring.toml [deps]` parsing ported into the self-hosted interpreter itself |
 | `set.add()` on a struct field (transpiler) | Fixed 2026-08-25 | N/A | `expr_is_set` now resolves struct-field Set types the same way `expr_is_dict` already did |
+| `Dict`/`Set` are O(n) (see 8.3) | Low today, would grow with real workloads | No — documented only | Would need a real `Value`-keyed hash table built from scratch in Boring; no trivial fix |
 
 ---
 
