@@ -1,0 +1,33 @@
+# Regression test for the assignment codegen in `src/transpiler/emit_expr.rs`
+# (the `Mutex field write` / `RwLock field write` arms): a compound
+# self-assignment through an `'actor`-qualified (`Arc<Mutex<T>>`) parameter —
+# `p.depth += 1`, which the parser desugars to `p.depth = p.depth + 1` — used
+# to transpile to two nested locks of the same non-reentrant
+# `std::sync::Mutex` in one statement:
+#
+#   { let mut __g = p.lock().unwrap(); __g.depth = (p.lock().unwrap().depth + 1); };
+#
+# `__g` holds the lock for the write while the RHS takes a *second* lock to
+# read the old value — a guaranteed self-deadlock at runtime, not a compile
+# error. The fix evaluates the RHS into a temporary *before* taking the write
+# guard, so the read's lock is released before the write's lock is taken:
+#
+#   { let __v = (p.lock().unwrap().depth + 1); let mut __g = p.lock().unwrap(); __g.depth = __v; };
+#
+# This program only passes if it actually completes (a hang here means the
+# deadlock is back — see tests/actor_self_compound_assign_no_deadlock.rs,
+# which runs the compiled binary under a timeout) and prints the correctly
+# incremented value.
+
+struct Counter:
+    var int depth
+
+def void counter_depth_inc(mut Counter'actor p) throws:
+    p.depth += 1
+
+def void main() throws:
+    mut c'actor = Counter(depth = 0)
+    counter_depth_inc(c)
+    counter_depth_inc(c)
+    counter_depth_inc(c)
+    print c.depth

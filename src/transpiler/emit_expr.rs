@@ -2257,9 +2257,13 @@ impl Transpiler {
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
                 if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                    // Evaluate the RHS into a temp *before* taking the write guard: the RHS
+                    // may itself read through the same mutex (e.g. `p.depth = p.depth + 1`),
+                    // and a non-reentrant Mutex/RwLock self-deadlocks if that read tries to
+                    // lock while the write guard above it is still held in the same statement.
                     let val_s = self.emit_expr_owned(value);
                     let guard = self.mutex_var_write(v, v);
-                    return format!("{{ let mut __g = {}; __g.{} = {}; }}", guard, field, val_s);
+                    return format!("{{ let __v = {}; let mut __g = {}; __g.{} = __v; }}", val_s, guard, field);
                 }
             }
             // self.worker.field = v
@@ -2270,9 +2274,10 @@ impl Transpiler {
                             .map(|t| format!("{}::{}", t, mutex_field));
                         if let Some(k) = key {
                             if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
+                                // See note above: evaluate RHS before taking the write guard.
                                 let val_s = self.emit_expr_owned(value);
                                 let guard = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
-                                return format!("{{ let mut __g = {}; __g.{} = {}; }}", guard, field, val_s);
+                                return format!("{{ let __v = {}; let mut __g = {}; __g.{} = __v; }}", val_s, guard, field);
                             }
                         }
                     }
@@ -2283,13 +2288,14 @@ impl Transpiler {
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
                 if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+                    // See note above: evaluate RHS before taking the write guard.
                     let val_s = self.emit_expr_owned(value);
                     let guard = if self.var_rwlock_task_types.contains(v.as_str()) {
                         self.guard_task_write_guard(v)
                     } else {
                         self.guard_write_guard(v)
                     };
-                    return format!("{{ let mut __wg = {}; __wg.{} = {}; }}", guard, field, val_s);
+                    return format!("{{ let __v = {}; let mut __wg = {}; __wg.{} = __v; }}", val_s, guard, field);
                 }
             }
             // self.data.field = v
@@ -2300,9 +2306,10 @@ impl Transpiler {
                             .map(|t| format!("{}::{}", t, rwlock_field));
                         if let Some(k) = key {
                             if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
+                                // See note above: evaluate RHS before taking the write guard.
                                 let val_s = self.emit_expr_owned(value);
                                 let guard = self.rwlock_field_write(&k, &format!("self.{}", rwlock_field));
-                                return format!("{{ let mut __wg = {}; __wg.{} = {}; }}", guard, field, val_s);
+                                return format!("{{ let __v = {}; let mut __wg = {}; __wg.{} = __v; }}", val_s, guard, field);
                             }
                         }
                     }
