@@ -21,10 +21,23 @@ use super::{DiagLevel, KernelDiagnostic};
 // ─── Float math built-ins ────────────────────────────────────────────────────
 
 /// Names of floating-point math functions that are disallowed in kernel context.
+///
+/// Deliberately excludes `abs`/`floor`/`ceil`/`round`: unlike every other name
+/// here (`sqrt`, `sin`, …, which always touch the FPU), these four have a real,
+/// pure int-typed no-op path at runtime (see their `Value::Int` arms in
+/// `src/interpreter/mod.rs`) — `abs(some_int)` never reaches the FPU. This
+/// validator has no type-checker pass to consult, so it can't tell an
+/// int-typed call from a float-typed one here; rejecting *every* call
+/// regardless of argument type (the previous behavior) was a false positive on
+/// the common int case. This isn't a real gap in FPU protection: any float
+/// value that could flow into one of these four is itself rejected
+/// independently, at its own literal (`ExprKind::Float`, "float is not allowed
+/// in kernel context") or declared type (`Type::Float32`/`Type::Float64` in
+/// `check_type`) — long before it could reach a call site.
 const FLOAT_MATH_FNS: &[&str] = &[
     "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "sinh", "cosh", "tanh", "exp", "exp2", "ln", "log", "log2", "log10",
-    "pow", "hypot", "floor", "ceil", "round", "trunc", "fract", "abs",
+    "pow", "hypot", "trunc", "fract",
     "signum", "copysign",
 ];
 
@@ -1041,5 +1054,73 @@ impl TypeInner for Type {
             Type::Qualified(inner, _) => Some(inner),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diags(src: &str) -> Vec<KernelDiagnostic> {
+        let tokens = crate::lexer::lex(src).expect("lex");
+        let program = crate::parser::parse(tokens).expect("parse");
+        KernelValidator::new().run(&program)
+    }
+
+    fn has_float_math_error(diags: &[KernelDiagnostic]) -> bool {
+        diags.iter().any(|d| d.level == DiagLevel::Error && d.message.contains("floating-point math"))
+    }
+
+    fn has_any_error(diags: &[KernelDiagnostic]) -> bool {
+        diags.iter().any(|d| d.level == DiagLevel::Error)
+    }
+
+    /// Regression test: `abs`/`floor`/`ceil`/`round` each have a real, pure
+    /// int-typed no-op path in the interpreter (src/interpreter/mod.rs) — unlike
+    /// the rest of FLOAT_MATH_FNS, they never touch the FPU when given an int.
+    /// A call on an int literal must not be rejected.
+    #[test]
+    fn int_safe_math_fns_accept_int_literal_args() {
+        for f in ["abs", "floor", "ceil", "round"] {
+            let src = format!("def main():\n    let x = {}(5)\n", f);
+            let d = diags(&src);
+            assert!(!has_any_error(&d), "{}(5) wrongly rejected: {:?}", f, d);
+        }
+    }
+
+    /// Same four functions, applied to a plain int-typed variable rather than a
+    /// literal — this validator has no type-checker pass, so it never could have
+    /// told this apart from a float-typed variable; the fix here is that these
+    /// four names are no longer in FLOAT_MATH_FNS at all; see its doc comment.
+    #[test]
+    fn int_safe_math_fns_accept_int_variable_args() {
+        for f in ["abs", "floor", "ceil", "round"] {
+            let src = format!("def main():\n    let v = 5\n    let x = {}(v)\n", f);
+            let d = diags(&src);
+            assert!(!has_any_error(&d), "{}(v) wrongly rejected: {:?}", f, d);
+        }
+    }
+
+    /// A float literal argument is still rejected — not via the "floating-point
+    /// math" message anymore (these four are no longer in FLOAT_MATH_FNS), but
+    /// the literal itself independently trips Rule 1 ("float is not allowed in
+    /// kernel context"), so no real FPU protection is lost.
+    #[test]
+    fn float_literal_arg_still_rejected_via_rule_1() {
+        for f in ["abs", "floor", "ceil", "round"] {
+            let src = format!("def main():\n    let x = {}(5.0)\n", f);
+            let d = diags(&src);
+            assert!(has_any_error(&d), "{}(5.0) should still be rejected (via the float literal itself)", f);
+            assert!(!has_float_math_error(&d), "{}(5.0) should no longer report 'floating-point math'", f);
+        }
+    }
+
+    /// The rest of FLOAT_MATH_FNS (sqrt, sin, ...) must still be rejected
+    /// regardless of argument type — they have no int-typed no-op path at all,
+    /// unlike the four carved out above.
+    #[test]
+    fn other_float_math_fns_still_rejected_regardless_of_arg_type() {
+        let d = diags("def main():\n    let x = sqrt(5)\n");
+        assert!(has_float_math_error(&d), "sqrt(5) should still be rejected — no int no-op path exists");
     }
 }
