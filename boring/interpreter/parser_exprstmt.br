@@ -243,7 +243,23 @@ def [(string, Expr)] parse_chained_for_clauses(mut Parser p, string first_var, E
         clauses.push((var_name, count))
     clauses
 
+# Recursion guard: this is the real entry point for expression recursion —
+# reached both from `parse_expr` (via `parse_else_expr` -> `parse_pipe`) AND
+# directly from call sites that bypass `parse_expr` altogether (closure
+# bodies, named-argument values, comprehension counts, ...). Guarding here —
+# rather than only in `parse_expr` — bounds ALL of those recursive paths
+# against a stack overflow, mirroring the Rust-hosted parser's own
+# `parse_or`-level guard (`src/parser/parse_expr.rs`).
 def Expr parse_or(mut Parser p) throws:
+    parser_depth_inc(p)
+    if parser_depth(p) > MAX_EXPR_DEPTH:
+        parser_depth_dec(p)
+        throw "expression nested too deeply"
+    let result = parse_or_inner(p)
+    parser_depth_dec(p)
+    result
+
+def Expr parse_or_inner(mut Parser p) throws:
     var lhs = parse_and(p)
     while parser_check(p, "Or"):
         let line = parser_line(p)
@@ -372,6 +388,20 @@ def Expr parse_multiplicative(mut Parser p) throws:
 
 def Expr parse_unary(mut Parser p) throws:
     let line = parser_line(p)
+    # Guard: `- - - …`/`! ! ! …`/`~ ~ ~ …` chains recurse directly, one frame
+    # per unary operator, entirely bypassing `parse_or`'s own guard — mirrors
+    # `parse_not`'s identical guard just above for `not not not …` chains.
+    if parser_check(p, "Minus") or parser_check(p, "Bang") or parser_check(p, "Tilde"):
+        parser_depth_inc(p)
+        if parser_depth(p) > MAX_EXPR_DEPTH:
+            parser_depth_dec(p)
+            throw "expression nested too deeply"
+        let result = parse_unary_op(p, line)
+        parser_depth_dec(p)
+        return result
+    parse_postfix(p)
+
+def Expr parse_unary_op(mut Parser p, int line) throws:
     if parser_check(p, "Minus"):
         parser_advance(p)
         let expr = parse_unary(p)
@@ -380,11 +410,9 @@ def Expr parse_unary(mut Parser p) throws:
         parser_advance(p)
         let expr = parse_unary(p)
         return make_unary("Not", expr, line)
-    if parser_check(p, "Tilde"):
-        parser_advance(p)
-        let expr = parse_unary(p)
-        return make_unary("BitNot", expr, line)
-    parse_postfix(p)
+    parser_advance(p) # Tilde
+    let expr = parse_unary(p)
+    make_unary("BitNot", expr, line)
 
 def Expr parse_postfix(mut Parser p) throws:
     parse_postfix_inner(p, true)
@@ -1090,7 +1118,21 @@ def Expr parse_task_expr(mut Parser p) throws:
 
 # ─── Statement Parsing ────────────────────────────────────────────────────────
 
+# Recursion guard: every nested block (an `if`/`while`/`for`/`match`
+# arm/`try`/`guard`/`with`/closure/... body) re-enters here, so guarding this
+# single chokepoint bounds the whole statement-nesting recursion against a
+# stack overflow — mirrors the Rust-hosted parser's own `parse_block` guard
+# (`src/parser/parse_stmt.rs`).
 def [Stmt] parse_block(mut Parser p) throws:
+    parser_depth_inc(p)
+    if parser_depth(p) > MAX_EXPR_DEPTH:
+        parser_depth_dec(p)
+        throw "block nested too deeply"
+    let stmts = parse_block_inner(p)
+    parser_depth_dec(p)
+    stmts
+
+def [Stmt] parse_block_inner(mut Parser p) throws:
     while parser_check(p, "Comment") or parser_check(p, "Newline") or parser_check(p, "Semicolon"):
         parser_advance(p)
     parser_expect(p, "Indent")

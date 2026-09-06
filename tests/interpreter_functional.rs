@@ -273,3 +273,76 @@ fn use_modules() {
 fn use_boring_stdlib_unsupported() {
     run_file_case_err("use_boring_stdlib_unsupported", "main.br", "boring.*");
 }
+
+// Regression test for the self-hosted parser's recursion-depth guard
+// (`boring/interpreter/parser_core.br`'s `parser_depth`/`parser_depth_inc`/
+// `parser_depth_dec`, and `parser_exprstmt.br`'s `parse_block`/`parse_or`/
+// `parse_unary`/`parser_core.br`'s `parse_pattern`). Before this fix, the
+// depth counter was a dead stub (`parser_depth` always returned `0`,
+// `_inc`/`_dec` were no-ops) — the sole guard site that used it
+// (`parse_not`, for `not not not …` chains) never actually tripped, and
+// every other recursive path (nested blocks, parens, patterns) had no guard
+// at all. A deeply nested program used to crash this compiled interpreter
+// with a native stack overflow (SIGABRT) instead of a clean parse error.
+//
+// Generates the source programmatically (500 levels of nested `if true:`
+// blocks) rather than committing a huge static fixture file — same approach
+// as the Rust-hosted parser's own analogous regression tests
+// (`src/parser/tests_recursion_depth.rs`).
+#[test]
+fn deeply_nested_blocks_produce_a_clean_error_not_a_crash() {
+    let mut src = String::new();
+    const N: usize = 500;
+    for i in 0..N {
+        src.push_str(&"    ".repeat(i));
+        src.push_str("if true:\n");
+    }
+    src.push_str(&"    ".repeat(N));
+    src.push_str("print 1\n");
+
+    let tmp = Path::new("tests/cases").join("deep_nested_blocks_generated.br");
+    std::fs::write(&tmp, &src).expect("failed to write generated fixture");
+
+    for (mode, threading, rust_dir) in MODES {
+        let label = format!("{}+{}", mode, threading);
+        let bin = find_bin_in(rust_dir);
+        assert!(
+            bin.exists(),
+            "[deep_nested_blocks@{}] binary not found at {} — run `cargo test --test interpreter_build` first",
+            label, bin.display()
+        );
+
+        let out = Command::new(&bin)
+            .arg(&tmp)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|e| panic!("[deep_nested_blocks@{}] failed to spawn: {}", label, e));
+
+        // The exact failure mode we're guarding against is a native crash
+        // (SIGABRT from a stack overflow) rather than a normal nonzero exit —
+        // `ExitStatus::code()` is `None` on Unix when the process was killed
+        // by a signal, which is exactly the crash this test must rule out.
+        assert!(
+            out.status.code().is_some(),
+            "[deep_nested_blocks@{}] interpreter crashed (terminated by signal, status: {}) \
+             instead of returning a clean parse error — stderr:\n{}",
+            label, out.status, String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success(),
+            "[deep_nested_blocks@{}] expected a clean parse-error failure, but the interpreter \
+             exited successfully (stdout:\n{})",
+            label, String::from_utf8_lossy(&out.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("nested too deeply"),
+            "[deep_nested_blocks@{}] expected a 'nested too deeply' parse error, got:\n{}",
+            label, stderr
+        );
+    }
+
+    let _ = std::fs::remove_file(&tmp);
+}

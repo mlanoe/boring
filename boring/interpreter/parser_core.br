@@ -7,6 +7,7 @@ struct Parser:
     var int pos
     var bool allow_noparen_closure = true
     var bool allow_trailing_closure = true
+    var int depth = 0
 
     req TokenKind peek():
         self.tokens[self.pos].kind
@@ -399,13 +400,20 @@ def void parser_set_allow_trailing_closure(mut Parser p, bool v) throws:
     p.allow_trailing_closure = v
 
 def int parser_depth(mut Parser p) throws:
-    0
+    p.depth
 
+# Read into a local before writing back — `p` is `'actor'task` (`Arc<Mutex<Parser>>`),
+# and `p.depth = p.depth + 1` written directly transpiles to two nested locks of the
+# same non-reentrant mutex in one statement (the assignment's own lock, plus another
+# to read the RHS) — a guaranteed self-deadlock at runtime. Splitting the read into
+# its own statement releases the first lock before the write takes the second.
 def void parser_depth_inc(mut Parser p) throws:
-    nil
+    let d = p.depth
+    p.depth = d + 1
 
 def void parser_depth_dec(mut Parser p) throws:
-    nil
+    let d = p.depth
+    p.depth = d - 1
 
 def bool parser_is_type_start_before_ident(mut Parser p):
     # returns true when current tokens look like "Type Ident" (typed binding)
@@ -1531,7 +1539,7 @@ def Program parse_program(mut Parser p) throws:
 
 def Program parse(string source) throws:
     let toks = lex(source)
-    mut p'actor = Parser(tokens= toks, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true)
+    mut p'actor = Parser(tokens= toks, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true, depth= 0)
     parse_program(p)
 # ── AST builder helpers ────────────────────────────────────────────────────────
 
@@ -1926,7 +1934,17 @@ def string string_trim(string s):
 def Type type_named(string name):
     Type.Named(name)
 
-static let int MAX_EXPR_DEPTH = 200
+# This self-hosted parser is transpiled then compiled (see this file's own
+# project doc comment) into a plain `boring build`-generated binary — unlike
+# the primary Rust-hosted compiler (`src/main.rs`), whose own `main` spawns a
+# thread with a 256 MB stack specifically because its recursive-descent
+# parser/interpreter need it, `boring build`'s generated `main()` never does
+# this for the programs it emits, this one included. Empirically (debug
+# build, this environment): ~120 levels of nested `if` blocks parse fine,
+# ~150 already overflows the default OS stack (SIGABRT) — well under the
+# primary compiler's own 200, which assumes that 256 MB stack. 60 leaves
+# comfortable margin below the observed crash point across platforms/builds.
+static let int MAX_EXPR_DEPTH = 60
 
 def TryStmt make_try_stmt([Stmt] body, [CatchClause] catch_clauses, int line):
     TryStmt(body= body, catch_clauses= catch_clauses, line= line)
@@ -2012,7 +2030,7 @@ def SkipResult? peek_dot_after_newlines_and_indents(mut Parser p):
     result
 
 def Parser'actor make_parser([Token] tokens):
-    let p'actor = Parser(tokens= tokens, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true)
+    let p'actor = Parser(tokens= tokens, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true, depth= 0)
     p
 
 def LoopStmt parse_loop_stmt(mut Parser p) throws:
@@ -2028,7 +2046,21 @@ def bool ident_is_capitalized(string name):
     let first = name.slice(0, 1)
     first >= "A" and first <= "Z"
 
+# Recursion guard: every nested sub-pattern (tuple elements, variant payload
+# fields, `Some(...)`, ...) re-enters here, so guarding this single
+# chokepoint bounds the whole pattern-nesting recursion against a stack
+# overflow — mirrors the Rust-hosted parser's own `parse_pattern` guard
+# (`src/parser/parse_stmt.rs`).
 def Pattern parse_pattern(mut Parser p) throws:
+    parser_depth_inc(p)
+    if parser_depth(p) > MAX_EXPR_DEPTH:
+        parser_depth_dec(p)
+        throw "pattern nested too deeply"
+    let result = parse_pattern_inner(p)
+    parser_depth_dec(p)
+    result
+
+def Pattern parse_pattern_inner(mut Parser p) throws:
     # Wildcard
     if parser_peek_ident(p) == "_":
         parser_advance(p)
