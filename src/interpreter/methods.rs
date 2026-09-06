@@ -1118,7 +1118,8 @@ impl Interpreter {
                 Ok(Some(Value::Str(result)))
             }
             "repeat" => {
-                let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)? as usize;
+                let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
+                let n = (n.max(0)) as usize;
                 Ok(Some(Value::Str(s.repeat(n))))
             }
             "parseInt" => {

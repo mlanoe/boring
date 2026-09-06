@@ -1,0 +1,6 @@
+# INT_MIN % -1 overflows i64 (mathematically 0, but the machine division
+# underlying `%` still overflows) — must raise a clean RuntimeError, not
+# panic the whole process (finding #1: eval_rem only checked `b == 0`).
+let int min = -9223372036854775807 - 1
+let int neg1 = -1
+print min % neg1

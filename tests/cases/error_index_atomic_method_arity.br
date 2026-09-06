@@ -1,0 +1,5 @@
+# arr[i].min()/.max()/.swap()/.cas() must reject the wrong argument count
+# with a clean error instead of panicking on a raw args[0]/args[1] index
+# (finding #2: try_index_atomic_method_call never checked args.len()).
+var [int] arr = [1, 2, 3]
+print arr[0].min()

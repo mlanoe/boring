@@ -1,0 +1,7 @@
+# INT_MIN / -1 overflows i64 — must raise a clean RuntimeError, not panic
+# the whole process (see finding #1: eval_div previously did a raw `a / b`
+# for the plain Int case instead of `checked_div`, unlike every fixed-width
+# signed variant right below it).
+let int min = -9223372036854775807 - 1
+let int neg1 = -1
+print min / neg1

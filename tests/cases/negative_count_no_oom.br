@@ -1,0 +1,15 @@
+# Negative counts must clamp to 0, not wrap to a huge usize and attempt a
+# gigantic allocation (finding #3: `Value::Int(n) => n as usize` without a
+# `n >= 0` check, for "x".repeat(n), array-fill/-alloc/-comp counts).
+let string s = "x".repeat(-1)
+print "repeat: {s.length}"
+
+let int n = -5
+let [int] filled = [42 for n]
+print "fill: {filled.length}"
+
+let [int] alloc = [..n]
+print "alloc: {alloc.length}"
+
+let [int] comp = [i for i in ..n]
+print "comp: {comp.length}"

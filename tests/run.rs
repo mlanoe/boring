@@ -560,3 +560,21 @@ error_test!(error_default_rest_positional_conflict);
 // (src/checker/mod.rs's `check_struct`/`check_enum`/`check_ext`/`check_item`)
 // — see tests/cases/error_immutable_local_in_init.br's own doc comment.
 error_test!(error_immutable_local_in_init);
+
+// INT_MIN / -1, INT_MIN % -1, and -INT_MIN all overflow i64 — the interpreter
+// must raise a clean RuntimeError, not panic the process (audit finding #1).
+error_test!(error_int_min_div_neg1);
+error_test!(error_int_min_rem_neg1);
+error_test!(error_int_min_neg);
+
+// arr[i].min()/.max()/.swap()/.cas() must reject a wrong argument count
+// cleanly, not panic on a raw args[0]/args[1] index (audit finding #2).
+error_test!(error_index_atomic_method_arity);
+
+// Negative counts to "x".repeat(n)/array-fill/-alloc/-comp must clamp to 0,
+// not wrap to a huge usize and attempt a gigantic allocation (finding #3).
+interp_test!(negative_count_no_oom);
+// An unchecked block/grid thread-count product must raise a clean
+// RuntimeError, not overflow usize or attempt an unbounded allocation
+// (finding #3).
+error_test!(error_kernel_thread_cap);

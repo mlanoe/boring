@@ -173,6 +173,18 @@ fn coerce_float_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr) -> (Val
     }
 }
 
+/// Builds the right `Signal` for a `checked_rem` failure: division-by-zero
+/// (`is_zero`) or the one other case `checked_rem` rejects, `MIN % -1`, which
+/// mathematically equals `0` but overflows because computing it goes through
+/// the same overflowing division as `MIN / -1`.
+fn checked_rem_err(is_zero: bool, line: usize, rcol: usize, rlen: usize) -> Signal {
+    if is_zero {
+        err_span("remainder by zero", line, rcol, rlen)
+    } else {
+        err_span("integer overflow: remainder result cannot be represented", line, rcol, rlen)
+    }
+}
+
 /// Generic fallback for a binary numeric op between two *different* numeric kinds,
 /// used from the catch-all arm of each arithmetic/bitwise operator's match — after
 /// the hand-written same-kind and legacy `Int`/`Uint`/`Uint8` arms have already had
@@ -337,6 +349,13 @@ impl Interpreter {
     ) -> Option<Eval> {
         if !matches!(method, "min" | "max" | "swap" | "cas") {
             return None;
+        }
+        let expected_argc = if method == "cas" { 2 } else { 1 };
+        if args.len() != expected_argc {
+            return Some(Err(err(
+                format!("{}() expects {} argument{}", method, expected_argc, if expected_argc == 1 { "" } else { "s" }),
+                line,
+            )));
         }
         Some((|| {
             let old = self.eval_expr(obj_expr, Rc::clone(env))?;
@@ -1292,17 +1311,23 @@ impl Interpreter {
                 let val = self.eval_expr(expr, Rc::clone(&env))?;
                 match op {
                     UnaryOp::Neg => match val {
-                        Value::Int(n) => Ok(Value::Int(-n)),
+                        Value::Int(n) => n.checked_neg().map(Value::Int)
+                            .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
                         // Sized *signed* integers are negatable, same as the
                         // generic `Value::Int` above. Only the
                         // signed family gets a case: negating an unsigned
                         // (`Value::Uint*`) legitimately stays an error, falling
                         // through to the catch-all arm below.
-                        Value::Int8(n) => Ok(Value::Int8(-n)),
-                        Value::Int16(n) => Ok(Value::Int16(-n)),
-                        Value::Int32(n) => Ok(Value::Int32(-n)),
-                        Value::Int64(n) => Ok(Value::Int64(-n)),
-                        Value::Int128(n) => Ok(Value::Int128(-n)),
+                        Value::Int8(n) => n.checked_neg().map(Value::Int8)
+                            .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
+                        Value::Int16(n) => n.checked_neg().map(Value::Int16)
+                            .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
+                        Value::Int32(n) => n.checked_neg().map(Value::Int32)
+                            .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
+                        Value::Int64(n) => n.checked_neg().map(Value::Int64)
+                            .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
+                        Value::Int128(n) => n.checked_neg().map(Value::Int128)
+                            .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
                         Value::Float64(f) => Ok(Value::Float64(-f)),
                         Value::Float32(f) => Ok(Value::Float32(-f)),
                         Value::Object(ref inner_rc) => {
@@ -1472,20 +1497,20 @@ impl Interpreter {
 
             ExprKind::ArrayFill { value, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let v = self.eval_expr(value, Rc::clone(&env))?;
                 Ok(Value::Array(vec![v; n].into()))
             }
 
             ExprKind::ArrayAlloc { count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 Ok(Value::Array(vec![Value::Int(0); n].into()))
             }
 
             ExprKind::ArrayComp { expr, var, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let mut vals = Vec::with_capacity(n);
                 for i in 0..n {
                     let inner = Env::child(Rc::clone(&env));
@@ -2219,7 +2244,13 @@ impl Interpreter {
     fn eval_div(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
         match (l, r) {
             (Value::Int(a), Value::Int(b)) => {
-                if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Int(a / b)) }
+                Ok(Value::Int(a.checked_div(b).ok_or_else(|| {
+                    if b == 0 {
+                        err_span("division by zero", line, rcol, rlen)
+                    } else {
+                        err_span("integer overflow: division result cannot be represented", line, rcol, rlen)
+                    }
+                })?))
             }
             (Value::Uint(a), Value::Uint(b)) => {
                 Ok(Value::Uint(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
@@ -2274,7 +2305,7 @@ impl Interpreter {
     fn eval_rem(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
         match (l, r) {
             (Value::Int(a), Value::Int(b)) => {
-                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int(a % b)) }
+                Ok(Value::Int(a.checked_rem(b).ok_or_else(|| checked_rem_err(b == 0, line, rcol, rlen))?))
             }
             (Value::Uint(a), Value::Uint(b)) => {
                 if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % b)) }
@@ -2298,19 +2329,19 @@ impl Interpreter {
                 if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % (b as u64))) }
             }
             (Value::Int8(a), Value::Int8(b)) => {
-                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int8(a % b)) }
+                Ok(Value::Int8(a.checked_rem(b).ok_or_else(|| checked_rem_err(b == 0, line, rcol, rlen))?))
             }
             (Value::Int16(a), Value::Int16(b)) => {
-                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int16(a % b)) }
+                Ok(Value::Int16(a.checked_rem(b).ok_or_else(|| checked_rem_err(b == 0, line, rcol, rlen))?))
             }
             (Value::Int32(a), Value::Int32(b)) => {
-                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int32(a % b)) }
+                Ok(Value::Int32(a.checked_rem(b).ok_or_else(|| checked_rem_err(b == 0, line, rcol, rlen))?))
             }
             (Value::Int64(a), Value::Int64(b)) => {
-                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int64(a % b)) }
+                Ok(Value::Int64(a.checked_rem(b).ok_or_else(|| checked_rem_err(b == 0, line, rcol, rlen))?))
             }
             (Value::Int128(a), Value::Int128(b)) => {
-                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int128(a % b)) }
+                Ok(Value::Int128(a.checked_rem(b).ok_or_else(|| checked_rem_err(b == 0, line, rcol, rlen))?))
             }
             (Value::Uint16(a), Value::Uint16(b)) => {
                 if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint16(a % b)) }

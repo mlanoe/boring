@@ -1,0 +1,6 @@
+# -INT_MIN overflows i64 — must raise a clean RuntimeError, not panic the
+# whole process (finding #1: UnaryOp::Neg did a raw `-n` instead of
+# `checked_neg`).
+let int min = -9223372036854775807 - 1
+let int r = -min
+print r

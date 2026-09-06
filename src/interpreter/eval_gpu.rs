@@ -400,6 +400,35 @@ pub(crate) struct LaunchDims {
     pub grid_z:        usize,
 }
 
+/// Upper bound on a single kernel launch's total thread count. `run_kernel_parallel`
+/// allocates a `Vec` sized to hold one result snapshot per thread (`Vec::with_capacity`
+/// below), so an unchecked `block * grid` product — user-controlled via `k(block=.., grid=..)`
+/// — must be capped before it ever reaches that allocation. Comfortably above any real
+/// kernel launch in this codebase's tests while staying far short of exhausting memory.
+const MAX_KERNEL_LAUNCH_THREADS: usize = 64 * 1024 * 1024;
+
+/// Multiplies the six block/grid dimensions into a total thread count, checking for
+/// `usize` overflow and capping the result at `MAX_KERNEL_LAUNCH_THREADS`. Returns
+/// `Err` (not a panic, not a silent wraparound) for either failure — see this
+/// module's `MAX_KERNEL_LAUNCH_THREADS` doc comment for why the cap exists.
+fn checked_total_threads(
+    block_x: usize, block_y: usize, block_z: usize,
+    grid_x: usize, grid_y: usize, grid_z: usize,
+    line: usize,
+) -> Result<usize, Signal> {
+    [block_x, block_y, block_z, grid_x, grid_y, grid_z]
+        .into_iter()
+        .try_fold(1usize, |acc, d| acc.checked_mul(d))
+        .filter(|&total| total <= MAX_KERNEL_LAUNCH_THREADS)
+        .ok_or_else(|| err(
+            format!(
+                "kernel launch requests too many threads (block {}x{}x{}, grid {}x{}x{}) — max {} total",
+                block_x, block_y, block_z, grid_x, grid_y, grid_z, MAX_KERNEL_LAUNCH_THREADS,
+            ),
+            line,
+        ))
+}
+
 /// Run the kernel's anonymous entry point for `dims.total_threads` threads in parallel.
 ///
 /// Returns the final kernel object with all thread writes merged.
@@ -999,7 +1028,7 @@ impl Interpreter {
             (inferred_x, 1, 1)
         };
 
-        let total_threads = block_x * block_y * block_z * grid_x * grid_y * grid_z;
+        let total_threads = checked_total_threads(block_x, block_y, block_z, grid_x, grid_y, grid_z, kernel_expr.line)?;
 
         let entry = decl.methods.iter().find(|m| m.name.is_empty() && m.params.is_empty());
         if let Some(entry) = entry {
@@ -1020,7 +1049,7 @@ impl Interpreter {
         _config: crate::ast::KernelConfig,
         kernel_val: Value,
         block_val: Value,
-        _line: usize,
+        line: usize,
         env: &EnvRef,
     ) -> Eval {
         let (type_name, fields, decl, captured) = match &kernel_val {
@@ -1087,7 +1116,7 @@ impl Interpreter {
         };
         let grid_z = 1;
 
-        let total_threads = block_x * block_y * block_z * grid_x * grid_y * grid_z;
+        let total_threads = checked_total_threads(block_x, block_y, block_z, grid_x, grid_y, grid_z, line)?;
 
         let entry = decl.methods.iter().find(|m| m.name.is_empty() && m.params.is_empty());
         if let Some(entry) = entry {

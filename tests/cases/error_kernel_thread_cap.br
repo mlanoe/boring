@@ -1,0 +1,12 @@
+# A kernel launch's block/grid dimensions come straight from user code —
+# an unchecked product (finding #3) either overflows usize or triggers an
+# unbounded Vec::with_capacity allocation. Must raise a clean RuntimeError
+# instead of overflowing/OOMing the process.
+kernel K:
+    def ():
+        let i = gpu.thread.x
+
+mut k = K()
+kernel:
+    k(block = 99999999999999)
+print "done"
