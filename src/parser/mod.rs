@@ -117,6 +117,28 @@ impl Parser {
         self.tokens[self.pos].len
     }
 
+    /// Length of the source span from `(start_line, start_col)` — recorded by the
+    /// caller *before* parsing an expression — up to the token most recently
+    /// consumed (`self.pos - 1`). This is the real extent of what was just parsed.
+    ///
+    /// `Expr` construction sites used to write `len: self.tok_len()` here instead,
+    /// which measures the length of whatever token comes *next* — correct only when
+    /// nothing was consumed between capturing `line`/`col` and building the `Expr`
+    /// (never true once a sub-expression, e.g. a binop's rhs, has been parsed). E.g.
+    /// `let x = 12345 / 0` would underline the `/` (1 char) instead of `12345` (5
+    /// chars) in a runtime error, because by the time `len` was computed the current
+    /// token was already past the literal.
+    fn span_len(&self, start_line: usize, start_col: usize) -> usize {
+        let last = &self.tokens[self.pos.saturating_sub(1)];
+        if last.line == start_line {
+            (last.col + last.len).saturating_sub(start_col)
+        } else {
+            // Multi-line span: a single `len` can't express a width across lines —
+            // fall back to the last consumed token's own length.
+            last.len
+        }
+    }
+
     fn advance(&mut self) -> &Token {
         let t = &self.tokens[self.pos];
         if self.pos + 1 < self.tokens.len() {
@@ -2201,6 +2223,10 @@ pub(crate) fn collect_const_params_from_type(ty: &crate::ast::Type, type_params:
         }
         Type::Tuple(elems) => {
             for e in elems { collect_const_params_from_type(e, type_params); }
+        }
+        Type::Fn(ret, param_types, _, _, _) => {
+            if let Some(r) = ret { collect_const_params_from_type(r, type_params); }
+            for p in param_types { collect_const_params_from_type(p, type_params); }
         }
         _ => {}
     }

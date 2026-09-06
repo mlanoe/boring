@@ -75,17 +75,7 @@ impl Parser {
         let params = self.parse_params()?;
         // All parameters in a `def`/`req` declaration must have explicit type annotations.
         // Unannotated params produce invalid Rust when using `boring build`.
-        for p in &params {
-            if p.ty.is_none() && !p.variadic {
-                return Err(ParseError::Generic {
-                    msg: format!(
-                        "parameter '{}' in 'def {}' has no type annotation — add a type (e.g. 'int {}')",
-                        p.name, name, p.name
-                    ),
-                    line: p.line, col: 0, len: 1,
-                });
-            }
-        }
+        Self::require_typed_params(&params, &format!("def {}", name))?;
         // Auto-collect implicit generic/const params from param types and return type
         // when no explicit `<...>` was written. E.g. `def T get(Matrix<T, uint N> m):`
         // automatically gets type_params = ["T", "$N:usize"].
@@ -176,6 +166,28 @@ impl Parser {
         let mut decl = self.parse_fn_decl(is_pub, mutating)?;
         decl.attrs = attrs;
         Ok(decl)
+    }
+
+    /// Every parameter in a `def`/`req` declaration — top-level, `type def`/`type req`
+    /// struct method, or trait method (abstract signature or default implementation) —
+    /// must carry an explicit type annotation. Unannotated params are fine for a
+    /// closure (types are inferred at the call site), but produce invalid Rust
+    /// (a reference to `_unknown`) once transpiled via `boring build` — a mismatch
+    /// only surfaced there, not at parse/interpret time, unless caught here.
+    /// `kind_desc` names the declaration in the error message (e.g. `"def foo"`).
+    pub(crate) fn require_typed_params(params: &[Param], kind_desc: &str) -> Result<(), ParseError> {
+        for p in params {
+            if p.ty.is_none() && !p.variadic {
+                return Err(ParseError::Generic {
+                    msg: format!(
+                        "parameter '{}' in '{}' has no type annotation — add a type (e.g. 'int {}')",
+                        p.name, kind_desc, p.name
+                    ),
+                    line: p.line, col: 0, len: 1,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Recursively collect all `TypeParam` names from a type into `out`, preserving
@@ -457,6 +469,8 @@ impl Parser {
                 let return_ty = self.try_parse_return_type_prefix();
                 let name = self.expect_ident()?;
                 let params = self.parse_params()?;
+                let kind_desc = if matches!(kind, TypeMethodKind::Def) { "def" } else { "req" };
+                Self::require_typed_params(&params, &format!("type {} {}", kind_desc, name))?;
                 let (throws, throws_ty, task) = self.parse_type_method_throws_task()?;
                 self.expect(&TokenKind::Colon)?;
                 let body = self.parse_method_body()?;
@@ -742,6 +756,10 @@ impl Parser {
         let (return_ty, _qualifier, name) = self.parse_fn_head()?;
         let (type_params, _) = self.parse_type_params();
         let params = self.parse_params()?;
+        // Same requirement as a top-level `def`/`req` — a trait method (abstract
+        // signature or default implementation) with an untyped param produces
+        // invalid Rust once transpiled.
+        Self::require_typed_params(&params, &format!("{} {}", if mutating { "def" } else { "req" }, name))?;
         let task = prefix_task;
         let mut throws = self.eat(&TokenKind::Throws);
         let mut throws_ty: Option<Type> = None;

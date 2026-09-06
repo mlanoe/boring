@@ -401,7 +401,7 @@ impl Parser {
             // `var T name'qualifier = value` — qualifier after the name applies to the type
             let ty = if self.check(&TokenKind::Tick) {
                 let next_kind = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
-                if matches!(next_kind, Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) | Some(TokenKind::Static)) {
+                if matches!(next_kind, Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) | Some(TokenKind::Static) | Some(TokenKind::New)) {
                     self.parse_type_qualifier(ty)?
                 } else {
                     ty
@@ -416,7 +416,7 @@ impl Parser {
                 let next_kind = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                 match &next_kind {
                     // `name'qualifier = Ctor(...)` → qualifier on variable, type inferred from RHS
-                    Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) | Some(TokenKind::Static) => {
+                    Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) | Some(TokenKind::Static) | Some(TokenKind::New) => {
                         // Do NOT advance here — parse_type_qualifier consumes the tick + qualifier itself.
                         let placeholder = Type::Named("_".to_string());
                         let qualified = self.parse_type_qualifier(placeholder)?;

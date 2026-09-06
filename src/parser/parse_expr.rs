@@ -124,7 +124,7 @@ impl Parser {
         // the `else` of an enclosing if-let as nil-coalescing
         if self.eat(&TokenKind::Eq) {
             let rhs = self.parse_or()?;
-            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()}));
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)}));
         }
         // Compound assignment
         let op = match self.peek() {
@@ -141,13 +141,13 @@ impl Parser {
         if let Some(op) = op {
             self.advance();
             let rhs = self.parse_or()?;
-            let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line, col, len: self.tok_len()};
-            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line, col, len: self.tok_len()}));
+            let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line, col, len: self.span_len(line, col)};
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line, col, len: self.span_len(line, col)}));
         }
         // Write-once / nil-coalescing assignment: `lhs ?= rhs`
         if self.eat(&TokenKind::QuestionEq) {
             let rhs = self.parse_or()?;
-            return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()}));
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)}));
         }
         // Command-style call: `print "hello"` or `foo arg1, arg2`
         // Same logic as in parse_stmt, but here we don't consume the trailing newline
@@ -160,7 +160,7 @@ impl Parser {
                     args.push(Arg { label: None, value: arg , spread: false, default_rest: false});
                     if !self.eat(&TokenKind::Comma) { break; }
                 }
-                Expr { kind: ExprKind::Call(Box::new(lhs), args), line, col, len: self.tok_len()}
+                Expr { kind: ExprKind::Call(Box::new(lhs), args), line, col, len: self.span_len(line, col)}
             } else {
                 lhs
             }
@@ -189,7 +189,7 @@ impl Parser {
                 let else_stmts = self.parse_else_body_stmts()?;
                 return Ok(Expr {
                     kind: ExprKind::TryElseBlock(try_stmts, else_stmts),
-                    line, col, len: self.tok_len(), });
+                    line, col, len: self.span_len(line, col), });
             }
 
             // `try? expr` — shorthand for `try expr else nil` (Result → Option).
@@ -199,9 +199,9 @@ impl Parser {
                 return Ok(Expr {
                     kind: ExprKind::TryElse(
                         Box::new(inner),
-                        Box::new(Expr { kind: ExprKind::Nil, line, col , len: self.tok_len()}),
+                        Box::new(Expr { kind: ExprKind::Nil, line, col , len: self.span_len(line, col)}),
                     ),
-                    line, col, len: self.tok_len(), });
+                    line, col, len: self.span_len(line, col), });
             }
 
             // `try expr else ...` — inline try expression with an else branch.
@@ -229,18 +229,18 @@ impl Parser {
                 if matches!(else_expr.kind, ExprKind::Nil) {
                     return Ok(Expr {
                         kind: ExprKind::TryElse(Box::new(inner), Box::new(else_expr)),
-                        line, col, len: self.tok_len(), });
+                        line, col, len: self.span_len(line, col), });
                 }
                 let else_stmts = match else_expr.kind {
                     ExprKind::Block(stmts) => stmts,
-                    other => vec![Stmt::Expr(Expr { kind: other, line: else_expr.line, col, len: self.tok_len()})],
+                    other => vec![Stmt::Expr(Expr { kind: other, line: else_expr.line, col, len: self.span_len(line, col)})],
                 };
                 return Ok(Expr {
                     kind: ExprKind::TryElseBlock(
                         vec![Stmt::Expr(inner)],
                         else_stmts,
                     ),
-                    line, col, len: self.tok_len(), });
+                    line, col, len: self.span_len(line, col), });
             }
             // bare `try expr` without else — the `try` keyword has no effect here, which
             // is almost certainly a mistake. Return a parse error rather than silently
@@ -264,7 +264,7 @@ impl Parser {
             let line = expr.line;
             return Ok(Expr {
                 kind: ExprKind::Else(Box::new(expr), Box::new(default)),
-                line, col, len: self.tok_len(), });
+                line, col, len: self.span_len(line, col), });
         }
         Ok(expr)
     }
@@ -325,9 +325,9 @@ impl Parser {
             };
             if method_pipe {
                 // `lhs |> .method(args)` → `lhs.method(args)` — emit as MethodCall
-                lhs = Expr { kind: ExprKind::MethodCall(Box::new(lhs), name, args), line, col, len: self.tok_len()};
+                lhs = Expr { kind: ExprKind::MethodCall(Box::new(lhs), name, args), line, col, len: self.span_len(line, col)};
             } else {
-                lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line, col, len: self.tok_len()};
+                lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line, col, len: self.span_len(line, col)};
             }
         }
         // Consume Dedents corresponding to any Indents we skipped over
@@ -395,7 +395,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_and()?;
-            lhs = Expr { kind: ExprKind::BinOp(BinOp::Or, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::Or, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -407,7 +407,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_not()?;
-            lhs = Expr { kind: ExprKind::BinOp(BinOp::And, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::And, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -430,7 +430,7 @@ impl Parser {
             }
             let result = self.parse_not();
             self.depth -= 1;
-            return Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(result?)), line, col, len: self.tok_len()});
+            return Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(result?)), line, col, len: self.span_len(line, col)});
         }
         self.parse_comparison()
     }
@@ -450,7 +450,7 @@ impl Parser {
                     BinOp::Is
                 };
                 let rhs = self.parse_bitor()?;
-                lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+                lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
                 continue;
             }
             let op = match self.peek() {
@@ -469,7 +469,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_bitor()?;
-            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -481,7 +481,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_bitxor()?;
-            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitOr, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitOr, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -493,7 +493,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_bitand()?;
-            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitXor, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitXor, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -505,7 +505,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_shift()?;
-            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -519,14 +519,14 @@ impl Parser {
                 let col = self.col();
                 self.advance(); self.advance();
                 let rhs = self.parse_add()?;
-                lhs = Expr { kind: ExprKind::BinOp(BinOp::Shl, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+                lhs = Expr { kind: ExprKind::BinOp(BinOp::Shl, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
             // `>>`: two consecutive Gt tokens
             } else if self.check(&TokenKind::Gt) && self.check2(&TokenKind::Gt) {
                 let line = self.line();
                 let col = self.col();
                 self.advance(); self.advance();
                 let rhs = self.parse_add()?;
-                lhs = Expr { kind: ExprKind::BinOp(BinOp::Shr, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+                lhs = Expr { kind: ExprKind::BinOp(BinOp::Shr, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
             } else {
                 break;
             }
@@ -546,7 +546,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_mul()?;
-            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -564,7 +564,7 @@ impl Parser {
             let col = self.col();
             self.advance();
             let rhs = self.parse_unary()?;
-            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()};
+            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
     }
@@ -585,13 +585,13 @@ impl Parser {
                 if self.check(&TokenKind::RBracket) {
                     Ok(Expr {
                         kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive },
-                        line, col, len: self.tok_len(),
+                        line, col, len: self.span_len(line, col),
                     })
                 } else {
                     let end = self.parse_unary_no_range()?;
                     Ok(Expr {
                         kind: ExprKind::Range { start: Box::new(start), end: Box::new(end), inclusive },
-                        line, col, len: self.tok_len(),
+                        line, col, len: self.span_len(line, col),
                     })
                 }
             }
@@ -622,7 +622,7 @@ impl Parser {
                 }
                 let expr = self.parse_unary_no_range();
                 self.depth -= 1;
-                Ok(Expr { kind: ExprKind::UnaryOp(op, Box::new(expr?)), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::UnaryOp(op, Box::new(expr?)), line, col, len: self.span_len(line, col)})
             }
             TokenKind::New => {
                 self.advance();
@@ -635,7 +635,7 @@ impl Parser {
                     None
                 };
                 let ctor = self.parse_postfix_top_level()?;
-                Ok(Expr { kind: ExprKind::New { arena, ctor: Box::new(ctor) }, line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::New { arena, ctor: Box::new(ctor) }, line, col, len: self.span_len(line, col)})
             }
             _ => self.parse_postfix_top_level(),
         }
@@ -700,9 +700,9 @@ impl Parser {
                             type_args.push(self.parse_type()?);
                         }
                         self.expect(&TokenKind::Gt)?;
-                        let callee = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.tok_len() };
+                        let callee = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.span_len(line, col) };
                         let args = if self.check(&TokenKind::LParen) { self.parse_call_args()? } else { vec![] };
-                        expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.tok_len() };
+                        expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col) };
                         continue;
                     }
                     // Check for trailing closure FIRST (before regular call args),
@@ -711,7 +711,7 @@ impl Parser {
                         // Method call with only a trailing closure (no parentheses for regular args)
                         let args = self.parse_trailing_closure(vec![])?;
                         seen_trailing_closure = true;
-                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line, col, len: self.span_len(line, col)};
                     } else if self.check(&TokenKind::LParen) {
                         let mut args = self.parse_call_args()?;
                         // Check for trailing closure after the argument list
@@ -732,14 +732,14 @@ impl Parser {
                             args = self.parse_trailing_body_no_colon(args)?;
                             seen_trailing_closure = true;
                         }
-                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line, col, len: self.span_len(line, col)};
                     } else if self.peek_is_trailing_closure_no_paren() {
                         // Method call with only a no-paren trailing closure: `expr.method x: body`
                         let args = self.parse_trailing_closure_no_paren(vec![])?;
                         seen_trailing_closure = true;
-                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line, col, len: self.span_len(line, col)};
                     } else {
-                        expr = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.span_len(line, col)};
                     }
                 }
                 TokenKind::QuestionDot => {
@@ -759,24 +759,24 @@ impl Parser {
                             type_args.push(self.parse_type()?);
                         }
                         self.expect(&TokenKind::Gt)?;
-                        let callee = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line, col, len: self.tok_len() };
+                        let callee = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line, col, len: self.span_len(line, col) };
                         let args = if self.check(&TokenKind::LParen) { self.parse_call_args()? } else { vec![] };
-                        expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.tok_len() };
+                        expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col) };
                         continue;
                     }
                     if self.peek_is_trailing_closure() {
                         let args = self.parse_trailing_closure(vec![])?;
                         seen_trailing_closure = true;
-                        expr = Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr), field, args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr), field, args), line, col, len: self.span_len(line, col)};
                     } else if self.check(&TokenKind::LParen) {
                         let mut args = self.parse_call_args()?;
                         if self.peek_is_trailing_closure() {
                             args = self.parse_trailing_closure(args)?;
                             seen_trailing_closure = true;
                         }
-                        expr = Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr), field, args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr), field, args), line, col, len: self.span_len(line, col)};
                     } else {
-                        expr = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line, col, len: self.span_len(line, col)};
                     }
                 }
                 TokenKind::LBracket => {
@@ -797,7 +797,7 @@ impl Parser {
                             args.push(self.parse_arg()?);
                         }
                         self.expect(&TokenKind::RBracket)?;
-                        expr = Expr { kind: ExprKind::LabeledIndex(Box::new(expr), args), line, col, len: self.tok_len() };
+                        expr = Expr { kind: ExprKind::LabeledIndex(Box::new(expr), args), line, col, len: self.span_len(line, col) };
                         continue;
                     }
                     // Slice with no start: `a[..N]`, `a[..=N]`, `a[..]`
@@ -809,27 +809,27 @@ impl Parser {
                         } else {
                             Some(Box::new(self.parse_expr()?))
                         };
-                        Expr { kind: ExprKind::SliceRange { start: None, end, inclusive }, line, col, len: self.tok_len() }
+                        Expr { kind: ExprKind::SliceRange { start: None, end, inclusive }, line, col, len: self.span_len(line, col) }
                     } else {
                         let inner = self.parse_expr()?;
                         // `parse_expr` consumed `M..N` → Range; convert to SliceRange.
                         // `M..` with no end is caught in the DotDot postfix arm below.
                         match inner.kind {
                             ExprKind::Range { start, end, inclusive } =>
-                                Expr { kind: ExprKind::SliceRange { start: Some(start), end: Some(end), inclusive }, line, col, len: self.tok_len() },
+                                Expr { kind: ExprKind::SliceRange { start: Some(start), end: Some(end), inclusive }, line, col, len: self.span_len(line, col) },
                             ExprKind::SliceRange { .. } => inner, // M.. already produced by postfix
                             _ => inner,
                         }
                     };
                     self.expect(&TokenKind::RBracket)?;
-                    expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), line, col, len: self.tok_len()};
+                    expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), line, col, len: self.span_len(line, col)};
                 }
                 TokenKind::LParen => {
                     // Check for trailing closure FIRST before trying to parse as regular call
                     if self.peek_is_trailing_closure() {
                         let args = self.parse_trailing_closure(vec![])?;
                         seen_trailing_closure = true;
-                        expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line, col, len: self.span_len(line, col)};
                     } else {
                         let mut args = self.parse_call_args()?;
                         // Check for trailing closure after the argument list
@@ -847,7 +847,7 @@ impl Parser {
                             args = self.parse_trailing_body_no_colon(args)?;
                             seen_trailing_closure = true;
                         }
-                        expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line, col, len: self.span_len(line, col)};
                     }
                 }
                 TokenKind::As => {
@@ -871,10 +871,10 @@ impl Parser {
                             pairs.push(self.parse_relabel_pair()?);
                         }
                         self.expect(&TokenKind::RBracket)?;
-                        expr = Expr { kind: ExprKind::RelabelCast(Box::new(expr), pairs), line, col, len: self.tok_len() };
+                        expr = Expr { kind: ExprKind::RelabelCast(Box::new(expr), pairs), line, col, len: self.span_len(line, col) };
                     } else {
                         let ty = self.parse_type()?;
-                        expr = Expr { kind: ExprKind::Cast(Box::new(expr), ty), line, col, len: self.tok_len()};
+                        expr = Expr { kind: ExprKind::Cast(Box::new(expr), ty), line, col, len: self.span_len(line, col)};
                     }
                 }
                 TokenKind::Ident(_) if self.peek_is_trailing_closure_no_paren() => {
@@ -883,7 +883,7 @@ impl Parser {
                     seen_trailing_closure = true;
                     expr = Expr {
                         kind: ExprKind::Call(Box::new(expr), args),
-                        line, col, len: self.tok_len(), };
+                        line, col, len: self.span_len(line, col), };
                 }
                 _ => break,
             }
@@ -1081,8 +1081,27 @@ impl Parser {
             }
             Stmt::For(f) => Self::scan_stmts_throws_task(&f.body),
             Stmt::Try(_) => (true, false),  // try block may catch throws, but the body throws
+            Stmt::Match(m) => Self::scan_match_throws_task(m),
             _ => (false, false),
         }
+    }
+
+    /// Shared by `scan_expr_throws_task`'s `ExprKind::Match` arm and
+    /// `scan_stmt_throws_task`'s `Stmt::Match` arm — a `task`/`throw` hidden inside
+    /// any match arm (guard or body) must still mark the enclosing closure.
+    fn scan_match_throws_task(m: &MatchStmt) -> (bool, bool) {
+        let (mut t, mut k) = Self::scan_expr_throws_task(&m.subject);
+        for arm in &m.arms {
+            if let Some(guard) = &arm.guard {
+                let (gt, gk) = Self::scan_expr_throws_task(guard); t |= gt; k |= gk;
+            }
+            let (bt, bk) = match &arm.body {
+                MatchBody::Expr(e) => Self::scan_expr_throws_task(e),
+                MatchBody::Block(stmts) => Self::scan_stmts_throws_task(stmts),
+            };
+            t |= bt; k |= bk;
+        }
+        (t, k)
     }
 
     pub(crate) fn scan_expr_throws_task(e: &Expr) -> (bool, bool) {
@@ -1116,6 +1135,18 @@ impl Parser {
                     let (bt, bk) = Self::scan_stmts_throws_task(body); t |= bt; k |= bk;
                 }
                 (t, k)
+            }
+            ExprKind::Match(m) => Self::scan_match_throws_task(m),
+            ExprKind::UnaryOp(_, ex) => Self::scan_expr_throws_task(ex),
+            ExprKind::TryElse(ex, default) => {
+                let (t1, k1) = Self::scan_expr_throws_task(ex);
+                let (t2, k2) = Self::scan_expr_throws_task(default);
+                (t1 | t2, k1 | k2)
+            }
+            ExprKind::TryElseBlock(body, els) => {
+                let (t1, k1) = Self::scan_stmts_throws_task(body);
+                let (t2, k2) = Self::scan_stmts_throws_task(els);
+                (t1 | t2, k1 | k2)
             }
             _ => (false, false),
         }
@@ -1151,7 +1182,7 @@ impl Parser {
         let (inf_throws, inf_task) = Self::infer_throws_task(&body);
         let closure_expr = Expr {
             kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task),
-            line, col, len: self.tok_len(), };
+            line, col, len: self.span_len(line, col), };
         existing_args.push(Arg { label: None, value: closure_expr , spread: false, default_rest: false});
         Ok(existing_args)
     }
@@ -1182,7 +1213,7 @@ impl Parser {
         let (inf_throws, inf_task) = Self::infer_throws_task(&body);
         let closure_expr = Expr {
             kind: ExprKind::Closure(vec![], None, body, inf_throws, inf_task),
-            line, col, len: self.tok_len(), };
+            line, col, len: self.span_len(line, col), };
         existing_args.push(Arg { label: None, value: closure_expr, spread: false, default_rest: false });
         Ok(existing_args)
     }
@@ -1200,7 +1231,7 @@ impl Parser {
         let (inf_throws, inf_task) = Self::infer_throws_task(&ClosureBody::Expr(Box::new(body_expr.clone())));
         let closure_expr = Expr {
             kind: ExprKind::Closure(vec![], None, ClosureBody::Expr(Box::new(body_expr)), inf_throws, inf_task),
-            line, col, len: self.tok_len(), };
+            line, col, len: self.span_len(line, col), };
         existing_args.push(Arg { label: None, value: closure_expr, spread: false, default_rest: false });
         Ok(existing_args)
     }
@@ -1243,7 +1274,7 @@ impl Parser {
         let (throws, task) = Self::infer_throws_task(&body);
         let closure_expr = Expr {
             kind: ExprKind::Closure(vec![param], None, body, throws, task),
-            line, col, len: self.tok_len(), };
+            line, col, len: self.span_len(line, col), };
         existing_args.push(Arg { label: None, value: closure_expr , spread: false, default_rest: false});
         Ok(existing_args)
     }
@@ -1393,41 +1424,41 @@ impl Parser {
         match self.peek().clone() {
             TokenKind::Int(n) => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Int(n), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Int(n), line, col, len: self.span_len(line, col)})
             }
             TokenKind::UInt64(n) => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::UInt64(n), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::UInt64(n), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Float(f) => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Float(f), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Float(f), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Str(s) => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Str(s), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Str(s), line, col, len: self.span_len(line, col)})
             }
             TokenKind::StringInterp(parts) => {
                 let parts = parts.clone();
                 self.advance();
                 let segments = self.resolve_interp(parts, line)?;
-                Ok(Expr { kind: ExprKind::StringInterp(segments), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::StringInterp(segments), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Bool(b) => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Bool(b), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Bool(b), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Nil => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Nil, line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Nil, line, col, len: self.span_len(line, col)})
             }
             TokenKind::Void => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Void, line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Void, line, col, len: self.span_len(line, col)})
             }
             TokenKind::SelfKw => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Var("self".to_string()), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Var("self".to_string()), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Ident(s) => {
                 let name = s.clone();
@@ -1441,7 +1472,7 @@ impl Parser {
                         self.advance(); // consume Ident
                         self.advance(); // consume Bang
                         let args = self.parse_macro_args()?;
-                        return Ok(Expr { kind: ExprKind::MacroCall { name, args }, line, col, len: self.tok_len()});
+                        return Ok(Expr { kind: ExprKind::MacroCall { name, args }, line, col, len: self.span_len(line, col)});
                     }
                 }
                 // Generic call: `name<T1, T2>(args)`
@@ -1458,13 +1489,13 @@ impl Parser {
                         type_args.push(self.parse_type()?);
                     }
                     self.expect(&TokenKind::Gt)?;
-                    let callee = Expr { kind: ExprKind::Var(name), line, col, len: self.tok_len()};
+                    let callee = Expr { kind: ExprKind::Var(name), line, col, len: self.span_len(line, col)};
                     let args = if self.check(&TokenKind::LParen) {
                         self.parse_call_args()?
                     } else {
                         vec![]
                     };
-                    return Ok(Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.tok_len()});
+                    return Ok(Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col)});
                 }
                 // Single-param closure without parens: `x: body`
                 // Only when allow_noparen_closure is set — disabled in condition contexts
@@ -1477,10 +1508,10 @@ impl Parser {
                     let param = Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col };
                     let body = self.parse_closure_body()?;
                     let (throws, task) = Self::infer_throws_task(&body);
-                    return Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line, col, len: self.tok_len()});
+                    return Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line, col, len: self.span_len(line, col)});
                 }
                 self.advance();
-                Ok(Expr { kind: ExprKind::Var(name), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Var(name), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Colon => {
                 // Closure shorthand: `:expr` → `(__x): __x.expr`
@@ -1496,14 +1527,14 @@ impl Parser {
                     ty: None, mutable: false, rebindable: false, owned: false, variadic: false,
                     default: None, line, col: 0,
                 };
-                let base = Expr { kind: ExprKind::Var("__x".to_string()), line, col, len: self.tok_len()};
+                let base = Expr { kind: ExprKind::Var("__x".to_string()), line, col, len: self.span_len(line, col)};
                 // First member: ident [ ( args ) ]
                 let member = self.expect_ident()?;
                 let mut acc = if self.check(&TokenKind::LParen) {
                     let args = self.parse_call_args()?;
-                    Expr { kind: ExprKind::MethodCall(Box::new(base), member, args), line, col, len: self.tok_len()}
+                    Expr { kind: ExprKind::MethodCall(Box::new(base), member, args), line, col, len: self.span_len(line, col)}
                 } else {
-                    Expr { kind: ExprKind::Field(Box::new(base), member), line, col, len: self.tok_len()}
+                    Expr { kind: ExprKind::Field(Box::new(base), member), line, col, len: self.span_len(line, col)}
                 };
                 // Optional trailing .field / .method() chain
                 while self.check(&TokenKind::Dot) {
@@ -1511,9 +1542,9 @@ impl Parser {
                     let next = self.expect_ident()?;
                     acc = if self.check(&TokenKind::LParen) {
                         let args = self.parse_call_args()?;
-                        Expr { kind: ExprKind::MethodCall(Box::new(acc), next, args), line, col, len: self.tok_len()}
+                        Expr { kind: ExprKind::MethodCall(Box::new(acc), next, args), line, col, len: self.span_len(line, col)}
                     } else {
-                        Expr { kind: ExprKind::Field(Box::new(acc), next), line, col, len: self.tok_len()}
+                        Expr { kind: ExprKind::Field(Box::new(acc), next), line, col, len: self.span_len(line, col)}
                     };
                 }
                 // Optional binary-operator continuation: `:length > 3`, `:count != 0`, etc.
@@ -1536,20 +1567,20 @@ impl Parser {
                     if let Some(op) = op {
                         self.advance(); // consume operator
                         let rhs = self.parse_or()?;
-                        Expr { kind: ExprKind::BinOp(op, Box::new(acc), Box::new(rhs)), line, col, len: self.tok_len()}
+                        Expr { kind: ExprKind::BinOp(op, Box::new(acc), Box::new(rhs)), line, col, len: self.span_len(line, col)}
                     } else {
                         acc
                     }
                 };
                 let body = ClosureBody::Expr(Box::new(body_expr));
                 let (throws, task) = Self::infer_throws_task(&body);
-                Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Dot => {
                 // Dot-prefix enum shorthand: `.Red`
                 self.advance();
                 let name = self.expect_ident()?;
-                Ok(Expr { kind: ExprKind::DotIdent(name), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::DotIdent(name), line, col, len: self.span_len(line, col)})
             }
             TokenKind::LParen => {
                 self.advance();
@@ -1562,9 +1593,9 @@ impl Parser {
                         self.advance();
                         let body = self.parse_closure_body()?;
                         let (inf_throws, inf_task) = Self::infer_throws_task(&body);
-                        return Ok(Expr { kind: ExprKind::Closure(vec![], None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.tok_len()});
+                        return Ok(Expr { kind: ExprKind::Closure(vec![], None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.span_len(line, col)});
                     }
-                    return Ok(Expr { kind: ExprKind::Tuple(vec![]), line, col, len: self.tok_len()});
+                    return Ok(Expr { kind: ExprKind::Tuple(vec![]), line, col, len: self.span_len(line, col)});
                 }
                 // Detect typed closure params: `(Type name, ...)` or `(var Type name, ...)`
                 // Heuristic: if first token is type-start AND second is an ident → typed params
@@ -1581,7 +1612,7 @@ impl Parser {
                     self.expect(&TokenKind::Colon)?;
                     let body = self.parse_closure_body()?;
                     let (inf_throws, inf_task) = Self::infer_throws_task(&body);
-                    return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.tok_len()});
+                    return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.span_len(line, col)});
                 }
                 // Untyped: parse as expression(s), then decide closure vs tuple vs grouping
                 let expr = self.parse_expr()?;
@@ -1600,9 +1631,9 @@ impl Parser {
                         let params = elems.iter().map(|e| expr_to_param(e, line, col)).collect::<Vec<_>>();
                         let body = self.parse_closure_body()?;
                         let (inf_throws, inf_task) = Self::infer_throws_task(&body);
-                        return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.tok_len()});
+                        return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.span_len(line, col)});
                     }
-                    Ok(Expr { kind: ExprKind::Tuple(elems), line, col, len: self.tok_len()})
+                    Ok(Expr { kind: ExprKind::Tuple(elems), line, col, len: self.span_len(line, col)})
                 } else {
                     self.skip_newlines_and_indent(); // allow newline before `)`
                     self.expect(&TokenKind::RParen)?;
@@ -1612,7 +1643,7 @@ impl Parser {
                         let params = vec![expr_to_param(&expr, line, col)];
                         let body = self.parse_closure_body()?;
                         let (inf_throws, inf_task) = Self::infer_throws_task(&body);
-                        return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.tok_len()});
+                        return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line, col, len: self.span_len(line, col)});
                     }
                     Ok(expr)
                 }
@@ -1654,7 +1685,7 @@ impl Parser {
                             self.skip_newlines_and_indent();
                             self.expect(&TokenKind::RBracket)?;
                             let kind = ExprKind::LabeledArrayComp { expr: Box::new(first), clauses };
-                            return Ok(Expr { kind, line, col, len: self.tok_len() });
+                            return Ok(Expr { kind, line, col, len: self.span_len(line, col) });
                         }
                         // `[v for i in ..n]` or `[f(x) for x in collection]` — computed form
                         let kind = if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::In) {
@@ -1677,13 +1708,13 @@ impl Parser {
                                     ExprKind::Range { inclusive: true, .. } => {
                                         return Err(ParseError::Generic {
                                             msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
-                                            line, col, len: self.tok_len(),
+                                            line, col, len: self.span_len(line, col),
                                         });
                                     }
                                     ExprKind::Range { .. } => {
                                         return Err(ParseError::Generic {
                                             msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
-                                            line, col, len: self.tok_len(),
+                                            line, col, len: self.span_len(line, col),
                                         });
                                     }
                                     _ => {
@@ -1722,11 +1753,11 @@ impl Parser {
                             } else {
                                 ExprKind::LabeledArrayComp { expr: comp_expr, clauses }
                             };
-                            return Ok(Expr { kind, line, col, len: self.tok_len() });
+                            return Ok(Expr { kind, line, col, len: self.span_len(line, col) });
                         }
                         self.skip_newlines_and_indent();
                         self.expect(&TokenKind::RBracket)?;
-                        return Ok(Expr { kind, line, col, len: self.tok_len()});
+                        return Ok(Expr { kind, line, col, len: self.span_len(line, col)});
                     }
                     // Regular array literal — continue collecting elements
                     let mut elems = vec![first];
@@ -1740,22 +1771,22 @@ impl Parser {
                     }
                     self.skip_newlines_and_indent();
                     self.expect(&TokenKind::RBracket)?;
-                    return Ok(Expr { kind: ExprKind::Array(elems), line, col, len: self.tok_len()});
+                    return Ok(Expr { kind: ExprKind::Array(elems), line, col, len: self.span_len(line, col)});
                 }
                 self.skip_newlines_and_indent();
                 self.expect(&TokenKind::RBracket)?;
-                Ok(Expr { kind: ExprKind::Array(vec![]), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Array(vec![]), line, col, len: self.span_len(line, col)})
             }
             TokenKind::LBrace => {
                 self.parse_brace_expr(line, col)
             }
             TokenKind::If => {
                 let if_stmt = self.parse_if_stmt()?;
-                Ok(Expr { kind: ExprKind::If(Box::new(if_stmt)), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::If(Box::new(if_stmt)), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Match => {
                 let match_stmt = self.parse_match_stmt()?;
-                Ok(Expr { kind: ExprKind::Match(Box::new(match_stmt)), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Match(Box::new(match_stmt)), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Do => {
                 // `do:` in expression context — always a scoped block, never do-while
@@ -1763,12 +1794,12 @@ impl Parser {
                 self.expect(&TokenKind::Colon)?;
                 self.expect_newline()?;
                 let stmts = self.parse_block()?;
-                Ok(Expr { kind: ExprKind::Do(stmts), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Do(stmts), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Loop => {
                 // `loop:` as an expression — evaluates to the `break value`
                 let s = self.parse_loop_stmt()?;
-                Ok(Expr { kind: ExprKind::Loop(s), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Loop(s), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Task => {
                 self.parse_task_expr()
@@ -1784,22 +1815,22 @@ impl Parser {
                     if !self.eat(&TokenKind::Comma) { break; }
                 }
                 self.expect(&TokenKind::RParen)?;
-                Ok(Expr { kind: ExprKind::JoinAll(exprs), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::JoinAll(exprs), line, col, len: self.span_len(line, col)})
             }
             // Soft keywords — also usable as function names / variable references in expressions.
             TokenKind::Get => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Var("get".to_string()), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Var("get".to_string()), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Set => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Var("set".to_string()), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Var("set".to_string()), line, col, len: self.span_len(line, col)})
             }
             // `wait(dur)` — function-call form of the `wait dur` statement.
             // Allows passing `wait` as a callable and using it in closures.
             TokenKind::Wait => {
                 self.advance();
-                Ok(Expr { kind: ExprKind::Var("wait".to_string()), line, col, len: self.tok_len()})
+                Ok(Expr { kind: ExprKind::Var("wait".to_string()), line, col, len: self.span_len(line, col)})
             }
             _ => Err(ParseError::Generic {
                 line, col,
@@ -1841,14 +1872,14 @@ impl Parser {
         if self.check(&TokenKind::RBrace) {
             self.advance();
             // {} = empty set; {=} = empty dict
-            return Ok(Expr { kind: ExprKind::Set(vec![]), line, col, len: self.tok_len()});
+            return Ok(Expr { kind: ExprKind::Set(vec![]), line, col, len: self.span_len(line, col)});
         }
 
         // {=} = also empty dict (alternate syntax)
         if self.check(&TokenKind::Eq) {
             self.advance();
             self.expect(&TokenKind::RBrace)?;
-            return Ok(Expr { kind: ExprKind::Dict(vec![]), line, col, len: self.tok_len()});
+            return Ok(Expr { kind: ExprKind::Dict(vec![]), line, col, len: self.span_len(line, col)});
         }
 
         // Distinguish dict from set: dict uses `=` as key-value separator
@@ -1868,7 +1899,7 @@ impl Parser {
             }
             self.skip_newlines_and_indent(); // allow newline before `}`
             self.expect(&TokenKind::RBrace)?;
-            Ok(Expr { kind: ExprKind::Dict(pairs), line, col, len: self.tok_len()})
+            Ok(Expr { kind: ExprKind::Dict(pairs), line, col, len: self.span_len(line, col)})
         } else {
             // Set
             let mut elems = vec![first_expr];
@@ -1879,7 +1910,7 @@ impl Parser {
             }
             self.skip_newlines_and_indent(); // allow newline before `}`
             self.expect(&TokenKind::RBrace)?;
-            Ok(Expr { kind: ExprKind::Set(elems), line, col, len: self.tok_len()})
+            Ok(Expr { kind: ExprKind::Set(elems), line, col, len: self.span_len(line, col)})
         }
     }
 
@@ -1984,13 +2015,13 @@ impl Parser {
                 self.expect_newline()?;
                 let stmts = self.parse_block()?;
                 check_no_return(&stmts, "task block")?;
-                Expr { kind: ExprKind::Block(stmts), line, col, len: self.tok_len()}
+                Expr { kind: ExprKind::Block(stmts), line, col, len: self.span_len(line, col)}
             } else {
                 self.parse_or()?
             };
             return Ok(Expr {
                 kind: ExprKind::TaskWithTimeout(Box::new(dur_expr), Box::new(body)),
-                line, col, len: self.tok_len(), });
+                line, col, len: self.span_len(line, col), });
         }
 
         // Optionally consume ':'
@@ -2000,7 +2031,7 @@ impl Parser {
             self.expect_newline()?;
             let stmts = self.parse_block()?;
             check_no_return(&stmts, "task block")?;
-            Expr { kind: ExprKind::Block(stmts), line, col, len: self.tok_len()}
+            Expr { kind: ExprKind::Block(stmts), line, col, len: self.span_len(line, col)}
         } else {
             let expr = self.parse_or()?;
             // Command-style: `task print "..."` → Task(Call(print, ["..."]))
@@ -2010,7 +2041,7 @@ impl Parser {
                     let arg = self.parse_expr()?;
                     Expr {
                         kind: ExprKind::Call(Box::new(expr), vec![Arg { label: None, value: arg , spread: false, default_rest: false }]),
-                        line: arg_line, col, len: self.tok_len(), }
+                        line: arg_line, col, len: self.span_len(line, col), }
                 } else {
                     expr
                 }
@@ -2018,7 +2049,7 @@ impl Parser {
                 expr
             }
         };
-        Ok(Expr { kind: ExprKind::Task(Box::new(inner)), line, col, len: self.tok_len()})
+        Ok(Expr { kind: ExprKind::Task(Box::new(inner)), line, col, len: self.span_len(line, col)})
     }
 
     /// Parse the count expression in an array comprehension (`[v for ..n]` or `[f(i) for i in ..n]`).
@@ -2029,7 +2060,7 @@ impl Parser {
         let count = self.parse_expr()?;
         self.skip_newlines_and_indent();
         self.expect(&TokenKind::RBracket)?;
-        Ok(Expr { kind: ExprKind::ArrayAlloc { count: Box::new(count) }, line, col, len: self.tok_len() })
+        Ok(Expr { kind: ExprKind::ArrayAlloc { count: Box::new(count) }, line, col, len: self.span_len(line, col) })
     }
 
     fn parse_comprehension_count(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
@@ -2046,17 +2077,17 @@ impl Parser {
                 } else {
                     Err(ParseError::Generic {
                         msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
-                        line, col, len: self.tok_len(),
+                        line, col, len: self.span_len(line, col),
                     })
                 }
             }
             ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
                 msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
-                line, col, len: self.tok_len(),
+                line, col, len: self.span_len(line, col),
             }),
             _ => Err(ParseError::Generic {
                 msg: "expected `..n` or `0..n` in array comprehension".to_string(),
-                line, col, len: self.tok_len(),
+                line, col, len: self.span_len(line, col),
             }),
         }
     }
@@ -2081,13 +2112,13 @@ impl Parser {
                 } else {
                     Err(ParseError::Generic {
                         msg: "array fill range must start at 0 — use `..n`, `0..n`, or a bare `n`".to_string(),
-                        line, col, len: self.tok_len(),
+                        line, col, len: self.span_len(line, col),
                     })
                 }
             }
             ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
                 msg: "array fill does not accept inclusive range (`..=`)".to_string(),
-                line, col, len: self.tok_len(),
+                line, col, len: self.span_len(line, col),
             }),
             _ => Ok(expr),
         }
