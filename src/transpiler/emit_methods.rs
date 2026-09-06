@@ -3479,6 +3479,7 @@ impl Transpiler {
             in_try_body: self.in_try_body,
             error_var_is_concrete_enum: self.error_var_is_concrete_enum,
             in_type_setter: self.in_type_setter,
+            in_instance_setter: self.in_instance_setter.clone(),
             in_init_body: self.in_init_body,
             struct_type_var_names: self.struct_type_var_names.clone(),
             struct_type_mut_var_names: self.struct_type_mut_var_names.clone(),

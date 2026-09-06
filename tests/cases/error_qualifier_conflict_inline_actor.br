@@ -1,0 +1,12 @@
+struct Counter:
+    var int value = 0
+
+def Counter'actor make_actor():
+    Counter(0)
+
+def use_inline(Counter'inline c):
+    print c.value
+
+def bad():
+    let c = make_actor()
+    use_inline(c)

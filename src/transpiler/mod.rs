@@ -548,6 +548,18 @@ struct Transpiler {
     pub(crate) error_var_is_concrete_enum: bool,
     /// True while emitting a `type set` body — prevents recursive setter dispatch.
     pub(crate) in_type_setter: bool,
+    /// `Some(field)` while emitting the body of the instance `set field(...)`
+    /// setter for `field` — prevents recursive setter dispatch, same reason as
+    /// `in_type_setter` (kept as an `Option<String>` rather than a bare `bool`
+    /// so that setter A's body assigning to a *different* field with its own
+    /// setter B still correctly dispatches through `set_B`; only a write back
+    /// to A's own field is redirected to a plain field write). Without this, a
+    /// setter whose property name matches the field it writes (the idiomatic
+    /// `set balance(balance): self.balance = balance`) has its own body's
+    /// `self.balance = ...` re-dispatched through `set_balance` again by
+    /// `emit_expr_assign`'s instance-setter check — infinite recursion in the
+    /// generated Rust, a stack overflow at runtime, not merely a no-op.
+    pub(crate) in_instance_setter: Option<String>,
     /// True while emitting an `init` body — `self` must be emitted as `__self`.
     pub(crate) in_init_body: bool,
     /// "StructName::var_name" → present if it's an immutable, *scalar* `type let`
@@ -1203,6 +1215,7 @@ impl Transpiler {
             in_try_body: false,
             error_var_is_concrete_enum: false,
             in_type_setter: false,
+            in_instance_setter: None,
             in_init_body: false,
             struct_type_var_names: std::collections::HashSet::new(),
             struct_type_mut_var_names: std::collections::HashSet::new(),

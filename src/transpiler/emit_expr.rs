@@ -2192,8 +2192,11 @@ impl Transpiler {
         if let ExprKind::Field(obj, field) = &target.kind {
             // Instance setter property: `t.prop = v` → `t.set_prop(v)`.
             // Check if `field` is registered as a setter for any struct.
-            let is_instance_setter = self.struct_setters.iter()
-                .any(|k| k.ends_with(&format!("::{}", field)));
+            // Unless we're already inside that exact setter's own body (see
+            // `in_instance_setter`'s doc comment) — its own `self.field = ...`
+            // must be a plain field write, not infinite recursion into itself.
+            let is_instance_setter = self.in_instance_setter.as_deref() != Some(field.as_str())
+                && self.struct_setters.iter().any(|k| k.ends_with(&format!("::{}", field)));
             if is_instance_setter {
                 let obj_s = self.emit_expr(obj);
                 let val_s = self.emit_expr_owned(value);

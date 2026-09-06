@@ -1,0 +1,23 @@
+# Regression test for `emit_setter` (src/transpiler/emit_struct.rs): when a
+# setter's own parameter is named the same as the field it assigns (the
+# idiomatic `set balance(balance): self.balance = balance`), the transpiler
+# used to never register `balance` (the parameter) in `known_local_vars`
+# before emitting the body — unlike `emit_init`, which does exactly this and
+# cleans it up afterward. Without it, the RHS `balance` in `self.balance =
+# balance` was (wrongly) resolved as an implicit `self.balance` access, so
+# the generated Rust was the silent no-op `self.balance = self.balance;`.
+# This program only passes if the setter genuinely changes the field.
+
+struct Account:
+    var float balance
+
+    init(float balance):
+        self.balance = balance
+
+    set balance(float balance):
+        self.balance = balance
+
+def main():
+    mut a = Account(10.0)
+    a.balance = 42.0
+    print a.balance

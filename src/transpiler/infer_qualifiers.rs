@@ -222,12 +222,11 @@ impl Transpiler {
             match remaining.len() {
                 0 if !is_alias => {
                     let line = self.fn_current_param_lines.get(var_name.as_str()).copied().unwrap_or(0);
-                    let loc = if line > 0 { format!(" line {}", line) } else { String::new() };
-                    eprintln!(
-                        "error{}: `{}` has no valid qualifier — usage constraints are incompatible\n  \
+                    self.push_error(line, 0, format!(
+                        "`{}` has no valid qualifier — usage constraints are incompatible\n  \
                          fix: annotate `{}` explicitly",
-                        loc, var_name, var_name
-                    );
+                        var_name, var_name
+                    ));
                 }
                 1 => {
                     self.inferred_qualifiers.insert(var_name.clone(), remaining[0].clone());
@@ -526,12 +525,11 @@ impl Transpiler {
                             // Error: def call on immutable auto-ref parameter.
                             if is_auto_ref_param && !is_mut_param {
                                 let line = self.fn_current_param_lines.get(var_name.as_str()).copied().unwrap_or(0);
-                                let loc = if line > 0 { format!(" line {}", line) } else { String::new() };
-                                eprintln!(
-                                    "error{}: parameter `{}` is immutable but `{}` is a `def` method \
+                                self.push_error(line, 0, format!(
+                                    "parameter `{}` is immutable but `{}` is a `def` method \
                                      — declare `mut {} n`",
-                                    loc, var_name, method, var_name
-                                );
+                                    var_name, method, var_name
+                                ));
                             }
                             constrain_candidates(
                                 candidates, var_name,
@@ -1104,14 +1102,14 @@ impl Transpiler {
                                 let Some(arg_qual) = self.var_qual(var_name) else { continue };
                                 if !members.iter().any(|m| quals_equal(m, &arg_qual)) {
                                     let allowed: Vec<&str> = members.iter().map(|q| qual_name(q)).collect();
-                                    eprintln!(
-                                        "error line {}: qualifier '{}' for `{}` is not allowed here\n  \
+                                    self.push_error(expr.line, expr.col, format!(
+                                        "qualifier '{}' for `{}` is not allowed here\n  \
                                          → parameter {} of `{}` accepts only: {}\n  \
                                          fix: annotate `{}` with one of the listed qualifiers",
-                                        expr.line, qual_name(&arg_qual), var_name,
+                                        qual_name(&arg_qual), var_name,
                                         i + 1, fn_name, allowed.join("|"),
                                         var_name
-                                    );
+                                    ));
                                 }
                             }
 
@@ -1121,14 +1119,14 @@ impl Transpiler {
                                 if let Some(arg_union) = self.var_union(var_name) {
                                     if !arg_union.iter().any(|m| quals_equal(m, &demanded)) {
                                         let union_s: Vec<&str> = arg_union.iter().map(|q| qual_name(q)).collect();
-                                        eprintln!(
-                                            "error line {}: `{}` has qualifier constraint '{}'\n  \
+                                        self.push_error(expr.line, expr.col, format!(
+                                            "`{}` has qualifier constraint '{}'\n  \
                                              → this call demands '{}' which is outside the constraint\n  \
                                              fix: change the qualifier constraint on `{}` to include '{}', \
                                              or pick a concrete qualifier",
-                                            expr.line, var_name, union_s.join("|"),
+                                            var_name, union_s.join("|"),
                                             qual_name(&demanded), var_name, qual_name(&demanded)
-                                        );
+                                        ));
                                     }
                                 }
                             }
@@ -1186,12 +1184,18 @@ impl Transpiler {
                 // Auto-ref (Borrow / BorrowMut) is resolved silently — no annotation needed.
                 if matches!(inferred, OwnerQual::Borrow | OwnerQual::BorrowMut) { continue; }
                 let line = self.fn_current_param_lines.get(param_name.as_str()).copied().unwrap_or(0);
-                eprintln!(
-                    "hint: parameter `{}` is always used as '{}' in this body\n  \
-                     → consider annotating it explicitly to make the contract clear at call sites\n \
-                     --> line {}",
-                    param_name, qual_name(inferred), line
-                );
+                // Advisory only — a successfully-inferred qualifier with a suggestion to
+                // annotate it explicitly, not a conflict. Unlike the other 4 `eprintln!`
+                // sites this module used to have (see the audit finding this fixes), this
+                // one is legitimately non-fatal: `push_warning` (not `push_error`) is the
+                // right severity — promoting it to a hard error would fail every build with
+                // an unannotated-but-successfully-inferred parameter, which is the common
+                // case, not a bug.
+                self.push_warning(line, 0, format!(
+                    "parameter `{}` is always used as '{}' in this body — \
+                     consider annotating it explicitly to make the contract clear at call sites",
+                    param_name, qual_name(inferred)
+                ));
             }
         }
     }

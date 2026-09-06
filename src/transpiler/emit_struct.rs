@@ -994,7 +994,20 @@ impl Transpiler {
         let param = format!("{}: {}", setter.param_name, self.emit_type(&setter.param_ty));
         self.line(&format!("{}fn set_{}(&mut self, {}) {{", vis, setter.name, param));
         self.indent += 1;
+        // Register the setter's own parameter as a known local — same reason and
+        // pattern as `emit_init` above: without this, `set balance(balance): self.balance
+        // = balance`'s RHS `balance` is (wrongly) resolved as an implicit `self.balance`
+        // access (`emit_expr.rs`'s `Var` resolution), so the emitted Rust becomes the
+        // silent no-op `self.balance = self.balance;` instead of assigning the parameter.
+        self.known_local_vars.insert(setter.param_name.clone());
+        // Guard against recursive setter dispatch — same pattern and reason as
+        // `in_type_setter` (see its own doc comment): the setter body's own
+        // `self.<field> = ...` (for the same field this setter writes) must be a
+        // plain field write, not another call into this exact setter.
+        let prev_in_instance_setter = std::mem::replace(&mut self.in_instance_setter, Some(setter.name.clone()));
         self.emit_body(&setter.body);
+        self.in_instance_setter = prev_in_instance_setter;
+        self.known_local_vars.remove(setter.param_name.as_str());
         self.indent -= 1;
         self.line("}");
     }
