@@ -2,4 +2,4 @@ error: undefined variable 'undefined_var'
  --> <file>:1:7
   |
 1 | print undefined_var
-  |       ^
+  |       ^^^^^^^^^^^^^
