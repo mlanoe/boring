@@ -753,7 +753,8 @@ impl Checker {
             Item::Mod(m)    => { for i in &m.items { self.check_item(i); } }
             Item::Stmt(s)   => self.check_stmt(s),
             Item::Kernel(k) => self.check_kernel_decl(k),
-            Item::Use(_) | Item::Alias(_) | Item::Trait(_) => {}
+            Item::Trait(t)  => self.check_trait(t),
+            Item::Use(_) | Item::Alias(_) => {}
         }
     }
 
@@ -916,6 +917,7 @@ impl Checker {
         for f in &s.fields {
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
         }
+        for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }
         for m in &s.type_methods {
             self.push_scope();
@@ -923,6 +925,8 @@ impl Checker {
             for stmt in &m.body { self.check_stmt(stmt); }
             self.pop_scope();
         }
+        for sd in &s.setters { self.check_set_decl(sd); }
+        for conv in &s.conversions { self.check_as_decl(conv); }
     }
 
     fn check_enum(&mut self, e: &EnumDecl) {
@@ -940,10 +944,61 @@ impl Checker {
             for stmt in &m.body { self.check_stmt(stmt); }
             self.pop_scope();
         }
+        for sd in &e.setters { self.check_set_decl(sd); }
+        for conv in &e.conversions { self.check_as_decl(conv); }
     }
 
     fn check_ext(&mut self, e: &ExtDecl) {
         for m in &e.methods { self.check_fn(m); }
+        for sd in &e.setters { self.check_set_decl(sd); }
+        for conv in &e.conversions { self.check_as_decl(conv); }
+    }
+
+    /// `init(...)` bodies were never walked by this checker at all — none of
+    /// its rules (immutability, `mut`/`'shared`/`'static`/`'weak`, ...) applied
+    /// inside a constructor, so `boring run` silently accepted an illegal
+    /// mutation there and `boring build --emit-rust` transpiled it into valid,
+    /// running Rust. Mirrors `check_fn`'s param-binding + body-walk shape;
+    /// `InitParam` has no `rebindable` axis (see its own doc comment), so
+    /// there is no `Var` binding kind to consider here, unlike `param_binding`.
+    fn check_init(&mut self, init: &InitDecl) {
+        self.push_scope();
+        for p in &init.params {
+            let kind = if p.mutable { BindingKind::Mut } else { BindingKind::Let };
+            if p.mutable {
+                self.check_qualifier_constraint(&kind, false, &p.ty, p.line, p.col);
+            }
+            self.check_set_mut_constraint(&p.ty, p.line, p.col);
+            self.define_typed(&p.name, kind, p.ty.clone());
+            if let Some(def) = &p.default { self.check_expr(def); }
+        }
+        for stmt in &init.body { self.check_stmt(stmt); }
+        self.pop_scope();
+    }
+
+    /// `set name(param): body` — same gap as `check_init`: the body was never
+    /// walked. `SetDecl` always has exactly one parameter with an explicit
+    /// type, always by-value (no `mut`/`var` on a setter's own parameter).
+    fn check_set_decl(&mut self, sd: &SetDecl) {
+        self.push_scope();
+        self.check_set_mut_constraint(&Some(sd.param_ty.clone()), sd.line, sd.col);
+        self.define_typed(&sd.param_name, BindingKind::Let, Some(sd.param_ty.clone()));
+        for stmt in &sd.body { self.check_stmt(stmt); }
+        self.pop_scope();
+    }
+
+    /// `as Type: body` conversion — same gap as `check_init`/`check_set_decl`:
+    /// the body was never walked. No parameters (the conversion body only
+    /// sees `self`, already in scope via the enclosing struct/enum/ext).
+    fn check_as_decl(&mut self, conv: &AsDecl) {
+        for stmt in &conv.body { self.check_stmt(stmt); }
+    }
+
+    /// Trait default method bodies (`t.defaults`) — previously entirely
+    /// unchecked (`Item::Trait(_) => {}` in `check_item`). Abstract
+    /// signatures (`t.signatures`/`t.type_signatures`) have no body to walk.
+    fn check_trait(&mut self, t: &TraitDecl) {
+        for def in &t.defaults { self.check_fn(def); }
     }
 
     // ── Functions ─────────────────────────────────────────────────────────────

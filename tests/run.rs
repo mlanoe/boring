@@ -538,3 +538,7 @@ error_test_exact!(error_array_comp_nonzero);
 error_test!(error_array_comp_iter_non_array);
 error_test!(error_default_rest_spread_conflict);
 error_test!(error_default_rest_positional_conflict);
+// The checker never walked `init`/`set`/`as`/trait-default bodies at all
+// (src/checker/mod.rs's `check_struct`/`check_enum`/`check_ext`/`check_item`)
+// — see tests/cases/error_immutable_local_in_init.br's own doc comment.
+error_test!(error_immutable_local_in_init);

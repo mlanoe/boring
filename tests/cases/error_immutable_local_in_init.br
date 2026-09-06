@@ -1,0 +1,19 @@
+# Regression test: the semantic checker (src/checker/mod.rs) never walked
+# `init(...)` bodies at all — `check_struct` only visited `s.methods` and
+# `s.type_methods`, never `s.inits`. So none of this checker's rules — here,
+# the `mut` reassignment rule already enforced inside an ordinary function
+# body — applied inside a constructor: `boring run` silently accepted this
+# illegal reassignment, and `boring build --emit-rust` transpiled it into
+# valid, running Rust that violates documented `mut` semantics with no
+# diagnostic at any stage.
+
+struct Counter:
+    var int value = 0
+
+struct Foo:
+    var int y
+
+    init(int y):
+        self.y = y
+        mut c = Counter(0)
+        c = Counter(5)
