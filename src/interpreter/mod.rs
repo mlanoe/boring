@@ -2184,6 +2184,19 @@ pub struct Interpreter {
     /// True while executing a `type set` body — prevents re-invoking the setter
     /// when the body itself assigns to the same type var (e.g. `Counter.count = v`).
     pub(crate) in_type_setter: bool,
+    /// `Some(field)` while executing the body of the instance `set field(...)` setter
+    /// for `field` — prevents re-dispatching through that exact setter again, same
+    /// reason as `in_type_setter` (kept as an `Option<String>` rather than a bare
+    /// `bool` so that setter A's body assigning to a *different* field with its own
+    /// setter B still correctly dispatches through B's setter; only a write back to
+    /// A's own field is redirected to a plain field write). Without this, a setter
+    /// whose property name matches the field it writes (the idiomatic
+    /// `set balance(balance): self.balance = balance`) has its own body's
+    /// `self.balance = ...` re-dispatched through the same setter again by the
+    /// `Assign` handler's instance-setter check — infinite recursion, a stack
+    /// overflow at runtime, not merely a no-op. Mirrors the transpiler's
+    /// `in_instance_setter` field (see its doc comment in `src/transpiler/mod.rs`).
+    pub(crate) in_instance_setter: Option<String>,
     /// True while executing a stream function body. `yield` statements push to
     /// `stream_yields` as a side effect instead of emitting a Signal::Yield.
     pub(crate) in_stream: bool,
@@ -2314,6 +2327,7 @@ impl Interpreter {
             in_init_body: false,
             type_var_store: HashMap::new(),
             in_type_setter: false,
+            in_instance_setter: None,
             in_stream: false,
             stream_yields: Vec::new(),
             user_args: Vec::new(),
@@ -2355,6 +2369,7 @@ impl Interpreter {
             in_init_body: false,
             type_var_store: HashMap::new(),
             in_type_setter: false,
+            in_instance_setter: None,
             in_stream: false,
             stream_yields: Vec::new(),
             user_args: Vec::new(),

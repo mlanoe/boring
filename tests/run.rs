@@ -515,6 +515,16 @@ interp_test!(self_field_loop_match_borrow);
 interp_test!(qualifier_group_param);
 interp_test!(cast_bare_field_index);
 
+// Regression: `boring run` (the interpreter) had the analogous bug to the
+// transpiler's `in_instance_setter` recursion guard (see
+// tests/setter_param_shadows_field.rs and this shared .br case's own doc
+// comment) -- the instance-setter-dispatch code in
+// src/interpreter/methods.rs had no check for "are we already executing
+// this exact setter", so a setter whose parameter is named like the field
+// it assigns (`set balance(balance): self.balance = balance`) recursed into
+// itself forever, aborting with a stack overflow instead of printing `42`.
+interp_test!(setter_param_shadows_field);
+
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
 // `use boring.<module>` for an unrecognized module name is a hard error,

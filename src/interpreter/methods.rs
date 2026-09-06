@@ -2187,10 +2187,18 @@ impl Interpreter {
                             let inner = inner_rc.borrow();
                             (inner.type_name.clone(), inner.fields.clone())
                         };
-                        // Check for setter first
+                        // Check for setter first — unless we're already inside that
+                        // exact setter's own body (see `in_instance_setter`'s doc
+                        // comment): its own `self.field = ...` must be a plain field
+                        // write, not infinite recursion into itself.
                         let struct_val = self.global.borrow().get(&type_name);
                         if let Some(Value::Struct { decl, captured }) = struct_val {
-                            if let Some(setter) = decl.setters.iter().find(|s| s.name == *field).cloned() {
+                            let setter_opt = if self.in_instance_setter.as_deref() != Some(field.as_str()) {
+                                decl.setters.iter().find(|s| s.name == *field).cloned()
+                            } else {
+                                None
+                            };
+                            if let Some(setter) = setter_opt {
                                 if setter.task && !self.task_context {
                                     return Err(err(
                                         format!("setter '{}' is a task and must be called from a task context", setter.name),
@@ -2205,7 +2213,10 @@ impl Interpreter {
                                 let fn_env = Env::child(Rc::clone(&captured));
                                 fn_env.borrow_mut().define_mut("self", obj.clone());
                                 fn_env.borrow_mut().define(&setter.param_name, val);
+                                let prev_in_instance_setter =
+                                    std::mem::replace(&mut self.in_instance_setter, Some(setter.name.clone()));
                                 let result = self.exec_block(&setter.body, Rc::clone(&fn_env));
+                                self.in_instance_setter = prev_in_instance_setter;
                                 if pushed { self.type_param_stack.pop(); }
                                 result?;
                                 // Write back self (setter may have mutated it)
@@ -2245,7 +2256,12 @@ impl Interpreter {
                     Value::EnumVariant { ref type_name, .. } => {
                         let ns = self.global.borrow().get(type_name);
                         if let Some(Value::EnumNamespace { setters, .. }) = ns {
-                            if let Some(setter) = setters.iter().find(|s| s.name == *field).cloned() {
+                            let setter_opt = if self.in_instance_setter.as_deref() != Some(field.as_str()) {
+                                setters.iter().find(|s| s.name == *field).cloned()
+                            } else {
+                                None
+                            };
+                            if let Some(setter) = setter_opt {
                                 if setter.task && !self.task_context {
                                     return Err(err(
                                         format!("setter '{}' is a task and must be called from a task context", setter.name),
@@ -2255,7 +2271,11 @@ impl Interpreter {
                                 let fn_env = Env::child(Rc::clone(&self.global));
                                 fn_env.borrow_mut().define_mut("self", obj.clone());
                                 fn_env.borrow_mut().define(&setter.param_name, val);
-                                self.exec_block(&setter.body, Rc::clone(&fn_env))?;
+                                let prev_in_instance_setter =
+                                    std::mem::replace(&mut self.in_instance_setter, Some(setter.name.clone()));
+                                let result = self.exec_block(&setter.body, Rc::clone(&fn_env));
+                                self.in_instance_setter = prev_in_instance_setter;
+                                result?;
                                 // Write back self (setter may have mutated it)
                                 if let Some(new_self) = fn_env.borrow().get("self") {
                                     self.assign(obj_expr, new_self, env, line)?;
