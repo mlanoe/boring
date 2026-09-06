@@ -512,7 +512,13 @@ impl Checker {
         match ty {
             Type::Qualified(_, OwnerQual::Shared) => true,
             Type::Qualified(inner, _) => self.type_has_shared(inner),
-            Type::Optional(inner) | Type::Array(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
+            // NOT Type::Array/Dict/Set: `mut [T] arr` grants *structural* mutation
+            // (push/pop) on the collection itself, entirely independent of whatever
+            // `mut` would or wouldn't unlock on its element type — recursing into the
+            // element here rejected `mut [Point'shared] arr = []`, which is valid and
+            // compiles fine, as if it were `mut Point'shared p` (content mutation on a
+            // single 'shared value, which really has nothing for `mut` to unlock).
+            Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
                 self.type_has_shared(inner)
             }
             _ => false,
@@ -592,7 +598,10 @@ impl Checker {
         match ty {
             Type::Qualified(_, OwnerQual::Static) => true,
             Type::Qualified(inner, _) => self.type_has_static(inner),
-            Type::Optional(inner) | Type::Array(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
+            // See type_has_shared's comment just above — same reasoning applies here:
+            // `mut [T] arr` is structural, independent of the element type's own
+            // qualifier, so `mut [Point'static] arr = []` must not be rejected either.
+            Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
                 self.type_has_static(inner)
             }
             _ => false,

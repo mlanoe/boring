@@ -525,6 +525,14 @@ interp_test!(cast_bare_field_index);
 // itself forever, aborting with a stack overflow instead of printing `42`.
 interp_test!(setter_param_shadows_field);
 
+// Regression: the checker's `mut 'shared`/`mut 'static` rejection
+// (type_has_shared/type_has_static in src/checker/mod.rs) used to recurse into
+// `Type::Array`, wrongly treating `mut [T] arr`'s *structural* mutation
+// (push/pop on the array itself) as if it were trying to unlock content
+// mutation on a `'shared`/`'static` element — rejecting `mut [Point'shared]
+// arr = []`/`mut [Point'static] arr = []`, which are valid and compile fine.
+interp_test!(mut_array_shared_element);
+
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
 // `use boring.<module>` for an unrecognized module name is a hard error,

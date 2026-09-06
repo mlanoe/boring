@@ -1,0 +1,10 @@
+struct Point:
+    float x
+    float y
+
+def main():
+    mut [Point'shared] arr = []
+    print "{arr.length}"
+
+    mut [Point'static] arr2 = []
+    print "{arr2.length}"
