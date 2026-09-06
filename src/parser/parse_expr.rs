@@ -19,24 +19,11 @@ impl Parser {
     pub(crate) fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         // Assignment is a statement only — expressions never produce Assign nodes
         //
-        // Every recursive sub-expression (parenthesized groups, array/tuple elements,
-        // call arguments, ...) re-enters here, so guarding this single chokepoint bounds
-        // the whole expression-parsing recursion (deeply nested `((((...))))`,
-        // `[[[[...]]]]`, etc.) against a stack-overflow crash, the same way the `not`-chain
-        // guard in `parse_not` bounds unary-`not` recursion.
-        let line = self.line();
-        let col = self.col();
-        self.depth += 1;
-        if self.depth > crate::parser::MAX_EXPR_DEPTH {
-            self.depth -= 1;
-            return Err(ParseError::Generic {
-                line, col,
-                msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
-            });
-        }
-        let result = self.parse_else_expr();
-        self.depth -= 1;
-        result
+        // The recursion guard itself lives in `parse_or` (see its doc comment) —
+        // every path that reaches deep expression nesting, including the ones that
+        // bypass `parse_expr` entirely (closure bodies, named call arguments),
+        // funnels through `parse_or` before reaching `parse_primary`.
+        self.parse_else_expr()
     }
 
     /// Parse a single statement for inline body positions (match arms, if-let inline,
@@ -377,6 +364,31 @@ impl Parser {
     }
 
     pub(crate) fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        // Recursion guard: this is the real entry point for expression recursion —
+        // reached both from `parse_expr` (via `parse_else_expr` → `parse_pipe`) AND
+        // directly from call sites that bypass `parse_expr` altogether (closure
+        // bodies in `parse_closure_body`, named-argument values in `parse_arg`,
+        // comprehension counts, ...). Guarding here — rather than only in
+        // `parse_expr` — bounds ALL of those recursive paths (deeply nested
+        // `((((...))))`, `[[[[...]]]]`, and closure/arg chains like
+        // `a: a: a: … 0`) against a stack-overflow crash, the same way the
+        // `not`-chain guard in `parse_not` bounds unary-`not` recursion.
+        let line = self.line();
+        let col = self.col();
+        self.depth += 1;
+        if self.depth > crate::parser::MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError::Generic {
+                line, col,
+                msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
+            });
+        }
+        let result = self.parse_or_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_or_inner(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_and()?;
         while self.check(&TokenKind::Or) {
             let line = self.line();

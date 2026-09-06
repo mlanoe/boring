@@ -17,6 +17,27 @@ impl Parser {
     // ─── Statements ─────────────────────────────────────────────────────────
 
     pub(crate) fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        // Recursion guard: every nested block (an `if`/`while`/`for`/`match`
+        // arm/`try`/`guard`/`with`/closure/... body) re-enters here, so
+        // guarding this single chokepoint bounds the whole statement-nesting
+        // recursion (thousands of nested `if`s, etc.) against a stack-overflow
+        // crash — same pattern as the expression-recursion guard in `parse_or`.
+        let line = self.line();
+        let col = self.col();
+        self.depth += 1;
+        if self.depth > crate::parser::MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError::Generic {
+                line, col,
+                msg: format!("block nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
+            });
+        }
+        let result = self.parse_block_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Vec<Stmt>, ParseError> {
         // Skip comment tokens (and newlines) that may appear before the indent
         while matches!(self.peek(), TokenKind::Comment(_) | TokenKind::Newline | TokenKind::Semicolon) {
             self.advance();
@@ -883,6 +904,28 @@ impl Parser {
     }
 
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // Recursion guard: every nested sub-pattern (tuple elements, variant
+        // payload fields, `Some(...)`, ...) re-enters here, so guarding this
+        // single chokepoint bounds the whole pattern-nesting recursion
+        // (deeply nested `((((...))))` tuple/variant patterns in a `match`)
+        // against a stack-overflow crash — same pattern as the
+        // expression-recursion guard in `parse_or`.
+        let line = self.line();
+        let col = self.col();
+        self.depth += 1;
+        if self.depth > crate::parser::MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError::Generic {
+                line, col,
+                msg: format!("pattern nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
+            });
+        }
+        let result = self.parse_pattern_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
         // Tuple pattern: `(pat, pat, ...)`
         if self.check(&TokenKind::LParen) {
             self.advance();

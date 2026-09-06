@@ -27,6 +27,28 @@ impl Parser {
     }
 
     pub(crate) fn parse_type(&mut self) -> Result<Type, ParseError> {
+        // Recursion guard: every recursive type position (array element `[T]`,
+        // tuple slots `(T, T)`, dict key/value `{K=V}`, function param/return
+        // types, `mut Type` wrapping, ...) re-enters here, so guarding this
+        // single chokepoint bounds the whole type-parsing recursion (deeply
+        // nested `[[[[...Int...]]]]`, etc.) against a stack-overflow crash —
+        // same pattern as the expression-recursion guard in `parse_or`.
+        let line = self.line();
+        let col = self.col();
+        self.depth += 1;
+        if self.depth > crate::parser::MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError::Generic {
+                line, col,
+                msg: format!("type nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
+            });
+        }
+        let result = self.parse_type_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_type_inner(&mut self) -> Result<Type, ParseError> {
         let line = self.line();
         let _col = self.col();
 

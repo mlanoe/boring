@@ -2212,3 +2212,5 @@ pub(crate) fn collect_const_params_from_type(ty: &crate::ast::Type, type_params:
 mod tests;
 #[cfg(test)]
 mod tests_labeled_array;
+#[cfg(test)]
+mod tests_recursion_depth;
