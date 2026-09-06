@@ -484,6 +484,22 @@ impl Checker {
         matches!(binding, BindingKind::Mut) || (matches!(binding, BindingKind::Var) && var_mut)
     }
 
+    /// Single entry point for the three `mut`-on-a-binding constraints that are
+    /// always invoked together, with the same arguments, at every real `let`
+    /// call site (`check_let_stmt`, `check_let_destructure`'s per-binding
+    /// loop) — `check_qualifier_constraint` (`mut 'shared` is always an
+    /// error), `check_tuple_mut_constraint` (`mut` on a tuple), and
+    /// `check_scalar_mut_constraint` (`mut` on a scalar). Each of the three
+    /// still repeats its own `kernel_dispatch_only`/`requests_mut` guard
+    /// internally (unchanged, to keep each independently callable and this
+    /// refactor behavior-preserving) — this just removes the need for every
+    /// call site to spell out all three calls by hand.
+    fn check_mut_constraints(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, value: &Option<Expr>, line: usize, col: usize) {
+        self.check_qualifier_constraint(binding, var_mut, ty, line, col);
+        self.check_tuple_mut_constraint(binding, var_mut, ty, value, line, col);
+        self.check_scalar_mut_constraint(binding, var_mut, ty, value, line, col);
+    }
+
     fn check_qualifier_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
         if !Self::requests_mut(binding, var_mut) { return; }
@@ -1122,9 +1138,7 @@ impl Checker {
 
     fn check_let_stmt(&mut self, s: &LetStmt) {
         self.check_static_provenance(&s.ty, s.value.as_ref(), s.line, s.col);
-        self.check_qualifier_constraint(&s.binding, s.var_mut, &s.ty, s.line, s.col);
-        self.check_tuple_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
-        self.check_scalar_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
+        self.check_mut_constraints(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
         self.check_set_mut_constraint(&s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         // Labeled multi-dim array cross-label check — only when this `let` has
@@ -1180,9 +1194,7 @@ impl Checker {
             }
             if b.name != "_" {
                 let elem_value = literal_elems.and_then(|elems| elems.get(i)).cloned();
-                self.check_qualifier_constraint(&b.binding, b.var_mut, &b.ty, s.line, s.col);
-                self.check_tuple_mut_constraint(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
-                self.check_scalar_mut_constraint(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
+                self.check_mut_constraints(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
                 self.check_set_mut_constraint(&b.ty, s.line, s.col);
             }
             if b.name == "_" { continue; }
