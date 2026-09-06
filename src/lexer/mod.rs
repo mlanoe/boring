@@ -398,11 +398,17 @@ struct Lexer<'a> {
     source: &'a str,
     line: usize,
     indent_stack: Vec<usize>,
+    /// The indentation character (' ' or '\t') established by the first indented
+    /// line in the file. Every later indented line must use the same character —
+    /// mixing tabs and spaces *across* lines is ambiguous (a tab could mean 1, 4,
+    /// or 8 columns depending on the reader/editor) even though no single line
+    /// mixes them itself. `None` until the first indented line is seen.
+    indent_style: Option<char>,
 }
 
 impl<'a> Lexer<'a> {
     fn new(source: &'a str) -> Self {
-        Self { source, line: 0, indent_stack: vec![0] }
+        Self { source, line: 0, indent_stack: vec![0], indent_style: None }
     }
 
     fn tokenize(mut self) -> Result<Vec<Token>, LexError> {
@@ -432,7 +438,7 @@ impl<'a> Lexer<'a> {
             if trimmed.starts_with('#') && apply_indent {
                 // Emit any pending DEDENTs based on the comment line's indentation,
                 // so a top-level comment after an indented block closes that block correctly.
-                let comment_indent = measure_indent(raw, self.line)?;
+                let comment_indent = self.measure_indent(raw)?;
                 let cur_indent = *self.indent_stack.last().unwrap();
                 if comment_indent < cur_indent {
                     loop {
@@ -448,7 +454,7 @@ impl<'a> Lexer<'a> {
                 i += 1;
                 continue;
             }
-            let line_indent = if apply_indent { measure_indent(raw, self.line)? } else { 0 };
+            let line_indent = if apply_indent { self.measure_indent(raw)? } else { 0 };
             if apply_indent {
                 // Before emitting this line's tokens, check if we should close inner colon blocks
                 // because indentation dropped back to or below their base level.
@@ -542,7 +548,7 @@ impl<'a> Lexer<'a> {
             }
             let apply_indent = paren_depth == 0 || inner_colon_blocks > 0;
             if trimmed.starts_with('#') && apply_indent {
-                let comment_indent = match measure_indent(raw, self.line) {
+                let comment_indent = match self.measure_indent(raw) {
                     Ok(n) => n,
                     Err(e) => { errors.push(e); i += 1; continue; }
                 };
@@ -562,7 +568,7 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             let line_indent = if apply_indent {
-                match measure_indent(raw, self.line) {
+                match self.measure_indent(raw) {
                     Ok(n) => n,
                     // MixedIndentation is structural — abort
                     Err(e @ LexError::MixedIndentation { .. }) => return Err(vec![e]),
@@ -683,20 +689,40 @@ fn comment_start(s: &str) -> usize {
     s.len()
 }
 
-fn measure_indent(line: &str, line_no: usize) -> Result<usize, LexError> {
-    let mut spaces = 0usize;
-    let mut tabs = 0usize;
-    for ch in line.chars() {
-        match ch {
-            ' '  => spaces += 1,
-            '\t' => tabs += 1,
-            _    => break,
+impl<'a> Lexer<'a> {
+    /// Measures the indentation of `line` in columns (1 tab = 4 columns), rejecting
+    /// ambiguous indentation. Two levels of ambiguity are caught:
+    ///   - tabs and spaces mixed *on the same line* (always ambiguous regardless of
+    ///     tab width);
+    ///   - a file that indents some lines with spaces and others with tabs — even
+    ///     though each individual line is "pure", comparing a tab-indented line
+    ///     against a space-indented one depends on an arbitrary tab-width choice
+    ///     (this mirrors CPython's `tabnanny`/`TabError` behavior).
+    fn measure_indent(&mut self, line: &str) -> Result<usize, LexError> {
+        let mut spaces = 0usize;
+        let mut tabs = 0usize;
+        for ch in line.chars() {
+            match ch {
+                ' '  => spaces += 1,
+                '\t' => tabs += 1,
+                _    => break,
+            }
         }
+        if spaces > 0 && tabs > 0 {
+            return Err(LexError::MixedIndentation { line: self.line });
+        }
+        let this_line_style = if tabs > 0 { Some('\t') } else if spaces > 0 { Some(' ') } else { None };
+        if let Some(style) = this_line_style {
+            match self.indent_style {
+                None => self.indent_style = Some(style),
+                Some(established) if established != style => {
+                    return Err(LexError::MixedIndentation { line: self.line });
+                }
+                _ => {}
+            }
+        }
+        Ok(spaces + tabs * 4)
     }
-    if spaces > 0 && tabs > 0 {
-        return Err(LexError::MixedIndentation { line: line_no });
-    }
-    Ok(spaces + tabs * 4)
 }
 
 type CharIter<'a> = std::iter::Peekable<std::str::CharIndices<'a>>;
@@ -1275,6 +1301,25 @@ mod tests {
         let k = kinds(src);
         assert!(k.contains(&TokenKind::Indent));
         assert!(k.contains(&TokenKind::Dedent));
+    }
+
+    /// Regression test: two *different* lines each pure in their own indentation
+    /// (one all-tabs, one all-spaces) must still be rejected — comparing them
+    /// requires an arbitrary tab-width assumption, so it's just as ambiguous as
+    /// mixing tabs and spaces on a single line.
+    #[test]
+    fn test_mixed_indentation_across_lines_is_rejected() {
+        // First block indents with a tab, second with 4 spaces.
+        let src = "if true:\n\tx\nif false:\n    y\n";
+        let err = lex(src).unwrap_err();
+        assert!(matches!(err, LexError::MixedIndentation { .. }), "expected MixedIndentation, got {:?}", err);
+    }
+
+    /// A file that consistently uses only tabs (or only spaces) throughout is fine.
+    #[test]
+    fn test_consistent_tab_only_indentation_is_accepted() {
+        let src = "if true:\n\tx\n\tif true:\n\t\ty\n";
+        assert!(lex(src).is_ok());
     }
 
     #[test]
