@@ -159,7 +159,19 @@ struct Checker {
     /// `check_fn` call so a nested `fn` (via `Stmt::Fn`) doesn't inherit `main`'s
     /// authorization.
     in_authorized_static_site: bool,
+    /// Statement-nesting recursion-depth counter — incremented on every `check_stmt`
+    /// entry, decremented on exit. The parser already bounds nested-block depth
+    /// (`parser::MAX_EXPR_DEPTH`, see `tests_recursion_depth::block_nesting_is_bounded`),
+    /// but that's a single line of defense; this mirrors the same bound here so the
+    /// checker can never stack-overflow on its own, independently of the parser (e.g.
+    /// if a future caller ever feeds it a hand-built or otherwise-sourced AST).
+    depth: usize,
 }
+
+/// Mirrors `parser::MAX_EXPR_DEPTH` — see that constant's doc comment for the
+/// stack-budget rationale (~15 frames per level, 200 levels safely fits the 256 MB
+/// thread stack `main.rs` spawns).
+const MAX_CHECK_DEPTH: usize = 200;
 
 impl Checker {
     fn new() -> Self {
@@ -178,6 +190,7 @@ impl Checker {
             // `check_fn` — this default is what makes them authorized without either
             // arm needing to set it explicitly.
             in_authorized_static_site: true,
+            depth: 0,
         }
     }
 
@@ -1036,6 +1049,20 @@ impl Checker {
     // ── Statements ────────────────────────────────────────────────────────────
 
     fn check_stmt(&mut self, stmt: &Stmt) {
+        self.depth += 1;
+        if self.depth > MAX_CHECK_DEPTH {
+            self.depth -= 1;
+            self.error(
+                format!("statement nested too deeply (limit: {})", MAX_CHECK_DEPTH),
+                0, 0,
+            );
+            return;
+        }
+        self.check_stmt_inner(stmt);
+        self.depth -= 1;
+    }
+
+    fn check_stmt_inner(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(s) => self.check_let_stmt(s),
             Stmt::LetDestructure(s) => self.check_let_destructure(s),
@@ -2073,5 +2100,36 @@ let b = a as [x = width, x = height]
 "#;
         let errs = errors_for(src);
         assert!(errs.iter().any(|e| e.contains("duplicate target axis 'x'")), "expected a duplicate-target error, got {errs:?}");
+    }
+}
+
+#[cfg(test)]
+mod check_stmt_depth_tests {
+    use super::*;
+
+    /// The parser already bounds nested-block depth at `parser::MAX_EXPR_DEPTH`
+    /// (200), so a `.br` source string can never actually hand the checker an
+    /// AST nested deeper than that. To verify the checker's *own* independent
+    /// depth guard (defense in depth, not reachable via `parse` alone), build a
+    /// deeply nested `if` statement directly as AST nodes, bypassing the parser
+    /// entirely, and check it straight through `Checker::check_block`.
+    #[test]
+    fn deeply_nested_if_is_bounded_independently_of_the_parser() {
+        let cond = Expr { kind: ExprKind::Bool(true), line: 1, col: 1, len: 1 };
+        let mut body: Vec<Stmt> = vec![Stmt::Return(ReturnStmt { value: None, line: 1, col: 1 })];
+        for _ in 0..(MAX_CHECK_DEPTH + 100) {
+            body = vec![Stmt::If(IfStmt {
+                branches: vec![(cond.clone(), body)],
+                else_body: None,
+                line: 1, col: 1,
+            })];
+        }
+        let mut checker = Checker::new();
+        checker.check_block(&body);
+        let msgs: Vec<&str> = checker.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("nested too deeply")),
+            "expected a 'nested too deeply' checker error, got {msgs:?}"
+        );
     }
 }

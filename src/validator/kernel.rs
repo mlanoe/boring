@@ -46,7 +46,16 @@ const FLOAT_MATH_FNS: &[&str] = &[
 /// Kernel validation visitor.  Accumulates diagnostics as it walks the AST.
 pub struct KernelValidator {
     diags: Vec<KernelDiagnostic>,
+    /// Statement-nesting recursion-depth counter — incremented on every `check_stmt`
+    /// entry, decremented on exit. Mirrors `parser::MAX_EXPR_DEPTH` as an independent
+    /// second line of defense: the parser already bounds nested-block depth, but this
+    /// validator has its own recursive walk and had no counter of its own at all.
+    depth: usize,
 }
+
+/// Mirrors `parser::MAX_EXPR_DEPTH` (200) — see that constant's doc comment for the
+/// stack-budget rationale.
+const MAX_CHECK_DEPTH: usize = 200;
 
 impl Default for KernelValidator {
     fn default() -> Self {
@@ -56,7 +65,7 @@ impl Default for KernelValidator {
 
 impl KernelValidator {
     pub fn new() -> Self {
-        KernelValidator { diags: Vec::new() }
+        KernelValidator { diags: Vec::new(), depth: 0 }
     }
 
     // ── Public entry point ───────────────────────────────────────────────────
@@ -474,6 +483,17 @@ impl KernelValidator {
     // ── Statement walking ────────────────────────────────────────────────────
 
     fn check_stmt(&mut self, stmt: &Stmt) {
+        self.depth += 1;
+        if self.depth > MAX_CHECK_DEPTH {
+            self.depth -= 1;
+            self.error(0, format!("statement nested too deeply (limit: {})", MAX_CHECK_DEPTH));
+            return;
+        }
+        self.check_stmt_inner(stmt);
+        self.depth -= 1;
+    }
+
+    fn check_stmt_inner(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(let_stmt) => {
                 if let Some(ty) = &let_stmt.ty {
@@ -1122,5 +1142,34 @@ mod tests {
     fn other_float_math_fns_still_rejected_regardless_of_arg_type() {
         let d = diags("def main():\n    let x = sqrt(5)\n");
         assert!(has_float_math_error(&d), "sqrt(5) should still be rejected — no int no-op path exists");
+    }
+
+    /// The parser already bounds nested-block depth at `parser::MAX_EXPR_DEPTH`
+    /// (200), so a `.br` source string can never actually hand this validator an
+    /// AST nested deeper than that. To verify the validator's *own* independent
+    /// depth guard (defense in depth, not reachable via `parse` alone), build a
+    /// deeply nested `if` statement directly as AST nodes, bypassing the parser
+    /// entirely, and check it straight through `KernelValidator::check_stmt`.
+    #[test]
+    fn deeply_nested_if_is_bounded_independently_of_the_parser() {
+        use crate::ast::{Expr, ExprKind, IfStmt, ReturnStmt, Stmt};
+        let cond = Expr { kind: ExprKind::Bool(true), line: 1, col: 1, len: 1 };
+        let mut body: Vec<Stmt> = vec![Stmt::Return(ReturnStmt { value: None, line: 1, col: 1 })];
+        for _ in 0..(MAX_CHECK_DEPTH + 100) {
+            body = vec![Stmt::If(IfStmt {
+                branches: vec![(cond.clone(), body)],
+                else_body: None,
+                line: 1, col: 1,
+            })];
+        }
+        let mut validator = KernelValidator::new();
+        for s in &body {
+            validator.check_stmt(s);
+        }
+        let msgs: Vec<&str> = validator.diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("nested too deeply")),
+            "expected a 'nested too deeply' validator error, got {msgs:?}"
+        );
     }
 }
