@@ -39,3 +39,22 @@ print xint + 1
 
 let string sname = "Alice"
 print "Hello, " + sname
+
+# Regression: unary `-` on each fixed-width *signed* integer type — the
+# self-hosted interpreter's UnaryOp.Neg only handled bare Int/Float64/Float32/
+# Object and threw "cannot negate" for int8/int16/int32/int64/int128.
+let int8 n8 = 5
+let int8 neg8 = -n8
+print neg8
+let int16 n16 = 5
+let int16 neg16 = -n16
+print neg16
+let int32 n32 = 5
+let int32 neg32 = -n32
+print neg32
+let int64 n64 = 5
+let int64 neg64 = -n64
+print neg64
+let int128 n128 = 5
+let int128 neg128 = -n128
+print neg128

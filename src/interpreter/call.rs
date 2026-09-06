@@ -3,7 +3,21 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 impl Interpreter {
-    pub(crate) fn call_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, _in_throws_context: bool) -> Eval {
+    pub(crate) fn call_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, in_throws_context: bool) -> Eval {
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(Signal::Error(RuntimeError {
+                message: format!("call stack overflow: function calls nested too deeply (limit: {})", MAX_CALL_DEPTH),
+                line, col: 0, len: 0,
+            }));
+        }
+        let result = self.call_fn_inner(decl, captured, args, line, in_throws_context);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn call_fn_inner(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, _in_throws_context: bool) -> Eval {
         // Stream functions: run the body collecting `yield` values into a Vec.
         if decl.stream {
             return self.call_stream_fn(decl, captured, args, line);
@@ -323,7 +337,21 @@ impl Interpreter {
         }
     }
 
-    pub(crate) fn call_closure(&mut self, params: Vec<Param>, body: ClosureBody, captured: EnvRef, args: Vec<Value>, _line: usize) -> Eval {
+    pub(crate) fn call_closure(&mut self, params: Vec<Param>, body: ClosureBody, captured: EnvRef, args: Vec<Value>, line: usize) -> Eval {
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(Signal::Error(RuntimeError {
+                message: format!("call stack overflow: function calls nested too deeply (limit: {})", MAX_CALL_DEPTH),
+                line, col: 0, len: 0,
+            }));
+        }
+        let result = self.call_closure_inner(params, body, captured, args, line);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn call_closure_inner(&mut self, params: Vec<Param>, body: ClosureBody, captured: EnvRef, args: Vec<Value>, _line: usize) -> Eval {
         let fn_env = Env::child(captured);
         for (i, param) in params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(Value::Nil);
@@ -346,6 +374,27 @@ impl Interpreter {
 
     /// Execute a `type def/req/set` method. No `self` — type_vars accessed via type_var_store.
     pub(crate) fn call_type_method(
+        &mut self,
+        type_name: &str,
+        method: &crate::ast::TypeMethod,
+        args: Vec<Value>,
+        captured: EnvRef,
+        line: usize,
+    ) -> Eval {
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(Signal::Error(RuntimeError {
+                message: format!("call stack overflow: function calls nested too deeply (limit: {})", MAX_CALL_DEPTH),
+                line, col: 0, len: 0,
+            }));
+        }
+        let result = self.call_type_method_inner(type_name, method, args, captured, line);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn call_type_method_inner(
         &mut self,
         type_name: &str,
         method: &crate::ast::TypeMethod,

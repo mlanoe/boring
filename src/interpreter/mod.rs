@@ -1601,6 +1601,10 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int(f.floor() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
+            // Same int-typed no-op family as the Float64/Int arms above (see
+            // `validator::kernel`'s doc comment on FLOAT_MATH_FNS) — a float32
+            // input truncates to an Int the same way a float64 one does.
+            Some(Value::Float32(f)) => Ok(Value::Int(f.floor() as i64)),
             _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line, col: 0, len: 0 })),
         },
     });
@@ -1609,6 +1613,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int(f.ceil() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
+            Some(Value::Float32(f)) => Ok(Value::Int(f.ceil() as i64)),
             _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0 })),
         },
     });
@@ -1617,6 +1622,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int(f.round() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
+            Some(Value::Float32(f)) => Ok(Value::Int(f.round() as i64)),
             _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0 })),
         },
     });
@@ -1667,6 +1673,9 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.ln())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).ln())),
+            // See the `abs`/`sin` free functions above — preserve float32 width
+            // instead of rejecting it as "not a number".
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.ln())),
             _ => Err(err("log: expected number", line)),
         },
     });
@@ -1675,6 +1684,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.log2())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).log2())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.log2())),
             _ => Err(err("log2: expected number", line)),
         },
     });
@@ -1683,6 +1693,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.log10())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).log10())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.log10())),
             _ => Err(err("log10: expected number", line)),
         },
     });
@@ -1783,6 +1794,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.exp())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).exp())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.exp())),
             _ => Err(err("exp: expected number", line)),
         },
     });
@@ -1791,6 +1803,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.tanh())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).tanh())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.tanh())),
             _ => Err(err("tanh: expected number", line)),
         },
     });
@@ -1800,15 +1813,20 @@ fn register_string_and_math_builtins(e: &mut Env) {
             Some(Value::Array(arr)) => {
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
+                let mut float32_sum = 0.0f32;
                 let mut is_float = false;
+                let mut is_float32 = false;
                 for v in arr.iter() {
                     match v {
                         Value::Float64(f) => { float_sum += f; is_float = true; }
-                        Value::Int(n)   => { int_sum += n; float_sum += *n as f64; }
+                        Value::Float32(f) => { float32_sum += f; is_float32 = true; }
+                        Value::Int(n)   => { int_sum += n; float_sum += *n as f64; float32_sum += *n as f32; }
                         _ => return Err(err("sum: array must contain numbers", line)),
                     }
                 }
-                if is_float { Ok(Value::Float64(float_sum)) } else { Ok(Value::Int(int_sum)) }
+                if is_float32 { Ok(Value::Float32(float32_sum)) }
+                else if is_float { Ok(Value::Float64(float_sum)) }
+                else { Ok(Value::Int(int_sum)) }
             }
             _ => Err(err("sum: expected array", line)),
         },
@@ -1862,6 +1880,10 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     Ok(Value::Float64(x.clamp(*lo as f64, *hi as f64))),
                 (Some(Value::Int(x)), Some(Value::Float64(lo)), Some(Value::Float64(hi))) =>
                     Ok(Value::Float64((*x as f64).clamp(*lo, *hi))),
+                // See the `abs`/`sin` free functions above — preserve float32 width
+                // instead of rejecting it as "not a number".
+                (Some(Value::Float32(x)), Some(Value::Float32(lo)), Some(Value::Float32(hi))) =>
+                    Ok(Value::Float32(x.clamp(*lo, *hi))),
                 _ => Err(err("clamp: expected (number, min, max)", line)),
             }
         },
@@ -1871,6 +1893,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Int(n))   => Ok(Value::Int(n.signum())),
             Some(Value::Float64(f)) => Ok(Value::Float64(f.signum())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.signum())),
             _ => Err(err("sign: expected number", line)),
         },
     });
@@ -1878,6 +1901,10 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "isNaN".into(),
         func: |args, _line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Bool(f.is_nan())),
+            // A real float32 NaN must not fall through to the generic `false` arm
+            // below — that would be a silent, undetectable false negative (unlike
+            // the other math builtins' missing-arm gap, which at least fails loudly).
+            Some(Value::Float32(f)) => Ok(Value::Bool(f.is_nan())),
             Some(Value::Int(_))   => Ok(Value::Bool(false)),
             _ => Ok(Value::Bool(false)),
         },
@@ -1886,6 +1913,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "isInfinite".into(),
         func: |args, _line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Bool(f.is_infinite())),
+            Some(Value::Float32(f)) => Ok(Value::Bool(f.is_infinite())),
             _                     => Ok(Value::Bool(false)),
         },
     });
@@ -2240,7 +2268,28 @@ pub struct Interpreter {
     /// thread's value to `scratch[warp_lane]`, waits on `warp_barrier`, then
     /// reads `scratch[target_lane]`. `None` alongside `warp_barrier`.
     pub(crate) warp_scratch: Option<std::sync::Arc<std::sync::Mutex<Vec<eval_gpu::ThreadValue>>>>,
+    /// Call-stack recursion-depth counter — incremented on every `call_fn`/
+    /// `call_closure`/`call_type_method` entry, decremented on exit. A Boring
+    /// function that recurses with no base case (an ordinary user bug) used to
+    /// overflow the real Rust call stack with a hard process crash instead of a
+    /// clean runtime error; this bounds it the same way the parser already
+    /// bounds expression/statement nesting depth.
+    pub(crate) call_depth: usize,
 }
+
+/// Maximum user-function call nesting depth before `call_fn`/`call_closure`/
+/// `call_type_method` report a clean runtime error instead of recursing further.
+///
+/// Unlike the parser's recursive-descent (`parser::MAX_EXPR_DEPTH`), one level of
+/// interpreter recursion (`call_fn` -> `exec_block` -> `exec_stmt` -> `eval_expr` ->
+/// `call_fn`) is comparatively expensive: `main.rs`'s own `STACK_SIZE` comment notes
+/// that in an *unoptimized debug build* the eval/exec match arms don't share stack
+/// slots, multiplying the real per-call cost roughly 10x. Empirically, a plain
+/// tail-recursive function with no base case overflowed the real 256 MB thread
+/// stack `main.rs` spawns at ~950 levels deep in a debug build; 500 leaves a
+/// healthy margin below that for heavier call frames (more locals/params) and for
+/// the smaller default stack `cargo test`'s own worker threads get.
+pub(crate) const MAX_CALL_DEPTH: usize = 500;
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -2338,6 +2387,7 @@ impl Interpreter {
             warp_active_lanes: 0,
             warp_barrier: None,
             warp_scratch: None,
+            call_depth: 0,
         }
     }
 
@@ -2380,6 +2430,7 @@ impl Interpreter {
             warp_active_lanes: 0,
             warp_barrier: None,
             warp_scratch: None,
+            call_depth: 0,
         }
     }
 

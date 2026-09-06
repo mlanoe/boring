@@ -162,7 +162,23 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                             else:
                                 throw "cannot negate {neg_inner.type_name}"
                         _:
-                            throw "cannot negate {val.type_name()}"
+                            # Fixed-width signed integers (int8/int16/int32/int64/int128) —
+                            # everything but the bare `Int`/`Float64`/`Float32`/`Object`
+                            # cases above, which are already handled. Stages through
+                            # int128 (same as apply_binop_numeric) rather than negating
+                            # the narrow type directly, so this can't overflow-panic for
+                            # any value except that kind's own MIN — the same inherent
+                            # edge case every other staged op here already has.
+                            if let ka = num_kind_of(val):
+                                if num_kind_signed(ka):
+                                    if let iv = value_as_i128(val):
+                                        i128_to_kind(ka, 0 - iv)
+                                    else:
+                                        throw "cannot negate {val.type_name()}"
+                                else:
+                                    throw "cannot negate {val.type_name()}"
+                            else:
+                                throw "cannot negate {val.type_name()}"
                 UnaryOp.Not:
                     match val:
                         Value.Bool(b):

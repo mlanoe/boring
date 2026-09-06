@@ -2495,3 +2495,112 @@ let _result = x
 "#;
     assert_eq!(run_src(src), Value::Int(42));
 }
+
+/// Regression test: a Boring function that recurses with no base case (an
+/// ordinary user bug, not a crafted attack) used to overflow the real Rust
+/// call stack — call_fn -> exec_block -> exec_stmt -> eval_expr -> call_fn,
+/// with no depth counter anywhere in that cycle — crashing the whole process
+/// instead of reporting a clean runtime error. `call_fn`'s own guard must
+/// trip well before that happens.
+///
+/// Runs on a dedicated worker thread with a large stack, mirroring the 256 MB
+/// stack `main.rs` spawns for every real `boring` invocation (see
+/// `MAX_CALL_DEPTH`'s doc comment) — `cargo test`'s own per-test thread stack
+/// is far smaller, which would make this test overflow *before* the guard
+/// ever gets a chance to trip, a false failure unrelated to the bug being
+/// guarded against.
+#[test]
+fn test_unbounded_recursion_is_a_clean_runtime_error_not_a_crash() {
+    const STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MB, matches main.rs
+    let handle = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            let src = r#"
+def int boom(int n):
+    return boom(n + 1)
+
+let _result = boom(0)
+"#;
+            let (_interp, res) = run(src);
+            res
+        })
+        .expect("failed to spawn worker thread");
+    let res = handle.join().expect("interpreter thread panicked instead of returning a clean error");
+    let err = res.expect_err("expected a runtime error, got Ok");
+    assert!(
+        err.message.contains("nested too deeply") || err.message.contains("stack overflow"),
+        "expected a call-stack-depth error, got: {}",
+        err.message
+    );
+}
+
+/// Regression test: `floor`/`ceil`/`round`/`log`/`log2`/`log10`/`exp`/`tanh`/
+/// `clamp`/`sign`/`sum` only matched `Float64`/`Int`, unlike `abs`/`sqrt`/
+/// `sin`/`cos`/`tan` which already had an explicit `Float32` arm — calling any
+/// of them on a `float32` value failed with "expected number" instead of
+/// working. `floor`/`ceil`/`round` are the int-typed-no-op family (see
+/// `validator::kernel`'s `FLOAT_MATH_FNS` doc comment) so they still produce
+/// an `Int` for a `float32` input, same as they already did for `float64`;
+/// the rest preserve `float32` width, matching `abs`/`sqrt`.
+#[test]
+fn test_float32_math_builtins_no_longer_reject_float32() {
+    let src = r#"
+let float32 f = -1.5
+let float32 pos = 2.5
+let float32 lo = -1.0
+let float32 hi = 1.0
+let int _r_floor = floor(f)
+let int _r_ceil = ceil(f)
+let int _r_round = round(f)
+let float32 _r_log = log(pos)
+let float32 _r_log2 = log2(pos)
+let float32 _r_log10 = log10(pos)
+let float32 _r_exp = exp(f)
+let float32 _r_tanh = tanh(f)
+let float32 _r_clamp = clamp(f, lo, hi)
+let float32 _r_sign = sign(f)
+let float32 _r_sum = sum([f, f])
+let _result = _r_floor + _r_ceil + _r_round
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_r_floor"), Value::Int(-2));
+    assert_eq!(get_var(&interp, "_r_ceil"), Value::Int(-1));
+    assert_eq!(get_var(&interp, "_r_round"), Value::Int(-2));
+    assert!(matches!(get_var(&interp, "_r_log"), Value::Float32(_)));
+    assert!(matches!(get_var(&interp, "_r_log2"), Value::Float32(_)));
+    assert!(matches!(get_var(&interp, "_r_log10"), Value::Float32(_)));
+    assert!(matches!(get_var(&interp, "_r_exp"), Value::Float32(_)));
+    assert!(matches!(get_var(&interp, "_r_tanh"), Value::Float32(_)));
+    let Value::Float32(clamp_v) = get_var(&interp, "_r_clamp") else { panic!("expected float32 clamp result") };
+    assert!((clamp_v - (-1.0)).abs() < 1e-6);
+    assert_eq!(get_var(&interp, "_r_sign"), Value::Float32(-1.0));
+    assert_eq!(get_var(&interp, "_r_sum"), Value::Float32(-3.0));
+}
+
+/// Regression test: `isNaN`/`isInfinite` silently returned `false` for a real
+/// float32 NaN/Infinity — falling through to the generic catch-all arm meant
+/// for non-numeric values, instead of an explicit `Float32` arm like the one
+/// `Float64` already has. Unlike `test_float32_math_builtins_no_longer_reject_
+/// float32` (a loud "expected number" error), this was a silent, undetectable
+/// false negative.
+#[test]
+fn test_isnan_isinfinite_detect_real_float32_values() {
+    let src = r#"
+let float32 zero = 0.0
+let float32 one = 1.0
+let float32 nan_val = zero / zero
+let float32 inf_val = one / zero
+let bool _r_nan = isNaN(nan_val)
+let bool _r_inf = isInfinite(inf_val)
+let bool _r_not_nan = isNaN(one)
+let bool _r_not_inf = isInfinite(one)
+let _result = _r_nan
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "_r_nan"), Value::Bool(true), "isNaN(float32 NaN) must be true");
+    assert_eq!(get_var(&interp, "_r_inf"), Value::Bool(true), "isInfinite(float32 Infinity) must be true");
+    assert_eq!(get_var(&interp, "_r_not_nan"), Value::Bool(false));
+    assert_eq!(get_var(&interp, "_r_not_inf"), Value::Bool(false));
+}
