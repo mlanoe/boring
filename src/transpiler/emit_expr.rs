@@ -23,6 +23,31 @@ fn is_known_numeric_scalar_type(ty: &Type) -> bool {
         | "f32" | "f64"))
 }
 
+/// Minimum argument count `emit_builtin_call` needs before it's safe to index
+/// into `args` for a given builtin name — most of its match arms (and some of
+/// their guards, which run before the arm's own body) unconditionally read
+/// `args[0]`/`args[1]`/`args[2]` with no arity check of their own, and neither
+/// the parser nor the checker validates builtin call arity. Returns `None` for
+/// any builtin (or non-builtin name) that never indexes unconditionally —
+/// no check needed, falls through to the generic call path unchanged.
+fn builtin_min_arity(name: &str) -> Option<usize> {
+    Some(match name {
+        "len" | "sum" | "drop" | "json" | "ord" | "chr" | "exit"
+        | "assert" | "min" | "max"
+        | "int" | "uint" | "uint8"
+        | "int8" | "int16" | "int32" | "int64" | "int128"
+        | "uint16" | "uint32" | "uint64" | "uint128"
+        | "float" | "float64" | "float32"
+        | "sqrt" | "abs" | "floor" | "ceil" | "round"
+        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+        | "exp" | "tanh" | "log" | "log2" | "log10"
+        | "bitsToFloat" | "floatToBits" | "sign" | "isNaN" | "isInfinite" => 1,
+        "assert_eq" | "assert_neq" | "atan2" | "pow" => 2,
+        "clamp" => 3,
+        _ => return None,
+    })
+}
+
 impl Transpiler {
     pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
         match &expr.kind {
@@ -2968,6 +2993,15 @@ impl Transpiler {
                 let args_s = self.emit_args(args);
                 let call_s = format!("{}({})", escape_rust_keyword(name), args_s);
                 return format!("{}?", call_s);
+            }
+            if let Some(min) = builtin_min_arity(name) {
+                if args.len() < min {
+                    self.push_error(callee.line, callee.col, format!(
+                        "`{}` expects at least {} argument{}, got {}",
+                        name, min, if min == 1 { "" } else { "s" }, args.len(),
+                    ));
+                    return "todo!(\"invalid argument count\")".to_string();
+                }
             }
             return self.emit_builtin_call(name, args);
         }

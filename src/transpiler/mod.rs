@@ -3916,9 +3916,16 @@ impl Transpiler {
                     }
                     if s.binding.is_mutable() {
                         // Top-level mutable var declarations — collect type and initial value.
-                        let init_val = self.emit_expr_owned(s.value.as_ref().unwrap());
                         self.global_var_types.insert(s.name.clone(), s.ty.clone());
-                        self.global_var_inits.insert(s.name.clone(), init_val);
+                        // `var v` with no initializer (deferred init, e.g. `var int x` with
+                        // no `= expr`) — same case `emit_let.rs`'s local-binding path
+                        // guards against. Leave no entry in `global_var_inits`; the one
+                        // reader of it (this fn, below) already falls back to
+                        // `Default::default()` when a name has none.
+                        if let Some(value) = &s.value {
+                            let init_val = self.emit_expr_owned(value);
+                            self.global_var_inits.insert(s.name.clone(), init_val);
+                        }
                     }
                 }
                 Item::Mod(m) => {

@@ -1,0 +1,7 @@
+# `len()` called with zero arguments used to index `args[0]` unconditionally
+# in `emit_builtin_call` — no arity check anywhere (parser, checker, or the
+# builtin itself) — panicking the transpiler with a raw Rust slice-index
+# out-of-bounds instead of a clean compile error (audit finding #4).
+def foo():
+    print len()
+foo()

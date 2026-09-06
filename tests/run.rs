@@ -578,3 +578,9 @@ interp_test!(negative_count_no_oom);
 // RuntimeError, not overflow usize or attempt an unbounded allocation
 // (finding #3).
 error_test!(error_kernel_thread_cap);
+
+// `let int? x = compute()` where `compute` is `throws` but returns a plain
+// (non-Optional) type — the interpreter path (`boring run`) for this file,
+// see tests/transpile.rs's `optional_let_throws_non_optional_return` for the
+// transpiler-side real-compile regression (audit finding #6).
+interp_test!(optional_let_throws_non_optional_return);

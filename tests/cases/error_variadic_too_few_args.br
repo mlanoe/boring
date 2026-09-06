@@ -1,0 +1,11 @@
+# `emit_args_coerced` used to slice `args[i..]` where `i` is the declared
+# variadic parameter's position — when a call passes fewer arguments than
+# that position (never validated by the checker), `i` exceeds `args.len()`
+# and the raw slice panics the transpiler instead of degrading gracefully
+# (audit finding #8).
+def greet(string name, string tags...):
+    print name
+    for t in tags:
+        print t
+
+greet()

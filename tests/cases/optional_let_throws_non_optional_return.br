@@ -1,0 +1,17 @@
+# `let int? x = compute()` where `compute` is `throws` but its declared
+# return type is a plain `int` (not `int?`) — must still wrap the value in
+# `Some(...)`, matching the `T?` annotation. `emit_let_value_optional`'s
+# `already_opt` check used to treat ANY throws-propagated call (anything
+# ending in `?`, whose expr kind is `Call`) as already `Option<T>`-shaped,
+# with no check of the function's actual declared return type — generating
+# `let x: Option<isize> = compute()?;`, which fails to compile (E0308:
+# expected `Option<isize>`, found `isize`) since `compute()?` is a plain
+# `isize`, not an `Option<isize>` (audit finding #6).
+def int compute() throws:
+    return 42
+
+def foo() throws:
+    let int? x = compute()
+    print x
+
+foo()

@@ -1473,7 +1473,7 @@ impl Transpiler {
                 let val_s = self.emit_expr_owned(&args[1].value);
                 return Some(format!("{}.insert({}, {})", obj_s, key_s, val_s));
             }
-            "contains" | "containsKey" | "has" => {
+            "contains" | "containsKey" | "has" if !args.is_empty() => {
                 let key_s = self.emit_dict_key_borrow(&args[0].value);
                 return Some(format!("{}.contains_key({})", obj_s, key_s));
             }
@@ -2613,9 +2613,13 @@ impl Transpiler {
         let mut i = 0;
         while i < n_params {
             if variadic_idx == Some(i) {
-                // Collect all remaining args into vec![...]
+                // Collect all remaining args into vec![...]. `i` can exceed
+                // `args.len()` when the call site passes fewer arguments than
+                // the declared variadic position (never validated by the
+                // checker) — clamp instead of a raw `args[i..]` slice, which
+                // panics on an out-of-bounds start index.
                 let elem_ty = sig.get(i);
-                let elems: Vec<String> = args[i..].iter()
+                let elems: Vec<String> = args.get(i.min(args.len())..).unwrap_or(&[]).iter()
                     .map(|a| self.emit_let_value(elem_ty, &a.value))
                     .collect();
                 result.push(format!("vec![{}]", elems.join(", ")));

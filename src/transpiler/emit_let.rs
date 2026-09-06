@@ -1375,9 +1375,6 @@ impl Transpiler {
                 || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
             || inner_val.ends_with(".ok()")
             || inner_val.ends_with(".map(|i| i as isize)")
-            // A throws-propagated call (ending in `?`) in an Optional declared context
-            // is already Option<T> — the throws function returns Result<Option<T>>.
-            || (inner_val.ends_with("?") && matches!(&value.kind, ExprKind::Call(_, _)))
             // Free-function call whose declared return type is Option<T>
             || matches!(&value.kind, ExprKind::Call(callee, _)
                 if matches!(&callee.kind, ExprKind::Var(fn_name)

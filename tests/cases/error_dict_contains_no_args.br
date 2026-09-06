@@ -1,0 +1,9 @@
+# `dict.contains()`/`.has()` with no key argument used to index `args[0]`
+# unconditionally in `try_emit_dict_method` — the only ungarded arm of that
+# match, unlike every other arm (`get`, `set`/`put`, `remove`), which all
+# check `args.len()` first. Panicked the transpiler with a raw Rust
+# index-out-of-bounds instead of falling through cleanly (audit finding #7).
+def foo():
+    let {string=int} scores = {"a" = 1}
+    print scores.contains()
+foo()

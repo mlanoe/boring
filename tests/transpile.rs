@@ -944,3 +944,11 @@ transpile_test!(monomorphize_ext_method);
 // the method is declared directly on an `enum` -- proves the registration/
 // append widening to `Item::Enum` resolves and specializes correctly.
 transpile_test!(monomorphize_enum_method);
+// `optional_let_throws_non_optional_return`: `let int? x = compute()` where
+// `compute` is `throws` but its declared return type is a plain `int`, not
+// `int?` -- `emit_let_value_optional`'s `already_opt` check used to treat
+// ANY throws-propagated call ending in `?` as already `Option<T>`-shaped
+// with no check of the callee's actual return type, generating
+// `let x: Option<isize> = compute()?;` (E0308: expected `Option<isize>`,
+// found `isize`) instead of wrapping in `Some(...)` (audit finding #6).
+transpile_test!(optional_let_throws_non_optional_return);
