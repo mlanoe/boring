@@ -284,6 +284,49 @@ kernel A:
         "expected memory_order_relaxed;\ngot:\n{msl}");
 }
 
+// Regression test: `try_atomic_assign`/`try_atomic_method_call` used to cast
+// every atomic op through `(device atomic_long*)` unconditionally (8 bytes),
+// regardless of the field's real element type — a 4-byte `int32`/`uint32`
+// field got the same 8-byte cast, corrupting adjacent GPU memory or producing
+// a wrong numeric result (the bit pattern of a neighboring element folded
+// into the same "atomic word"). Every existing atomic test before this one
+// used a bare `[int]` field (64-bit — `int64_t`, the one case the old
+// hardcoded `atomic_long` was actually width-correct for), so none of them
+// exercised the 32-bit path at all. See `atomic_msl_cast`'s own doc comment.
+#[test]
+fn device_actor_global_int32_atomic_uses_32bit_intrinsic_not_atomic_long() {
+    let (msl, _) = metal_codegen("atomic_add_int32", r#"
+kernel A:
+    mut [int32]'actor'global counts
+    def ():
+        let tid = gpu.thread.x
+        counts[0] += tid
+"#);
+    assert!(msl.contains("(device atomic_int*)&counts[0]"),
+        "expected a 4-byte `atomic_int` cast for an `int32` element, not the \
+         field-width-blind `atomic_long` (8 bytes);\ngot:\n{msl}");
+    assert!(!msl.contains("atomic_long"),
+        "must not fall back to the 64-bit `atomic_long` cast for a 32-bit element;\ngot:\n{msl}");
+    assert!(msl.contains("device int* counts [[buffer(0)]]"),
+        "expected a 4-byte `int*` buffer param for an `int32` field, not `int64_t*`;\ngot:\n{msl}");
+}
+
+#[test]
+fn device_actor_global_uint32_atomic_uses_32bit_intrinsic_not_atomic_long() {
+    let (msl, _) = metal_codegen("atomic_add_uint32", r#"
+kernel A:
+    mut [uint32]'actor'global counts
+    def ():
+        let tid = gpu.thread.x
+        counts[0] += tid
+"#);
+    assert!(msl.contains("(device atomic_uint*)&counts[0]"),
+        "expected a 4-byte `atomic_uint` cast for a `uint32` element, not the \
+         field-width-blind `atomic_long` (8 bytes);\ngot:\n{msl}");
+    assert!(!msl.contains("atomic_long"),
+        "must not fall back to the 64-bit `atomic_long` cast for a 32-bit element;\ngot:\n{msl}");
+}
+
 #[test]
 fn device_actor_global_field_has_device_ptr_param() {
     let (msl, _) = metal_codegen("atomic_ptr_param", r#"

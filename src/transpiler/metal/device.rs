@@ -454,6 +454,40 @@ impl DeviceEmitter {
             f.name == name && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified))
     }
 
+    /// Returns the MSL atomic pointer-cast type and the matching scalar cast type
+    /// for the *real* element type of the `'actor'global`/`'actor'unified` array
+    /// field named `arr_name` — e.g. `("atomic_int", "int")` for an `int32`
+    /// element, not the field-width-blind `("atomic_long", "long")` this backend
+    /// used to hardcode for every atomic op regardless of the field's actual MSL
+    /// type (`elem_msl_type`). A real 8-byte `atomic_long` cast onto a 4-byte
+    /// `int32`/`uint32` element reads/writes 4 bytes past the valid allocation
+    /// (or reinterprets a neighboring element's bytes as part of the same atomic
+    /// word) — GPU memory corruption or a numerically wrong result, not merely a
+    /// style nit.
+    ///
+    /// `None` for an element type with no correct portable MSL atomic (8/16-bit
+    /// integers, floats, and the already-unsupported 64/128-bit named widths) —
+    /// callers fall back to a `/* ERROR: ... */`-flagged passthrough, the same
+    /// "flag it in a comment, don't silently miscompile" convention
+    /// `msl_unsupported_width`/`msl_unsupported_f64` above already use for these
+    /// types as plain (non-atomic) fields.
+    fn atomic_msl_cast(&self, arr_name: &str) -> Option<(&'static str, &'static str)> {
+        let field = self.current_fields.iter().find(|f| f.name == arr_name)?;
+        match elem_msl_type(&field.ty).as_str() {
+            "int"  => Some(("atomic_int", "int")),
+            "uint" => Some(("atomic_uint", "uint")),
+            // Bare `int`/`uint` (isize/usize) — this backend's one genuinely
+            // 64-bit element type (`msl_type` emits `int64_t`/`uint64_t` for it).
+            // Preserved as `atomic_long`/`long`, matching this codegen's
+            // pre-existing (and, per `try_atomic_method_call`'s own doc comment,
+            // still not independently verified against a real Metal compiler)
+            // choice for the 64-bit case specifically — unlike the 32-bit case
+            // above, that choice was already width-correct.
+            "int64_t" | "uint64_t" => Some(("atomic_long", "long")),
+            _ => None,
+        }
+    }
+
     /// Detect `arr[i] OP= v` on an `'actor'global`/`'actor'unified` field and emit Metal
     /// atomic intrinsic.
     fn try_atomic_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<String> {
@@ -468,13 +502,20 @@ impl DeviceEmitter {
         let target = self.expr(lhs);
         let v = self.expr(value);
 
+        let Some((cast_ty, val_ty)) = self.atomic_msl_cast(&arr_name) else {
+            return Some(format!(
+                "/* ERROR: atomic op on `{}` has no portable MSL atomic for its element type */;",
+                arr_name
+            ));
+        };
+
         // MSL atomic intrinsics — no atomicSub: use add with negation.
         let intrinsic = match op {
-            BinOp::Add    => format!("atomic_fetch_add_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v),
-            BinOp::Sub    => format!("atomic_fetch_add_explicit((device atomic_long*)&{}, -(long)({}), memory_order_relaxed)", target, v),
-            BinOp::BitOr  => format!("atomic_fetch_or_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v),
-            BinOp::BitAnd => format!("atomic_fetch_and_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v),
-            BinOp::BitXor => format!("atomic_fetch_xor_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v),
+            BinOp::Add    => format!("atomic_fetch_add_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v),
+            BinOp::Sub    => format!("atomic_fetch_add_explicit((device {}*)&{}, -({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v),
+            BinOp::BitOr  => format!("atomic_fetch_or_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v),
+            BinOp::BitAnd => format!("atomic_fetch_and_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v),
+            BinOp::BitXor => format!("atomic_fetch_xor_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v),
             _ => return None,
         };
         Some(format!("{};", intrinsic))
@@ -516,16 +557,22 @@ impl DeviceEmitter {
         if !matches!(method, "min" | "max" | "swap" | "cas") { return None; }
         let target = self.expr(obj);
         if self.is_atomic_field(&arr_name) {
+            let Some((cast_ty, val_ty)) = self.atomic_msl_cast(&arr_name) else {
+                return Some(format!(
+                    "/* ERROR: atomic op on `{}` has no portable MSL atomic for its element type */",
+                    arr_name
+                ));
+            };
             match (method, args_s) {
                 ("min", [v]) => Some(format!(
-                    "atomic_fetch_min_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v)),
+                    "atomic_fetch_min_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v)),
                 ("max", [v]) => Some(format!(
-                    "atomic_fetch_max_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v)),
+                    "atomic_fetch_max_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v)),
                 ("swap", [v]) => Some(format!(
-                    "atomic_exchange_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v)),
+                    "atomic_exchange_explicit((device {}*)&{}, ({})({}), memory_order_relaxed)", cast_ty, target, val_ty, v)),
                 ("cas", [expected, new]) => Some(format!(
-                    "({{ long __boring_cas_exp = (long)({}); atomic_compare_exchange_weak_explicit((device atomic_long*)&{}, &__boring_cas_exp, (long)({}), memory_order_relaxed, memory_order_relaxed); __boring_cas_exp; }})",
-                    expected, target, new
+                    "({{ {} __boring_cas_exp = ({})({}); atomic_compare_exchange_weak_explicit((device {}*)&{}, &__boring_cas_exp, ({})({}), memory_order_relaxed, memory_order_relaxed); __boring_cas_exp; }})",
+                    val_ty, val_ty, expected, cast_ty, target, val_ty, new
                 )),
                 _ => None,
             }
