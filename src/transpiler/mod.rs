@@ -5127,6 +5127,70 @@ struct Widget:\n    var int count\n\n    task req int fetchCount():\n        cou
             "a non-mutating task req method must keep &self, got:\n{}", code);
     }
 
+    // ── emit_task_await / emit_plain_task_await ─────────────────────────────
+    //
+    // Regression tests for factoring the `.value`/`.wait` await dispatch (used to
+    // be duplicated inline at 3+ call sites) into two shared helpers. Each test
+    // below pins one call site's exact output so the refactor can't silently
+    // collapse two historically-distinct branches into one.
+
+    #[test]
+    fn test_throws_join_handle_wait_in_throws_ctx_maps_join_error() {
+        // task_vars path, is_throws_handle=true, use_error_mapping=true: a
+        // throws-context `.wait` on a JoinHandle<Result<T, BoringError>> must
+        // map_err the JoinError into a boxed error before the double `?`.
+        let src = "\
+task def int work() throws: 42\n\ndef run() throws:\n    let f = task work()\n    f.wait\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("map_err(|__e| Box::new(BoringError::String"),
+            "throws-JoinHandle wait in a throws context must map_err the JoinError, got:\n{}", code);
+        assert!(code.contains("??.expect(\"unhandled task error\")"),
+            "throws-JoinHandle wait in a throws context must double-`?` past both errors, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_timeout_join_handle_wait_in_throws_ctx_skips_error_mapping() {
+        // TaskWithTimeout path, is_throws_handle=true, use_error_mapping=false:
+        // unlike the throws-JoinHandle case above, its inner error (`Elapsed`)
+        // already converts into the throws context's own error type, so no
+        // map_err/BoringError dance is needed here — just expect + `?`. This is
+        // the one branch where the two "throws handle" call sites genuinely
+        // differ, so collapsing them into one path with no distinction would be
+        // a real regression.
+        // Uses the INLINE form (`.wait` chained directly off the `task(...)`
+        // expression, never bound to a `let`) — a `let`-bound TaskWithTimeout
+        // is tracked in task_vars and goes through the *other* helper call site
+        // (also is_throws_handle=true, but with use_error_mapping=true, since
+        // task_vars can't distinguish a real `throws` fn's JoinHandle from a
+        // timeout's); only the truly inline form reaches this one.
+        let src = "\
+def int fetch(int n):\n    n * 10\n\ndef run() throws:\n    (task(Duration.from_millis(50)): fetch(5)).wait\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("map_err(|__e| Box::new(BoringError::String"),
+            "timeout-JoinHandle wait must NOT use the throws-JoinHandle's error mapping, got:\n{}", code);
+        assert!(code.contains(".await.expect(\"task panicked\")?"),
+            "timeout-JoinHandle wait in a throws context should be a plain expect + `?`, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_plain_inline_task_value_and_wait_ignore_throws_context() {
+        // emit_plain_task_await path (inline `(task: expr).value`/`.wait`, whose
+        // `is_future` heuristic matches `ExprKind::Task(_)` directly): always
+        // `.expect`s / discards, regardless of `throws` context — there's no
+        // tracked inner-Result shape to propagate here, unlike the two
+        // task_vars-backed paths above. Uses a captureless task body (`task: 42`)
+        // to avoid the separate non-Arc-capture inlining special case (see
+        // `emit_expr_field`'s "Special case" comment), which would otherwise
+        // intercept `.value`/`.wait` before this heuristic is even reached.
+        let src = "\
+def run() throws:\n    let v = (task: 42).value\n    print v\n    (task: 42).wait\n    print \"done\"\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains(".await.expect(\"task panicked\")") && !code.contains(".await.expect(\"task panicked\")?"),
+            "inline task .value must always .expect, never `?` even in a throws context, got:\n{}", code);
+        assert!(code.contains("{ let _ = ") && code.contains(".await; }"),
+            "inline task .wait must discard the awaited value unconditionally, got:\n{}", code);
+    }
+
     #[test]
     fn test_managed_named_not_wrapped() {
         // Plain Named (Type::Named) is NOT wrapped in managed mode — only T'owned is.

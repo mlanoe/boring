@@ -1768,6 +1768,78 @@ impl Transpiler {
         format!("({} {} {})", ls, binop_str(op), rs)
     }
 
+    /// Emit `.value`/`.wait` on a JoinHandle whose inner Result (if any) needs its
+    /// own error-propagation dance in a `throws` context — the throws-JoinHandle
+    /// (`task ... throws`) and timeout-JoinHandle (`task_with_timeout`) cases.
+    /// Both share the exact same three of four branches; they differ only in how
+    /// a throws-context `wait` propagates the *inner* error once the outer
+    /// JoinError itself is unwrapped:
+    ///   - `use_error_mapping: true` (throws-JoinHandle): the inner error is a
+    ///     `BoringError`, unrelated to the surrounding throws context's own error
+    ///     type, so it needs an explicit `map_err` into a boxed error before a
+    ///     double `?` can propagate both errors.
+    ///   - `use_error_mapping: false` (timeout-JoinHandle): the inner error is
+    ///     `Elapsed`, which already converts into the throws context's error type
+    ///     (`Error.Expired`), so a single `?` on the inner Result is enough.
+    ///
+    /// `is_join_handle` only affects the `.value` case when neither of the above
+    /// applies: `true` for a plain spawned `JoinHandle<T>` (always `.expect(...)`,
+    /// no inner Result to propagate); `false` for an async-fn-param
+    /// `impl Future<Output = T>` (no JoinError either, so a throws-context read
+    /// can use a bare `?` directly).
+    ///
+    /// Centralizes dispatch that used to be re-implemented at each call site —
+    /// a documented source of past regressions (double-wrap, optional dict-index).
+    fn emit_task_await(&self, obj_s: &str, field: &str, is_throws_handle: bool, is_join_handle: bool, use_error_mapping: bool) -> String {
+        let in_throws_ctx = self.in_throws || self.in_try_body;
+        if field == "wait" {
+            if is_throws_handle && in_throws_ctx {
+                if use_error_mapping {
+                    let p = self.str_ptr();
+                    format!("{{ let _ = {obj_s}.await.map_err(|__e| Box::new(BoringError::String({p}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??.expect(\"unhandled task error\"); }}")
+                } else {
+                    format!("{{ let _ = {obj_s}.await.expect(\"task panicked\")?; }}")
+                }
+            } else if is_throws_handle {
+                format!("{{ let _ = {obj_s}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}")
+            } else if in_throws_ctx {
+                let p = self.str_ptr();
+                format!("{{ {obj_s}.await.map_err(|__e| Box::new(BoringError::String({p}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)?; }}")
+            } else {
+                format!("{{ let _ = {obj_s}.await; }}")
+            }
+        } else {
+            // .value
+            if is_throws_handle {
+                if in_throws_ctx {
+                    format!("{obj_s}.await.expect(\"task panicked\")?")
+                } else {
+                    format!("{obj_s}.await.expect(\"task panicked\").expect(\"unhandled task error\")")
+                }
+            } else if is_join_handle {
+                format!("{obj_s}.await.expect(\"task panicked\")")
+            } else if in_throws_ctx {
+                format!("{obj_s}.await?")
+            } else {
+                format!("{obj_s}.await.expect(\"task panicked\")")
+            }
+        }
+    }
+
+    /// Emit `.value`/`.wait` on a bare future/JoinHandle reached only through a
+    /// structural heuristic (an inline `(task ...).value`, or a loop variable never
+    /// tracked in `task_vars`) rather than a known handle kind — always `.expect`s
+    /// on `.value` and discards on `.wait`, regardless of `throws` context (there is
+    /// no tracked inner-Result shape to propagate here). Shared by both heuristic
+    /// call sites in `emit_expr_field`, which used to duplicate this verbatim.
+    fn emit_plain_task_await(&self, obj_s: &str, field: &str) -> String {
+        if field == "wait" {
+            format!("{{ let _ = {obj_s}.await; }}")
+        } else {
+            format!("{obj_s}.await.expect(\"task panicked\")")
+        }
+    }
+
     /// `obj.field` — by far the largest single case in `emit_expr`: task/JoinHandle
     /// `.value`/`.wait`/`.done`, type-level access (`Counter.MAX`), getter/enum-getter
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
@@ -1893,36 +1965,9 @@ impl Transpiler {
                 );
             }
             if (field == "value" || field == "wait") && self.task_vars.contains(type_name.as_str()) {
-                let in_throws_ctx = self.in_throws || self.in_try_body;
                 let is_throws_handle = self.throws_join_handle_vars.contains(type_name.as_str());
                 let is_join_handle   = self.join_handle_vars.contains(type_name.as_str());
-                let p = self.str_ptr();
-                return if field == "wait" {
-                    if is_throws_handle && in_throws_ctx {
-                        format!("{{ let _ = {}.await.map_err(|__e| Box::new(BoringError::String({}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??.expect(\"unhandled task error\"); }}", type_name, p)
-                    } else if is_throws_handle {
-                        format!("{{ let _ = {}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}", type_name)
-                    } else if in_throws_ctx {
-                        format!("{{ {}.await.map_err(|__e| Box::new(BoringError::String({}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)?; }}", type_name, p)
-                    } else {
-                        format!("{{ let _ = {}.await; }}", type_name)
-                    }
-                } else {
-                    // .value
-                    if is_throws_handle {
-                        if in_throws_ctx {
-                            format!("{}.await.expect(\"task panicked\")?", type_name)
-                        } else {
-                            format!("{}.await.expect(\"task panicked\").expect(\"unhandled task error\")", type_name)
-                        }
-                    } else if is_join_handle {
-                        format!("{}.await.expect(\"task panicked\")", type_name)
-                    } else if in_throws_ctx {
-                        format!("{}.await?", type_name)
-                    } else {
-                        format!("{}.await.expect(\"task panicked\")", type_name)
-                    }
-                };
+                return self.emit_task_await(type_name, field, is_throws_handle, is_join_handle, true);
             }
         }
         let obj_s = self.emit_expr(obj);
@@ -1942,29 +1987,14 @@ impl Transpiler {
             // Needs .await.unwrap()? in throws context to propagate Error.Expired,
             // or .await.unwrap().unwrap() otherwise (panics on Elapsed).
             if matches!(&obj.kind, ExprKind::TaskWithTimeout(..)) {
-                let in_throws_ctx = self.in_throws || self.in_try_body;
-                return if field == "wait" {
-                    if in_throws_ctx {
-                        format!("{{ let _ = {}.await.expect(\"task panicked\")?; }}", obj_s)
-                    } else {
-                        format!("{{ let _ = {}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}", obj_s)
-                    }
-                } else if in_throws_ctx {
-                    format!("{}.await.expect(\"task panicked\")?", obj_s)
-                } else {
-                    format!("{}.await.expect(\"task panicked\").expect(\"unhandled task error\")", obj_s)
-                };
+                return self.emit_task_await(&obj_s, field, true, false, false);
             }
 
             let is_future = matches!(&obj.kind, ExprKind::Task(_))
                 || obj_s.contains("tokio::spawn")
                 || obj_s.contains("async move");
             if is_future {
-                return if field == "wait" {
-                    format!("{{ let _ = {}.await; }}", obj_s)
-                } else {
-                    format!("{}.await.expect(\"task panicked\")", obj_s)
-                };
+                return self.emit_plain_task_await(&obj_s, field);
             }
             // Loop variable holding a JoinHandle: only treat as future if the var is
             // explicitly in task_vars (declared with a task expression).
@@ -1983,11 +2013,7 @@ impl Transpiler {
                     && !self.var_mutex_types.contains(v.as_str())
                     && !is_known_struct
                 {
-                    return if field == "wait" {
-                        format!("{{ let _ = {}.await; }}", obj_s)
-                    } else {
-                        format!("{}.await.expect(\"task panicked\")", obj_s)
-                    };
+                    return self.emit_plain_task_await(&obj_s, field);
                 }
             }
         }
