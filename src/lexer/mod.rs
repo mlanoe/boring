@@ -989,22 +989,22 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize, col: usize) ->
                 chars.next();
                 let digits = lex_digits(chars, |c| c.is_ascii_hexdigit());
                 let val = u64::from_str_radix(&digits, 16)
-                    .map_err(|_| LexError::IntegerOverflow { line, col })? as i64;
-                return Ok(TokenKind::Int(val));
+                    .map_err(|_| LexError::IntegerOverflow { line, col })?;
+                return Ok(int_or_uint64(val));
             }
             Some('b') | Some('B') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| matches!(c, '0' | '1'));
                 let val = u64::from_str_radix(&digits, 2)
-                    .map_err(|_| LexError::IntegerOverflow { line, col })? as i64;
-                return Ok(TokenKind::Int(val));
+                    .map_err(|_| LexError::IntegerOverflow { line, col })?;
+                return Ok(int_or_uint64(val));
             }
             Some('o') | Some('O') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| matches!(c, '0'..='7'));
                 let val = u64::from_str_radix(&digits, 8)
-                    .map_err(|_| LexError::IntegerOverflow { line, col })? as i64;
-                return Ok(TokenKind::Int(val));
+                    .map_err(|_| LexError::IntegerOverflow { line, col })?;
+                return Ok(int_or_uint64(val));
             }
             _ => {}
         }
@@ -1059,6 +1059,18 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize, col: usize) ->
     match s.parse::<i64>() {
         Ok(n) => Ok(TokenKind::Int(n)),
         Err(_) => s.parse::<u64>().map(TokenKind::UInt64).map_err(|_| LexError::IntegerOverflow { line, col }),
+    }
+}
+
+/// A `u64` value that doesn't fit in `i64` (e.g. `0xFFFFFFFFFFFFFFFF`, `u64::MAX`)
+/// must not be silently truncated by an `as i64` cast — that turns it into a
+/// negative `Int` (`-1` for `u64::MAX`) instead of the value the source wrote.
+/// Mirrors the decimal-literal fallback above: widen to `UInt64` instead of wrapping.
+fn int_or_uint64(val: u64) -> TokenKind {
+    if val <= i64::MAX as u64 {
+        TokenKind::Int(val as i64)
+    } else {
+        TokenKind::UInt64(val)
     }
 }
 
@@ -1203,6 +1215,28 @@ mod tests {
     fn test_integer_overflowing_u64_is_still_an_error() {
         let src = "184467440737095516150"; // u64::MAX * 10
         assert!(lex(src).is_err());
+    }
+
+    /// Regression test: hex/octal/binary literals that overflow `i64` but fit
+    /// `u64` (e.g. `0xFFFFFFFFFFFFFFFF` == `u64::MAX`) must lex as `UInt64`, the
+    /// same way the decimal literal above does — not silently truncate through
+    /// an `as i64` cast into a negative `Int` (`0xFFFFFFFFFFFFFFFF` → `-1`).
+    #[test]
+    fn test_hex_octal_binary_overflowing_i64_but_fits_u64() {
+        assert_eq!(
+            kinds("0xFFFFFFFFFFFFFFFF"),
+            vec![TokenKind::UInt64(u64::MAX), TokenKind::Newline, TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds("0o1777777777777777777777"), // u64::MAX in octal
+            vec![TokenKind::UInt64(u64::MAX), TokenKind::Newline, TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds("0b1111111111111111111111111111111111111111111111111111111111111111"), // u64::MAX in binary
+            vec![TokenKind::UInt64(u64::MAX), TokenKind::Newline, TokenKind::Eof]
+        );
+        // Values that still fit i64 are unaffected.
+        assert_eq!(kinds("0xFF"), vec![TokenKind::Int(0xFF), TokenKind::Newline, TokenKind::Eof]);
     }
 
     #[test]
