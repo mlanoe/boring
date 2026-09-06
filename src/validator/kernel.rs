@@ -435,6 +435,31 @@ impl KernelValidator {
             }
 
             ExprKind::KernelLaunch { config, kernel } => {
+                // The kernel-target (`--target kernel`, Rust-for-Linux, no_std)
+                // transpiler backend has no GPU access at all — it lowers this to a
+                // bare `/* unsupported: gpu kernel launch in kernel module */`
+                // comment unconditionally (see `transpiler::kernel::emit_expr`),
+                // which is fine as a whole statement but syntactically invalid Rust
+                // wherever a value is expected (`let x = k.launch(...)` becomes
+                // `let x = /* comment */;`, missing its initializer). Reject it here
+                // instead of letting that reach `rustc` as a confusing downstream
+                // syntax error.
+                //
+                // NOTE — currently dead in practice: per `check_kernel_dispatch_
+                // qualifier`'s doc comment in `checker/mod.rs`, the parser never
+                // actually constructs an `ExprKind::KernelLaunch` node for a
+                // `kernel:` block's `k(block = ..., grid = ...)` call sites — those
+                // parse as an ordinary `ExprKind::Call`, which is what every real
+                // backend (including this validator's own `Call` arm above)
+                // detects via its own `block=`/`grid=` labeled-arg heuristic
+                // instead. This arm is kept as defense in depth (and is exercised
+                // directly, bypassing the parser, by this file's own
+                // `kernel_launch_is_rejected_in_kernel_target_context` test) should
+                // a future change ever start constructing this node for real; the
+                // `Call`-shaped, actually-reachable version of the same gap (a
+                // `k(block = ...)` call reaching this validator's `Call` arm with
+                // no equivalent rejection) is not yet covered here.
+                self.error(line, "GPU kernel launch is not supported in kernel context (no GPU access in a Rust-for-Linux module)");
                 if let Some(e) = &config.block { self.check_expr(e); }
                 if let Some(e) = &config.grid  { self.check_expr(e); }
                 if let Some(e) = &config.after { self.check_expr(e); }
@@ -717,10 +742,10 @@ impl KernelValidator {
             if let Some(self_param) = fn_decl.params.first() {
                 if self_param.name == "self" {
                     if let Some(ty) = &self_param.ty {
-                        if !is_task_actor_or_guard(ty) {
+                        if !is_shared_actor_or_guard(ty) {
                             self.error(
                                 line,
-                                "task method on self requires 'task, 'actor, or 'guard qualifier",
+                                "task method on self requires 'shared, 'actor, or 'guard qualifier",
                             );
                         }
                     }
@@ -1049,13 +1074,17 @@ impl KernelValidator {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Returns `true` if the type carries a `'task`, `'actor`, or `'guard` qualifier
-/// (possibly nested inside borrows or optional wrappers).
-fn is_task_actor_or_guard(ty: &Type) -> bool {
+/// Returns `true` if the type carries a `'shared`, `'actor`, or `'guard`
+/// qualifier (possibly nested inside borrows or optional wrappers). Note:
+/// `'task` alone is not one of these — it's a deprecated alias that already
+/// resolves to `OwnerQual::Shared` (see that variant's own doc comment), so
+/// it's covered by the `Shared` arm below; the *compound* `'actor'task`/
+/// `'guard'task` qualifiers (`OwnerQual::ActorTask`/`GuardTask`) are not.
+fn is_shared_actor_or_guard(ty: &Type) -> bool {
     match ty {
         Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => true,
-        Type::Qualified(inner, _) => is_task_actor_or_guard(inner),
-        Type::Optional(inner) => is_task_actor_or_guard(inner),
+        Type::Qualified(inner, _) => is_shared_actor_or_guard(inner),
+        Type::Optional(inner) => is_shared_actor_or_guard(inner),
         _ => false,
     }
 }
@@ -1170,6 +1199,40 @@ mod tests {
         assert!(
             msgs.iter().any(|m| m.contains("nested too deeply")),
             "expected a 'nested too deeply' validator error, got {msgs:?}"
+        );
+    }
+
+    /// Regression test: `ExprKind::KernelLaunch` used to reach
+    /// `transpiler::kernel::emit_expr` unrejected, where it lowers to a bare
+    /// `/* unsupported */` comment — syntactically invalid Rust wherever a
+    /// value is expected (e.g. `let x = k(...)`), a confusing downstream
+    /// `rustc` error instead of a clear validator diagnostic.
+    ///
+    /// Built directly as an AST node (bypassing the parser) rather than from
+    /// real `.br` source: as `check_kernel_dispatch_qualifier`'s own doc
+    /// comment in `checker/mod.rs` notes, the parser never actually
+    /// constructs `ExprKind::KernelLaunch` for a `kernel:` block's `k(...)`
+    /// call sites today — those parse as an ordinary `Call`, which every
+    /// backend (this validator's `Call` arm included) currently detects via
+    /// its own `block=`/`grid=` labeled-arg heuristic instead. This test
+    /// covers the `KernelLaunch` arm as written — real (defense-in-depth,
+    /// forward-compatible) protection should that ever change — while the
+    /// `Call`-shaped, actually-reachable version of this gap is tracked
+    /// separately (see the doc comment on the `KernelLaunch` arm itself).
+    #[test]
+    fn kernel_launch_is_rejected_in_kernel_target_context() {
+        use crate::ast::{Expr, ExprKind, KernelConfig};
+        let kernel = Expr { kind: ExprKind::Var("k".to_string()), line: 1, col: 1, len: 1 };
+        let config = KernelConfig { block: None, grid: None, after: None, priority: None, line: 1, col: 1 };
+        let launch = Expr {
+            kind: ExprKind::KernelLaunch { config: Box::new(config), kernel: Box::new(kernel) },
+            line: 1, col: 1, len: 1,
+        };
+        let mut validator = KernelValidator::new();
+        validator.check_expr(&launch);
+        assert!(
+            validator.diags.iter().any(|diag| diag.level == DiagLevel::Error && diag.message.contains("GPU kernel launch is not supported")),
+            "expected a kernel-launch-not-supported error, got {:?}", validator.diags
         );
     }
 }
