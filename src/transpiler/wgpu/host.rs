@@ -1831,6 +1831,12 @@ fn array_inner(ty: &Type) -> Type {
 fn host_scalar_type(ty: &Type) -> &'static str {
     match ty {
         // GPU buffers always use 32-bit elements (WGSL narrows int→i32, uint→u32, float→f32).
+        // This host-side mirror type must match the device layout, so it stays i32/u32 even
+        // though `int`/`uint` are 64-bit (isize/usize) on the host and on every other GPU
+        // backend — any host value outside i32/u32 range silently wraps once packed into
+        // this buffer. The functional diagnostic for this narrowing is emitted on the device
+        // side, see `wgsl_narrowed_width` in device.rs (the generated shaders/main.wgsl
+        // itself names the risk); this comment documents the host-side half of the same limit.
         Type::Int   => "i32",
         Type::Uint  => "u32",
         Type::Float32 => "f32",

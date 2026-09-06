@@ -2532,6 +2532,41 @@ fn resolve_thrown_enum_name(e: &Expr, all_enum_types: &std::collections::HashSet
     }
 }
 
+/// Returns true if a `while`/`for` loop appears anywhere in `stmt`'s subtree,
+/// including nested inside `if` branches. Mirrors the recursion `body_has_explicit_sync`
+/// (per-backend `device.rs`) already does when looking for an explicit `sync` marker.
+fn stmt_contains_loop(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::While(_) | Stmt::For(_) => true,
+        Stmt::If(i) => i.branches.iter().any(|(_, b)| body_contains_loop(b))
+                    || i.else_body.as_ref().is_some_and(|b| body_contains_loop(b)),
+        _ => false,
+    }
+}
+
+fn body_contains_loop(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_contains_loop)
+}
+
+/// Index of the first top-level statement that is, or recursively contains (including
+/// nested inside `if` branches), a loop -- the point before which the GPU backends'
+/// auto-inserted write-phase barrier (`threadgroup_barrier`/`__syncthreads`/
+/// `workgroupBarrier`) must land, so every thread finishes an initial shared-memory
+/// write (often itself guarded by a top-level `if`, e.g. `if tid == 0: shared[0] = 0`)
+/// before any thread starts a loop that reads that memory cross-thread.
+///
+/// Previously only matched a bare top-level `Stmt::While`/`Stmt::For` directly, so a
+/// loop nested inside a top-level `if` (e.g. `if n > 0: for i in 0..n: ...` right after
+/// the shared-memory initializer) was invisible to `.position()`: it fell through to
+/// `stmts.len()`, and every one of the 4 GPU backends emitted the *entire* body --
+/// including the loop's cross-thread reads -- with no barrier at all. Identical bug,
+/// independently duplicated in `metal`/`cuda`/`rocm`/`wgpu`'s own `device.rs`; factored
+/// here so one fix covers all four.
+pub(crate) fn first_loop_index(stmts: &[Stmt]) -> usize {
+    stmts.iter().position(stmt_contains_loop)
+        .unwrap_or(stmts.len())
+}
+
 #[cfg(test)]
 mod labeled_array_tests {
     use super::*;

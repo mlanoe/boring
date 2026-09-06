@@ -123,15 +123,33 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
     // See this module's doc comment for the full splice architecture.
     let kernel_touching = crate::transpiler::kernel_touching_fn_names(program, &kernel_names_set);
     let kernel_touching_structs = crate::transpiler::kernel_touching_struct_names(program, &kernel_names_set);
-    if !kernel_touching_structs.is_empty() {
-        eprintln!(
-            "warning: struct(s) {:?} have a kernel-touching method -- the ROCm backend's \
-             general-pipeline splice doesn't support this combination (see rocm::mod's doc \
-             comment); these structs will keep the old by-value parameter behavior instead \
-             of the fix applied to every other struct/function.",
-            kernel_touching_structs
-        );
-    }
+    // Previously just an `eprintln!` warning, then silent fall-through to the old
+    // by-value parameter behavior -- exactly the pattern documented (this module's
+    // doc comment, and `kernel_touching_struct_names`'s own doc) as the historical
+    // cause of `E0382`/`E0308` build failures in the *generated* Rust (structs/enums
+    // that need to move by reference instead get passed by value). A build that is
+    // going to fail should fail here, in `boring build`, with a clear reason -- not
+    // downstream in `cargo build` on code the user never wrote. Promoted to a hard
+    // error, accumulated into the same `errors` this backend already surfaces
+    // instead of writing out `host_rs`/`device_hip` (see `RocmOutput::errors`'s doc).
+    let struct_errors: Vec<crate::transpiler::TranspileError> = program.items.iter()
+        .filter_map(|item| match item {
+            Item::Struct(s) if kernel_touching_structs.contains(&s.name) => {
+                Some(crate::transpiler::TranspileError::at_line(
+                    format!(
+                        "struct `{}` has a kernel-touching method -- the ROCm backend's \
+                         general-pipeline splice doesn't support this combination (see \
+                         rocm::mod's doc comment and `kernel_touching_struct_names`); \
+                         rewrite the kernel-touching logic as a free function instead of \
+                         a struct method",
+                        s.name
+                    ),
+                    s.line,
+                ))
+            }
+            _ => None,
+        })
+        .collect();
 
     // Bare top-level kernel construction/dispatch — see `cuda::mod`'s identical
     // doc comment for why this can't go through the general-pipeline splice.
@@ -167,7 +185,9 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
     let build_rs  = emit_build_rs();
     let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
-    RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors: general_out.errors }
+    let mut errors = general_out.errors;
+    errors.extend(struct_errors);
+    RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors }
 }
 
 // ─── build.rs generation ─────────────────────────────────────────────────────

@@ -1314,3 +1314,87 @@ kernel:
     assert!(toml.contains("softbuffer = \"0.3\""), "missing softbuffer dep for a Screen program;\ngot:\n{toml}");
     assert!(toml.contains("cudarc"), "must still depend on cudarc;\ngot:\n{toml}");
 }
+
+// ─── device — auto-sync barrier recurses into top-level `if` ──────────────────
+
+#[test]
+fn device_auto_sync_barrier_found_when_loop_nested_inside_top_level_if() {
+    // No explicit `sync` here — relies on the auto-inserted write-phase barrier
+    // (`first_loop_index` in transpiler/helpers.rs). The accumulation loop that reads
+    // `shared` cross-thread is nested inside a top-level `if`, not a bare top-level
+    // `for`/`while` sibling — `first_loop_index` used to only match a bare top-level
+    // loop statement directly, so this shape was invisible to it and no barrier at
+    // all was emitted before the loop, a real cross-thread race on shared memory.
+    let (cu, _) = cuda_codegen("auto_sync_nested_if", r#"
+kernel Reduce:
+    let [int, 4]'actor shared
+
+    def ():
+        let tid = gpu.thread.x
+        if tid == 0:
+            shared[0] = 0
+        if true:
+            for i in 0..4:
+                shared[i] = shared[i] + 1
+"#);
+    assert!(cu.contains("__syncthreads();"),
+        "expected an auto-inserted __syncthreads() before the loop nested inside \
+         the top-level `if`, even with no explicit `sync`;\ngot:\n{cu}");
+}
+
+// ─── kernel-touching struct method — hard error, not a silent eprintln! ────────
+
+#[test]
+fn kernel_touching_struct_method_is_a_hard_build_error() {
+    // A struct method that touches a kernel (constructs one / dispatches one) isn't
+    // supported by the general-pipeline splice (see this module's doc comment and
+    // `kernel_touching_struct_names`) -- this used to just `eprintln!` a warning and
+    // fall through to codegen that's documented as the historical cause of real
+    // `E0382`/`E0308` build failures in the *generated* Rust. `boring build` itself
+    // must now fail with a clear diagnostic instead of silently writing out a
+    // project doomed to fail downstream in `cargo build`.
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("cuda_codegen").join("kernel_touching_struct_method");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+struct Runner:
+    def run():
+        let data = [1.0, 2.0]
+        mut k = Scale(data)
+"#).unwrap();
+
+    let result = Command::new(bin)
+        .args(["build", "--target", "cuda"])
+        .arg(&br_file)
+        .output()
+        .unwrap();
+
+    assert!(
+        !result.status.success(),
+        "boring build must fail (exit non-zero) for a kernel-touching struct method \
+         instead of silently succeeding with a stderr-only warning"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("Runner"),
+        "error output should name the offending struct `Runner`;\ngot:\n{stderr}"
+    );
+    // Must not have written out the (necessarily broken) generated project.
+    assert!(
+        !tmp.join("test_cuda").join("src").join("main.rs").exists(),
+        "boring build should not write out a generated project when it reports \
+         this as a hard error"
+    );
+}

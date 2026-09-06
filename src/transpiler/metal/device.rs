@@ -7,6 +7,7 @@ use crate::ast::*;
 use crate::transpiler::helpers::{
     reachable_free_fns,
     labeled_array_at_index, labeled_array_dim_literal,
+    first_loop_index,
 };
 
 pub(super) fn emit_device_msl(program: &Program) -> String {
@@ -1059,9 +1060,3 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
     }
 }
 
-/// Returns the index of the first While or For loop in the statement list.
-/// Used to split the pre-loop write phase from the loop phase.
-fn first_loop_index(stmts: &[Stmt]) -> usize {
-    stmts.iter().position(|s| matches!(s, Stmt::While(_) | Stmt::For(_)))
-        .unwrap_or(stmts.len())
-}

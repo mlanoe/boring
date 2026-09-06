@@ -215,6 +215,33 @@ kernel Tile:
 }
 
 #[test]
+fn test_auto_sync_barrier_found_when_loop_nested_inside_top_level_if() {
+    // No explicit `sync` here — relies on the auto-inserted write-phase barrier
+    // (`first_loop_index` in transpiler/helpers.rs). The accumulation loop that reads
+    // `shared` cross-thread is nested inside a top-level `if`, not a bare top-level
+    // `for`/`while` sibling — `first_loop_index` used to only match a bare top-level
+    // loop statement directly, so this shape was invisible to it and no barrier at
+    // all was emitted before the loop, a real cross-thread race on shared memory.
+    let src = r#"
+kernel Reduce:
+    let [int, 4]'actor shared
+
+    def ():
+        let tid = gpu.thread.x
+        if tid == 0:
+            shared[0] = 0
+        if true:
+            for i in 0..4:
+                shared[i] = shared[i] + 1
+"#;
+    let (wgsl, _rs) = wgpu_codegen("auto_sync_nested_if", src);
+
+    assert!(wgsl.contains("workgroupBarrier()"),
+        "expected an auto-inserted workgroupBarrier() before the loop nested inside \
+         the top-level `if`, even with no explicit `sync`;\ngot:\n{wgsl}");
+}
+
+#[test]
 fn test_actor_global_atomic() {
     let src = r#"
 kernel Histogram:
@@ -386,6 +413,34 @@ kernel Narrow:
 
     assert!(wgsl.contains("i32"), "int fields should narrow to i32 in WGSL");
     assert!(!wgsl.contains("i64"), "i64 must not appear in WGSL");
+}
+
+#[test]
+fn test_int_uint_narrowing_warns_in_generated_wgsl() {
+    // `int`/`uint` are 64-bit (isize/usize) on every other GPU backend, but WGSL has no
+    // 64-bit integer type -- silently mapping them to i32/u32 here (like the genuinely
+    // unsupported 8/16/64/128-bit widths already do via `wgsl_unsupported_width`) must
+    // leave a diagnostic in the generated shader instead of narrowing in total silence.
+    let src = r#"
+kernel Narrow:
+    mut [int]'unified buf
+    mut [uint]'unified ubuf
+
+    def ():
+        let x: int = 42
+        buf[0] = x
+        let y: uint = 7
+        ubuf[0] = y
+"#;
+    let (wgsl, _rs) = wgpu_codegen("narrow_warn", src);
+
+    assert!(wgsl.contains("i32"), "int fields should still narrow to i32 in WGSL");
+    assert!(wgsl.contains("u32"), "uint fields should still narrow to u32 in WGSL");
+    assert!(
+        wgsl.contains("64-bit"),
+        "narrowing `int`/`uint` to 32-bit on wgpu should emit an explicit diagnostic \
+         comment naming the 64-bit narrowing, generated wgsl was:\n{wgsl}"
+    );
 }
 
 #[test]

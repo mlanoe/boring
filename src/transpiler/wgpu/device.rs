@@ -7,6 +7,7 @@ use crate::ast::*;
 use crate::transpiler::helpers::{
     collect_vars_in_stmt,
     labeled_array_at_index, labeled_array_dim_literal,
+    first_loop_index,
 };
 
 /// Emits the WGSL device module(s) for this program. Returns `(real, emulated)`:
@@ -1191,10 +1192,21 @@ fn wgsl_unsupported_f64(fallback: &str) -> String {
     format!("/* ERROR: `float64` is not supported on --target wgpu (WGSL has no 64-bit float type — use float32) */ {}", fallback)
 }
 
+/// `int`/`uint` are Boring's default-width integer types — 64-bit (`isize`/`usize`) on
+/// every native GPU backend (metal/cuda/rocm, which have real 64-bit integer types).
+/// WGSL has no 64-bit integer type at all, so unlike those backends this target can only
+/// represent `int`/`uint` as 32-bit `i32`/`u32` — any value outside [-2^31, 2^31) (`int`)
+/// or [0, 2^32) (`uint`) wraps silently on this target only. Emit a comment naming this
+/// narrowing explicitly (mirrors `wgsl_unsupported_width`'s convention for the genuinely
+/// unrepresentable widths) instead of narrowing in total silence.
+fn wgsl_narrowed_width(name: &str, fallback: &str) -> String {
+    format!("/* WARNING: `{}` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside {} range wrap silently */ {}", name, fallback, fallback)
+}
+
 fn wgsl_scalar(ty: &Type) -> String {
     match ty {
-        Type::Int              => "i32".into(),
-        Type::Uint             => "u32".into(),
+        Type::Int              => wgsl_narrowed_width("int", "i32"),
+        Type::Uint             => wgsl_narrowed_width("uint", "u32"),
         Type::Int32             => "i32".into(),
         Type::Uint32            => "u32".into(),
         Type::Uint8             => wgsl_unsupported_width("uint8", "u32"),
@@ -1210,8 +1222,10 @@ fn wgsl_scalar(ty: &Type) -> String {
         // bool is not allowed in storage/uniform buffers in WGSL — use u32.
         Type::Bool             => "u32".into(),
         Type::Named(n) => match n.as_str() {
-            "int"   | "i32" => "i32".to_string(),
-            "uint"  | "u32" => "u32".to_string(),
+            "int"   => wgsl_narrowed_width("int", "i32"),
+            "uint"  => wgsl_narrowed_width("uint", "u32"),
+            "i32" => "i32".to_string(),
+            "u32" => "u32".to_string(),
             "float32" | "f32" => "f32".to_string(),
             "float" | "float64" | "f64" => wgsl_unsupported_f64("f32"),
             "bool"                  => "u32".to_string(),
@@ -1519,11 +1533,6 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
                                    || args.iter().any(|a| expr_references_any(&a.value, names)),
         _ => false,
     }
-}
-
-fn first_loop_index(stmts: &[Stmt]) -> usize {
-    stmts.iter().position(|s| matches!(s, Stmt::While(_) | Stmt::For(_)))
-        .unwrap_or(stmts.len())
 }
 
 /// Scan `kernel:` blocks for `kname(block = ...)` calls and return per-kernel block sizes.
