@@ -1,0 +1,8 @@
+# Regression test: ord/chr used to be registered twice in the interpreter's
+# builtin env (register_string_and_math_builtins, then silently shadowed by
+# register_result_and_args_builtins) — removing the dead first copy must not
+# change behavior.
+print ord("A")
+print chr(65)
+print ord("z")
+print chr(97)

@@ -158,6 +158,7 @@ interp_test!(guard);
 interp_test!(with_stmt);
 interp_test!(generics);
 interp_test!(operators);
+interp_test!(ord_chr);
 interp_test!(macros);
 interp_test!(defer);
 interp_test!(do_block);

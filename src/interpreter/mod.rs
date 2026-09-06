@@ -1846,28 +1846,10 @@ fn register_string_and_math_builtins(e: &mut Env) {
             _ => Err(err("floatToBits: expected number", line)),
         },
     });
-    e.define("chr", Value::NativeFn {
-        name: "chr".into(),
-        func: |args, line| match args.first() {
-            Some(Value::Int(n)) => {
-                char::from_u32(*n as u32)
-                    .map(|c| Value::Str(c.to_string()))
-                    .ok_or_else(|| err("chr: invalid Unicode code point", line))
-            }
-            _ => Err(err("chr: expected int", line)),
-        },
-    });
-    e.define("ord", Value::NativeFn {
-        name: "ord".into(),
-        func: |args, line| match args.first() {
-            Some(Value::Str(s)) => {
-                s.chars().next()
-                    .map(|c| Value::Int(c as i64))
-                    .ok_or_else(|| err("ord: empty string", line))
-            }
-            _ => Err(err("ord: expected string", line)),
-        },
-    });
+    // `chr`/`ord` are registered once, below, by
+    // `register_result_and_args_builtins` — that registration runs after this
+    // one on the same `Env` (see `Interpreter::new`), so a duplicate pair used
+    // to live here too, silently shadowed and dead (last `e.define` wins).
     e.define("clamp", Value::NativeFn {
         name: "clamp".into(),
         func: |args, line| {

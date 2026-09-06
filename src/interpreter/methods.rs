@@ -1452,18 +1452,13 @@ impl Interpreter {
             }
             "sortedBy" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
-                let mut new_arr = Value::rc_vec_into_owned(arr);
+                let new_arr = Value::rc_vec_into_owned(arr);
                 let mut sort_err: Option<Signal> = None;
-                new_arr.sort_by(|a, b| {
-                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                    // Call closure(a, b) — returns negative/zero/positive or Bool
-                    // We need &mut self but sort_by takes an Fn. Use a workaround:
-                    // Return Equal for now; real impl needs unsafe or different approach.
-                    // We use a pre-pass to build a key array instead.
-                    let _ = (a, b, &closure);
-                    std::cmp::Ordering::Equal
-                });
-                // Pre-pass approach: map each element to a sort key, then sort by key index
+                // Pre-pass approach: map each element to a sort key, then sort by key
+                // index. `sort_by` takes an `Fn`, not `FnMut`, so it can't call back
+                // into `self.call_value` (which needs `&mut self`) directly — hence
+                // the two-phase map-then-sort-by-key below, rather than a single
+                // `sort_by` comparator closure.
                 let keys: Vec<Value> = {
                     let mut ks = Vec::new();
                     for item in &new_arr {
