@@ -1,0 +1,12 @@
+# .slice() negative-index clamping (matches native a[m..n] slice syntax) —
+# self-hosted interpreter only (boring/interpreter/methods.br). NOT a shared
+# fixture with tests/transpile.rs: the main compiler's own native `.slice()`
+# builtin casts start/end straight to `usize` with no clamping at all, so a
+# negative literal there is a hard compile error (`cannot apply unary
+# operator '-' to type 'usize'`) — a separate, out-of-scope gap in the main
+# compiler, not the self-hosted-interpreter bug this case targets.
+let s = "Hello, World!"
+print s.slice(0, 5)
+print s.slice(-6, -1)
+print s.slice(-100, 3)
+print s.slice(5, 2)

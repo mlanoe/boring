@@ -106,6 +106,15 @@ macro_rules! itest {
 
 itest!(basics);
 itest!(strings);
+// `.slice()` negative-index clamping — deliberately NOT added to the
+// `strings`/`collections` fixtures above: those are shared verbatim with
+// `tests/transpile.rs` (the main compiler's own transpile+build+run suite),
+// whose native `.slice()` builtin doesn't clamp negative indices at all (a
+// separate, out-of-scope gap) and would fail to even compile on a negative
+// literal. Dedicated cases keep this self-hosted-interpreter-only fix
+// (boring/interpreter/methods.br) isolated from that other suite.
+itest!(string_slice_clamp);
+itest!(array_slice_clamp);
 itest!(control_flow);
 itest!(match_stmt);
 itest!(functions);
@@ -272,6 +281,19 @@ fn use_modules() {
 #[test]
 fn use_boring_stdlib_unsupported() {
     run_file_case_err("use_boring_stdlib_unsupported", "main.br", "boring.*");
+}
+
+// Regression test for `parse_hex_str`/`parse_bin_str`/`parse_oct_str`
+// (boring/interpreter/lexer.br) accumulating a hex/octal/binary literal
+// straight into an `int` (isize, 64-bit) with no overflow check at all — a
+// 17+ hex digit literal (e.g. `0xFFFFFFFFFFFFFFFF`, u64::MAX) silently
+// wrapped in release or panicked on the raw `acc * 16 + digit` overflow in
+// debug. Must now fail lexing fast with a clear error naming the literal,
+// same as the main compiler's own lexer already does for this class of
+// literal (src/lexer/mod.rs's `LexError::IntegerOverflow`).
+#[test]
+fn numeric_literal_overflow() {
+    run_file_case_err("numeric_literal_overflow", "main.br", "too large");
 }
 
 // Regression test for the self-hosted parser's recursion-depth guard

@@ -1,0 +1,10 @@
+# .slice() negative-index clamping (matches native a[m..n] slice syntax) —
+# self-hosted interpreter only (boring/interpreter/methods.br); see
+# string_slice_clamp.br's header comment for why this is a dedicated case
+# rather than added to the strings.br/collections.br fixtures shared with
+# tests/transpile.rs (the main compiler's own `.slice()` doesn't clamp).
+let sl = [1, 2, 3, 4, 5]
+print "{sl.slice(1, 3)}"
+print "{sl.slice(-3, -1)}"
+print "{sl.slice(-100, 2)}"
+print "{sl.slice(3, 1)}"

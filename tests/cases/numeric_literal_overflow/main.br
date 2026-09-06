@@ -1,0 +1,8 @@
+# Hex/octal/binary literals that overflow `int`'s 64-bit range must fail
+# lexing fast with a clear error, not silently wrap/truncate or panic on
+# the raw accumulator overflow (see boring/interpreter/lexer.br's
+# parse_hex_str/parse_bin_str/parse_oct_str — accumulate through `int128`
+# staging, then reject anything that still doesn't fit `int`).
+let x = 0xFFFFFFFFFFFFFFFF
+
+print "unreachable"

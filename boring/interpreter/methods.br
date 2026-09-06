@@ -269,7 +269,21 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     match start_val:
                         Value.Int(start):
                             match end_val:
-                                Value.Int(end): Value.Str(s.slice(start, end))
+                                Value.Int(end):
+                                    # Clamp exactly like the native `a[m..n]` slice syntax
+                                    # (see ExprKind.SliceRange in eval.br) — negative indices
+                                    # count from the end, out-of-bounds indices clamp to the
+                                    # string's own bounds, and an empty/inverted range yields
+                                    # "" instead of panicking (this used to pass start/end
+                                    # straight through to `s.slice`, so e.g. `"hi".slice(-1, 3)`
+                                    # would crash instead of the Python-like idiom it looks like).
+                                    let len = s.length
+                                    let lo = if start < 0: (len + start).max(0) else: start.min(len)
+                                    let hi = if end < 0: (len + end).max(0) else: end.min(len)
+                                    if lo >= len or lo >= hi:
+                                        Value.Str("")
+                                    else:
+                                        Value.Str(s.slice(lo, hi))
                                 _: throw "slice: expected int end"
                         _: throw "slice: expected int start"
                 "indexOf":
@@ -550,9 +564,22 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Int(start):
                             match end_val:
                                 Value.Int(end):
-                                    let s = if start < arr.length: start else: arr.length
-                                    let e = if end < arr.length: end else: arr.length
-                                    Value.Array(arr.slice(s, e))
+                                    # Clamp exactly like the native `a[m..n]` slice syntax
+                                    # (see ExprKind.SliceRange in eval.br) — negative indices
+                                    # count from the end, out-of-bounds indices clamp to the
+                                    # array's own bounds, and an empty/inverted range yields
+                                    # [] instead of panicking. Previously only clamped the
+                                    # upper bound (`if start < arr.length: start else: arr.length`),
+                                    # which leaves a negative `start`/`end` untouched — the
+                                    # Python-like idiom `arr.slice(-1, 3)` would crash instead
+                                    # of slicing from the end.
+                                    let len = arr.length
+                                    let lo = if start < 0: (len + start).max(0) else: start.min(len)
+                                    let hi = if end < 0: (len + end).max(0) else: end.min(len)
+                                    if lo >= len or lo >= hi:
+                                        Value.Array([])
+                                    else:
+                                        Value.Array(arr.slice(lo, hi))
                                 _: throw "slice: expected int end"
                         _: throw "slice: expected int start"
                 "zip":

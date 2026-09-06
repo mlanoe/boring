@@ -21,23 +21,41 @@ def int hex_digit_val(string c):
     elif c == "f" or c == "F": 15
     else: 0
 
-def int parse_hex_str(string s):
-    var acc = 0
-    for c in s.chars():
-        acc = acc * 16 + hex_digit_val(c)
-    acc
+# These three used to accumulate directly into an `int` (isize, 64-bit)
+# without any overflow check — a hex literal of 17+ digits (or 22+ octal, or
+# 65+ binary) overflows that accumulator, silently wrapping in release or
+# panicking in debug (overflow-checks). Widening the accumulator to `int128`
+# (mirrors eval.br's `value_as_i128` staging convention for overflow-safe
+# arithmetic) pushes that ceiling out to 32/43/128 digits respectively —
+# comfortably past any realistic literal — and the explicit range check
+# below then rejects anything that still doesn't fit `int`'s own 64-bit
+# range with a clear lexical error, instead of silently narrowing (and
+# possibly flipping the sign of) an out-of-range value.
+let int128 int_max_128 = 9223372036854775807
 
-def int parse_bin_str(string s):
-    var acc = 0
+def int parse_hex_str(string s) throws:
+    var int128 acc = 0
     for c in s.chars():
-        acc = acc * 2 + ((c as int) else 0)
-    acc
+        acc = acc * 16 + (hex_digit_val(c) as int128)
+        if acc > int_max_128:
+            throw "hex literal '0x{s}' is too large (exceeds int's 64-bit range)"
+    acc as int
 
-def int parse_oct_str(string s):
-    var acc = 0
+def int parse_bin_str(string s) throws:
+    var int128 acc = 0
     for c in s.chars():
-        acc = acc * 8 + ((c as int) else 0)
-    acc
+        acc = acc * 2 + (((c as int) else 0) as int128)
+        if acc > int_max_128:
+            throw "binary literal '0b{s}' is too large (exceeds int's 64-bit range)"
+    acc as int
+
+def int parse_oct_str(string s) throws:
+    var int128 acc = 0
+    for c in s.chars():
+        acc = acc * 8 + (((c as int) else 0) as int128)
+        if acc > int_max_128:
+            throw "octal literal '0o{s}' is too large (exceeds int's 64-bit range)"
+    acc as int
 
 def int measure_indent(string line):
     var spaces = 0
