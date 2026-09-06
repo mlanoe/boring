@@ -485,9 +485,15 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            let content = raw.trim_start();
-            let content = &content[..comment_start(content)];
-            let line_tokens = lex_line(content.trim_end(), self.line)?;
+            let indent_offset = raw.len() - trimmed.len();
+            let content = &trimmed[..comment_start(trimmed)];
+            let mut line_tokens = lex_line(content.trim_end(), self.line)?;
+            // `lex_line` computed columns relative to `content`, which has had the
+            // line's leading indentation stripped — add that offset back so
+            // `Token.col` reflects the real column in the source line.
+            for t in &mut line_tokens {
+                t.col += indent_offset;
+            }
             // Update paren depth and track colon-blocks inside parens.
             let mut last_meaningful_is_colon = false;
             for t in &line_tokens {
@@ -602,12 +608,18 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            let content = raw.trim_start();
-            let content = &content[..comment_start(content)];
-            let line_tokens = match lex_line(content.trim_end(), self.line) {
+            let indent_offset = raw.len() - trimmed.len();
+            let content = &trimmed[..comment_start(trimmed)];
+            let mut line_tokens = match lex_line(content.trim_end(), self.line) {
                 Ok(t) => t,
                 Err(e) => { errors.push(e); i += 1; continue; }
             };
+            // `lex_line` computed columns relative to `content`, which has had the
+            // line's leading indentation stripped — add that offset back so
+            // `Token.col` reflects the real column in the source line.
+            for t in &mut line_tokens {
+                t.col += indent_offset;
+            }
             let mut last_meaningful_is_colon = false;
             for t in &line_tokens {
                 match &t.kind {
@@ -1301,6 +1313,18 @@ mod tests {
         let k = kinds(src);
         assert!(k.contains(&TokenKind::Indent));
         assert!(k.contains(&TokenKind::Dedent));
+    }
+
+    /// Regression test: `Token.col` must account for a line's leading indentation,
+    /// not just its position within the trimmed content `lex_line` actually sees.
+    #[test]
+    fn test_col_accounts_for_indentation() {
+        let src = "if true:\n    x\n";
+        let tokens = lex(src).unwrap();
+        // "x" is on line 2, indented by 4 spaces, so it starts at column 5.
+        let x_tok = tokens.iter().find(|t| matches!(&t.kind, TokenKind::Ident(s) if s == "x")).unwrap();
+        assert_eq!(x_tok.line, 2);
+        assert_eq!(x_tok.col, 5);
     }
 
     /// Regression test: two *different* lines each pure in their own indentation

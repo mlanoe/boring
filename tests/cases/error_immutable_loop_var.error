@@ -1,5 +1,5 @@
 error: cannot assign to `i`: declared as `let` (immutable)
- --> <file>:2:1
+ --> <file>:2:5
   |
 2 |     i = 0
-  | ^
+  |     ^
