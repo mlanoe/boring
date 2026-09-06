@@ -118,7 +118,7 @@ impl Parser {
             self.expect_newline_soft();
             let s = match stmt {
                 Stmt::Expr(ref e) if !matches!(e.kind, ExprKind::Assign(..)) => {
-                    vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line , col: 0 })]
+                    vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line, col: e.col })]
                 }
                 other => vec![other],
             };
@@ -183,7 +183,7 @@ impl Parser {
                         "parameter '{}' in '{}' has no type annotation — add a type (e.g. 'int {}')",
                         p.name, kind_desc, p.name
                     ),
-                    line: p.line, col: 0, len: 1,
+                    line: p.line, col: p.col, len: 1,
                 });
             }
         }
@@ -451,7 +451,7 @@ impl Parser {
                 let body = self.parse_method_body()?;
                 let param = crate::ast::Param {
                     name: param_name, ty: Some(param_ty),
-                    mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col: 0,
+                    mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col,
                 };
                 Ok(TypeMemberKind::Method(TypeMethod {
                     kind: TypeMethodKind::Set, name, params: vec![param],
@@ -573,6 +573,7 @@ impl Parser {
         let mut params = Vec::new();
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
             let pline = self.line();
+            let pcol = self.col();
 
             // `pub var?` or `var` or nothing
             let is_pub = self.eat(&TokenKind::Pub);
@@ -602,7 +603,7 @@ impl Parser {
                 None
             };
 
-            params.push(InitParam { is_pub, mutable, name, ty, default, line: pline , col: 0 });
+            params.push(InitParam { is_pub, mutable, name, ty, default, line: pline, col: pcol });
 
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -778,7 +779,7 @@ impl Parser {
                 self.expect_newline_soft();
                 match stmt {
                     Stmt::Expr(ref e) if !matches!(e.kind, ExprKind::Assign(..)) =>
-                        vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line , col: 0 })],
+                        vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line, col: e.col })],
                     other => vec![other],
                 }
             };

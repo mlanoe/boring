@@ -75,7 +75,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
 
 /// Maximum `not` chain depth. Each `not` creates ~15 Rust stack frames in the
 /// recursive-descent parser; at 200 that's ~3000 frames (~6 MB in debug mode),
-/// safely within the 8 MB thread stack set in main.rs.
+/// safely within the 256 MB thread stack set in main.rs.
 const MAX_EXPR_DEPTH: usize = 200;
 
 struct Parser {
@@ -980,6 +980,141 @@ impl Parser {
         }
     }
 
+    /// Shared suffix-qualifier lookahead for `is_type_start_before_ident`'s
+    /// named-type and array/set/dict-type arms — skips everything between a
+    /// type's "core" (the name+generics, or the closing `]`/`}`) and its
+    /// optional trailing parameter name: an optional `?`, a `'`-qualifier
+    /// (with its own chained `'task`/`'weak` sub-qualifiers), another `?`, an
+    /// `&`-borrow qualifier (in either its `'qual&` or bare `Type&` form), an
+    /// optional function-type `(...)` suffix, and a trailing `...` variadic
+    /// marker. Returns the token index just past everything it consumed.
+    ///
+    /// Extracted from what used to be ~140 lines of near-identical duplicated
+    /// lookahead between the two match arms — real duplication whose drift
+    /// once caused a genuine bug (see the `'actor'task`/`'guard'task` note
+    /// below): a chained-qualifier fix landed in only one of the two copies,
+    /// silently leaving the other one behind. Sharing one implementation
+    /// closes that class of bug by construction.
+    fn skip_type_suffix_qualifiers(&self, start: usize) -> usize {
+        let mut i = start;
+        // skip optional `?`
+        if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
+        // skip optional tick + qualifier keyword
+        if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Tick) {
+            i += 1;
+            let mut qual_is_auto_or_shared = false;
+            if let Some(tok) = self.tokens.get(i) {
+                match &tok.kind {
+                    TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
+                    TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap") => { i += 1; }
+                    // `'actor` may be followed by `'task` → `'actor'task`, or by
+                    // `'weak` → `'actor'weak` (via the trailing-weak check below,
+                    // which needs `qual_is_auto_or_shared` set even for bare `'actor`).
+                    TokenKind::Ident(q) if q == "actor" => {
+                        i += 1;
+                        qual_is_auto_or_shared = true;
+                        if i < self.tokens.len()
+                            && matches!(self.tokens[i].kind, TokenKind::Tick)
+                            && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
+                        {
+                            i += 2; // consume `'task`
+                        }
+                    }
+                    // `'guard` may be followed by `'task` → `'guard'task`
+                    TokenKind::Guard => {
+                        i += 1;
+                        qual_is_auto_or_shared = true;
+                        if i < self.tokens.len()
+                            && matches!(self.tokens[i].kind, TokenKind::Tick)
+                            && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
+                        {
+                            i += 2;
+                        }
+                    }
+                    TokenKind::Ident(q) if q == "weak" => { i += 1; }
+                    TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
+                    TokenKind::New => { i += 1; }
+                    // `'static` — no chained sub-qualifier (no `'static'task`/
+                    // `'static'weak`), just skip past it like `'new`.
+                    TokenKind::Static => { i += 1; }
+                    // `'mut` / `'req` — named qualifier groups (parameters only,
+                    // see docs/qualifiers.md). Both `mut` and `req` are reserved
+                    // keywords, not `Ident`s, so they need their own arms here —
+                    // unlike `'one`/`'many`, which are plain idents and already
+                    // fall through to the trailing-ident check below. No chained
+                    // sub-qualifier, just skip past like `'new`/`'static`.
+                    TokenKind::Mut => { i += 1; }
+                    TokenKind::Req => { i += 1; }
+                    _ => {}
+                }
+            }
+            if qual_is_auto_or_shared
+                && i < self.tokens.len()
+                && matches!(self.tokens[i].kind, TokenKind::Tick)
+                && matches!(self.tokens.get(i + 1).map(|t| &t.kind),
+                            Some(TokenKind::Ident(q)) if q == "weak")
+            {
+                i += 2;
+            }
+            if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
+            if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ampersand) {
+                i += 1;
+                if let Some(t) = self.tokens.get(i) {
+                    if let TokenKind::Ident(q) = &t.kind {
+                        if q.len() == 1
+                            && q.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
+                            && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                        {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // skip `&` qualifier in any form
+        if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ampersand) {
+            if let Some(tok) = self.tokens.get(i + 1) {
+                match &tok.kind {
+                    TokenKind::Ident(q) if q == "auto"   => { i += 2; }
+                    TokenKind::Task => { i += 2; }
+                    TokenKind::Ident(q)
+                        if q.len() == 1
+                            && q.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) =>
+                    {
+                        if matches!(self.tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    TokenKind::Ident(_) => { i += 1; }
+                    _ => {}
+                }
+            }
+        }
+        // skip optional function-type suffix
+        if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::LParen) {
+            i += 1;
+            let mut depth = 1usize;
+            while i < self.tokens.len() && depth > 0 {
+                match &self.tokens[i].kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            while i < self.tokens.len()
+                && matches!(self.tokens[i].kind, TokenKind::Throws | TokenKind::Task)
+            {
+                i += 1;
+            }
+        }
+        // skip optional `...`
+        if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::DotDotDot) { i += 1; }
+        i
+    }
+
     fn is_type_start_before_ident(&self) -> bool {
         // Returns true if current token starts a type that is followed by an ident (param name).
         match self.peek() {
@@ -1007,121 +1142,7 @@ impl Parser {
                 {
                     i += 2;
                 }
-                // skip optional `?`
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
-                // skip optional tick + qualifier keyword
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Tick) {
-                    i += 1;
-                    let mut qual_is_auto_or_shared = false;
-                    if let Some(tok) = self.tokens.get(i) {
-                        match &tok.kind {
-                            TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap") => { i += 1; }
-                            // `'actor` may be followed by `'task` → `'actor'task`, or by
-                            // `'weak` → `'actor'weak` (via the trailing-weak check below,
-                            // which needs `qual_is_auto_or_shared` set even for bare `'actor`).
-                            TokenKind::Ident(q) if q == "actor" => {
-                                i += 1;
-                                qual_is_auto_or_shared = true;
-                                if i < self.tokens.len()
-                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
-                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
-                                {
-                                    i += 2; // consume `'task`
-                                }
-                            }
-                            // `'guard` may be followed by `'task` → `'guard'task`
-                            TokenKind::Guard => {
-                                i += 1;
-                                qual_is_auto_or_shared = true;
-                                if i < self.tokens.len()
-                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
-                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
-                                {
-                                    i += 2;
-                                }
-                            }
-                            TokenKind::Ident(q) if q == "weak" => { i += 1; }
-                            TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::New => { i += 1; }
-                            // `'static` — no chained sub-qualifier (no `'static'task`/
-                            // `'static'weak`), just skip past it like `'new`.
-                            TokenKind::Static => { i += 1; }
-                            // `'mut` / `'req` — named qualifier groups (parameters only,
-                            // see docs/qualifiers.md). Both `mut` and `req` are reserved
-                            // keywords, not `Ident`s, so they need their own arms here —
-                            // unlike `'one`/`'many`, which are plain idents and already
-                            // fall through to the trailing-ident check below. No chained
-                            // sub-qualifier, just skip past like `'new`/`'static`.
-                            TokenKind::Mut => { i += 1; }
-                            TokenKind::Req => { i += 1; }
-                            _ => {}
-                        }
-                    }
-                    if qual_is_auto_or_shared
-                        && i < self.tokens.len()
-                        && matches!(self.tokens[i].kind, TokenKind::Tick)
-                        && matches!(self.tokens.get(i + 1).map(|t| &t.kind),
-                                    Some(TokenKind::Ident(q)) if q == "weak")
-                    {
-                        i += 2;
-                    }
-                    if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
-                    if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ampersand) {
-                        i += 1;
-                        if let Some(t) = self.tokens.get(i) {
-                            if let TokenKind::Ident(q) = &t.kind {
-                                if q.len() == 1
-                                    && q.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
-                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
-                                {
-                                    i += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-                // skip `&` qualifier in any form
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ampersand) {
-                    if let Some(tok) = self.tokens.get(i + 1) {
-                        match &tok.kind {
-                            TokenKind::Ident(q) if q == "auto"   => { i += 2; }
-                            TokenKind::Task => { i += 2; }
-                            TokenKind::Ident(q)
-                                if q.len() == 1
-                                    && q.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) =>
-                            {
-                                if matches!(self.tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
-                                    i += 2;
-                                } else {
-                                    i += 1;
-                                }
-                            }
-                            TokenKind::Ident(_) => { i += 1; }
-                            _ => {}
-                        }
-                    }
-                }
-                // skip optional function-type suffix
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::LParen) {
-                    i += 1;
-                    let mut depth = 1usize;
-                    while i < self.tokens.len() && depth > 0 {
-                        match &self.tokens[i].kind {
-                            TokenKind::LParen => depth += 1,
-                            TokenKind::RParen => depth -= 1,
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                    while i < self.tokens.len()
-                        && matches!(self.tokens[i].kind, TokenKind::Throws | TokenKind::Task)
-                    {
-                        i += 1;
-                    }
-                }
-                // skip optional `...`
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::DotDotDot) { i += 1; }
+                i = self.skip_type_suffix_qualifiers(i);
                 i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_))
             }
             // Array type `[...]` or Set/Dict type `{...}` before a param name
@@ -1135,108 +1156,7 @@ impl Parser {
                     if &self.tokens[i].kind == close { depth -= 1; }
                     i += 1;
                 }
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Tick) {
-                    i += 1;
-                    let mut qual_is_auto_or_shared = false;
-                    if let Some(tok) = self.tokens.get(i) {
-                        match &tok.kind {
-                            TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap") => { i += 1; }
-                            // `[T]'actor` may be followed by `'task` → `[T]'actor'task`
-                            // (Arc<tokio::sync::Mutex<Vec<T>>>) — mirrors the named-type
-                            // arm above (`TokenKind::Ident(s)` case's own `"actor"` match).
-                            // This arm used to just consume `actor` and stop, leaving the
-                            // following `'task`'s tick unconsumed; since `qual_is_auto_or_shared`
-                            // was also never set for `actor` here (unlike the named-type arm),
-                            // the whole lookahead fell through and reported "not a type start"
-                            // for e.g. `var [User]'actor'task all_users = []`, which then
-                            // misparsed `var` as an inferred-type binding and choked on the
-                            // `[` where it expected the variable name (confirmed via
-                            // examples/tokio.br).
-                            TokenKind::Ident(q) if q == "actor" => {
-                                i += 1;
-                                qual_is_auto_or_shared = true;
-                                if i < self.tokens.len()
-                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
-                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
-                                {
-                                    i += 2; // consume `'task`
-                                }
-                            }
-                            // `[T]'guard'task` — same reasoning as `'actor'task` above.
-                            TokenKind::Guard => {
-                                i += 1;
-                                qual_is_auto_or_shared = true;
-                                if i < self.tokens.len()
-                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
-                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
-                                {
-                                    i += 2;
-                                }
-                            }
-                            TokenKind::Ident(q) if q == "weak" => { i += 1; }
-                            TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::New => { i += 1; }
-                            // `'static` — no chained sub-qualifier (no `'static'task`/
-                            // `'static'weak`), just skip past it like `'new`.
-                            TokenKind::Static => { i += 1; }
-                            // `'mut` / `'req` — named qualifier groups (parameters only,
-                            // see docs/qualifiers.md); mirrors the named-type arm above.
-                            TokenKind::Mut => { i += 1; }
-                            TokenKind::Req => { i += 1; }
-                            _ => {}
-                        }
-                    }
-                    if qual_is_auto_or_shared
-                        && i < self.tokens.len()
-                        && matches!(self.tokens[i].kind, TokenKind::Tick)
-                        && matches!(self.tokens.get(i + 1).map(|t| &t.kind),
-                                    Some(TokenKind::Ident(q)) if q == "weak")
-                    {
-                        i += 2;
-                    }
-                    if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
-                    if qual_is_auto_or_shared
-                        && i < self.tokens.len()
-                        && matches!(self.tokens[i].kind, TokenKind::Ampersand)
-                    {
-                        i += 1;
-                    }
-                }
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ampersand) {
-                    if let Some(tok) = self.tokens.get(i + 1) {
-                        match &tok.kind {
-                            TokenKind::Ident(q) if q == "auto"   => { i += 2; }
-                            TokenKind::Task => { i += 2; }
-                            TokenKind::Ident(q)
-                                if q.len() == 1
-                                    && q.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) =>
-                            { i += 2; }
-                            TokenKind::Ident(_) => { i += 1; }
-                            _ => {}
-                        }
-                    }
-                }
-                // skip optional function-type suffix
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::LParen) {
-                    i += 1;
-                    let mut depth = 1usize;
-                    while i < self.tokens.len() && depth > 0 {
-                        match &self.tokens[i].kind {
-                            TokenKind::LParen => depth += 1,
-                            TokenKind::RParen => depth -= 1,
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                    while i < self.tokens.len()
-                        && matches!(self.tokens[i].kind, TokenKind::Throws | TokenKind::Task)
-                    {
-                        i += 1;
-                    }
-                }
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::DotDotDot) { i += 1; }
+                i = self.skip_type_suffix_qualifiers(i);
                 i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_))
             }
             // Tuple type `(T1, T2, ...)` before a param/variable name.

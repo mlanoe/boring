@@ -1252,6 +1252,7 @@ impl Parser {
             self.skip_newlines();
             if self.check(&TokenKind::Catch) {
                 let catch_line = self.line();
+                let catch_col = self.col();
                 self.advance();
                 let mut types = Vec::new();
                 let mut variant: Option<String> = None;
@@ -1273,7 +1274,7 @@ impl Parser {
                 self.expect(&TokenKind::Colon)?;
                 self.expect_newline()?;
                 let catch_body = self.parse_block()?;
-                catch_clauses.push(CatchClause { types, variant, body: catch_body, line: catch_line , col: 0 });
+                catch_clauses.push(CatchClause { types, variant, body: catch_body, line: catch_line, col: catch_col });
             } else {
                 break;
             }

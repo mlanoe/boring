@@ -419,7 +419,7 @@ impl Parser {
             self.advance();
             // Guard: `not not not …` chains recurse directly, one frame per `not`.
             // Each `not` contributes ~15 Rust frames; at MAX_EXPR_DEPTH the stack is
-            // MAX * 15 frames deep which is safe within the 8 MB thread stack.
+            // MAX * 15 frames deep which is safe within the 256 MB thread stack.
             self.depth += 1;
             if self.depth > crate::parser::MAX_EXPR_DEPTH {
                 self.depth -= 1;
@@ -871,6 +871,20 @@ impl Parser {
                             pairs.push(self.parse_relabel_pair()?);
                         }
                         self.expect(&TokenKind::RBracket)?;
+                        // Mirror `Type::LabeledArray`'s own "at least 2 axes" rule
+                        // (try_parse_labeled_axes / Type::labeled_array_shape_error) — a
+                        // relabeling is meaningless for a single axis (nothing to
+                        // disambiguate), the same reason the type-annotation form
+                        // rejects it at parse time instead of accepting it silently.
+                        if pairs.len() < 2 {
+                            return Err(ParseError::Generic {
+                                line, col,
+                                msg: "labeled array relabeling needs at least 2 axes — a \
+                                      single axis has no ambiguity to resolve"
+                                    .to_string(),
+                                len: self.span_len(line, col),
+                            });
+                        }
                         expr = Expr { kind: ExprKind::RelabelCast(Box::new(expr), pairs), line, col, len: self.span_len(line, col) };
                     } else {
                         let ty = self.parse_type()?;

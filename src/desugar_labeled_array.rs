@@ -829,7 +829,12 @@ fn labeled_comp_fill_stmts(
     let counts_d: Vec<Expr> = clauses.iter().map(|(_, c)| desugar_expr((**c).clone(), scope)).collect();
     let total = counts_d.iter().cloned()
         .reduce(|a, b| Expr { kind: ExprKind::BinOp(BinOp::Mul, Box::new(a), Box::new(b)), line, col, len: 0 })
-        .expect("LabeledArrayComp always has >= 2 clauses");
+        // `.reduce()` only returns `None` for an EMPTY iterator — this needs just
+        // >= 1 clause, not >= 2 (a single-axis `[v for w = n]` is a legitimate 1D
+        // fill, see this function's own doc comment). The parser's clause-parsing
+        // loop always pushes at least one clause before it can ever break, so
+        // `clauses` (and therefore `counts_d`) is never empty by construction.
+        .expect("LabeledArrayComp always has >= 1 clause (parser invariant)");
 
     let target_var = || Expr { kind: ExprKind::Var(target_name.to_string()), line, col, len: 0 };
 
@@ -886,7 +891,9 @@ fn labeled_comp_fill_stmts(
             Some(prev) => Expr { kind: ExprKind::BinOp(BinOp::Add, Box::new(prev), Box::new(term)), line, col, len: 0 },
         });
     }
-    let flat_index = flat.expect("LabeledArrayComp always has >= 2 clauses");
+    // Same non-empty-by-construction invariant as `total` above — >= 1
+    // clause, not >= 2.
+    let flat_index = flat.expect("LabeledArrayComp always has >= 1 clause (parser invariant)");
 
     let assign = Stmt::Expr(Expr {
         kind: ExprKind::Assign(

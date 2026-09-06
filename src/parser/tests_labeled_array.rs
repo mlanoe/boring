@@ -394,3 +394,16 @@ fn cast_to_labeled_array_type_is_a_real_cast_not_relabel() {
         other => panic!("expected Cast to LabeledArray, got {:?}", other),
     }
 }
+
+#[test]
+fn single_axis_relabel_cast_is_a_parse_error_not_silently_reinterpreted() {
+    // Regression test: the `Type::LabeledArray` type-annotation form has
+    // rejected a single axis at parse time from the start (see
+    // `single_fixed_axis_is_a_parse_error_not_silently_reinterpreted` above),
+    // but the `as [...]` relabel-cast expression form had no equivalent
+    // check at all — `a as [x = width]` silently parsed as a one-pair
+    // RelabelCast instead of failing loudly, an inconsistency with the type
+    // form despite both representing the same "at least 2 axes" concept.
+    let msg = parse_err("let b = img as [line = width]");
+    assert!(msg.contains("at least 2 axes"), "unexpected message: {msg}");
+}
