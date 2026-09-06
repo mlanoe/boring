@@ -110,3 +110,24 @@ fn pattern_nesting_is_bounded() {
     let src = format!("match x:\n    {}y{}: 1\n", "(".repeat(N), ")".repeat(N));
     assert_rejected_cleanly(&src);
 }
+
+/// `resolve_interp` used to instantiate a fresh `Parser` (starting back at
+/// `depth: 0`) for every string-interpolation hole, discarding the enclosing
+/// parser's recursion-depth counter entirely. A string interpolated inside
+/// another interpolated string — nested thousands of levels deep — could
+/// therefore recurse well past `MAX_EXPR_DEPTH` (in fact straight through the
+/// real call stack) without the guard ever tripping, since each sub-parser
+/// only ever saw itself at depth 1.
+#[test]
+fn nested_string_interpolation_is_bounded() {
+    // Builds `"{"{"{...1...}"}"}"`, N levels deep. Parsing the outermost string
+    // literal recurses into a fresh sub-parser per hole (one level per wrap);
+    // the fix makes each sub-parser inherit the enclosing depth so the guard
+    // trips instead of recursing unbounded.
+    let mut nested = "1".to_string();
+    for _ in 0..N {
+        nested = format!("\"{{{}}}\"", nested);
+    }
+    let src = format!("let x = {}\n", nested);
+    assert_rejected_cleanly(&src);
+}

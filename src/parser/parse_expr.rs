@@ -1925,6 +1925,12 @@ impl Parser {
                     } else {
                         let hole_tokens = lex(&code).map_err(ParseError::Lex)?;
                         let mut sub_parser = Parser::new(hole_tokens);
+                        // Propagate the current recursion depth into the sub-parser instead of
+                        // starting it back at 0 — otherwise a string interpolation hole nested
+                        // thousands of levels deep (each level re-entering `resolve_interp` with
+                        // a fresh `Parser`) can blow the real call stack without ever tripping
+                        // `MAX_EXPR_DEPTH`.
+                        sub_parser.depth = self.depth;
                         sub_parser.skip_newlines();
                         let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic { line, col: 0, msg: format!("in string interpolation: {}", e), len: 1 })?;
                         segments.push(StringSegment::Expr(Box::new(expr)));
@@ -1936,6 +1942,12 @@ impl Parser {
                     } else {
                         let hole_tokens = lex(&code).map_err(ParseError::Lex)?;
                         let mut sub_parser = Parser::new(hole_tokens);
+                        // Propagate the current recursion depth into the sub-parser instead of
+                        // starting it back at 0 — otherwise a string interpolation hole nested
+                        // thousands of levels deep (each level re-entering `resolve_interp` with
+                        // a fresh `Parser`) can blow the real call stack without ever tripping
+                        // `MAX_EXPR_DEPTH`.
+                        sub_parser.depth = self.depth;
                         sub_parser.skip_newlines();
                         let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic { line, col: 0, msg: format!("in string interpolation: {}", e), len: 1 })?;
                         segments.push(StringSegment::FormattedExpr(Box::new(expr), fmt));
