@@ -779,11 +779,14 @@ fn run_kernel_parallel(
                         // comment), and a stack overflow deep inside a thread
                         // that's mid-recursion while holding a `'sync` field's
                         // Mutex (or waiting at the Barrier) hangs every other
-                        // thread in the block rather than failing loudly. 8 MB
-                        // (not 64 MB) — verified against the full test suite
-                        // (486+ interpreter tests, including real nested-loop
-                        // kernel bodies) with no overflow; smaller reservations
-                        // measurably speed up repeated spawn/destroy cycles.
+                        // thread in the block rather than failing loudly. 64 MB
+                        // — shrinking to 8 MB was tried on the theory that a
+                        // smaller reservation would speed up repeated
+                        // spawn/destroy cycles, but a controlled back-to-back
+                        // comparison (3 runs each) showed no measurable
+                        // difference (64 MB: 40.0/46.4/45.4s; 8 MB:
+                        // 41.9/45.7/44.4s — ranges overlap entirely), so it
+                        // was reverted to 64 MB.
                         std::thread::Builder::new()
                             .stack_size(64 * 1024 * 1024)
                             .spawn_scoped(scope, move || {

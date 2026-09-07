@@ -425,6 +425,7 @@ transpile_test!(range_unary);
 transpile_test!(closure_colon);
 transpile_test!(collections2);
 transpile_test!(join_handle);
+transpile_test!(task_timeout);
 transpile_test!(select);
 transpile_test!(auto_ref_infer);
 transpile_test!(qualifiers_actor);

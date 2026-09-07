@@ -314,6 +314,7 @@ interp_test!(array_comprehension);
 interp_test!(array_comp_iter);
 interp_test!(callable_struct);
 interp_test!(fixed_array);
+interp_test!(labeled_array);
 interp_test!(auto_ref_infer);
 interp_test!(collections2);
 interp_test!(join_handle);
@@ -579,6 +580,10 @@ interp_test!(negative_count_no_oom);
 // RuntimeError, not overflow usize or attempt an unbounded allocation
 // (finding #3).
 error_test!(error_kernel_thread_cap);
+error_test!(error_array_fill_alloc_cap);
+error_test!(error_array_alloc_cap);
+error_test!(error_array_comp_cap);
+error_test!(error_string_repeat_cap);
 
 // `let int? x = compute()` where `compute` is `throws` but returns a plain
 // (non-Optional) type — the interpreter path (`boring run`) for this file,

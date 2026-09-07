@@ -241,15 +241,20 @@ pub(crate) fn labeled_array_total_size_expr(axes: &[crate::ast::LabeledAxis]) ->
 
 /// Detects a *desugared* dynamic-shape `LabeledArray` field's shadow
 /// siblings, using `desugar_labeled_array`'s
-/// positional naming (`__{field}_axis0`/`_axis1`/`_axis2`, not label-text-
-/// based — labels are arbitrary user text). Returns them in axis order;
-/// `None` for a plain dynamic array with no such shadow siblings. Feeds
-/// directly into the existing `shadow_grid_axes` (already name-agnostic —
-/// no LabeledArray-specific sibling needed there).
+/// positional naming (`__{field}_axis0_line_col`/`_axis1_line_col`/
+/// `_axis2_line_col`, not label-text-based — labels are arbitrary user
+/// text). Matched by *prefix* rather than exact equality: the field's own
+/// declaration `line`/`col` (folded into the synthesized name — see
+/// `desugar_labeled_array::shadow_axis_name`'s doc comment — to keep it from
+/// colliding with a user-declared field of the same plain spelling) isn't
+/// available here, only its name. Returns them in axis order; `None` for a
+/// plain dynamic array with no such shadow siblings. Feeds directly into the
+/// existing `shadow_grid_axes` (already name-agnostic — no LabeledArray-
+/// specific sibling needed there).
 pub(crate) fn desugared_labeled_array_shadow_fields(field_name: &str, all_fields: &[KernelFieldDecl]) -> Option<Vec<String>> {
     let shadow = |i: usize| -> Option<String> {
-        let name = format!("__{field_name}_axis{i}");
-        all_fields.iter().any(|f| f.name == name).then_some(name)
+        let prefix = format!("__{field_name}_axis{i}_");
+        all_fields.iter().find(|f| f.name.starts_with(&prefix)).map(|f| f.name.clone())
     };
     let axis0 = shadow(0)?;
     let axis1 = shadow(1)?;
@@ -1436,6 +1441,13 @@ pub(crate) fn expr_has_channel_or_task(expr: &Expr) -> bool {
         }
         ExprKind::Task(_) | ExprKind::TaskWithTimeout(..) => true,
         ExprKind::Block(stmts) => body_has_channel_or_task(stmts),
+        // `(task ...).wait` / `(task ...).value` — the task/timeout expression sits
+        // one level down, behind the field access, so a bare top-level match above
+        // misses it entirely (this was a real bug: a `throws` fn whose only async
+        // content was a tail `.wait`/`.value` on an inline `task(dur): body` never
+        // got promoted to `async fn`, producing an E0728 "await is only allowed
+        // inside async functions" on the `.await` emitted for that field access).
+        ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) => expr_has_channel_or_task(obj),
         _ => false,
     }
 }
@@ -1534,6 +1546,10 @@ fn expr_calls_task_fn(expr: &Expr, task_fns: &std::collections::HashSet<String>)
         ExprKind::BinOp(_, l, r) => {
             expr_calls_task_fn(l, task_fns) || expr_calls_task_fn(r, task_fns)
         }
+        // Same gap as `expr_has_channel_or_task` above: `.wait`/`.value` on an
+        // inline `task ...`/`task(dur): ...` expression is a field access one
+        // level above the task/timeout node itself.
+        ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) => expr_calls_task_fn(obj, task_fns),
         ExprKind::Closure(_, _, body, _, _) => match body {
             ClosureBody::Expr(e) => expr_calls_task_fn(e, task_fns),
             ClosureBody::Block(stmts) => body_calls_task_fn(stmts, task_fns),
@@ -2663,13 +2679,16 @@ mod labeled_array_tests {
 
     #[test]
     fn desugared_labeled_array_shadow_fields_finds_positional_siblings() {
+        // Real synthesized names carry a `_line_col` suffix (see
+        // `desugar_labeled_array::shadow_axis_name`'s doc comment) that this
+        // helper can't reconstruct exactly — it matches by prefix instead.
         let fields = vec![
-            KernelFieldDecl { name: "__src_axis0".into(), binding: FieldBinding::Let, qual: GpuQual::Const, ty: Type::Uint, default: None, line: 0, col: 0 },
-            KernelFieldDecl { name: "__src_axis1".into(), binding: FieldBinding::Let, qual: GpuQual::Const, ty: Type::Uint, default: None, line: 0, col: 0 },
+            KernelFieldDecl { name: "__src_axis0_3_5".into(), binding: FieldBinding::Let, qual: GpuQual::Const, ty: Type::Uint, default: None, line: 0, col: 0 },
+            KernelFieldDecl { name: "__src_axis1_3_5".into(), binding: FieldBinding::Let, qual: GpuQual::Const, ty: Type::Uint, default: None, line: 0, col: 0 },
         ];
         assert_eq!(
             desugared_labeled_array_shadow_fields("src", &fields),
-            Some(vec!["__src_axis0".to_string(), "__src_axis1".to_string()]),
+            Some(vec!["__src_axis0_3_5".to_string(), "__src_axis1_3_5".to_string()]),
         );
         assert_eq!(desugared_labeled_array_shadow_fields("other", &fields), None);
     }

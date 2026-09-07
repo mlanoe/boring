@@ -5173,6 +5173,25 @@ def int fetch(int n):\n    n * 10\n\ndef run() throws:\n    (task(Duration.from_
     }
 
     #[test]
+    fn test_tail_wait_on_inline_task_timeout_promotes_fn_to_async() {
+        // Regression test: a `throws` fn whose only async content is a bare
+        // `(task(dur): body).wait`/`.value` in TAIL position never got promoted to
+        // `async fn` — `body_has_channel_or_task`/`expr_has_channel_or_task` (which
+        // `implicit_async` in emit_top.rs consults) only matched `ExprKind::Task`/
+        // `TaskWithTimeout` at the top level of a statement, not one level down
+        // behind the `.wait`/`.value` field access that actually wraps it here.
+        // The emitted `.await` then landed inside a non-`async fn`, an E0728
+        // compile error ("await is only allowed inside async functions and
+        // blocks") never caught by the interpreter-only test suite. Fixed by
+        // having both helpers recurse through `ExprKind::Field`/`OptionalField`.
+        let src = "\
+def int fetch(int n):\n    n * 10\n\ndef run() throws:\n    (task(Duration.from_millis(50)): fetch(5)).wait\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("async fn run("),
+            "a throws fn with a tail `.wait` on an inline task(dur) must be promoted to `async fn`, got:\n{}", code);
+    }
+
+    #[test]
     fn test_plain_inline_task_value_and_wait_ignore_throws_context() {
         // emit_plain_task_await path (inline `(task: expr).value`/`.wait`, whose
         // `is_future` heuristic matches `ExprKind::Task(_)` directly): always

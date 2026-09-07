@@ -43,7 +43,7 @@ kernel Grid:
     let program = desugared(src);
     let k = only_kernel(&program);
     let names: Vec<&str> = k.fields.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(names, vec!["img", "__img_axis0", "__img_axis1"]);
+    assert_eq!(names, vec!["img", "__img_axis0_3_5", "__img_axis1_3_5"]);
     assert!(matches!(&k.fields[0].ty, Type::Array(inner) if matches!(&**inner, Type::Named(n) if n == "float")));
     // Type::Int, not Uint — see desugar_kernel_decl's own note (matches a
     // shadow value's typical `int`-typed source, and the Int/Int bounds a
@@ -52,6 +52,38 @@ kernel Grid:
     assert!(matches!(k.fields[1].binding, FieldBinding::Let));
     assert!(matches!(k.fields[1].qual, GpuQual::Const));
     assert!(matches!(k.fields[2].ty, Type::Int));
+}
+
+/// Regression test for the audit's synthesized-name-collision finding:
+/// `shadow_axis_name` used to produce a bare `__{name}_axis{i}` name with no
+/// disambiguation against a user-declared field/binding that happens to spell
+/// exactly the same thing — a silent field-name collision in the generated
+/// Rust, surfacing as a confusing Rust compile error instead of a clear
+/// Boring one. A user field literally named `__img_axis0` (the plain-format
+/// name the old scheme would have synthesized for `img`'s axis 0) must not
+/// collide with the actual synthesized shadow field now that the name also
+/// carries `img`'s own declaration line/col (see `shadow_axis_name`'s doc).
+#[test]
+fn user_field_matching_plain_shadow_name_does_not_collide() {
+    let src = r#"
+kernel Grid:
+    mut [float, width, height]'unified img
+    let int __img_axis0
+    def ():
+        img[0] = 1.0
+"#;
+    let program = desugared(src);
+    let k = only_kernel(&program);
+    let names: Vec<&str> = k.fields.iter().map(|f| f.name.as_str()).collect();
+    // 4 distinct fields: img, the user's own __img_axis0, and img's two
+    // synthesized (line/col-suffixed) shadow fields — no two entries equal.
+    assert_eq!(names.len(), 4, "expected 4 distinct fields, got {:?}", names);
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 4, "expected no duplicate field names, got {:?}", names);
+    assert!(names.contains(&"__img_axis0"), "expected the user's own field to survive untouched: {:?}", names);
+    assert!(names.iter().any(|n| n.starts_with("__img_axis0_") && *n != "__img_axis0"), "expected a distinct synthesized shadow name: {:?}", names);
 }
 
 #[test]
@@ -81,15 +113,17 @@ kernel Grid:
     let k = only_kernel(&program);
     let Stmt::Expr(e) = &k.methods[0].body[0] else { panic!("expected Stmt::Expr") };
     let ExprKind::Assign(lhs, _) = &e.kind else { panic!("expected Assign") };
-    // 2 + 3 * __img_axis0  (width=axis0=fastest-varying, so its own index has
-    // no stride factor; height=axis1 is multiplied by axis0's shadow size).
+    // 2 + 3 * __img_axis0_3_5  (width=axis0=fastest-varying, so its own index
+    // has no stride factor; height=axis1 is multiplied by axis0's shadow
+    // size). The `_3_5` suffix is the `img` field's own line/col (see
+    // `shadow_axis_name`'s doc comment).
     let ExprKind::Index(obj, offset) = &lhs.kind else { panic!("expected Index, got {:?}", lhs.kind) };
     assert!(matches!(&obj.kind, ExprKind::Var(n) if n == "img"));
     let ExprKind::BinOp(BinOp::Add, left, right) = &offset.kind else { panic!("expected Add, got {:?}", offset.kind) };
     assert!(matches!(left.kind, ExprKind::Int(2)));
     let ExprKind::BinOp(BinOp::Mul, factor, stride) = &right.kind else { panic!("expected Mul, got {:?}", right.kind) };
     assert!(matches!(factor.kind, ExprKind::Int(3)));
-    assert!(matches!(&stride.kind, ExprKind::Var(n) if n == "__img_axis0"));
+    assert!(matches!(&stride.kind, ExprKind::Var(n) if n == "__img_axis0_3_5"));
 }
 
 #[test]
@@ -104,7 +138,7 @@ kernel Grid:
     let k = only_kernel(&program);
     let Stmt::Let(l) = &k.methods[0].body[0] else { panic!("expected Stmt::Let") };
     let value = l.value.as_ref().expect("expected initializer");
-    assert!(matches!(&value.kind, ExprKind::Var(n) if n == "__img_axis0"));
+    assert!(matches!(&value.kind, ExprKind::Var(n) if n == "__img_axis0_3_5"));
 }
 
 // ─── `let`-declared locals ───────────────────────────────────────────────────
@@ -147,11 +181,11 @@ let [float, width, height] a = [width for width in ..2 for height in ..3]
         n
     };
     let Item::Let(shadow0) = &program.items[1] else { panic!("expected shadow let") };
-    assert_eq!(shadow0.name, "__a_axis0");
+    assert_eq!(shadow0.name, "__a_axis0_2_1");
     assert_eq!(shadow0.ty, Some(Type::Int));
     assert_eq!(unwrap_int(shadow0.value.as_ref().unwrap()), 2);
     let Item::Let(shadow1) = &program.items[2] else { panic!("expected shadow let") };
-    assert_eq!(shadow1.name, "__a_axis1");
+    assert_eq!(shadow1.name, "__a_axis1_2_1");
     assert_eq!(shadow1.ty, Some(Type::Int));
     assert_eq!(unwrap_int(shadow1.value.as_ref().unwrap()), 3);
 }
@@ -258,7 +292,7 @@ kernel Grid:
         let ExprKind::Var(name) = &lhs.kind else { panic!("expected Var lhs") };
         name.as_str()
     }).collect();
-    assert_eq!(names_assigned, vec!["src", "__src_axis0", "__src_axis1"]);
+    assert_eq!(names_assigned, vec!["src", "__src_axis0_3_5", "__src_axis1_3_5"]);
     let Stmt::Expr(shadow0) = &k.methods[0].body[1] else { unreachable!() };
     let ExprKind::Assign(_, rhs) = &shadow0.kind else { unreachable!() };
     // Wrapped in an explicit `as int` — the param here is `uint`-typed

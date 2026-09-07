@@ -235,6 +235,15 @@ impl Transpiler {
                 let mut try_sub = self.make_sub();
                 try_sub.in_throws = true;
                 try_sub.fn_returns_void = false;
+                // `fn_declared_void` also needs clearing here, not just `fn_returns_void`:
+                // `make_sub` inherits it from the *enclosing* function, and when that
+                // function happens to be void (e.g. `def run():`), `emit_stmt`'s
+                // `is_last && in_throws && fn_declared_void` branch fires — treating the
+                // try body's tail expression as a side-effect statement (semicolon-terminated,
+                // then an unconditional `Ok(())` appended) instead of the value this
+                // try/else expression actually produces. The try body is its own
+                // Result-producing scope regardless of what the outer function returns.
+                try_sub.fn_declared_void = false;
                 try_sub.emit_body(try_stmts);
 
                 let mut else_sub = self.make_sub();
@@ -595,6 +604,13 @@ impl Transpiler {
             let mut sub = self.make_sub();
             sub.in_async = true;
             sub.in_throws = false;
+            // This inner block is the future's own tail value (what `timeout(...)`/`.value`
+            // ultimately resolves to), not a void function body — it must NOT inherit the
+            // *outer* function's void-ness (e.g. `def run():`), or the last statement gets
+            // a spurious `;` and the block infers as `()` instead of the tail expression's
+            // real type. Same fix as the `if`/`match`-as-expression and closure-block cases
+            // above/below.
+            sub.fn_returns_void = false;
             sub.emit_body(stmts);
             format!("{{\n{}}}", sub.out)
         } else {
@@ -619,14 +635,26 @@ impl Transpiler {
                 .join(" ") + " "
         };
 
-        // tokio::time::timeout wraps the body future; Elapsed propagates via ?
+        // tokio::time::timeout(dur, fut) IS a `Future<Output = Result<T, Elapsed>>`
+        // already — `.await` on it directly yields `Result<T, Elapsed>`, which is
+        // exactly the shape `emit_task_await`'s "throws JoinHandle" path expects to
+        // find inside the `JoinHandle` (double-unwrapped there: `.expect("task
+        // panicked")` for the outer `JoinError`, then either `?` or `.expect(...)`
+        // for the inner `Elapsed`). No `?` belongs on this `.await`: using it here
+        // would need this block's own tail to itself be a `Result` for the `?` to
+        // propagate into (a bare `expr?` tail infers the block's success type as
+        // the *unwrapped* value, not `Result<_, _>` — ordinary Rust: `fn f() ->
+        // Result<T, E> { g()? }` doesn't compile unless wrapped `Ok(g()?)`), and
+        // Ok-wrapping it would leave the error type ambiguous (nothing here
+        // constrains it to `Elapsed` — E0282/E0283) for no benefit, since the
+        // unwrapped `Result<T, Elapsed>` is already exactly what's wanted.
         let timeout_fn = if expr_is_instant(dur_expr, &self.instant_vars) {
             "timeout_at"
         } else {
             "timeout"
         };
         let timeout_future = format!(
-            "{}async move {{ tokio::time::{}({}, async move {}).await? }}",
+            "{}async move {{ tokio::time::{}({}, async move {}).await }}",
             clone_prefix, timeout_fn, dur_s, inner_s
         );
 

@@ -1,0 +1,6 @@
+# `string.repeat(n)`'s count comes straight from user code — an unchecked huge
+# count would attempt a multi-TB `String::repeat` allocation and OOM the
+# process. Must raise a clean RuntimeError instead (same class of bug as the
+# array fill/alloc/comp cases — see error_array_fill_alloc_cap.br).
+let s = "x".repeat(999999999999999)
+print s

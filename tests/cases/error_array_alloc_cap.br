@@ -1,0 +1,5 @@
+# `[..n]` (ArrayAlloc) is the other array-count entry point sharing the same
+# unbounded-allocation risk as the fill/comprehension forms — see
+# error_array_fill_alloc_cap.br.
+let a = [..999999999999999]
+print a.length()

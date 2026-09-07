@@ -1,0 +1,6 @@
+# An array-fill count comes straight from user code — an unchecked huge count
+# would attempt a multi-TB `vec![v; n]` allocation and OOM the process. Must
+# raise a clean RuntimeError instead (mirrors error_kernel_thread_cap.br's
+# GPU-side MAX_KERNEL_LAUNCH_THREADS guard, for the CPU-side allocation path).
+let a = [0 for 999999999999999]
+print a.length()

@@ -213,6 +213,23 @@ impl KernelValidator {
                         );
                     }
                 }
+                // Rule 8 — GPU kernel dispatch call (`k(block = N[, grid = M])` inside
+                // a `kernel:` block). This is the actually-reachable shape of a kernel
+                // launch: per `check_kernel_dispatch_qualifier`'s doc comment in
+                // `checker/mod.rs`, the parser never constructs `ExprKind::KernelLaunch`
+                // for it — it parses as an ordinary `Call`. Every real GPU backend
+                // (`transpiler::{cuda,rocm,metal,wgpu}::host`) detects this same shape
+                // via a `block=`-labeled-arg heuristic (`grid=` is optional — it defaults
+                // when omitted, same as those backends), so mirror it here rather than
+                // letting it silently reach `transpiler::kernel::emit_expr`, which has no
+                // GPU dispatch support at all and would otherwise lower it into invalid
+                // Rust discovered only via a downstream `rustc` error.
+                if args.iter().any(|a| a.label.as_deref() == Some("block")) {
+                    self.error(
+                        line,
+                        "GPU kernel launch is not supported in kernel context — no GPU access in a Rust-for-Linux module",
+                    );
+                }
                 self.check_expr(callee);
                 for arg in args {
                     self.check_expr(&arg.value);
@@ -455,10 +472,11 @@ impl KernelValidator {
                 // instead. This arm is kept as defense in depth (and is exercised
                 // directly, bypassing the parser, by this file's own
                 // `kernel_launch_is_rejected_in_kernel_target_context` test) should
-                // a future change ever start constructing this node for real; the
-                // `Call`-shaped, actually-reachable version of the same gap (a
-                // `k(block = ...)` call reaching this validator's `Call` arm with
-                // no equivalent rejection) is not yet covered here.
+                // a future change ever start constructing this node for real. The
+                // `Call`-shaped, actually-reachable version of the same gap is now
+                // covered too — see the `block=`-labeled-arg check in the `Call`
+                // arm above (Rule 8) and
+                // `kernel_dispatch_call_is_rejected_in_kernel_target_context` below.
                 self.error(line, "GPU kernel launch is not supported in kernel context (no GPU access in a Rust-for-Linux module)");
                 if let Some(e) = &config.block { self.check_expr(e); }
                 if let Some(e) = &config.grid  { self.check_expr(e); }
@@ -1233,6 +1251,40 @@ mod tests {
         assert!(
             validator.diags.iter().any(|diag| diag.level == DiagLevel::Error && diag.message.contains("GPU kernel launch is not supported")),
             "expected a kernel-launch-not-supported error, got {:?}", validator.diags
+        );
+    }
+
+    /// Regression test for the actually-reachable gap: a real `kernel:` block
+    /// dispatch call (`k(block = N)`), parsed normally through the real lexer/
+    /// parser rather than hand-built — unlike
+    /// `kernel_launch_is_rejected_in_kernel_target_context` above, this one CAN
+    /// go through the real parser, since (per the `Call` arm's Rule 8 comment,
+    /// and `check_kernel_dispatch_qualifier`'s doc in `checker/mod.rs`) a
+    /// `kernel:` block's dispatch call parses as an ordinary `ExprKind::Call`,
+    /// never `ExprKind::KernelLaunch`. This must be rejected by the `Call` arm's
+    /// `block=`-labeled-arg check.
+    #[test]
+    fn kernel_dispatch_call_is_rejected_in_kernel_target_context() {
+        let src = "\
+kernel K:
+    mut [int]'unified data
+
+    init([int]'unified d):
+        data = d
+
+    def ():
+        data[0] = 1
+
+def main():
+    let N = 4
+    mut k = K([0 for ..N])
+    kernel:
+        k(block = N)
+";
+        let d = diags(src);
+        assert!(
+            d.iter().any(|diag| diag.level == DiagLevel::Error && diag.message.contains("GPU kernel launch is not supported")),
+            "expected a kernel-launch-not-supported error for `k(block = N)`, got {:?}", d
         );
     }
 }

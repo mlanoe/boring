@@ -1498,6 +1498,7 @@ impl Interpreter {
             ExprKind::ArrayFill { value, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
                 let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                check_alloc_count(n, expr.line)?;
                 let v = self.eval_expr(value, Rc::clone(&env))?;
                 Ok(Value::Array(vec![v; n].into()))
             }
@@ -1505,12 +1506,14 @@ impl Interpreter {
             ExprKind::ArrayAlloc { count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
                 let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                check_alloc_count(n, expr.line)?;
                 Ok(Value::Array(vec![Value::Int(0); n].into()))
             }
 
             ExprKind::ArrayComp { expr, var, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
                 let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                check_alloc_count(n, expr.line)?;
                 let mut vals = Vec::with_capacity(n);
                 for i in 0..n {
                     let inner = Env::child(Rc::clone(&env));

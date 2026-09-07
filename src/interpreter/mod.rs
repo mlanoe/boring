@@ -44,6 +44,25 @@ fn err_span(msg: impl Into<String>, line: usize, col: usize, len: usize) -> Sign
     Signal::Error(RuntimeError::new(msg, line, col, len))
 }
 
+/// Upper bound on a single CPU-side allocation driven by a user-controlled element
+/// count: array fill/alloc/comprehension (`eval_expr.rs`) and `string.repeat(n)`
+/// (`methods.rs`). Without this, a count like `999999999999999` reaches a raw
+/// `vec![_; n]`/`String::repeat` allocation directly and can OOM the process —
+/// mirrors `eval_gpu.rs`'s `MAX_KERNEL_LAUNCH_THREADS`/`checked_total_threads` guard
+/// for the same class of problem on the GPU-kernel-launch path.
+pub(crate) const MAX_ALLOC_COUNT: usize = 64 * 1024 * 1024;
+
+/// Checks a user-controlled element count against `MAX_ALLOC_COUNT` before it
+/// reaches an allocation. Returns a clean runtime error (not a panic, not an OOM
+/// attempt) when the count is too large.
+pub(crate) fn check_alloc_count(n: usize, line: usize) -> Result<(), Signal> {
+    if n > MAX_ALLOC_COUNT {
+        Err(err(format!("allocation of {} elements exceeds the maximum of {}", n, MAX_ALLOC_COUNT), line))
+    } else {
+        Ok(())
+    }
+}
+
 /// Check whether two overload FnDecls conflict and exit with an error if they do.
 /// A conflict exists when there is a call-arity N at which both can be invoked and
 /// all N parameter types are compatible — most commonly triggered by default params:

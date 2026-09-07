@@ -32,6 +32,9 @@ let back = e.flatten()
 print back[5]
 
 # Cross-label rename (same axis order — a safe relabel, not a transpose)
-let g = flat.reshape(width = 3, height = 2)
+# (using `back`, not `flat` — `.reshape()` moves its buffer per
+# docs/array-multidim-types.md, and `flat` was already moved into `e` above;
+# `back` holds the identical round-tripped data.)
+let g = back.reshape(width = 3, height = 2)
 let f = g as [w = width, h = height]
 print f[w = 2, h = 1]

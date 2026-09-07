@@ -25,10 +25,14 @@
 //!
 //! Handled:
 //! - Kernel fields, dynamic shape: flat buffer + positional shadow fields
-//!   (`__name_axis0`, `__name_axis1`, ...), exactly like `Image<T>`/
-//!   `Volume<T>`'s existing treatment, just positionally named instead of
-//!   `w`/`h`/`d` (labels are arbitrary user text here, so a positional
-//!   scheme avoids downstream code needing to remember spelling/order).
+//!   (`__name_axis0_line_col`, `__name_axis1_line_col`, ...), exactly like
+//!   `Image<T>`/`Volume<T>`'s existing treatment, just positionally named
+//!   instead of `w`/`h`/`d` (labels are arbitrary user text here, so a
+//!   positional scheme avoids downstream code needing to remember
+//!   spelling/order). The trailing `line_col` is the declaration's own
+//!   source position (see `shadow_axis_name`'s doc comment) — it keeps a
+//!   user-declared field/binding from silently colliding with a synthesized
+//!   name that only depended on its plain spelling.
 //! - Kernel fields, fixed shape: **untouched** — left as `Type::LabeledArray`
 //!   for the interpreter's GPU path (`eval_gpu.rs`, stage 5) and all four
 //!   transpiler backends (stage 6) to lower directly, mirroring how
@@ -109,9 +113,16 @@ impl LabeledInfo {
 type ArrayScope = HashMap<String, LabeledInfo>;
 
 /// The synthesized shadow-binding name for axis `i` of a name — positional,
-/// not label-text-based (see this module's doc comment for why).
-fn shadow_axis_name(name: &str, i: usize) -> String {
-    format!("__{name}_axis{i}")
+/// not label-text-based (see this module's doc comment for why). Includes the
+/// declaration's own `line`/`col` (matching `desugar_labeled_comp`'s
+/// `__comp_{line}_{col}` temp names below) so a user-declared field/binding
+/// would have to guess the *exact* source position of the labeled-array
+/// declaration to collide with it, rather than just its plain name (e.g. a
+/// field literally named `__x_axis0`) — a silent field/binding-name collision
+/// in the generated Rust would otherwise surface as a confusing Rust compile
+/// error instead of a clear Boring-level one.
+fn shadow_axis_name(name: &str, i: usize, line: usize, col: usize) -> String {
+    format!("__{name}_axis{i}_{line}_{col}")
 }
 
 pub fn desugar_labeled_array(mut program: Program) -> Program {
@@ -168,7 +179,7 @@ fn desugar_kernel_decl(decl: &mut KernelDecl) {
             let is_dynamic = axes.iter().all(|a| a.size.is_none());
             if is_dynamic {
                 let shadow_names: Vec<String> =
-                    (0..axes.len()).map(|i| shadow_axis_name(&field.name, i)).collect();
+                    (0..axes.len()).map(|i| shadow_axis_name(&field.name, i, field.line, field.col)).collect();
                 dynamic_scope.insert(
                     field.name.clone(),
                     LabeledInfo { elem: (**elem).clone(), axes: axes.clone(), shadow_names: Some(shadow_names.clone()) },
@@ -284,7 +295,7 @@ fn infer_let_labeled_info(s: &LetStmt, scope: &ArrayScope) -> Option<(LabeledInf
         let is_dynamic = axes.iter().all(|a| a.size.is_none());
         let shadow_values = if is_dynamic { s.value.as_ref().and_then(|v| extract_shadow_values(v, axes)) } else { None };
         let shadow_names = if is_dynamic {
-            Some((0..axes.len()).map(|i| shadow_axis_name(&s.name, i)).collect::<Vec<_>>())
+            Some((0..axes.len()).map(|i| shadow_axis_name(&s.name, i, s.line, s.col)).collect::<Vec<_>>())
         } else {
             None
         };
@@ -298,7 +309,7 @@ fn infer_let_labeled_info(s: &LetStmt, scope: &ArrayScope) -> Option<(LabeledInf
                 .map(|(name, _)| LabeledAxis { label: name.clone(), size: None })
                 .collect();
             let shadow_values = extract_shadow_values(value, &axes);
-            let shadow_names = Some((0..axes.len()).map(|i| shadow_axis_name(&s.name, i)).collect());
+            let shadow_names = Some((0..axes.len()).map(|i| shadow_axis_name(&s.name, i, s.line, s.col)).collect());
             Some((LabeledInfo { elem: unknown_elem(), axes, shadow_names }, shadow_values))
         }
         ExprKind::MethodCall(_, method, args) if method == "reshape" => {
@@ -306,7 +317,7 @@ fn infer_let_labeled_info(s: &LetStmt, scope: &ArrayScope) -> Option<(LabeledInf
             if labels.is_empty() { return None; }
             let axes: Vec<LabeledAxis> = labels.into_iter().map(|label| LabeledAxis { label, size: None }).collect();
             let shadow_values = extract_shadow_values(value, &axes);
-            let shadow_names = Some((0..axes.len()).map(|i| shadow_axis_name(&s.name, i)).collect());
+            let shadow_names = Some((0..axes.len()).map(|i| shadow_axis_name(&s.name, i, s.line, s.col)).collect());
             Some((LabeledInfo { elem: unknown_elem(), axes, shadow_names }, shadow_values))
         }
         ExprKind::RelabelCast(inner, pairs) => {
@@ -937,6 +948,12 @@ fn labeled_comp_fill_stmts(
 /// Used for every EXPRESSION-position occurrence (e.g. `let a = [comp]`);
 /// see `labeled_comp_fill_stmts`'s doc for why a kernel-field reassignment
 /// (`desugar_reassign_stmt`) needs the unwrapped statements instead.
+///
+/// `tmp` already folds this comprehension's own `line`/`col` into its name
+/// below — the same source-position-based disambiguation `shadow_axis_name`
+/// uses for the same reason (see its doc comment): a user-declared binding
+/// would have to guess this exact comprehension's source position to
+/// collide with it, not just spell `__comp_` plus two digits.
 fn desugar_labeled_comp(
     expr: Expr,
     clauses: Vec<(String, Box<Expr>)>,
