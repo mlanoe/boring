@@ -7,9 +7,9 @@ struct Dimension {
 
 // ─── kernel VectorAdd ───
 
-@group(0) @binding(0) var<storage, read> vectoradd_a: array<i32>;
-@group(0) @binding(1) var<storage, read> vectoradd_b: array<i32>;
-@group(0) @binding(2) var<storage, read_write> vectoradd_result: array<i32>;
+@group(0) @binding(0) var<storage, read> vectoradd_a: array</* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32>;
+@group(0) @binding(1) var<storage, read> vectoradd_b: array</* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32>;
+@group(0) @binding(2) var<storage, read_write> vectoradd_result: array</* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32>;
 
 
 @compute @workgroup_size(256, 1, 1)

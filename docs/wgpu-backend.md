@@ -403,7 +403,7 @@ WGSL does not support 64-bit integers. Inside a `kernel` struct and its `def` bo
 | `float` | `f64` | `f32` |
 | `bool` | `bool` | `u32` (see note) |
 
-The narrowing is **silent for variables and fields** — the transpiler emits `i32` without warning. Integer literals inside a kernel body are checked at compile time: a literal outside the `i32` range (−2 147 483 648 to 2 147 483 647) is a compile error.
+The narrowing for a variable or field is **flagged, not silent**: the transpiler emits `i32`/`u32` but wraps it in an inline WGSL comment at every declaration site — `array</* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32>` — so the generated shader itself carries the caveat even though nothing stops the build. Integer literals inside a kernel body are still checked at compile time: a literal outside the `i32` range (−2 147 483 648 to 2 147 483 647) is a compile error.
 
 ```boring
 kernel Bad:

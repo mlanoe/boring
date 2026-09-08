@@ -40,7 +40,12 @@ kernel Saxpy:
 
 mut k = Saxpy(alpha, x, y)
 kernel:
-    k(block = N)
+    # `grid=` is passed explicitly — a plain `[T]'unified` field's length
+    # isn't known at transpile time, so `grid=` always has to be sized by
+    # hand from the host-side count (`N`) and the chosen `block=`, same as
+    # examples/vector_add_gpu.br. One workgroup of `N` threads covers every
+    # element here since `block == N`.
+    k(block = N, grid = 1)
 
 print "Results (expected: y[i] = 2*i + 1):"
 for i, v in k.y:

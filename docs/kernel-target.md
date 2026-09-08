@@ -292,7 +292,8 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 | `print "…"` | `println!` | `kernel::pr_info!` | always `pr_info!` — no severity routing |
 | `assert_eq!` | `assert_eq!` | plain `assert_eq!` | no `WARN_ON` mapping |
 | `panic(…)` | `panic!` | — | forbidden — use `throws` / `Result` |
-| math (`sqrt`, `sin`…) | `std::f64` | — | forbidden — FPU disabled |
+| `abs`/`floor`/`ceil`/`round` on an `int` argument | `std::f64` (equivalent) | plain int arithmetic | **allowed** — a pure int no-op path, no FPU touched |
+| `abs`/`floor`/`ceil`/`round` on a `float` argument, and every other math fn (`sqrt`, `sin`…) | `std::f64` | — | forbidden — FPU disabled |
 | `Vec` methods | `std::vec` | `kernel::prelude::Vec` | slightly different API |
 | `{K=V}` | `HashMap` | `kernel::rbtree::RBTree<K,V>` | ordered, O(log n) |
 
@@ -304,7 +305,7 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 
 | Construct | Reason |
 |-----------|--------|
-| `float`, floating-point math | FPU disabled |
+| `float`, and any floating-point-*typed* argument to math functions (`sqrt`, `sin`, …, including `abs`/`floor`/`ceil`/`round` when the argument is a `float`) | FPU disabled |
 | `panic(…)` | kernel oops/crash — use `throws` / `Result` |
 | `task def` on `self` with `T&`, `T&mut`, `T'new` | lifetime incompatible with a work item |
 | `kernel Foo: ...` (GPU kernel struct) | no host/device split under `no_std` — GPU kernels require `--target cuda`, `--target metal`, `--target wgpu`, or `--target rocm` |

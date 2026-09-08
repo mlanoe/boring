@@ -2543,7 +2543,54 @@ T <span class="fn">first</span>([T] items):
 print <span class="s">"<span class="si">{p.first}</span> / <span class="si">{p.second}</span>"</span>   <span class="co"># 10 / hello</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">struct</span> <span class="kt">Pair</span>&lt;<span class="kt">T</span>, <span class="kt">U</span>&gt; { first: <span class="kt">T</span>, second: <span class="kt">U</span> }</code></pre></div>
-<p>A <code>mut</code>-qualified type argument (<code>Container&lt;mut Point&gt;</code> for <code>struct Container&lt;T&gt;: T item</code>) is not yet supported — propagating a <code>mut</code>-qualified type argument through generic instantiation into the field&#x27;s own permission check is separate, unimplemented design work, not a corollary of ordinary <code>mut Type</code> field support (<a href="#mutable-fields">Mutable fields</a>).</p>
+<p>A <code>mut</code>-qualified type argument (<code>Container&lt;mut Point&gt;</code> for <code>struct Container&lt;T&gt;: T item</code>) propagating into the field&#x27;s own permission check is still unimplemented for the <em>inferred</em> (no-turbofish) generic-instantiation path — that remains separate, unimplemented design work, not a corollary of ordinary <code>mut Type</code> field support (<a href="#mutable-fields">Mutable fields</a>). It IS handled for an explicit, fully-concrete turbofish construction site (<code>Container&lt;mut Point&gt;(...)</code>): the Boring-side monomorphizer (<code>src/transpiler/monomorphize.rs</code>) specializes a non-generic clone with <code>T</code> substituted by the concrete <code>mut Point</code> directly as the field&#x27;s own type, so <code>c.item.move_to(...)</code> compiles through ordinary <code>mut Type</code> field support on that specialized copy — see <code>tests/cases/monomorphize_mut_arg.br</code>.</p>
+<h3 id="turbofish-monomorphization">Turbofish monomorphization</h3>
+<p>An explicit, fully-concrete turbofish call site — <code>Struct&lt;T&gt;(...)</code>, <code>fn&lt;T&gt;(...)</code>, or <code>obj.method&lt;T&gt;(...)</code> — gets a specialized, non-generic Rust clone alongside the existing, unmodified <code>impl&lt;T: Clone&gt; ...</code> generic-emission path (which every other, non-turbofish use of the same generic still flows through unchanged). This works same-file or cross-file (across <code>use</code> and <code>[deps]</code> boundaries) with no extra re-parse.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> T <span class="fn">identity</span>(T x):
+    x
+
+print identity&lt;<span class="kt">int</span>&gt;(<span class="nb">42</span>)      <span class="co"># → identity_int(42), a specialized non-generic clone</span>
+print <span class="fn">identity</span>(<span class="nb">42</span>)           <span class="co"># unaffected — still ordinary inferred generic Rust</span></code></pre></div>
+<p><strong>Generic method calls</strong> — <code>obj.method&lt;T&gt;(...)</code> — extend this to a method that introduces its own type parameter, separate from anything its declaring struct declares:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Box&lt;T&gt;:
+    <span class="kw">var</span> T value
+
+    <span class="kw">def</span> U describe&lt;U&gt;(U extra):
+        extra
+
+<span class="kw">mut</span> b = Box&lt;<span class="kt">int</span>&gt;(<span class="nb">5</span>)
+print b.describe&lt;<span class="kt">string</span>&gt;(<span class="s">"hello"</span>)   <span class="co"># → b.describe_string(&quot;hello&quot;)</span></code></pre></div>
+<p>Resolution here is deliberately <strong>name-only</strong> — the receiver&#x27;s own resolved type is never tracked. A method call site is specialized only when its bare method name (<code>describe</code> above) is unique among every generic method reachable from the whole file graph; if two or more declarations anywhere declare a method with the same name and its own type parameter, the call site is left as ordinary generic Rust (<code>obj.method::&lt;T&gt;(args)</code>) instead — a safe, silent fallback, not an error.</p>
+<p>This same name-uniqueness rule covers a method&#x27;s declaring item regardless of whether it&#x27;s a <code>struct</code>, an <code>ext</code> block, or an <code>enum</code> — a method with its own type parameter declared inside an <code>ext TypeName:</code> block, or directly on an <code>enum</code>, is specialized exactly like a struct method:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Wrapper:
+    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+
+<span class="kw">ext</span> Wrapper:
+    <span class="kw">def</span> U convert&lt;U&gt;(U x):
+        x
+
+<span class="kw">mut</span> w = <span class="fn">Wrapper</span>(<span class="nb">5</span>)
+print w.convert&lt;<span class="kt">int</span>&gt;(<span class="nb">42</span>)   <span class="co"># → w.convert_int(42)</span>
+
+<span class="kw">enum</span> Shape:
+    <span class="fn">Circle</span>(<span class="kt">float</span> radius)
+
+    <span class="kw">def</span> U convert2&lt;U&gt;(U x):
+        x
+
+<span class="kw">let</span> s = Shape.<span class="fn">Circle</span>(<span class="nb">1.0</span>)
+print s.convert2&lt;<span class="kt">int</span>&gt;(<span class="nb">42</span>)  <span class="co"># → s.convert2_int(42)</span></code></pre></div>
+<p>The ambiguity check spans all three kinds together: a struct&#x27;s own-generic <code>convert&lt;T&gt;</code> and an unrelated <code>ext</code> block&#x27;s own-generic <code>convert&lt;T&gt;</code> sharing the same bare name anywhere in the reachable file graph makes <code>convert</code> ambiguous, and every call site naming it — on either type — falls back to ordinary generic Rust, exactly as if two structs had collided.</p>
+<p><strong>Optional chaining</strong> — <code>obj?.method&lt;T&gt;(...)</code> — is also supported, with the same name-uniqueness restriction and the same silent-fallback behavior on an ambiguous method name:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> OConverter:
+    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+
+    <span class="kw">def</span> T2 convert&lt;T2&gt;(T2 x):
+        x
+
+<span class="kw">let</span> OConverter<span class="lf">&#x27;owned</span>? c = <span class="fn">OConverter</span>(<span class="nb">5</span>)
+print c?.convert&lt;<span class="kt">int</span>&gt;(<span class="nb">42</span>)   <span class="co"># → c.clone().map(|mut __v| __v.convert_int(42))</span></code></pre></div>
+<p>The short-circuit (nil-propagating) semantics of <code>?.</code> are preserved exactly — only the method name resolved by the turbofish gets swapped for its specialized clone.</p>
 <h3 id="trait-constraints--as">Trait constraints — <code>as</code></h3>
 <p>Use <code>as</code> inside <code>&lt;…&gt;</code> to require a trait on a type parameter.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Wrapper&lt;T <span class="kw">as</span> Display&gt;:
@@ -3540,11 +3587,13 @@ wait Duration.<span class="fn">fromSecs</span>(<span class="nb">5</span>)
 <span class="kw">let</span> Outer<span class="lf">&#x27;static</span> G = <span class="fn">Outer</span>(inner = <span class="fn">Inner</span>())
 <span class="co"># --threading single: error, &#x27;shared collapses to Rc&lt;T&gt;, not Sync</span>
 <span class="co"># --threading multi:  fine, &#x27;shared is Arc&lt;T&gt;, Sync</span></code></pre></div>
-<p><strong>Generic structs.</strong> A <code>type let</code> field whose type does <strong>not</strong> depend on the struct&#x27;s own type parameter becomes a genuine cross-instantiation singleton — one static, shared regardless of how many concrete instantiations of the generic struct exist. A field whose type <strong>does</strong> depend on the type parameter is rejected outright: a Rust <code>static</code> cannot be generic, so there is no single instance to share across instantiations.</p>
+<p><strong>Generic structs.</strong> A <code>type let</code> field whose type does <strong>not</strong> depend on the struct&#x27;s own type parameter becomes a genuine cross-instantiation singleton — one static, shared regardless of how many concrete instantiations of the generic struct exist. A field whose type <strong>does</strong> depend on the type parameter is rejected outright — a Rust <code>static</code> cannot be generic, so there is no single instance to share across instantiations — <strong>unless</strong> a concrete turbofish specialization of the struct exists somewhere in the program (see &quot;Turbofish monomorphization&quot; earlier in this chapter): the specialized, non-generic copy has no type parameter left to depend on, so the field compiles fine <em>for that copy</em>, while the struct&#x27;s still-generic form keeps rejecting it.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Display&lt;T&gt;:
     T value
     <span class="kw">type</span> <span class="kw">let</span> Logger shared_logger = <span class="fn">Logger</span>()   <span class="co"># OK — one instance, any T</span>
-    <span class="kw">type</span> <span class="kw">let</span> T default = value                 <span class="co"># error — depends on T</span></code></pre></div>
+    <span class="kw">type</span> <span class="kw">let</span> T default = value                 <span class="co"># error on the generic form —</span>
+                                                <span class="co"># OK if Display&lt;Concrete&gt; is</span>
+                                                <span class="co"># specialized elsewhere</span></code></pre></div>
 <p><code>&#x27;req</code> accepts <code>&#x27;static</code> in addition to <code>&#x27;shared</code> (both are always immutable, and <code>&#x27;static</code> is, if anything, more restrictive):</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(Counter<span class="lf">&#x27;req</span> c):   <span class="co"># accepts &#x27;shared or &#x27;static</span>
     print c.value</code></pre></div>

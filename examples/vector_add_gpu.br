@@ -22,7 +22,11 @@ var [int] host_b = [i * 2 for i in 0..n]
 
 var k = VectorAdd(host_a, host_b)
 kernel:
-    k(block = 256)
+    # `grid=` is passed explicitly, sized from `n` and the chosen `block=` —
+    # a plain `[T]'unified` field's length isn't known at transpile time, so
+    # there's no sound way to auto-infer a grid size here (see
+    # examples/saxpy.br for the same pattern).
+    k(block = 256, grid = (n + 255) / 256)
 
 # `k.result[i]` alone would read the whole buffer back from the GPU on every
 # iteration of this loop. Binding it through an alias and reading it inside a

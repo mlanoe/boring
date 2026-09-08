@@ -1,8 +1,8 @@
 # Plan: porting the Rust interpreter to Boring
 
 **Date:** 2026-06-10  
-**Updated:** 2026-08-25 — real `use` module-import support, §8.2  
-**Status:** Complete — 78/78 tests passing, single-thread and multi-thread modes  
+**Updated:** 2026-09-07 — `Dict`/`Set` O(n) limitation documented, §8.3 (real `use` module-import support, §8.2, landed 2026-08-25)  
+**Status:** Complete — 83/83 tests passing, single-thread and multi-thread modes  
 **Goal:** rewrite the interpreter (`src/interpreter/`) in Boring, transpile it to Rust, and have it pass the existing test suite.
 
 ---

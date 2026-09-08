@@ -719,6 +719,29 @@ impl Transpiler {
             };
             shadow_grid_axes(var_name, &shadows, [bx.as_str(), by.as_str(), bz.as_str()])
         } else {
+            // No explicit `grid=`, and no LabeledArray field (fixed- or
+            // dynamic-shape) to auto-infer one from at transpile time — a
+            // plain `[T]'unified`/`'global` field's *length* isn't known
+            // here (its Rust representation varies by backend — e.g. a
+            // read-only field becomes a bare GPU buffer handle with no
+            // element count on wgpu — so there's no single safe way to read
+            // it back at this shared, backend-agnostic call site). Silently
+            // dispatching one `block=`-sized workgroup regardless of the
+            // real element count is a real, confirmed footgun (found via
+            // this cycle's examples-verification pass: `examples/saxpy.br`
+            // and `examples/vector_add_gpu.br` both cross-checked wrong
+            // against `boring run`'s own interpreter simulation before both
+            // were fixed to pass `grid=` explicitly) — flagged with a
+            // build-time warning rather than silence, but intentionally
+            // left non-fatal: turning it into a hard error would also
+            // reject every existing test/example kernel dispatch that
+            // relies on this same default deliberately (a single-workgroup
+            // dispatch where `block=` already covers every element).
+            self.push_warning(block.line, block.col, format!(
+                "kernel `{var_name}` dispatch has no `grid=` and no LabeledArray field to auto-infer \
+                 one from — defaulting to a single `block=`-sized workgroup; if the field holds more \
+                 elements than that, pass `grid=` explicitly (e.g. `{var_name}(block = ..., grid = ...)`)"
+            ));
             ("1".to_string(), "1".to_string(), "1".to_string())
         };
         Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
@@ -748,6 +771,7 @@ impl Transpiler {
                 && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
             .find_map(|f| crate::transpiler::helpers::desugared_labeled_array_shadow_fields(&f.name, &decl.fields))
     }
+
 
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked
     /// kernel variable, emit the GPU read-back call (converted back to the

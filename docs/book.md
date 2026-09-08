@@ -6102,15 +6102,21 @@ let Outer'static G = Outer(inner = Inner())
 the struct's own type parameter becomes a genuine cross-instantiation
 singleton — one static, shared regardless of how many concrete
 instantiations of the generic struct exist. A field whose type **does**
-depend on the type parameter is rejected outright: a Rust `static` cannot
+depend on the type parameter is rejected outright — a Rust `static` cannot
 be generic, so there is no single instance to share across
-instantiations.
+instantiations — **unless** a concrete turbofish specialization of the
+struct exists somewhere in the program (see "Turbofish monomorphization"
+earlier in this chapter): the specialized, non-generic copy has no type parameter left to
+depend on, so the field compiles fine *for that copy*, while the struct's
+still-generic form keeps rejecting it.
 
 ```boring
 struct Display<T>:
     T value
     type let Logger shared_logger = Logger()   # OK — one instance, any T
-    type let T default = value                 # error — depends on T
+    type let T default = value                 # error on the generic form —
+                                                # OK if Display<Concrete> is
+                                                # specialized elsewhere
 ```
 
 `'req` accepts `'static` in addition to `'shared` (both are always

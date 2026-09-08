@@ -1544,16 +1544,42 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
 fn collect_block_sizes(program: &Program) -> std::collections::HashMap<String, (u32, u32, u32)> {
     let mut var_to_type: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut map = std::collections::HashMap::new();
+    // A `k(block = N)` dispatch site commonly references a top-level scalar
+    // `let` (e.g. `let N = 16`) rather than an int literal — WGSL's
+    // `@workgroup_size` must still be a compile-time constant, so that
+    // reference needs resolving here before the shader is emitted. Collected
+    // up front (top-level only — a dispatch-site block size referencing a
+    // local/function-scoped variable isn't statically resolvable this way and
+    // falls back to the same conservative default as any other unresolvable
+    // expression).
+    let const_ints = collect_top_level_int_consts(program);
     for item in &program.items {
         match item {
             Item::Let(s) => resolve_let_kernel_type(s, &mut var_to_type),
-            Item::Stmt(s) => scan_call_block_size(s, &mut map, &mut var_to_type),
-            Item::Fn(f) => { for s in &f.body { scan_call_block_size(s, &mut map, &mut var_to_type); } }
-            Item::Struct(s) => { for m in &s.methods { for st in &m.body { scan_call_block_size(st, &mut map, &mut var_to_type); } } }
+            Item::Stmt(s) => scan_call_block_size(s, &mut map, &mut var_to_type, &const_ints),
+            Item::Fn(f) => { for s in &f.body { scan_call_block_size(s, &mut map, &mut var_to_type, &const_ints); } }
+            Item::Struct(s) => { for m in &s.methods { for st in &m.body { scan_call_block_size(st, &mut map, &mut var_to_type, &const_ints); } } }
             _ => {}
         }
     }
     map
+}
+
+/// Top-level `let NAME = <int literal>` bindings, by name — the only shape a
+/// `block = NAME` dispatch-site argument can be resolved against at
+/// transpile time (see `collect_block_sizes`'s doc comment above).
+fn collect_top_level_int_consts(program: &Program) -> std::collections::HashMap<String, i64> {
+    let mut consts = std::collections::HashMap::new();
+    for item in &program.items {
+        if let Item::Let(s) = item {
+            if let Some(val) = &s.value {
+                if let ExprKind::Int(n) = &val.kind {
+                    consts.insert(s.name.clone(), *n);
+                }
+            }
+        }
+    }
+    consts
 }
 
 fn resolve_let_kernel_type(s: &LetStmt, map: &mut std::collections::HashMap<String, String>) {
@@ -1570,38 +1596,39 @@ fn scan_call_block_size(
     s: &Stmt,
     map: &mut std::collections::HashMap<String, (u32, u32, u32)>,
     var_to_type: &mut std::collections::HashMap<String, String>,
+    const_ints: &std::collections::HashMap<String, i64>,
 ) {
     match s {
         Stmt::Let(ls) => resolve_let_kernel_type(ls, var_to_type),
-        Stmt::Loop(ls) => { for inner in &ls.body { scan_call_block_size(inner, map, var_to_type); } }
-        Stmt::While(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type); } }
-        Stmt::WhileLet(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type); } }
-        Stmt::DoWhile(ds) => { for inner in &ds.body { scan_call_block_size(inner, map, var_to_type); } }
-        Stmt::For(fs) => { for inner in &fs.body { scan_call_block_size(inner, map, var_to_type); } }
-        Stmt::Guard(gs) => { for inner in &gs.else_body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::Loop(ls) => { for inner in &ls.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+        Stmt::While(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+        Stmt::WhileLet(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+        Stmt::DoWhile(ds) => { for inner in &ds.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+        Stmt::For(fs) => { for inner in &fs.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+        Stmt::Guard(gs) => { for inner in &gs.else_body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         Stmt::Try(ts) => {
-            for inner in &ts.body { scan_call_block_size(inner, map, var_to_type); }
-            for c in &ts.catch_clauses { for inner in &c.body { scan_call_block_size(inner, map, var_to_type); } }
+            for inner in &ts.body { scan_call_block_size(inner, map, var_to_type, const_ints); }
+            for c in &ts.catch_clauses { for inner in &c.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         }
-        Stmt::Defer(body) => { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::Defer(body) => { for inner in body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         Stmt::If(is) => {
-            for (_, body) in &is.branches { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
-            if let Some(body) = &is.else_body { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+            for (_, body) in &is.branches { for inner in body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+            if let Some(body) = &is.else_body { for inner in body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         }
         Stmt::IfLet(is) => {
-            for inner in &is.then_body { scan_call_block_size(inner, map, var_to_type); }
-            for branch in &is.elif_branches { for inner in &branch.body { scan_call_block_size(inner, map, var_to_type); } }
-            if let Some(body) = &is.else_body { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+            for inner in &is.then_body { scan_call_block_size(inner, map, var_to_type, const_ints); }
+            for branch in &is.elif_branches { for inner in &branch.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
+            if let Some(body) = &is.else_body { for inner in body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         }
         Stmt::Match(ms) => {
             for arm in &ms.arms {
                 match &arm.body {
-                    MatchBody::Block(body) => { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+                    MatchBody::Block(body) => { for inner in body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
                     MatchBody::Expr(_) => {}
                 }
             }
         }
-        Stmt::KernelBlock(block) => { for inner in &block.body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::KernelBlock(block) => { for inner in &block.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         Stmt::Expr(e) => {
             if let ExprKind::Call(callee, args) = &e.kind {
                 if let ExprKind::Var(kname) = &callee.kind {
@@ -1609,7 +1636,17 @@ fn scan_call_block_size(
                         let parse_u32 = |e: &Expr| -> u32 {
                             match &e.kind {
                                 ExprKind::Int(n) => *n as u32,
-                                ExprKind::Var(_) => 1, // conservative fallback
+                                // A top-level scalar `let` referenced by name (e.g.
+                                // `let N = 16` then `k(block = N)`) — WGSL's
+                                // `@workgroup_size` has to be a compile-time
+                                // constant, so this is the one variable shape
+                                // that's actually resolvable here. Anything else
+                                // (a local/function-scoped variable, or a
+                                // computed expression) still falls back to the
+                                // same conservative default as before.
+                                ExprKind::Var(name) => const_ints.get(name.as_str())
+                                    .map(|n| *n as u32)
+                                    .unwrap_or(1),
                                 _ => 1,
                             }
                         };

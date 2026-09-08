@@ -510,7 +510,7 @@ fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     k.copy_a_to_device(&host_a.iter().map(|&x| x as i32).collect::<Vec<i32>>());
     k.copy_b_to_device(&host_b.iter().map(|&x| x as i32).collect::<Vec<i32>>());
     k.copy_result_to_device(&vec![(0) as i32; (N) as usize]);
-    k.dispatch((1) as u32, (1) as u32, (1) as u32)?;
+    k.dispatch((((N + 255) / 256)) as u32, (1) as u32, (1) as u32)?;
     // `k.result[i]` alone would read the whole buffer back from the GPU on every
     // iteration of this loop. Binding it through an alias and reading it inside a
     // `with` block materializes it exactly once instead — see

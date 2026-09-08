@@ -16,13 +16,13 @@ struct SaxpyParams {
 
 
 
-@compute @workgroup_size(1, 1, 1)
+@compute @workgroup_size(16, 1, 1)
 fn Saxpy_main(
     @builtin(local_invocation_id) bp_tid:  vec3<u32>,
     @builtin(workgroup_id)         bp_bid:  vec3<u32>,
     @builtin(num_workgroups)       bp_gdim: vec3<u32>,
 ) {
-    let bp_bdim = vec3<u32>(1u, 1u, 1u);
+    let bp_bdim = vec3<u32>(16u, 1u, 1u);
     let alpha: f32 = saxpy_params.alpha;
     let i = (i32(bp_tid.x) + (i32(bp_bid.x) * i32(bp_bdim.x)));
     saxpy_y[u32(i)] = ((alpha * saxpy_x[u32(i)]) + saxpy_y[u32(i)]);

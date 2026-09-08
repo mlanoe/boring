@@ -7,7 +7,7 @@ struct Dimension {
 
 // ─── kernel Plasma ───
 
-@group(0) @binding(0) var<storage, read_write> plasma_pixels: array<u32>;
+@group(0) @binding(0) var<storage, read_write> plasma_pixels: array</* WARNING: `uint` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside u32 range wrap silently */ u32>;
 struct PlasmaParams {
     dim_w: i32,
     dim_h: i32,

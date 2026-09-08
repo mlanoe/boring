@@ -23,8 +23,8 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 | `'local` | registers | thread-private (default) |
 | `'const` scalar | `__constant__ T name;` | `constant T* name [[buffer(N)]]` — dereferenced (`*name`) in body |
 | `'const` fixed array (`[T, N]`) | `__constant__ T name[N];` | `constant T* name [[buffer(N)]]` — accessed as `name[i]` in body |
-| `'actor'global` | device DRAM, atomic access | `device T*` — cast to `atomic_long*` at the atomic call site |
-| `'actor'unified` | unified DRAM, atomic access | `device T*` + `MTLStorageModeShared` — same atomic cast as `'actor'global` |
+| `'actor'global` | device DRAM, atomic access | `device T*` — cast to the atomic type matching `T`'s own width at the atomic call site (`atomic_int`/`atomic_uint` for `int32`/`uint32`, `atomic_long` only for the genuinely-64-bit `int`/`uint`) |
+| `'actor'unified` | unified DRAM, atomic access | `device T*` + `MTLStorageModeShared` — same width-matched atomic cast as `'actor'global` |
 
 ---
 
@@ -49,13 +49,15 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 | `[i].min/max/swap(v)` | `atomicMin`/`atomicMax`/`atomicExch` | `atomic_fetch_min_explicit`/`atomic_fetch_max_explicit`/`atomic_exchange_explicit` |
 | `[i].cas(expected, new)` | `atomicCAS` | `atomic_compare_exchange_weak_explicit` (bridged — see below) |
 
-`.min`/`.max`/`.swap`/`.cas` are methods on an indexed `'actor'global`/`'actor'unified` element, handled in expression position (they return the previous value, matching CUDA/HIP's real semantics) rather than as a statement-only compound-assign desugar like `+= -= &= |= ^=`. `min`/`max`/`swap` map straight onto MSL's `atomic_fetch_min/max_explicit`/`atomic_exchange_explicit`, which already return the previous value — same `(device atomic_long*)` cast already used for `+=`/`-=`/etc. (`atomic_fetch_min/max_explicit` on 64-bit `atomic_long` specifically is not independently verified against a real Metal compiler in this environment, same caveat this backend's docs already carry elsewhere for untestable-locally MSL codegen).
+`.min`/`.max`/`.swap`/`.cas` are methods on an indexed `'actor'global`/`'actor'unified` element, handled in expression position (they return the previous value, matching CUDA/HIP's real semantics) rather than as a statement-only compound-assign desugar like `+= -= &= |= ^=`. `min`/`max`/`swap` map straight onto MSL's `atomic_fetch_min/max_explicit`/`atomic_exchange_explicit`, which already return the previous value — cast to the atomic type matching the field's own element width (`atomic_int`/`atomic_uint` for a 4-byte `int32`/`uint32` element, `atomic_long` only for the genuinely-64-bit bare `int`/`uint`), not a blanket 8-byte `atomic_long` regardless of element width — an earlier version of this backend cast every atomic op to `atomic_long` unconditionally, which read/wrote 4 bytes past a 4-byte element's valid allocation. An element type with no portable MSL atomic (8/16-bit ints, floats, the already-unsupported 64/128-bit named widths) emits a flagged `/* ERROR: ... */` comment instead of an atomic op. (`atomic_fetch_min/max_explicit` on 64-bit `atomic_long` specifically is not independently verified against a real Metal compiler in this environment, same caveat this backend's docs already carry elsewhere for untestable-locally MSL codegen.)
 
-`.cas` is a real shape mismatch: MSL's `atomic_compare_exchange_weak_explicit(object, &expected, desired, ...)` takes a *pointer* to the expected value (overwritten with the real current value on failure) and returns a `bool` — unlike CUDA/HIP's `atomicCAS`, which just returns the previous value directly. Bridged via a GNU/Clang statement-expression (`({ ... })`, supported by Metal's Clang-based compiler — `metal`'s own generated `Debug` impl already relies on the same compiler being Clang-based for other things) so the whole thing is still usable as one expression:
+`.cas` is a real shape mismatch: MSL's `atomic_compare_exchange_weak_explicit(object, &expected, desired, ...)` takes a *pointer* to the expected value (overwritten with the real current value on failure) and returns a `bool` — unlike CUDA/HIP's `atomicCAS`, which just returns the previous value directly. Bridged via a GNU/Clang statement-expression (`({ ... })`, supported by Metal's Clang-based compiler — `metal`'s own generated `Debug` impl already relies on the same compiler being Clang-based for other things) so the whole thing is still usable as one expression, e.g. for a 4-byte `int32` element:
 
 ```msl
-({ long __exp = (long)(expected); atomic_compare_exchange_weak_explicit((device atomic_long*)&x, &__exp, (long)(new), memory_order_relaxed, memory_order_relaxed); __exp; })
+({ int __exp = (int)(expected); atomic_compare_exchange_weak_explicit((device atomic_int*)&x, &__exp, (int)(new), memory_order_relaxed, memory_order_relaxed); __exp; })
 ```
+
+(The genuinely-64-bit bare `int`/`uint` case still casts to `atomic_long`/`long`, as before.)
 
 **Without `'actor'global`/`'actor'unified`**, `.min`/`.max`/`.swap`/`.cas` still work — matching `+= -= &= |= ^=`'s existing degrade-to-plain-arithmetic behavior off a non-actor field — bridged via the same GNU/Clang statement-expression, just without the atomic cast or memory order: `({ auto __old = x; x = min(x, (v)); __old; })`.
 

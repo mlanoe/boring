@@ -9,8 +9,8 @@ struct Dimension {
 
 @group(0) @binding(0) var<storage, read_write> mandelbrot_image: array<f32>;
 struct MandelbrotParams {
-    bp_image_axis0: i32,
-    bp_image_axis1: i32,
+    bp_image_axis0_18_5: /* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32,
+    bp_image_axis1_18_5: /* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32,
 }
 @group(0) @binding(1) var<uniform> mandelbrot_params: MandelbrotParams;
 
@@ -23,16 +23,16 @@ fn Mandelbrot_main(
     @builtin(num_workgroups)       bp_gdim: vec3<u32>,
 ) {
     let bp_bdim = vec3<u32>(16u, 16u, 1u);
-    let bp_image_axis0: i32 = mandelbrot_params.bp_image_axis0;
-    let bp_image_axis1: i32 = mandelbrot_params.bp_image_axis1;
+    let bp_image_axis0_18_5: /* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32 = mandelbrot_params.bp_image_axis0_18_5;
+    let bp_image_axis1_18_5: /* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32 = mandelbrot_params.bp_image_axis1_18_5;
     let col = ((i32(bp_bid.x) * i32(bp_bdim.x)) + i32(bp_tid.x));
     let row = ((i32(bp_bid.y) * i32(bp_bdim.y)) + i32(bp_tid.y));
-    if (((col < bp_image_axis0) && (row < bp_image_axis1))) {
-        let x0 = ((-2.0) + ((f32(col) * (1.0 - (-2.0))) / f32(bp_image_axis0)));
-        let y0 = ((-1.5) + ((f32(row) * (1.5 - (-1.5))) / f32(bp_image_axis1)));
+    if (((col < bp_image_axis0_18_5) && (row < bp_image_axis1_18_5))) {
+        let x0 = ((-2.0) + ((f32(col) * (1.0 - (-2.0))) / f32(bp_image_axis0_18_5)));
+        let y0 = ((-1.5) + ((f32(row) * (1.5 - (-1.5))) / f32(bp_image_axis1_18_5)));
         var cx: f32 = 0.0;
         var cy: f32 = 0.0;
-        var it: i32 = 0;
+        var it: /* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32 = 0;
         loop {
             if !(((((cx * cx) + (cy * cy)) < 4.0) && (it < 100)))
                 { break; }
@@ -42,7 +42,7 @@ fn Mandelbrot_main(
             it = (it + 1);
         }
         let value = select((f32(it) / f32(100)), 1.0, (it == 100));
-        mandelbrot_image[u32((col + (row * bp_image_axis0)))] = value;
+        mandelbrot_image[u32((col + (row * bp_image_axis0_18_5)))] = value;
     }
 }
 

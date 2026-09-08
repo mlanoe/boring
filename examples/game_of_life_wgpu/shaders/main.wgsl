@@ -7,8 +7,8 @@ struct Dimension {
 
 // ─── kernel Step ───
 
-@group(0) @binding(0) var<storage, read_write> step_cells_in: array<u32>;
-@group(0) @binding(1) var<storage, read_write> step_cells_out: array<u32>;
+@group(0) @binding(0) var<storage, read_write> step_cells_in: array</* WARNING: `uint` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside u32 range wrap silently */ u32>;
+@group(0) @binding(1) var<storage, read_write> step_cells_out: array</* WARNING: `uint` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside u32 range wrap silently */ u32>;
 struct StepParams {
     dim_w: i32,
     dim_h: i32,
@@ -28,7 +28,7 @@ fn Step_main(
     let col = ((i32(bp_bid.x) * i32(bp_bdim.x)) + i32(bp_tid.x));
     let row = ((i32(bp_bid.y) * i32(bp_bdim.y)) + i32(bp_tid.y));
     if (((col < dim.width) && (row < dim.height))) {
-        var n: i32 = 0;
+        var n: /* WARNING: `int` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside i32 range wrap silently */ i32 = 0;
         {
             var dy: i32 = (-1);
             loop {
@@ -56,8 +56,8 @@ fn Step_main(
 
 // ─── kernel Render ───
 
-@group(0) @binding(0) var<storage, read> render_cells: array<u32>;
-@group(0) @binding(1) var<storage, read_write> render_pixels: array<u32>;
+@group(0) @binding(0) var<storage, read> render_cells: array</* WARNING: `uint` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside u32 range wrap silently */ u32>;
+@group(0) @binding(1) var<storage, read_write> render_pixels: array</* WARNING: `uint` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside u32 range wrap silently */ u32>;
 struct RenderParams {
     dim_w: i32,
     dim_h: i32,

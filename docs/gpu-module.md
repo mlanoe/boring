@@ -272,13 +272,30 @@ k(block = N, grid = M)     # explicit grid of M blocks
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block |
-| `grid` | `int` or tuple | no | blocks per grid — inferred from field length if omitted |
+| `grid` | `int` or tuple | see below | blocks per grid |
 | `after` | kernel var or `[k1, k2, ...]` | no | ordering: this dispatch starts after the listed ones complete (GPU-side on CUDA, submission-ordered on wgpu, sequential on Metal and `boring run`) |
 | `priority` | `"high"` / `"normal"` / `"low"` | no | scheduling priority — CUDA only; ignored on all other backends |
 
-When `grid` is omitted it is inferred:
-- **1D**: `ceil(n / block)` where `n` is the length of the first array field.
-- **2D** (kernel has a `Dimension` field alongside a `'surface` field): `(ceil(w/bx), ceil(h/by), 1)`.
+`grid` can be omitted only when it's auto-inferable at transpile time:
+- **A `LabeledArray` field** (fixed- or dynamic-shape, §"Multi-dimensional
+  labeled arrays" above): inferred from the field's own axis sizes as
+  `ceil(axis / block)` per axis — see each backend doc's own grid-inference
+  section (`cuda-module.md`, `rocm-backend.md`, `metal-backend.md`,
+  `wgpu-backend.md`).
+- **2D screen rendering** (kernel has a `Dimension` field alongside a
+  `'surface` field): `(ceil(w/bx), ceil(h/by), 1)`.
+
+A kernel with only plain `[T]'unified`/`'global` array fields (no
+`LabeledArray`, no `Dimension`/`'surface`) has no field whose *length* the
+transpiler can see at build time. Omitting `grid` in this case defaults to
+a single `block=`-sized workgroup — correct only when the field genuinely
+holds no more elements than that — and `boring build` emits a warning
+naming the kernel (`dispatch has no grid= and no LabeledArray field to
+auto-infer one from — defaulting to a single block=-sized workgroup`).
+Whenever the field holds more elements than one `block=` worth, pass
+`grid=` explicitly, computed from the host-side count and the chosen
+`block`, e.g. `k(block = 256, grid = (n + 255) / 256)` — see
+`examples/vector_add_gpu.br`.
 
 ### Multi-pass with `after =`
 

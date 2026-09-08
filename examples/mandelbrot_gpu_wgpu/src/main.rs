@@ -11,8 +11,8 @@ static MANDELBROT_PIPELINE: std::sync::OnceLock<std::sync::Arc<wgpu::ComputePipe
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct MandelbrotParams {
-    __image_axis0: i32,
-    __image_axis1: i32,
+    __image_axis0_18_5: i32,
+    __image_axis1_18_5: i32,
 }
 
 struct Mandelbrot {
@@ -22,8 +22,8 @@ struct Mandelbrot {
     bind_group: wgpu::BindGroup,
     image_buf: std::sync::Arc<wgpu::Buffer>,
     image: Vec<f32>,
-    __image_axis0: i32,
-    __image_axis1: i32,
+    __image_axis0_18_5: i32,
+    __image_axis1_18_5: i32,
     params_buf: wgpu::Buffer,
 }
 
@@ -77,8 +77,8 @@ impl Mandelbrot {
             image_buf,
             image: vec![f32::default(); 0],
             params_buf,
-            __image_axis0: i32::default(),
-            __image_axis1: i32::default(),
+            __image_axis0_18_5: i32::default(),
+            __image_axis1_18_5: i32::default(),
         }
     }
 
@@ -97,8 +97,8 @@ impl Mandelbrot {
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let params = MandelbrotParams {
-            __image_axis0: self.__image_axis0,
-            __image_axis1: self.__image_axis1,
+            __image_axis0_18_5: self.__image_axis0_18_5,
+            __image_axis1_18_5: self.__image_axis1_18_5,
         };
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -514,14 +514,14 @@ fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // native `double`, so a `--target metal` build requires float32 buffers (same
     // reasoning as examples/saxpy.br).
     let mut k = Mandelbrot::new(__boring_gpu_device(), __boring_gpu_queue());
-    k.__image_axis0 = (WIDTH) as i32;
-    k.__image_axis1 = (HEIGHT) as i32;
+    k.__image_axis0_18_5 = (WIDTH) as i32;
+    k.__image_axis1_18_5 = (HEIGHT) as i32;
     k.copy_image_to_device(&vec![(0) as f32; ((WIDTH * HEIGHT)) as usize]);
     k.dispatch((((WIDTH + 15) / 16)) as u32, (((HEIGHT + 15) / 16)) as u32, (1) as u32)?;
     // Color palette: deep blue → cyan → white for points outside the set
     // Points inside the set (value == 1.0) remain black
     // PPM P6 encoding (ASCII header + binary RGB pixels)
-    let header = Arc::<str>::from(format!("P6\n{} {}\n255\n", WIDTH, HEIGHT).as_str());
+    let header: Arc<str> = Arc::<str>::from(Arc::<str>::from(format!("P6\n{} {}\n255\n", WIDTH, HEIGHT).as_str()));
     let header_chars = header.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>();
     let mut header_bytes: Vec<isize> = (0..((header_chars.len() as isize) as usize)).map(|__boring_i| { let i = __boring_i as isize; (header_chars[(i) as usize].clone()).chars().next().expect("ord: empty string") as isize }).collect::<Vec<_>>();
     let mut pixels: Vec<isize> = vec![0; ((WIDTH * HEIGHT) * 3) as usize];
