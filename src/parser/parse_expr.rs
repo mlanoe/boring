@@ -573,6 +573,13 @@ impl Parser {
     /// `-1..2` is `(-1)..2`, not `-(1..2)`. So parse the full unary chain first
     /// via `parse_unary_no_range`, then attach a trailing range at this level —
     /// one layer above unary, below `parse_mul`.
+    ///
+    /// The range's end is parsed via `parse_mul` (not `parse_unary_no_range`), so
+    /// a bare product/quotient binds into the end without needing parens —
+    /// `0..W * H` is `0..(W * H)`, matching Rust's range precedence (looser than
+    /// `*`/`/`/`%`) and this same function's own doc above. `for k in 0..W * H:`
+    /// (a real kernel body, see `linguist/samples/gpu.br`) used to mis-parse as
+    /// `(0..W) * H` — a `Range * Int` type error — before this fix.
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
         let col = self.col();
@@ -588,7 +595,7 @@ impl Parser {
                         line, col, len: self.span_len(line, col),
                     })
                 } else {
-                    let end = self.parse_unary_no_range()?;
+                    let end = self.parse_mul()?;
                     Ok(Expr {
                         kind: ExprKind::Range { start: Box::new(start), end: Box::new(end), inclusive },
                         line, col, len: self.span_len(line, col),

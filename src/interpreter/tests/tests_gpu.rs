@@ -599,6 +599,72 @@ let _out255 = k.out[255]
     assert_eq!(get_var(&interp, "_out255"), Value::Float64(1.0));
 }
 
+// ─── auto-inserted barrier for a bare `'actor` field with no explicit `sync` ──
+
+#[test]
+fn test_actor_tile_reduction_without_explicit_sync() {
+    // Same kernel as `linguist/samples/gpu.br`'s "Shared-memory tile reduction"
+    // section — see `insert_auto_sync_barriers`'s doc comment in `eval_gpu.rs`.
+    // It relies entirely on the transpiler's documented "auto-barrier rules"
+    // (docs/gpu-module.md) to make its shared-memory tile reduction safe: no
+    // `sync` statement appears anywhere in the source. Before the fix, the
+    // interpreter only ever called `Barrier::wait()` for an *explicit* `sync`
+    // statement, so a kernel like this one — correct once compiled, where the
+    // transpiler's own auto-barrier pass does insert real barriers — ran every
+    // thread to completion with no cross-thread ordering at all under `boring
+    // run`: each thread's read of a block-mate's `tile[..]` slot raced (and
+    // typically lost to) that write, producing `sum = 0` deterministically
+    // instead of `523776` (the sum of 0..1023).
+    let src = r#"
+kernel TileSum:
+    let [float]'global  data
+    mut [float]'unified result
+    mut [float, 256]'actor tile
+
+    init([float] data, [float]'unified result):
+        data = data
+        result = result
+
+    def ():
+        let i    = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let tid  = gpu.thread.x
+        tile[tid] = data[i]
+
+        var stride = gpu.block_dim.x / 2
+        while stride > 0:
+            if tid < stride:
+                tile[tid] = tile[tid] + tile[tid + stride]
+            stride = stride / 2
+
+        if tid == 0:
+            result[gpu.block.x] = tile[0]
+
+let data    = [i as float for i in ..1024]
+mut partial = [0.0 for ..4]
+
+mut ts = TileSum(data, partial)
+kernel:
+    ts(block = 256, grid = 4)
+
+# Read back via `ts.result` — a kernel field's writes don't alias the host
+# variable (`partial`) originally passed into the constructor, a separate,
+# pre-existing limitation unrelated to the auto-barrier bug this test covers
+# (see `linguist/samples/gpu.br`'s matching comment).
+let _result = ts.result
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    let total: f64 = match val {
+        Value::Array(arr) => arr.iter().map(|v| match v {
+            Value::Float64(f) => *f,
+            other => panic!("expected a float element in the reduced 'unified array, got {other:?}"),
+        }).sum(),
+        other => panic!("expected 'ts.result' to be an array, got {other:?}"),
+    };
+    assert_eq!(total, 523776.0, "sum of 0..1023 via a 4-block/256-thread shared-memory tile reduction");
+}
+
 // ─── explicit `grid =` must be honored, not silently re-inferred ───────────
 
 #[test]
@@ -1795,4 +1861,120 @@ let _o3 = lin2.out[3]
         .unwrap()
         .join()
         .unwrap();
+}
+
+// ─── const-generic kernel (`kernel Foo<int W, int H>:`) — regression ────────
+//
+// The interpreter erases turbofish type args for every ordinary generic
+// call ("type args are erased" — see `eval_expr_generic_call`'s doc in
+// `src/interpreter/eval_expr.rs`), which is correct for a regular `<T>` type
+// parameter (no runtime value to erase). A kernel's const-generic params
+// (`<int W, int H>`) are the one exception: `W`/`H` are read as real values
+// inside the kernel body (`for k in 0..W * H`), not just used for
+// compile-time dispatch — so a `Blur<3, 1>(...)` construction used to fail
+// with `error: undefined variable 'W'` the moment the kernel body referenced
+// it. See `resolve_const_generics`/`instantiate_kernel_struct`'s doc comments
+// for the fix (found while verifying `linguist/samples/gpu.br` for the 0.9.7
+// release).
+
+#[test]
+fn test_kernel_const_generic_binds_type_params() {
+    // A 1D box-blur tap: `weights` has a const-generic size `W * H`, and the
+    // kernel body's `for k in 0..W * H` / `weights[k]` both need `W`/`H` bound
+    // to their concrete turbofish values (3, 1) to run at all.
+    let src = r#"
+kernel Blur<int W, int H>:
+    let [float, W * H]'const weights
+    let [float]'global        input
+    mut [float]'global        output
+
+    init([float] w, [float] inp, [float] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..W * H:
+            let idx = i + k
+            if idx < input.len():
+                acc = acc + weights[k] * input[idx]
+        output[i] = acc
+
+let w      = [0.25, 0.5, 0.25]
+let pixels = [i as float for i in ..8]
+mut result = [0.0 for ..8]
+
+mut blur = Blur<3, 1>(w, pixels, result)
+kernel:
+    blur(block = 4)
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Object(inner) = get_var(&interp, "blur") else { panic!("expected blur to be an Object") };
+    let fields = inner.borrow().fields.clone();
+    let output = fields.iter().find(|(k, _)| k == "output").map(|(_, v)| v.clone());
+    // p = [0..7]; out[i] = 0.25*p[i] + 0.5*p[i+1] + 0.25*p[i+2], 0 past the edge.
+    let expected = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 5.0, 1.75];
+    match output {
+        Some(Value::Array(arr)) => {
+            assert_eq!(arr.len(), expected.len());
+            for (i, (got, &exp)) in arr.iter().zip(expected.iter()).enumerate() {
+                if let Value::Float64(got) = got {
+                    assert!((got - exp).abs() < 1e-9, "output[{}]: expected {}, got {}", i, exp, got);
+                } else { panic!("output[{}]: expected float, got {:?}", i, got); }
+            }
+        }
+        other => panic!("expected output to be an Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_kernel_const_generic_survives_relaunch() {
+    // The resolved `W`/`H` bindings are stashed as hidden fields on the
+    // constructed object (see `instantiate_kernel_struct`'s doc) precisely so
+    // a SECOND `kernel: blur(block = ...)` dispatch on the same instance still
+    // sees them — not just the first launch a naive "consume once" fix would
+    // have covered.
+    let src = r#"
+kernel Tile<int N>:
+    let [float, N]'const  weights
+    mut [float]'global    output
+
+    init([float] w, [float] out):
+        weights = w
+        output  = out
+
+    def ():
+        let i = gpu.thread.x
+        var acc = 0.0
+        for k in 0..N:
+            acc = acc + weights[k]
+        output[i] = output[i] + acc
+
+let w = [1.0, 2.0, 3.0]
+mut result = [0.0, 0.0]
+mut t = Tile<3>(w, result)
+kernel:
+    t(block = 2)
+kernel:
+    t(block = 2)
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Object(inner) = get_var(&interp, "t") else { panic!("expected t to be an Object") };
+    let fields = inner.borrow().fields.clone();
+    let output = fields.iter().find(|(k, _)| k == "output").map(|(_, v)| v.clone());
+    match output {
+        Some(Value::Array(arr)) => {
+            for (i, got) in arr.iter().enumerate() {
+                if let Value::Float64(got) = got {
+                    // 1+2+3 per launch, two launches.
+                    assert!((got - 12.0).abs() < 1e-9, "output[{}]: expected 12, got {}", i, got);
+                } else { panic!("output[{}]: expected float, got {:?}", i, got); }
+            }
+        }
+        other => panic!("expected output to be an Array, got {:?}", other),
+    }
 }

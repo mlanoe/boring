@@ -375,3 +375,31 @@ fn test_trait_default_method_requires_typed_params() {
     let msg = format!("{:?}", err);
     assert!(msg.contains("has no type annotation"), "unexpected error: {}", msg);
 }
+
+#[test]
+fn test_range_end_binds_looser_than_mul() {
+    // Regression test: `parse_unary`'s embedded range case used to parse its
+    // END via `parse_unary_no_range` — a single bare unary term — instead of
+    // `parse_mul`, so `0..W * H` mis-parsed as `(0..W) * H` (a `Range * Int`
+    // BinOp, a guaranteed type error at both `boring run` and `boring build`)
+    // instead of the intended `0..(W * H)`. Matches Rust's own range precedence
+    // (looser than `*`/`/`/`%`). Found while verifying `linguist/samples/gpu.br`'s
+    // `for k in 0..W * H:` (a real kernel body) for the 0.9.7 release.
+    let src = "for k in 0..w * h:\n    print \"{k}\"";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    let ast::Item::Stmt(ast::Stmt::For(for_stmt)) = &program.items[0] else {
+        panic!("expected a top-level For statement, got {:?}", program.items[0]);
+    };
+    match &for_stmt.iterable.kind {
+        ast::ExprKind::Range { start, end, .. } => {
+            assert!(matches!(start.kind, ast::ExprKind::Int(0)), "start: {:?}", start.kind);
+            assert!(
+                matches!(&end.kind, ast::ExprKind::BinOp(ast::BinOp::Mul, _, _)),
+                "end should be the full `w * h` product, not just `w` — got {:?}",
+                end.kind
+            );
+        }
+        other => panic!("expected a Range iterable, got {:?} (mis-parsed as `(0..w) * h`?)", other),
+    }
+}

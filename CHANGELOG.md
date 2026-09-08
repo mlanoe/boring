@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Interpreter never bound a kernel's const-generic type params (`kernel Foo<int W, int H>:`)** — `boring run` erases turbofish type args for every generic call except `fromJson` (correct for a regular `<T>`, which has no runtime value), but a kernel's `<int W, int H>` are real values read inside the body (`for k in 0..W * H`). `Blur<3, 1>(...)` failed with `error: undefined variable 'W'` the moment its body referenced one. Fixed by resolving the concrete turbofish values against the kernel's `type_params` and threading them through construction and every `kernel:` launch (including a relaunch of the same instance).
+- **Metal/CUDA/ROCm: a `'const`-qualified array field whose size is a const-generic expression** (`[float, W * H]'const`, `Type::ArrayNExpr` — as opposed to a literal `[float, 3]`, `Type::ArrayN`) **fell through every "is this an array field" check** in all three backends' host codegen, landing in the scalar fallback and emitting `weights: ()` (a unit-type struct field) plus a matching `let weights: () = w;` init assignment — a guaranteed `E0308`/`E0618` the moment the generated Rust was compiled.
+- **Metal/CUDA/ROCm: a turbofish kernel construction (`Blur<3, 1>(...)`) wasn't transpiled at all** — each backend's host `expr()` had no `ExprKind::GenericCall` arm, so the call fell to that function's `/* expr */` placeholder (a guaranteed syntax error). A later `blur(block = 256)` dispatch on the same variable also wasn't recognized as a kernel launch (`resolve_kernel_type` had no `GenericCall` arm either), degrading to a bogus ordinary function call. Fixed by re-dispatching a `GenericCall` kernel construction as a plain `Call` (turbofish type args are erased on the host side — the const-generic value only matters device-side/interpreter-side) and adding the matching `resolve_kernel_type` case.
+- **Metal/CUDA/ROCm: `.reduce(seed, closure)`/`.fold(seed, closure)` on an array** inside kernel-touching top-level code wasn't recognized by any of the three backends' own hand-rolled method-call table (unlike the general/wgpu transpiler pipeline's `map_method`), falling to a bare passthrough (`arr.reduce(...)`, `E0599` — `Vec` has no such method). Now emits `.iter().cloned().fold(seed, closure)`, matching the general pipeline's own convention.
+- **Parser: a range's end bound ignored operator precedence** — `0..W * H` mis-parsed as `(0..W) * H` (a `Range * Int`, a guaranteed type error) instead of the intended `0..(W * H)`, because `parse_unary`'s embedded range case parsed its end via a single bare unary term instead of `parse_mul`. Also affected any array slice with a computed upper bound (`a[i..j * 2]`). Fixed by parsing the range end at `parse_mul` precedence, matching Rust's own (range binds looser than `*`/`/`/`%`).
+
+All five found while verifying `linguist/samples/gpu.br` end-to-end (`boring run` and `boring build --target metal/cuda/rocm`) after the 0.9.7 release — wgpu was unaffected (its own kernel const-generic monomorphization already handles all of this correctly).
+
 ---
 
 ## [0.9.7] — 2026-09-08 *(cargo test: 1845/1845 passing across 33 suites · clippy: clean · self-hosted interpreter functional: 83/83 × 4 modes)*

@@ -1398,3 +1398,58 @@ struct Runner:
          this as a hard error"
     );
 }
+
+// ─── const-generic kernel field (`kernel Foo<int W, int H>:`) — regression ──
+//
+// See `metal_codegen.rs`'s identical test for the full root-cause writeup
+// (found while verifying `linguist/samples/gpu.br` for the 0.9.7 release).
+// This backend's 'const fixed-size array fields are stored as `Vec<T>` (not
+// `Buffer`, unlike Metal — see `host_field_type`'s doc), but the same
+// `Type::ArrayNExpr` (const-generic array size) fell through the same kind of
+// "is this an array field" checks, producing `weights: ()` here too.
+
+#[test]
+fn const_generic_array_field_becomes_vec_not_unit() {
+    let (_cu, rs) = cuda_codegen("const_generic_field", r#"
+kernel Blur<int W, int H>:
+    let [float, W * H]'const weights
+    let [float]'global        input
+    mut [float]'global        output
+
+    init([float] w, [float] inp, [float] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x
+        output[i] = weights[0] * input[i]
+
+let w = [0.5]
+let pixels = [1.0, 2.0]
+mut result = [0.0, 0.0]
+mut blur = Blur<1, 1>(w, pixels, result)
+kernel:
+    blur(block = 2)
+"#);
+    assert!(
+        rs.contains("weights: Vec<f64>,"),
+        "expected the const-generic-sized 'const array field to become \
+         Vec<f64> (matching plain `[T, N]'const`), not `()`;\ngot:\n{rs}"
+    );
+    assert!(
+        !rs.contains("weights: (),") && !rs.contains("let weights: () = "),
+        "the field/init-assignment must not fall back to the unit type;\ngot:\n{rs}"
+    );
+    assert!(
+        rs.contains("let mut blur = Blur::new("),
+        "expected the turbofish construction `Blur<1, 1>(...)` to emit a plain \
+         `Blur::new(...)` call (type args erased, same as a non-generic kernel), \
+         not this file's `/* expr */` catch-all;\ngot:\n{rs}"
+    );
+    assert!(
+        rs.contains("blur.__boring_launch("),
+        "expected `blur(block = 2)` to be recognized as a kernel launch \
+         (`blur.__boring_launch(...)`), not a bogus ordinary function call;\ngot:\n{rs}"
+    );
+}

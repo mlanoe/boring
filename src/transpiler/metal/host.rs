@@ -135,7 +135,7 @@ struct HostEmitter {
 /// See `cuda::host`'s identical function.
 fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String>) -> bool {
     match ty {
-        Type::Array(_) | Type::ArrayN(_, _) | Type::Dict(_, _) | Type::Set(_) => true,
+        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) => true,
         Type::Named(n) => struct_names.contains(n),
         _ => false,
     }
@@ -155,7 +155,7 @@ fn is_float_array_param(ty: &Type) -> bool {
             || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64" | "f32" | "f64"))
     }
     match ty {
-        Type::Array(inner) | Type::ArrayN(inner, _) => is_float(inner),
+        Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => is_float(inner),
         _ => false,
     }
 }
@@ -1139,7 +1139,7 @@ impl HostEmitter {
                 GpuQual::Actor | GpuQual::Local => {}
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                     match &field.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => {
+                        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                             self.line(&format!("{}: Buffer,", field.name));
                         }
                         ty if ty.as_labeled_array().is_some() => {
@@ -1156,7 +1156,7 @@ impl HostEmitter {
         for field in &decl.fields {
             if matches!(field.qual, GpuQual::Local) {
                 match &field.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {}
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {}
                     ty if ty.as_labeled_array().is_some() => {}
                     _ => {
                         let ty = rust_type(&field.ty);
@@ -1185,7 +1185,7 @@ impl HostEmitter {
         for field in &decl.fields {
             match field.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
-                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some() =>
+                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || field.ty.as_labeled_array().is_some() =>
                 {
                     let elem = elem_rust_type(&field.ty);
                     self.line(&format!(
@@ -1306,7 +1306,7 @@ impl HostEmitter {
             GpuQual::Surface => {
                 // Surface pixel buffer defaults to single-pixel placeholder (32-bit)
                 match &field.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                         self.line(&format!(
                             "let {}: Buffer = __device.new_buffer(mem::size_of::<u32>() as u64, MTLResourceOptions::StorageModeShared);",
                             field.name
@@ -1323,7 +1323,7 @@ impl HostEmitter {
             }
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const => {
                 match &field.ty {
-                    Type::Array(inner) | Type::ArrayN(inner, _) => {
+                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => {
                         let elem = rust_type(inner);
                         self.line(&format!(
                             "let {}: Buffer = __device.new_buffer(mem::size_of::<{}>() as u64, MTLResourceOptions::StorageModeShared);",
@@ -1362,7 +1362,7 @@ impl HostEmitter {
             GpuQual::Actor => {}
             GpuQual::Local => {
                 match &field.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {}
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {}
                     _ => {
                         let ty = rust_type(&field.ty);
                         let val = field.default.as_ref()
@@ -1385,11 +1385,11 @@ impl HostEmitter {
             match field.qual {
                 GpuQual::Actor => {}
                 GpuQual::Local => match &field.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {}
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {}
                     _ => self.line(&format!("{},", field.name)),
                 },
                 _ => match &field.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => self.line(&format!("{},", field.name)),
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => self.line(&format!("{},", field.name)),
                     _ => self.line(&format!("{},", field.name)),
                 }
             }
@@ -1457,7 +1457,7 @@ impl HostEmitter {
                                         }
                                         _ => {
                                             let rhs_s = self.expr(rhs);
-                                            let is_array_like = matches!(&field.ty, Type::Array(_) | Type::ArrayN(_, _))
+                                            let is_array_like = matches!(&field.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _))
                                                 || field.ty.as_labeled_array().is_some();
                                             match () {
                                                 () if is_array_like => {
@@ -1520,7 +1520,7 @@ impl HostEmitter {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                     match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
+                        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => Some(f.name.clone()),
                         ty if ty.as_labeled_array().is_some() => Some(f.name.clone()),
                         _ => None,
                     }
@@ -1612,7 +1612,7 @@ impl HostEmitter {
         for f in fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
-                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() =>
+                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() =>
                 {
                     self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
                     buf_idx += 1;
@@ -1622,7 +1622,7 @@ impl HostEmitter {
         }
         for f in fields {
             if matches!(f.qual, GpuQual::Const) {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() {
                     self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
                 } else {
                     let elem = elem_rust_type(&f.ty);
@@ -1635,7 +1635,7 @@ impl HostEmitter {
             }
         }
         for f in fields {
-            if matches!(f.qual, GpuQual::Local) && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_labeled_array().is_none() {
+            if matches!(f.qual, GpuQual::Local) && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) && f.ty.as_labeled_array().is_none() {
                 let elem = rust_type(&f.ty);
                 self.line(&format!(
                     "__encoder.set_bytes({}, mem::size_of::<{}>() as u64, &self.{} as *const _ as *const _);",
@@ -2143,7 +2143,7 @@ impl HostEmitter {
             .and_then(|t| self.kernel_decls.get(t))
             .map(|decl| decl.fields.iter().any(|f|
                 matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())))
+                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some())))
             .unwrap_or(false);
         let block = args.iter().find(|a| a.label.as_deref() == Some("block"))
             .map(|a| self.dim3_expr(&a.value))
@@ -2550,6 +2550,24 @@ impl HostEmitter {
                 }
                 call
             }
+            ExprKind::GenericCall(callee, _type_args, args) => {
+                // Turbofish type args are erased for this backend's host codegen,
+                // same philosophy as the interpreter (`eval_expr_generic_call`'s
+                // doc): a kernel struct's Rust field types don't depend on the
+                // concrete const-generic values here (buffers are runtime-sized —
+                // see `rust_type`'s `Type::ArrayNExpr` arm), so
+                // `Blur<3, 1>(w, pixels, result)` should emit identically to a
+                // plain `Blur(w, pixels, result)` call. Reuse the `Call` arm's
+                // full logic (kernel-constructor detection, builtins, ordinary
+                // calls) by re-dispatching as one, instead of duplicating it —
+                // this case used to fall through to this function's `/* expr */`
+                // catch-all default, a guaranteed syntax error (confirmed via
+                // `linguist/samples/gpu.br`'s `Blur<3, 1>(...)` construction).
+                self.expr(&Expr {
+                    kind: ExprKind::Call(callee.clone(), args.clone()),
+                    line: e.line, col: e.col, len: e.len,
+                })
+            }
             ExprKind::MethodCall(obj, method, args) => {
                 // screen.key("q") → boring_keys.contains("q")
                 if let ExprKind::Var(name) = &obj.kind {
@@ -2608,6 +2626,15 @@ impl HostEmitter {
                     // closure (see the `ExprKind::Closure` case below).
                     "map" if args_s.len() == 1 && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
                         format!("{}.iter().cloned().map({}).collect::<Vec<_>>()", o, args_s[0]),
+                    // `.reduce(seed, closure)` / `.fold(seed, closure)` — same
+                    // `iter().cloned().fold(...)` shape as the general (std/wgpu)
+                    // transpiler's `map_method` (helpers.rs), which this backend's
+                    // own kernel-touching-code emitter doesn't consult. Found via
+                    // `linguist/samples/gpu.br`'s `partial.reduce(0.0, (acc, v): ...)`
+                    // falling to this match's bare passthrough default below
+                    // (`Vec<f32>` has no `.reduce()` — E0599).
+                    "reduce" | "fold" if args_s.len() == 2 && matches!(&args[1].value.kind, ExprKind::Closure(..)) =>
+                        format!("{}.iter().cloned().fold({}, {})", o, args_s[0], args_s[1]),
                     // `.sum()` — Metal floats are always f32 (see `rust_type`'s `Float`
                     // case), unlike CUDA/the general pipeline's f64 default.
                     "sum" if args.is_empty() => format!("{}.iter().cloned().sum::<f32>()", o),
@@ -2642,7 +2669,7 @@ impl HostEmitter {
                     .and_then(|t| self.kernel_decls.get(&t))
                     .map(|decl| decl.fields.iter().any(|f|
                         matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                        && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())))
+                        && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some())))
                     .unwrap_or(false);
                 let k = self.expr(kernel);
                 let block = config.block.as_ref()
@@ -2848,6 +2875,19 @@ impl HostEmitter {
                 }
                 None
             }
+            // `mut blur = Blur<3, 1>(...)` — a turbofish kernel construction. Same
+            // detection as the plain `Call` case above (type args are erased for
+            // this backend's host codegen — see the `expr()` `GenericCall` arm's
+            // doc); without this arm, `blur` never gets registered in
+            // `var_kernel_type`, so a later `blur(block = 256)` dispatch wasn't
+            // recognized as a kernel launch and degraded to a bogus ordinary call
+            // (`blur(256)`, `E0618`) instead of `blur.__boring_launch(...)`.
+            ExprKind::GenericCall(callee, _, _) => {
+                if let ExprKind::Var(n) = &callee.kind {
+                    if self.kernel_names.contains(n.as_str()) { return Some(n.clone()); }
+                }
+                None
+            }
             ExprKind::KernelLaunch { kernel, .. } => self.resolve_kernel_type(kernel),
             ExprKind::New { ctor, .. }             => self.resolve_kernel_type(ctor),
             ExprKind::Pipe(lhs, method, _) if method == "wait" => self.resolve_kernel_type(lhs),
@@ -2886,7 +2926,7 @@ impl HostEmitter {
                     // way through, producing `field: Buffer = param` with `param: Vec<f32>`
                     // (E0308) — confirmed via examples/matrix_mul_gpu.br's `a`/`b`/`c`
                     // fields, all `[float32, width = 32, height = 32]'global`/`'unified`.
-                    && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())
+                    && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some())
             }).unwrap_or(false)
         }).collect())
     }
@@ -3011,7 +3051,7 @@ impl HostEmitter {
                 // `k.field` read (no `.flatten()`) of a labeled-array field used to fall
                 // through to `None` here, silently missing the `.read_{field}()` buffer
                 // readback this same shape already gets for a flat array field.
-                if matches!(&kf.ty, Type::Array(_) | Type::ArrayN(_, _)) || kf.ty.as_labeled_array().is_some() {
+                if matches!(&kf.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || kf.ty.as_labeled_array().is_some() {
                     Some(format!("{}.read_{}()?", obj, field))
                 } else {
                     None
@@ -3041,7 +3081,7 @@ impl HostEmitter {
         match kf.qual {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 match &kf.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => Some(format!(
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => Some(format!(
                         "BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<f32>())",
                         obj = obj_name, field = field
                     )),
@@ -3070,6 +3110,10 @@ fn elem_rust_type(ty: &Type) -> String {
     match ty {
         Type::Array(inner)        => rust_type(inner),
         Type::ArrayN(inner, _)    => rust_type(inner),
+        // A fixed-size array whose length is a const-generic expression
+        // (`[float, W * H]'const`) rather than a literal (`Type::ArrayN`) — same
+        // element type either way, just unwrap to `inner` like `ArrayN` above.
+        Type::ArrayNExpr(inner, _) => rust_type(inner),
         Type::Qualified(inner, _) => elem_rust_type(inner),
         Type::LabeledArray(inner, _) => rust_type(inner),
         _                         => rust_type(ty),
@@ -3088,7 +3132,7 @@ fn elem_rust_type(ty: &Type) -> String {
 /// and its wrap/unwrap call sites, which convert between the two explicitly.
 fn general_host_elem_type(ty: &Type) -> String {
     match ty {
-        Type::Array(inner) | Type::ArrayN(inner, _) => general_host_elem_type(inner),
+        Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => general_host_elem_type(inner),
         Type::LabeledArray(inner, _) => general_host_elem_type(inner),
         Type::Qualified(inner, _) => general_host_elem_type(inner),
         // `float32` keeps its own real width here — only the bare `float`/`float64`
@@ -3129,6 +3173,17 @@ fn rust_type(ty: &Type) -> String {
         Type::Never          => "!".into(),
         Type::Array(inner)   => format!("Vec<{}>", rust_type(inner)),
         Type::ArrayN(inner, n) => format!("[{}; {}]", rust_type(inner), n),
+        // Const-generic-sized fixed array (`[float, W * H]'const`) — the length
+        // is an unevaluated expression here (no monomorphization pass resolves
+        // kernel const generics for this backend yet, unlike wgpu's), so this
+        // can't produce a literal-length `[T; N]` the way `ArrayN` above does.
+        // Every real call site reaches this field via a plain `field = param`
+        // init assignment (the field's Rust type is never actually constructed
+        // from this string — see `emit_kernel_struct`'s `Buffer` special-case
+        // for 'const/'unified/'global-qualified array-shaped fields, which this
+        // arm is a fallback for, not the path real kernels take) — `Vec<T>`
+        // is honest about that, matching plain `Array`'s convention above.
+        Type::ArrayNExpr(inner, _) => format!("Vec<{}>", rust_type(inner)),
         Type::LabeledArray(inner, _) => format!("Vec<{}>", rust_type(inner)),
         // `{K=V}` dict type — was previously falling to this function's `_ => "()"`
         // default (the exact bug this fixes: tokenizer.br's `{string=int} vocab`
@@ -3194,7 +3249,7 @@ fn elem_size_bytes(ty: &Type) -> usize {
             _               => 8,
         },
         Type::Qualified(inner, _)                 => elem_size_bytes(inner),
-        Type::Array(inner) | Type::ArrayN(inner, _) => elem_size_bytes(inner),
+        Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => elem_size_bytes(inner),
         _                                         => 8,
     }
 }

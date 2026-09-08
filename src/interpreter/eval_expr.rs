@@ -1211,7 +1211,37 @@ impl Interpreter {
         for a in args {
             evaled_args.push(self.eval_expr(&a.value, Rc::clone(&env))?);
         }
+        // A `kernel Foo<int W, int H>:` construction (`Blur<3, 1>(...)`) is the one
+        // exception to the type-erasure philosophy above: `W`/`H` are const generics,
+        // read as real values inside the kernel body (`for k in 0..W * H`), not just
+        // used for compile-time dispatch — so their concrete turbofish values must
+        // survive into the interpreter. See `resolve_const_generics`'s and
+        // `instantiate_kernel_struct`'s doc comments for how they're threaded through.
+        if let Value::KernelStruct { decl, captured } = &callee_val {
+            let const_generics = Self::resolve_const_generics(&decl.type_params, type_args);
+            return self.instantiate_kernel_struct(decl, captured, evaled_args, line, &const_generics);
+        }
         self.call_value(callee_val, evaled_args, line, false)
+    }
+
+    /// Resolve a kernel's `<int W, int H>`-style const-generic parameters against a
+    /// turbofish construction's concrete type arguments (`Blur<3, 1>` → `[("W", 3),
+    /// ("H", 1)]`). `type_params` uses the `"$NAME:rust_ty"` encoding documented on
+    /// `KernelDecl::type_params`; a plain type parameter (no `$` prefix) has no
+    /// runtime value and is skipped, as is any type-arg position that isn't a
+    /// literal integer (`Type::ConstInt`) — matching what real kernel const
+    /// generics accept today (`int`/`uint`; `bool` consts aren't yet exercised by
+    /// any turbofish call site, so aren't special-cased here).
+    fn resolve_const_generics(type_params: &[String], type_args: &[Type]) -> Vec<(String, Value)> {
+        type_params.iter().zip(type_args.iter())
+            .filter_map(|(param, ty)| {
+                let name = param.strip_prefix('$')?.split_once(':')?.0;
+                match ty {
+                    Type::ConstInt(n) => Some((name.to_string(), Value::Int(*n))),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     pub fn eval_expr(&mut self, expr: &Expr, env: EnvRef) -> Eval {
@@ -2678,7 +2708,7 @@ impl Interpreter {
             }
             Value::KernelStruct { decl, captured } => {
                 // Kernel struct callable as constructor: calls its `init` if present.
-                self.instantiate_kernel_struct(&decl, &captured, args, line)
+                self.instantiate_kernel_struct(&decl, &captured, args, line, &[])
             }
             Value::EnumNamespace { name, variants: _, .. } => {
                 // Calling enum namespace means accessing a variant constructor

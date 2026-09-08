@@ -167,7 +167,7 @@ impl DeviceEmitter {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified => {
                     let elem_ty: Option<&Type> = match &f.ty {
-                        Type::Array(inner) | Type::ArrayN(inner, _) => Some(inner.as_ref()),
+                        Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => Some(inner.as_ref()),
                         ty if ty.as_labeled_array().is_some() => Some(ty.as_labeled_array().unwrap().0),
                         _ => None,
                     };
@@ -182,7 +182,7 @@ impl DeviceEmitter {
                 // 'surface pixel buffers use 32-bit uint (BGRA8Unorm = 4 bytes/pixel)
                 GpuQual::Surface => {
                     match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => {
+                        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                             params.push(format!("device uint* {} [[buffer({})]]", f.name, buf_idx));
                             buf_idx += 1;
                         }
@@ -200,7 +200,7 @@ impl DeviceEmitter {
             if matches!(f.qual, GpuQual::Const) {
                 let elem = elem_msl_type(&f.ty);
                 match &f.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                         // Array: use the field name directly — accessed as name[i] in the kernel body.
                         params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
                     }
@@ -220,7 +220,7 @@ impl DeviceEmitter {
         // 3. Scalar 'local fields → constant T* [[buffer(N)]] (passed from host as scalar)
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Local)
-                && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+                && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _))
                 && f.ty.as_labeled_array().is_none() {
                     let ty = msl_type(&f.ty);
                     params.push(format!("constant {}* __{}_init [[buffer({})]]", ty, f.name, buf_idx));
@@ -282,7 +282,7 @@ impl DeviceEmitter {
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Const) {
                 match &f.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                         // Array: accessed directly via name[i] — no deref needed.
                     }
                     ty if ty.as_labeled_array().is_some() => {}
@@ -756,7 +756,7 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
             GpuQual::Const => {
                 let elem = elem_msl_type(&f.ty);
                 match &f.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                         // Array: direct pointer, no deref — same as in the entry point.
                         Some(format!("constant {}* {}", elem, f.name))
                     }
@@ -827,6 +827,13 @@ fn msl_type(ty: &Type) -> String {
         Type::Nil | Type::Void => "void".into(),
         Type::Array(inner)     => format!("{}*", msl_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", msl_type(inner), n),
+        // Const-generic-sized fixed array (`[float, W * H]'const`) — no literal
+        // length available here (see `rust_type`'s identical arm in host.rs),
+        // so fall back to a pointer like plain `Array` above. Every real 'const
+        // array field takes this backend's direct-pointer MSL param path
+        // (`constant T* name [[buffer(N)]]`, see this file's `Type::ArrayNExpr`
+        // arms above) rather than this fallback.
+        Type::ArrayNExpr(inner, _) => format!("{}*", msl_type(inner)),
         Type::LabeledArray(inner, _) => format!("{}*", msl_type(inner)),
         Type::Named(n) => match n.as_str() {
             "float32" | "f32"       => "float".to_string(),
@@ -857,6 +864,7 @@ fn elem_msl_type(ty: &Type) -> String {
     match ty {
         Type::Array(inner)        => msl_type(inner),
         Type::ArrayN(inner, _)    => msl_type(inner),
+        Type::ArrayNExpr(inner, _) => msl_type(inner),
         Type::Qualified(inner, _) => elem_msl_type(inner),
         Type::LabeledArray(inner, _) => msl_type(inner),
         _                         => msl_type(ty),

@@ -200,6 +200,135 @@ fn stmt_uses_gpu_warp(stmt: &Stmt) -> bool {
     }
 }
 
+// ─── Auto-barrier (bare `'actor` fields with no explicit `sync`) ──────────────
+//
+// The 4 GPU transpiler backends (metal/cuda/rocm/wgpu `device.rs`) each carry an
+// identical "auto-sync" pass: a kernel `def` with at least one `'actor`-qualified
+// field and no explicit `sync` statement gets real thread-group barriers inserted
+// for it automatically (see docs/gpu-module.md's "Auto-barrier rules") — (1) once,
+// right before the first top-level statement that is or contains a loop, and (2) at
+// the top of every `while`/`for` loop body (any nesting depth) that references an
+// `'actor` field. This mirrors that pass for the interpreter's own block-scoped
+// real-OS-thread simulation (`run_kernel_parallel`'s "else" branch): it rewrites the
+// kernel body, splicing in the same `Stmt::Comment("sync")` node a literal `sync`
+// statement parses to (see `exec.rs`'s `Stmt::Comment(c) if c == "sync"` handling,
+// which is what actually calls `Barrier::wait()`), at the same two points. Without
+// this, a kernel like `linguist/samples/gpu.br`'s "Shared-memory tile reduction"
+// example — which relies entirely on auto-inserted barriers, no `sync` in the source
+// — ran every thread to completion with no barrier ever firing at all: each thread
+// read its shared tile slots long before its block-mates had written them, so the
+// reduction silently produced all-zero results under `boring run` despite compiling
+// and running correctly once transpiled (where the auto-sync pass above does fire).
+//
+// Kept independent from (not sharing code with) the 4 backends' own copies of this
+// logic — those already duplicate it 4 ways (only `first_loop_index`, reused below,
+// was ever factored out into `transpiler::helpers`); wiring a 5th caller through
+// that duplication isn't this fix's job.
+
+/// Returns true if `stmts` contains an explicit `sync` statement at any depth
+/// (inside `while`/`for`/`if`) — mirrors `body_has_explicit_sync` in each GPU
+/// backend's `device.rs`. When true, the kernel is in "manual mode": the developer
+/// owns every barrier and no auto-insertion happens at all.
+fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Comment(c) if c == "sync" => true,
+        Stmt::While(w) => body_has_explicit_sync(&w.body),
+        Stmt::For(f)   => body_has_explicit_sync(&f.body),
+        Stmt::If(i)    => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
+                        || i.else_body.as_ref().is_some_and(|b| body_has_explicit_sync(b)),
+        _ => false,
+    })
+}
+
+/// Returns true if `stmts` references any name in `sync_names` — mirrors
+/// `body_accesses_sync_field`/`stmts_reference_any`/`stmt_references_any` in each
+/// GPU backend's `device.rs` (same reduced expression-pattern coverage: enough for
+/// the assignment/index/field-access shapes real kernel bodies use).
+fn body_accesses_sync_field(stmts: &[Stmt], sync_names: &[String]) -> bool {
+    if sync_names.is_empty() { return false; }
+    stmts.iter().any(|s| stmt_references_any(s, sync_names))
+}
+
+fn stmt_references_any(stmt: &Stmt, names: &[String]) -> bool {
+    match stmt {
+        Stmt::Expr(e)   => expr_references_any(e, names),
+        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
+        Stmt::Let(s)    => s.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
+        Stmt::While(w)  => w.body.iter().any(|s| stmt_references_any(s, names)),
+        Stmt::For(f)    => f.body.iter().any(|s| stmt_references_any(s, names)),
+        Stmt::If(i)     => i.branches.iter().any(|(_, b)| b.iter().any(|s| stmt_references_any(s, names)))
+                         || i.else_body.as_ref().is_some_and(|b| b.iter().any(|s| stmt_references_any(s, names))),
+        _ => false,
+    }
+}
+
+fn expr_references_any(expr: &Expr, names: &[String]) -> bool {
+    match &expr.kind {
+        ExprKind::Var(n)         => names.iter().any(|nm| nm == n),
+        ExprKind::Index(a, i)    => expr_references_any(a, names) || expr_references_any(i, names),
+        ExprKind::Field(e, _)    => expr_references_any(e, names),
+        ExprKind::BinOp(_, l, r) => expr_references_any(l, names) || expr_references_any(r, names),
+        ExprKind::UnaryOp(_, e)  => expr_references_any(e, names),
+        ExprKind::Assign(l, r)   => expr_references_any(l, names) || expr_references_any(r, names),
+        ExprKind::Call(f, args)  => expr_references_any(f, names) || args.iter().any(|a| expr_references_any(&a.value, names)),
+        _ => false,
+    }
+}
+
+/// Rewrites `stmts` (a kernel `def`'s body, already confirmed auto-sync-eligible by
+/// the caller — see this section's header comment) to splice in explicit
+/// `Stmt::Comment("sync")` barrier nodes at the same two points the GPU transpiler
+/// backends emit a real barrier at compile time.
+fn insert_auto_sync_barriers(stmts: &[Stmt], sync_names: &[String]) -> Vec<Stmt> {
+    let split = crate::transpiler::helpers::first_loop_index(stmts);
+    let mut out: Vec<Stmt> = stmts[..split].iter().map(|s| rewrite_stmt_auto_sync(s, sync_names)).collect();
+    if split < stmts.len() {
+        out.push(Stmt::Comment("sync".to_string()));
+    }
+    out.extend(stmts[split..].iter().map(|s| rewrite_stmt_auto_sync(s, sync_names)));
+    out
+}
+
+/// Recursively rewrites one statement: `while`/`for` loop bodies get a barrier
+/// spliced onto their front when they reference an `'actor` field (rule 2 — see
+/// this section's header comment), and `if` branches get recursed into so a loop
+/// nested inside one still gets the same treatment. Every other statement kind is
+/// cloned unchanged.
+fn rewrite_stmt_auto_sync(stmt: &Stmt, sync_names: &[String]) -> Stmt {
+    match stmt {
+        Stmt::While(w) => {
+            let needs_barrier = body_accesses_sync_field(&w.body, sync_names);
+            let mut body: Vec<Stmt> = w.body.iter().map(|s| rewrite_stmt_auto_sync(s, sync_names)).collect();
+            if needs_barrier {
+                body.insert(0, Stmt::Comment("sync".to_string()));
+            }
+            let mut w2 = w.clone();
+            w2.body = body;
+            Stmt::While(w2)
+        }
+        Stmt::For(f) => {
+            let needs_barrier = body_accesses_sync_field(&f.body, sync_names);
+            let mut body: Vec<Stmt> = f.body.iter().map(|s| rewrite_stmt_auto_sync(s, sync_names)).collect();
+            if needs_barrier {
+                body.insert(0, Stmt::Comment("sync".to_string()));
+            }
+            let mut f2 = f.clone();
+            f2.body = body;
+            Stmt::For(f2)
+        }
+        Stmt::If(i) => {
+            let mut i2 = i.clone();
+            i2.branches = i.branches.iter()
+                .map(|(c, b)| (c.clone(), b.iter().map(|s| rewrite_stmt_auto_sync(s, sync_names)).collect()))
+                .collect();
+            i2.else_body = i.else_body.as_ref()
+                .map(|b| b.iter().map(|s| rewrite_stmt_auto_sync(s, sync_names)).collect());
+            Stmt::If(i2)
+        }
+        other => other.clone(),
+    }
+}
+
 // Thread pool with an enlarged stack (64 MB) for the recursive tree-walk interpreter.
 static KERNEL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
@@ -359,6 +488,29 @@ pub(crate) fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
     }
 }
 
+/// Recover a kernel object's `$`-prefixed const-generic fields (stashed there by
+/// `instantiate_kernel_struct` — see its doc comment) and bind them under their
+/// real names (`"$W"` → `W`) into a fresh child of `captured`. Returns `captured`
+/// itself, unwrapped, when the object carries none (the common non-generic-kernel
+/// case) — avoids an env allocation on every launch of an ordinary kernel.
+///
+/// This is what lets a kernel body do `for k in 0..W * H` and have `W`/`H`
+/// actually resolve: they're real per-instance values (from `Blur<3, 1>(...)`),
+/// not just type-level info the interpreter can erase like a regular `<T>`.
+fn bind_const_generic_fields(fields: &[(String, Value)], captured: &EnvRef) -> EnvRef {
+    let consts: Vec<(&str, &Value)> = fields.iter()
+        .filter_map(|(name, val)| name.strip_prefix('$').map(|n| (n, val)))
+        .collect();
+    if consts.is_empty() {
+        return Rc::clone(captured);
+    }
+    let env = Env::child(Rc::clone(captured));
+    for (name, val) in consts {
+        env.borrow_mut().define(name, val.clone());
+    }
+    env
+}
+
 // ─── Snapshot helpers ─────────────────────────────────────────────────────────
 
 /// Walk the env chain and snapshot every binding that converts to ThreadValue.
@@ -463,7 +615,6 @@ fn run_kernel_parallel(
     // derefs through these the same as it would a plain `&T` — no behavior
     // change there.
     let captured_snapshot = Arc::new(snapshot_env(captured));
-    let entry_body        = Arc::new(entry.body.clone());
     let decl_fields       = Arc::new(decl.fields.clone());
     let decl_methods      = Arc::new(decl.methods.clone());
     let traits            = Arc::new(interp.traits.clone());
@@ -493,6 +644,21 @@ fn run_kernel_parallel(
             _ => None,
         })
         .collect();
+
+    // Auto-barrier mode (see `insert_auto_sync_barriers`'s doc comment): a kernel
+    // with at least one `'actor` field and no explicit `sync` statement gets real
+    // barriers spliced into its body here, at the same points the 4 GPU transpiler
+    // backends (metal/cuda/rocm/wgpu `device.rs`) insert them at compile time — the
+    // simulator must place them identically or a kernel correct under `boring run`
+    // (which silently ran every thread to completion with no cross-thread ordering
+    // at all, prior to this) could still be wrong once actually compiled, and vice
+    // versa.
+    let sync_field_names: Vec<String> = sync_field_specs.iter().map(|(name, _, _)| name.clone()).collect();
+    let entry_body = if !sync_field_names.is_empty() && !body_has_explicit_sync(&entry.body) {
+        Arc::new(insert_auto_sync_barriers(&entry.body, &sync_field_names))
+    } else {
+        Arc::new(entry.body.clone())
+    };
 
     // `gpu.warp.sync()`/`gpu.warp.shuffle_*()` need genuine cross-thread
     // coordination within a block, exactly like a `'actor` field's barrier —
@@ -1035,9 +1201,10 @@ impl Interpreter {
 
         let entry = decl.methods.iter().find(|m| m.name.is_empty() && m.params.is_empty());
         if let Some(entry) = entry {
+            let launch_captured = bind_const_generic_fields(&fields, &captured);
             let kernel_obj = make_object(type_name, fields);
             let kernel_obj = run_kernel_parallel(
-                self, &decl, &captured, kernel_obj, entry,
+                self, &decl, &launch_captured, kernel_obj, entry,
                 LaunchDims { total_threads, block_x, block_y, block_z, grid_x, grid_y, grid_z },
             )?;
             Ok(Value::KernelHandle { result: Box::new(kernel_obj) })
@@ -1123,9 +1290,10 @@ impl Interpreter {
 
         let entry = decl.methods.iter().find(|m| m.name.is_empty() && m.params.is_empty());
         if let Some(entry) = entry {
+            let launch_captured = bind_const_generic_fields(&fields, &captured);
             let kernel_obj = make_object(type_name, fields);
             let kernel_obj = run_kernel_parallel(
-                self, &decl, &captured, kernel_obj, entry,
+                self, &decl, &launch_captured, kernel_obj, entry,
                 LaunchDims { total_threads, block_x, block_y, block_z, grid_x, grid_y, grid_z },
             )?;
             Ok(Value::KernelHandle { result: Box::new(kernel_obj) })
@@ -1135,12 +1303,23 @@ impl Interpreter {
     }
 
     /// Instantiate a kernel struct: call its `init` declaration (if any).
+    ///
+    /// `const_generics` are the resolved `<int W, int H>`-style const-generic
+    /// bindings from a turbofish construction (`Blur<3, 1>(...)`) — see
+    /// `resolve_const_generics`'s doc comment for why the interpreter (unlike
+    /// regular type-param generics) can't erase these: `W`/`H` are read as
+    /// real values inside the kernel body (`for k in 0..W * H`), not just used
+    /// for compile-time dispatch. Empty for a non-generic kernel struct.
+    /// Stashed as hidden `$`-prefixed fields on the returned object (see below)
+    /// so a later `blur(block=...)` launch can recover them — an object is the
+    /// only place per-instance data survives between construction and launch.
     pub(crate) fn instantiate_kernel_struct(
         &mut self,
         decl: &crate::ast::KernelDecl,
         captured: &EnvRef,
         args: Vec<Value>,
         _line: usize,
+        const_generics: &[(String, Value)],
     ) -> Eval {
         let mut fields: Vec<(String, Value)> = decl.fields
             .iter()
@@ -1166,6 +1345,9 @@ impl Interpreter {
 
         if let Some(init_decl) = init_decl {
             let env = Env::child(Rc::clone(captured));
+            for (name, val) in const_generics {
+                env.borrow_mut().define(name, val.clone());
+            }
             let mut positional: std::collections::VecDeque<Value> = args.into_iter().collect();
             let param_names: std::collections::HashSet<String> =
                 init_decl.params.iter().map(|p| p.name.clone()).collect();
@@ -1225,6 +1407,10 @@ impl Interpreter {
                     }
                 }
             }
+        }
+
+        for (name, val) in const_generics {
+            fields.push((format!("${}", name), val.clone()));
         }
 
         Ok(make_object(decl.name.clone(), fields))

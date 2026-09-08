@@ -643,7 +643,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                 Some(format!("{}{}* {}", constness, base, f.name))
             }
             GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() {
                     None  // __constant__ arrays are file-scope globals, not parameters
                 } else {
                     let base = elem_c_type(&f.ty);
@@ -660,7 +660,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
             match f.qual {
                 GpuQual::Local => {
                     match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => None,
+                        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => None,
                         ty if ty.as_labeled_array().is_some() => None,
                         _ => Some(format!("{} {}", c_type(&f.ty), f.name)),
                     }
@@ -681,7 +681,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
                 Some(f.name.clone())
             }
             GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() {
                     None  // __constant__ arrays accessed via file-scope global, not as args
                 } else {
                     Some(f.name.clone())
@@ -693,7 +693,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
             match f.qual {
                 GpuQual::Local => {
                     match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => None,
+                        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => None,
                         ty if ty.as_labeled_array().is_some() => None,
                         _ => Some(f.name.clone()),
                     }
@@ -728,6 +728,10 @@ fn c_type(ty: &Type) -> String {
         Type::Nil | Type::Void => "void".into(),
         Type::Array(inner)     => format!("{}*", c_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", c_type(inner), n),
+        // Const-generic-sized fixed array (`[float, W * H]'const`) — no literal
+        // length available here (see `rust_type`'s identical arm in host.rs), so
+        // fall back to a pointer like plain `Array` above.
+        Type::ArrayNExpr(inner, _) => format!("{}*", c_type(inner)),
         Type::LabeledArray(inner, _) => format!("{}*", c_type(inner)),
         // Named primitives — the kernel field parser may store raw keyword strings.
         Type::Named(n) => match n.as_str() {
@@ -759,6 +763,7 @@ fn elem_c_type(ty: &Type) -> String {
     match ty {
         Type::Array(inner)     => c_type(inner),
         Type::ArrayN(inner, _) => c_type(inner),
+        Type::ArrayNExpr(inner, _) => c_type(inner),
         Type::Qualified(inner, _) => elem_c_type(inner),
         Type::LabeledArray(inner, _) => c_type(inner),
         _                      => c_type(ty),

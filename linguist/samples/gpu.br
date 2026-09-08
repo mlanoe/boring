@@ -50,8 +50,10 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:
-            acc = acc + weights[k] * input[i + k]
+        for k in 0..W * H:                  # tap offsets — clamp at the array edge
+            let idx = i + k
+            if idx < input.len():
+                acc = acc + weights[k] * input[idx]
         output[i] = acc
 
 let w = [0.25, 0.5, 0.25]
@@ -94,5 +96,8 @@ mut ts = TileSum(data, partial)
 kernel:
     ts(block = 256, grid = 4)
 
-let total = partial.reduce(0.0, (acc, v): acc + v)
+# Read back via `ts.result`, not `partial` — a kernel field's writes don't alias
+# the host variable originally passed into the constructor (same reason the SAXPY
+# example above reads `k.y[0]`, not `ys[0]`).
+let total = ts.result.reduce(0.0, (acc, v): acc + v)
 print "sum = {total}"
