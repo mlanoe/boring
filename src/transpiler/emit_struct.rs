@@ -1004,7 +1004,7 @@ impl Transpiler {
         // `in_type_setter` (see its own doc comment): the setter body's own
         // `self.<field> = ...` (for the same field this setter writes) must be a
         // plain field write, not another call into this exact setter.
-        let prev_in_instance_setter = std::mem::replace(&mut self.in_instance_setter, Some(setter.name.clone()));
+        let prev_in_instance_setter = self.in_instance_setter.replace(setter.name.clone());
         self.emit_body(&setter.body);
         self.in_instance_setter = prev_in_instance_setter;
         self.known_local_vars.remove(setter.param_name.as_str());

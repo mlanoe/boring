@@ -2211,7 +2211,7 @@ impl Interpreter {
                                 fn_env.borrow_mut().define_mut("self", obj.clone());
                                 fn_env.borrow_mut().define(&setter.param_name, val);
                                 let prev_in_instance_setter =
-                                    std::mem::replace(&mut self.in_instance_setter, Some(setter.name.clone()));
+                                    self.in_instance_setter.replace(setter.name.clone());
                                 let result = self.exec_block(&setter.body, Rc::clone(&fn_env));
                                 self.in_instance_setter = prev_in_instance_setter;
                                 if pushed { self.type_param_stack.pop(); }
@@ -2269,7 +2269,7 @@ impl Interpreter {
                                 fn_env.borrow_mut().define_mut("self", obj.clone());
                                 fn_env.borrow_mut().define(&setter.param_name, val);
                                 let prev_in_instance_setter =
-                                    std::mem::replace(&mut self.in_instance_setter, Some(setter.name.clone()));
+                                    self.in_instance_setter.replace(setter.name.clone());
                                 let result = self.exec_block(&setter.body, Rc::clone(&fn_env));
                                 self.in_instance_setter = prev_in_instance_setter;
                                 result?;

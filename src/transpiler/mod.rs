@@ -445,7 +445,7 @@ struct Transpiler {
     /// so every later consumer (instantiation-map building, method-append) uses
     /// the exact same filtered/ordered list rather than recomputing it against a
     /// possibly different snapshot.
-    pub(crate) global_generic_methods: std::collections::HashMap<String, Vec<(String, monomorphize::MethodOwnerKind, Vec<String>, FnDecl)>>,
+    pub(crate) global_generic_methods: monomorphize::GenericMethodMap,
     /// Every turbofish method-call (`obj.method<T>(...)`, parsed as
     /// `GenericCall(Field(receiver, method), type_args, args)`) site found anywhere
     /// in the reachable file graph during `deep_pre_scan`, recorded unconditionally

@@ -929,6 +929,17 @@ pub(crate) enum MethodOwnerKind {
     Enum,
 }
 
+/// `(owner_name, owner_kind, own_type_params, method_decl)` — one entry in
+/// `Transpiler::global_generic_methods` / the `generic_methods` map passed to
+/// `build_method_instantiation_map`. Named to keep both signatures under
+/// clippy's `type_complexity` threshold; see `global_generic_methods`'s own
+/// doc comment for what each tuple field means.
+pub(crate) type GenericMethodEntry = (String, MethodOwnerKind, Vec<String>, FnDecl);
+
+/// `method_name -> [GenericMethodEntry]` — every owner (struct/ext/enum) that
+/// declares a generic method by that name, anywhere in the reachable graph.
+pub(crate) type GenericMethodMap = HashMap<String, Vec<GenericMethodEntry>>;
+
 /// A resolved, specializable generic-method turbofish call site
 /// (`obj.method<T>(...)`). Unlike `Instantiation`, this also carries the
 /// declaring struct/ext/enum's name and kind — needed at method-append time (in
@@ -966,7 +977,7 @@ fn method_instantiation_map_insert(map: &mut MethodInstantiationMap, method_name
 /// fallback, emitting ordinary (unspecialized) generic Rust.
 pub(crate) fn build_method_instantiation_map(
     candidates: &[MethodCandidateCall],
-    generic_methods: &HashMap<String, Vec<(String, MethodOwnerKind, Vec<String>, FnDecl)>>,
+    generic_methods: &GenericMethodMap,
 ) -> MethodInstantiationMap {
     let mut map = MethodInstantiationMap::new();
     for cand in candidates {
