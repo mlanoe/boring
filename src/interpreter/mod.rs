@@ -1318,7 +1318,7 @@ fn register_io_and_diagnostics_builtins(e: &mut Env) {
             if args.len() < 2 {
                 return Err(err("assert_eq() takes 2 arguments", line));
             }
-            if args[0] == args[1] {
+            if Interpreter::values_equal(&args[0], &args[1]) {
                 Ok(Value::Void)
             } else {
                 let msg = if args.len() > 2 {
@@ -1337,7 +1337,7 @@ fn register_io_and_diagnostics_builtins(e: &mut Env) {
             if args.len() < 2 {
                 return Err(err("assert_neq() takes 2 arguments", line));
             }
-            if args[0] != args[1] {
+            if !Interpreter::values_equal(&args[0], &args[1]) {
                 Ok(Value::Void)
             } else {
                 let msg = if args.len() > 2 {

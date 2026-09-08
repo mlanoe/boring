@@ -301,6 +301,24 @@ impl Transpiler {
 
 
     pub(crate) fn emit_guard(&mut self, s: &GuardStmt) {
+        // A `guard ... else` body is an early-exit branch, not the tail of the
+        // enclosing function — by the language's own contract (book.md's
+        // "guard"/"guard let") it must diverge (return/throw/panic/break/
+        // continue) before falling off its end. `emit_body`/`emit_stmt`'s
+        // "throws function needs an implicit Ok(())" padding (emit_top.rs,
+        // emit_stmt.rs's `Stmt::Expr` handling) only makes sense for the
+        // actual function body — applied here too (since both just check
+        // `self.in_throws`/`self.suppress_ok_wrap` with no notion of "am I
+        // the function body or a nested branch"), it silently appended a
+        // trailing `Ok(())` after a diverging `panic(...)` statement, giving
+        // rustc a two-statement else-block whose tail is `Ok(())` instead of
+        // the diverging call — "`else` clause of `let...else` does not
+        // diverge" (E0308). Suppressing the padding here mirrors how if/match
+        // branches already opt out of it (see `suppress_ok_wrap`'s other call
+        // sites) — exactly the same "this is a branch, not a function body"
+        // reasoning.
+        let prev_suppress_ok_wrap = self.suppress_ok_wrap;
+        self.suppress_ok_wrap = true;
         match &s.cond {
             GuardCond::Expr(e) => {
                 let cond = self.emit_expr(e);
@@ -457,6 +475,7 @@ impl Transpiler {
                 }
             }
         }
+        self.suppress_ok_wrap = prev_suppress_ok_wrap;
     }
 
     pub(crate) fn emit_try(&mut self, s: &TryStmt) {

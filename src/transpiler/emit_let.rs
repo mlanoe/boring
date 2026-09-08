@@ -140,12 +140,22 @@ impl Transpiler {
     }
 
     /// Computes the emitted type annotation (e.g. `": Foo"`, possibly empty) and value
-    /// expression string for a `let`/`var` binding's RHS, plus whether it's a mutable
-    /// string binding (literal or `string`-typed) — those need `Arc<str>`/`Rc<str>`, not
-    /// `&str`, so they can be reassigned. Read-only: emits nothing, mutates nothing.
+    /// expression string for a `let`/`var` binding's RHS, plus whether it's a (mutable or
+    /// immutable) `string` binding (literal or `string`-typed) — those need
+    /// `Arc<str>`/`Rc<str>`, not `&str`. Read-only: emits nothing, mutates nothing.
     fn compute_let_ty_and_value(&self, s: &LetStmt, s_value: &Expr) -> (String, String, bool, bool) {
-        // Mutable string bindings must be Arc<str> (not &str) so they can be reassigned
-        let is_mutable_string_lit = s.binding.is_mutable() && s.ty.is_none()
+        // A `string`-typed local must always be `Arc<str>`/`Rc<str>` — Boring's one
+        // canonical representation for `string`, used everywhere else it appears
+        // (function params, struct fields, explicitly-annotated locals). Without this,
+        // an untyped `let x = "literal"` let Rust infer `&'static str` from the bare
+        // literal (a literal genuinely has `'static` lifetime, so this compiles at the
+        // `let` site itself) — the mismatch only surfaces later, at a call site that
+        // expects the normal `string` representation (e.g. a `type def`/static-method
+        // parameter: `emit_expr_owned`'s `string_vars` arm just does `v.clone()`,
+        // assuming — wrongly, for this case — that `v` is already `Arc<str>`/`Rc<str>`).
+        // Not gated on `s.binding.is_mutable()`: an immutable `let` needs the same
+        // canonical representation, not just a `var`/`mut` that must support reassignment.
+        let is_mutable_string_lit = s.ty.is_none()
             && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
         let is_mutable_string_ty = s.binding.is_mutable()
             && matches!(&s.ty, Some(Type::Named(n)) if n == "string" || n == "str")

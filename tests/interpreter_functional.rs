@@ -147,6 +147,7 @@ itest!(loops);
 itest!(traits);
 itest!(numeric);
 itest!(float_width_cross_eq);
+itest!(int_width_cross_assert_eq);
 itest!(scalar_catch);
 itest!(modules);
 itest!(ownership);

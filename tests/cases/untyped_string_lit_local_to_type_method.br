@@ -1,0 +1,35 @@
+# Regression test: an untyped `let` local initialized purely from a string
+# literal (`let x = "..."`, no `let string x = ...` annotation) must transpile
+# to the same `Arc<str>`/`Rc<str>` representation used everywhere else `string`
+# appears in Boring — not a raw `&'static str`.
+#
+# Found while writing boring-numlib's test suite: `BigUint.from_decimal_string`
+# (a `type def` static factory method taking a `string` param) rejected an
+# untyped literal local with a Rust type mismatch (`expected Arc<str>, found
+# &str`) unless the local was given an explicit `let string x = ...`
+# annotation. A plain function call already coerced the argument correctly
+# (`emit_call`'s `emit_args_coerced` looks up the callee's real param type and
+# converts); a static `Type.method(...)` call did not — `try_emit_type_call`
+# (src/transpiler/emit_methods.rs) uses `emit_expr_owned` on each arg instead,
+# and `emit_expr_owned`'s `string_vars` arm (src/transpiler/emit_top.rs) just
+# emits `v.clone()`, assuming `v` is already `Arc<str>`/`Rc<str>` — true for a
+# `var`/`mut` string binding (already promoted, see `is_mutable_string_lit` in
+# src/transpiler/emit_let.rs), but NOT for a plain immutable `let` initialized
+# from a literal, which the transpiler left as a raw `&'static str` (a literal
+# genuinely has `'static` lifetime, so the `let` itself still compiled — only a
+# later call site expecting the normal `string` representation failed).
+#
+# Fixed by promoting every untyped string-literal `let`/`var` local to
+# `Arc<str>`/`Rc<str>` at its declaration, regardless of mutability, matching
+# what an explicit `let string x = ...` annotation already produced.
+struct Greeting:
+    int value
+
+    type def Greeting from_text(string s):
+        Greeting(s.length)
+
+def main():
+    let big = "123456789012345678901234567890"
+    let g = Greeting.from_text(big)
+    print "{g.value}"
+    print big

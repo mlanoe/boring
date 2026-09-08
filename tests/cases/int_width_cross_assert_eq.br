@@ -1,0 +1,23 @@
+# Regression test: assert_eq()/assert_neq() must compare numeric values, not
+# the interpreter's internal int-kind tag. A default (untyped) int literal
+# evaluates as Value::Int, while an `int64`-typed binding evaluates as the
+# distinct Value::Int64 variant — same value, different tag. Under
+# `boring run`, assert_eq() used to bypass the numeric-aware `==` used
+# elsewhere in the interpreter (see float_width_cross_eq.br) and fall back to
+# a tag-sensitive derived equality instead, so this used to fail even though
+# `a` and `b` hold the same numeric value — and even though transpiled Rust's
+# own `assert_eq!(a, b)` compiles and passes here (the untyped literal infers
+# to match `a`'s width, same as it does for a bare `==`).
+
+let int64 a = 7
+let b = 7
+
+# Bare `==` was never affected — it already goes through the numeric-aware
+# `values_equal` — but assert_eq()/assert_neq() used to fail this.
+print a == b
+assert_eq(a, b)
+assert_eq(a, 7)
+assert_neq(a, 8)
+assert_neq(b, 9)
+
+print "ok"

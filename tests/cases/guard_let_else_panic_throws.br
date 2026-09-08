@@ -1,0 +1,45 @@
+# Regression test: `guard let ... else: panic(...)` inside a `throws`-declared
+# function used to fail to compile with a real rustc error --
+#   error[E0308]: `else` clause of `let...else` does not diverge
+# -- because `emit_body`/`emit_stmt`'s "a throws function's void tail needs an
+# implicit `Ok(())`" padding (added for the actual function body) also fired
+# for a `guard`'s else-BODY, which is a nested early-exit branch, not the
+# function's own tail. That appended a spurious `Ok(())` statement right
+# after the diverging `panic!(...)` call, giving rustc a two-statement
+# else-block whose tail expression was `Ok(())` instead of the `!`-typed
+# `panic!(...)` -- exactly the same failure whether `panic(...)` was the
+# block's sole statement (single-line `else panic(...)`) or the last
+# statement of a multi-line `else:` block. See `emit_guard` in
+# `src/transpiler/emit_flow.rs` for the fix (`suppress_ok_wrap` around the
+# whole guard, mirroring how if/match branches already opt out of this
+# padding).
+#
+# Covers: void-returning `throws` function, both the block-form (`else:`
+# newline) and single-line (`else panic(...)`) spellings, plus a
+# non-void-returning `throws` function with the block form -- and a plain
+# (non-`throws`) function as a control showing the bug was throws-specific.
+
+def check_block(int? maybe_val) throws:
+    guard let v = maybe_val else:
+        panic("no value")
+    print v
+
+def check_inline(int? maybe_val) throws:
+    guard let v = maybe_val else panic("no value")
+    print v
+
+int check_value(int? maybe_val) throws:
+    guard let v = maybe_val else:
+        panic("no value")
+    return v
+
+int check_plain(int? maybe_val):
+    guard let v = maybe_val else:
+        panic("no value")
+    return v
+
+def main() throws:
+    check_block(1)
+    check_inline(2)
+    print check_value(3)
+    print check_plain(4)

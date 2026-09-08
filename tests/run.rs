@@ -181,6 +181,7 @@ interp_test!(trait_type_level_methods);
 interp_test!(trait_dynamic_dispatch);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);
+interp_test!(int_width_cross_assert_eq);
 interp_test!(scalar_catch);
 interp_test!(modules);
 // `use boring.collections` — the first-party stdlib mechanism (docs/cross-
@@ -329,6 +330,7 @@ interp_test!(builtin_error_enum);
 interp_test!(multi_variant_catch_dispatch);
 interp_test!(type_def_typed_throws);
 interp_test!(type_method_throws_untyped);
+interp_test!(untyped_string_lit_local_to_type_method);
 interp_test!(ref_identity);
 interp_test!(mut_scalar);
 interp_test!(int_float_literal_compare);
@@ -590,3 +592,9 @@ error_test!(error_string_repeat_cap);
 // see tests/transpile.rs's `optional_let_throws_non_optional_return` for the
 // transpiler-side real-compile regression (audit finding #6).
 interp_test!(optional_let_throws_non_optional_return);
+
+// `guard let ... else: panic(...)` inside a `throws` function — the
+// interpreter path (`boring run`) for this file, see tests/transpile.rs's
+// `guard_let_else_panic_throws` for the transpiler-side real-compile
+// regression (`else` clause of `let...else` does not diverge, E0308).
+interp_test!(guard_let_else_panic_throws);

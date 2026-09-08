@@ -375,6 +375,7 @@ transpile_test!(trait_dynamic_dispatch);
 transpile_test!(numeric);
 transpile_test!(uint_int_cross_eq);
 transpile_test!(float_width_cross_eq);
+transpile_test!(int_width_cross_assert_eq);
 transpile_test!(scalar_catch);
 transpile_test!(modules);
 // `use boring.collections` — the first-party stdlib mechanism (docs/cross-
@@ -446,6 +447,14 @@ transpile_test!(typed_catch_match_error);
 // impls) the same way a regular throwing function's typed throws_ty already is.
 transpile_test!(type_def_typed_throws);
 transpile_test!(type_method_throws_untyped);
+// An untyped `let x = "literal"` local (no `let string x = ...` annotation) was left as
+// a raw `&'static str` instead of Boring's normal `Arc<str>`/`Rc<str>` `string`
+// representation -- fine at the `let` site itself (a literal has `'static` lifetime),
+// but a mismatch (`expected Arc<str>, found &str`) once passed to a `type def` static
+// method's `string` parameter. Fixed in `compute_let_ty_and_value`
+// (src/transpiler/emit_let.rs) by promoting the local at declaration regardless of
+// mutability, matching what an explicit `string` annotation already produced.
+transpile_test!(untyped_string_lit_local_to_type_method);
 // An enum's
 // `type_methods` were silently dropped from codegen entirely -- `enum Foo { A(isize) }`
 // with no `impl Foo { fn make() ... }` block, even though the call site (`Foo::make()`)
@@ -953,3 +962,12 @@ transpile_test!(monomorphize_enum_method);
 // `let x: Option<isize> = compute()?;` (E0308: expected `Option<isize>`,
 // found `isize`) instead of wrapping in `Some(...)` (audit finding #6).
 transpile_test!(optional_let_throws_non_optional_return);
+// `guard_let_else_panic_throws`: `guard let ... else: panic(...)` (both the
+// multi-line `else:` block form and the single-line `else panic(...)` form)
+// inside a `throws`-declared function used to fail real `cargo build` with
+// `error[E0308]: 'else' clause of 'let...else' does not diverge` — the
+// transpiler's "throws function needs an implicit `Ok(())`" tail padding
+// (meant for the actual function body) also fired for a `guard`'s
+// else-BODY, appending a spurious `Ok(())` right after the diverging
+// `panic!(...)` call. See `emit_guard` in `src/transpiler/emit_flow.rs`.
+transpile_test!(guard_let_else_panic_throws);
