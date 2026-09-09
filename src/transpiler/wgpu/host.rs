@@ -526,12 +526,22 @@ impl<'a> HostEmitter<'a> {
             self.line("        }));");
         }
 
-        // Params buffer.
+        // Params buffer. See `super::kernel_params_use_storage`'s doc comment: a
+        // fixed-size scalar array field forces the matching WGSL binding
+        // (`device::emit_params_struct`) into `var<storage, read>` instead of
+        // `var<uniform>` — the buffer's own usage flags must agree, since a
+        // buffer created with only `UNIFORM` usage can't satisfy a storage
+        // binding at bind-group-creation time.
         if !params_fields.is_empty() {
+            let usage = if super::kernel_params_use_storage(decl) {
+                "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST"
+            } else {
+                "wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST"
+            };
             self.line("        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {");
             self.line("            label: None,");
             self.line(&format!("            size: std::mem::size_of::<{}Params>() as u64,", name));
-            self.line("            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,");
+            self.line(&format!("            usage: {},", usage));
             self.line("            mapped_at_creation: false,");
             self.line("        });");
         }
@@ -989,6 +999,32 @@ impl<'a> HostEmitter<'a> {
                         if let ExprKind::Field(kobj, kfield) = &arg.value.kind {
                             if let ExprKind::Var(kname) = &kobj.kind {
                                 return format!("{kname}.{kfield}_buf");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // No explicit `screen.present(k.field)` call in the loop (a `'surface`
+        // field presents implicitly) -- fall back to scanning top-level kernel
+        // instantiations for a `'surface`-qualified buffer-array field, and
+        // qualify it with the kernel instance's own variable name. Without this,
+        // the caller's bare `"pixels_buf"` default gets emitted as
+        // `self.pixels_buf` in `__App` (which has no such field -- the kernel
+        // instance is `self.{var}`, a field *on* `__App`, not `__App` itself) --
+        // see `emit_kernel_rebuild_bind_group`'s `self.{var}.{field}_buf` for the
+        // pattern this must match.
+        for item in &self.program.items {
+            if let Item::Let(s) = item {
+                if let Some(val) = &s.value {
+                    if let ExprKind::Call(callee, _) = &val.kind {
+                        if let ExprKind::Var(kname) = &callee.kind {
+                            if let Some(decl) = self.effective_kernels.iter().find(|d| &d.name == kname) {
+                                if let Some(field) = decl.fields.iter().find(|f| {
+                                    matches!(f.qual, GpuQual::Surface) && is_buffer_array_ty(&f.ty)
+                                }) {
+                                    return format!("{}.{}_buf", s.name, field.name);
+                                }
                             }
                         }
                     }
@@ -1660,19 +1696,27 @@ impl<'a> HostEmitter<'a> {
             }
             // float32(expr) → expr as f32 (wgpu is f32-only on device, and this
             // host helper narrows the same way regardless of width). Bare
-            // `float(expr)` must NOT join float32 here — `float` is a pure alias
-            // of `float64` (see host_scalar_type/CLAUDE.md), not its own type, so
-            // it belongs with the float64 branch below (a real f64). Grouping it
-            // with float32 mis-cast a `var float t` field's assignment to f32,
-            // mismatching the f64 field it actually is (plasma_metal.br's wgpu
-            // regression).
+            // `float(expr)`/`float64(expr)` now join float32 here too —
+            // `host_scalar_type` (this module) narrows `Type::Float64` to `"f32"`
+            // for exactly the same reason (WGSL has no 64-bit float; the device
+            // buffer/Params struct is always f32 in practice regardless of the
+            // Boring-level width — see that function's own doc), so a `var float t`
+            // Local field now gets an `f32` host mirror, not `f64`. This used to be
+            // split (float/float64 cast to f64, matching a then-`f64` field type —
+            // see plasma_metal.br's wgpu regression, the reason for the split in the
+            // first place) — keeping that split after `host_scalar_type` changed
+            // would reintroduce the exact same class of mismatch in the other
+            // direction (`error[E0308]: expected f32, found f64` assigning this
+            // cast's result into the now-`f32` field). Confirmed via a real
+            // `cargo build` of a `var float t` Local field inside a `Screen`
+            // render loop after narrowing `host_scalar_type` alone, tests/
+            // wgpu_codegen.rs's own `host_bare_float_scalar_field_assign_casts_to_
+            // f64_not_f32` only asserts the generated *text*, not that the project
+            // actually compiles, so it didn't catch this on its own).
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Var(n) = &callee.kind {
-                    if n == "float32" && args.len() == 1 {
+                    if (n == "float32" || n == "float" || n == "float64") && args.len() == 1 {
                         return format!("({} as f32)", self.host_expr(&args[0].value));
-                    }
-                    if (n == "float" || n == "float64") && args.len() == 1 {
-                        return format!("({} as f64)", self.host_expr(&args[0].value));
                     }
                 }
                 // Generic call (best effort)
@@ -1846,10 +1890,34 @@ fn host_scalar_type(ty: &Type) -> &'static str {
         // which emits a clear compile error for those widths); the host Rust type still
         // reflects the declared width so the mismatch is visible on the device side, not
         // silently mis-typed here too (the previous behavior for `Uint8`, which fell to `i64`).
-        // `float64` gets the same treatment — it used to silently narrow to `f32` here,
-        // masking the very WGSL-has-no-f64 error `wgsl_unsupported_f64` now raises on the
-        // device side (docs/float-width-types.md §6).
-        Type::Float64 => "f64",
+        //
+        // `float`/`float64` is NOT one of those explicit fixed-width opt-ins, though — it's
+        // Boring's *default* float type, the direct analogue of `int`/`uint` above, which
+        // this same function DOES narrow to match the device layout. A prior revision kept
+        // this at `"f64"`, reasoning that `wgsl_unsupported_f64` (device.rs) "now raises" a
+        // real compile error for `float64` on this target, making the host/device mismatch
+        // moot. It doesn't: `wgsl_unsupported_f64` only ever emits a `/* ERROR: ... */`
+        // *comment* ahead of a still-emitted, still-narrowed `f32` in the generated WGSL —
+        // naga accepts the comment and compiles the shader at `f32` regardless, and nothing
+        // scans `device_wgsl` for that marker to turn it into a real `TranspileError` (see
+        // `wgpu::transpile_wgpu`). So every `float`/`float64` kernel field's *device* buffer
+        // is always `f32` in practice, while this function kept telling the *host* side
+        // (`copy_{field}_to_device`'s parameter type, this struct's own field type, the
+        // `Params` struct packed into the uniform buffer) it was `f64` — a real buffer
+        // layout mismatch, not just a naming one: `bytemuck::cast_slice` on an `&[f64]`
+        // produces twice the byte width the `f32` shader elements expect. Confirmed via
+        // `linguist/samples/gpu.br --target wgpu` + `cargo build`: every kernel using a bare
+        // `float` field (Saxpy's `alpha`, Blur's `weights`/`sigma`, not just a
+        // const-generic kernel) failed with `error[E0308]: expected &[f64], found &Vec<f32>`
+        // at its `copy_*_to_device` call site (`emit_kernel.rs`'s construction codegen
+        // already casts to `f32` there, matching the real device width). Narrowed back to
+        // `f32` to match what the device buffer actually is; the stale-but-harmless comment
+        // in the generated WGSL is left as-is (a real hard error belongs in the checker, a
+        // separate, larger gap this narrowing fix doesn't attempt — see
+        // docs/float-width-types.md §6's own "one real, pre-existing gap remains" note
+        // about the *different* `kernel_host_scalar_type`/`kernel_host_element_type` pair in
+        // `emit_kernel.rs`, which already narrows here correctly and was never the bug).
+        Type::Float64 => "f32",
         Type::Uint8 => "u8",
         Type::Int8   => "i8",
         Type::Int16  => "i16",
@@ -1864,7 +1932,7 @@ fn host_scalar_type(ty: &Type) -> &'static str {
             "int" | "i32"   => "i32",
             "uint" | "u32"  => "u32",
             "float32" | "f32" => "f32",
-            "float" | "float64" | "f64" => "f64",
+            "float" | "float64" | "f64" => "f32",
             "bool"                  => "bool",
             "uint8"                 => "u8",
             "int8"                  => "i8",

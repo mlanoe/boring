@@ -17,7 +17,7 @@
 //         Cargo.toml
 
 use std::collections::HashMap;
-use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKind, BinOp, UnaryOp, ConstExpr, LabeledAxis};
+use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKind, BinOp, UnaryOp, ConstExpr, LabeledAxis, GpuQual};
 
 mod device;
 mod host;
@@ -59,7 +59,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     // Resolve generic kernel instantiations → monomorphised KernelDecls.
     // Non-generic kernels pass through unchanged; generic ones are specialised
     // once per unique set of concrete type arguments found in the program.
-    let effective_kernels = resolve_effective_kernels(program);
+    let (effective_kernels, gpu_kernel_generic_names, kernel_consts) = resolve_effective_kernels(program);
 
     let has_screen = program.items.iter().any(|item| {
         if let Item::Let(s) = item {
@@ -74,7 +74,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
         false
     });
 
-    let (device_wgsl, device_wgsl_emulated) = device::emit_device_wgsl(program, &effective_kernels);
+    let (device_wgsl, device_wgsl_emulated) = device::emit_device_wgsl(program, &effective_kernels, &kernel_consts);
 
     // Non-kernel code (regular fn/struct/enum/dict logic, including the user's own
     // `def main()`, if any) is transpiled by the SAME general pipeline the std/Rust
@@ -89,6 +89,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     let renamed_program = crate::transpiler::rename_top_level_main(program, "boring_main");
     let general_config = crate::transpiler::TranspileConfig {
         gpu_kernels: effective_kernels.clone(),
+        gpu_kernel_generic_names: gpu_kernel_generic_names.clone(),
         is_gpu_target: true,
         // A `Screen`-using program's top-level kernel/Screen construction, dispatch, and
         // the render loop itself are entirely owned by `host::emit_screen_main` (kernel
@@ -127,13 +128,90 @@ pub(super) fn kernel_uses_gpu_warp(decl: &KernelDecl) -> bool {
     decl.methods.iter().any(|m| crate::interpreter::eval_gpu::stmts_use_gpu_warp(&m.body))
 }
 
+/// Does this kernel's params struct (the `var<uniform>`/scalars+fixed-arrays
+/// blob emitted by `device::emit_params_struct`) contain a fixed-size scalar
+/// array field (`[T, N]'const`, or a labeled array with every axis a literal
+/// int)? WGSL's `uniform` address space follows std140-like layout rules,
+/// which require every array element's *stride* to be a multiple of 16
+/// bytes — so a bare `array<f32, N>` (4-byte stride) is invalid there and
+/// fails real shader validation at pipeline-creation time (`naga`/driver
+/// error: "Alignment requirements for address space Uniform are not met" /
+/// "array stride ... is not a multiple of the required alignment 16"), even
+/// though it compiles and *parses* fine — `cargo build` never notices since
+/// it never parses the embedded WGSL string.
+///
+/// `storage` buffers follow std430 rules instead, which only require 4-byte
+/// alignment for a scalar array's stride, so a kernel whose params struct
+/// has a fixed array field must use `var<storage, read>` there rather than
+/// `var<uniform>` — both `device::emit_params_struct` (the WGSL binding) and
+/// `host::emit_kernel_new`/`host::buffer_usages`-adjacent params-buffer
+/// creation (the matching `wgpu::BufferUsages`) must agree on this, since
+/// the bind group layout for a kernel's params binding is auto-derived from
+/// the compiled shader module (`pipeline.get_bind_group_layout(0)`) — the
+/// buffer's own usage flags just need to satisfy whatever the shader
+/// reflects. A params struct with only scalars (or a `Dimension` field,
+/// which lowers to two plain `i32`s) never hits this and keeps using
+/// `var<uniform>` as before.
+pub(super) fn kernel_params_use_storage(decl: &KernelDecl) -> bool {
+    decl.fields.iter().any(|f| is_fixed_array_params_field(f))
+}
+
+fn is_fixed_array_params_field(f: &KernelFieldDecl) -> bool {
+    let is_params = match f.qual {
+        GpuQual::Const => true,
+        GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)),
+        _ => false,
+    };
+    if !is_params {
+        return false;
+    }
+    match &f.ty {
+        Type::ArrayN(_, _) => true,
+        ty => ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some(),
+    }
+}
+
 // ─── Monomorphisation ─────────────────────────────────────────────────────────
 
-/// For each kernel declaration, return the list of concrete (monomorphised) decls to emit.
+/// Monomorphised kernel name → `type_param_name -> concrete_value` (e.g.
+/// `"Blur_3_1" -> {"W": 3, "H": 1}`) — see `resolve_effective_kernels`'s doc comment.
+pub(super) type KernelConstsMap = HashMap<String, HashMap<String, i64>>;
+
+/// Original generic kernel name → `[(concrete_type_args, monomorphised_name), ...]`
+/// (e.g. `"Blur" -> [([3, 1], "Blur_3_1")]`) — feeds `TranspileConfig::gpu_kernel_generic_names`,
+/// see `resolve_effective_kernels`'s doc comment.
+pub(super) type GenericKernelNamesMap = HashMap<String, Vec<(Vec<i64>, String)>>;
+
+/// For each kernel declaration, return the list of concrete (monomorphised) decls to emit,
+/// alongside a `original name -> [(type_args, monomorphised_name), ...]` map for every
+/// generic kernel (empty entry list for a non-generic kernel, since there's nothing to
+/// rename). The second value feeds `TranspileConfig::gpu_kernel_generic_names` so the
+/// general pipeline's kernel-construction codegen (`emit_kernel::try_emit_kernel_let`) can
+/// resolve a source-level turbofish call (`Blur<3, 1>(...)`, still spelled with the
+/// original name in the AST) back to the matching monomorphised decl below (named
+/// `"Blur_3_1"`, with `type_params` cleared -- see `monomorphise`), which it has no other
+/// way to recover once monomorphisation has erased the original name.
 /// Non-generic kernels → one entry (unchanged).
 /// Generic kernels → one entry per unique instantiation found in the program.
-pub(super) fn resolve_effective_kernels(program: &Program) -> Vec<KernelDecl> {
+///
+/// The third return value maps each *monomorphised* kernel name (e.g. `"Blur_3_1"`)
+/// to the `name -> concrete_value` substitution used to specialise it (e.g.
+/// `{"W": 3, "H": 1}`) — `monomorphise` only substitutes `type_params` references
+/// inside a kernel's `fields` (via `monomorphise_type`), never inside its
+/// `methods`/`inits` bodies (copied unchanged via `..decl.clone()`), so a body
+/// statement like `for k in 0..W * H` still contains bare `Var("W")`/`Var("H")`
+/// after monomorphisation. `device::emit_device_wgsl` consults this map to
+/// substitute those identifiers with their concrete literal when emitting WGSL
+/// (see its `DeviceEmitter::expr`'s `ExprKind::Var` case) — unlike metal/cuda,
+/// which use Rust's own native const generics (`fn foo<const W: usize>`) so
+/// rustc resolves `W`/`H` inside the body for free, wgpu emits the kernel body
+/// as a separate WGSL shader *string* with no notion of Rust generics, so it
+/// needs this substitution pass to itself. Non-generic kernels get no entry
+/// (lookup returns `None`, treated as "nothing to substitute").
+pub(super) fn resolve_effective_kernels(program: &Program) -> (Vec<KernelDecl>, GenericKernelNamesMap, KernelConstsMap) {
     let mut result = Vec::new();
+    let mut generic_names: GenericKernelNamesMap = HashMap::new();
+    let mut kernel_consts: KernelConstsMap = HashMap::new();
     for item in &program.items {
         if let Item::Kernel(decl) = item {
             if decl.type_params.is_empty() {
@@ -141,17 +219,22 @@ pub(super) fn resolve_effective_kernels(program: &Program) -> Vec<KernelDecl> {
             } else {
                 // Collect all concrete arg lists for this kernel.
                 let mut seen: Vec<Vec<i64>> = Vec::new();
+                let mut names = Vec::new();
                 for inst in collect_instantiations(program, &decl.name) {
                     if !seen.contains(&inst) {
                         seen.push(inst.clone());
                         let subst = build_subst(decl, &inst);
-                        result.push(monomorphise(decl, &inst, &subst));
+                        let monomorphised = monomorphise(decl, &inst, &subst);
+                        names.push((inst, monomorphised.name.clone()));
+                        kernel_consts.insert(monomorphised.name.clone(), subst);
+                        result.push(monomorphised);
                     }
                 }
+                generic_names.insert(decl.name.clone(), names);
             }
         }
     }
-    result
+    (result, generic_names, kernel_consts)
 }
 
 /// Scan every top-level `let`/`var` statement for `Name<arg, ...>()` calls

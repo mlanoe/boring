@@ -243,13 +243,45 @@ impl Transpiler {
             return false;
         }
         let Some(val) = &s.value else { return false };
-        let ExprKind::Call(callee, args) = &val.kind else { return false };
-        let ExprKind::Var(kname) = &callee.kind else { return false };
-        let Some(decl) = self.kernel_decls.get(kname).cloned() else { return false };
+        // Two call shapes construct a kernel: a plain `KernelName(args...)` (`ExprKind::
+        // Call`), or a const-generic kernel's turbofish instantiation `KernelName<W, H>
+        // (args...)` (`ExprKind::GenericCall`) -- the latter still spells the *original*
+        // declared name (e.g. `"Blur"`), which doesn't appear as-is in `kernel_decls`:
+        // `TranspileConfig::gpu_kernels` only ever carries the *monomorphised* decls
+        // (`"Blur_3_1"`, see `wgpu::monomorphise`), so it must be resolved through
+        // `gpu_kernel_generic_names` first. See that field's doc comment for why the
+        // mapping can't be reconstructed from `kernel_decls` alone.
+        let (kname, args): (String, &[Arg]) = match &val.kind {
+            ExprKind::Call(callee, args) => {
+                let ExprKind::Var(name) = &callee.kind else { return false };
+                (name.clone(), args.as_slice())
+            }
+            ExprKind::GenericCall(callee, type_args, args) => {
+                let ExprKind::Var(base_name) = &callee.kind else { return false };
+                let Some(mangled) = self.resolve_generic_kernel_name(base_name, type_args) else { return false };
+                (mangled, args.as_slice())
+            }
+            _ => return false,
+        };
+        let Some(decl) = self.kernel_decls.get(&kname).cloned() else { return false };
 
         self.emit_kernel_construction(&s.name, &decl, args, s.line, s.col);
-        self.kernel_vars.insert(s.name.clone(), kname.clone());
+        self.kernel_vars.insert(s.name.clone(), kname);
         true
+    }
+
+    /// Resolves a const-generic kernel turbofish call's original name + concrete type
+    /// arguments (e.g. `"Blur"` + `[ConstInt(3), ConstInt(1)]`) to the matching
+    /// monomorphised `kernel_decls` key (`"Blur_3_1"`), via `TranspileConfig::
+    /// gpu_kernel_generic_names`. See that field's doc comment for why the mapping
+    /// can't be reconstructed from `kernel_decls` alone.
+    fn resolve_generic_kernel_name(&self, base_name: &str, type_args: &[Type]) -> Option<String> {
+        let insts = self.config.gpu_kernel_generic_names.get(base_name)?;
+        let args: Vec<i64> = type_args.iter().map(|t| match t {
+            Type::ConstInt(n) => *n,
+            _ => 0,
+        }).collect();
+        insts.iter().find(|(inst_args, _)| *inst_args == args).map(|(_, name)| name.clone())
     }
 
     /// Resolves `expr` to a `(source kernel var, source field)` pair when it names a
@@ -428,6 +460,28 @@ impl Transpiler {
                         "{var_name}.copy_{field_name}_to_device(&{arg_rust}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
                     ));
                 }
+            } else if let Type::ArrayN(inner, _) = &field.ty {
+                // A `'const`-qualified fixed-size array field (`[float, W*H]'const
+                // weights`) isn't a device buffer at all -- wgpu packs it straight into
+                // the kernel's `#[repr(C)] Params` struct as `[T; N]` (see wgpu::host's
+                // own `GpuQual::Const` struct-field arm), using the same narrowed width
+                // as an actual device buffer (`wgpu::host::host_scalar_type`, e.g. `float`/
+                // `float64` -> `f32` -- WGSL has no 64-bit float, see that function's own
+                // doc) -- so `kernel_host_scalar_type` (this file's mirror of that same
+                // mapping) is the right width here too, not `kernel_host_element_type`
+                // (host-native width, used for a value already round-tripped off a GPU
+                // buffer -- wrong type here, `weights` never leaves the Params struct).
+                // The blanket `_ => "i64"` fallback `kernel_host_scalar_type` used to hit
+                // for any type it didn't otherwise recognize (including this one)
+                // previously emitted a nonsensical whole-array-to-scalar cast
+                // (`blur.weights = (w) as i64;`) instead of the needed per-element cast +
+                // `Vec<T>` -> `[T; N]` conversion. The target array's length is inferred
+                // from the field's own declared `[T; N]` type at the assignment site, no
+                // need to spell `N` again.
+                let elem = kernel_host_scalar_type(inner);
+                self.line(&format!(
+                    "{var_name}.{field_name} = {arg_rust}.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>().try_into().unwrap();"
+                ));
             } else {
                 let cast = kernel_host_scalar_type(&field.ty);
                 self.line(&format!("{var_name}.{field_name} = ({arg_rust}) as {cast};"));

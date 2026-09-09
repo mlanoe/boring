@@ -79,6 +79,22 @@ pub struct TranspileConfig {
     /// including inside ordinary function bodies, not just top-level statements. Empty
     /// (the default) for every other target, which leaves current behavior untouched.
     pub gpu_kernels: Vec<crate::ast::KernelDecl>,
+    /// For a const-generic `kernel Name<int W, ...>: ...` declaration, maps the
+    /// *original* declared name (e.g. `"Blur"`) to every concrete instantiation found
+    /// in the program, as `(type_args, monomorphised_name)` pairs (e.g. `([3, 1],
+    /// "Blur_3_1")`) — mirrors `wgpu::monomorphised_name`'s own mangling scheme,
+    /// computed once by the GPU target driving this transpile (currently wgpu only;
+    /// see `wgpu::transpile_wgpu`) since `gpu_kernels` itself already carries only the
+    /// *monomorphised* decls (their `name` is `"Blur_3_1"`, `type_params` cleared) —
+    /// with no way back to the source-level name a turbofish call site
+    /// (`Blur<3, 1>(...)`, parsed as `ExprKind::GenericCall`) actually spells. Consulted
+    /// by `emit_kernel::try_emit_kernel_let` to resolve such a call to the matching
+    /// `gpu_kernels` entry before falling through to the general (non-kernel-aware)
+    /// generic-struct-construction codegen, which has no notion of this renaming and
+    /// would otherwise emit real Rust turbofish syntax on the un-mangled name
+    /// (`Blur::<3, 1>(...)`, `error[E0425]: cannot find function`). Empty for every
+    /// non-generic-kernel program, which leaves current behavior untouched.
+    pub gpu_kernel_generic_names: std::collections::HashMap<String, Vec<(Vec<i64>, String)>>,
     /// True when this transpile_with_config call is producing the "general" (non-kernel)
     /// Rust code that a GPU target (wgpu/cuda/metal) splices into its own generated
     /// main.rs (see transpiler::wgpu::transpile_wgpu). Distinct from `gpu_kernels` being
@@ -162,6 +178,7 @@ impl Default for TranspileConfig {
             source_dir: std::path::PathBuf::new(),
             deps: std::collections::HashMap::new(),
             gpu_kernels: Vec::new(),
+            gpu_kernel_generic_names: std::collections::HashMap::new(),
             is_gpu_target: false,
             gpu_top_level_handled_by_host: false,
             external_tuple_structs: Vec::new(),

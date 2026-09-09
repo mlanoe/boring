@@ -18,17 +18,21 @@ use crate::transpiler::helpers::{
 /// shared-memory-emulated mapping, for adapters lacking `wgpu::Features::SUBGROUP`
 /// (see `WarpMode`). The host (`host::emit_host_rs`) chooses between them at
 /// runtime by querying that feature.
-pub(super) fn emit_device_wgsl(program: &Program, effective_kernels: &[crate::ast::KernelDecl]) -> (String, Option<String>) {
+pub(super) fn emit_device_wgsl(
+    program: &Program,
+    effective_kernels: &[crate::ast::KernelDecl],
+    kernel_consts: &super::KernelConstsMap,
+) -> (String, Option<String>) {
     let uses_warp = effective_kernels.iter().any(super::kernel_uses_gpu_warp);
 
     let mut real = DeviceEmitter::new(WarpMode::Real);
     real.program_uses_warp = uses_warp;
-    real.emit_program(program, effective_kernels);
+    real.emit_program(program, effective_kernels, kernel_consts);
 
     let emulated = if uses_warp {
         let mut e = DeviceEmitter::new(WarpMode::Emulated);
         e.program_uses_warp = true;
-        e.emit_program(program, effective_kernels);
+        e.emit_program(program, effective_kernels, kernel_consts);
         Some(e.out)
     } else {
         None
@@ -99,6 +103,12 @@ struct DeviceEmitter {
     /// expansion introduces (`Stmt::Let` handling) — WGSL has no shadowing, so two
     /// shuffle call sites in the same kernel can't reuse the same temp names.
     warp_tmp_counter: u32,
+    /// `name -> concrete_value` const-generic substitution for the kernel currently
+    /// being emitted (e.g. `{"W": 3, "H": 1}` for a monomorphised `Blur_3_1`), from
+    /// `super::resolve_effective_kernels`'s `kernel_consts` map — see that map's doc
+    /// comment for why the body needs this even though `fields` are already
+    /// substituted by `monomorphise_type`. Empty for a non-generic kernel.
+    current_kernel_consts: std::collections::HashMap<String, i64>,
 }
 
 impl DeviceEmitter {
@@ -116,6 +126,7 @@ impl DeviceEmitter {
             mode,
             program_uses_warp: false,
             warp_tmp_counter: 0,
+            current_kernel_consts: std::collections::HashMap::new(),
         }
     }
 
@@ -128,7 +139,12 @@ impl DeviceEmitter {
 
     fn blank(&mut self) { self.out.push('\n'); }
 
-    fn emit_program(&mut self, program: &Program, effective_kernels: &[crate::ast::KernelDecl]) {
+    fn emit_program(
+        &mut self,
+        program: &Program,
+        effective_kernels: &[crate::ast::KernelDecl],
+        kernel_consts: &super::KernelConstsMap,
+    ) {
         // Pre-pass: collect top-level scalar lets for inlining.
         for item in &program.items {
             if let Item::Let(s) = item {
@@ -202,6 +218,7 @@ impl DeviceEmitter {
         }
 
         for decl in effective_kernels {
+            self.current_kernel_consts = kernel_consts.get(&decl.name).cloned().unwrap_or_default();
             self.emit_kernel_decl(decl);
         }
     }
@@ -380,9 +397,14 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("}");
         let var_name = format!("{}_params", decl.name.to_lowercase());
+        // See `super::kernel_params_use_storage`'s doc comment: a fixed-size
+        // scalar array field can't live in `var<uniform>` (std140 requires a
+        // 16-byte array stride there) — fall back to `var<storage, read>`
+        // (std430, 4-byte stride) whenever one is present.
+        let addr_space = if super::kernel_params_use_storage(decl) { "storage, read" } else { "uniform" };
         self.line(&format!(
-            "@group(0) @binding({}) var<uniform> {}: {};",
-            binding, var_name, struct_name
+            "@group(0) @binding({}) var<{}> {}: {};",
+            binding, addr_space, var_name, struct_name
         ));
         self.blank();
     }
@@ -956,6 +978,17 @@ impl DeviceEmitter {
             ExprKind::Nil      => "0".into(),
             ExprKind::Void     => "".into(),
             ExprKind::Var(name) => {
+                // Const-generic kernel type params (e.g. `W`/`H` on `kernel Blur<int W, int H>`)
+                // are substituted down to a concrete literal here — `monomorphise`/`monomorphise_type`
+                // only rewrites `type_params` references inside a kernel's `fields`, never inside
+                // `methods`/`inits` bodies (see `resolve_effective_kernels`'s doc comment), so a body
+                // expression like `0..W * H` still contains a bare `Var("W")`/`Var("H")` after
+                // monomorphisation — checked first since a type-param name is never also a real
+                // buffer/field/top-level name in practice, and this is the single choke point every
+                // expression emission passes through, so no occurrence (however nested) is missed.
+                if let Some(v) = self.current_kernel_consts.get(name) {
+                    return v.to_string();
+                }
                 // Buffer-qualified fields (`'unified`/`'global`/`'actor'global`) become WGSL
                 // module-level globals shared across every kernel in the same shader file —
                 // a bare field name like `a` collides the moment two kernels both happen to
@@ -996,6 +1029,29 @@ impl DeviceEmitter {
                 format!("({} = {})", self.expr(lhs), self.expr(rhs))
             }
             ExprKind::Index(arr, idx) => {
+                // A fixed-size (`'const`) array field lives inside the params uniform
+                // struct, not as a bare module-scope var (`emit_params_struct`'s
+                // `Type::ArrayN`/labeled-array branches) — unlike a scalar params field,
+                // which DOES get unpacked into a same-named local by `emit_entry_point`
+                // ("Unpack 'const scalars ... from params struct"), a fixed array is
+                // deliberately left un-unpacked ("Fixed arrays are accessed as
+                // {pvar}.field[i] directly" — see that comment) since copying a whole
+                // array into a local WGSL `var` on every kernel invocation is wasteful.
+                // But nothing else ever emitted that `{pvar}.field[i]` rewrite the
+                // comment promises: a bare index like `weights[k]` (declared as
+                // `let [float, W*H]'const weights`) fell through the generic `Var` case
+                // as an un-prefixed `weights[...]`, an undefined WGSL identifier at
+                // shader-validation time. Rewrite it here instead.
+                if let ExprKind::Var(name) = &arr.kind {
+                    if let Some(field) = self.current_fields.iter().find(|f| f.name == *name) {
+                        let is_fixed_array = matches!(field.ty, Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some();
+                        if is_params_field(field) && is_fixed_array {
+                            let pvar = format!("{}_params", self.current_kernel.to_lowercase());
+                            let idx_s = self.expr(idx);
+                            return format!("{}.{}[u32({})]", pvar, wgsl_safe_ident(name), idx_s);
+                        }
+                    }
+                }
                 format!("{}[u32({})]", self.expr(arr), self.expr(idx))
             }
             ExprKind::LabeledIndex(obj, args) => {
@@ -1063,6 +1119,47 @@ impl DeviceEmitter {
                 }
                 if let Some(wgsl) = self.try_atomic_method_call(obj, method, &args_s) {
                     return wgsl;
+                }
+                // `.len()` on a kernel array field — WGSL has no `len(x)` free function
+                // (unlike CUDA/Metal's plain array-length arithmetic); a runtime-sized
+                // storage-buffer field (`'global`/`'unified`/... ) needs the WGSL builtin
+                // `arrayLength(&buf)`, while a compile-time-fixed-size field (`'const`
+                // array, `[T, N]`) already has its length known at transpile time, so it's
+                // emitted as a plain integer literal instead of a call. Checked before the
+                // generic numeric-method fallback below, which would otherwise emit the
+                // invalid `len(...)` call (`map_builtin_fn`'s catch-all passes unknown
+                // method names through unchanged).
+                if method == "len" && args.is_empty() {
+                    if let ExprKind::Var(name) = &obj.kind {
+                        if let Some(field) = self.current_fields.iter().find(|f| f.name == *name) {
+                            if is_buffer_field(field) {
+                                let obj_s = self.expr(obj);
+                                // `arrayLength` returns `u32`, but every kernel-body index/
+                                // loop-variable expression is emitted as `i32` (see the
+                                // `gpu.thread.x`/`gpu.block.x` builtins and the `for`-loop
+                                // variable further down in this file) -- WGSL's comparison
+                                // and arithmetic operators require identical operand types,
+                                // with no implicit signed/unsigned promotion like C/Rust.
+                                // Comparing (or otherwise combining) the bare `u32` result
+                                // against an `i32` index (`idx < input.len()`) is invalid
+                                // WGSL and fails real shader validation at pipeline-creation
+                                // time ("Operation Less can't work with ..."), even though it
+                                // passes a plain `cargo build` (which never parses the
+                                // embedded WGSL string) and this file's text-only codegen
+                                // tests. Cast to `i32` here, once, at the single choke point
+                                // that ever emits `arrayLength`, rather than at every call
+                                // site that happens to compare/combine a `.len()` against an
+                                // index.
+                                return format!("i32(arrayLength(&{}))", obj_s);
+                            }
+                            if let Type::ArrayN(_, n) = &field.ty {
+                                return n.to_string();
+                            }
+                            if let Some(len) = field.ty.labeled_array_len() {
+                                return len.to_string();
+                            }
+                        }
+                    }
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
                     let fn_name = format!("{}_{}", self.current_kernel, method);
@@ -1584,10 +1681,39 @@ fn collect_top_level_int_consts(program: &Program) -> std::collections::HashMap<
 
 fn resolve_let_kernel_type(s: &LetStmt, map: &mut std::collections::HashMap<String, String>) {
     if let Some(val) = &s.value {
-        if let ExprKind::Call(callee, _) = &val.kind {
-            if let ExprKind::Var(type_name) = &callee.kind {
-                map.insert(s.name.clone(), type_name.clone());
+        match &val.kind {
+            ExprKind::Call(callee, _) => {
+                if let ExprKind::Var(type_name) = &callee.kind {
+                    map.insert(s.name.clone(), type_name.clone());
+                }
             }
+            // A turbofish const-generic construction (`Blur<3, 1>(...)`) parses as
+            // `GenericCall`, a distinct AST variant from a plain `Call` — must be
+            // handled separately or `var_to_type` never gets an entry for the
+            // binding, and a later `blur(block = N)` dispatch-site lookup can never
+            // resolve `blur` back to a kernel type name (see `collect_block_sizes`'s
+            // doc comment). The recorded name must match the *monomorphised* decl
+            // name (e.g. `"Blur_3_1"`) that `resolve_effective_kernels` in
+            // `wgpu/mod.rs` produces and that `emit_kernel_decl`/`emit_entry_point`
+            // key `block_sizes` by — so mangle it here the same way
+            // `monomorphised_name` does: original name + concrete type args joined
+            // with `_`, non-integer type args treated as `0` (matching
+            // `collect_instantiations`/`build_subst` in `wgpu/mod.rs`).
+            ExprKind::GenericCall(callee, type_args, _) => {
+                if let ExprKind::Var(type_name) = &callee.kind {
+                    let suffix: Vec<String> = type_args.iter().map(|t| match t {
+                        Type::ConstInt(n) => n.to_string(),
+                        _ => "0".to_string(),
+                    }).collect();
+                    let mangled = if suffix.is_empty() {
+                        type_name.clone()
+                    } else {
+                        format!("{}_{}", type_name, suffix.join("_"))
+                    };
+                    map.insert(s.name.clone(), mangled);
+                }
+            }
+            _ => {}
         }
     }
 }

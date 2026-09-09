@@ -1704,11 +1704,32 @@ kernel:
 }
 
 #[test]
-fn host_bare_float_scalar_field_assign_casts_to_f64_not_f32() {
-    // `float(expr)` is a pure alias of `float64`, not its own type (see
-    // CLAUDE.md/host_scalar_type) -- `var float t` gets an `f64` host struct
-    // field, so `k.t = float(screen.time)` must cast to `f64`, not join
-    // `float32(expr)`'s `as f32` narrowing.
+fn host_bare_float_scalar_field_assign_casts_to_f32_matching_narrowed_field() {
+    // `float(expr)` is a pure alias of `float64`, not its own type — but on
+    // `--target wgpu`, `host_scalar_type` narrows `Type::Float64` to `"f32"` (WGSL has
+    // no 64-bit float; the device buffer/Params struct backing a kernel field is
+    // always f32 in practice regardless of the Boring-level width, see that
+    // function's own doc). `var float t` therefore gets an `f32` host struct field,
+    // so `k.t = float(screen.time)` must cast to `f32` too, joining
+    // `float32(expr)`'s narrowing rather than producing a real `f64` — this used to
+    // be split the other way (this cast stayed `f64`, back when `host_scalar_type`
+    // itself still returned `"f64"` for `Type::Float64`); flipping one side without
+    // the other reintroduces the exact same class of mismatch this split originally
+    // fixed, just in the opposite direction (`error[E0308]: expected f32, found
+    // f64` assigning this cast's result into the now-`f32` field — confirmed via a
+    // real `cargo build`, not caught by this test's own text-only assertions, which
+    // is why the pairing needs stating explicitly here rather than left implied).
+    //
+    // No `cargo build` check here (unlike this file's other float-width regression
+    // test, `test_const_generic_kernel_turbofish_construction`) — text-only
+    // assertions are enough for the f32-cast behavior under test. This exact
+    // `Screen`-driven `'surface pixels` field combination (a kernel field
+    // presented implicitly, with no explicit `screen.present(k.field)` call in
+    // the loop) used to also hit a separate, unrelated bug in the blit-bind-group
+    // codegen (`error[E0609]: no field 'pixels_buf' on type '&mut __App'`,
+    // `self.pixels_buf` instead of `self.k.pixels_buf`) — fixed, and covered by
+    // a real `cargo build` in `wgpu_screen_surface_field_without_explicit_present_compiles`
+    // below.
     let src = r#"
 let width = 4
 let height = 4
@@ -1735,10 +1756,94 @@ kernel:
         break
 "#;
     let (_wgsl, rs) = wgpu_codegen("float_alias_scalar_field", src);
-    assert!(rs.contains("k.t = (") && rs.contains("__start_time.elapsed().as_secs_f32() as f64);"),
-        "expected bare float(...) to cast to f64, matching `var float t`'s f64 host field;\ngot:\n{rs}");
-    assert!(!rs.contains("__start_time.elapsed().as_secs_f32() as f32);"),
-        "must not narrow a bare float(...) scalar-field assignment to f32;\ngot:\n{rs}");
+    assert!(rs.contains("k.t = (") && rs.contains("__start_time.elapsed().as_secs_f32() as f32);"),
+        "expected bare float(...) to cast to f32, matching `var float t`'s now-narrowed \
+         f32 host field;\ngot:\n{rs}");
+    assert!(!rs.contains("__start_time.elapsed().as_secs_f32() as f64);"),
+        "must not cast a bare float(...) scalar-field assignment to f64 -- the field \
+         itself is f32, this would no longer compile;\ngot:\n{rs}");
+}
+
+/// Regression test for `find_present_buffer`'s fallback in `src/transpiler/wgpu/host.rs`:
+/// a `Screen`-driven program whose kernel has a `mut [uint]'surface` field, presented
+/// implicitly (no explicit `screen.present(k.field)` call anywhere in the render loop —
+/// only `k.t = ...` and `k(block = ...)`). Before the fix, `find_present_buffer` only
+/// recognized the explicit-`present()` shape and otherwise fell back to a bare
+/// `"pixels_buf"` default, which the blit-bind-group codegen then emitted as
+/// `self.pixels_buf` — a field that doesn't exist on `__App` (the kernel instance is
+/// `self.k`, a field *of* `__App`, and the buffer is `self.k.pixels_buf`) — failing a
+/// real `cargo build` with `error[E0609]: no field 'pixels_buf' on type '&mut __App'`.
+/// The fix makes the fallback scan top-level kernel instantiations for a
+/// `'surface`-qualified buffer-array field and qualify it with the instance's own
+/// variable name, matching the `self.{var}.{field}_buf` shape `emit_kernel_rebuild_bind_group`
+/// already uses elsewhere in the same file.
+#[test]
+fn wgpu_screen_surface_field_without_explicit_present_compiles() {
+    let src = r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "test")
+
+kernel T:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float t
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+        t = 0.0
+
+    def ():
+        pass
+
+var mut k = T(Dimension(width, height))
+kernel:
+    loop:
+        k.t = float(screen.time)
+        k(block = (4, 4))
+        break
+"#;
+    let (_wgsl, _emulated, rs, _toml) = run_wgpu("screen_surface_field_no_explicit_present", src);
+
+    // Scope the assertion to the blit bind group's own creation block -- `self.pixels_buf`
+    // (bare, unqualified) is legitimately correct inside `T`'s *own* `rebuild_bind_group`
+    // method (there `self` is `&T`, the kernel instance itself), so a blanket
+    // `!rs.contains("self.pixels_buf")` over the whole file would false-positive on that
+    // unrelated, correct occurrence. Only `__App`'s blit bind group (built in `resumed()`,
+    // where `self` is `&mut __App`) needs the `self.k.` prefix.
+    let blit_bg_start = rs.find("let blit_bg = self.device.create_bind_group")
+        .unwrap_or_else(|| panic!("expected a `let blit_bg = self.device.create_bind_group(...)` \
+                                    block in the generated source:\n{rs}"));
+    let blit_bg_block = &rs[blit_bg_start..(blit_bg_start + 400).min(rs.len())];
+    assert!(blit_bg_block.contains("resource: self.k.pixels_buf.as_entire_binding()"),
+        "expected the blit bind group to address the kernel instance's buffer as \
+         `self.k.pixels_buf`, not a bare `self.pixels_buf` (no such field exists on \
+         `__App`), blit bind group block:\n{blit_bg_block}");
+    assert!(!blit_bg_block.contains("resource: self.pixels_buf.as_entire_binding()"),
+        "blit bind group must not address `self.pixels_buf` directly on `__App` -- the \
+         buffer lives on the kernel instance field `self.k`, blit bind group block:\n{blit_bg_block}");
+
+    // Real `cargo build` of the generated project -- this exact combination
+    // (Screen + `'surface` field, no explicit `screen.present(...)` call) used to fail
+    // to compile even though the text-only assertions above would not have caught it
+    // without this check (the bug was in a totally different generated fn than the one
+    // exercised by the assertions), see this test's own doc comment.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("screen_surface_field_no_explicit_present");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let build = Command::new("cargo")
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(
+        build.status.success(),
+        "expected the generated wgpu project to compile, but `cargo build` failed:\n\
+         --- stderr ---\n{}",
+        String::from_utf8_lossy(&build.stderr),
+    );
 }
 
 #[test]
@@ -1897,4 +2002,485 @@ kernel:
     let (_wgsl, rs) = wgpu_codegen("screen_unconditional_break", src);
     assert!(rs.contains("event_loop.exit();"),
         "expected a bare `break` to translate to an unconditional event_loop.exit();\ngot:\n{rs}");
+}
+
+/// Regression test for a const-generic kernel's top-level turbofish construction
+/// (`Blur<3, 1>(...)`) on `--target wgpu` — a non-`Screen` top-level statement, so it's
+/// transpiled by the *general* pipeline (`gpu_kernels` set, see `transpiler::wgpu::
+/// transpile_wgpu`'s doc), not wgpu's own `host::emit_screen_main`.
+///
+/// `resolve_effective_kernels` correctly renames the kernel *struct* itself to
+/// `Blur_3_1` (mirrored in `TranspileConfig::gpu_kernel_generic_names`), but the general
+/// pipeline's own construction codegen (`emit_kernel::try_emit_kernel_let`) used to only
+/// recognize a plain `ExprKind::Call` callee — a turbofish `ExprKind::GenericCall` fell
+/// through untouched to the generic monomorphization codegen, which has no notion of
+/// wgpu's separate kernel-renaming scheme and emitted real Rust turbofish syntax on the
+/// *original* name verbatim (`Blur::<3, 1>(w, pixels, result)` — `error[E0425]: cannot
+/// find function Blur in this scope`, since only `Blur_3_1` is ever defined).
+///
+/// Two more bugs surfaced once that one was fixed, both asserted against below:
+///   - a `'const`-qualified fixed-size array field (`weights`) fell through
+///     `emit_kernel_construction`'s scalar-field assignment branch (which only special-
+///     cases `'unified`/`'global`/`'actor'global` buffer fields), casting the whole host
+///     array straight to `i64` (`blur.weights = (w) as i64;`) instead of converting it to
+///     the field's actual `[f64; 3]` — now `[f32; 3]`, see next point — array type.
+///   - `wgpu::host::host_scalar_type` kept `float`/`float64` at `f64` on the host side
+///     (struct field type, `copy_*_to_device`'s parameter type) while the *device* WGSL
+///     buffer is always `f32` in practice (WGSL has no 64-bit float — `device.rs`'s
+///     `wgsl_unsupported_f64` only emits a comment in the generated shader, not a real
+///     `TranspileError`, so nothing ever rejects the mismatch) — a real host/device
+///     buffer layout mismatch, surfacing as `cargo build`'s `error[E0308]: expected
+///     &[f64], found &Vec<f32>` on every kernel with a bare `float`/`float64` field
+///     (Saxpy's `alpha`, not just the const-generic `Blur`).
+///
+/// Exercises the full `linguist/samples/gpu.br` "Const generic params" kernel end to
+/// end, including a real `cargo build` of the generated project — the only GPU backend
+/// that can be fully compiled locally without extra toolchains (see that file's own
+/// header comment), so this is the one target where a full `cargo build` check is
+/// meaningful in CI too.
+#[test]
+fn test_const_generic_kernel_turbofish_construction() {
+    let src = r#"
+kernel Blur<int W, int H>:
+    let [float, W * H]'const weights
+    let [float]'global        input
+    mut [float]'global        output
+    let float                 sigma = 1.0
+
+    init([float] w, [float] inp, [float] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..W * H:
+            let idx = i + k
+            if idx < input.len():
+                acc = acc + weights[k] * input[idx]
+        output[i] = acc
+
+let w = [0.25, 0.5, 0.25]
+let pixels = [i as float for i in ..1024]
+mut result = [0.0 for ..1024]
+
+mut blur = Blur<3, 1>(w, pixels, result)
+kernel:
+    blur(block = 256)
+"#;
+    let (_wgsl, _emulated, rs, _toml) = run_wgpu("const_generic_kernel_turbofish", src);
+
+    assert!(rs.contains("struct Blur_3_1 {"), "expected the monomorphised kernel struct \
+        Blur_3_1, generated source:\n{rs}");
+    assert!(rs.contains("let mut blur = Blur_3_1::new(__boring_gpu_device(), __boring_gpu_queue());"),
+        "turbofish construction `Blur<3, 1>(...)` should resolve to the monomorphised \
+         `Blur_3_1::new(...)`, not real Rust turbofish syntax on the original name, \
+         generated source:\n{rs}");
+    assert!(!rs.contains("Blur::<3, 1>("),
+        "generated source still contains raw (un-mangled) turbofish construction syntax, \
+         which doesn't compile (no `Blur` type is ever defined, only `Blur_3_1`):\n{rs}");
+    assert!(rs.contains("blur.weights = w.iter().map(|&x| x as f32).collect::<Vec<f32>>().try_into().unwrap();"),
+        "expected the `'const` fixed-size array field `weights` to be converted from the \
+         constructor argument, not cast straight to a scalar, generated source:\n{rs}");
+    assert!(!rs.contains("blur.weights = (w) as"),
+        "`weights` (a `[float, W*H]'const` array field) must not be cast to a scalar \
+         type, generated source:\n{rs}");
+
+    // Real `cargo build` of the generated project — catches the host/device float-width
+    // buffer mismatch (`error[E0308]: expected &[f64], found &Vec<f32>`) that the string
+    // assertions above can't see, since it fires against every plain `float` kernel
+    // field (Saxpy-style), not just the const-generic one under test here.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("const_generic_kernel_turbofish");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let build = Command::new("cargo")
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(
+        build.status.success(),
+        "expected the generated wgpu project to compile, but `cargo build` failed:\n\
+         --- stderr ---\n{}",
+        String::from_utf8_lossy(&build.stderr),
+    );
+}
+
+/// Regression test for a silent `block = N` dispatch-site argument being dropped for
+/// any const-generic (turbofish-constructed) kernel on `--target wgpu`.
+///
+/// `collect_block_sizes`/`resolve_let_kernel_type` (`src/transpiler/wgpu/device.rs`)
+/// resolve a `k(block = N)` dispatch call back to its kernel type by first recording,
+/// from the `let`/`mut` binding that constructed `k`, a `binding name -> kernel type
+/// name` map. That resolution only pattern-matched a plain `ExprKind::Call` callee --
+/// a turbofish const-generic construction (`Blur<3, 1>(w, pixels, result)`) parses as
+/// the distinct `ExprKind::GenericCall` variant, so `var_to_type` never got an entry
+/// for `blur`, the later `blur(block = 256)` dispatch-site lookup could never resolve
+/// `blur` back to a kernel type, and `block_sizes` ended up with no entry at all for
+/// this kernel -- `emit_kernel_decl`/`emit_entry_point`'s `unwrap_or((1, 1, 1))`
+/// default silently kicked in instead, regardless of the `block = 256` actually
+/// requested. Silent: no error, no warning, `cargo build` succeeds, the program runs
+/// to completion -- it just only ever computes 1 GPU thread's worth of work.
+///
+/// Confirmed concretely before the fix: this exact source generated
+/// `@compute @workgroup_size(1, 1, 1)` for `Blur_3_1` in shaders/main.wgsl (and
+/// `blur.dispatch(1u32, 1u32, 1u32)` in src/main.rs) no matter what `block = ...` was
+/// requested at the dispatch site.
+#[test]
+fn test_const_generic_kernel_turbofish_construction_block_size() {
+    let src = r#"
+kernel Blur<int W, int H>:
+    let [float, W * H]'const weights
+    let [float]'global        input
+    mut [float]'global        output
+
+    init([float] w, [float] inp, [float] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..W * H:
+            let idx = i + k
+            if idx < input.len():
+                acc = acc + weights[k] * input[idx]
+        output[i] = acc
+
+let w = [0.25, 0.5, 0.25]
+let pixels = [i as float for i in ..1024]
+mut result = [0.0 for ..1024]
+
+mut blur = Blur<3, 1>(w, pixels, result)
+kernel:
+    blur(block = 256)
+"#;
+    let (wgsl, _rs) = wgpu_codegen("const_generic_kernel_turbofish_block_size", src);
+
+    assert!(
+        wgsl.contains("@compute @workgroup_size(256, 1, 1)"),
+        "expected the `block = 256` dispatch-site argument on the turbofish-constructed \
+         kernel `blur` to resolve back to `Blur_3_1` and set its @workgroup_size, but it \
+         didn't -- generated shader:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.contains("@compute @workgroup_size(1, 1, 1)"),
+        "found the silent (1, 1, 1) default -- `block = 256` was dropped for the \
+         turbofish-constructed kernel, generated shader:\n{wgsl}"
+    );
+}
+
+/// Regression test for three bugs found running the monomorphised `Blur_3_1` kernel's
+/// *body* through real WGSL shader validation (`wgpu`'s `Device::create_shader_module`)
+/// -- `test_const_generic_kernel_turbofish_construction` above only got this kernel to
+/// `cargo build`, since a Rust-level compile never parses the WGSL string it embeds. All
+/// three are `DeviceEmitter::expr`/`emit_stmt` bugs (`src/transpiler/wgpu/device.rs`),
+/// not this file's mundane text-fixture drift, so a real `wgpu` adapter (available here
+/// since this repo's CI runs on macOS/Metal) was used once, by hand, to confirm each
+/// fix actually clears shader validation and progresses further -- not just that the
+/// assertions below hold, which they trivially would even if the substitution were
+/// subtly wrong (e.g. swapped W/H).
+///
+/// 1. `for k in 0..W * H` (and any other body reference to a `kernel Blur<int W, int
+///    H>` const-generic param) used to stay a bare, unsubstituted `Var("W")`/`Var("H")`
+///    after monomorphisation -- `monomorphise`/`monomorphise_type` only rewrites
+///    `type_params` references inside a kernel's `fields`, never inside its
+///    `methods`/`inits` bodies (see `resolve_effective_kernels`'s doc comment in
+///    `src/transpiler/wgpu/mod.rs`) -- so `device::emit_device_wgsl` emitted `W`/`H`
+///    straight through as undefined WGSL identifiers ("no definition in scope for
+///    identifier: 'W'"). Fixed by threading the per-instantiation `name -> concrete
+///    value` substitution map into `DeviceEmitter` (`current_kernel_consts`) and
+///    consulting it in the single `ExprKind::Var` choke point every expression
+///    emission passes through, so no occurrence (however nested) is missed.
+/// 2. `input.len()` on a `'global` storage-buffer field emitted the free function call
+///    `len(blur_3_1_input)` -- WGSL has no such builtin (unlike CUDA/Metal's plain
+///    array-length arithmetic); the real builtin is `arrayLength(&buf)`, and only
+///    applies to a runtime-sized storage buffer, not a fixed-size `'const` array.
+/// 3. `weights[k]` (a `'const`-qualified fixed-size array field) emitted a bare,
+///    unprefixed `weights[u32(k)]` -- a `'const` array field lives inside the
+///    `Blur_3_1Params` uniform-struct binding (`blur_3_1_params.weights`), not as its
+///    own module-scope var; `emit_entry_point`'s own comment already said "Fixed
+///    arrays are accessed as `{pvar}.field[i]` directly" but nothing implemented that
+///    rewrite, so any index into a `'const` array field fell through as an undefined
+///    identifier just like bug 1.
+///
+/// Note: getting `Blur_3_1` to fully execute (not just pass shader validation) hits a
+/// fourth, unrelated bug past the scope of this fix -- WGSL's `uniform` address space
+/// requires array elements be aligned to a 16-byte stride ("Alignment requirements for
+/// address space Uniform are not met"), which a plain `array<f32, N>` params-struct
+/// member violates; fixing that needs a host.rs buffer-layout change (`uniform` →
+/// `storage` binding for any kernel with a fixed-array params field, or std140-style
+/// padding) well beyond a `DeviceEmitter::expr` fix, so it's left for separate work.
+#[test]
+fn test_const_generic_kernel_body_substitution_and_array_field_access() {
+    let src = r#"
+kernel Blur<int W, int H>:
+    let [float, W * H]'const weights
+    let [float]'global        input
+    mut [float]'global        output
+    let float                 sigma = 1.0
+
+    init([float] w, [float] inp, [float] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..W * H:
+            let idx = i + k
+            if idx < input.len():
+                acc = acc + weights[k] * input[idx]
+        output[i] = acc
+
+let w = [0.25, 0.5, 0.25]
+let pixels = [i as float for i in ..1024]
+mut result = [0.0 for ..1024]
+
+mut blur = Blur<3, 1>(w, pixels, result)
+kernel:
+    blur(block = 256)
+"#;
+    let (wgsl, _rs) = wgpu_codegen("const_generic_kernel_body_subst", src);
+
+    // Bug 1: the loop bound is the concrete product, not the bare type-param names.
+    assert!(wgsl.contains("if !(k < (3 * 1)) { break; }"),
+        "expected the monomorphised loop bound `0..W * H` to substitute down to the \
+         concrete `3 * 1`, generated WGSL:\n{wgsl}");
+    assert!(!wgsl.contains("(W * H)"),
+        "generated WGSL still references the const-generic params `W`/`H` verbatim -- \
+         invalid WGSL (\"no definition in scope for identifier\"), generated WGSL:\n{wgsl}");
+    // Cheap, generic backstop matching this test's own doc comment: neither type-param
+    // name should ever appear as a bare identifier (word-boundary check) anywhere in the
+    // module -- catches a stray occurrence in a nested/derived expression this test's
+    // specific source snippet doesn't happen to exercise.
+    for name in ["W", "H"] {
+        assert!(
+            !wgsl.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|tok| tok == name),
+            "generated WGSL contains a bare identifier `{name}` -- a const-generic kernel \
+             type param must always be substituted with its concrete value, generated WGSL:\n{wgsl}"
+        );
+    }
+
+    // Bug 2: `.len()` on a storage-buffer field → `arrayLength(&buf)`, not `len(buf)`.
+    assert!(wgsl.contains("arrayLength(&blur_3_1_input)"),
+        "expected `input.len()` to lower to WGSL's `arrayLength(&buf)` builtin, \
+         generated WGSL:\n{wgsl}");
+    assert!(!wgsl.contains("len(blur_3_1_input)"),
+        "generated WGSL still contains the invalid WGSL call `len(...)` -- WGSL has no \
+         such free function, generated WGSL:\n{wgsl}");
+
+    // Bug 3: a `'const` fixed-array field is accessed through the params struct.
+    assert!(wgsl.contains("blur_3_1_params.weights[u32(k)]"),
+        "expected the `'const` array field `weights` to be indexed through the params \
+         uniform struct (`blur_3_1_params.weights[...]`), generated WGSL:\n{wgsl}");
+    assert!(!wgsl.contains(" weights[u32(k)]") && !wgsl.contains("(weights[u32(k)]"),
+        "generated WGSL still contains a bare, unprefixed index into `weights` -- an \
+         undefined WGSL identifier, generated WGSL:\n{wgsl}");
+}
+
+/// Regression test for the fourth blocker named in
+/// `test_const_generic_kernel_body_substitution_and_array_field_access`'s doc comment:
+/// a kernel whose params struct has a fixed-size scalar array field (here, `weights`,
+/// a `[float32, W * H]'const` array) used to emit that struct as
+/// `@group(0) @binding(n) var<uniform> ... { weights: array<f32, 3>, ... }`.
+///
+/// WGSL's `uniform` address space follows std140-like layout rules, which require
+/// every array element's *stride* to be a multiple of 16 bytes -- a bare
+/// `array<f32, N>` (4-byte stride) violates that and fails real GPU shader
+/// validation at pipeline-creation time:
+///   Shader validation error: Global variable [N] '..._params' is invalid
+///     Alignment requirements for address space Uniform are not met by [...]
+///       The array stride 4 is not a multiple of the required alignment 16
+/// even though the generated text is syntactically valid WGSL and the host-side
+/// Rust compiles cleanly -- neither this file's usual text-only assertions nor a
+/// plain `cargo build` of the generated project (a Rust-level compile never parses
+/// the embedded WGSL string) can see this; only creating a real `wgpu::Device` and
+/// compute pipeline from the generated shader catches it, hence the full `cargo run`
+/// below (this repo's CI runs on macOS/Metal, see the sibling test's doc comment).
+///
+/// Fixed by switching that binding -- and the matching host-side
+/// `wgpu::BufferUsages` for `params_buf` -- to `var<storage, read>` /
+/// `wgpu::BufferUsages::STORAGE` whenever the params struct has a fixed-array
+/// field (`transpiler::wgpu::kernel_params_use_storage`); `storage` follows std430
+/// layout instead, which only requires 4-byte alignment for a scalar array's stride.
+///
+/// Note: this test's kernel body deliberately drops the `if idx < input.len(): ...`
+/// guard the sibling test above uses -- `input.len()` lowers to WGSL's `arrayLength`,
+/// which returns `u32`, while `idx` is `i32` (derived from `gpu.thread.x`/`gpu.block.x`),
+/// and WGSL's `<` operator rejects mixed-signedness operands ("Operation Less can't
+/// work with ..."). That's a real, separate bug (a plain `Type::Named("Dimension")`-
+/// style comparison-type-promotion gap, unrelated to buffer address spaces) that this
+/// fix doesn't touch -- left for separate follow-up so this test stays focused on the
+/// one bug it's named for.
+#[test]
+fn test_const_generic_kernel_fixed_array_params_real_shader_validation() {
+    let src = r#"
+kernel Blur<int W, int H>:
+    let [float32, W * H]'const weights
+    let [float32]'global        input
+    mut [float32]'global        output
+
+    init([float32] w, [float32] inp, [float32] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..W * H:
+            acc = acc + weights[k] * input[i + k]
+        output[i] = acc
+
+let w = [0.25, 0.5, 0.25]
+let pixels = [i as float32 for i in ..8]
+mut result = [0.0 for ..8]
+
+mut blur = Blur<3, 1>(w, pixels, result)
+kernel:
+    blur(block = 8)
+
+print "done"
+"#;
+    let (wgsl, _emulated, _rs, _toml) = run_wgpu("const_generic_kernel_fixed_array_params_validation", src);
+
+    // The params struct binding must be `storage`, not `uniform`, precisely because
+    // it has a fixed-array field (`weights`).
+    assert!(wgsl.contains("var<storage, read> blur_3_1_params:"),
+        "expected the params struct (has a fixed-array field `weights`) to bind as \
+         `var<storage, read>`, not `var<uniform>` (which fails real WGSL alignment \
+         validation for an `array<f32, N>` member) -- generated WGSL:\n{wgsl}");
+    assert!(!wgsl.contains("var<uniform> blur_3_1_params:"),
+        "params struct must not use `var<uniform>` once it has a fixed-array field \
+         -- generated WGSL:\n{wgsl}");
+
+    // Real end-to-end validation: build and run the generated project against a real
+    // GPU. Before the fix, this compiled fine (`cargo build` never parses the embedded
+    // WGSL) but panicked at runtime with wgpu's uncaptured "Alignment requirements for
+    // address space Uniform are not met" validation error the moment the compute
+    // pipeline was created, well before any dispatch.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("const_generic_kernel_fixed_array_params_validation");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(stdout.contains("done"),
+        "expected the program to run to completion and print \"done\", but got:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(!stderr.contains("Alignment requirements"),
+        "the uniform-buffer alignment bug regressed -- generated program's stderr:\n{stderr}");
+}
+
+/// Regression test for the separate bug named in the sibling test's doc comment above
+/// (left as follow-up there so that test stayed focused on the uniform-alignment bug):
+/// `input.len()` lowers to WGSL's `arrayLength(&buf)` builtin, which returns `u32`, but
+/// every kernel-body index/loop expression (`gpu.thread.x`/`gpu.block.x` arithmetic,
+/// `for`-loop variables) is emitted as `i32`. WGSL requires identical operand types for
+/// comparison operators -- no implicit signed/unsigned promotion like C/Rust -- so
+/// `idx < input.len()` lowered to `idx < arrayLength(&input)` (`i32 < u32`), which
+/// `cargo build` never catches (it doesn't parse the embedded WGSL string) but fails
+/// real shader validation at pipeline-creation time:
+///   Shader validation error: Entry point ... is invalid
+///     Expression [27] is invalid
+///       Operation Less can't work with [24] and [26]
+///
+/// Fixed by casting the `arrayLength(...)` result to `i32` at its single emission choke
+/// point (`DeviceEmitter::expr`'s `method == "len"` buffer branch), rather than at every
+/// comparison/arithmetic site that might combine a `.len()` against an index.
+///
+/// This kernel deliberately avoids a `'const` fixed-size array field (unlike the sibling
+/// test above) to sidestep that test's own unrelated uniform-alignment bug -- and uses a
+/// `'unified` output field, not `'global`, since a `'global` field's buffer is
+/// host-write-only (no `COPY_SRC` usage flag) and can't be read back for the `print`
+/// assertions below; that asymmetry is itself an existing, separate gap, not something
+/// this test is about.
+#[test]
+fn test_len_comparison_against_i32_index_real_shader_validation() {
+    let src = r#"
+kernel Sum2:
+    let [float]'global   x
+    mut [float]'unified  y
+
+    init([float] xs, [float]'unified ys):
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..2:
+            let idx = i + k
+            if idx < x.len():
+                acc = acc + x[idx]
+        y[i] = acc
+
+let n = 8
+let xs = [i as float for i in ..n]
+mut ys = [0.0 for ..n]
+
+mut k = Sum2(xs, ys)
+kernel:
+    k(block = 8)
+
+print "y[0] = {k.y[0]}"
+print "y[6] = {k.y[6]}"
+print "y[7] = {k.y[7]}"
+"#;
+    let (wgsl, _emulated, _rs, _toml) = run_wgpu("len_comparison_against_i32_index", src);
+
+    // Text-level sanity check: the `arrayLength` result must be cast to `i32` before
+    // it's compared against the `i32` loop-derived index.
+    assert!(wgsl.contains("i32(arrayLength(&sum2_x))"),
+        "expected `x.len()` to lower to an `i32`-cast `arrayLength` call so it compares \
+         cleanly against the `i32` index, generated WGSL:\n{wgsl}");
+
+    // Real end-to-end run against a real GPU adapter (this repo's CI runs on
+    // macOS/Metal, see the sibling test's doc comment) -- `cargo build` alone can't
+    // catch this bug since it never parses the embedded WGSL string; only real shader
+    // validation at pipeline-creation time (triggered by actually running the
+    // generated binary) does.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("len_comparison_against_i32_index");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(
+        !stderr.contains("Shader validation error") && !stderr.contains("is invalid"),
+        "generated project produced a real WGSL shader validation error at runtime -- \
+         `idx < input.len()` (an `i32 < u32` comparison) is invalid WGSL:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    // Values: x = [0..8), for each thread i, acc = x[i] + x[i+1] when both indices are
+    // in bounds, else just x[i] (the k=1 tap is dropped once idx == x.len()).
+    assert!(stdout.contains("y[0] = 1"), "expected y[0] = x[0]+x[1] = 0+1 = 1, got:\n{stdout}");
+    assert!(stdout.contains("y[6] = 13"), "expected y[6] = x[6]+x[7] = 6+7 = 13, got:\n{stdout}");
+    assert!(stdout.contains("y[7] = 7"), "expected y[7] = x[7] (k=1 tap out of bounds) = 7, got:\n{stdout}");
 }
