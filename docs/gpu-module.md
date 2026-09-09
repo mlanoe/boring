@@ -386,6 +386,45 @@ for g in GPU.all():
 
 ## Memory safety model
 
+### Host variables never alias kernel fields
+
+> **This applies to every qualifier equally — `'unified`, `'global`, bare `'actor`, and the atomic forms.** It is easy to assume `'unified` is the exception, since its whole point is "no explicit copy needed" — but that guarantee is about `k.<field>` itself being directly readable/writable from host code, not about `k.<field>` being the *same* memory as whatever host variable was passed into the constructor. It never is.
+
+A kernel struct's fields are always a separate allocation from the host variable passed into `init()`. Assigning a host variable to a field in `init()` is a **copy-in**; reading `k.<field>` after a `kernel:` block is a **copy-out**. Writes made inside a kernel `def` are visible on the field (`k.<field>`) but never on the original host variable — and writes to the host variable after construction are never visible to the kernel either.
+
+```boring
+kernel Saxpy:
+    let float alpha
+    let [float]'global x
+    mut [float]'global y
+
+    init(float a, [float] xs, [float] ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+let n = 1024
+let xs = [i as float for i in ..n]
+mut ys = [1.0 for ..n]
+
+mut k = Saxpy(2.0, xs, ys)
+kernel:
+    k(block = 256, grid = (n + 255) / 256)
+
+print "orig ys[0] = {ys[0]}"   # 1 — unchanged. NOT a bug: ys never aliased k.y.
+print "k.y[0] = {k.y[0]}"      # 1 — correct
+print "orig ys[1] = {ys[1]}"   # 1 — unchanged, same reason
+print "k.y[1] = {k.y[1]}"      # 3 — correct: alpha * x[1] + y[1] = 2*1 + 1
+```
+
+This is not a Boring limitation — it mirrors real GPU host/device memory separation. Every backend (metal/cuda/rocm/wgpu — see `src/transpiler/emit_kernel.rs`) transpiles `init()` into an explicit host→device copy (`k.copy_<field>_to_device(...)` or equivalent) and a field read into an explicit device→host copy (`k.copy_<field>_to_host()`), exactly like CUDA/Metal/ROCm/wgpu code without unified/managed memory — there is no representation in the compiled output where the two could alias. `boring run`'s interpreter matches this on purpose: `run_kernel_parallel` (`src/interpreter/eval_gpu.rs`) round-trips field values through the thread simulation and merges them into a freshly-built kernel object, never writing back into the original host environment slot.
+
+**The correct pattern**: after a `kernel:` block completes, always read results back through `k.<field>` — never through the original host variable passed into the constructor. Every example in this repo already follows this: `examples/saxpy.br` and `linguist/samples/gpu.br`'s SAXPY section read `k.y[...]`; `examples/vector_add_gpu.br` reads back via `let result = k.result`; and `linguist/samples/gpu.br`'s `TileSum` section reads `ts.result`, not the `partial` array passed to its constructor.
+
 ### `'unified` — zero-copy host/device
 
 `'unified` fields share physical memory between host and device. No explicit H2D/D2H copy is needed. The `kernel:` block guarantees completion before the next host line.

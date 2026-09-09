@@ -295,6 +295,37 @@ print <span class="s">"Device: <span class="si">{g.name()}</span> — <span clas
 <table><thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead><tbody><tr><td><code>name()</code></td><td>device model name</td><td></td></tr><tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td><td>may be 0 on unified-memory GPUs on wgpu</td></tr><tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td><td>always 0 on wgpu — not exposed by the API</td></tr><tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td><td>CUDA SM version; <code>[0, 0]</code> on wgpu and Metal</td></tr><tr><td><code>warpSize()</code></td><td>threads per warp</td><td>conservative default (32) on wgpu</td></tr><tr><td><code>maxThreads()</code></td><td>max threads per block</td><td></td></tr><tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td><td></td></tr><tr><td><code>index()</code></td><td>device index</td><td></td></tr></tbody></table>
 <hr>
 <h2 id="memory-safety-model">Memory safety model</h2>
+<h3 id="host-variables-never-alias-kernel-fields">Host variables never alias kernel fields</h3>
+<blockquote><strong>This applies to every qualifier equally — <code>&#x27;unified</code>, <code>&#x27;global</code>, bare <code>&#x27;actor</code>, and the atomic forms.</strong> It is easy to assume <code>&#x27;unified</code> is the exception, since its whole point is &quot;no explicit copy needed&quot; — but that guarantee is about <code>k.&lt;field&gt;</code> itself being directly readable/writable from host code, not about <code>k.&lt;field&gt;</code> being the <em>same</em> memory as whatever host variable was passed into the constructor. It never is.</blockquote>
+<p>A kernel struct&#x27;s fields are always a separate allocation from the host variable passed into <code>init()</code>. Assigning a host variable to a field in <code>init()</code> is a <strong>copy-in</strong>; reading <code>k.&lt;field&gt;</code> after a <code>kernel:</code> block is a <strong>copy-out</strong>. Writes made inside a kernel <code>def</code> are visible on the field (<code>k.&lt;field&gt;</code>) but never on the original host variable — and writes to the host variable after construction are never visible to the kernel either.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Saxpy:
+    <span class="kw">let</span> <span class="kt">float</span> alpha
+    <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;global</span> x
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;global</span> y
+
+    <span class="kw">init</span>(<span class="kt">float</span> a, [<span class="kt">float</span>] xs, [<span class="kt">float</span>] ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+<span class="kw">let</span> n = <span class="nb">1024</span>
+<span class="kw">let</span> xs = [i <span class="kw">as</span> <span class="kt">float</span> <span class="kw">for</span> i <span class="kw">in</span> ..n]
+<span class="kw">mut</span> ys = [<span class="nb">1.0</span> <span class="kw">for</span> ..n]
+
+<span class="kw">mut</span> k = <span class="fn">Saxpy</span>(<span class="nb">2.0</span>, xs, ys)
+<span class="kw">kernel</span>:
+    <span class="fn">k</span>(block = <span class="nb">256</span>, grid = (n + <span class="nb">255</span>) / <span class="nb">256</span>)
+
+print <span class="s">"orig ys[0] = <span class="si">{ys[0]}</span>"</span>   <span class="co"># 1 — unchanged. NOT a bug: ys never aliased k.y.</span>
+print <span class="s">"k.y[0] = <span class="si">{k.y[0]}</span>"</span>      <span class="co"># 1 — correct</span>
+print <span class="s">"orig ys[1] = <span class="si">{ys[1]}</span>"</span>   <span class="co"># 1 — unchanged, same reason</span>
+print <span class="s">"k.y[1] = <span class="si">{k.y[1]}</span>"</span>      <span class="co"># 3 — correct: alpha * x[1] + y[1] = 2*1 + 1</span></code></pre></div>
+<p>This is not a Boring limitation — it mirrors real GPU host/device memory separation. Every backend (metal/cuda/rocm/wgpu — see <code>src/transpiler/emit_kernel.rs</code>) transpiles <code>init()</code> into an explicit host→device copy (<code>k.copy_&lt;field&gt;_to_device(...)</code> or equivalent) and a field read into an explicit device→host copy (<code>k.copy_&lt;field&gt;_to_host()</code>), exactly like CUDA/Metal/ROCm/wgpu code without unified/managed memory — there is no representation in the compiled output where the two could alias. <code>boring run</code>&#x27;s interpreter matches this on purpose: <code>run_kernel_parallel</code> (<code>src/interpreter/eval_gpu.rs</code>) round-trips field values through the thread simulation and merges them into a freshly-built kernel object, never writing back into the original host environment slot.</p>
+<p><strong>The correct pattern</strong>: after a <code>kernel:</code> block completes, always read results back through <code>k.&lt;field&gt;</code> — never through the original host variable passed into the constructor. Every example in this repo already follows this: <code>examples/saxpy.br</code> and <code>linguist/samples/gpu.br</code>&#x27;s SAXPY section read <code>k.y[...]</code>; <code>examples/vector_add_gpu.br</code> reads back via <code>let result = k.result</code>; and <code>linguist/samples/gpu.br</code>&#x27;s <code>TileSum</code> section reads <code>ts.result</code>, not the <code>partial</code> array passed to its constructor.</p>
 <h3 id="unified--zero-copy-hostdevice"><code>&#x27;unified</code> — zero-copy host/device</h3>
 <p><code>&#x27;unified</code> fields share physical memory between host and device. No explicit H2D/D2H copy is needed. The <code>kernel:</code> block guarantees completion before the next host line.</p>
 <h3 id="global--device-only"><code>&#x27;global</code> — device-only</h3>
