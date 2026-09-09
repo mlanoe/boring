@@ -1459,7 +1459,7 @@ impl Transpiler {
     /// single-thread mode). Clones an existing Arc/Rc var instead of moving it; unboxes
     /// a `'owned` source with `*` before wrapping; `.clone()`s an `'inline` source so the
     /// original binding stays valid.
-    fn emit_let_value_arc_qualified(&self, t: &Type, value: &Expr) -> String {
+    pub(crate) fn emit_let_value_arc_qualified(&self, t: &Type, value: &Expr) -> String {
         let is_actor = Self::is_mutex_binding(false, t);
         let is_guard = Self::is_rwlock_binding(false, t);
         let is_actor_or_guard = is_actor || is_guard;

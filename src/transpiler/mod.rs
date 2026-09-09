@@ -841,6 +841,12 @@ struct Transpiler {
     pub(crate) struct_has_init_body: std::collections::HashSet<String>,
     /// struct_name → Vec<Option<String>> of default values for init params (parallel to init params).
     pub(crate) struct_init_defaults: std::collections::HashMap<String, Vec<Option<String>>>,
+    /// struct_name → Vec<Type> of the chosen init's parameter types, in declaration order.
+    /// Consulted by the `struct_has_init_body` positional-arg constructor path so it can emit
+    /// `Arc::clone`/`Rc::clone` for `'shared`/`'actor`/`'guard`-qualified params instead of a
+    /// bare move — mirrors `struct_init_defaults`'s "last init in `s.inits` wins" selection,
+    /// populated at the same site for the same init.
+    pub(crate) struct_init_param_types: std::collections::HashMap<String, Vec<Type>>,
     /// Top-level mutable `var` declarations accessed inside function bodies.
     /// These can't be local to `main()` and must be emitted as module-level statics.
     /// Maps var_name → declared boring type (None = inferred as Arc<str>).
@@ -1349,6 +1355,7 @@ impl Transpiler {
             user_defines_result: false,
             struct_has_init_body: std::collections::HashSet::new(),
             struct_init_defaults: std::collections::HashMap::new(),
+            struct_init_param_types: std::collections::HashMap::new(),
             global_var_types: std::collections::HashMap::new(),
             global_var_inits: std::collections::HashMap::new(),
             global_vars_used_in_fns: std::collections::HashSet::new(),
@@ -3106,6 +3113,16 @@ impl Transpiler {
                 .collect();
             if defaults.iter().any(|d| d.is_some()) {
                 self.struct_init_defaults.insert(s.name.clone(), defaults);
+            }
+            // Track this init's parameter types (mirrors the selection above: the last
+            // init in `s.inits` wins), so the positional-arg constructor-call path can
+            // look up each param's declared type and emit an implicit-alias clone for
+            // 'shared/'actor/'guard-qualified args instead of a bare move.
+            let param_types: Vec<Type> = init.params.iter()
+                .filter_map(|p| p.ty.clone())
+                .collect();
+            if param_types.len() == init.params.len() {
+                self.struct_init_param_types.insert(s.name.clone(), param_types);
             }
         }
         // Register concrete associated type definitions for `T.AssocName` resolution.

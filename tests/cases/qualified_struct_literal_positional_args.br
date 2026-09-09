@@ -1,0 +1,47 @@
+# Same underlying bug as `qualified_ctor_positional_args`, but for the OTHER positional-
+# args code path: a struct with NO custom init() body, so the transpiler emits a plain
+# struct literal (`Name { field: value, ... }`) instead of routing through `::new(args)`.
+# 'shared/'actor/'guard-qualified fields must still get an owned Arc::clone/Rc::clone at
+# each field position, not a bare borrow (`&x`) -- the field's declared type is an owned
+# `Arc<Mutex<T>>`/`Arc<RwLock<T>>`, not a reference. The source variable passed in must
+# also remain usable afterward (the implicit-alias guarantee from book.md).
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct Store:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+struct Holder:
+    let Counter'shared shared_c
+    let Counter'actor actor_c
+    let Store'guard guard_s
+
+let Counter'shared sc = Counter()
+mut Counter'actor ac = Counter()
+mut Store'guard gs = Store()
+
+ac.inc()
+gs.write(1)
+
+let h = Holder(sc, ac, gs)
+
+# sc/ac/gs must all still be usable here -- the struct literal must have cloned
+# (bumped the refcount), not moved them out.
+ac.inc()
+let cur = gs.read()
+gs.write(cur + 1)
+print ac.get()
+print gs.read()

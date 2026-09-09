@@ -430,6 +430,8 @@ transpile_test!(task_timeout);
 transpile_test!(select);
 transpile_test!(auto_ref_infer);
 transpile_test!(qualifiers_actor);
+transpile_test!(qualified_ctor_positional_args);
+transpile_test!(qualified_struct_literal_positional_args);
 transpile_test!(pipe);
 transpile_test!(inline_match);
 transpile_test!(supertraits);
@@ -971,3 +973,14 @@ transpile_test!(optional_let_throws_non_optional_return);
 // else-BODY, appending a spurious `Ok(())` right after the diverging
 // `panic!(...)` call. See `emit_guard` in `src/transpiler/emit_flow.rs`.
 transpile_test!(guard_let_else_panic_throws);
+// `init_bare_field_assign`: an init() body written entirely as bare
+// (non-`self.`-prefixed) field assignments (`c1 = a`) used to always miss
+// `emit_init`'s `all_self_assigns` fast-path check (which only recognized
+// explicit `self.field = expr`), falling into the "general case" that
+// zero-prefills every field via `Default::default()` — a hard compile
+// failure for struct-typed fields, since Boring structs don't implement
+// `Default`. See `emit_init` in `src/transpiler/emit_struct.rs`.
+transpile_test!(init_bare_field_assign);
+// `init_bare_field_assign_qualified`: same bug as `init_bare_field_assign`,
+// for 'shared/'actor/'guard-qualified fields assigned via bare names.
+transpile_test!(init_bare_field_assign_qualified);

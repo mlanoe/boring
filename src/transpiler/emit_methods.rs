@@ -3552,6 +3552,7 @@ impl Transpiler {
             user_defines_result: self.user_defines_result,
             struct_has_init_body: self.struct_has_init_body.clone(),
             struct_init_defaults: self.struct_init_defaults.clone(),
+            struct_init_param_types: self.struct_init_param_types.clone(),
             global_var_types: self.global_var_types.clone(),
             global_var_inits: self.global_var_inits.clone(),
             global_vars_used_in_fns: self.global_vars_used_in_fns.clone(),

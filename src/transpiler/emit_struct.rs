@@ -700,13 +700,40 @@ impl Transpiler {
             self.indent += 1;
             // Add init params to known_local_vars so bare param names don't resolve to self.field.
             for p in &init.params { self.known_local_vars.insert(p.name.clone()); }
-            // Check if the body consists entirely of `self.field = expr` assignments.
+            // A statement's assignment target counts as a "field assign" for the fast-path
+            // struct-literal codegen below when it's either `self.field = expr` OR a bare
+            // `field = expr` — per book.md, bare assignment to a field name inside a method
+            // implicitly means `self.field` (mirrors the read-side implicit-self resolution
+            // in `emit_expr`'s `ExprKind::Var` arm). Recognizing the bare form here lets this
+            // fast path cover the common init() style (`c1 = a` rather than `self.c1 = a`),
+            // which used to always fall into the "general case" below — one that zero-prefills
+            // every field via `Default::default()`, hard-failing to compile for any field
+            // whose type doesn't implement `Default` (virtually every Boring struct/enum, and
+            // 'actor/'guard-wrapped ones whose inner type doesn't either).
+            // A bare name only counts as a field assign if it isn't shadowed by an init
+            // param of the same name (already inserted into `known_local_vars` above).
+            let field_assign_name = |target: &Expr| -> Option<String> {
+                match &target.kind {
+                    ExprKind::Field(obj, field) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
+                        Some(field.clone())
+                    }
+                    ExprKind::Var(v) if !self.known_local_vars.contains(v.as_str())
+                        && fields.iter().any(|f| &f.name == v) =>
+                    {
+                        Some(v.clone())
+                    }
+                    _ => None,
+                }
+            };
+            // Check if the body consists entirely of field-assign statements (see above).
             // If so, emit a struct literal instead of using `self` directly.
             let all_self_assigns = init.body.iter().all(|stmt| {
-                matches!(stmt, Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. })
-                    if matches!(&e.kind, ExprKind::Assign(target, _)
-                        if matches!(&target.kind, ExprKind::Field(obj, _)
-                            if matches!(&obj.kind, ExprKind::Var(v) if v == "self"))))
+                match stmt {
+                    Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. }) => {
+                        matches!(&e.kind, ExprKind::Assign(target, _) if field_assign_name(target).is_some())
+                    }
+                    _ => false,
+                }
             });
             if all_self_assigns && !init.body.is_empty() {
                 // Collect field → value assignments in order.
@@ -718,7 +745,7 @@ impl Transpiler {
                         _ => continue,
                     };
                     if let ExprKind::Assign(target, value) = &e.kind {
-                        if let ExprKind::Field(_, field) = &target.kind {
+                        if let Some(field) = field_assign_name(target) {
                             let val_s = self.emit_expr(value);
                             field_vals.push((field.clone(), val_s));
                         }

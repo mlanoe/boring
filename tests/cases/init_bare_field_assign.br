@@ -1,0 +1,31 @@
+# emit_init's "general case" branch (used whenever an init() body isn't 100%
+# `self.field = expr` assignments) used to zero-prefill every struct field with
+# `Default::default()` before running the body — a hard compile failure
+# (E0277) for any field whose type doesn't implement Rust's `Default`, which
+# most Boring-declared structs don't. Bare (non-`self.`-prefixed) field
+# assignment in an init() body — valid per book.md's implicit-self rule —
+# didn't count as a "self assign" for the fast-path struct-literal codegen,
+# so it always fell into that buggy general case. This covers the plain
+# (unqualified) struct-field case: `Holder`'s fields are themselves structs
+# with no `@derive(Default)` and no `Default` impl at all.
+
+struct Counter:
+    var int value = 0
+
+    req int get():
+        value
+
+struct Holder:
+    let Counter c1
+    let Counter c2
+
+    init(Counter a, Counter b):
+        c1 = a
+        c2 = b
+
+def main():
+    let c1 = Counter(1)
+    let c2 = Counter(2)
+    let h = Holder(c1, c2)
+    print h.c1.get()
+    print h.c2.get()

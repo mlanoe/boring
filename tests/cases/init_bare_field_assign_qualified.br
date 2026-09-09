@@ -1,0 +1,52 @@
+# Same "general case" zero-prefill bug as init_bare_field_assign.br, but for
+# 'shared/'actor/'guard-qualified struct fields assigned via bare (non-`self.`)
+# names in init() — a variant of qualified_ctor_positional_args.br with
+# `self.field = ...` replaced by bare `field = ...`. Before the fix, this fell
+# into the same buggy general case and failed to compile: `Rc<Counter>`/
+# `Arc<Mutex<Counter>>`/`Arc<RwLock<Store>>` only implement `Default` when
+# their inner type does, and neither `Counter` nor `Store` does.
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct Store:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+struct Holder:
+    let Counter'shared shared_c
+    let Counter'actor actor_c
+    let Store'guard guard_s
+
+    init(Counter'shared s, Counter'actor a, Store'guard g):
+        shared_c = s
+        actor_c = a
+        guard_s = g
+
+let Counter'shared sc = Counter()
+mut Counter'actor ac = Counter()
+mut Store'guard gs = Store()
+
+ac.inc()
+gs.write(1)
+
+let h = Holder(sc, ac, gs)
+
+# sc/ac/gs must all still be usable here — the constructor call must have cloned
+# (bumped the refcount), not moved them out.
+ac.inc()
+let cur = gs.read()
+gs.write(cur + 1)
+print ac.get()
+print gs.read()

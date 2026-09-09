@@ -1,0 +1,50 @@
+# Constructor-argument codegen for 'shared/'actor/'guard-qualified struct fields, on a
+# struct with a custom init() body, called with positional args (see book.md's implicit-
+# alias guarantee: "both bindings stay valid. No .clone() needed."). The source variable
+# passed into the constructor must remain usable afterward — the transpiler must emit
+# Arc::clone/Rc::clone at the call site, not a bare move.
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct Store:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+struct Holder:
+    let Counter'shared shared_c
+    let Counter'actor actor_c
+    let Store'guard guard_s
+
+    init(Counter'shared s, Counter'actor a, Store'guard g):
+        self.shared_c = s
+        self.actor_c = a
+        self.guard_s = g
+
+let Counter'shared sc = Counter()
+mut Counter'actor ac = Counter()
+mut Store'guard gs = Store()
+
+ac.inc()
+gs.write(1)
+
+let h = Holder(sc, ac, gs)
+
+# sc/ac/gs must all still be usable here — the constructor call must have cloned
+# (bumped the refcount), not moved them out.
+ac.inc()
+let cur = gs.read()
+gs.write(cur + 1)
+print ac.get()
+print gs.read()

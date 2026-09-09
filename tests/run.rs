@@ -598,3 +598,11 @@ interp_test!(optional_let_throws_non_optional_return);
 // `guard_let_else_panic_throws` for the transpiler-side real-compile
 // regression (`else` clause of `let...else` does not diverge, E0308).
 interp_test!(guard_let_else_panic_throws);
+
+// Bare (non-`self.`-prefixed) field assignment in init() — the interpreter
+// path (`boring run`) for these files, see tests/transpile.rs's
+// `init_bare_field_assign`/`init_bare_field_assign_qualified` for the
+// transpiler-side real-compile regression (`emit_init`'s general-case
+// zero-prefill emitting `Default::default()` for non-`Default` field types).
+interp_test!(init_bare_field_assign);
+interp_test!(init_bare_field_assign_qualified);

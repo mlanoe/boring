@@ -3713,8 +3713,40 @@ impl Transpiler {
             // set computed fields (e.g. `self.area = 3.14 * r * r`) that can't be in a literal.
             if self.struct_has_init_body.contains(name) {
                 // Fill in default args for any omitted trailing params.
+                // Use the init's declared param types (when known and matching in count)
+                // so a 'shared/'actor/'guard-qualified arg emits an implicit-alias clone
+                // (Arc::clone/Rc::clone) instead of a bare move — matching the plain `let`
+                // assignment case. Fall back to the plain, type-unaware emit_expr when
+                // there's no entry or the arity doesn't line up, rather than risk a wrong
+                // pairing.
+                //
+                // 'actor/'guard params get special handling: `emit_init` (emit_struct.rs)
+                // emits a body-init's ::new() signature via plain `emit_type`, which — unlike
+                // `emit_param`'s regular-function convention — does NOT borrow (`&Arc<Mutex<T>>`)
+                // 'actor/'guard params; it takes them by value (`Arc<Mutex<T>>`), same as
+                // 'shared. So the general `emit_let_value` dispatcher (which assumes the
+                // by-reference function-parameter convention for these two qualifiers) would
+                // emit a bare `&x` here — a type mismatch against the by-value signature.
+                // Route through `emit_let_value_arc_qualified` instead, which produces the
+                // owned `Arc::clone`/`Rc::clone` alias matching what's actually emitted.
+                let param_types = self.struct_init_param_types.get(name);
                 let mut all_args: Vec<String> = args.iter()
-                    .map(|a| self.emit_expr(&a.value))
+                    .enumerate()
+                    .map(|(i, a)| {
+                        match param_types {
+                            // `args` may be shorter than the full param list (trailing
+                            // params filled from defaults below) but never longer.
+                            Some(tys) if tys.len() >= args.len() => {
+                                let ty = &tys[i];
+                                if Self::is_arc_qualified(ty) {
+                                    self.emit_let_value_arc_qualified(ty, &a.value)
+                                } else {
+                                    self.emit_let_value(Some(ty), &a.value)
+                                }
+                            }
+                            _ => self.emit_expr(&a.value),
+                        }
+                    })
                     .collect();
                 if let Some(defaults) = self.struct_init_defaults.get(name).cloned() {
                     for def in defaults.iter().skip(all_args.len()).flatten() {
@@ -3744,13 +3776,26 @@ impl Transpiler {
                                 } else { &a.value }
                             } else { &a.value };
                             let rec_key = format!("{}::{}", name, fname);
+                            // 'actor/'guard fields: `emit_let_value`'s dispatch for these two
+                            // qualifiers assumes the by-reference function-parameter calling
+                            // convention (`&Arc<Mutex<T>>`, matching `emit_param`) — appropriate
+                            // for a call argument, but wrong here: a struct literal field needs
+                            // an owned `Arc<Mutex<T>>`/`Arc<RwLock<T>>` value, not a borrow.
+                            // Route through `emit_let_value_arc_qualified` instead, same fix as
+                            // the `struct_has_init_body` ::new(args) branch above.
                             let val = if self.recursive_fields.contains(&rec_key) {
-                                let raw = self.emit_let_value(Some(fty), effective_value);
+                                let raw = if Self::is_arc_qualified(fty) {
+                                    self.emit_let_value_arc_qualified(fty, effective_value)
+                                } else {
+                                    self.emit_let_value(Some(fty), effective_value)
+                                };
                                 if matches!(fty, Type::Optional(_)) {
                                     format!("{}.map(Box::new)", raw)
                                 } else {
                                     format!("Box::new({})", raw)
                                 }
+                            } else if Self::is_arc_qualified(fty) {
+                                self.emit_let_value_arc_qualified(fty, effective_value)
                             } else {
                                 self.emit_let_value(Some(fty), effective_value)
                             };
