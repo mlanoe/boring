@@ -612,8 +612,13 @@ let _result = u?.name else "anonymous"
 // ─── Ownership tests ─────────────────────────────────────────────────────
 
 #[test]
-fn test_owned_param_invalidates_source() {
-    // After passing a value to an owned param, the source variable must be gone
+fn test_owned_param_plain_call_does_not_invalidate_source() {
+    // A plain function call to an `'owned` parameter is NOT a move — it matches
+    // the transpiler, which clones the box at the call site (`bump(ac.clone())`)
+    // unless the parameter is also `mut`/`var`, and even then never actually
+    // moves it (see `tests/cases/owned_call_arg_no_double_box.br` and the
+    // matching NOTE in `eval_expr.rs`'s `eval_expr_call`). The source variable
+    // must stay usable afterward — this used to be wrongly invalidated.
     let src = r#"
 struct Dog:
     string name
@@ -625,12 +630,14 @@ let _r = pet(d)
 let _use_after = d
 "#;
     let (_, res) = run(src);
-    assert!(res.is_err(), "using a moved variable should fail");
+    res.expect("using the source variable again after a plain owned-param call should succeed");
 }
 
 #[test]
-fn test_double_use_same_call_errors() {
-    // Same variable passed twice to owned params → error
+fn test_double_use_same_call_does_not_error() {
+    // Passing the same variable to two `'owned` positions in one plain call is
+    // not a move conflict — the transpiler clones each position independently
+    // (`combine(ac.clone(), ac.clone())`), so this must not error either.
     let src = r#"
 struct Dog:
     string name
@@ -641,7 +648,7 @@ let d = Dog("Rex")
 let _r = feed(d, d)
 "#;
     let (_, res) = run(src);
-    assert!(res.is_err(), "double-move in same call should fail");
+    res.expect("passing the same variable to two owned params in one call should succeed");
 }
 
 #[test]

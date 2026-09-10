@@ -560,19 +560,22 @@ impl Interpreter {
                 return self.eval_kernel_launch_with_val(config, callee, block_val, line, &env);
             }
         }
-        // Check for double-use of owned args before evaluating
-        if let Value::Fn { ref decl, .. } = callee {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for (param, arg) in decl.params.iter().zip(args.iter()) {
-                if param.owned {
-                    if let ExprKind::Var(name) = &arg.value.kind {
-                        if !seen.insert(name.clone()) {
-                            return Err(err(format!("'{}' moved twice in the same call", name), line));
-                        }
-                    }
-                }
-            }
-        }
+        // NOTE: a plain function call to an `'owned` parameter is deliberately NOT
+        // treated as a move here, even when `param.owned` is set — matching the
+        // transpiler exactly (see `src/checker/mod.rs`'s "Use-after-move:
+        // committed-`'owned` struct-constructor arguments" section header comment,
+        // and `tests/cases/owned_call_arg_no_double_box.br`). Confirmed against a
+        // clean `main` checkout: `boring build --emit-rust` always clones the box
+        // at a plain call site when the parameter isn't `mut`/`var`
+        // (`bump(ac.clone())`), and even a `mut`/`var` parameter never moves it —
+        // `mut` still clones (`bump(c.clone())`), `var` takes `&mut c` (a borrow,
+        // written back after the call, never consumed). So passing the same
+        // variable to two `'owned` positions in one call (`combine(ac, ac)`)
+        // transpiles fine (`combine(ac.clone(), ac.clone())`) and is not an error;
+        // only a struct-constructor call that stores the argument into an `'owned`
+        // field is a genuine, exclusive move (that case isn't handled by this
+        // call-expression path at all — struct construction never reaches here as
+        // a `Value::Fn` callee).
         for arg in args.iter() {
             Self::check_no_owned_extract(&arg.value, &env, line)?;
         }
@@ -605,16 +608,9 @@ impl Interpreter {
                 }
             }
         }
-        // Invalidate owned param sources after successful call
-        if let Value::Fn { ref decl, .. } = callee {
-            for (param, arg) in decl.params.iter().zip(args.iter()) {
-                if param.owned {
-                    if let ExprKind::Var(name) = &arg.value.kind {
-                        env.borrow_mut().invalidate(name);
-                    }
-                }
-            }
-        }
+        // No `'owned`-param invalidation here — see the matching NOTE above
+        // `check_no_owned_extract`'s loop: a plain call never moves its argument,
+        // regardless of `mut`/`var`, so the caller's variable stays usable.
         Ok(result)
     }
 

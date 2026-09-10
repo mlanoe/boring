@@ -606,3 +606,15 @@ interp_test!(guard_let_else_panic_throws);
 // zero-prefill emitting `Default::default()` for non-`Default` field types).
 interp_test!(init_bare_field_assign);
 interp_test!(init_bare_field_assign_qualified);
+
+// A plain function call to an `'owned` parameter is not a move — the
+// interpreter (`boring run`) path for these files, see tests/transpile.rs's
+// `owned_call_arg_no_double_box`/`new_owned_no_double_or_missing_box` for the
+// transpiler-side regressions. `boring run` used to invalidate the caller's
+// variable after ANY call to a function with a matching `'owned` parameter
+// regardless of `mut`/`var` (`src/interpreter/eval_expr.rs`'s
+// `eval_expr_call`), so the second call in each of these files used to fail
+// with "undefined variable" instead of matching `boring build`'s clone
+// semantics (source stays usable, prints the same value twice).
+interp_test!(owned_call_arg_no_double_box);
+interp_test!(new_owned_no_double_or_missing_box);
