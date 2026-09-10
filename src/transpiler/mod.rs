@@ -847,6 +847,14 @@ struct Transpiler {
     /// bare move — mirrors `struct_init_defaults`'s "last init in `s.inits` wins" selection,
     /// populated at the same site for the same init.
     pub(crate) struct_init_param_types: std::collections::HashMap<String, Vec<Type>>,
+    /// struct_name → Vec<String> of the chosen init's parameter *names*, in declaration
+    /// order (same "last init in `s.inits` wins" selection as `struct_init_defaults`/
+    /// `struct_init_param_types`, populated at the same site). Consulted by the
+    /// `struct_has_init_body` **labeled**-arg constructor-call path so it can reorder
+    /// `Name(label = value, ...)` into the `::new(...)` positional order by matching each
+    /// label against the init's own parameter name — which is not guaranteed to match the
+    /// struct's field name (e.g. `init(a):  arr = a` — param `a`, field `arr`).
+    pub(crate) struct_init_param_names: std::collections::HashMap<String, Vec<String>>,
     /// Top-level mutable `var` declarations accessed inside function bodies.
     /// These can't be local to `main()` and must be emitted as module-level statics.
     /// Maps var_name → declared boring type (None = inferred as Arc<str>).
@@ -1356,6 +1364,7 @@ impl Transpiler {
             struct_has_init_body: std::collections::HashSet::new(),
             struct_init_defaults: std::collections::HashMap::new(),
             struct_init_param_types: std::collections::HashMap::new(),
+            struct_init_param_names: std::collections::HashMap::new(),
             global_var_types: std::collections::HashMap::new(),
             global_var_inits: std::collections::HashMap::new(),
             global_vars_used_in_fns: std::collections::HashSet::new(),
@@ -3124,6 +3133,10 @@ impl Transpiler {
             if param_types.len() == init.params.len() {
                 self.struct_init_param_types.insert(s.name.clone(), param_types);
             }
+            // Same selection, for param *names* — used to reorder labeled-arg constructor
+            // calls into the ::new(...) positional order (see field doc comment).
+            let param_names: Vec<String> = init.params.iter().map(|p| p.name.clone()).collect();
+            self.struct_init_param_names.insert(s.name.clone(), param_names);
         }
         // Register concrete associated type definitions for `T.AssocName` resolution.
         if !s.assoc_type_defs.is_empty() {

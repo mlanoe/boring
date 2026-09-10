@@ -984,3 +984,55 @@ transpile_test!(init_bare_field_assign);
 // `init_bare_field_assign_qualified`: same bug as `init_bare_field_assign`,
 // for 'shared/'actor/'guard-qualified fields assigned via bare names.
 transpile_test!(init_bare_field_assign_qualified);
+// `labeled_ctor_init_call`: a labeled-argument constructor call
+// (`Name(label = value, ...)`) on a struct whose init() has a body used to
+// always build a struct literal keyed by the *label*, ignoring
+// `struct_has_init_body` entirely — broken whenever an init param name
+// doesn't match the real field name (bogus nonexistent-field struct literal,
+// init() body never run), and also broken for out-of-declaration-order
+// labeled args. See `try_emit_labeled_init_call` in
+// `src/transpiler/emit_expr.rs`.
+transpile_test!(labeled_ctor_init_call);
+// `labeled_ctor_init_call_qualified`: same bug as `labeled_ctor_init_call`,
+// for a 'actor-qualified field constructed via a labeled arg whose init
+// param name differs from the field name.
+transpile_test!(labeled_ctor_init_call_qualified);
+// `owned_call_arg_no_double_box`: passing a `Counter'owned` (Box<Counter>)
+// variable to a plain function call re-wrapped it in a second
+// `Box::new(...)` — `bump(ac)` emitted `bump(Box::new(ac))`, a
+// `Box<Box<Counter>>` argument that doesn't type-check against `bump`'s
+// `Box<Counter>` parameter. The Box-wrap dispatch in `emit_let_value`
+// (`src/transpiler/emit_let.rs`) only looked at the target parameter's
+// `'owned`/`'new` qualifier, never at whether the source expression was
+// already boxed itself. Managed mode (`Arc<Mutex<T>>`) hits an unrelated,
+// pre-existing gap calling a method directly on a top-level managed-owned
+// variable (`ac.get()`) — see `ignore_managed`'s doc.
+transpile_test!(owned_call_arg_no_double_box, ignore_managed);
+// `owned_ctor_arg_no_double_box`: same double-`Box::new(...)` bug as
+// `owned_call_arg_no_double_box`, for a positional struct-constructor call
+// on a struct whose `init()` has a body (`Holder(ac)` → `Holder::new(...)`,
+// see `try_emit_labeled_init_call`'s sibling positional-arg path in
+// `src/transpiler/emit_expr.rs`) — emitted `Holder::new(Box::new(ac))`
+// before the fix.
+transpile_test!(owned_ctor_arg_no_double_box, ignore_managed);
+// `new_owned_no_double_or_missing_box`: two related `T'new` bugs. (1) Missing
+// wrap: `mut Counter'new ac = Counter(3)` emitted a bare `Counter { .. }`
+// initializer with no `Box::new(...)` against the (correctly-emitted)
+// `Box<Counter>` type annotation — a `mut`/`var mut` binding's type parses as
+// `Type::Mut(Qualified(Counter, New))`, and `emit_let_value`'s dispatch never
+// saw through the `Type::Mut` permission wrapper to find the `'owned`/`'new`
+// qualifier underneath (a plain `let` binding, with no `Type::Mut` wrapper,
+// was never affected). (2) Double wrap: passing the resulting `Box<Counter>`
+// to `bump` hit the same double-`Box::new(...)` bug as
+// `owned_call_arg_no_double_box`, via `'new`'s inference-to-`'owned`
+// fallback instead of an explicit `'owned` annotation.
+transpile_test!(new_owned_no_double_or_missing_box, ignore_managed);
+// `owned_operator_rhs_no_double_box`: same double-`Box::new(...)` bug as
+// `owned_call_arg_no_double_box`, for a struct operator method's rhs operand
+// (`a + b` → `a.clone().add(b.clone())`, see the `BinOp` struct-operator
+// dispatch in `src/transpiler/emit_expr.rs`) when the rhs is itself already
+// `'owned` — emitted `a.clone().add(Box::new(b.clone()))` before the fix.
+// Managed mode hits the same pre-existing gap as the other tests above (plus
+// a `Arc<Mutex<Box2>>`/`RefCell<Box2>` orphan-rule error from the operator
+// trait impls being generated for the wrapper type directly).
+transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);

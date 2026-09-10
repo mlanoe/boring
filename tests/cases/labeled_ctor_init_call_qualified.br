@@ -1,0 +1,34 @@
+# Same bug as labeled_ctor_init_call.br, for a 'actor-qualified field whose
+# init() parameter name differs from the field name (`a` vs `actor_c`). Before
+# the fix, `Holder(a = ac)` emitted a bogus struct literal
+# (`Holder { a: Arc::clone(&ac), actor_c: Arc::new(...) }`) — a nonexistent
+# `a` field plus a spurious wrong-default `actor_c` — never calling
+# `Holder::new(...)`.
+#
+# `ac` must still be usable after the constructor call (the labeled-arg path
+# must clone/alias it the same way the already-fixed positional-arg path
+# does, not move it out).
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct Holder:
+    let Counter'actor actor_c
+
+    init(Counter'actor a):
+        actor_c = a
+
+def main():
+    mut Counter'actor ac = Counter(0)
+    ac.inc()
+
+    let h = Holder(a = ac)
+
+    ac.inc()
+    print h.actor_c.get()

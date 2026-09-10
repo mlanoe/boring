@@ -1,0 +1,29 @@
+# Passing a variable that is already `'owned`-qualified (Rust `Box<T>`) into
+# a plain function call used to re-wrap it in an extra `Box::new(...)`:
+# `bump(ac)` (where `ac: Counter'owned`) emitted `bump(Box::new(ac))`, a
+# `Box<Box<Counter>>` argument that doesn't type-check against `bump`'s
+# `Box<Counter>` parameter (E0308) — the wrap decision only looked at the
+# target parameter's `'owned`/`'new` qualifier, never at whether the source
+# expression (`ac`) was already boxed itself.
+#
+# Boring's normal "no moves" value semantics still apply here: `bump`'s
+# parameter isn't `mut`/`var`, so the transpiler auto-clones the box
+# (`ac.clone()`) at the call site instead of moving it — `ac` must still be
+# usable afterward, same as any other struct-typed argument.
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+def bump(Counter'owned c):
+    print c.get()
+
+def main():
+    let Counter'owned ac = Counter(5)
+    bump(ac)
+    print ac.get()

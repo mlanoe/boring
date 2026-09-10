@@ -1,0 +1,11 @@
+struct Counter:
+    var int value = 0
+    def inc():
+        value += 1
+
+def bump(mut Counter'owned c):
+    c.inc()
+
+def main():
+    mut Counter'owned c = Counter(0)
+    bump(c)

@@ -1,0 +1,36 @@
+# Two related `T'new` (candidate-set qualifier, docs/book.md §"T'new") bugs,
+# both stemming from the Box-wrap decision not looking at the *actual*
+# representation of the value being emitted:
+#
+# 1. Missing wrap: `mut Counter'new ac = Counter(3)` used to emit
+#    `let mut ac: Box<Counter> = Counter { value: 3 };` — the declared type
+#    annotation was correctly `Box<Counter>` (mut) but the initializer was
+#    never wrapped in `Box::new(...)`, because a `mut`/`var mut` binding's
+#    type is parsed as `Type::Mut(Qualified(Counter, Owned/New))` and the
+#    Box-wrap dispatch didn't see through the `Type::Mut` permission wrapper
+#    to find the `'owned`/`'new` qualifier underneath. A plain `let` binding
+#    (no `Type::Mut` wrapper) was never affected.
+#
+# 2. Double wrap: once `ac` legitimately holds a `Box<Counter>` (inferred
+#    `'new` → `'owned`, same fallback per docs/book.md §8462), passing it to
+#    `bump` (a plain call) re-wrapped it in a second `Box::new(...)` — the
+#    same bug as owned_call_arg_no_double_box.br, exercised here via the
+#    `'new` inference path instead of an explicit `'owned` annotation.
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+def bump(Counter'owned c):
+    print c.get()
+
+def main():
+    mut Counter'new ac = Counter(3)
+    ac.inc()
+    bump(ac)
+    print ac.get()

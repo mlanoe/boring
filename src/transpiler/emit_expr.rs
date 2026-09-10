@@ -1713,8 +1713,15 @@ impl Transpiler {
                                 } else {
                                     format!("{}.clone()", rs_raw)
                                 };
-                                // In managed mode: wrap in Arc<Mutex<T>> or RefCell<T>.
-                                if self.is_managed_owned_user(pty) {
+                                // `r` may itself already be `'owned`/`'new` (e.g. `e3 == e3`
+                                // where `e3: Expr'owned`) — same double-`Box::new(...)` bug
+                                // as `emit_let_value`'s owned/new arm (see
+                                // `expr_already_owned_repr`'s doc): don't wrap an already-
+                                // boxed operand a second time, the cloned box is enough.
+                                if self.expr_already_owned_repr(r) {
+                                    clone_expr
+                                } else if self.is_managed_owned_user(pty) {
+                                    // In managed mode: wrap in Arc<Mutex<T>> or RefCell<T>.
                                     match self.config.threading {
                                         crate::transpiler::ThreadingMode::Multi =>
                                             format!("Arc::new(std::sync::Mutex::new({}))", clone_expr),
@@ -2406,9 +2413,7 @@ impl Transpiler {
                     && !self.var_rwlock_types.contains(v.as_str())
                     && !self.var_rwlock_task_types.contains(v.as_str())
                 {
-                    let struct_name = self.fn_current_params.get(v.as_str()).and_then(|ty| {
-                        if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
-                    });
+                    let struct_name = self.param_direct_struct_name(v.as_str());
                     if let Some(sn) = struct_name {
                         if self.struct_fields.contains_key(sn.as_str()) {
                             let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
@@ -3345,6 +3350,84 @@ impl Transpiler {
         result
     }
 
+    /// For a labeled-argument constructor call (`Name(label = value, ...)`) on a struct
+    /// whose init() has a body (`self.struct_has_init_body.contains(name)`), reorders the
+    /// labeled args into the init's declared parameter order and emits `Name::new(...)` —
+    /// same shape as the positional-arg branch of `emit_constructor_inner` below, which
+    /// already handles this correctly. A plain struct literal (`Name { label: value, ... }`)
+    /// is wrong here: it assumes each label already *is* the real field name — true only
+    /// when there's no custom init(), or the label happens to coincide with the field name
+    /// — and it skips the init() body's actual logic entirely (e.g. `init(a): arr = a`,
+    /// where the param is named `a` but the field is `arr`).
+    ///
+    /// Returns `None` (the caller falls back to its own struct-literal emission — today's
+    /// pre-existing, broken-for-this-case behavior) when reordering can't be done safely:
+    /// a label that doesn't match any init parameter name, a duplicate label, or a missing
+    /// required arg with no init-param default. Each of those pushes a transpile error via
+    /// `push_error` first, so the user gets a clear diagnostic rather than a silent bad
+    /// struct literal that merely fails to compile downstream.
+    fn try_emit_labeled_init_call(&self, name: &str, args: &[Arg]) -> Option<String> {
+        let param_names = self.struct_init_param_names.get(name)?;
+        let param_types = self.struct_init_param_types.get(name);
+        let defaults = self.struct_init_defaults.get(name);
+
+        // Map each provided label to its effective value expr, unwrapping the `|field| expr`
+        // closure-style labeled-arg form the same way the struct-literal path above does.
+        // A bare `_` (default_rest) carries no label of its own and is skipped — any param
+        // it was meant to cover is picked up via `defaults` below, same as everywhere else
+        // `struct_init_defaults` is consulted.
+        let mut by_label: std::collections::HashMap<&str, &Expr> = std::collections::HashMap::new();
+        for a in args {
+            if a.default_rest {
+                continue;
+            }
+            let label: &str = if let Some(l) = &a.label {
+                l.as_str()
+            } else if let ExprKind::Closure(params, _, _, _, _) = &a.value.kind {
+                if params.len() == 1 { params[0].name.as_str() } else { continue }
+            } else {
+                continue;
+            };
+            let eff_value: &Expr = if let ExprKind::Closure(_, _, body, _, _) = &a.value.kind {
+                if let ClosureBody::Expr(e) = body { e.as_ref() } else { &a.value }
+            } else {
+                &a.value
+            };
+            if !param_names.iter().any(|p| p == label) {
+                self.push_error(a.value.line, a.value.col, format!(
+                    "`{}(...)`: `{}` is not a parameter of {}'s init() — cannot construct via labeled argument",
+                    name, label, name));
+                return None;
+            }
+            if by_label.insert(label, eff_value).is_some() {
+                self.push_error(a.value.line, a.value.col, format!(
+                    "`{}(...)`: labeled argument `{}` given more than once", name, label));
+                return None;
+            }
+        }
+
+        let mut reordered: Vec<String> = Vec::with_capacity(param_names.len());
+        for (i, pname) in param_names.iter().enumerate() {
+            if let Some(val_expr) = by_label.get(pname.as_str()) {
+                let s = match param_types.and_then(|t| t.get(i)) {
+                    Some(ty) if Self::is_arc_qualified(ty) => self.emit_let_value_arc_qualified(ty, val_expr),
+                    Some(ty) => self.emit_let_value(Some(ty), val_expr),
+                    None => self.emit_expr(val_expr),
+                };
+                reordered.push(s);
+            } else if let Some(Some(def)) = defaults.and_then(|d| d.get(i)) {
+                reordered.push(def.clone());
+            } else {
+                let (line, col) = args.first().map(|a| (a.value.line, a.value.col)).unwrap_or((0, 0));
+                self.push_error(line, col, format!(
+                    "`{}(...)`: missing required labeled argument `{}` (no default value declared on {}'s init())",
+                    name, pname, name));
+                return None;
+            }
+        }
+        Some(format!("{}::new({})", name, reordered.join(", ")))
+    }
+
     pub(crate) fn emit_constructor_inner(&self, name: &str, args: &[Arg]) -> String {
         // Result constructors: `Ok(v)` / `Err(e)` are Rust built-ins, not struct types.
         if name == "Ok" || name == "Err" {
@@ -3508,6 +3591,17 @@ impl Transpiler {
             a.default_rest || a.label.is_some() || matches!(&a.value.kind, ExprKind::Closure(params, _, _, _, _) if params.len() == 1)
         });
         if all_labeled {
+            // Struct with a custom init() body: route labeled args through ::new(...) in
+            // the init's own parameter order, instead of building a struct literal keyed by
+            // label (which is only correct when there's no custom init(), or a label happens
+            // to already match the real field name — see `try_emit_labeled_init_call`'s doc).
+            if self.struct_has_init_body.contains(name) {
+                if let Some(call) = self.try_emit_labeled_init_call(name, args) {
+                    return call;
+                }
+                // Reordering failed (diagnostic already pushed) — fall through to the
+                // pre-existing struct-literal emission below as a best-effort fallback.
+            }
             let mut fields: Vec<String> = args.iter()
                 .filter(|a| !a.default_rest)
                 .map(|a| {

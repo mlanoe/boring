@@ -1,0 +1,22 @@
+# Same double-`Box::new(...)` bug as owned_call_arg_no_double_box.br, in a
+# third call-site shape: a struct operator method (`ext Box2: def add(...)`)
+# whose rhs parameter is itself `'owned`. `a + b` (both `Box2'owned`) dispatches
+# through `emit_expr.rs`'s `BinOp` struct-operator-method handling
+# (`a.clone().add(b.clone())`), which always wrapped the rhs operand in a
+# fresh `Box::new(...)` whenever the declared param type was `'owned`/`'new` —
+# `b` being *already* `Box<Box2>` produced `a.clone().add(Box::new(b.clone()))`,
+# a `Box<Box<Box2>>` argument that doesn't type-check against `add`'s
+# `Box<Box2>` parameter.
+
+struct Box2:
+    int n
+
+ext Box2:
+    def Box2'owned add(Box2'owned rhs):
+        return Box2(self.n + rhs.n)
+
+def main():
+    let Box2'owned a = Box2(3)
+    let Box2'owned b = Box2(4)
+    let c = a + b
+    print c.n

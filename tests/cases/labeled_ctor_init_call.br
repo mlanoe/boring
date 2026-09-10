@@ -1,0 +1,41 @@
+# A labeled-argument constructor call (`Name(label = value)`) on a struct
+# whose init() has a body used to always build a struct literal keyed by the
+# argument's *label* (`Name { label: value, ... }`), regardless of whether the
+# struct even has a field of that name — completely skipping the init() body's
+# real logic (arbitrary field assignment/computation) and, whenever an init
+# param name doesn't match the real field name, emitting a bogus struct
+# literal with a nonexistent field that doesn't compile at all.
+#
+# `Wrapper` here has init param `a` but field `arr` — the label `a` used to
+# get emitted as a nonexistent `arr: ...`... no, as `Wrapper { a: ... }`
+# (field `a` doesn't exist on Wrapper, only `arr` does).
+#
+# `Point` covers the reordering case: two labeled args given out of
+# declaration order (`y` before `x`), with param names (`x`/`y`) that also
+# differ from the real field names (`px`/`py`) — the fix must resolve each
+# label against the init()'s own parameter name (not the struct's field
+# name) and reorder into the init's declared parameter order before calling
+# `::new(...)`.
+
+struct Wrapper:
+    var [float] arr
+
+    init([float] a):
+        arr = a
+
+struct Point:
+    var int px
+    var int py
+
+    init(int x, int y):
+        px = x
+        py = y
+
+def main():
+    var ys = [1.0, 2.0, 3.0]
+    let w = Wrapper(a = ys)
+    print w.arr[0]
+
+    let p = Point(y = 20, x = 10)
+    print p.px
+    print p.py

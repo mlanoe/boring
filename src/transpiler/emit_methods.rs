@@ -2026,6 +2026,43 @@ impl Transpiler {
         self.emit_method_call_fallback(obj, method, args)
     }
 
+    /// Resolves the struct name for a parameter whose Rust binding is a *direct* value —
+    /// `T` or `Box<T>`, no `&`/`Arc<Mutex<_>>`/`Arc<RwLock<_>>` indirection — so the
+    /// "not declared `mut`" `def`-method/field-assign diagnostic applies to it the same
+    /// way it already does to a bare `Type::Named` param. Covers:
+    /// - `Type::Named(n)` — a bare struct param (pre-inference; auto-ref decides `&`/`&mut`
+    ///   later, but `emit_param` never adds `mut` on its own either way).
+    /// - `Type::Qualified(_, OwnerQual::Owned | OwnerQual::Inline)` — a committed `'owned`/
+    ///   `'inline` param. `emit_param` emits `Box<T>`/`T` with no `&`, gated on `p.mutable`
+    ///   the same as a bare param (see its doc: "`mut` is added only when explicitly
+    ///   declared in Boring... Struct params do NOT get `mut` automatically") — but until
+    ///   this fix, nothing here actually enforced that, so `boring build` "succeeded" and
+    ///   only `cargo build` on the emitted project caught the missing `mut` (rustc E0596).
+    /// - `Type::Qualified(_, OwnerQual::Union(_))` (`'new`) resolved by qualifier inference
+    ///   to `Owned`/`Inline` — same Rust shape once resolved, just not knowable until
+    ///   `infer_qualifiers` has run for this function (`emit_body` runs it before any
+    ///   statement is emitted, so `self.inferred_qualifiers` is already populated here).
+    ///   Any other resolution (`Shared`/`Actor`/`Guard`/a borrow/…) is intentionally excluded
+    ///   — those are references or go through their own dedicated mutation diagnostics
+    ///   (`try_emit_mutex_method`/`try_emit_rwlock_method`), not this direct-value contract.
+    pub(crate) fn param_direct_struct_name(&self, param_name: &str) -> Option<String> {
+        match self.fn_current_params.get(param_name)? {
+            crate::ast::Type::Named(n) => Some(n.clone()),
+            crate::ast::Type::Qualified(inner, crate::ast::OwnerQual::Owned | crate::ast::OwnerQual::Inline) => {
+                if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
+            }
+            crate::ast::Type::Qualified(inner, crate::ast::OwnerQual::Union(_)) => {
+                match self.inferred_qualifiers.get(param_name) {
+                    Some(crate::ast::OwnerQual::Owned) | Some(crate::ast::OwnerQual::Inline) => {
+                        if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// The generic method-call fallback, reached once every specialized dispatch above has
     /// declined: path receivers (`mpsc::channel`, `tokio::time::sleep`), the immutable-param
     /// `def`-method diagnostic, user-struct method-name/overload resolution, Boring→Rust
@@ -2112,9 +2149,7 @@ impl Transpiler {
                 && !self.var_rwlock_task_types.contains(v.as_str())
             {
                 // Check if the param's type is a known user struct and the method is `def` (not `req`).
-                let struct_name = self.fn_current_params.get(v.as_str()).and_then(|ty| {
-                    if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
-                });
+                let struct_name = self.param_direct_struct_name(v.as_str());
                 if let Some(sn) = struct_name {
                     // A struct always gets this check (unchanged); an enum only when it has
                     // at least one `mut`-qualified variant field — see this function's other
@@ -3553,6 +3588,7 @@ impl Transpiler {
             struct_has_init_body: self.struct_has_init_body.clone(),
             struct_init_defaults: self.struct_init_defaults.clone(),
             struct_init_param_types: self.struct_init_param_types.clone(),
+            struct_init_param_names: self.struct_init_param_names.clone(),
             global_var_types: self.global_var_types.clone(),
             global_var_inits: self.global_var_inits.clone(),
             global_vars_used_in_fns: self.global_vars_used_in_fns.clone(),

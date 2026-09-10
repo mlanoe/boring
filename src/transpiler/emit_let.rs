@@ -1565,12 +1565,80 @@ impl Transpiler {
         }
     }
 
+    /// True when `value`'s *own* emitted representation already matches what a
+    /// `T'owned`/`T'new` target slot expects (`Box<T>` in strict mode,
+    /// `Arc<Mutex<T>>`/`RefCell<T>` in managed mode — whichever `self.config.mode`
+    /// is active applies uniformly, so this doesn't need to re-check which one),
+    /// so wrapping it again (`Box::new(...)` / `wrap_managed(...)`) would double-box
+    /// it rather than move it. Two cases:
+    ///   - A variable (local or function parameter) declared, or inferred, `'owned`/
+    ///     `'new` — `arg_is_heap_var`, but only trusted when the variable's own type
+    ///     is itself qualified (`Type::Qualified`, e.g. an explicit `'owned`/`'new`
+    ///     suffix) or it's a function parameter. `arg_is_heap_var` also consults
+    ///     `inferred_qualifiers`, which — for a *bare*-typed (`Type::Named`, no
+    ///     qualifier at all) local — records the representation that would satisfy
+    ///     every call site without extra wrapping, NOT what its own `let` actually
+    ///     emits: `emit_let`'s bare-`Type::Named` path never applies that inference to
+    ///     box the local itself (only a parameter's signature gets boxed by inference,
+    ///     via `emit_param`'s `apply_inferred_qual`). Trusting it for a bare local
+    ///     produced a real regression: `let OItemB ii = OItemB(10); read_heap(ii)`
+    ///     (`read_heap`'s param is `OItemB'new`) resolved `inferred_qualifiers["ii"]`
+    ///     to `Owned` (the fallback that satisfies the `'new` call site), but `ii`
+    ///     itself stayed the plain, unboxed `OItemB` — skipping the `Box::new(...)`
+    ///     wrap here left a bare `OItemB` argument where `read_heap` needs `Box<OItemB>`.
+    ///     E.g. (the actually-fixed case) `let Counter'owned ac = Counter(0); bump(ac)`
+    ///     — `ac`'s own type IS qualified, so it's trusted: `ac` is already
+    ///     `Box<Counter>`, and re-wrapping the call argument produced
+    ///     `bump(Box::new(ac))`, a `Box<Box<Counter>>` that doesn't compile (E0308)
+    ///     against `bump`'s `Box<Counter>` parameter.
+    ///   - A call to a function whose *declared return type* is concretely `'owned`
+    ///     (not the still-unresolved `'new` candidate set, for the same reason as
+    ///     above — untested whether a `'new`-returning function's inferred
+    ///     resolution actually lands on `Owned`) — its Rust return type is already
+    ///     boxed even though the call-site text is just `fn_name(args)`, not a
+    ///     literal `Box::new(...)` (that string shape is checked separately by the
+    ///     `Box::new(` prefix check at each call site below, which this deliberately
+    ///     doesn't duplicate).
+    pub(crate) fn expr_already_owned_repr(&self, value: &Expr) -> bool {
+        if let ExprKind::Var(v) = &value.kind {
+            let has_qualified_own_type = matches!(
+                self.var_types.get(v.as_str()).map(Type::without_mut),
+                Some(Type::Qualified(_, _))
+            );
+            let is_param = self.fn_current_params.contains_key(v.as_str());
+            if (has_qualified_own_type || is_param) && self.arg_is_heap_var(value) {
+                return true;
+            }
+        }
+        if let ExprKind::Call(callee, _) = &value.kind {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                if let Some(ret_ty) = self.fn_return_types.get(fn_name.as_str()) {
+                    return matches!(ret_ty.without_mut(), Type::Qualified(_, OwnerQual::Owned));
+                }
+            }
+        }
+        false
+    }
+
     pub(crate) fn emit_let_value(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
         // Implicit Arc::clone for auto-ref parameters assigned to an owned context.
         // e.g. `counter = c` where `c: Counter'actor` (emitted as &Arc<Mutex<Counter>>)
         // and `counter` expects an owned Arc<Mutex<Counter>>.
         // Note: T'actor/'shared/'guard params are now by-value (owned clones at call site).
         // The regular emit_let_value coercion paths below handle Rc::clone/Arc::clone correctly.
+        // Strip a `Type::Mut` wrapper (the `mut Type`/bare-`mut` binding-keyword permission
+        // marker — see its doc) before dispatching on shape: it carries no distinct Rust
+        // representation of its own, so every arm below (Optional, Qualified/'owned+'new,
+        // arc-qualified, etc.) needs to see straight through it exactly like `without_mut()`'s
+        // own doc instructs every non-checker consumer to. Without this, `mut Counter'owned c
+        // = Counter(0)` (declared_ty = `Mut(Qualified(Counter, Owned))`) never matched the
+        // `q.is_owned_or_new()` arm below at all — it fell through to the generic fallback,
+        // which emits the bare struct literal with no `Box::new(...)` wrap, producing a
+        // `Counter` where `Box<Counter>` is required (E0308) despite the emitted type
+        // annotation itself (via `emit_type`, which already calls `without_mut()`) being the
+        // correct `Box<Counter>`. A plain `let Counter'owned c = ...` (no `Type::Mut` wrapper)
+        // was never affected — only `mut`/`var mut` bindings were.
+        let declared_ty = declared_ty.map(Type::without_mut);
         // Resolve named type aliases through non_fn_type_aliases before dispatching.
         // e.g. `use Pt as LPoint'` makes `Pt` an alias for `Box<LPoint>`;
         // when calling `describe(p)` where describe expects `Pt`, we must Box::new() the arg.
@@ -1908,17 +1976,23 @@ impl Transpiler {
                 }
             }
             // T'owned (Box<T> in strict, Arc<Mutex<T>>/RefCell<T> in managed) or T'new: wrap accordingly.
+            // `already_owned` catches a source expression whose *own* representation is
+            // already boxed (an 'owned/'new-typed variable or param, or a call to a fn
+            // that already returns one) — see `expr_already_owned_repr`'s doc for why
+            // wrapping that again would double-box it instead of just moving it.
             Some(ty @ Type::Qualified(_, q)) if q.is_owned_or_new() => {
                 let inner = self.emit_expr(value);
+                let already_owned = self.expr_already_owned_repr(value);
                 if self.is_managed_owned_user(ty) {
-                    if inner.starts_with("Arc::new(std::sync::Mutex::new(")
+                    if already_owned
+                        || inner.starts_with("Arc::new(std::sync::Mutex::new(")
                         || inner.starts_with("RefCell::new(")
                     {
                         inner
                     } else {
                         self.wrap_managed(&inner)
                     }
-                } else if inner.starts_with("Box::new(") {
+                } else if already_owned || inner.starts_with("Box::new(") {
                     inner
                 } else {
                     format!("Box::new({})", inner)

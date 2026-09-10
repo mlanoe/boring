@@ -1,0 +1,31 @@
+# Same double-`Box::new(...)` bug as owned_call_arg_no_double_box.br, for a
+# positional struct-constructor call on a struct whose `init()` has a body
+# (routed through `Name::new(...)`, not a struct literal — see
+# labeled_ctor_init_call.br). `Holder(ac)` where `ac: Counter'owned` used to
+# emit `Holder::new(Box::new(ac))` — a `Box<Box<Counter>>` argument that
+# doesn't type-check against `init`'s `Counter'owned` (`Box<Counter>`)
+# parameter.
+#
+# Unlike the plain-function-call case, this path moves `ac` into the
+# constructor rather than cloning it (an `'owned` value has exactly one
+# owner) — `ac` is not read again after the call.
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct Holder:
+    var Counter'owned oc
+
+    init(Counter'owned c):
+        oc = c
+
+def main():
+    let Counter'owned ac = Counter(7)
+    let h = Holder(ac)
+    print h.oc.get()
