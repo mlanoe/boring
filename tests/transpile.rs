@@ -1036,3 +1036,51 @@ transpile_test!(new_owned_no_double_or_missing_box, ignore_managed);
 // a `Arc<Mutex<Box2>>`/`RefCell<Box2>` orphan-rule error from the operator
 // trait impls being generated for the wrapper type directly).
 transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);
+
+// ── Strict-mode size-based return-type auto-boxing (docs/transpilation-modes.md
+//    "Size-based auto-boxing") ────────────────────────────────────────────────
+//
+// A function with a BARE (unqualified) return type naming a struct larger than
+// `--inline-auto-bytes` (default 256) gets its signature silently size-boxed to
+// `Box<T>` by `emit_type`'s "Priority 6" (`emit_named_type` in
+// src/transpiler/emit_top.rs) — but before this fix, that decision only ever
+// touched the rendered *type string*, never the value-producing side, so the
+// body stayed an unwrapped `T` where `Box<T>` was declared (E0308).
+// `promote_bare_return_ty` (src/transpiler/emit_top.rs) now rewrites the return
+// type itself to `Type::Qualified(_, OwnerQual::Owned)` up front so every
+// existing `'owned`-aware return/tail-expression/constructor code path already
+// used for an explicit `T'owned` annotation applies here too.
+transpile_test!(oversized_return_boxed_direct);
+// Companion case: the constructor is bound to a local first and returned via a
+// bare tail variable (`let b = Big(...); b`). This also depends on a second,
+// closely-related fix in `compute_let_ty_and_value` (src/transpiler/emit_let.rs):
+// a bare local's own size-inferred `'owned` qualifier (Priority 5, a separate,
+// pre-existing mechanism — docs/qualifiers.md) previously only ever changed its
+// *annotation*, never its *value*, so `b`'s own `let` was already broken before
+// it even reached the return. Managed mode variants now un-ignored: `resolve_fallback`
+// (src/transpiler/infer_qualifiers.rs) no longer applies this size-based fallback at
+// all in managed mode (size-based auto-boxing is strict-mode-only per
+// docs/transpilation-modes.md), so `b` stays plain `Big`/inline there, matching the
+// function's own unpromoted managed-mode return type — see the `.br` file's own doc
+// comment and docs/qualifiers.md's now-closed "Managed mode and a bare oversized local
+// variable" section for the previously-open gap this closes.
+transpile_test!(oversized_return_boxed_via_let);
+// Contrast case: a struct SMALLER than the threshold must never be size-boxed,
+// in either return shape — guards `promote_bare_return_ty`/the
+// `compute_let_ty_and_value` fix against firing unconditionally.
+transpile_test!(oversized_return_small_stays_unboxed);
+// Sibling case: a bare oversized struct used as a STRUCT FIELD must stay
+// completely unaffected (a separate, already-correct suppression mechanism,
+// `emit_field_type`) — pins that down against a future regression. Managed mode
+// variants now un-ignored — see the `.br` file's own doc comment for why the same
+// `resolve_fallback` mode-awareness fix above also closes this sibling gap.
+transpile_test!(oversized_struct_field_stays_inline);
+// Sibling case (previously out-of-scope bug, tracked separately — see
+// oversized_struct_field_stays_inline.br's header comment): a bare oversized
+// struct used as a free-function PARAMETER with no other usage signal must
+// auto-ref to a plain `&T`/`&mut T` (docs/book.md ch. 30's "universal borrow"
+// pre-fallback), not `&Box<T>`/`&mut Box<T>` — `emit_type`'s
+// `OwnerQual::Borrow`/`OwnerQual::BorrowMut` branches now suppress Priority 6
+// on their `Named` inner the same way the `OwnerQual::Owned` branch already
+// did (src/transpiler/emit_top.rs).
+transpile_test!(oversized_param_borrow_stays_unboxed);

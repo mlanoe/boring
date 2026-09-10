@@ -1,0 +1,98 @@
+# Regression guard for a real pre-existing transpiler bug: a bare (unqualified)
+# free-function parameter whose type is a struct larger than
+# `--inline-auto-bytes` (default 256 bytes), with no other usage signal to
+# narrow its qualifier, resolves via the "universal borrow" pre-fallback
+# (docs/book.md ch. 30 "Universal borrow as inference output";
+# src/transpiler/infer_qualifiers.rs's `auto_ref_param_vars` +
+# `OwnerQual::Borrow`/`BorrowMut`) to a plain `&T`/`&mut T` — this borrow
+# resolution happens BEFORE the size-based (Priority 6) auto-boxing fallback
+# chain even runs.
+#
+# The rendered Rust signature used to come out as `&Box<T>`/`&mut Box<T>`
+# instead, while call sites still passed a plain `&T`/`&mut T` struct literal
+# reference — a real `error[E0308]: mismatched types`. Root cause: `emit_type`
+# (src/transpiler/emit_top.rs)'s `OwnerQual::Borrow`/`OwnerQual::BorrowMut`
+# rendering branches recursed into the inner `Named(T)` via a plain
+# `self.emit_type(inner)`, which re-triggers Priority 6 size-based auto-boxing
+# a second time on top of an already-decided borrow — the same
+# double-application-of-Priority-6 bug class already fixed for the `'owned`
+# qualifier's own branch (see oversized_return_boxed_direct.br/
+# oversized_struct_field_stays_inline.br's header comment, which flagged this
+# exact bug as out of scope there and tracked it separately). Confirmed
+# present even in the original, pre-existing binary — fully independent of
+# that earlier fix.
+#
+# Fixed by mirroring the `'owned` branch's `suppress_size_box` handling: a
+# bare `Named` inner under `Borrow`/`BorrowMut` now goes through
+# `emit_named_type(n, /* suppress_size_box */ true)` instead of a plain
+# recursive `self.emit_type(inner)` call.
+#
+# Covers both the immutable (`Borrow` → `&T`, `sumFirstTwo`) and mutable
+# (`BorrowMut` → `&mut T`, `setFirstField`) cases — both branches had the
+# identical bug. `setFirstField` mutates via a `def` method call
+# (`b.setF0(...)`), not a direct field reassignment (`b.f0 = ...`) — the
+# latter is a distinct usage signal that demands an `'owned` qualifier outright
+# (unrelated to this bug, see `auto_ref_infer.br`'s own case 2 for the same
+# method-call pattern used to reach plain `mut Counter&`/`BorrowMut`).
+# `Small` is the contrast case: a bare small-struct param was never affected
+# (well under the 256-byte threshold, Priority 6 never fires either way),
+# pinned here so a future change to this code path can't regress it.
+struct Big:
+    var int f0
+    int f1
+    int f2
+    int f3
+    int f4
+    int f5
+    int f6
+    int f7
+    int f8
+    int f9
+    int f10
+    int f11
+    int f12
+    int f13
+    int f14
+    int f15
+    int f16
+    int f17
+    int f18
+    int f19
+    int f20
+    int f21
+    int f22
+    int f23
+    int f24
+    int f25
+    int f26
+    int f27
+    int f28
+    int f29
+    int f30
+    int f31
+    int f32
+    int f33
+    int f34
+
+    def setF0(int v):
+        f0 = v
+
+struct Small:
+    int x
+    int y
+
+def int sumFirstTwo(Big b):
+    b.f0 + b.f1
+
+def setFirstField(mut Big b):
+    b.setF0(99)
+
+def int sumSmall(Small s):
+    s.x + s.y
+
+def main():
+    mut big = Big(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34)
+    print sumFirstTwo(big)
+    setFirstField(big)
+    print big.f0
+    print sumSmall(Small(10, 20))

@@ -249,6 +249,7 @@ impl Transpiler {
                         .copied();
                     if let Some(q) = resolve_fallback(
                         &remaining, false, type_size, self.config.inline_auto_bytes,
+                        self.config.mode == crate::transpiler::TranspileMode::Strict,
                     ) {
                         self.inferred_qualifiers.insert(var_name.clone(), q);
                     }
@@ -847,7 +848,10 @@ impl Transpiler {
                     let type_size = target_fields.get(field_name.as_str())
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))
                         .copied();
-                    match resolve_fallback(&remaining, true, type_size, self.config.inline_auto_bytes) {
+                    match resolve_fallback(
+                        &remaining, true, type_size, self.config.inline_auto_bytes,
+                        self.config.mode == crate::transpiler::TranspileMode::Strict,
+                    ) {
                         Some(q) => q,
                         None => continue,
                     }
@@ -1338,17 +1342,30 @@ fn all_qualifiers() -> Vec<OwnerQual> {
 /// 1. If `Inline` ∈ candidates:
 ///    - struct field (any binding) → `'inline` (bytes are part of parent allocation)
 ///    - local variable, sizeof(T) ≤ inline_auto_bytes → `'inline`
-///    - type too large → skip `'inline`, go to ordered chain
+///    - type too large, and size-based auto-boxing applies (`size_boxing_applies`,
+///      strict mode only — see `docs/transpilation-modes.md` "Size-based auto-boxing
+///      (strict mode only)") → skip `'inline`, go to ordered chain
+///    - type too large, but size-based auto-boxing does NOT apply (managed mode) →
+///      stay `'inline` regardless of size
 ///
 /// 2. Ordered chain: `'owned` > `'shared` > `'actor`(/`'actor'task`) > `'guard`(/`'guard'task`)
+///
+/// `size_boxing_applies` is `false` in `--mode managed`: that mode's own `'owned` →
+/// `Arc<Mutex<T>>`/`RefCell<T>` promotion is keyed on an explicit qualifier, never a bare
+/// name (see `promote_bare_return_ty`, `src/transpiler/emit_top.rs`), so a bare oversized
+/// local must stay `'inline` too — otherwise the local's own managed-wrapper type could
+/// disagree with a bare, unwrapped enclosing function return type (or an unwrapped bare
+/// constructor call initializing it), a real `cargo build` mismatch confirmed and documented
+/// in `docs/qualifiers.md` "Managed mode and a bare oversized local variable" before this fix.
 fn resolve_fallback(
     candidates: &[OwnerQual],
     is_struct_field: bool,
     type_size: Option<usize>,
     inline_auto_bytes: usize,
+    size_boxing_applies: bool,
 ) -> Option<OwnerQual> {
     let has = |q: &OwnerQual| candidates.iter().any(|c| quals_equal(c, q));
-    let fits = type_size.is_none_or(|s| s <= inline_auto_bytes);
+    let fits = !size_boxing_applies || type_size.is_none_or(|s| s <= inline_auto_bytes);
 
     // Ordered chain: 'owned > 'shared > 'actor(/'actor'task) > 'guard(/'guard'task).
     // The 'task variant is checked first at each slot so that it wins when it's the one

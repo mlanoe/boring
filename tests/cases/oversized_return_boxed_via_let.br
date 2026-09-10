@@ -1,0 +1,70 @@
+# Companion to oversized_return_boxed_direct.br: same size-based return-type
+# auto-boxing bug, but for a constructor bound to a local first and returned via
+# a bare tail variable (`let b = Big(...); b`) rather than a direct tail
+# constructor call. Before this fix this was WORSE than the direct case: the
+# local's own bare-oversized-type qualifier inference (Priority 5, a completely
+# separate, pre-existing mechanism — see docs/qualifiers.md) independently
+# resolved `b` to `'owned` too, but nothing ever re-derived the local's VALUE
+# against that inferred qualifier, so the generated code was doubly wrong: a
+# double-boxed annotation (`Box<Box<Big>>`) initialized from a bare, unboxed
+# struct literal. Confirmed via a real `cargo build` before the fix.
+#
+# managed mode is included too (all four mode/threading variants run — see
+# tests/transpile.rs). It used to be excluded: the local's qualifier inference
+# (`resolve_fallback`, src/transpiler/infer_qualifiers.rs) was size-based but
+# mode-independent, so it resolved a bare oversized local like `b` to a managed
+# wrapper (`Arc<Mutex<T>>`/`RefCell<T>`) even though size-based auto-boxing is
+# documented as strict-mode-only (docs/transpilation-modes.md "Size-based
+# auto-boxing (strict mode only)") — while the function's own signature render
+# (Priority 6, also strict-mode-only) never boxed a managed-mode return type at
+# all, producing a real `b.clone()` (`Arc<Mutex<Big>>`) vs. `-> Big` mismatch
+# (E0308), confirmed via a real `cargo build`. Fixed by making
+# `resolve_fallback` itself mode-aware: it now only applies the size-based
+# fallback in strict mode, so `b` stays plain, unboxed `Big` in managed mode —
+# matching the function's own unpromoted return type. See docs/qualifiers.md's
+# now-closed "Managed mode and a bare oversized local variable" section.
+struct Big:
+    int f0
+    int f1
+    int f2
+    int f3
+    int f4
+    int f5
+    int f6
+    int f7
+    int f8
+    int f9
+    int f10
+    int f11
+    int f12
+    int f13
+    int f14
+    int f15
+    int f16
+    int f17
+    int f18
+    int f19
+    int f20
+    int f21
+    int f22
+    int f23
+    int f24
+    int f25
+    int f26
+    int f27
+    int f28
+    int f29
+    int f30
+    int f31
+    int f32
+    int f33
+    int f34
+
+def Big make_via_let():
+    let b = Big(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34)
+    b
+
+def main():
+    let v = make_via_let()
+    print v.f0
+    print v.f34

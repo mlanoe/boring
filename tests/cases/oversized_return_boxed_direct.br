@@ -1,0 +1,56 @@
+# Real transpiler bug (strict mode, default): a function with a BARE (unqualified)
+# return type naming a struct larger than `--inline-auto-bytes` (default 256) gets
+# its SIGNATURE silently size-boxed to `Box<T>` by `emit_type`'s "Priority 6"
+# (docs/transpilation-modes.md "Size-based auto-boxing"), but — before this fix —
+# the tail-expression BODY stayed an unwrapped `T { ... }` struct literal, since
+# that size-based decision only ever touched `emit_type`'s string rendering, never
+# the value-producing side. Confirmed via a real `cargo build`:
+#   error[E0308]: mismatched types
+#   fn make_direct() -> Box<Big> { Big { f0: 0, ... } }  // expected Box<Big>, found Big
+#
+# `Big` here is 35 * 8 = 280 bytes (isize fields on a 64-bit target), safely over
+# the 256-byte default threshold regardless of platform int width quirks.
+struct Big:
+    int f0
+    int f1
+    int f2
+    int f3
+    int f4
+    int f5
+    int f6
+    int f7
+    int f8
+    int f9
+    int f10
+    int f11
+    int f12
+    int f13
+    int f14
+    int f15
+    int f16
+    int f17
+    int f18
+    int f19
+    int f20
+    int f21
+    int f22
+    int f23
+    int f24
+    int f25
+    int f26
+    int f27
+    int f28
+    int f29
+    int f30
+    int f31
+    int f32
+    int f33
+    int f34
+
+def Big make_direct():
+    Big(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34)
+
+def main():
+    let b = make_direct()
+    print b.f0
+    print b.f34

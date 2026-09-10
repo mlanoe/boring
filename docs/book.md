@@ -8461,6 +8461,19 @@ def process(Counter'mut c): # group — {Inline, Owned, Actor, Guard}
 
 If the body provides no narrowing signal, the fallback for bare `T` is size-based, for `T'new` is `'owned`, and for a group is the first member of the group.
 
+A function's own **return type**, when written bare, is a distinct case from a
+parameter or local variable: it has no per-use-site signal to narrow at all (a
+return position has exactly one "use" — the value flowing out), so this inference
+pass never runs on it directly. It still gets the same size-based fallback,
+applied separately: `promote_bare_return_ty` (`src/transpiler/emit_top.rs`)
+rewrites a bare return type naming a struct over `--inline-auto-bytes` (strict
+mode only) to `Type::Qualified(_, OwnerQual::Owned)` before the signature is
+rendered, so the emitted `Box<T>` return and the function's body (`return`
+statements, tail expressions, constructor calls) agree — see
+`docs/transpilation-modes.md`'s "Size-based auto-boxing" → "Function return
+types" for the full writeup, including the one known managed-mode gap it doesn't
+cover.
+
 ### Universal borrow as inference output
 
 When a bare parameter has no storage signal and no qualifier demand signal, the inference resolves to a **universal borrow** — `Counter&` or `mut Counter&` — as a pre-fallback step, before the size-based chain.
@@ -8487,6 +8500,8 @@ A **storage signal** (field assignment, task capture, return with ownership qual
 | `Counter c` | storage | concrete qualifier |
 
 The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a method parameter.
+
+**A universal borrow is never subject to size-based auto-boxing.** Because it resolves as a *pre-fallback*, before the size-based chain (`docs/transpilation-modes.md`'s "Size-based auto-boxing") even runs, a struct over `--inline-auto-bytes` still renders as a plain `&Counter`/`&mut Counter` when it resolves to a universal borrow — never `&Box<Counter>`/`&mut Box<Counter>`. (`emit_type`'s `OwnerQual::Borrow`/`OwnerQual::BorrowMut` rendering, `src/transpiler/emit_top.rs`, suppresses the size-based fallback on its `Named` inner the same way the `'owned` qualifier's own branch already does — see `tests/cases/oversized_param_borrow_stays_unboxed.br`.)
 
 ### Cross-function propagation
 

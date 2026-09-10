@@ -1,0 +1,25 @@
+# Contrast case for oversized_return_boxed_direct.br/oversized_return_boxed_via_let.br:
+# a struct SMALLER than `--inline-auto-bytes` (default 256) must never be
+# size-boxed at all — its bare return type stays a plain `T`, in both the direct
+# tail-constructor-call and let-then-tail-variable return shapes. Guards against a
+# regression that makes `promote_bare_return_ty` (src/transpiler/emit_top.rs) or the
+# `compute_let_ty_and_value` local-qualifier fix (src/transpiler/emit_let.rs) apply
+# unconditionally instead of only when the type is actually oversized.
+struct Small:
+    int a
+    int b
+
+def Small make_direct():
+    Small(1, 2)
+
+def Small make_via_let():
+    let s = Small(3, 4)
+    s
+
+def main():
+    let d = make_direct()
+    let v = make_via_let()
+    print d.a
+    print d.b
+    print v.a
+    print v.b

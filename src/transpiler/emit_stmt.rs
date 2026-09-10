@@ -545,8 +545,13 @@ impl Transpiler {
             }
         }).collect();
         let params_str = params.join(", ");
+        // See `promote_bare_return_ty`'s doc: a bare oversized return type is rewritten to
+        // `Type::Qualified(_, OwnerQual::Owned)` here (same as the top-level `emit_fn`
+        // signature path in emit_top.rs) so the closure body below agrees with the
+        // `Box<T>` signature this renders.
+        let promoted_return_ty = self.promote_bare_return_ty(f.return_ty.clone());
         // Return type annotation.
-        let ret_ty = f.return_ty.as_ref()
+        let ret_ty = promoted_return_ty.as_ref()
             .map(|t| format!(" -> {}", self.emit_type(t)))
             .unwrap_or_default();
         // Register this name as a local var so subsequent code can call it.
@@ -559,7 +564,7 @@ impl Transpiler {
         let prev_fn_return_ty = self.fn_return_ty.clone();
         let prev_fn_returns_void = self.fn_returns_void;
         self.in_throws = f.throws;
-        self.fn_return_ty = f.return_ty.clone();
+        self.fn_return_ty = promoted_return_ty;
         self.fn_returns_void = f.return_ty.is_none() || matches!(&f.return_ty, Some(Type::Void));
         let body_len = f.body.len();
         for (i, stmt) in f.body.iter().enumerate() {

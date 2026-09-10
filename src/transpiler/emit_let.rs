@@ -143,7 +143,16 @@ impl Transpiler {
     /// expression string for a `let`/`var` binding's RHS, plus whether it's a (mutable or
     /// immutable) `string` binding (literal or `string`-typed) — those need
     /// `Arc<str>`/`Rc<str>`, not `&str`. Read-only: emits nothing, mutates nothing.
-    fn compute_let_ty_and_value(&self, s: &LetStmt, s_value: &Expr) -> (String, String, bool, bool) {
+    ///
+    /// The trailing `Option<Type>` is `Some(qualified_ty)` exactly when a *bare* (no
+    /// explicit `s.ty`) local's inferred qualifier (Priority 5 below) required rewriting
+    /// both the annotation and the value against a real `Type::Qualified` — the caller
+    /// must record this as the binding's true type in `var_types` (it's the actual Rust
+    /// representation now, e.g. `Box<Big>`, not the bare `Big` the Boring source wrote),
+    /// or later call sites (`arg_is_heap_var`/`expr_already_owned_repr`) still see a bare
+    /// `Type::Named` and wrap the already-boxed value a second time (`Box::new(a)` where
+    /// `a` is already `Box<Small>`, a real E0308 confirmed via `cargo build`).
+    fn compute_let_ty_and_value(&self, s: &LetStmt, s_value: &Expr) -> (String, String, bool, bool, Option<Type>) {
         // A `string`-typed local must always be `Arc<str>`/`Rc<str>` — Boring's one
         // canonical representation for `string`, used everywhere else it appears
         // (function params, struct fields, explicitly-annotated locals). Without this,
@@ -165,7 +174,7 @@ impl Transpiler {
                 crate::transpiler::ThreadingMode::Single => ": Rc<str>",
                 crate::transpiler::ThreadingMode::Multi  => ": Arc<str>",
             };
-            return (str_ty_annotation.to_string(), self.emit_expr_owned(s_value), is_mutable_string_lit, is_mutable_string_ty);
+            return (str_ty_annotation.to_string(), self.emit_expr_owned(s_value), is_mutable_string_lit, is_mutable_string_ty, None);
         }
         let val = self.emit_let_value(s.ty.as_ref(), s_value);
         // Auto-clone: field accesses can't be moved out of a struct in Rust.
@@ -188,6 +197,12 @@ impl Transpiler {
         // Inferred T'weak binding (bare `d'weak`, no compound qualifier): if the value
         // is Arc::downgrade(...), the annotation must be std::sync::Weak (not rc::Weak).
         // Compound forms like `Resource'task'weak` are handled correctly by emit_type.
+        // Set below (Priority 5 branch) when a bare local's inferred qualifier requires
+        // re-deriving `val` against the resolved qualified type — see that branch's comment.
+        let mut val_override: Option<String> = None;
+        // Set alongside `val_override`: the resolved `Type::Qualified` the caller must
+        // record in `var_types` for this binding — see this function's doc comment.
+        let mut resolved_qualified_ty: Option<Type> = None;
         let ty = if let Some(ty) = s.ty.as_ref() {
             let is_bare_weak = matches!(ty,
                 Type::Qualified(inner, OwnerQual::Weak)
@@ -283,14 +298,33 @@ impl Transpiler {
                 let qualified_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(
                     &declared_ty, inferred_qual,
                 );
-                format!(": {}", self.emit_type(&qualified_ty))
+                let ty_ann = format!(": {}", self.emit_type(&qualified_ty));
+                // Re-derive `val` against the just-resolved qualified type instead of
+                // keeping the plain, no-type-hint value computed above (`s.ty` is `None`
+                // here — this is a bare, unqualified local — so the original
+                // `emit_let_value(s.ty.as_ref(), s_value)` call never saw a `Box<T>` (or
+                // `Rc<T>`/`Arc<Mutex<T>>`/etc.) target and emitted the raw constructor
+                // call unwrapped). Left alone, `ty_ann` here would declare e.g. `Box<Big>`
+                // while `val` stayed a bare `Big { ... }` literal — a real, confirmed
+                // E0308 (see docs/transpilation-modes.md "Size-based auto-boxing"): this
+                // hits for ANY inferred qualifier that needs wrapping, not just size-based
+                // `'owned`, since nothing downstream of `s.ty.is_none()` ever revisited
+                // `val` against the inference result before this fix. `emit_let_value`
+                // already knows how to wrap a constructor call for every qualified shape
+                // (Box::new for 'owned/'new, Rc::new/Arc::new for 'shared, the managed-mode
+                // Arc<Mutex<_>>/RefCell<_> wrap, etc.) and de-dupes an already-boxed/-wrapped
+                // inner value, so re-running it here is safe and cannot double-wrap.
+                val_override = Some(self.emit_let_value(Some(&qualified_ty), s_value));
+                resolved_qualified_ty = Some(qualified_ty);
+                ty_ann
             } else {
                 String::new()
             }
         } else {
             String::new()
         };
-        (ty, val, is_mutable_string_lit, is_mutable_string_ty)
+        let val = val_override.unwrap_or(val);
+        (ty, val, is_mutable_string_lit, is_mutable_string_ty, resolved_qualified_ty)
     }
 
     /// Classifies a `let`/`var` binding after its value/type-annotation strings have been
@@ -1227,7 +1261,15 @@ impl Transpiler {
         let forces_mut = s.ty.as_ref().is_some_and(Type::nested_slot_grants_mut);
         let kw = if s.binding.is_mutable() || forces_mut { "let mut" } else { "let" };
         let vis = if s.is_pub { "pub " } else { "" };
-        let (ty, val, is_mutable_string_lit, is_mutable_string_ty) = self.compute_let_ty_and_value(s, s_value);
+        let (ty, val, is_mutable_string_lit, is_mutable_string_ty, resolved_qualified_ty) =
+            self.compute_let_ty_and_value(s, s_value);
+        // A bare local whose inferred qualifier resolved to a real `Type::Qualified`
+        // (see `compute_let_ty_and_value`'s doc) — record it as this binding's true type
+        // so later call-site coercion (`arg_is_heap_var`/`expr_already_owned_repr`) knows
+        // the value is already wrapped (`Box<T>`/`Rc<T>`/etc.) and doesn't wrap it again.
+        if let Some(qualified_ty) = resolved_qualified_ty {
+            self.var_types.insert(s.name.clone(), qualified_ty);
+        }
         if self.track_let_metadata(s, s_value, &val, is_mutable_string_lit, is_mutable_string_ty) {
             return;
         }

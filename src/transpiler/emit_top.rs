@@ -761,12 +761,50 @@ impl Transpiler {
 
     // ── Functions ─────────────────────────────────────────────────────────────
 
+    /// A bare (unqualified) return type gets promoted to `Type::Qualified(_, OwnerQual::Owned)`
+    /// exactly when strict-mode size-based auto-boxing (`emit_named_type`'s Priority 6)
+    /// would render it as `Box<T>` anyway. Without this, that rendering decision lived
+    /// *only* inside `emit_type`, a pure string-rendering function with no way to also
+    /// tell the body emitter (`self.fn_return_ty`, `emit_constructor`, `emit_return`'s
+    /// explicit `return`, tail-expression handling) that the value itself must be
+    /// `Box::new(...)`-wrapped — so a function returning an oversized bare struct got a
+    /// `Box<T>` signature with an unwrapped `T` body (confirmed via a real `cargo build`:
+    /// `error[E0308]: mismatched types`, `expected Box<Big>, found Big`).
+    ///
+    /// Promoting the *type itself* (once, here) instead of teaching each return/tail-
+    /// expression call site a second, ad hoc box-wrap check means every one of those
+    /// existing `'owned`/`'new`-aware code paths — already correct for an explicit
+    /// `T'owned` annotation — now also fires for this bare, size-triggered case, and
+    /// signature/body can no longer disagree by construction.
+    ///
+    /// No-op for anything but a bare `Type::Named` naming an actual oversized struct/enum
+    /// present in `type_sizes`: a trait name is excluded (that return type is `impl Trait`,
+    /// a separate mechanism `compute_fn_return_type` below applies before this could ever
+    /// matter) and non-strict modes never populate this size-based path at all (managed
+    /// mode's own `'owned` → `Arc<Mutex<T>>`/`RefCell<T>` boxing is keyed on an explicit
+    /// qualifier, not a bare name — see `docs/transpilation-modes.md` "Size-based
+    /// auto-boxing").
+    pub(crate) fn promote_bare_return_ty(&self, ty: Option<Type>) -> Option<Type> {
+        match ty {
+            Some(Type::Named(n))
+                if self.config.mode == crate::transpiler::TranspileMode::Strict
+                    && !self.trait_method_names.contains_key(n.as_str())
+                    && self.type_sizes.get(n.as_str())
+                        .is_some_and(|&size| size > self.config.inline_auto_bytes) =>
+            {
+                Some(Type::Qualified(Box::new(Type::Named(n)), OwnerQual::Owned))
+            }
+            other => other,
+        }
+    }
+
     /// Computes a function's Rust return-type string: GPU-resident substitution
     /// (`BoringGpuArg<T>`, including the resident-tuple-slot variant), `impl Trait`
     /// for a return type that names a known trait, `throws` → `Result<T, Box<dyn Error>>`,
     /// and bare `Result` return-type inference (`Ok`/`Err` return-statement scan).
     fn compute_fn_return_type(&self, f: &FnDecl) -> String {
-        let base_ret = f.return_ty.as_ref()
+        let promoted_return_ty = self.promote_bare_return_ty(f.return_ty.clone());
+        let base_ret = promoted_return_ty.as_ref()
             .map(|t| {
                 // Interprocedural GPU residency (docs/scoped-access-blocks.md): an
                 // explicit `'gpu'unified`/`'gpu'global` return type means this
@@ -1548,7 +1586,11 @@ impl Transpiler {
         self.in_struct_method = self_ty.is_some();
         self.in_async  = is_async;
         let prev_fn_return_ty = self.fn_return_ty.clone();
-        self.fn_return_ty = f.return_ty.clone();
+        // See `promote_bare_return_ty`'s doc: a bare oversized return type is rewritten
+        // to `Type::Qualified(_, OwnerQual::Owned)` so the body emitted below (`return`
+        // statements, tail expressions, constructor calls) agrees with the `Box<T>`
+        // signature `compute_fn_return_type` already renders for it.
+        self.fn_return_ty = self.promote_bare_return_ty(f.return_ty.clone());
         let prev_fn_current_params = std::mem::take(&mut self.fn_current_params);
         self.fn_current_params = f.params.iter()
             .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
@@ -2892,6 +2934,47 @@ impl Transpiler {
         self.emit_type(ty)
     }
 
+    /// Body of `emit_type`'s `Type::Named` arm, factored out so the `'owned`/`'new`
+    /// qualified-type recursion below (`Type::Qualified(Type::Named(n), Owned)`) can
+    /// call it directly with `suppress_size_box: true` — that recursion already
+    /// committed to `Box<T>` from the qualifier itself, so re-running Priority 6 on
+    /// `n` here (the normal `emit_type` path, `suppress_size_box: false`) would
+    /// double-box an oversized `T` as `Box<Box<T>>`. See the call site's comment.
+    fn emit_named_type(&self, n: &str, suppress_size_box: bool) -> String {
+        // Const-encoded type arg `"$N:usize"` → emit just the name `N` at use sites.
+        if let Some(rest) = n.strip_prefix('$') {
+            if let Some((name, _)) = rest.split_once(':') {
+                return name.to_string();
+            }
+        }
+        // Expand function type aliases (e.g. `use Pure as req int(int)`) inline.
+        if let Some(fn_ty) = self.fn_type_aliases.get(n) {
+            return self.emit_type(&fn_ty.clone());
+        }
+        // Inside a trait impl block, associated type names must be qualified as `Self::Name`
+        // in return types / parameter types (bare names are not in scope in Rust impl blocks).
+        if self.current_trait_assoc_names.contains(n) {
+            return format!("Self::{}", n);
+        }
+        // Priority 4: `dyn Trait` positions — auto-box when T is a known trait name.
+        // Params use `impl Trait` (handled in emit_param before calling emit_type).
+        // Function return types use `impl Trait` (handled in emit_fn before calling emit_type).
+        // All other positions (struct fields, collections, etc.) → Box<dyn Trait>.
+        if self.trait_method_names.contains_key(n) {
+            return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
+        }
+        // Priority 6: size-based auto-boxing (strict mode only).
+        // If the type exceeds inline_auto_bytes, silently promote to Box<T>.
+        if !suppress_size_box && self.config.mode == crate::transpiler::TranspileMode::Strict {
+            if let Some(&size) = self.type_sizes.get(n) {
+                if size > self.config.inline_auto_bytes {
+                    return format!("Box<{}>", normalize_type_name(n, self.use_rc_str()));
+                }
+            }
+        }
+        normalize_type_name(n, self.use_rc_str())
+    }
+
     pub(crate) fn emit_type(&self, ty: &Type) -> String {
         match ty {
             Type::Int   => "isize".into(),
@@ -2912,40 +2995,7 @@ impl Transpiler {
             Type::Bool  => "bool".into(),
             Type::Nil | Type::Void => "()".into(),
             Type::Never => "!".into(),
-            Type::Named(n) => {
-                // Const-encoded type arg `"$N:usize"` → emit just the name `N` at use sites.
-                if let Some(rest) = n.strip_prefix('$') {
-                    if let Some((name, _)) = rest.split_once(':') {
-                        return name.to_string();
-                    }
-                }
-                // Expand function type aliases (e.g. `use Pure as req int(int)`) inline.
-                if let Some(fn_ty) = self.fn_type_aliases.get(n.as_str()) {
-                    return self.emit_type(&fn_ty.clone());
-                }
-                // Inside a trait impl block, associated type names must be qualified as `Self::Name`
-                // in return types / parameter types (bare names are not in scope in Rust impl blocks).
-                if self.current_trait_assoc_names.contains(n.as_str()) {
-                    return format!("Self::{}", n);
-                }
-                // Priority 4: `dyn Trait` positions — auto-box when T is a known trait name.
-                // Params use `impl Trait` (handled in emit_param before calling emit_type).
-                // Function return types use `impl Trait` (handled in emit_fn before calling emit_type).
-                // All other positions (struct fields, collections, etc.) → Box<dyn Trait>.
-                if self.trait_method_names.contains_key(n.as_str()) {
-                    return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
-                }
-                // Priority 6: size-based auto-boxing (strict mode only).
-                // If the type exceeds inline_auto_bytes, silently promote to Box<T>.
-                if self.config.mode == crate::transpiler::TranspileMode::Strict {
-                    if let Some(&size) = self.type_sizes.get(n.as_str()) {
-                        if size > self.config.inline_auto_bytes {
-                            return format!("Box<{}>", normalize_type_name(n, self.use_rc_str()));
-                        }
-                    }
-                }
-                normalize_type_name(n, self.use_rc_str())
-            }
+            Type::Named(n) => self.emit_named_type(n, false),
             Type::TypeParam(n) => n.clone(),
             Type::Optional(inner) => format!("Option<{}>", self.emit_type(inner)),
             Type::Array(inner)    => format!("Vec<{}>", self.emit_type(inner)),
@@ -3023,7 +3073,19 @@ impl Transpiler {
                     {
                         self.emit_managed_actor(inner)
                     } else if matches!(qual, OwnerQual::Owned) {
-                        format!("Box<{}>", self.emit_type(inner))
+                        // For a bare Named inner, go through `emit_named_type` with size-based
+                        // auto-boxing suppressed: this qualifier already committed to `Box<T>`,
+                        // so recursing through the ordinary `emit_type` path (which re-checks
+                        // Priority 6 on `inner` itself) would double-box an oversized `T` as
+                        // `Box<Box<T>>` — confirmed via a real `cargo build` on `T'owned` over
+                        // a >256-byte struct. Still routes through `emit_named_type` (not a bare
+                        // `normalize_type_name`, unlike the `'inline` arm below) so a trait name
+                        // or `$`-const/type-alias inner still gets its ordinary treatment.
+                        let inner_s = match inner.as_ref() {
+                            Type::Named(n) => self.emit_named_type(n, true),
+                            _ => self.emit_type(inner),
+                        };
+                        format!("Box<{}>", inner_s)
                     } else {
                         // T'inline: explicit inline — skip auto-boxing even if size > threshold.
                         match inner.as_ref() {
@@ -3088,9 +3150,32 @@ impl Transpiler {
                     if matches!(**inner, Type::Str)
                     || matches!(**inner, Type::Named(ref n) if n == "str" || n == "String")
                     { "&str".into() }
-                    else { format!("&{}", self.emit_type(inner)) }
+                    else {
+                        // For a bare Named inner, suppress size-based auto-boxing (Priority 6):
+                        // this qualifier already committed to a plain borrow (`&T`), so recursing
+                        // through the ordinary `emit_type` path (which re-checks Priority 6 on
+                        // `inner` itself) would render `&Box<T>` for an oversized `T` while call
+                        // sites still pass a plain `&T` — confirmed via a real `cargo build` on a
+                        // bare oversized-struct param with no other usage signal (auto-ref-inferred
+                        // to `Borrow`). Same double-application-of-Priority-6 class of bug already
+                        // fixed for `OwnerQual::Owned` above; mirrors that fix. A non-`Named` inner
+                        // (e.g. already `Qualified(_, Owned)` from an explicit `T'owned` that's also
+                        // borrowed) still goes through the ordinary `self.emit_type(inner)` path
+                        // below, unaffected — that recursion resolves its own qualifier correctly.
+                        let inner_s = match inner.as_ref() {
+                            Type::Named(n) => self.emit_named_type(n, true),
+                            _ => self.emit_type(inner),
+                        };
+                        format!("&{}", inner_s)
+                    }
                 }
-                OwnerQual::BorrowMut    => format!("&mut {}",    self.emit_type(inner)),
+                OwnerQual::BorrowMut    => {
+                    let inner_s = match inner.as_ref() {
+                        Type::Named(n) => self.emit_named_type(n, true),
+                        _ => self.emit_type(inner),
+                    };
+                    format!("&mut {}", inner_s)
+                }
                 OwnerQual::BorrowOwned  => format!("&Box<{}>",  self.emit_type(inner)),
                 OwnerQual::BorrowOption    => format!("&Option<{}>",     self.emit_type(inner)),
                 OwnerQual::BorrowOptionMut => format!("&mut Option<{}>", self.emit_type(inner)),

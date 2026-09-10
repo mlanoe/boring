@@ -797,6 +797,35 @@ This is a deliberate constraint, not a gap to fill later:
 
 **Expected pattern:** write explicit qualifier annotations on fields whose qualifier depends on external callers. The inference handles everything within a file automatically.
 
+### Managed mode and a bare oversized local variable (fixed)
+
+A bare (unqualified) local variable whose type is a struct larger than
+`--inline-auto-bytes` is resolved by the size-based fallback (see
+`docs/transpilation-modes.md` "Size-based auto-boxing (strict mode only)") —
+`resolve_fallback` (`src/transpiler/infer_qualifiers.rs`). This fallback used to
+not check `--mode` at all, so it resolved a bare oversized local to `'owned`
+regardless of mode; in `--mode managed`, `'owned` means `Arc<Mutex<T>>`/
+`RefCell<T>` rather than `Box<T>`. A function with a bare (also unqualified)
+return type of the same oversized struct does **not** get its signature promoted
+in managed mode (see "Function return types" in `docs/transpilation-modes.md` —
+managed mode's own promotion is keyed on an explicit qualifier), so a bare
+oversized local returned as a tail expression from such a function could end up
+managed-wrapped while the function's own signature stayed a plain, unwrapped `T`
+— a real `cargo build` `E0308` mismatch. The same root cause also broke a bare
+oversized local used only as a struct-field initializer inside `main()` (never
+returned at all): the local's own `let` got wrapped while its constructor-call
+initializer stayed bare and unwrapped.
+
+Fixed by making `resolve_fallback` itself mode-aware: size-based auto-boxing now
+only ever escalates a bare local past `'inline` in strict mode (matching the
+"strict mode only" scope size-based auto-boxing has always been documented
+with) — in managed mode a bare oversized local now stays plain, unboxed `T`
+regardless of size, agreeing by construction with the (also unpromoted)
+managed-mode function-return signature and with any bare, unwrapped constructor
+call that initializes it. See `tests/cases/oversized_return_boxed_via_let.br`
+and `tests/cases/oversized_struct_field_stays_inline.br` (both now run all four
+mode/threading variants in `tests/transpile.rs`, no `ignore_managed`).
+
 ---
 
 ## Implementation notes

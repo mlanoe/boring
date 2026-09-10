@@ -925,10 +925,15 @@ impl Transpiler {
             Some(Type::Named(n)) if n == "void" || n == "nil" => true,
             _ => false,
         };
+        // See `promote_bare_return_ty`'s doc: a bare oversized return type is rewritten to
+        // `Type::Qualified(_, OwnerQual::Owned)` here (consistently with the `emit_fn`
+        // signature path in emit_top.rs) so the body emitted below agrees with the
+        // `Box<T>` signature this renders.
+        let promoted_return_ty = self.promote_bare_return_ty(tm.return_ty.clone());
         let base_ret = if declared_void {
             "()".to_string()
         } else {
-            tm.return_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "()".into())
+            promoted_return_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "()".into())
         };
         // `throws`/`throws Type:` on a type-level method previously had NO effect on codegen
         // at all: no `Result<_, _>` wrapping here, so `throw` inside the body fell through to
@@ -960,7 +965,7 @@ impl Transpiler {
         self.in_throws = tm.throws;
         self.fn_returns_void = !tm.throws && declared_void;
         self.fn_declared_void = declared_void;
-        self.fn_return_ty = tm.return_ty.clone();
+        self.fn_return_ty = promoted_return_ty;
         // A type-level method's params were never fed into the per-function-body
         // local-variable bookkeeping `seed_param_locals` populates (emit_top.rs) --
         // unlike `emit_fn`, which does this for every regular function/instance method.

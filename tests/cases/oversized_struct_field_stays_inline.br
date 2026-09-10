@@ -1,0 +1,72 @@
+# Sibling-case regression guard for the return-type size-based auto-boxing fix
+# (oversized_return_boxed_direct.br/oversized_return_boxed_via_let.br): a bare
+# oversized struct used as a STRUCT FIELD must be completely unaffected by
+# size-based auto-boxing — fields already go through their own, separate,
+# correct mechanism (`emit_field_type`, src/transpiler/emit_top.rs, suppresses
+# it outright: "All bare-T struct fields are always inline in the parent
+# struct's allocation", docs/transpilation-modes.md "Size-based auto-boxing").
+# Already correct before this fix; this pins it down so a future change to
+# `emit_named_type`/`promote_bare_return_ty` can't regress it.
+#
+# (A sibling bare-oversized-PARAMETER case was also tried here, but turned up a
+# separate, pre-existing transpiler bug of its own — an auto-ref-inferred bare
+# param's Rust signature can render `&Box<T>` while the call site passes
+# `&T` — confirmed present even without any of this fix's changes, so it's out
+# of scope here and tracked separately rather than folded into this guard.)
+#
+# managed mode is included too (all four mode/threading variants run — see
+# tests/transpile.rs). It used to be excluded: `h` itself is a bare oversized
+# local (`Holder` is exactly as large as its inline `Big` field), and managed
+# mode's local-qualifier inference (`resolve_fallback`,
+# src/transpiler/infer_qualifiers.rs) used to resolve any bare oversized local
+# to a managed wrapper (`Arc<Mutex<T>>`/`RefCell<T>`) regardless of mode, even
+# though size-based auto-boxing is documented as strict-mode-only
+# (docs/transpilation-modes.md) — leaving `h`'s own `let` wrapped while its
+# initializer (`Holder(Big(...))`) stayed a bare, unwrapped constructor call
+# (E0308), confirmed via a real `cargo build` before the fix. Fixed by the same
+# `resolve_fallback` mode-awareness change as `oversized_return_boxed_via_let`:
+# `h` now stays plain, unboxed `Holder` in managed mode too.
+struct Big:
+    int f0
+    int f1
+    int f2
+    int f3
+    int f4
+    int f5
+    int f6
+    int f7
+    int f8
+    int f9
+    int f10
+    int f11
+    int f12
+    int f13
+    int f14
+    int f15
+    int f16
+    int f17
+    int f18
+    int f19
+    int f20
+    int f21
+    int f22
+    int f23
+    int f24
+    int f25
+    int f26
+    int f27
+    int f28
+    int f29
+    int f30
+    int f31
+    int f32
+    int f33
+    int f34
+
+struct Holder:
+    Big data
+
+def main():
+    let h = Holder(Big(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34))
+    print h.data.f0
+    print h.data.f34

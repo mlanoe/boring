@@ -204,6 +204,40 @@ struct Wrapper:
     let BigData'new backup    # T'new — always Box<BigData>, even on a let field
 ```
 
+### Function return types
+
+A bare (unqualified) function return type participates in this same size-based
+promotion — `def BigData make(): ...` renders its Rust signature as `-> Box<BigData>`
+exactly like a `BigData'owned` return would, with no explicit annotation needed. Unlike
+a local variable or struct field, a return type is never *explicitly* qualified through
+the normal qualifier-inference machinery (chapter 30) when written bare — there is no
+per-use-site signal to narrow, since a return position has exactly one "use" (the value
+flowing out). `promote_bare_return_ty` (`src/transpiler/emit_top.rs`) closes this by
+rewriting a bare oversized return type to `Type::Qualified(_, OwnerQual::Owned)` up
+front, before the signature is rendered and before the function body is transpiled —
+so every return path (an explicit `return expr`, a bare tail-expression constructor
+call, a `let`-bound local returned via a bare tail variable) goes through the same
+`Box::new(...)`-wrapping machinery already used for an explicit `T'owned` return, and
+the emitted signature and body can never disagree.
+
+A bare oversized local returned via a tail variable (`let b = BigData(...); b`, no
+`return` keyword) additionally depends on `compute_let_ty_and_value`
+(`src/transpiler/emit_let.rs`) re-deriving the local's *value* against its own
+size-inferred qualifier, not just its annotation — see that function's doc comment.
+
+This does **not** apply in `--mode managed`: managed mode's own `'owned` →
+`Arc<Mutex<T>>`/`RefCell<T>` promotion is keyed on an explicit qualifier, not a bare
+name, so a bare oversized return type is left untouched there. A bare oversized
+*local variable* (not a return type) is a separate case — it goes through the same
+size-based fallback chain (`resolve_fallback`, `src/transpiler/infer_qualifiers.rs`)
+that a return type's own qualifier would otherwise seed, and that fallback is now
+also mode-aware: it only escalates past `'inline` in strict mode, so in managed mode
+a bare oversized local stays plain, unboxed `T` too — agreeing with the (also
+unpromoted) enclosing function's return type instead of ending up managed-wrapped
+against it. (Previously this fallback didn't check the mode at all, which was a
+known, now-fixed gap — see `docs/qualifiers.md`'s "Managed mode and a bare oversized
+local variable" section and `tests/cases/oversized_return_boxed_via_let.br`.)
+
 ## Enum size warnings (strict mode only)
 
 ```
