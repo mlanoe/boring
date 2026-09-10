@@ -1,0 +1,22 @@
+# False-positive guard for the use-after-move check (see
+# error_owned_ctor_use_after_move.br): two DIFFERENT `'owned` local variables,
+# each moved into its own `Holder`, must never be flagged just because the two
+# constructor calls share the same target struct/field.
+
+struct Counter:
+    var int value = 0
+    req int get():
+        value
+
+struct Holder:
+    var Counter'owned oc
+    init(Counter'owned c):
+        oc = c
+
+def main():
+    let Counter'owned a = Counter(1)
+    let Counter'owned b = Counter(2)
+    let h1 = Holder(a)
+    let h2 = Holder(b)
+    print h1.oc.get()
+    print h2.oc.get()

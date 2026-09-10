@@ -1,0 +1,33 @@
+# Regression test: passing an already-`'owned`-moved local variable into a
+# SECOND struct-constructor call used to raise no Boring-level diagnostic at
+# all. `boring build --emit-rust` "succeeded" and emitted (roughly):
+#
+#   let ac: Box<Counter> = Box::new(Counter { value: 1 });
+#   let h1: Holder = Holder::new(ac);
+#   let h2: Holder = Holder::new(ac);   // moved again here
+#
+# which then failed `cargo build`/`rustc` with a raw E0382 ("use of moved
+# value: `ac`"), pointing at generated Rust the user never wrote rather than
+# the actual Boring source line. A struct-constructor call storing its
+# argument into an `'owned` field is a genuine, exclusive Rust move — unlike
+# a plain function call to an `'owned` parameter, which the transpiler clones
+# at the call site instead of moving (see tests/cases/owned_call_arg_no_double_box.br) —
+# so reusing `ac` after it was already moved into `h1` is a real error, caught
+# here at the Boring level instead of at the `rustc` step.
+
+struct Counter:
+    var int value = 0
+    req int get():
+        value
+
+struct Holder:
+    var Counter'owned oc
+    init(Counter'owned c):
+        oc = c
+
+def main():
+    let Counter'owned ac = Counter(1)
+    let h1 = Holder(ac)
+    let h2 = Holder(ac)
+    print h1.oc.get()
+    print h2.oc.get()

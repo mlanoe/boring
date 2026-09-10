@@ -145,6 +145,39 @@ struct Checker {
     /// `Type::LabeledArray`. See docs/array-multidim-proposal.md,
     /// "Cross-label compatibility between same-shape types".
     fn_param_types: HashMap<String, Vec<Option<Type>>>,
+    /// Struct name -> ordered `(param name, is-committed-'owned)` pairs for that
+    /// struct's constructor, used by the use-after-move check
+    /// (`check_move_read`/`owned_target_for_arg`) — see that section's header
+    /// comment for why *only* constructor calls (never a plain function call)
+    /// are a move source. Reuses the same "committed `'owned`" predicate
+    /// `Param.owned` uses (`Type::Qualified(_, OwnerQual::Owned)` exactly, never
+    /// `'new`). Sourced from the struct's own single `init(...)` when it has
+    /// exactly one (mirroring `kernel_init_field_for_param`'s
+    /// `decl.inits.first()` precedent), or from its field declarations in
+    /// declaration order when it has no explicit `init` at all (the implicit,
+    /// fully-positional constructor). A struct with more than one `init`
+    /// overload is skipped entirely — matching which overload a given call
+    /// resolves to needs real overload resolution this checker doesn't have;
+    /// no move-check for that struct's constructor calls at all, rather than
+    /// risk a false positive/negative from guessing.
+    struct_ctor_owned: HashMap<String, Vec<(String, bool)>>,
+    /// Use-after-move tracking for committed-`'owned` local variables
+    /// (`check_move_read`/`record_move`). One frame per scope, pushed/popped in
+    /// lockstep with `scopes` (see `push_scope`/`pop_scope`) — deliberately
+    /// scoped to "straight-line code within the same block" only: a nested block
+    /// (an `if`/`while`/`for`/... body, opened via `check_block`) gets its own
+    /// fresh, empty frame, so a move recorded before the nested block isn't
+    /// visible inside it, and a move recorded inside the nested block is
+    /// forgotten once it's popped back out. That's a real, documented gap for
+    /// conditional/loop control flow (a move down one `if` branch followed by a
+    /// reuse after the `if`, or a reuse on a second loop iteration, is not
+    /// caught) — full flow-sensitive analysis (tracking per-branch, merging at
+    /// join points) is out of scope for this first version; see
+    /// `check_move_read`'s doc for the concrete cases this does and doesn't
+    /// catch. This mirrors how `open_with_names` and the `scopes` stack
+    /// themselves are already block-structured, just narrower (top-frame-only
+    /// lookup, not `lookup`'s walk-every-enclosing-scope).
+    moved: Vec<HashMap<String, (usize, usize)>>,
     /// When `true`, every check EXCEPT `check_kernel_dispatch_qualifier` is silenced
     /// (the tree is still walked, to keep scope/binding tracking correct, but no
     /// other error is pushed). See `check_kernel_dispatch_only`'s doc for why this
@@ -185,6 +218,8 @@ impl Checker {
             fn_gpu_arg_params: HashMap::new(),
             fn_returns_resident_tuple: HashMap::new(),
             fn_param_types: HashMap::new(),
+            struct_ctor_owned: HashMap::new(),
+            moved: vec![HashMap::new()],
             kernel_dispatch_only: false,
             // Top-level `let`s are checked directly from `check_item`, never through
             // `check_fn` — this default is what makes them authorized without either
@@ -196,9 +231,18 @@ impl Checker {
 
     // ── Scope helpers ─────────────────────────────────────────────────────────
 
-    fn push_scope(&mut self) { self.scopes.push(HashMap::new()); }
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+        // Kept in lockstep with `scopes` — see `moved`'s own doc comment for why
+        // a nested block starts with a fresh, empty move-frame instead of
+        // inheriting (or writing back to) its parent's.
+        self.moved.push(HashMap::new());
+    }
 
-    fn pop_scope(&mut self) { self.scopes.pop(); }
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        self.moved.pop();
+    }
 
     fn define(&mut self, name: &str, kind: BindingKind) {
         self.define_typed(name, kind, None);
@@ -350,6 +394,21 @@ impl Checker {
     fn collect_struct_signature(&mut self, s: &StructDecl) {
         for m in &s.methods {
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
+        }
+        // See `struct_ctor_owned`'s doc: exactly one explicit `init` -> use its
+        // params; no explicit `init` -> the implicit constructor matches fields
+        // positionally; more than one `init` (overloaded) -> ambiguous, skip.
+        if s.inits.len() == 1 {
+            let init = &s.inits[0];
+            let owned: Vec<(String, bool)> = init.params.iter()
+                .map(|p| (p.name.clone(), matches!(p.ty, Some(Type::Qualified(_, OwnerQual::Owned)))))
+                .collect();
+            self.struct_ctor_owned.insert(s.name.clone(), owned);
+        } else if s.inits.is_empty() {
+            let owned: Vec<(String, bool)> = s.fields.iter()
+                .map(|f| (f.name.clone(), matches!(f.ty, Type::Qualified(_, OwnerQual::Owned))))
+                .collect();
+            self.struct_ctor_owned.insert(s.name.clone(), owned);
         }
     }
 
@@ -1353,6 +1412,24 @@ impl Checker {
                     if !carved_out {
                         self.check_expr(&a.value);
                     }
+                    // Use-after-move: this argument is a bare `Var` landing on a
+                    // committed-`'owned` constructor init-param/field (never a
+                    // plain function call — see `owned_target_for_arg`'s doc and
+                    // its section header comment for why) — record the move
+                    // *after* checking the argument above (so this, the moving
+                    // occurrence itself, is never flagged as a read-after-move),
+                    // immediately rather than batched at the end of the loop (so
+                    // two owned fields filled with the same variable in one call,
+                    // e.g. `Pair(ac, ac)`, still catch the second one). Spread/
+                    // default-rest args are never move sources — see
+                    // `owned_target_for_arg`'s section header doc.
+                    if !a.spread && !a.default_rest {
+                        if let ExprKind::Var(name) = &a.value.kind {
+                            if self.owned_target_for_arg(callee, i, a.label.as_deref()) {
+                                self.record_move(name, expr.line, expr.col);
+                            }
+                        }
+                    }
                     // Labeled multi-dim array cross-label check (best-effort,
                     // positional args only — a labeled/named call argument isn't
                     // matched back to its declared parameter position here).
@@ -1477,7 +1554,10 @@ impl Checker {
             // GPU-resident name bottoms out — indexing, `.length`, iteration, string
             // interpolation, an argument in a call — since check_expr always recurses
             // down to this leaf for each of those. One check here covers all of them.
-            ExprKind::Var(name) => self.check_gpu_opacity(name, expr.line, expr.col),
+            ExprKind::Var(name) => {
+                self.check_gpu_opacity(name, expr.line, expr.col);
+                self.check_move_read(name, expr.line, expr.col);
+            }
 
             // Leaves — nothing to recurse into.
             ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)
@@ -1578,6 +1658,110 @@ impl Checker {
                 line, col,
             );
         }
+    }
+
+    // ── Use-after-move: committed-`'owned` struct-constructor arguments ────────
+    //
+    // Scope note: `'owned` (`Box<T>`) is the one qualifier where Boring's normal
+    // "everything is passed by reference, the caller keeps ownership" model
+    // (docs/book.md's parameter-passing rules) doesn't hold outright — but even
+    // there, only ONE call shape is a genuine, exclusive Rust move: a struct
+    // *constructor* call storing the argument straight into an `'owned` field
+    // (`Holder(ac)`, `init(...)`'s body doing `oc = c`, or the implicit
+    // all-fields constructor when there's no explicit `init` at all) — the field
+    // is the value's new, sole, longer-lived owner, so the source variable is
+    // gone for good (confirmed empirically against a clean `main` checkout:
+    // `boring build --emit-rust` + `cargo build` on `let h1 = Holder(ac); let h2
+    // = Holder(ac)` fails with a raw `E0382`, pointing at *generated* code the
+    // user never wrote, not the actual Boring source line — this check moves
+    // that diagnostic to the real source line, before the Rust step ever runs).
+    //
+    // A PLAIN FUNCTION CALL to an `'owned` parameter is deliberately NOT a move
+    // source, even though the parameter itself is `Param.owned` too — see
+    // `tests/cases/owned_call_arg_no_double_box.br`'s own header comment: unless
+    // that parameter is also `mut`/`var`, the transpiler clones the box at the
+    // call site instead of moving it (`bump(ac.clone())`), specifically so the
+    // caller's variable stays usable afterward — reusing it is correct,
+    // documented, tested behavior, not a bug. Treating every `'owned` function
+    // parameter as a move (this check's first draft did) is a confirmed false
+    // positive against that exact, already-passing regression test — a real
+    // lesson from building this feature, not a hypothetical: the mere fact that
+    // a Rust `Box<T>` gets passed somewhere doesn't by itself mean Boring's own
+    // ownership model treats it as consumed; only construction genuinely does.
+    //
+    // What's covered: an argument that is a bare local variable (`ExprKind::Var`),
+    // passed positionally or by label, to a struct-constructor call, at an
+    // init-param/field position this checker can statically resolve to committed
+    // `'owned` (`struct_ctor_owned` — reusing `Param.owned`'s exact predicate,
+    // `Type::Qualified(_, OwnerQual::Owned)`). Once moved, *any* subsequent read
+    // of that name — a call argument (to a function OR another constructor), a
+    // method-call receiver, a field access, a bare mention in an expression — is
+    // flagged, because every one of those bottoms out at the same
+    // `ExprKind::Var` leaf `check_expr` already visits (see
+    // `check_gpu_opacity`'s identical shape).
+    //
+    // What's NOT covered (documented gaps, not silent unsoundness — this never
+    // produces a false positive on legal code, only misses some illegal code):
+    //   - `'new` (`T'new`, or `new Ctor()`) — a candidate-set qualifier that only
+    //     *becomes* `Owned` after the transpiler's own per-usage inference
+    //     (`infer_qualifiers.rs`) runs, which happens well after this checker.
+    //     Duplicating that inference here would be a much larger project;
+    //     `'new` values are silently skipped rather than guessed at.
+    //   - A method-call argument (`obj.method(ac)`) — this checker doesn't track
+    //     per-struct method parameter ownership.
+    //   - Anything that isn't straight-line code in the *same* block: a move in
+    //     one `if`/`match` branch followed by a reuse after the branch, a reuse
+    //     across a loop's iterations, a move inside a closure — see `moved`'s own
+    //     doc comment for why (each nested block gets its own fresh move-frame).
+    //   - A spread (`..expr`) or `_` (default-rest) constructor argument is never
+    //     treated as a move source — matching those back to a specific field
+    //     needs more than positional/label matching.
+    //   - A struct with more than one `init` overload is skipped entirely
+    //     (ambiguous which one a given call resolves to without real overload
+    //     resolution) — see `struct_ctor_owned`'s own doc.
+
+    /// Records `name` as moved-away in the *current* (innermost) move-frame only
+    /// — see `moved`'s doc comment for why this is deliberately not visible to
+    /// an enclosing or sibling block.
+    fn record_move(&mut self, name: &str, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        if let Some(frame) = self.moved.last_mut() {
+            frame.insert(name.to_string(), (line, col));
+        }
+    }
+
+    /// If `name` was already moved in the current move-frame, a compile error:
+    /// a value can only be moved once. See this section's header comment for
+    /// exactly what is and isn't caught.
+    fn check_move_read(&mut self, name: &str, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        if self.moved.last().and_then(|f| f.get(name)).is_some() {
+            self.error(
+                format!(
+                    "`{name}` was already moved (passed to an owned parameter) here; \
+                     a value can only be moved once — clone it explicitly first if you \
+                     need to use it again"
+                ),
+                line, col,
+            );
+        }
+    }
+
+    /// Is the init-param/field at `callee`'s constructor-argument position
+    /// `index` (or, for a labeled argument, named `label`) committed `'owned`?
+    /// `callee` must be a bare `Var` naming a known, unambiguous struct
+    /// constructor (`struct_ctor_owned`) — anything else (a plain function call
+    /// — deliberately not a move source, see this section's header comment — a
+    /// method call, an unknown/overloaded struct name, a computed callee)
+    /// returns `false`, matching this check's best-effort, never-false-positive
+    /// design.
+    fn owned_target_for_arg(&self, callee: &Expr, index: usize, label: Option<&str>) -> bool {
+        let ExprKind::Var(name) = &callee.kind else { return false };
+        let Some(params) = self.struct_ctor_owned.get(name.as_str()) else { return false };
+        if let Some(label) = label {
+            return params.iter().find(|(n, _)| n == label).map(|(_, o)| *o).unwrap_or(false);
+        }
+        params.get(index).map(|(_, o)| *o).unwrap_or(false)
     }
 }
 

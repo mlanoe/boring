@@ -1,0 +1,22 @@
+# Same use-after-move gap as error_owned_ctor_use_after_move.br, but for a
+# struct with NO explicit `init` at all — the implicit, fully-positional
+# constructor (`Holder(ac)` maps straight onto `Holder`'s single `oc` field,
+# same as a Rust struct-literal `Holder { oc: ac }`) moves just as exclusively
+# as an explicit `init(...)` body does. Confirmed against a clean `main`
+# checkout: `boring build --emit-rust` + `cargo build` on this exact program
+# fails with a raw E0382 on the second `Holder(ac)`.
+
+struct Counter:
+    var int value = 0
+    req int get():
+        value
+
+struct Holder:
+    var Counter'owned oc
+
+def main():
+    let Counter'owned ac = Counter(1)
+    let h1 = Holder(ac)
+    let h2 = Holder(ac)
+    print h1.oc.get()
+    print h2.oc.get()

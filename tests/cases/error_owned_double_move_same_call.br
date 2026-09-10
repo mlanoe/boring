@@ -1,0 +1,22 @@
+# Use-after-move gap, same-call variant: the SAME local variable passed as
+# TWO different `'owned` init-params in a single constructor call
+# (`Pair(ac, ac)`) — the second occurrence is caught immediately, in the same
+# call, not just across two separate statements (see
+# error_owned_ctor_use_after_move.br for the across-statements case).
+
+struct Counter:
+    var int value = 0
+    req int get():
+        value
+
+struct Pair:
+    var Counter'owned first
+    var Counter'owned second
+    init(Counter'owned a, Counter'owned b):
+        first = a
+        second = b
+
+def main():
+    let Counter'owned ac = Counter(1)
+    let p = Pair(ac, ac)
+    print p.first.get()
