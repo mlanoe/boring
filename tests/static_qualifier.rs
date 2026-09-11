@@ -6,9 +6,13 @@
 // constant global instances with no Rc/Arc refcounting, `&'static T` in
 // generated Rust. Covers the three authorized construction sites (top
 // level, `main`-scope, and `type let`'s implicit path), the provenance
-// gate (both at a `let`'s own initializer and at call-argument sites),
-// `mut`/`'weak` rejection, the `Sync` check under `--threading single`,
-// and the generic-struct field rejection.
+// gate (both at a `let`'s own initializer and at call-argument sites) —
+// including the fixed gap where a call to an ordinary (lowercase) wrapper
+// function/method that itself constructs and returns a fresh value used to
+// slip past the gate outside an authorized site, since the old check only
+// recognized a direct, uppercase-named constructor call as "fresh
+// construction" — `mut`/`'weak` rejection, the `Sync` check under
+// `--threading single`, and the generic-struct field rejection.
 //
 // Run with:
 //   cargo test --test static_qualifier
@@ -124,7 +128,7 @@ fn top_level_and_main_scope_construction_build_and_run() {
         "static_top_level_and_main.br",
         &[],
         "default",
-        "direct field: 42\nvalue: 42\nvalue: 99",
+        "direct field: 42\nvalue: 42\nvalue: 7\nvalue: 99\nvalue: 7",
     );
 }
 
@@ -134,7 +138,7 @@ fn top_level_and_main_scope_construction_build_and_run_single_threaded() {
         "static_top_level_and_main.br",
         &["--threading", "single"],
         "single",
-        "direct field: 42\nvalue: 42\nvalue: 99",
+        "direct field: 42\nvalue: 42\nvalue: 7\nvalue: 99\nvalue: 7",
     );
 }
 
@@ -181,6 +185,24 @@ fn req_group_accepts_static_argument_build_and_run() {
 fn construction_outside_authorized_site_is_rejected() {
     assert_build_rejected(
         "static_provenance_bad.br",
+        &[],
+        "cannot construct a 'static instance here",
+    );
+}
+
+#[test]
+fn construction_via_wrapper_function_outside_authorized_site_is_rejected() {
+    // Regression for a real gap: the provenance check used to recognize "fresh
+    // construction" only via a syntactic heuristic (uppercase-first-letter callee,
+    // e.g. `A(...)`), so `let x'static = create()` — where `create()` is an
+    // ordinary lowercase function that itself constructs and returns a fresh
+    // `Config` — sailed through unrejected at a non-authorized site, unlike the
+    // direct-construction form covered by `construction_outside_authorized_site_is_rejected`
+    // above. The checker now conservatively rejects any non-authorized-site
+    // initializer that isn't provably a reference to an existing 'static binding,
+    // regardless of how the callee is spelled.
+    assert_build_rejected(
+        "static_provenance_wrapper_fn_bad.br",
         &[],
         "cannot construct a 'static instance here",
     );

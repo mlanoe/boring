@@ -1,7 +1,11 @@
 struct Config:
     int value
 
+def Config create_config():
+    Config(value = 7)
+
 let Config'static GLOBAL_CONFIG = Config(value = 42)
+let Config'static WRAPPED_CONFIG = create_config()
 
 req show(Config'static cfg):
     print "value: {cfg.value}"
@@ -9,5 +13,8 @@ req show(Config'static cfg):
 def main():
     print "direct field: {GLOBAL_CONFIG.value}"
     show(GLOBAL_CONFIG)
+    show(WRAPPED_CONFIG)
     let Config'static local_cfg = Config(value = 99)
     show(local_cfg)
+    let Config'static wrapped_local = create_config()
+    show(wrapped_local)

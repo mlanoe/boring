@@ -621,17 +621,42 @@ impl Checker {
     // construction sites this check covers (the third, `type let`, is implicit and
     // has no `'static` annotation to check here at all). Anywhere else, the
     // initializer must already be a reference to an existing 'static-typed value
-    // (a bare name, not a fresh construction) — never verified beyond "not a
-    // constructor call" today (confirming the referenced name is itself genuinely
-    // 'static-typed would need a real expression-type-inference pass this checker
-    // doesn't have; a real gap, not silently assumed correct).
+    // (a bare `Var` whose own declared type is itself `'static`) — never a fresh
+    // construction.
+    //
+    // Fixed gap (previously): this used to recognize "fresh construction" only via
+    // `is_constructor_call_expr`'s syntactic heuristic (an uppercase-first-letter
+    // callee, e.g. `A(...)`) — so `let x'static = create()`, where `create()` is an
+    // ordinary lowercase function/method that itself returns a freshly constructed
+    // value, sailed through unrejected at a non-authorized site, silently violating
+    // the same provenance guarantee this gate exists to enforce. Knowing for certain
+    // whether an arbitrary call's return value is "fresh" would need a real
+    // expression-type/provenance-inference pass this checker doesn't have. Rather
+    // than special-case more callee shapes (always one indirection away from the
+    // next false negative), this now follows `check_static_arg_provenance`'s
+    // existing, already-conservative model: at a non-authorized site, only a bare
+    // `Var` provably typed `'static` is accepted as the initializer; every `Call`,
+    // `MethodCall`, or anything else this checker cannot positively prove is a
+    // reference to an existing `'static` binding is rejected — erring towards
+    // rejecting an as-yet-unrecognized-but-valid pattern rather than letting an
+    // unsound one through.
     fn check_static_provenance(&mut self, ty: &Option<Type>, value: Option<&Expr>, line: usize, col: usize) {
         let Some(Type::Qualified(_, OwnerQual::Static)) = ty else { return };
         let Some(value) = value else { return };
         if self.in_authorized_static_site { return; }
-        if Self::is_constructor_call_expr(value) {
+        let is_provably_static_ref = match &value.kind {
+            ExprKind::Var(name) => matches!(
+                self.lookup(name).and_then(|b| b.ty.as_ref()),
+                Some(Type::Qualified(_, OwnerQual::Static))
+            ),
+            _ => false,
+        };
+        if !is_provably_static_ref {
             self.error(
-                "cannot construct a 'static instance here — 'static values may only be constructed at top level or inside `main`",
+                "cannot construct a 'static instance here — 'static values may only be constructed \
+                 at top level or inside `main`; elsewhere the initializer must already be a \
+                 reference to an existing 'static-typed binding (a name whose own type is \
+                 T'static), not a fresh construction, a call, or a field read",
                 line, col,
             );
         }
@@ -665,20 +690,6 @@ impl Checker {
                  local value, a fresh construction, or a field read",
                 line, col,
             );
-        }
-    }
-
-    /// Best-effort recognition of "this expression constructs a fresh instance" —
-    /// a call whose callee is a capitalized name (`Config(...)`, `Point.new(...)`).
-    /// Mirrors the same heuristic `top_level_let_external_call` (transpiler side)
-    /// and this file's own `top_level_let_is_string_literal`-style checks use for
-    /// "is this initializer a constructor call" — mirrors, not literally reuses,
-    /// since checker and transpiler are separate passes.
-    fn is_constructor_call_expr(value: &Expr) -> bool {
-        match &value.kind {
-            ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)),
-            ExprKind::MethodCall(obj, _, _) => matches!(&obj.kind, ExprKind::Var(n) if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)),
-            _ => false,
         }
     }
 

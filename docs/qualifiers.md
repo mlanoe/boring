@@ -63,7 +63,8 @@ show(&APP_CONFIG);
 
 A `T'static` value can only be **constructed** at one of three sites —
 anywhere else, its initializer must already be a reference to an
-existing `'static` value, never a constructor call:
+existing `'static` value: a bare name whose own declared type is
+`'static`, never a fresh construction:
 
 | Site | Form | Notes |
 |---|---|---|
@@ -71,10 +72,27 @@ existing `'static` value, never a constructor call:
 | Inside `main` | same form, in `main`'s body | hoisted to the same module-level `static` before `main` runs |
 | A `type let` field | `type let T NAME = Ctor(...)` on a struct | `'static` is implicit here — **never annotated**, see below |
 
+At an authorized site, the initializer can be a direct constructor call
+(`Config(...)`) or a call to an ordinary function/method that itself
+returns a freshly constructed value (`create_config()`) — both are
+promoted the same way. Anywhere else, **any** call is rejected, not just
+a direct constructor call — the checker cannot verify whether an
+arbitrary function's return value is a fresh construction or a reference
+to something already `'static`, so it conservatively rejects every
+`Call`/`MethodCall` initializer outside an authorized site, regardless
+of whether the callee looks like a constructor:
+
 ```boring
+def Config create_config():
+    Config(debug = false)
+
 req make():
     let Config'static cfg = Config(debug = false)  # error: cannot construct
                                                      # a 'static instance here
+    let Config'static cfg2 = create_config()        # error: same rejection —
+                                                     # wrapping the construction
+                                                     # in an ordinary function
+                                                     # doesn't launder it
 ```
 
 A `type let` field has no other possible interpretation — it names
