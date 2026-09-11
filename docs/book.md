@@ -122,6 +122,8 @@ Unlike many languages, these two axes are controlled **independently**, and `mut
 
 `mut x = 42; x = 43` is a compile error, which is the whole point of writing `mut` instead of `var` in the first place.
 
+> **Rule of thumb:** these four forms aren't four independent choices to weigh every time — they collapse to two questions. First, is the type a scalar (`int`/`uint`/`float`/`bool`)? If so, `mut` is off the table (no `def` methods to unlock — see below), so the only choice is `let` (never reassigned) vs `var` (reassigned). Otherwise, default to `let` (never touched) vs `mut` (fixed identity, content changed via `def`); reach for `var`/`var mut` only when the binding itself genuinely needs to point at a *different* instance later — the rarest of the four in practice.
+
 ### Immutable bindings — `let`
 
 ```boring
@@ -5951,6 +5953,14 @@ let mut c: Arc<Mutex<Counter>>   = Arc::new(Mutex::new(Counter { value: 0 }));
 ```
 
 The qualifier-on-name form is especially concise when the type is obvious from context. The full `Type'qualifier name` form remains valid and is preferred when the type needs to be explicit.
+
+**One position, not both.** A qualifier goes on the type OR on the name — never both on the same binding:
+
+```boring
+let Counter'actor c'guard = Counter(0)   # ERROR — qualifier on both the type and the name
+```
+
+This is a compile error, not silently resolved by picking one qualifier over the other — there is no defined precedence between the two, and no use case needs it: a real compound qualifier chain (`'actor'task`, `'shared'weak`) is already written as a single tick-sequence in one position, so writing a second, independent qualifier in the other position only adds ambiguity, never expressiveness.
 
 ### Placement operator — `new`
 
