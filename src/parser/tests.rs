@@ -332,6 +332,116 @@ fn test_let_typed_new_qualifier_after_name_is_recognized() {
     }
 }
 
+// ── Qualifier on BOTH the type and the name is rejected (not silently stacked) ──
+//
+// `let Type'qual1 name'qual2 = value` used to parse without error, producing a
+// doubly-nested `Type::Qualified(Type::Qualified(Named, qual1), qual2)` with no
+// defined semantics (see docs/qualifiers.md's "One position, not both" section) —
+// the transpiler emitted nonsensical, non-compiling Rust for it (e.g. a stray `&`
+// in front of an owned `Arc::new(...)`/`Mutex::new(...)` call it had no type for).
+// A qualifier must appear on the type OR on the name, never both.
+
+#[test]
+fn test_let_qualifier_on_both_type_and_name_is_rejected() {
+    let src = "let Counter'actor c'guard = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let err = crate::parser::parse(tokens).expect_err("expected a parse error, qualifier was written in both positions");
+    assert!(err.msg().contains("both the type") && err.msg().contains("the name"), "unexpected message: {}", err.msg());
+}
+
+#[test]
+fn test_let_same_qualifier_repeated_on_both_positions_is_rejected() {
+    // Same qualifier spelled twice (once per position) is just as ambiguous as two
+    // different ones — still rejected, not silently deduplicated.
+    let src = "let Counter'actor c'actor = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let err = crate::parser::parse(tokens).expect_err("expected a parse error, qualifier was written in both positions");
+    assert!(err.msg().contains("both the type") && err.msg().contains("the name"), "unexpected message: {}", err.msg());
+}
+
+#[test]
+fn test_let_compound_type_qualifier_then_name_qualifier_is_rejected() {
+    // A legitimate compound chain (`'actor'task`) written entirely in the type
+    // position still counts as "the type already carries a qualifier" — a further
+    // qualifier on the name is still rejected, not merged into the chain.
+    let src = "let Counter'actor'task c'guard = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let err = crate::parser::parse(tokens).expect_err("expected a parse error, qualifier was written in both positions");
+    assert!(err.msg().contains("both the type") && err.msg().contains("the name"), "unexpected message: {}", err.msg());
+}
+
+#[test]
+fn test_let_compound_qualifier_in_one_position_still_parses() {
+    // The legitimate case the rejection above must not break: a real compound
+    // qualifier chain written in a SINGLE position (all in the type position here)
+    // parses exactly as before.
+    let src = "let Counter'actor'task c = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert!(let_stmt.value.is_some());
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(Box::new(ast::Type::Named("Counter".to_string())), ast::OwnerQual::ActorTask))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_let_qualifier_on_type_only_still_parses() {
+    // `let Type'qual name = value` — qualifier on the type, none on the name —
+    // must keep working exactly as before.
+    let src = "let Counter'actor c = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert!(let_stmt.value.is_some());
+        assert_eq!(let_stmt.name, "c");
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(Box::new(ast::Type::Named("Counter".to_string())), ast::OwnerQual::Actor))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_let_qualifier_on_name_only_bare_type_still_parses() {
+    // `let Type name'qual = value` (bare type, qualifier on the name) — the
+    // existing, intentionally-tested sugar — must keep working exactly as before.
+    let src = "let Counter c'new = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert!(let_stmt.value.is_some());
+        assert_eq!(let_stmt.name, "c");
+        assert!(matches!(&let_stmt.ty, Some(ast::Type::Qualified(inner, _)) if **inner == ast::Type::Named("Counter".to_string())));
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_let_qualifier_on_name_only_inferred_type_still_parses() {
+    // `let name'qual = value` — qualifier on the name, type inferred from the RHS.
+    let src = "let c'actor = Counter(0)";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert!(let_stmt.value.is_some());
+        assert_eq!(let_stmt.name, "c");
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(Box::new(ast::Type::Named("Counter".to_string())), ast::OwnerQual::Actor))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}
+
 #[test]
 fn test_generic_param_only_in_fn_type_return_position_is_collected() {
     // Regression test: `collect_const_params_from_type`'s first pass had no

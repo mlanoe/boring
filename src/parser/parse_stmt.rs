@@ -391,17 +391,49 @@ impl Parser {
         // `let name = value`         — no type annotation, borrow by default
         // `let type name = value`    — explicit type annotation (boring convention)
         let (name, ty) = if self.is_type_start_before_ident() {
+            // Remember where the type itself starts, for the error message below
+            // if it turns out to already carry a qualifier.
+            let type_line = self.line();
+            let type_col = self.col();
             let base = self.parse_type()?;
+            // `parse_type()` already consumes any tick/`&` qualifier written
+            // directly after the type (`parse_type_inner`'s own "Apply ownership
+            // qualifier" step) — so if `base` comes back as `Type::Qualified`,
+            // the type position already carries one. Needed below to reject a
+            // second, independent qualifier written after the name.
+            let type_pos_qualified = matches!(base, Type::Qualified(_, _));
+            // Defensive/likely-redundant given the above, but kept as-is —
+            // harmless no-op when `parse_type()` already consumed the qualifier.
             let ty = self.parse_type_qualifier(base)?;
             // `mut Type` / `mut Type&` / `var mut Type&` → apply the permission
             // to the type itself (owned form wraps in `Type::Mut`; borrow form
             // upgrades to its mutable qualifier) — see `wrap_type_mut`'s doc.
             let ty = if wrap_mut { Self::wrap_type_mut(ty) } else { ty };
             let name = self.expect_ident()?;
-            // `var T name'qualifier = value` — qualifier after the name applies to the type
+            // `var T name'qualifier = value` — qualifier after the name applies to the type.
+            // But a qualifier already sitting on the type (`type_pos_qualified`) makes a
+            // second one here ambiguous/redundant, not a legitimate compound chain — a real
+            // compound qualifier (`'actor'task`, `'shared'weak`) is written as a single
+            // tick-sequence in ONE position, and `parse_type_qualifier` already consumes
+            // that whole chain in its one call above. Two qualifiers arriving from two
+            // different syntactic positions (type position + name position) is instead
+            // rejected outright: there is no defined precedence for which one would win,
+            // and the transpiler has no sane way to emit a doubly-qualified type (see
+            // docs/qualifiers.md).
             let ty = if self.check(&TokenKind::Tick) {
                 let next_kind = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                 if matches!(next_kind, Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) | Some(TokenKind::Static) | Some(TokenKind::New)) {
+                    if type_pos_qualified {
+                        return Err(ParseError::Generic {
+                            msg: format!(
+                                "qualifier written on both the type (at {}:{}) and the name (at {}:{}) — \
+                                 an ownership qualifier belongs on the type OR on the name, never both; \
+                                 remove one of them (a compound chain like 'actor'task is written in a single position)",
+                                type_line, type_col, self.line(), self.col(),
+                            ),
+                            line: self.line(), col: self.col(), len: self.tok_len(),
+                        });
+                    }
                     self.parse_type_qualifier(ty)?
                 } else {
                     ty

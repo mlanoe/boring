@@ -882,6 +882,10 @@ These sets are populated during statement emission and propagated into sub-trans
 
 `'actor'task` and `'guard'task` are two-token qualifiers. The `is_type_start_before_ident()` lookahead was extended to consume both tokens so that `let Counter'actor'task c = …` is parsed as a type annotation rather than an expression.
 
+### Qualifier on the type OR the name, never both
+
+A `let` binding's qualifier can be written on the type (`let Counter'actor c = …`) or, when the type can be inferred, on the name (`let c'actor = …`) — see the book's "Qualifier on the variable name" section. Writing it in **both** positions on the same binding (`let Counter'actor c'guard = …`) is a parse error (`parse_let_stmt_pub` in `src/parser/parse_stmt.rs`), not silently resolved by any precedence rule — there is no defined semantics for which qualifier would win, and the transpiler has no sane way to emit a doubly-qualified type. This is unrelated to a legitimate compound chain (`'actor'task`, `'shared'weak`): those are written as a single tick-sequence in one position and are unaffected.
+
 ### Interior mutability in the interpreter
 
 The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables declared with an interior-mutable qualifier. Calls to `def` methods on these variables skip the "cannot call mutating method on immutable binding" check, matching the transpiler's semantics.
