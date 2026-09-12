@@ -986,6 +986,8 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   T'shared        →  Rc<T>              ref-counted, single-thread
 #   T'actor         →  Arc<Mutex<T>>      shared mutable; all accesses auto-locked
 #   T'guard         →  Arc<RwLock<T>>     concurrent reads, exclusive writes
+#   T'atomic        →  Arc<AtomicX>       scalar int/bool only; lock-free load/store/
+#                       (single-thread: Rc<Cell<X>>)  fetch_add/fetch_sub/swap; rejects `with`
 #   T'weak          →  Weak<T>            non-owning; .upgrade() → T'shared?
 #   T'static        →  &'static T          constant global instance, no refcount;
 #                                          provenance-gated (see docs/qualifiers.md
@@ -1001,7 +1003,7 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   float32 → Float32'copy  →  f32
 #   bool   →  Bool'copy     →  bool
 #
-owner_qual      ::= "owned" | "inline" | "copy" | "const" | "shared" | "actor" | "guard" | "weak"
+owner_qual      ::= "owned" | "inline" | "copy" | "const" | "shared" | "actor" | "guard" | "atomic" | "weak"
                   | owner_qual "|" owner_qual   # qualifier union: T'inline|owned (resolved at inference time)
                   # NOTE: bare tick (no qualifier after `'`) is a parse error — write
                   # the qualifier explicitly, e.g. T'new for "any indirection, inferred".

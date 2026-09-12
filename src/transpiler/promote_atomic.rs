@@ -343,18 +343,15 @@ fn expr_use_name(e: &Expr, name: &str, escapes: &mut bool, bad_op: &mut bool) {
         // Captured by a task/closure — conservatively always an escape when `name`
         // appears anywhere inside, since the captured value may be handed to
         // genuinely concurrent code this local analysis can't see.
-        ExprKind::Task(inner) => {
-            if expr_refs(inner, name) { *escapes = true; }
-        }
-        ExprKind::TaskWithTimeout(dur, inner) => {
-            if expr_refs(dur, name) || expr_refs(inner, name) { *escapes = true; }
-        }
+        ExprKind::Task(inner) if expr_refs(inner, name) => { *escapes = true; }
+        ExprKind::Task(_) => {}
+        ExprKind::TaskWithTimeout(dur, inner) if expr_refs(dur, name) || expr_refs(inner, name) => { *escapes = true; }
+        ExprKind::TaskWithTimeout(..) => {}
         // Captured by a closure — conservatively always an escape when `name` appears
         // anywhere inside its body (`collect_var_names` already recurses into a
         // closure's body for us), same rationale as `Task`/`TaskWithTimeout` above.
-        ExprKind::Closure(..) => {
-            if expr_refs(e, name) { *escapes = true; }
-        }
+        ExprKind::Closure(..) if expr_refs(e, name) => { *escapes = true; }
+        ExprKind::Closure(..) => {}
         ExprKind::Field(obj, _) => expr_use_name(obj, name, escapes, bad_op),
         ExprKind::Index(obj, idx) => { expr_use_name(obj, name, escapes, bad_op); expr_use_name(idx, name, escapes, bad_op); }
         ExprKind::LabeledIndex(obj, args) => {
@@ -403,10 +400,9 @@ fn check_assign_shape(value: &Expr, name: &str, _escapes: &mut bool, bad_op: &mu
         return; // plain store — safe regardless of representation
     }
     if let ExprKind::BinOp(op, l, r) = &value.kind {
-        if matches!(op, crate::ast::BinOp::Add | crate::ast::BinOp::Sub) {
-            if matches!(&l.kind, ExprKind::Var(v) if v == name) && !expr_refs(r, name) {
-                return; // fetch_add / fetch_sub — safe
-            }
+        if matches!(op, crate::ast::BinOp::Add | crate::ast::BinOp::Sub)
+            && matches!(&l.kind, ExprKind::Var(v) if v == name) && !expr_refs(r, name) {
+            return; // fetch_add / fetch_sub — safe
         }
     }
     // Anything else referencing `name` on the RHS (`name * 2`, `f(name)`, `name + name`,

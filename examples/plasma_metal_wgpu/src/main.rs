@@ -18,7 +18,7 @@ static PLASMA_PIPELINE: std::sync::OnceLock<std::sync::Arc<wgpu::ComputePipeline
 struct PlasmaParams {
     dim_w: i32,
     dim_h: i32,
-    t: f64,
+    t: f32,
 }
 
 struct Plasma {
@@ -29,7 +29,7 @@ struct Plasma {
     pixels_buf: std::sync::Arc<wgpu::Buffer>,
     pixels: Vec<u32>,
     dim: (i32, i32),
-    t: f64,
+    t: f32,
     params_buf: wgpu::Buffer,
 }
 
@@ -84,7 +84,7 @@ impl Plasma {
             pixels: vec![u32::default(); 0],
             params_buf,
             dim: (width, height),
-            t: f64::default(),
+            t: f32::default(),
         }
     }
 
@@ -600,7 +600,7 @@ struct BlitVOut { @builtin(position) pos: vec4<f32> }
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.k.t = (self.__start_time.elapsed().as_secs_f32() as f64);
+                self.k.t = (self.__start_time.elapsed().as_secs_f32() as f32);
                 self.k.dispatch((800 + 16 - 1) / 16, (600 + 16 - 1) / 16, 1).expect("wgpu: kernel dispatch rejected");
                 __boring_present_buffer(&self.device, &self.queue, self.surface.as_ref().unwrap(), self.__blit_pipeline.as_ref().unwrap(), self.__blit_bg.as_ref().unwrap());
                 if self.__keys.contains("Escape") { event_loop.exit(); }

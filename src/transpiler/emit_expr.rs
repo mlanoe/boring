@@ -3480,8 +3480,8 @@ impl Transpiler {
             } else {
                 continue;
             };
-            let eff_value: &Expr = if let ExprKind::Closure(_, _, body, _, _) = &a.value.kind {
-                if let ClosureBody::Expr(e) = body { e.as_ref() } else { &a.value }
+            let eff_value: &Expr = if let ExprKind::Closure(_, _, ClosureBody::Expr(e), _, _) = &a.value.kind {
+                e.as_ref()
             } else {
                 &a.value
             };

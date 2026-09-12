@@ -153,7 +153,7 @@ pub(super) fn kernel_uses_gpu_warp(decl: &KernelDecl) -> bool {
 /// which lowers to two plain `i32`s) never hits this and keeps using
 /// `var<uniform>` as before.
 pub(super) fn kernel_params_use_storage(decl: &KernelDecl) -> bool {
-    decl.fields.iter().any(|f| is_fixed_array_params_field(f))
+    decl.fields.iter().any(is_fixed_array_params_field)
 }
 
 fn is_fixed_array_params_field(f: &KernelFieldDecl) -> bool {
