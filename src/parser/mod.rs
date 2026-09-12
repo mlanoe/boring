@@ -1056,6 +1056,29 @@ impl Parser {
             {
                 i += 2;
             }
+            // `'qual|qual2|qual3` — pipe-separated qualifier union continuation
+            // (mirrors `parse_type_qualifier`'s real union-continuation code,
+            // which accepts `inline`/`owned`/`shared`/`actor`/`atomic` or the
+            // `guard` keyword as later members). Needed because a few qualifier
+            // words above (`'actor`, `'guard`, `'static`, ...) are fully consumed
+            // by the match above — unlike a plain-Ident qualifier such as
+            // `'shared`, which falls through the `_ => {}` arm and is left
+            // unconsumed, so the trailing "is the next token an Ident?" check
+            // below coincidentally still lands on an Ident (the qualifier word
+            // itself) and returns the right answer regardless of what follows.
+            // A *consumed* qualifier followed directly by `|` instead leaves
+            // `i` sitting on the `Pipe` token, which is not an `Ident` — without
+            // skipping the union here, the caller (`is_type_start_before_ident`)
+            // would misjudge `T'actor|shared name` as not being a type followed
+            // by a name at all.
+            while i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Pipe) {
+                let is_union_member = matches!(
+                    self.tokens.get(i + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(q)) if matches!(q.as_str(), "inline" | "owned" | "shared" | "actor" | "atomic")
+                ) || matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Guard));
+                if !is_union_member { break; }
+                i += 2;
+            }
             if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Question) { i += 1; }
             if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ampersand) {
                 i += 1;

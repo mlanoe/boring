@@ -572,13 +572,6 @@ fn test_let_qualifier_atomic_on_name_bool_literal_infers_bool_base() {
 fn test_atomic_qualifier_union_member_parses() {
     // `T'shared|atomic` — `'atomic` is a valid member of an explicit qualifier union,
     // just like `'shared`/`'owned`/`'inline`.
-    //
-    // NOTE: `'actor` as the *first* member of a pipe union (`T'actor|shared`,
-    // `T'actor|guard`, `T'actor|atomic`, ...) is a separate, pre-existing parser bug
-    // unrelated to `'atomic` — confirmed to fail identically with no `'atomic`
-    // involved at all (`T'actor|shared` alone). Not this feature's to fix; filed
-    // separately. `'atomic` first (this test) and `'atomic` as a later member both
-    // parse correctly.
     let src = "let int'shared|atomic x = 0";
     let tokens = crate::lexer::lex(src).expect("lex");
     let program = crate::parser::parse(tokens).expect("parse");
@@ -592,5 +585,53 @@ fn test_atomic_qualifier_union_member_parses() {
         );
     } else {
         panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_actor_first_qualifier_union_member_parses() {
+    // `T'actor|<anything>` — `'actor` as the *first* member of an explicit
+    // qualifier union used to fail to parse at all (regardless of the second
+    // member), with a misleading "expected Eq, got Ident(...)" error coming
+    // from `parse_let_stmt_pub` — not even from the union-parsing code itself.
+    //
+    // Root cause: the `is_type_start_before_ident()` lookahead (used by
+    // `let`/`var` to decide whether `<type> <name>` or a bare `<name>'qual`
+    // form follows) delegates to `skip_type_suffix_qualifiers`, which had no
+    // awareness of a `|`-separated qualifier union at all. Most single-ident
+    // qualifiers (`'shared`, `'owned`, `'atomic`, ...) aren't actually consumed
+    // by that helper — it falls through an unhandled `_ => {}` arm — so it
+    // coincidentally still lands back on an `Ident` token (the qualifier word
+    // itself) and reports "yes, a name follows" regardless of what comes after.
+    // `'actor` (and `'guard`, `'static`) *are* specially consumed there (to
+    // skip their own `'actor'task`-style chaining), so a following `|` left the
+    // lookahead sitting on the `Pipe` token instead of an `Ident`, making it
+    // wrongly conclude the type wasn't followed by a name — which sent
+    // `parse_let_stmt_pub` down its "bare name, qualifier, infer type from RHS"
+    // branch instead, misparsing `int` itself as the variable name.
+    //
+    // Fixed by teaching `skip_type_suffix_qualifiers` to skip a full
+    // pipe-separated union continuation, mirroring the members
+    // `parse_type_qualifier`'s real union-continuation code accepts
+    // (`inline`/`owned`/`shared`/`actor`/`atomic`/`guard`).
+    for (src, second) in [
+        ("let int'actor|shared x = 0", ast::OwnerQual::Shared),
+        ("let int'actor|guard x = 0",  ast::OwnerQual::Guard),
+        ("let int'actor|atomic x = 0", ast::OwnerQual::Atomic),
+    ] {
+        let tokens = crate::lexer::lex(src).expect("lex");
+        let program = crate::parser::parse(tokens).expect("parse");
+        if let ast::Item::Let(let_stmt) = &program.items[0] {
+            assert_eq!(
+                let_stmt.ty,
+                Some(ast::Type::Qualified(
+                    Box::new(ast::Type::Named("int".to_string())),
+                    ast::OwnerQual::Union(vec![ast::OwnerQual::Actor, second]),
+                )),
+                "mismatched parse for {src:?}"
+            );
+        } else {
+            panic!("expected Let item for {src:?}");
+        }
     }
 }
