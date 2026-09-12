@@ -27,6 +27,7 @@ mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
 mod infer_qualifiers;
+mod promote_atomic;
 pub(crate) mod monomorphize;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
@@ -616,6 +617,23 @@ struct Transpiler {
     pub(crate) struct_mutex_fields: std::collections::HashSet<String>,
     /// "StructName::field_name" for fields typed `T'task` (Arc<tokio::sync::Mutex<T>> in Rust).
     pub(crate) struct_mutex_task_fields: std::collections::HashSet<String>,
+    /// Variable names declared as `T'atomic` — hold `Arc<AtomicX>` (multi) /
+    /// `Rc<Cell<X>>` (single). Bare reads emit `.load(...)`/`.get()`, plain
+    /// assignment emits `.store(...)`/`.set(...)`, and `x += n`/`x -= n` emit
+    /// `.fetch_add`/`.fetch_sub` (or the single-thread read-modify-write
+    /// equivalent) — see `emit_expr.rs`'s bare-`Var`-target `Assign` handling
+    /// and `emit_expr.rs`'s bare-`Var` read path. Also set by the automatic
+    /// `'actor`/`'guard` → `'atomic` promotion pass (`promote_atomic.rs`), which
+    /// moves a name here (and out of `var_mutex_types`/`var_rwlock_types`) once
+    /// it proves the promotion's four conservative criteria all hold.
+    pub(crate) var_atomic_types: std::collections::HashSet<String>,
+    /// Names the automatic `'actor`/`'guard` → `'atomic` promotion pass
+    /// (`promote_atomic.rs`) has proven safe to promote, computed fresh per function
+    /// body by `scan_atomic_promotions` before any statement of that function is
+    /// emitted. Consulted by `try_emit_qualified_let`'s `'actor`/`'guard` branches,
+    /// which emit the atomic representation (and populate `var_atomic_types` instead
+    /// of `var_mutex_types`/`var_rwlock_types`) for a name found here.
+    pub(crate) promoted_atomic_vars: std::collections::HashSet<String>,
     /// Variable names declared as `T'guard` — hold `Arc<std::sync::RwLock<T>>` (sync).
     pub(crate) var_rwlock_types: std::collections::HashSet<String>,
     /// Variable names declared as `T'guard'task` — hold `Arc<tokio::sync::RwLock<T>>` (async).
@@ -1258,6 +1276,8 @@ impl Transpiler {
             transient_fields: std::collections::HashMap::new(),
             var_struct_types: std::collections::HashMap::new(),
             var_mutex_types: std::collections::HashSet::new(),
+            var_atomic_types: std::collections::HashSet::new(),
+            promoted_atomic_vars: std::collections::HashSet::new(),
             var_mutex_task_types: std::collections::HashSet::new(),
             struct_mutex_fields: std::collections::HashSet::new(),
             struct_mutex_task_fields: std::collections::HashSet::new(),
@@ -2357,6 +2377,7 @@ impl Transpiler {
                 _ => None,
             }).collect();
             self.infer_qualifiers(&main_infer_stmts);
+            self.scan_atomic_promotions(&main_infer_stmts);
             let needs_async = items_have_task(&stmts)
                 || body_has_stream_for(&top_stmts, &self.stream_fns)
                 || items_have_task_call(&stmts, &self.task_fns);

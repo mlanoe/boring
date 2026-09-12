@@ -1084,3 +1084,16 @@ transpile_test!(oversized_struct_field_stays_inline);
 // on their `Named` inner the same way the `OwnerQual::Owned` branch already
 // did (src/transpiler/emit_top.rs).
 transpile_test!(oversized_param_borrow_stays_unboxed);
+
+// ── `'atomic` qualifier (see docs/qualifiers.md's `'atomic` section) ────────────────
+
+// Part 1: explicit `'atomic` operation mapping — bare read (load), plain assignment
+// (store), compound assign (fetch_add/fetch_sub), `.swap(...)`.
+transpile_test!(atomic_explicit_ops);
+// Part 2: automatic `'actor` → `'atomic` promotion — the positive (fires) case.
+// `tests/atomic_qualifier.rs` additionally inspects the generated Rust to confirm
+// the atomic representation is really emitted, not just that stdout matches.
+transpile_test!(atomic_promotion_actor);
+// Part 2: promotion conservatively suppressed by `with`-block usage (criterion 4) —
+// must produce the exact same result as the promoted version above.
+transpile_test!(atomic_promotion_suppressed_with);

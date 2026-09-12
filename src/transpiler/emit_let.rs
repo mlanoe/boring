@@ -41,7 +41,39 @@ impl Transpiler {
     /// managed-mode `T'` (`OwnerQual::Owned`) over a user type — locking wrapper bindings
     /// that need their own constructor call and lock-guard shadow, not a plain `let`.
     /// Returns `true` if it fully emitted the binding (caller must return immediately).
+    /// Shared emission for a binding that ends up with the `'atomic` representation —
+    /// either an explicit `T'atomic` (Part 1) or a promoted `'actor`/`'guard` local
+    /// (Part 2, `promote_atomic.rs`). `inner` is the scalar payload type.
+    fn emit_atomic_let(&mut self, s: &LetStmt, inner: &Type, s_value: &Expr) {
+        let atomic_ty = self.emit_atomic_type(inner);
+        let raw_val = self.emit_let_value(Some(inner), s_value);
+        let init = self.emit_atomic_new(inner, &raw_val);
+        self.var_atomic_types.insert(s.name.clone());
+        self.arc_vars.insert(s.name.clone());
+        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+            self.rc_vars.insert(s.name.clone());
+        }
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        let name = escape_rust_keyword(&s.name);
+        self.line(&format!("{} {}: {} = {};", kw, name, atomic_ty, init));
+    }
+
     fn try_emit_qualified_let(&mut self, s: &LetStmt, ty: &Type, s_value: &Expr) -> bool {
+        // Automatic `'actor`/`'guard` → `'atomic` promotion (Part 2 — see
+        // `promote_atomic.rs`): `scan_atomic_promotions` has already proven this exact
+        // name safe to promote within this function's local scope, before any of its
+        // statements were emitted. Checked first so the mutex/rwlock branches below
+        // never see a promoted name.
+        if self.promoted_atomic_vars.contains(&s.name) {
+            let inner = match ty.without_mut() {
+                Type::Qualified(inner, OwnerQual::Actor | OwnerQual::Guard) => Some(inner.as_ref().clone()),
+                _ => None,
+            };
+            if let Some(inner) = inner {
+                self.emit_atomic_let(s, &inner, s_value);
+                return true;
+            }
+        }
         // T'actor → Arc<Mutex<T>> (multi) or Rc<RefCell<T>> (single).
         // All field reads/writes and method calls on this variable will go through the lock/borrow.
         // Works with both `let` and `var` — the actor qualifier alone triggers mutex semantics.
@@ -71,6 +103,17 @@ impl Transpiler {
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                 let name = escape_rust_keyword(&s.name);
                 self.line(&format!("{} {}: {} = {};", kw, name, mutex_ty, init));
+                return true;
+            }
+        }
+        // T'atomic → Arc<AtomicX> (multi) or Rc<Cell<X>> (single). Scalar-only (the
+        // checker's `check_atomic_compatibility` rejects float/struct/enum before this
+        // is ever reached) — no lock/guard shadow needed, just a construction call and
+        // a name registered in `var_atomic_types` for the load/store/fetch_add op-mapping
+        // in `emit_expr.rs`'s bare-`Var` read and `Assign` handling.
+        if Self::is_atomic_binding(ty) {
+            if let Some(inner) = Self::atomic_inner(ty).cloned() {
+                self.emit_atomic_let(s, &inner, s_value);
                 return true;
             }
         }

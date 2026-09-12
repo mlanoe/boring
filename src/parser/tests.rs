@@ -513,3 +513,84 @@ fn test_range_end_binds_looser_than_mul() {
         other => panic!("expected a Range iterable, got {:?} (mis-parsed as `(0..w) * h`?)", other),
     }
 }
+
+// ─── `'atomic` qualifier — parser (see docs/qualifiers.md's `'atomic` section) ─────
+
+#[test]
+fn test_let_qualifier_atomic_on_type_only_parses() {
+    // `let Type'atomic name = value` — qualifier on the type, scalar payload.
+    let src = "let int'atomic x = 0";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert_eq!(let_stmt.name, "x");
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(Box::new(ast::Type::Named("int".to_string())), ast::OwnerQual::Atomic))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_let_qualifier_atomic_on_name_int_literal_infers_int_base() {
+    // `let name'atomic = <int literal>` — no constructor call to infer the base type
+    // from (unlike `'actor`/`'guard`'s usual `Ctor(...)` RHS) — the parser infers it
+    // directly from the literal's own kind instead.
+    let src = "let counter'atomic = 5";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert_eq!(let_stmt.name, "counter");
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(Box::new(ast::Type::Int), ast::OwnerQual::Atomic))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_let_qualifier_atomic_on_name_bool_literal_infers_bool_base() {
+    let src = "let flag'atomic = true";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert_eq!(let_stmt.name, "flag");
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(Box::new(ast::Type::Bool), ast::OwnerQual::Atomic))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}
+
+#[test]
+fn test_atomic_qualifier_union_member_parses() {
+    // `T'shared|atomic` — `'atomic` is a valid member of an explicit qualifier union,
+    // just like `'shared`/`'owned`/`'inline`.
+    //
+    // NOTE: `'actor` as the *first* member of a pipe union (`T'actor|shared`,
+    // `T'actor|guard`, `T'actor|atomic`, ...) is a separate, pre-existing parser bug
+    // unrelated to `'atomic` — confirmed to fail identically with no `'atomic`
+    // involved at all (`T'actor|shared` alone). Not this feature's to fix; filed
+    // separately. `'atomic` first (this test) and `'atomic` as a later member both
+    // parse correctly.
+    let src = "let int'shared|atomic x = 0";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let ast::Item::Let(let_stmt) = &program.items[0] {
+        assert_eq!(
+            let_stmt.ty,
+            Some(ast::Type::Qualified(
+                Box::new(ast::Type::Named("int".to_string())),
+                ast::OwnerQual::Union(vec![ast::OwnerQual::Shared, ast::OwnerQual::Atomic]),
+            ))
+        );
+    } else {
+        panic!("expected Let item");
+    }
+}

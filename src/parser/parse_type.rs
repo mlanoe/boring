@@ -470,6 +470,12 @@ impl Parser {
                 "weak"   => { self.advance(); OwnerQual::Weak }
                 "inline" => { self.advance(); OwnerQual::Inline }
                 "owned"  => { self.advance(); OwnerQual::Owned }
+                // `T'atomic` — Arc<AtomicX> (multi) / Rc<Cell<X>> (single). Explicit only:
+                // never chosen by the plain priority-ordered fallback (see resolve_fallback
+                // in infer_qualifiers.rs) — only reachable via this explicit annotation or
+                // an explicit call-site demand. Type-shape validation (scalar int/bool only,
+                // never float/struct/enum) happens in the checker, not here.
+                "atomic" => { self.advance(); OwnerQual::Atomic }
                 // GPU memory qualifiers (kernel-context and host-context).
                 "unified" => { self.advance(); OwnerQual::GpuUnified }
                 "global"  => { self.advance(); OwnerQual::GpuGlobal }
@@ -537,7 +543,7 @@ impl Parser {
                 // Write the qualifier explicitly; `'new` covers what bare tick used to mean
                 // ("any indirection, inferred" — see OwnerQual::Union's doc comment).
                 _ => return Err(ParseError::Generic {
-                    msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
+                    msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'atomic, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
                     line: self.line(), col: self.col(), len: self.tok_len(),
                 }),
             },
@@ -584,7 +590,7 @@ impl Parser {
             // Truly bare tick — nothing recognizable follows `'` at all. Same rule as
             // the ident catch-all above: no longer supported, `'new` is the replacement.
             _ => return Err(ParseError::Generic {
-                msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
+                msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'atomic, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
                 line: self.line(), col: self.col(), len: self.tok_len(),
             }),
         };
@@ -601,6 +607,7 @@ impl Parser {
                         "owned"  => { self.advance(); OwnerQual::Owned }
                         "shared" => { self.advance(); OwnerQual::Shared }
                         "actor"  => { self.advance(); OwnerQual::Actor }
+                        "atomic" => { self.advance(); OwnerQual::Atomic }
                         _        => break,
                     },
                     TokenKind::Guard => { self.advance(); OwnerQual::Guard }

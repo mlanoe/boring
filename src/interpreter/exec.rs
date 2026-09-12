@@ -1174,6 +1174,7 @@ impl Interpreter {
                     OwnerQual::ActorTask    => "'task".to_string(),
                     OwnerQual::Guard        => "'guard".to_string(),
                     OwnerQual::GuardTask    => "'guard'task".to_string(),
+                    OwnerQual::Atomic       => "'atomic".to_string(),
                     OwnerQual::Shared       => "'shared".to_string(),
                     OwnerQual::Weak         => "'weak".to_string(),
                     OwnerQual::Inline       => "'inline".to_string(),

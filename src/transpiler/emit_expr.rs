@@ -102,6 +102,11 @@ impl Transpiler {
                         }
                     }
                 }
+                // `'atomic` bindings: a bare read is a load — `.load(Ordering::SeqCst)`
+                // (multi) / `.get()` (single). See `emit_top.rs`'s `atomic_load`.
+                if self.var_atomic_types.contains(n.as_str()) {
+                    return self.atomic_load(n);
+                }
                 // `var` primitive params are `&mut T` — auto-deref on use.
                 if self.var_primitive_params.contains(n.as_str()) {
                     return format!("(*{})", n);
@@ -2273,6 +2278,31 @@ impl Transpiler {
             if self.var_primitive_params.contains(var_name.as_str()) {
                 let val_s = self.emit_expr(value);
                 return format!("*{} = {}", var_name, val_s);
+            }
+            // `'atomic` bindings — operation mapping (Part 1, point 6):
+            //   x += n / x -= n  → fetch_add / fetch_sub (`+=`/`-=` desugar to
+            //                       `x = x + n` / `x = x - n` at parse time, see
+            //                       parse_expr.rs's compound-assignment desugar —
+            //                       recognized here as `Assign(Var(x), BinOp(Add|Sub, Var(x), rhs))`)
+            //   x = n            → store (anything else on the RHS)
+            // `x.swap(n)` is handled in `emit_method_call` (receiver-is-atomic-var case);
+            // a recognizable compare-and-swap pattern (`if x == a: x = b`) is deliberately
+            // NOT pattern-matched here — see docs/qualifiers.md's `'atomic` section,
+            // "Deferred: compare-and-swap detection".
+            if self.var_atomic_types.contains(var_name.as_str()) {
+                if let ExprKind::BinOp(op, l, r) = &value.kind {
+                    if matches!(op, BinOp::Add | BinOp::Sub) {
+                        if let ExprKind::Var(lv) = &l.kind {
+                            if lv == var_name {
+                                let op_name = if matches!(op, BinOp::Add) { "fetch_add" } else { "fetch_sub" };
+                                let rhs_s = self.emit_expr_owned(r);
+                                return self.atomic_fetch_op(var_name, op_name, &rhs_s);
+                            }
+                        }
+                    }
+                }
+                let val_s = self.emit_expr_owned(value);
+                return self.atomic_store(var_name, &val_s);
             }
         }
         if let ExprKind::Field(obj, field) = &target.kind {

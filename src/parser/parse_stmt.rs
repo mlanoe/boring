@@ -464,7 +464,33 @@ impl Parser {
                                     Some(Self::replace_type_base(qualified, base))
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
-                        } else { Some(qualified) };
+                        } else {
+                            // `x'qual = <literal>` where the RHS isn't a constructor call — most
+                            // commonly a scalar `'atomic` counter/flag (`x'atomic = 0`), but this
+                            // applies to any qualifier: there is no callee to infer the base type
+                            // from, so infer it directly from the literal's own kind instead
+                            // (int → `int`, bool → `bool`, float → `float64`; a negated int/float
+                            // literal unwraps the same way). Fixes a pre-existing gap where a
+                            // scalar initializer under a non-`'atomic` qualifier (e.g. a plain
+                            // `x'actor = 0`) silently left the `_` placeholder unresolved, which
+                            // the transpiler then emitted verbatim as `Mutex<_>` — never a valid
+                            // Rust type. Anything else (a variable read, a more complex
+                            // expression) is left as the `_` placeholder, same as before.
+                            fn infer_scalar_literal_base(e: &Expr) -> Option<Type> {
+                                match &e.kind {
+                                    ExprKind::Int(_) => Some(Type::Int),
+                                    ExprKind::UInt64(_) => Some(Type::Uint),
+                                    ExprKind::Bool(_) => Some(Type::Bool),
+                                    ExprKind::Float(_) => Some(Type::Float64),
+                                    ExprKind::UnaryOp(_, inner) => infer_scalar_literal_base(inner),
+                                    _ => None,
+                                }
+                            }
+                            match infer_scalar_literal_base(&value) {
+                                Some(base) => Some(Self::replace_type_base(qualified, base)),
+                                None => Some(qualified),
+                            }
+                        };
                         let ty = if wrap_mut { ty.map(Self::wrap_type_mut) } else { ty };
                         return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col });
                     }

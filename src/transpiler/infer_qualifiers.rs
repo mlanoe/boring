@@ -1315,7 +1315,7 @@ fn disambiguate_task_variant(remaining: &mut Vec<OwnerQual>, has_task_call: bool
 /// For 'inline/'owned demands, only the exact qualifier is accepted.
 fn coercible_from(demanded: OwnerQual) -> Vec<OwnerQual> {
     match demanded {
-        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard =>
+        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Atomic =>
             vec![OwnerQual::Inline, OwnerQual::Owned, demanded],
         // Universal immutable borrow: any qualifier is accepted — no constraint on caller.
         OwnerQual::Borrow => all_qualifiers(),
@@ -1367,15 +1367,25 @@ fn resolve_fallback(
     let has = |q: &OwnerQual| candidates.iter().any(|c| quals_equal(c, q));
     let fits = !size_boxing_applies || type_size.is_none_or(|s| s <= inline_auto_bytes);
 
-    // Ordered chain: 'owned > 'shared > 'actor(/'actor'task) > 'guard(/'guard'task).
+    // Ordered chain: 'owned > 'shared > 'actor(/'actor'task) > 'atomic > 'guard(/'guard'task).
     // The 'task variant is checked first at each slot so that it wins when it's the one
     // that survived constraint elimination (e.g. after `disambiguate_task_variant`) —
     // by that point at most one of {Actor, ActorTask} and one of {Guard, GuardTask} remain.
+    //
+    // 'atomic sits after 'actor(/'actor'task) and before 'guard(/'guard'task) — but this
+    // position is inert for default-selection purposes: 'actor(/'actor'task) is checked
+    // first and always wins the tie-break whenever {Actor, Guard, Atomic} (or any subset
+    // containing Actor) remain candidates simultaneously, exactly like 'guard already never
+    // wins today. 'atomic is reachable only via an explicit `x'atomic` annotation or an
+    // explicit call-site demand (a parameter typed `T'atomic`) — see
+    // docs/qualifiers.md's `'atomic` section and this file's `mod tests` below, which
+    // pins this inertness down as a regression test.
     fn tail_pick(has: &dyn Fn(&OwnerQual) -> bool) -> Option<OwnerQual> {
         if has(&OwnerQual::Owned) { return Some(OwnerQual::Owned); }
         if has(&OwnerQual::Shared) { return Some(OwnerQual::Shared); }
         if has(&OwnerQual::ActorTask) { return Some(OwnerQual::ActorTask); }
         if has(&OwnerQual::Actor) { return Some(OwnerQual::Actor); }
+        if has(&OwnerQual::Atomic) { return Some(OwnerQual::Atomic); }
         if has(&OwnerQual::GuardTask) { return Some(OwnerQual::GuardTask); }
         if has(&OwnerQual::Guard) { return Some(OwnerQual::Guard); }
         None
@@ -1538,7 +1548,7 @@ fn qual_of_type(ty: &Type) -> Option<OwnerQual> {
     match ty.without_mut() {
         Type::Qualified(_, q) => match q {
             OwnerQual::Inline | OwnerQual::Owned | OwnerQual::Shared
-            | OwnerQual::Actor | OwnerQual::Guard => Some(q.clone()),
+            | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Atomic => Some(q.clone()),
             OwnerQual::Union(_) => None,
             _ => None,
         },
@@ -1581,6 +1591,7 @@ fn qual_name(q: &OwnerQual) -> &'static str {
         OwnerQual::ActorTask => "actor'task",
         OwnerQual::Guard     => "guard",
         OwnerQual::GuardTask => "guard'task",
+        OwnerQual::Atomic    => "atomic",
         OwnerQual::Weak      => "weak",
         OwnerQual::Borrow    => "T&",
         OwnerQual::BorrowMut => "mut T&",
@@ -1769,5 +1780,56 @@ fn collect_self_fields_in_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<
             for st in &s.body { collect_self_fields_in_stmt(st, out); }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `'atomic` fallback-chain inertness (see docs/qualifiers.md's `'atomic` section
+    // and this file's `resolve_fallback` doc comment): `'actor` always precedes both
+    // `'atomic` and `'guard` in the ordered chain, so whenever `{Actor, Guard, Atomic}`
+    // (or any subset containing `Actor`) remain candidates simultaneously, `'actor`
+    // wins the tie-break regardless of where `'atomic`/`'guard` sit relative to each
+    // other. `'atomic` is reachable only via an explicit annotation or an explicit
+    // call-site demand — never the plain fallback.
+    #[test]
+    fn atomic_never_wins_fallback_when_actor_present() {
+        let candidates = [OwnerQual::Actor, OwnerQual::Guard, OwnerQual::Atomic];
+        let result = resolve_fallback(&candidates, false, None, 256, true);
+        assert_eq!(result, Some(OwnerQual::Actor), "expected 'actor to win the tie-break, not 'atomic or 'guard");
+    }
+
+    #[test]
+    fn atomic_never_wins_fallback_actor_task_present() {
+        let candidates = [OwnerQual::ActorTask, OwnerQual::Atomic, OwnerQual::Guard];
+        let result = resolve_fallback(&candidates, false, None, 256, true);
+        assert_eq!(result, Some(OwnerQual::ActorTask), "expected 'actor'task to win the tie-break over 'atomic");
+    }
+
+    // With no 'actor/'actor'task in the running, 'atomic DOES win over 'guard —
+    // confirming it participates correctly in the chain once it's actually a
+    // candidate (reachable only via explicit annotation/demand, per the doc above),
+    // it isn't simply dead code that never resolves to anything.
+    #[test]
+    fn atomic_wins_over_guard_when_actor_absent() {
+        let candidates = [OwnerQual::Guard, OwnerQual::Atomic];
+        let result = resolve_fallback(&candidates, false, None, 256, true);
+        assert_eq!(result, Some(OwnerQual::Atomic), "expected 'atomic to win over 'guard when 'actor isn't a candidate");
+    }
+
+    #[test]
+    fn atomic_alone_resolves_to_atomic() {
+        let candidates = [OwnerQual::Atomic];
+        let result = resolve_fallback(&candidates, false, None, 256, true);
+        assert_eq!(result, Some(OwnerQual::Atomic));
+    }
+
+    #[test]
+    fn owned_still_wins_over_atomic() {
+        let candidates = [OwnerQual::Owned, OwnerQual::Atomic, OwnerQual::Actor];
+        let result = resolve_fallback(&candidates, false, None, 256, true);
+        assert_eq!(result, Some(OwnerQual::Owned), "expected 'owned to still win the whole chain");
     }
 }

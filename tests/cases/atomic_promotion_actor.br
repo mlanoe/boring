@@ -1,0 +1,23 @@
+# Behavioral test for the automatic `'actor` -> `'atomic` promotion pass (Part 2 of
+# the `'atomic` design — see docs/qualifiers.md's `'atomic` section and
+# src/transpiler/promote_atomic.rs). `counter` here is `'actor`-qualified, never
+# escapes its local scope, is never used inside a `with` block, and every access
+# decomposes into a single recognized atomic primitive — so the promotion pass
+# rewrites it to the `'atomic` representation (Arc<AtomicIsize> / Rc<Cell<isize>>)
+# instead of Arc<Mutex<isize>> / Rc<RefCell<isize>>.
+#
+# Also proves a real, previously-broken combination now works: a scalar `'actor`
+# binding's compound assignment (`counter += 5`) used to transpile to a bare `+=`
+# directly on the `Arc<Mutex<isize>>` wrapper with no `.lock()` at all — not valid
+# Rust. Promoting to `'atomic` sidesteps that bug entirely by using `fetch_add`
+# instead.
+#
+# `tests/atomic_qualifier.rs`'s `promotion_fires_for_local_scalar_actor` inspects
+# the actual generated Rust (not just this file's stdout) to confirm the atomic
+# representation is really what gets emitted, not just that the output happens to
+# match — see that test for the codegen-level half of this regression pin.
+def main():
+    var counter'actor = 0
+    counter += 5
+    counter -= 2
+    print "{counter}"

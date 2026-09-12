@@ -1,0 +1,22 @@
+# Regression pin for the CONSERVATIVE side of the automatic `'actor` -> `'atomic`
+# promotion pass (Part 2, see docs/qualifiers.md's `'atomic` section): `counter` is
+# used inside a `with` block — criterion 4 (never used inside a `with` block) fails,
+# so the promotion pass must NOT fire here; `counter` stays on the original `'actor`
+# (Mutex-backed) representation.
+#
+# Deliberately read-only inside the `with` block: mutating an *unpromoted* scalar
+# `'actor`/`'guard` binding (bare compound-assign or plain assign, with or without a
+# `with` wrapper) hits a separate, pre-existing codegen gap — a scalar `'actor`
+# binding's own assignment was never specially handled the way a struct field's is
+# (see `emit_expr.rs`'s `emit_expr_assign`, which only special-cases `Field` write
+# targets through the lock, never a bare `Var` target) — unrelated to `'atomic` and
+# filed separately. This fixture sidesteps it entirely so the test pins down exactly
+# one thing: that criterion 4 really does suppress promotion, and the (read-only)
+# result is still correct. See atomic_promotion_actor.br for the mutating,
+# successfully-promoted counterpart, and `tests/atomic_qualifier.rs`'s
+# `promotion_suppressed_for_with_block_usage` for the codegen-level inspection
+# (confirms it really did stay on Mutex, not just that stdout happens to match).
+def main():
+    var counter'actor = 3
+    with counter:
+        print "{counter}"

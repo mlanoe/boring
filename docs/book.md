@@ -6021,6 +6021,7 @@ All ownership qualifiers:
 | `T'actor'task` / `T'task` | `Arc<tokio::sync::Mutex<T>>`   | not supported         | Shared mutable — async, hold lock across `.await` |
 | `T'guard`          | `Arc<std::sync::RwLock<T>>`           | `Rc<RefCell<T>>`      | Shared mutable — reader-writer, sync  |
 | `T'guard'task`     | `Arc<tokio::sync::RwLock<T>>`         | not supported         | Reader-writer — async context         |
+| `T'atomic`         | `Arc<AtomicX>`                        | `Rc<Cell<X>>`         | Lock-free — scalar-only (`int`/`uint`/`bool`/sized ints), see below |
 | `T'shared'weak`    | `std::sync::Weak<T>`                  | `Weak<T>`             | Weak ref to `T'shared`                |
 | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`           | `Weak<RefCell<T>>`    | Weak ref to `T'actor`                 |
 | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`          | `Weak<RefCell<T>>`    | Weak ref to `T'guard`                 |
@@ -6136,6 +6137,49 @@ immutable, and `'static` is, if anything, more restrictive):
 def process(Counter'req c):   # accepts 'shared or 'static
     print c.value
 ```
+
+### `'atomic` — lock-free scalar qualifier
+
+`T'atomic` is structurally in the same family as `T'actor`/`T'guard` (a
+smart-pointer storage/synchronization choice), not a provenance qualifier
+like `T'static` — it participates in the same candidate-elimination
+inference system, just never wins the plain fallback (see below). Unlike
+`'actor`/`'guard`, it is never a real lock: it wraps a scalar in a
+genuinely lock-free `std::sync::atomic` type (`Rc<Cell<X>>` single-thread,
+since there's no real concurrency to protect against there):
+
+```boring
+let counter'atomic = 0
+counter += 5             # fetch_add — a single atomic instruction
+let old = counter.swap(100)
+```
+
+**Scalar-only**: `int`/`uint`/`bool` and every fixed-width
+`int8`..`int64`/`uint8`..`uint64` — never `float`/`float32`/`float64` (no
+stable `std::sync::atomic` float type) and never `int128`/`uint128` (no
+`AtomicI128`/`AtomicU128` in stable `std`); a struct/enum is rejected
+outright, same reasoning. All generated operations use
+`Ordering::SeqCst` — the conservative default, no ordering-tuning surface
+yet.
+
+`'atomic` is inserted into the priority-ordered fallback chain
+(chapter 30) right after `'actor`(/`'actor'task`) — but since `'actor`
+is checked first, it always wins that tie-break, so **`'atomic` is never
+chosen by inference alone**: it's reachable only via an explicit
+`x'atomic` annotation or an explicit call-site demand (a parameter typed
+`T'atomic`).
+
+`'atomic` has no lock/guard object for `with` to hold across a scoped
+block, so `with x: ...` on an `'atomic`-qualified `x` is a hard compile
+error — see "Scoped access blocks — `with`" below.
+
+> A separate, purely additive optimization pass automatically promotes a
+> local `'actor`/`'guard`-qualified scalar to `'atomic` when it provably
+> never escapes its function, every access is a single recognized atomic
+> operation, and it's never used inside a `with` block. See
+> [`docs/qualifiers.md`'s `'atomic` section](qualifiers.md#atomic--lock-free-scalar-qualifier)
+> for the full type-compatibility table, operation mapping, and the
+> promotion pass's four criteria in detail.
 
 ### Qualifier groups — parameter constraints
 
@@ -6373,6 +6417,8 @@ with a, b:
 Nesting a block on the **same** name inside itself is a compile error (double-acquire — `Mutex`/`RwLock` are not reentrant). Nesting on **different** names is unrestricted.
 
 > `with` also has a GPU-specific use — materializing a `kernel` struct's `'unified`/`'global` field exactly once instead of on every access, including across a function-call boundary. See [chapter 32, GPU Computing](#32-gpu-computing).
+
+> `with` is not valid on a `T'atomic` binding — atomics have no lock/guard object to hold across a scoped block (every access is already a single, independent atomic operation). See ["`'atomic` — lock-free scalar qualifier"](#atomic--lock-free-scalar-qualifier) above.
 
 ---
 
@@ -8363,6 +8409,7 @@ Each unqualified local variable starts as a candidate for every qualifier: `{Inl
 | Call site demanding `T'shared` | `{Shared}` |
 | Call site demanding `T'actor` | `{Actor}` |
 | Call site demanding `T'guard` | `{Guard}` |
+| Call site demanding `T'atomic` | `{Atomic}` |
 | Call site demanding `T'inline` | `{Inline}` |
 | Call site demanding `T'owned` | `{Owned}` |
 | `def` method call on the variable | `{Inline, Owned, Actor, Guard}` |
@@ -8396,7 +8443,9 @@ struct Wrapper:
 
 **Step 2 — ordered chain.** If `'inline` was not selected, the transpiler picks the first qualifier present in the remaining candidates, in this order:
 
-`'owned` > `'shared` > `'actor` > `'guard`
+`'owned` > `'shared` > `'actor` > `'atomic` > `'guard`
+
+> `'atomic` sits between `'actor` and `'guard` in this chain, but that position is inert for default selection: `'actor` is checked first and always wins whenever both remain candidates, so `'atomic` is never chosen by this fallback alone — only by an explicit `x'atomic` annotation or an explicit call-site demand. A separate, later optimization pass can still automatically *promote* an already-`'actor`/`'guard`-resolved local scalar to `'atomic` when it's provably safe — see [chapter 21, "`'atomic` — lock-free scalar qualifier"](#atomic--lock-free-scalar-qualifier) and `docs/qualifiers.md`'s `'atomic` section for the full design.
 
 ### Threshold
 
@@ -8953,7 +9002,7 @@ The following documents cover topics in greater depth or address areas still und
 ### Ownership and qualifiers
 
 **[Qualifiers — Complete Reference](qualifiers.html)**
-All ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'inline`→`'owned`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and known limitations.
+All ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`, `'atomic`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'inline`→`'owned`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, `'atomic`'s type-compatibility table and operation mapping, the automatic `'actor`/`'guard`→`'atomic` promotion pass, and known limitations.
 
 **[Binding and mutability](binding-mutability.html)**
 Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.

@@ -1120,6 +1120,18 @@ pub enum OwnerQual {
     ActorTask, // Arc<tokio::sync::Mutex<T>> (multi) or Rc<RefCell<T>> (single) — alias: 'task
     Guard,     // Arc<std::sync::RwLock<T>> (multi) or Rc<RefCell<T>> (single)
     GuardTask, // Arc<tokio::sync::RwLock<T>> (multi) or Rc<RefCell<T>> (single)
+    /// `T'atomic` — Arc<AtomicX> (multi-thread) or Rc<Cell<X>> (single-thread), where
+    /// `X` is the std atomic type matching `T`'s width (`AtomicIsize`, `AtomicU32`, `AtomicBool`, …).
+    /// Only valid on the integer/bool scalar family — never on `float`/`float32`/`float64`
+    /// (no stable `std::sync::atomic` equivalent) and never on a struct/enum. See
+    /// `docs/qualifiers.md`'s `'atomic` section for the full design: the type-compatibility
+    /// table, its (inert, for default-selection purposes) position in the priority-ordered
+    /// fallback chain, the `with`-incompatibility rule, and the separate automatic
+    /// `'actor`/`'guard` → `'atomic` promotion pass. Structurally a storage/synchronization
+    /// qualifier like `'actor`/`'guard` (participates in normal candidate-elimination
+    /// inference), NOT a provenance qualifier like `'static` (which is walled off from
+    /// inference entirely).
+    Atomic,
     /// Arc<T> (multi-thread) or Rc<T> (single-thread).
     /// The `--threading` flag determines which is emitted.
     /// Replaces the deprecated `T'auto` and `T'task` qualifiers.
@@ -1477,6 +1489,53 @@ impl Type {
     /// position a `Set` could be nested (tuple slots, array/dict elements,
     /// generic arguments, qualifiers) so `[{mut T}]`, `({mut T}, int)`, etc.
     /// are all caught too, not just a bare `{mut T}` at the top level.
+    /// True for the scalar family `'atomic` may wrap: `int`/`uint`/`bool` and every
+    /// fixed-width `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` —
+    /// never a float (no stable `std::sync::atomic` equivalent) and never
+    /// `int128`/`uint128` (no `AtomicI128`/`AtomicU128` in stable `std`). See
+    /// `docs/qualifiers.md`'s `'atomic` section for the full type-compatibility table.
+    pub fn is_atomic_eligible_scalar(&self) -> bool {
+        matches!(self,
+            Type::Int | Type::Uint | Type::Bool
+            | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+            | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64
+        )
+        // Lowercase Boring keywords (`int`, `uint`, `bool`, sized variants) parse as
+        // `Type::Named` and are only resolved to the variants above later (interpreter
+        // alias table / transpiler size lookup) — checker/parser code that runs before
+        // that resolution has to match the spelling directly instead. Same duality,
+        // same list shape, as `checker::is_scalar_type` / `emit_top::is_copy_type`.
+        // `int128`/`uint128`/`i128`/`u128` are deliberately excluded — no
+        // `AtomicI128`/`AtomicU128` in stable `std`. Floats are excluded too.
+        || matches!(self, Type::Named(n) if matches!(n.as_str(),
+            "int" | "uint" | "bool"
+            | "int8" | "int16" | "int32" | "int64"
+            | "uint8" | "uint16" | "uint32" | "uint64"
+            | "i8" | "i16" | "i32" | "i64" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "usize"))
+    }
+
+    /// Recursively searches for a `Qualified(inner, Atomic)` node whose `inner` is
+    /// NOT `is_atomic_eligible_scalar` — i.e. an illegal `'atomic` application
+    /// (float, struct, enum, collection, ...). Returns the offending inner type for
+    /// use in the checker's error message. Mirrors `contains_illegal_mut_set`'s
+    /// recursion shape just above.
+    pub fn find_atomic_incompatibility(&self) -> Option<&Type> {
+        match self {
+            Type::Qualified(inner, OwnerQual::Atomic) if !inner.is_atomic_eligible_scalar() => Some(inner),
+            Type::Set(elem) => elem.find_atomic_incompatibility(),
+            Type::Tuple(elems) => elems.iter().find_map(Type::find_atomic_incompatibility),
+            Type::Dict(k, v) => k.find_atomic_incompatibility().or_else(|| v.find_atomic_incompatibility()),
+            Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _)
+                | Type::LabeledArray(inner, _) | Type::Optional(inner) | Type::Mut(inner)
+                | Type::Qualified(inner, _) | Type::Dyn(inner) | Type::Impl(inner) => {
+                inner.find_atomic_incompatibility()
+            }
+            Type::Generic(_, args) => args.iter().find_map(Type::find_atomic_incompatibility),
+            _ => None,
+        }
+    }
+
     pub fn contains_illegal_mut_set(&self) -> bool {
         match self {
             Type::Set(elem) => elem.grants_mut() || elem.contains_illegal_mut_set(),
@@ -1544,6 +1603,7 @@ impl Type {
             Type::Qualified(_, OwnerQual::Shared)     => true,  // Arc<T> (multi) / Rc<T> (single) — qualifier intent is task-safe
             Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask) => true,
             Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask) => true,
+            Type::Qualified(_, OwnerQual::Atomic) => true, // Arc<AtomicX> (multi) / Rc<Cell<X>> (single) — task-safe like 'actor/'guard
             Type::Qualified(_, OwnerQual::Weak)       => false, // Weak<T> — non-owning, conservative
             Type::Qualified(_, OwnerQual::Lifetime(_)) => true, // borrow — task-safe for transpilation
             Type::Qualified(_, OwnerQual::Static) => true, // &'static T outlives any task, unconditionally safe

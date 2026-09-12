@@ -27,6 +27,7 @@ Qualifiers are resolved at transpile time. The interpreter ignores them (all val
 | `'actor'task` / `'task` | `Arc<tokio::sync::Mutex<T>>` | `Rc<RefCell<T>>` | interior mutability | async context |
 | `'guard` | `Arc<std::sync::RwLock<T>>` | `Rc<RefCell<T>>` | interior mutability | reader-writer, sync |
 | `'guard'task` | `Arc<tokio::sync::RwLock<T>>` | `Rc<RefCell<T>>` | interior mutability | async context |
+| `'atomic` | `Arc<AtomicX>` | `Rc<Cell<X>>` | lock-free | scalar-only (`int`/`uint`/`bool`/sized ints) — see below |
 | `'weak` | `Weak<T>` / `sync::Weak<T>` | `Rc::Weak<T>` | no | non-owning, inferred from RHS |
 | `'static` | `&'static T` | `&'static T` | no | constant global instance, no refcount — see below |
 
@@ -577,6 +578,7 @@ Each unqualified local variable starts with a candidate set of all possible qual
 | Call site demanding `T'shared` | `{Shared}` |
 | Call site demanding `T'actor` | `{Actor}` |
 | Call site demanding `T'guard` | `{Guard}` |
+| Call site demanding `T'atomic` | `{Atomic}` |
 | Call site demanding `T'inline` | `{Inline}` |
 | Call site demanding `T'owned` | `{Owned}` |
 | `def` method call on the variable | `{Inline, Owned, Actor, Guard}` |
@@ -609,7 +611,9 @@ The threshold is configurable: `boring build --inline-auto-bytes 512` (default: 
 
 If `'inline` was not selected, pick the first qualifier from the remaining set:
 
-`'owned` > `'shared` > `'actor` > `'guard`
+`'owned` > `'shared` > `'actor` > `'atomic` > `'guard`
+
+`'atomic`'s position here is inert for default-selection purposes — see "`'atomic` — lock-free scalar qualifier" below for why (`'actor` always precedes it, so it's reachable only via explicit annotation or an explicit call-site demand, never the plain fallback).
 
 ### Examples
 
@@ -755,8 +759,106 @@ The `--threading single` / `--threading multi` flag (default: multi) selects the
 | `'guard` | `Arc<std::sync::RwLock<T>>` | `Rc<RefCell<T>>` |
 | `'actor'task` | `Arc<tokio::sync::Mutex<T>>` | `Rc<RefCell<T>>` |
 | `'guard'task` | `Arc<tokio::sync::RwLock<T>>` | `Rc<RefCell<T>>` |
+| `'atomic` | `Arc<AtomicX>` | `Rc<Cell<X>>` |
 
 In single-thread mode `'actor` and `'guard` both map to `Rc<RefCell<T>>` — there is no semantic difference between reader and writer locks in a single-threaded context. The same collapse applies to the `'task` variants: single-thread mode still runs under a tokio `current_thread` runtime (`#[tokio::main(flavor = "current_thread")]`, `tokio::task::spawn_local`), but since everything runs on one thread there is no need for `Send + Sync` locks, so `'actor'task` / `'guard'task` reuse plain `Rc<RefCell<T>>` instead of the tokio async locks.
+
+---
+
+## `'atomic` — lock-free scalar qualifier
+
+`'atomic` is a storage/synchronization qualifier structurally in the same family as `'actor`/`'guard` (a smart-pointer wrapper choice) — it is **not** a provenance qualifier like `'static`, and it participates in the ordinary candidate-elimination inference system rather than being walled off from it. Unlike `'actor`/`'guard`, it is never a real lock: it always maps to a genuinely lock-free hardware/std-library primitive, so it exists only for a narrower family of types.
+
+### Syntax
+
+```boring
+let int'atomic counter = 0        # Type'atomic name = value
+let counter'atomic = 0            # name'atomic = value — base type inferred from the literal
+var flag'atomic = false
+```
+
+Like every other qualifier, it can be written on the type or on the name (never both — see "Qualifier on the type OR the name, never both" below), and it participates in explicit qualifier unions: `T'shared|atomic`.
+
+### Type compatibility
+
+`'atomic` only wraps the scalar family with a real `std::sync::atomic` (or, single-thread, `Cell`) equivalent:
+
+| Boring scalar | `--threading multi` | `--threading single` |
+|---|---|---|
+| `int` | `Arc<AtomicIsize>` | `Rc<Cell<isize>>` |
+| `uint` | `Arc<AtomicUsize>` | `Rc<Cell<usize>>` |
+| `bool` | `Arc<AtomicBool>` | `Rc<Cell<bool>>` |
+| `int8`/`int16`/`int32`/`int64` | `Arc<AtomicI8/16/32/64>` | `Rc<Cell<i8/16/32/64>>` |
+| `uint8`/`uint16`/`uint32`/`uint64` | `Arc<AtomicU8/16/32/64>` | `Rc<Cell<u8/16/32/64>>` |
+
+Rejected as a **compile error**, with a message naming the offending type:
+
+- `float`/`float32`/`float64` — no stable `std::sync::atomic` float type exists.
+- `int128`/`uint128` — no `AtomicI128`/`AtomicU128` in stable `std`.
+- Any struct, enum, collection, or other non-scalar type — no atomic representation at all; use `'actor`/`'guard` for interior mutability there instead.
+
+The single-thread collapse to `Rc<Cell<X>>` reuses the same precedent as `transient` fields (`Cell<T>` for `Copy` types, `RefCell<T>` otherwise, in "Advanced — `transient` fields" in `docs/book.md`) — there is no real concurrency to protect against single-threaded, so the heavier lock-free-atomic representation is unnecessary; `Cell`'s `get`/`set`/`replace` give the same load/store/swap vocabulary at a fraction of the cost.
+
+### Memory ordering
+
+Every generated atomic operation uses `std::sync::atomic::Ordering::SeqCst` — the strongest, safest ordering, consistent with the project's existing "conservative by default" philosophy (compare `--inline-auto-bytes`'s own conservative size estimate). This first version does not expose ordering tuning; a future extension could add it (e.g. `'atomic'relaxed`) once a real workload demonstrates the need.
+
+### Operation mapping
+
+| Boring | Multi-thread | Single-thread |
+|---|---|---|
+| bare read (`x` as a value) | `x.load(Ordering::SeqCst)` | `x.get()` |
+| `x = n` | `x.store(n, Ordering::SeqCst)` | `x.set(n)` |
+| `x += n` | `x.fetch_add(n, Ordering::SeqCst)` | `{ let v = x.get(); x.set(v + n); v }` |
+| `x -= n` | `x.fetch_sub(n, Ordering::SeqCst)` | `{ let v = x.get(); x.set(v - n); v }` |
+| `x.swap(n)` | `x.swap(n, Ordering::SeqCst)` | `x.replace(n)` |
+
+**Deferred**: a recognizable compare-and-swap pattern (`if x == a: x = b`) is not pattern-matched into `compare_exchange` in this first version — left as a documented gap rather than a fragile heuristic. A binding that needs CAS semantics should stay on `'actor`/`'guard` (or use an explicit, hand-written pattern) for now.
+
+### Position in the priority-ordered fallback chain — inert by construction
+
+`'atomic` is inserted into the ordered chain (see "Priority-ordered fallback" above) immediately after `'actor`(/`'actor'task`):
+
+`'owned` > `'shared` > `'actor`(/`'actor'task`) > `'atomic` > `'guard`(/`'guard'task`)
+
+Its exact position relative to `'guard` doesn't matter for default-selection purposes: `'actor` is checked *before* both `'atomic` and `'guard` in the chain, so whenever `{Actor, Guard, Atomic}` (or any subset containing `Actor`) remain candidates simultaneously, `'actor` wins the tie-break regardless of where `'atomic`/`'guard` sit relative to each other — exactly the reason `'guard` is already never chosen by the plain fallback today. This means **`'atomic` is never chosen by inference alone** — it is reachable only via:
+
+1. An explicit annotation (`x'atomic`).
+2. An explicit call-site demand elsewhere in the program (a parameter typed `T'atomic`, added to the signal table as "Call site demanding `T'atomic`" → `{Atomic}`, exactly like the existing `'shared`/`'actor`/`'guard` demand signals).
+
+A bare scalar whose only signals are ambiguous between `{Actor, Guard, Atomic}` still resolves to `'actor` by default — confirmed as a regression test against `resolve_fallback` directly (`src/transpiler/infer_qualifiers.rs`'s test module).
+
+### `with`-block incompatibility
+
+A `with`-block (see [chapter 21, Scoped access blocks — `with`](book.md#scoped-access-blocks--with) in `docs/book.md`, and `docs/scoped-access-blocks.md`) lets a `'actor`/`'guard` binding hold its lock across multiple operations instead of acquiring/releasing per access. `'atomic` has no lock/guard object to hold — every access already is a single, independent atomic operation — so `with x: ...` on an `'atomic`-qualified `x` is a **hard compile error**, not a silent fallback to per-access codegen:
+
+```boring
+var counter'atomic = 0
+with counter:              # ERROR: 'atomic has no lock/guard to hold across a `with` block
+    counter += 1
+```
+
+### Automatic `'actor`/`'guard` → `'atomic` promotion
+
+This is a **separate, purely additive, behavior-preserving, and conservative optimization pass** — architecturally distinct from `'atomic`'s participation in candidate-elimination inference above. It runs *after* ordinary qualifier resolution has already committed a local binding to `'actor` or `'guard` (never as another candidate competing in the priority-ordered fallback — inserting it there alone would never fire it, since `'actor` always wins that tie-break, which is exactly why this is a separate mechanism).
+
+**False negatives (missing a safe promotion) are acceptable; false positives (an unsound promotion) are not.**
+
+A local (never a struct field, parameter, or return value) `'actor`/`'guard`-qualified scalar binding is promoted to the `'atomic` representation only when **all four** of the following hold, checked within the same function-local analysis scope `with`'s own mutation scan already uses (recursing into `if`/`while`/`for`/`match`/`loop`/`do-while`/`guard`/`try`/`defer`/closures nested in the same function — never into a called function's own body):
+
+1. **Atomic-eligible scalar type** — never a struct, never a float, never `int128`/`uint128`.
+2. **Never escapes the local scope** — never returned, never assigned into a struct field, never captured by a `task`/closure, never passed as an argument to a function/method call (its own `swap` excepted).
+3. **Every access decomposes into a single atomic primitive** from the operation-mapping table above: a bare read, `x = <value not referencing x>`, `x = x + <value not referencing x>` / `x = x - <value not referencing x>` (a genuinely single `fetch_add`/`fetch_sub` instruction), or `x.swap(<value not referencing x>)`. Any other shape referencing `x` on an assignment's RHS (`x = x * 2`, `x = f(x)`, `x = x + x`, ...) would require decomposing into a separate load then store under the atomic representation — **not** equivalent to the original lock-protected read-modify-write, so it blocks promotion rather than firing an unsound rewrite.
+4. **Never used inside a `with` block** anywhere in the same local scope — same non-whole-program boundary as `with`'s own existing scan, a known, already-accepted limitation, not a new one.
+
+Both `'actor` and `'guard` sources are treated identically: promoting a `'guard`-resolved scalar is at least as safe as promoting `'actor` — a `RwLock`'s whole benefit (cheap concurrent reads) is preserved and improved by a lock-free atomic `load()`.
+
+**Deferred** (future work, not attempted in this first version):
+
+- **Compare-and-swap pattern detection** — a `'actor`/`'guard` scalar used only via an `if x == a: x = b` pattern is not recognized as CAS-safe and stays on the lock-based representation.
+- **Cross-function whole-program promotion** — a promoted variable passed to another Boring function/method is always treated as escaping (criterion 2), exactly like `with`'s own local-only scan never opens a called function's body. A future version could extend the analysis to also examine the callee's own body when it's defined in the same file/module, under the same conservative false-negative-ok principle.
+
+Implementation: `src/transpiler/promote_atomic.rs` (`scan_atomic_promotions`, run once per function body immediately after `infer_qualifiers`/`infer_struct_field_qualifiers`, before any statement is emitted) populates `self.promoted_atomic_vars`; `emit_let.rs`'s `try_emit_qualified_let` consults it before falling through to the ordinary `'actor`/`'guard` mutex/rwlock emission.
 
 ---
 
@@ -858,6 +960,7 @@ The transpiler maintains four sets per scope for dispatch:
 | `var_mutex_task_types` | local vars with `'actor'task` / `'task` |
 | `var_rwlock_types` | local vars with `'guard` |
 | `var_rwlock_task_types` | local vars with `'guard'task` |
+| `var_atomic_types` | local vars with `'atomic` (explicit, or promoted from `'actor`/`'guard` — see `promoted_atomic_vars` below) |
 
 Parallel sets exist for struct fields (`struct_mutex_fields`, `struct_mutex_task_fields`, `struct_rwlock_fields`, `struct_rwlock_task_fields`).
 
@@ -914,6 +1017,11 @@ The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables d
 | Struct field inference (all fields, single-file) | ✅ implemented |
 | Optional (`T?`, `T'?`) inner-type inference | ✅ implemented |
 | `'actor'task`/`'guard'task` vs `'actor`/`'guard` disambiguation (task-method-call signal) | ✅ implemented |
+| `'atomic` — explicit qualifier, scalar type-compatibility gate, `with`-incompatibility | ✅ implemented |
+| `'atomic` — priority-chain position + call-site demand signal | ✅ implemented (inert by construction — see above) |
+| `'actor`/`'guard` → `'atomic` automatic promotion (local scalars, single-op compound assign) | ✅ implemented |
+| `'atomic` — compare-and-swap pattern detection | not implemented |
+| `'atomic` — cross-function whole-program promotion | not implemented |
 | Cross-file inference | not implemented |
 | Fixed-point propagation (mutual recursion) | not implemented |
 

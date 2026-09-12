@@ -551,6 +551,7 @@ impl Transpiler {
             sub.in_struct_method = false;
 
             sub.infer_qualifiers(&f.body);
+            sub.scan_atomic_promotions(&f.body);
             let pre_inferred: std::collections::HashMap<String, crate::ast::OwnerQual> = f.params.iter()
                 .filter_map(|p| sub.inferred_qualifiers.get(&p.name).map(|q| (p.name.clone(), q.clone())))
                 .collect();
@@ -1435,6 +1436,7 @@ impl Transpiler {
             let prev_in_struct_method = self.in_struct_method;
             self.in_struct_method = self_ty.is_some();
             self.infer_qualifiers(&f.body);
+            self.scan_atomic_promotions(&f.body);
             self.in_struct_method = prev_in_struct_method;
             // Snapshot only the qualifiers for THIS function's params.
             pre_inferred_param_quals = f.params.iter()
@@ -2275,6 +2277,7 @@ impl Transpiler {
         // Emit all but last normally, then last with Optional context.
         // We must run qualifier inference on the full slice first.
         self.infer_qualifiers(stmts);
+        self.scan_atomic_promotions(stmts);
         self.validate_union_constraints(stmts);
         self.suggest_param_annotations();
         let non_defers: Vec<&Stmt> = stmts.iter().filter(|s| !matches!(s, Stmt::Defer(_))).collect();
@@ -2306,6 +2309,7 @@ impl Transpiler {
         if stmts.is_empty() { return; }
         // Priority 5: use-site qualifier inference — runs before size-based decisions, all modes.
         self.infer_qualifiers(stmts);
+        self.scan_atomic_promotions(stmts);
         // After inference: validate union constraints (both caller-side and body-side),
         // then emit hints for unqualified parameters that could benefit from annotation.
         self.validate_union_constraints(stmts);
@@ -2605,6 +2609,18 @@ impl Transpiler {
         }
     }
 
+    pub(crate) fn is_atomic_binding(ty: &Type) -> bool {
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Atomic))
+    }
+
+    pub(crate) fn atomic_inner(ty: &Type) -> Option<&Type> {
+        if let Type::Qualified(inner, OwnerQual::Atomic) = ty.without_mut() {
+            Some(inner)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if the program uses async actors (tokio::sync::Mutex/RwLock).
     /// When no task or stream functions exist, all actor access is synchronous and
     /// std::sync::Mutex is used instead, avoiding the need for async fn and .await.
@@ -2712,6 +2728,116 @@ impl Transpiler {
         match self.config.threading {
             crate::transpiler::ThreadingMode::Multi  => format!("{}.read().unwrap()", expr),
             crate::transpiler::ThreadingMode::Single => format!("{}.borrow()", expr),
+        }
+    }
+
+    // ── 'atomic (std::sync::atomic::AtomicX / Cell<X>) ───────────────────────
+
+    /// The `std::sync::atomic` type name for an atomic-eligible scalar Boring type.
+    /// `None` for anything else (float, struct, enum, collection, ...) — the checker
+    /// (`check_atomic_compatibility`, src/checker/mod.rs) rejects those before a
+    /// `'atomic`-qualified binding of that shape can ever reach codegen, so the `None`
+    /// arm here is unreachable in a checked program; it exists only so this function
+    /// stays total rather than panicking if ever called on unchecked/interpreter paths.
+    /// `int128`/`uint128` are deliberately excluded — there is no `AtomicI128`/`AtomicU128`
+    /// in stable `std::sync::atomic`.
+    pub(crate) fn atomic_scalar_name(inner: &Type) -> Option<&'static str> {
+        match inner {
+            Type::Int    => Some("AtomicIsize"),
+            Type::Uint   => Some("AtomicUsize"),
+            Type::Bool   => Some("AtomicBool"),
+            Type::Int8   => Some("AtomicI8"),
+            Type::Int16  => Some("AtomicI16"),
+            Type::Int32  => Some("AtomicI32"),
+            Type::Int64  => Some("AtomicI64"),
+            Type::Uint8  => Some("AtomicU8"),
+            Type::Uint16 => Some("AtomicU16"),
+            Type::Uint32 => Some("AtomicU32"),
+            Type::Uint64 => Some("AtomicU64"),
+            // Lowercase Boring keywords parse as `Type::Named` and are only resolved to
+            // the variants above later — see `Type::is_atomic_eligible_scalar`'s doc.
+            Type::Named(n) => match n.as_str() {
+                "int" | "isize"  => Some("AtomicIsize"),
+                "uint" | "usize" => Some("AtomicUsize"),
+                "bool"           => Some("AtomicBool"),
+                "int8" | "i8"    => Some("AtomicI8"),
+                "int16" | "i16"  => Some("AtomicI16"),
+                "int32" | "i32"  => Some("AtomicI32"),
+                "int64" | "i64"  => Some("AtomicI64"),
+                "uint8" | "u8"   => Some("AtomicU8"),
+                "uint16" | "u16" => Some("AtomicU16"),
+                "uint32" | "u32" => Some("AtomicU32"),
+                "uint64" | "u64" => Some("AtomicU64"),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `T'atomic` → `Arc<std::sync::atomic::AtomicX>` (multi) / `Rc<std::cell::Cell<X>>`
+    /// (single — no real concurrency single-threaded, so this collapses to the same
+    /// lighter-weight `Cell<T>` precedent already used for `transient` fields, see
+    /// `emit_struct.rs`'s `is_copy_type`-gated `Cell`/`RefCell` choice).
+    pub(crate) fn emit_atomic_type(&self, inner: &Type) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi => match Self::atomic_scalar_name(inner) {
+                Some(name) => format!("Arc<std::sync::atomic::{}>", name),
+                None => format!("Arc<std::sync::Mutex<{}>>", self.emit_type(inner)), // unreachable — see doc above
+            },
+            crate::transpiler::ThreadingMode::Single => format!("Rc<std::cell::Cell<{}>>", self.emit_type(inner)),
+        }
+    }
+
+    /// Construction expression for a fresh `'atomic` binding: `Arc::new(AtomicIsize::new(v))`
+    /// (multi) / `Rc::new(Cell::new(v))` (single).
+    pub(crate) fn emit_atomic_new(&self, inner: &Type, inner_expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi => match Self::atomic_scalar_name(inner) {
+                Some(name) => format!("Arc::new(std::sync::atomic::{}::new({}))", name, inner_expr),
+                None => format!("Arc::new(std::sync::Mutex::new({}))", inner_expr), // unreachable — see emit_atomic_type
+            },
+            crate::transpiler::ThreadingMode::Single => format!("Rc::new(std::cell::Cell::new({}))", inner_expr),
+        }
+    }
+
+    /// atomic load: `.load(Ordering::SeqCst)` (multi), `.get()` (single).
+    /// `SeqCst` is the fixed, conservative default ordering for this first version —
+    /// see `docs/qualifiers.md`'s `'atomic` section; no ordering-tuning surface yet.
+    pub(crate) fn atomic_load(&self, expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  => format!("{}.load(std::sync::atomic::Ordering::SeqCst)", expr),
+            crate::transpiler::ThreadingMode::Single => format!("{}.get()", expr),
+        }
+    }
+
+    /// atomic store: `.store(v, Ordering::SeqCst)` (multi), `.set(v)` (single).
+    pub(crate) fn atomic_store(&self, expr: &str, val: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  => format!("{}.store({}, std::sync::atomic::Ordering::SeqCst)", expr, val),
+            crate::transpiler::ThreadingMode::Single => format!("{}.set({})", expr, val),
+        }
+    }
+
+    /// atomic fetch_add/fetch_sub: `.fetch_add(v, Ordering::SeqCst)` (multi) — no
+    /// direct fetch_add on `Cell`, so single-thread reads-then-sets:
+    /// `{ let __v = expr.get(); expr.set(__v + v); __v }` (matching `fetch_add`'s own
+    /// "returns the previous value" semantics, for behavioral parity across threading modes).
+    pub(crate) fn atomic_fetch_op(&self, expr: &str, op: &str, val: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi =>
+                format!("{}.{}({}, std::sync::atomic::Ordering::SeqCst)", expr, op, val),
+            crate::transpiler::ThreadingMode::Single => {
+                let bin = match op { "fetch_add" => "+", "fetch_sub" => "-", _ => unreachable!("atomic_fetch_op: unsupported op {op}") };
+                format!("{{ let __v = {expr}.get(); {expr}.set(__v {bin} ({val})); __v }}")
+            }
+        }
+    }
+
+    /// atomic swap: `.swap(v, Ordering::SeqCst)` (multi), `.replace(v)` (single).
+    pub(crate) fn atomic_swap(&self, expr: &str, val: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  => format!("{}.swap({}, std::sync::atomic::Ordering::SeqCst)", expr, val),
+            crate::transpiler::ThreadingMode::Single => format!("{}.replace({})", expr, val),
         }
     }
 
@@ -3116,6 +3242,7 @@ impl Transpiler {
                 OwnerQual::ActorTask => self.emit_actor_task_type(inner),
                 OwnerQual::Guard     => self.emit_guard_type(inner),
                 OwnerQual::GuardTask => self.emit_guard_task_type(inner),
+                OwnerQual::Atomic    => self.emit_atomic_type(inner),
                 OwnerQual::Weak    => {
                     match inner.as_ref() {
                         Type::Qualified(base, OwnerQual::Shared) =>

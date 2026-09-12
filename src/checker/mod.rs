@@ -808,6 +808,49 @@ impl Checker {
         }
     }
 
+    // ── `'atomic` type-compatibility gate ─────────────────────────────────────
+    //
+    // `'atomic` may only wrap the scalar int/bool family (`Type::is_atomic_eligible_scalar`)
+    // — never a float (no stable `std::sync::atomic` equivalent) and never a
+    // struct/enum/collection (no atomic representation at all). Checked at every
+    // declared-type site this checker already visits for `check_set_mut_constraint`
+    // (let/var/mut bindings, destructured bindings, fn/init/setter params, struct/enum
+    // fields) — see that function's call sites, which this mirrors exactly, since both
+    // are unconditional type-shape legality checks independent of `mut`-ness.
+    fn check_atomic_compatibility(&mut self, ty: &Option<Type>, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        let Some(ty) = ty else { return };
+        if let Some(bad_inner) = ty.find_atomic_incompatibility() {
+            self.error(
+                format!(
+                    "cannot combine `'atomic` with `{}`: `'atomic` only wraps a scalar integer or `bool` type \
+                     (`int`, `uint`, `bool`, `int8`/`int16`/`int32`/`int64`, `uint8`/`uint16`/`uint32`/`uint64`) — \
+                     floats have no stable `std::sync::atomic` equivalent, `int128`/`uint128` have no `AtomicI128`/`AtomicU128` \
+                     in stable `std`, and structs/enums have no atomic representation at all; use `'actor` or `'guard` \
+                     for interior mutability on this type",
+                    Self::describe_type_for_atomic_error(bad_inner),
+                ),
+                line, col,
+            );
+        }
+    }
+
+    fn describe_type_for_atomic_error(ty: &Type) -> String {
+        match ty {
+            Type::Float32 => "float32".to_string(),
+            Type::Float64 => "float64 (`float`)".to_string(),
+            Type::Int128 => "int128".to_string(),
+            Type::Uint128 => "uint128".to_string(),
+            // `_` is the unresolved-placeholder base type left behind when a
+            // name-position `x'atomic = <initializer>` couldn't infer a concrete
+            // base type at parse time (an initializer more complex than a bare
+            // literal) — not a real named type to surface verbatim.
+            Type::Named(n) if n == "_" => "this type".to_string(),
+            Type::Named(n) => n.clone(),
+            _ => "this type".to_string(),
+        }
+    }
+
     // ── Kernel dispatch: reject a `'shared`/`'actor`/`'guard`-qualified instance ──
 
     /// A kernel struct instance dispatched via `kernel:` is launched through
@@ -1024,6 +1067,7 @@ impl Checker {
     fn check_struct(&mut self, s: &StructDecl) {
         for f in &s.fields {
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
+            self.check_atomic_compatibility(&Some(f.ty.clone()), f.line, f.col);
         }
         for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }
@@ -1041,6 +1085,7 @@ impl Checker {
         for v in &e.variants {
             for f in &v.fields {
                 self.check_set_mut_constraint(&Some(f.ty.clone()), v.line, v.col);
+                self.check_atomic_compatibility(&Some(f.ty.clone()), v.line, v.col);
             }
         }
         for m in &e.methods { self.check_fn(m); }
@@ -1077,6 +1122,7 @@ impl Checker {
                 self.check_qualifier_constraint(&kind, false, &p.ty, p.line, p.col);
             }
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
+            self.check_atomic_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, kind, p.ty.clone());
             if let Some(def) = &p.default { self.check_expr(def); }
         }
@@ -1090,6 +1136,7 @@ impl Checker {
     fn check_set_decl(&mut self, sd: &SetDecl) {
         self.push_scope();
         self.check_set_mut_constraint(&Some(sd.param_ty.clone()), sd.line, sd.col);
+        self.check_atomic_compatibility(&Some(sd.param_ty.clone()), sd.line, sd.col);
         self.define_typed(&sd.param_name, BindingKind::Let, Some(sd.param_ty.clone()));
         for stmt in &sd.body { self.check_stmt(stmt); }
         self.pop_scope();
@@ -1125,6 +1172,7 @@ impl Checker {
             // `{mut T}` is illegal regardless of whether the parameter itself
             // is `mut` — the illegality lives on the Set's element type.
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
+            self.check_atomic_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
         for stmt in &f.body { self.check_stmt(stmt); }
@@ -1210,6 +1258,7 @@ impl Checker {
         self.check_static_provenance(&s.ty, s.value.as_ref(), s.line, s.col);
         self.check_mut_constraints(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
         self.check_set_mut_constraint(&s.ty, s.line, s.col);
+        self.check_atomic_compatibility(&s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
@@ -1266,6 +1315,7 @@ impl Checker {
                 let elem_value = literal_elems.and_then(|elems| elems.get(i)).cloned();
                 self.check_mut_constraints(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
                 self.check_set_mut_constraint(&b.ty, s.line, s.col);
+                self.check_atomic_compatibility(&b.ty, s.line, s.col);
             }
             if b.name == "_" { continue; }
             let position_resident = tuple_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
@@ -1642,12 +1692,32 @@ impl Checker {
                     );
                 }
             } else {
+                // `'atomic` bindings have no lock/guard object to hold across a scoped
+                // critical section — every access is already a single, independent
+                // atomic operation (load/store/fetch_add/...), so `with x: ...` on an
+                // `'atomic`-qualified `x` is a hard compile error, not a silent
+                // fallback to per-access codegen. See docs/qualifiers.md's `'atomic`
+                // section, "with-block incompatibility".
+                if self.lookup(name).and_then(|b| b.ty.as_ref()).is_some_and(Self::type_is_atomic_qualified) {
+                    self.error(
+                        format!(
+                            "cannot use `with {name}:` — `{name}` is `'atomic`-qualified; atomics have no \
+                             lock/guard object to hold across a scoped block (each access is already a single, \
+                             independent atomic operation) — remove the `with` wrapper and access `{name}` directly"
+                        ),
+                        s.line, s.col,
+                    );
+                }
                 self.open_with_names.insert(name.clone());
                 newly_opened.push(name.clone());
             }
         }
         self.check_block(&s.body);
         for name in &newly_opened { self.open_with_names.remove(name); }
+    }
+
+    fn type_is_atomic_qualified(ty: &Type) -> bool {
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Atomic))
     }
 
     /// If `name` is a `'gpu'unified`/`'gpu'global` binding sourced from a bare

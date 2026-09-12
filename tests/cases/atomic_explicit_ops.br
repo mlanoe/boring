@@ -1,0 +1,15 @@
+# Behavioral test for the explicit `'atomic` qualifier's operation mapping
+# (Part 1 of the `'atomic` design — see docs/qualifiers.md's `'atomic` section):
+# bare read (load), plain assignment (store), compound assign (fetch_add/fetch_sub),
+# and `.swap(...)`. Runs identically under all four mode/threading combinations.
+def main():
+    var counter'atomic = 0
+    counter += 5
+    counter -= 2
+    counter = 10
+    let old = counter.swap(100)
+    print "{counter} {old}"
+
+    var flag'atomic = false
+    flag = true
+    print "{flag}"

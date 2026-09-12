@@ -874,6 +874,24 @@ impl Transpiler {
     /// of that type, plus managed-mode (implicit `Arc<Mutex<T>>`/`RefCell<T>`) vars. Locks
     /// via `.lock()`/`.borrow_mut()` (or `.borrow()` for `req` methods in single-thread
     /// mode), awaits the lock in async 'actor'task context, and propagates `throws` errors.
+    /// `x.swap(n)` on an `'atomic`-qualified local → `.swap(n, Ordering::SeqCst)`
+    /// (multi) / `.replace(n)` (single) — see `emit_top.rs`'s `atomic_swap`. The only
+    /// method Part 1 supports on an `'atomic` scalar today; a recognizable
+    /// compare-and-swap pattern (`if x == a: x = b`) is deliberately left as a
+    /// documented gap (docs/qualifiers.md's `'atomic` section) rather than a
+    /// fragile heuristic here.
+    fn try_emit_atomic_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ExprKind::Var(v) = &obj.kind else { return None };
+        if !self.var_atomic_types.contains(v.as_str()) { return None; }
+        match (method, args) {
+            ("swap", [arg]) => {
+                let val_s = self.emit_expr_owned(&arg.value);
+                Some(self.atomic_swap(v, &val_s))
+            }
+            _ => None,
+        }
+    }
+
     fn try_emit_mutex_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // Mutex local var method: w.method(args) → w.lock().await.method(args)
         if let ExprKind::Var(v) = &obj.kind {
@@ -2011,6 +2029,7 @@ impl Transpiler {
         if let Some(r) = self.try_emit_channel_method(obj, method, args) { return r; }
 
         if let Some(r) = self.try_emit_type_method_call(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_atomic_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_rwlock_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_mutex_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_actor_field_method(obj, method, args) { return r; }
@@ -3530,6 +3549,8 @@ impl Transpiler {
             transient_fields: self.transient_fields.clone(),
             var_struct_types: self.var_struct_types.clone(),
             var_mutex_types: self.var_mutex_types.clone(),
+            var_atomic_types: self.var_atomic_types.clone(),
+            promoted_atomic_vars: self.promoted_atomic_vars.clone(),
             var_mutex_task_types: self.var_mutex_task_types.clone(),
             struct_mutex_fields: self.struct_mutex_fields.clone(),
             struct_mutex_task_fields: self.struct_mutex_task_fields.clone(),
