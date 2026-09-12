@@ -39,7 +39,7 @@ string greet(string? name, int visits) throws:
 ```
 
 ```rust
-fn greet(name: Option<Arc<str>>, visits: i64)
+fn greet(name: Option<Arc<str>>, visits: isize)
     -> Result<Arc<str>, Box<dyn std::error::Error>>
 {
     if visits <= 0 {
@@ -58,31 +58,62 @@ Boring is not a toy. It has a full interpreter for rapid prototyping and two tra
 
 ## Targets
 
-Boring compiles the same source to two distinct Rust targets:
+Boring compiles the same source to several distinct Rust targets — from userspace CLIs down to GPU kernels and Linux kernel modules:
 
-| Command | Target | Runtime | Use case |
-|---------|--------|---------|----------|
-| `boring build` | Rust std + tokio | userspace | servers, CLIs, desktop apps |
-| `boring build --mode managed` | Rust std + tokio | userspace | managed memory (unqualified `T` → `Arc<Mutex<T>>`) |
-| `boring build --threading single` | Rust std + tokio | userspace | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
-| `boring build --target kernel` | Rust-for-Linux (`no_std`) | Linux kernel | drivers, subsystems, kernel modules |
+| Command | Target | Use case |
+|---------|--------|----------|
+| `boring build` | Rust std + tokio | servers, CLIs, desktop apps |
+| `boring build --target cuda` | Rust + CUDA C (NVIDIA) | GPU compute |
+| `boring build --target rocm` | Rust + HIP C++ (AMD) | GPU compute |
+| `boring build --target metal` | Rust + MSL (Apple Silicon/macOS) | GPU compute |
+| `boring build --target wgpu` | Rust + WGSL (any DX12/Vulkan/Metal GPU) | GPU compute, cross-platform |
+| `boring build --mode managed` | Rust std + tokio | managed memory (unqualified `T` → `Arc<Mutex<T>>`) |
+| `boring build --threading single` | Rust std + tokio | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
+| `boring build --target kernel` | Rust-for-Linux (`no_std`) | Linux drivers, subsystems, kernel modules |
 
-The kernel backend applies the same language — structs, enums, traits, ownership qualifiers, error handling, async tasks — but maps every construct to its kernel-native equivalent: `Arc<kernel::sync::Mutex<T>>` instead of `tokio::sync::Mutex`, work items on `system_wq` instead of `tokio::spawn`, ring-buffer channels instead of MPSC, and errno-based errors instead of `Box<dyn Error>`.
+The GPU targets are the most fully developed: the same `kernel` struct, ownership qualifiers, and `gpu.*` built-ins transpile unchanged to CUDA C, HIP C++, Metal Shading Language, or WGSL depending on the flag — see [GPU computing](#gpu-computing) below. The kernel target is a smaller, more experimental backend: it maps the same language (structs, enums, traits, ownership qualifiers, `throws`, `task`) onto Rust-for-Linux equivalents (`Arc<kernel::sync::Mutex<T>>`, `system_wq` work items, ring-buffer channels, errno-based errors) and validates kernel-incompatible constructs (`float`, `panic`) at build time — see [`docs/kernel-target.md`](docs/kernel-target.md).
+
+---
+
+## GPU computing
+
+GPU code is ordinary Boring: a `kernel` struct groups device memory fields, an `init` allocator, and an entry point, dispatched from regular host code with `kernel:` — no separate device-language file, no manual memory-transfer boilerplate.
 
 ```boring
-# Same source, two targets
-task def Page fetch_page(string url) throws:
-    # ... fetch logic
+kernel Scale:
+    mut [float]'unified buf
+
+    init([float]'unified data):
+        buf = data
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        buf[i] *= 2.0
+
+mut k = Scale(data)
+kernel:
+    k(block = 256)
+
+print k.buf[0]
 ```
+
+The same source targets four backends, chosen purely by build flag:
+
+| Target | OS | GPU |
+|---|---|---|
+| `--target cuda` | Windows / Linux | NVIDIA only |
+| `--target rocm` | Windows / Linux | AMD only |
+| `--target metal` | macOS only | Apple / Intel Mac |
+| `--target wgpu` | Windows / Linux / macOS | Any DirectX 12, Vulkan, or Metal GPU |
+
+Ownership qualifiers carry the host/device split: `'unified` (zero-copy managed memory), `'global` (device-only), bare `'actor` (shared/threadgroup/workgroup memory), `'const` (read-only constant memory), and `'actor'global`/`'actor'unified` for atomics — each mapped to the right construct per backend (`cudaMallocManaged` + `__shared__` on CUDA, `MTLStorageModeShared` + `threadgroup` on Metal, `storage`/`workgroup` buffers on wgpu, and so on).
 
 ```sh
-boring build main.br                   # → Cargo project with tokio
-boring build --target kernel main.br   # → Rust-for-Linux module
+boring build --target metal main.br    # → Rust + MSL project
+cd main_rust && cargo run
 ```
 
-The kernel backend validates your source before emitting — `float` and `panic` are rejected with explicit error messages; channels and streams without an explicit capacity emit a warning and default to 2.
-
-See [`docs/kernel-transpiler-mapping.md`](docs/kernel-transpiler-mapping.md) for the full mapping reference.
+See [`docs/gpu-module.md`](docs/gpu-module.md) for the full language reference (kernel structs, generics, qualifier inference), and [`docs/cuda-module.md`](docs/cuda-module.md), [`docs/rocm-backend.md`](docs/rocm-backend.md), [`docs/metal-backend.md`](docs/metal-backend.md), [`docs/wgpu-backend.md`](docs/wgpu-backend.md) for backend-specific codegen.
 
 ---
 
@@ -95,7 +126,7 @@ Boring replaces all of that with a single `throws` keyword — just like Swift.
 
 | | Boring | Rust |
 |---|---|---|
-| Declaration | `int divide(int a, int b) throws:` | `fn divide(a: i64, b: i64) -> Result<i64, Box<dyn Error>>` |
+| Declaration | `int divide(int a, int b) throws:` | `fn divide(a: isize, b: isize) -> Result<isize, Box<dyn Error>>` |
 | Early exit | `guard b != 0 else throw "division by zero"` | `if b == 0 { return Err("division by zero".into()); }` |
 | Call + fallback | `let r = try divide(10, 0) else -1` | `let r = divide(10, 0).unwrap_or(-1)` |
 
@@ -114,7 +145,7 @@ print "pi ≈ {3.14159:.3}, hex = {255:x}"
 ```rust
 // Rust equivalent
 println!("Hello, {}! The answer is {}.", name, n);
-println!("pi ≈ {:.3}, hex = {:x}", 3.14159_f64, 255_i64);
+println!("pi ≈ {:.3}, hex = {:x}", 3.14159_f64, 255_isize);
 ```
 
 ### Types and ownership
@@ -124,11 +155,11 @@ Boring provides a concise qualifier syntax inspired by Swift's value/reference t
 
 | Boring | Rust | Meaning |
 |---|---|---|
-| `int` | `i64` | copy integer |
+| `int` | `isize` | copy integer, pointer-width |
 | `float` | `f64` | copy float |
 | `string` | `Rc<str>` (single) / `Arc<str>` (multi) | shared string — threading-aware |
 | `T?` | `Option<T>` | optional value |
-| `T'` | `Box<T>` | heap-allocated exclusive |
+| `T'owned` | `Box<T>` | heap-allocated exclusive |
 | `T'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | shared reference — threading-aware |
 
 ```boring
@@ -164,13 +195,42 @@ struct Counter:
 ```
 
 ```rust
-struct Counter { value: i64 }
+struct Counter { value: isize }
 
 impl Counter {
-    fn get(&self) -> i64 { self.value }
+    fn get(&self) -> isize { self.value }
     fn inc(&mut self) { self.value += 1; }
 }
 ```
+
+### Closures
+
+Rust closures need `|params|` bars and, in a chain, plenty of `.iter()`/`.collect()` scaffolding around them. Boring closures read like a lambda calculus cheat sheet: a trailing one drops its parens entirely, and a single-parameter one can drop its own parens too.
+
+```boring
+let numbers = [1, 2, 3, 4, 5]
+let words = ["hello", "world", "boring"]
+
+numbers.map (n): n * 2              # trailing closure, no parens around the call
+numbers.filter n: n % 2 == 0        # trailing + no-paren single param
+words.map(:upper())                 # shorthand: field/method on the implicit arg
+```
+
+```rust
+numbers.iter().map(|n| n * 2).collect::<Vec<_>>();
+numbers.iter().filter(|n| n % 2 == 0).cloned().collect::<Vec<_>>();
+words.iter().map(|w| w.to_uppercase()).collect::<Vec<_>>();
+```
+
+A multi-line body is just an indented block, no braces:
+
+```boring
+let big = [1, 10, 2, 9, 3].filter (n):
+    n > 5
+# [10, 9]
+```
+
+See [`docs/book.md`](docs/book.md) §14 (Closures and Higher-Order Functions) for the full set of forms, including zero-arg trailing closures and the `do` disambiguation keyword.
 
 ### Pipe operator and data pipelines
 
@@ -193,7 +253,7 @@ for w in result:
 let words: Vec<&str> = "the quick brown fox jumps over the lazy dog".split(' ').collect();
 
 let mut result: Vec<Arc<str>> = words.iter()
-    .filter(|__x| __x.len() as i64 > 3)
+    .filter(|__x| __x.len() as isize > 3)
     .map(|__x| Arc::from(__x.to_uppercase().as_str()))
     .collect();
 result.sort();
@@ -306,12 +366,18 @@ boring/
 │   ├── validator/           # kernel.rs — pre-emission validation pass
 │   └── transpiler/
 │       ├── *.rs             # Standard backend → Rust std + tokio
+│       ├── cuda/            # GPU backend → CUDA C
+│       ├── rocm/            # GPU backend → HIP C++ (AMD)
+│       ├── metal/           # GPU backend → Metal Shading Language
+│       ├── wgpu/            # GPU backend → WGSL (cross-platform)
 │       └── kernel/          # Kernel backend → Rust-for-Linux (no_std)
 ├── stdlib/                  # First-party `use boring.<module>` standard library
 ├── docs/
 │   ├── book.md              # Full language reference
+│   ├── gpu-module.md        # GPU computing language reference
+│   ├── cuda-module.md / rocm-backend.md / metal-backend.md / wgpu-backend.md  # Per-backend codegen
 │   ├── cross-project-code-sharing-gap.md  # Dependency system design + known limitations
-│   └── kernel-transpiler-mapping.md  # Boring → Rust-for-Linux mapping
+│   └── kernel-target.md     # Boring → Rust-for-Linux mapping
 ├── spec/
 │   └── grammar.bnf          # Formal BNF grammar
 ├── examples/

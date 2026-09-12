@@ -5962,53 +5962,20 @@ let Counter'actor c'guard = Counter(0)   # ERROR — qualifier on both the type 
 
 This is a compile error, not silently resolved by picking one qualifier over the other — there is no defined precedence between the two, and no use case needs it: a real compound qualifier chain (`'actor'task`, `'shared'weak`) is already written as a single tick-sequence in one position, so writing a second, independent qualifier in the other position only adds ambiguity, never expressiveness.
 
-### Placement operator — `new`
+### Qualifier shorthands and reference
 
-`new` is a placement operator that signals non-inline allocation without naming a qualifier. The transpiler infers the qualifier from usage (excluding `'inline`):
+A handful of type forms are pure shorthand and resolve to the same Rust type regardless of `--mode`:
 
-```boring
-let v = Counter()       # inferred — 'inline included in candidates
-let v = new Counter()   # inferred — 'inline excluded from candidates
-let v'actor = Counter() # explicit qualifier
-```
+| Boring shorthand | Rust | Meaning |
+|------------------|------|---------|
+| `T?` | `Option<T>` | Optional value |
+| `[T]` | `Vec<T>` | Dynamic array |
+| `{T}` | `HashSet<T>` | Unordered set |
+| `{K=V}` | `HashMap<K, V>` | Key-value map |
 
-For delayed initialisation, `'new` is the equivalent pseudo-qualifier:
+A bare, unqualified struct/enum type (`let c = Counter(0)`) is different: it has no fixed shorthand mapping — its Rust representation depends on how the variable is used, resolved by the qualifier-inference algorithm in [chapter 30 — Qualifier Inference](#30-qualifier-inference). Explicit qualifiers (`T'inline`, `T'owned`, `T'shared`, etc.) are **contracts** and are never affected by the mode or by inference.
 
-```boring
-let Counter v           # delayed init — 'inline included
-let Counter'new v       # delayed init — 'inline excluded
-let Counter'actor v     # delayed init — explicit qualifier
-```
-
-`new` also accepts a GPU arena as first argument (see the CUDA section):
-
-```boring
-new(g0) Counter()   # GPU device g0
-```
-
-Ownership transfer between bindings is implicit — see "Move semantics" below; there is no explicit move-marker syntax.
-
-`'new` is a **candidate-set qualifier**, not a caller-facing acceptance group (contrast with `'one`/`'many`/`'mut`/`'req` below): it seeds the same candidate-elimination inference used for a bare `T`, just with `'inline` excluded from the starting set. That is why, unlike those four groups, `'new` keeps narrowing by usage on **local variables** too, not only on parameters:
-
-```boring
-let v = new Counter()
-spawn_actor(v)   # demands 'actor → v narrows all the way to 'actor, not just "some indirection"
-```
-
-Shorthands cover the most common cases without writing a qualifier explicitly:
-
-| Boring shorthand | Strict mode (`--mode strict`) | Managed mode (`--mode managed`) | Meaning |
-|------------------|-------------------------------|----------------------------------|---------|
-| `T`  | `T` (inline) | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous — transpiler decides |
-| `T'new` | `Box<T>` | `Arc<Mutex<T>>` / `RefCell<T>` | Non-inline placement, qualifier inferred by transpiler |
-| `T?` | `Option<T>` | `Option<T>` | Optional value |
-| `[T]` | `Vec<T>` | `Vec<T>` | Dynamic array |
-| `{T}` | `HashSet<T>` | `HashSet<T>` | Unordered set |
-| `{K=V}` | `HashMap<K, V>` | `HashMap<K, V>` | Key-value map |
-
-`T` and `T'new` are **anonymous forms** — the transpiler resolves them based on the active flags. Explicit qualifiers (`T'inline`, `T'owned`, etc.) are **contracts** and are never affected by the mode.
-
-In managed mode, `Arc<Mutex<T>>` is used with `--threading multi` (default) and `RefCell<T>` with `--threading single`.
+In managed mode, an inferred/unqualified struct resolves to `Arc<Mutex<T>>` with `--threading multi` (default) or `RefCell<T>` with `--threading single`.
 
 All ownership qualifiers:
 
@@ -6181,27 +6148,7 @@ error — see "Scoped access blocks — `with`" below.
 > for the full type-compatibility table, operation mapping, and the
 > promotion pass's four criteria in detail.
 
-### Qualifier groups — parameter constraints
-
-On function parameters, a qualifier group expresses "this parameter accepts any qualifier from this set". The transpiler narrows the set further using the same inference signals as for anonymous variables.
-
-```boring
-def process(Counter'mut c):   # 'mut → accepts 'inline, 'owned, 'actor, 'guard
-    spawn_actor(c)            # demands 'actor → infers 'actor for c
-```
-
-| Group | Accepted qualifiers |
-|---|---|
-| `T'one` | `'inline`, `'owned` — single-owner forms |
-| `T'many` | `'shared`, `'actor`, `'guard` — shared-owner forms |
-| `T'mut` | `'inline`, `'owned`, `'actor`, `'guard` — any mutable form |
-| `T'req` | `'shared`, `'static` — always immutable |
-
-Pipe-separated unions are also valid: `T'inline|owned` accepts only `'inline` or `'owned`.
-
-Groups have no Rust representation — no trait bound is emitted. The constraint is enforced at the Boring level: the transpiler rejects callers that pass a qualifier outside the declared group, and uses the body's inference signals to resolve to a single concrete qualifier for emission. If inference cannot resolve to one qualifier, the first member of the group is used as fallback.
-
-> Groups are meaningful only on parameters, not on local variables. On a local variable the inference starting set already covers this information, and writing an explicit qualifier is clearer. `'new` (above) is a different kind of thing — a candidate-set qualifier, not an acceptance group — which is why it's documented separately and does narrow on local variables.
+> Qualifier groups (`T'one`, `T'many`, `T'mut`, `T'req`) — a parameter-only constraint mechanism — have moved to ["Advanced — Qualifier groups"](#advanced--qualifier-groups-tone-tmany-tmut-treq).
 
 ### Transpilation flags
 
@@ -8385,9 +8332,68 @@ let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 
 ---
 
+### Advanced — `new` placement operator and `'new` qualifier
+
+`new` is a placement operator that signals non-inline allocation without naming a qualifier. The transpiler infers the qualifier from usage (excluding `'inline`):
+
+```boring
+let v = Counter()       # inferred — 'inline included in candidates
+let v = new Counter()   # inferred — 'inline excluded from candidates
+let v'actor = Counter() # explicit qualifier
+```
+
+`new` also accepts a GPU arena as first argument (see the CUDA section):
+
+```boring
+new(g0) Counter()   # GPU device g0
+```
+
+Ownership transfer between bindings is implicit — see ["Move semantics"](#move-semantics) above; there is no explicit move-marker syntax.
+
+`'new` is the delayed-initialisation counterpart, for a variable declared without an initial value:
+
+```boring
+let Counter v           # delayed init — 'inline included
+let Counter'new v       # delayed init — 'inline excluded
+let Counter'actor v     # delayed init — explicit qualifier
+```
+
+`'new` is a **candidate-set qualifier**, not a caller-facing acceptance group (contrast with the qualifier groups below): it seeds the same candidate-elimination inference used for a bare `T`, just with `'inline` excluded from the starting set. That is why, unlike those four groups, `'new` keeps narrowing by usage on **local variables** too, not only on parameters:
+
+```boring
+let v = new Counter()
+spawn_actor(v)   # demands 'actor → v narrows all the way to 'actor, not just "some indirection"
+```
+
+See [chapter 21 — Qualifier shorthands and reference](#qualifier-shorthands-and-reference) for the master qualifier↔Rust mapping, and [chapter 30 — `T'new`](#tnew--the-indirection-hint) for the full inference mechanics (candidate set, fallback, optional forms).
+
+### Advanced — Qualifier groups (`T'one`, `T'many`, `T'mut`, `T'req`)
+
+On function parameters, a qualifier group expresses "this parameter accepts any qualifier from this set". The transpiler narrows the set further using the same inference signals as for anonymous variables.
+
+```boring
+def process(Counter'mut c):   # 'mut → accepts 'inline, 'owned, 'actor, 'guard
+    spawn_actor(c)            # demands 'actor → infers 'actor for c
+```
+
+| Group | Accepted qualifiers |
+|---|---|
+| `T'one` | `'inline`, `'owned` — single-owner forms |
+| `T'many` | `'shared`, `'actor`, `'guard` — shared-owner forms |
+| `T'mut` | `'inline`, `'owned`, `'actor`, `'guard` — any mutable form |
+| `T'req` | `'shared`, `'static` — always immutable |
+
+Pipe-separated unions are also valid: `T'inline|owned` accepts only `'inline` or `'owned`.
+
+Groups have no Rust representation — no trait bound is emitted. The constraint is enforced at the Boring level: the transpiler rejects callers that pass a qualifier outside the declared group, and uses the body's inference signals to resolve to a single concrete qualifier for emission. If inference cannot resolve to one qualifier, the first member of the group is used as fallback.
+
+> Groups are meaningful only on parameters, not on local variables. On a local variable the inference starting set already covers this information, and writing an explicit qualifier is clearer. `'new` (above) is a different kind of thing — a candidate-set qualifier, not an acceptance group — which is why it's documented separately and does narrow on local variables.
+
+---
+
 ## 30. Qualifier Inference
 
-Boring's ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.
+Boring's ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`, `'atomic`) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.
 
 ### The zero-annotation goal
 
@@ -8614,7 +8620,7 @@ An explicit qualifier has the highest priority and overrides all inference signa
 
 ### `T'new` — the indirection hint
 
-`T'new` signals that the value must not be inline, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Inline` from the start. It is a **candidate-set qualifier**, not a caller-facing acceptance group like `'one`/`'many`/`'mut`/`'req` (§21) — which is why, like a bare `T`, it keeps narrowing by usage on local variables, not just on parameters.
+`T'new` signals that the value must not be inline, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Inline` from the start. It is a **candidate-set qualifier**, not a caller-facing acceptance group like `'one`/`'many`/`'mut`/`'req` (§29, [Advanced — Qualifier groups](#advanced--qualifier-groups-tone-tmany-tmut-treq)) — which is why, like a bare `T`, it keeps narrowing by usage on local variables, not just on parameters.
 
 ```boring
 let c'new = Counter(0)     # 'new → candidates: {Owned, Shared, Actor, Guard}
