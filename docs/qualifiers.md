@@ -266,7 +266,7 @@ struct Counter:
     task def inc():          # declared `task` → needs the tokio lock
         value += 1
 
-def void run(Counter c):
+def void run(mut Counter c):
     task c.inc()              # c infers 'actor'task — Arc<tokio::sync::Mutex<Counter>>
 ```
 
@@ -277,11 +277,61 @@ struct Counter:
     def inc():                # plain `def`, not `task`
         value += 1
 
-def void run(Counter c):
+def void run(mut Counter c):
     task c.inc()              # c infers 'actor' — Arc<std::sync::Mutex<Counter>>
 ```
 
-If any method called on the captured variable is itself declared `task`, the inferrer picks `'actor'task` (or `'guard'task` if the receiver is otherwise constrained to a reader-writer lock); if none are, it falls back to the plain sync variant. This only resolves the ambiguity when the disambiguating signal is a method call — a task body that reads/writes the captured value without calling a `task` method, then separately awaits something unrelated while still holding the lock, still needs an explicit `'actor'task`/`'guard'task` annotation.
+If any method called on the captured variable is itself declared `task`, the inferrer picks `'actor'task` (or `'guard'task` if the receiver is otherwise constrained to a reader-writer lock); if none are, it falls back to the plain sync variant. This resolves the ambiguity whenever the disambiguating signal is a method call itself declared `task` — but that was, until the two extensions below, the *only* signal the inferrer recognized.
+
+#### Local live-range analysis: a `with` block holding an unrelated await
+
+A `with name:` block (see "Method dispatch" above and `docs/scoped-access-blocks.md`) conceptually holds its named value's lock for its **entire span** — not just for one method call. That means a genuine await *anywhere* inside that span is proof the async lock variant is required, even when nothing called on the guarded value in the block is itself declared `task`:
+
+```boring
+struct Counter:
+    var int value = 0
+
+    def inc():                 # plain `def`, not `task` — the method-call signal
+        value += 1               # above alone sees nothing here
+
+task def void worker(mut Counter c):
+    with c:
+        c.inc()                            # not a task-method call
+        wait(Duration.fromMillis(100))     # …but this unrelated wait, inside the SAME
+                                            # with-held span, is still proof the lock
+                                            # is held across an await
+    print c.get()
+```
+
+The inferrer scans every `with` block in the function/task body it already walks (the same boundary the task-method-call heuristic above uses — recursing into `if`/`while`/`for`/`match`/nested `with`/task/closure bodies, never into a called function's own body) for an unambiguous await point inside that block's own span: an explicit `wait(...)`, a `join […]`, or a direct call into an already-known `task`-declared function/method. Finding one upgrades every named value in that block to the `'task` variant, exactly as if a task method had been called on it directly — `worker`'s `c` above now infers `'actor'task` on its own, with no explicit annotation, closing the gap the previous paragraph used to describe. A `with` block referencing a value is *also*, on its own (regardless of whether it holds across an await), enough to rule out a plain auto-ref borrow for that value — the same "storage signal" a task/closure capture already provides.
+
+The scan is deliberately narrow, matching this section's "conservative toward sync" design (see below): a blocking `.value`/`.wait` on a spawned task handle is a real await too, but recognizing it needs type information this early pre-pass doesn't have, so it isn't recognized — which only means such a case falls into the same residual gap described below, never a false upgrade.
+
+#### Cross-function propagation
+
+Parameter-qualifier inference already propagates forward through `fn_sigs` between functions in the same file (see "Cross-function propagation" below): once a function's own parameter is inferred, callers processed later see the qualified signature and their own matching argument is constrained to it. The `'actor'task`/`'guard'task` decision rides the same mechanism, with no separate fact to propagate — if a callee's own parameter is inferred (by either signal above) to `'actor'task`/`'guard'task`, that qualifier is exactly what ends up in `fn_sigs`, and a caller passing its own `'actor`/`'guard` value into that parameter picks up the same requirement automatically, without needing any local `.await` of its own:
+
+```boring
+task def void holdAndWait(mut Counter c):
+    with c:
+        c.inc()
+        wait(Duration.fromMillis(10))     # holdAndWait's own `c` infers 'actor'task
+
+task def void caller(mut Counter c):
+    holdAndWait(c)                        # caller has no with-block or wait of its own —
+                                           # but its `c` must be the SAME concrete lock type
+                                           # as holdAndWait's, so it infers 'actor'task too
+```
+
+Because the two lock types are different concrete Rust types (`tokio::sync::Mutex<T>`'s guard is `Send`; `std::sync::Mutex<T>`'s is not, and `tokio::sync::Mutex::lock()` only exists as an `async fn` — there is no synchronous way to call it at all), a caller cannot simply decline a callee's `'actor'task`/`'guard'task` demand the way it can decline, say, a `'shared` demand from a plain value: it must adopt the same variant, or the two would disagree about the very type being shared. This is the one place the plain `'actor`/`'guard` candidate for an otherwise-untouched value is ever widened to also consider the `'task` variant outside an actual task/closure capture — and it only ever fires because some callee has already proven (or been told, via an explicit annotation) that it needs the async lock, never merely because a caller couldn't rule an await out.
+
+This is file-order-dependent, the same known limitation `fn_sigs` propagation already has for every other qualifier: a function only sees a callee's fact if that callee was already processed (its own inference run, whether speculatively via `pre_infer_fn_qualifiers` or for real) by the time the caller's own inference runs. A caller of a callee not yet visible this way — declared later and not yet reached by the speculative forward pass, defined in another module/file this pass doesn't see, or a genuinely external/opaque function boring has no body for — cannot pick up the fact at all.
+
+#### The residual gap, and what to do about it
+
+After both extensions above, there remain cases the analysis simply cannot decide — most commonly a value passed into a function the propagation above hasn't (yet, or ever will) reach. In every one of those cases the default stays the plain `'actor`/`'guard` variant — **never** the `'task` variant, and never a compile error. This is a deliberate design choice, not an oversight: this module's inference always treats an unresolved case as a reason to stay on the cheaper, narrower contract, not as license to guess in the "safe but expensive" direction. The `with`-access-scan two sections above is a documented example of the same policy — "Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program" (see `docs/book.md`) — and the reasoning here is stronger, not just parallel: `'actor`/`'guard` values are used specifically *because* they are shared, so they routinely escape into other functions; treating "cannot prove no await" as a signal to upgrade would make that escape — the ordinary case for this qualifier, not a rare edge one — silently promote almost every `'actor`/`'guard` value in real code to the heavier lock. Worse, since `tokio::sync::Mutex::lock()` has no synchronous form at all, such a silent promotion would not just cost performance — it would stop every other, genuinely-synchronous call site sharing that same value from compiling, a correctness regression cascading from one code path the analysis merely failed to rule out.
+
+The practical consequence: a value that genuinely does need the async lock, but only through a path this analysis cannot see (an opaque external function, a call the forward propagation hasn't reached yet, a blocking `.value`/`.wait` await this pre-pass has no type information for), stays on the plain sync variant and is **not** automatically corrected. The failure mode this produces at runtime is a real one — a task holding a `std::sync::Mutex` guard across what turns out to be an await point either won't compile (the guard is `!Send`, so the enclosing future itself becomes `!Send`) or, if the await is well hidden enough to avoid that, risks a genuine deadlock under contention. Both are bounded and, once hit, straightforward to fix: the developer writes the explicit `'actor'task`/`'guard'task` annotation themselves. The compiler deliberately does not attempt to guess the safe-but-expensive direction on the developer's behalf — see the design rationale above for why that would be worse, not better.
 
 ---
 

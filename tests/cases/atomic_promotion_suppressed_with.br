@@ -4,19 +4,21 @@
 # so the promotion pass must NOT fire here; `counter` stays on the original `'actor`
 # (Mutex-backed) representation.
 #
-# Deliberately read-only inside the `with` block: mutating an *unpromoted* scalar
-# `'actor`/`'guard` binding (bare compound-assign or plain assign, with or without a
-# `with` wrapper) hits a separate, pre-existing codegen gap — a scalar `'actor`
-# binding's own assignment was never specially handled the way a struct field's is
-# (see `emit_expr.rs`'s `emit_expr_assign`, which only special-cases `Field` write
-# targets through the lock, never a bare `Var` target) — unrelated to `'atomic` and
-# filed separately. This fixture sidesteps it entirely so the test pins down exactly
-# one thing: that criterion 4 really does suppress promotion, and the (read-only)
-# result is still correct. See atomic_promotion_actor.br for the mutating,
-# successfully-promoted counterpart, and `tests/atomic_qualifier.rs`'s
-# `promotion_suppressed_for_with_block_usage` for the codegen-level inspection
-# (confirms it really did stay on Mutex, not just that stdout happens to match).
+# Now mutates inside the `with` block (`counter += 5`) — this used to have to stay
+# read-only here: a scalar `'actor`/`'guard` binding's own assignment was never
+# specially handled the way a struct field's is (see `emit_expr.rs`'s
+# `emit_expr_assign`, which used to only special-case `Field` write targets through
+# the lock, never a bare `Var` target) — fixed, see `var_lock_scalar`'s doc comment
+# on the `Transpiler` struct (`src/transpiler/mod.rs`) and
+# tests/cases/actor_guard_scalar_mutation.br for the dedicated regression coverage.
+# This fixture pins down exactly one thing: that criterion 4 really does suppress
+# promotion, and the (now mutating) result is still correct. See
+# atomic_promotion_actor.br for the mutating, successfully-promoted counterpart, and
+# `tests/atomic_qualifier.rs`'s `promotion_suppressed_for_with_block_usage` for the
+# codegen-level inspection (confirms it really did stay on Mutex, not just that
+# stdout happens to match).
 def main():
     var counter'actor = 3
     with counter:
+        counter += 5
         print "{counter}"

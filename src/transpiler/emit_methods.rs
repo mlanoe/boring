@@ -3550,6 +3550,7 @@ impl Transpiler {
             var_struct_types: self.var_struct_types.clone(),
             var_mutex_types: self.var_mutex_types.clone(),
             var_atomic_types: self.var_atomic_types.clone(),
+            var_lock_scalar: self.var_lock_scalar.clone(),
             promoted_atomic_vars: self.promoted_atomic_vars.clone(),
             var_mutex_task_types: self.var_mutex_task_types.clone(),
             struct_mutex_fields: self.struct_mutex_fields.clone(),

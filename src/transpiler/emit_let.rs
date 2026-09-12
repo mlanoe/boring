@@ -88,6 +88,12 @@ impl Transpiler {
                 } else {
                     self.var_mutex_types.insert(s.name.clone());
                 }
+                // Scalar `T'actor` (no fields to route a mutation through — see
+                // `var_lock_scalar`'s doc comment): mark it so bare reads/writes of
+                // the binding itself go through the lock.
+                if Self::is_copy_type(inner) {
+                    self.var_lock_scalar.insert(s.name.clone());
+                }
                 self.arc_vars.insert(s.name.clone());
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                     self.rc_vars.insert(s.name.clone());
@@ -132,6 +138,10 @@ impl Transpiler {
                     self.var_rwlock_task_types.insert(s.name.clone());
                 } else {
                     self.var_rwlock_types.insert(s.name.clone());
+                }
+                // Scalar `T'guard` — see `var_lock_scalar`'s doc comment.
+                if Self::is_copy_type(inner) {
+                    self.var_lock_scalar.insert(s.name.clone());
                 }
                 self.arc_vars.insert(s.name.clone());
                 if let Some(type_name) = constructor_type_name(s_value) {
@@ -969,6 +979,11 @@ impl Transpiler {
                             if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                                 self.rc_vars.insert(s.name.clone());
                             }
+                            // See `var_lock_scalar`'s doc comment.
+                            let inner = Self::mutex_inner(&ret_ty).or_else(|| Self::rwlock_inner(&ret_ty));
+                            if inner.map(Self::is_copy_type).unwrap_or(false) {
+                                self.var_lock_scalar.insert(s.name.clone());
+                            }
                         }
                     }
                 }
@@ -990,6 +1005,11 @@ impl Transpiler {
                     self.arc_vars.insert(s.name.clone());
                     if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                         self.rc_vars.insert(s.name.clone());
+                    }
+                    // See `var_lock_scalar`'s doc comment.
+                    let inner = Self::mutex_inner(dst_ty).or_else(|| Self::rwlock_inner(dst_ty));
+                    if inner.map(Self::is_copy_type).unwrap_or(false) {
+                        self.var_lock_scalar.insert(s.name.clone());
                     }
                 } else if is_rc_like {
                     self.arc_vars.insert(s.name.clone());
@@ -1066,6 +1086,11 @@ impl Transpiler {
                     self.rc_vars.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                 }
+                // Propagate the scalar marker alongside the lock-kind sets above —
+                // see `var_lock_scalar`'s doc comment.
+                if self.var_lock_scalar.contains(src.as_str()) {
+                    self.var_lock_scalar.insert(s.name.clone());
+                }
                 if self.string_vars.contains(src.as_str()) {
                     self.string_vars.insert(s.name.clone());
                 }
@@ -1100,6 +1125,11 @@ impl Transpiler {
                                         self.arc_vars.insert(s.name.clone());
                                         if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                                             self.rc_vars.insert(s.name.clone());
+                                        }
+                                        // See `var_lock_scalar`'s doc comment.
+                                        let inner = Self::mutex_inner(&field_ty).or_else(|| Self::rwlock_inner(&field_ty));
+                                        if inner.map(Self::is_copy_type).unwrap_or(false) {
+                                            self.var_lock_scalar.insert(s.name.clone());
                                         }
                                     }
                                     self.var_types.insert(s.name.clone(), field_ty);
@@ -1138,6 +1168,11 @@ impl Transpiler {
                                 self.arc_vars.insert(s.name.clone());
                                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                                     self.rc_vars.insert(s.name.clone());
+                                }
+                                // See `var_lock_scalar`'s doc comment.
+                                let inner = Self::mutex_inner(&field_ty).or_else(|| Self::rwlock_inner(&field_ty));
+                                if inner.map(Self::is_copy_type).unwrap_or(false) {
+                                    self.var_lock_scalar.insert(s.name.clone());
                                 }
                             }
                             self.var_types.insert(s.name.clone(), field_ty);

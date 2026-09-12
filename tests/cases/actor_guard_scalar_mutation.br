@@ -1,0 +1,35 @@
+# Regression test: a scalar (no-fields) local qualified `'actor`/`'guard` used to
+# never route its own bare-`Var` read/write through the lock — only a struct-typed
+# `'actor`/`'guard` binding was ever exercised in practice, where every mutation goes
+# through a field write or a `def` method call (both already routed through the lock
+# — see `emit_expr_assign`'s `Field`-target branches). A scalar binding has no fields,
+# so every mutation *is* a bare-`Var`-target read/write, which fell through to a plain
+# Rust read/assignment on the `Arc<Mutex<T>>`/`Arc<RwLock<T>>` handle itself — invalid
+# Rust (no `Display`/`AddAssign`/plain-assign on the handle type). See
+# `src/transpiler/mod.rs`'s `var_lock_scalar` doc comment for the fix.
+#
+# Covers: `'actor` (int) and `'guard` (bool, float) scalars; a bare compound
+# assignment and a plain assignment; both outside and inside a `with` block (which
+# shadows the binding to the already-acquired guard for the block's duration — a
+# separate codegen path, see `emit_stmt.rs`'s `emit_with`).
+def main():
+    var counter'actor = 0
+    counter += 5
+    counter -= 2
+    print "{counter}"
+
+    with counter:
+        counter += 100
+    print "{counter}"
+
+    var flag'guard = false
+    flag = true
+    print "{flag}"
+
+    with flag:
+        flag = false
+    print "{flag}"
+
+    var total'guard = 1.5
+    total += 2.5
+    print "{total}"

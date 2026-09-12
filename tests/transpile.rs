@@ -1097,3 +1097,9 @@ transpile_test!(atomic_promotion_actor);
 // Part 2: promotion conservatively suppressed by `with`-block usage (criterion 4) —
 // must produce the exact same result as the promoted version above.
 transpile_test!(atomic_promotion_suppressed_with);
+
+// Regression: a *scalar* `'actor`/`'guard` local's own bare-`Var` read/write (no
+// fields to route a mutation through, unlike a struct-typed binding) must go
+// through the lock — both outside and inside a `with` block. See the fixture's
+// own doc comment and `src/transpiler/mod.rs`'s `var_lock_scalar`.
+transpile_test!(actor_guard_scalar_mutation);

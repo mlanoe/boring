@@ -627,6 +627,20 @@ struct Transpiler {
     /// moves a name here (and out of `var_mutex_types`/`var_rwlock_types`) once
     /// it proves the promotion's four conservative criteria all hold.
     pub(crate) var_atomic_types: std::collections::HashSet<String>,
+    /// Variable names declared `T'actor`/`T'actor'task`/`T'guard`/`T'guard'task` where
+    /// `T` is itself a scalar (`Self::is_copy_type` — int/uint/bool/float/…, no fields).
+    /// Struct-typed `'actor`/`'guard` bindings mutate through a field write or a `def`
+    /// method call, both of which already route through the lock (see
+    /// `emit_expr_assign`'s `Field`-target branches and `mutex_field_write`/etc.) — a
+    /// bare read/write of the *binding itself* correctly stays the plain Arc handle
+    /// (e.g. to store into another struct field, see the `.clone()`-on-assign
+    /// handling below). A scalar binding has no fields at all, so every mutation
+    /// *is* a bare-`Var`-target read/write — this set marks those names so
+    /// `emit_expr.rs`'s bare-`Var` read and `emit_expr_assign`'s bare-`Var` write
+    /// route through the lock instead of falling through to a plain Rust
+    /// read/assignment on the `Arc<Mutex<T>>`/`Arc<RwLock<T>>` handle (which doesn't
+    /// compile — no `Display`/`AddAssign`/etc. on the handle type itself).
+    pub(crate) var_lock_scalar: std::collections::HashSet<String>,
     /// Names the automatic `'actor`/`'guard` → `'atomic` promotion pass
     /// (`promote_atomic.rs`) has proven safe to promote, computed fresh per function
     /// body by `scan_atomic_promotions` before any statement of that function is
@@ -1277,6 +1291,7 @@ impl Transpiler {
             var_struct_types: std::collections::HashMap::new(),
             var_mutex_types: std::collections::HashSet::new(),
             var_atomic_types: std::collections::HashSet::new(),
+            var_lock_scalar: std::collections::HashSet::new(),
             promoted_atomic_vars: std::collections::HashSet::new(),
             var_mutex_task_types: std::collections::HashSet::new(),
             struct_mutex_fields: std::collections::HashSet::new(),

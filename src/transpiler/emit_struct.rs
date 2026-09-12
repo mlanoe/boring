@@ -993,8 +993,23 @@ impl Transpiler {
         let prev_task_vars          = std::mem::take(&mut self.task_vars);
         let prev_throws_fn_params   = std::mem::take(&mut self.throws_fn_params);
         let prev_var_newtype_type   = std::mem::take(&mut self.var_newtype_type);
+        // `seed_param_locals` also consults `self.inferred_qualifiers` (to populate the
+        // mutex/rwlock/arc tracking sets for a BARE param whose 'actor'/'guard' qualifier
+        // came from inference rather than an explicit annotation — see its own doc comment).
+        // Unlike `emit_fn`, nothing runs `infer_qualifiers` for `tm`'s own params/body before
+        // this call, so `self.inferred_qualifiers` here is still whatever the *previously*
+        // emitted item's body left behind — a stale map keyed by unrelated variable names.
+        // Left in place, a `tm` param that happens to share a name with one of those stale
+        // entries would wrongly be treated as mutex/rwlock/arc-qualified regardless of its
+        // own (possibly primitive) declared type — confirmed via a real `cargo build`
+        // regression: a plain `int c` type-method param emitted `Arc::clone(&c)` on an
+        // `isize`. Clear it before seeding so the lookup finds nothing (never wired up for
+        // type-method params to begin with — see the gap noted above) and restore the
+        // caller's map afterward, same save/take/restore rationale as every other set here.
+        let prev_inferred_qualifiers = std::mem::take(&mut self.inferred_qualifiers);
         self.seed_param_locals(&tm.params);
         self.emit_body(&tm.body);
+        self.inferred_qualifiers = prev_inferred_qualifiers;
         self.var_newtype_type   = prev_var_newtype_type;
         self.throws_fn_params   = prev_throws_fn_params;
         self.task_vars          = prev_task_vars;

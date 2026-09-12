@@ -1048,6 +1048,14 @@ pub(crate) fn collect_vars_in_stmt(stmt: &Stmt, out: &mut Vec<String>) {
                 out.extend(arm_vars.into_iter().filter(|v| !bound.contains(v)));
             }
         }
+        // `with name[, name...]:` — the block's own body is ordinary nested code that
+        // still references `name` (e.g. `with c: c.value += 1`); recurse into it like
+        // any other nested block, or a task/closure capturing `c` only through a `with`
+        // block would see it as uncaptured (see infer_qualifiers.rs's live-range analysis
+        // for the task/'actor'task inference this used to silently break).
+        Stmt::With(w) => {
+            for s in &w.body { collect_vars_in_stmt(s, out); }
+        }
         _ => {}
     }
 }

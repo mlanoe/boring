@@ -2,6 +2,17 @@ use super::Transpiler;
 use crate::ast::{BindingKind, Expr, ExprKind, MatchBody, OwnerQual, Stmt, Type};
 use super::helpers::collect_var_names;
 
+/// Output of `Transpiler::collect_with_await_signals`: candidate names referenced inside at
+/// least one `with` block anywhere in the scanned body (`referenced` — these need lock/
+/// interior-mutability semantics, never a plain auto-ref borrow, regardless of awaiting), and
+/// the subset of those whose block provably holds across a genuine await (`awaited` — these
+/// additionally need the `'task` lock variant). `awaited` is always a subset of `referenced`.
+#[derive(Default)]
+struct WithSignals {
+    referenced: std::collections::HashSet<String>,
+    awaited: std::collections::HashSet<String>,
+}
+
 impl Transpiler {
     /// Pre-pass: walk a function body and populate `inferred_qualifiers`.
     ///
@@ -209,6 +220,37 @@ impl Transpiler {
                     }
                 }
             }
+        }
+
+        // Local live-range analysis (extends the task-method-call heuristic above): a `with`
+        // block conceptually holds its named value's lock for its whole span, so a genuine
+        // await anywhere in that span — even one utterly unrelated to the guarded value, and
+        // even when nothing called on the guarded value inside the block is itself declared
+        // `task` — is a positive signal that the 'task lock variant is required. Scans the
+        // whole body (including inside nested task/closure literals, which is exactly where a
+        // captured actor/guard value is normally used) for such blocks; every named candidate
+        // whose block provably holds across an await is fed into the same disambiguation signal
+        // (`task_method_call_vars`) `constrain_task_captures` already populates above, whether or
+        // not that var was also captured by a task/closure. See docs/qualifiers.md's "Inferring
+        // 'actor'task/'guard'task from task-method calls" for the full design and worked example.
+        let mut with_signals = WithSignals::default();
+        self.collect_with_await_signals(stmts, &anonymous_vars, &var_struct_types, &mut with_signals);
+        for name in &with_signals.referenced {
+            // A `with` block always requires lock/interior-mutability semantics — never a
+            // plain auto-ref borrow — regardless of whether this particular usage also
+            // proves an await (mirrors the task-capture "storage signal" handling above).
+            constrain_candidates(
+                &mut candidates, name,
+                &[OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+                &alias_of,
+            );
+            if auto_ref_param_vars.contains(name.as_str()) {
+                has_qualifier_constraint.insert(name.clone());
+            }
+        }
+        for name in &with_signals.awaited {
+            promote_task_variants(&mut candidates, name, &alias_of);
+            self.task_method_call_vars.insert(name.clone());
         }
 
         // Resolve candidates → inferred_qualifiers.
@@ -435,6 +477,27 @@ impl Transpiler {
                             let Some(demanded) = qual_of_type(param_ty) else { continue };
                             let ExprKind::Var(var_name) = &arg.value.kind else { continue };
                             if anonymous_vars.contains(var_name.as_str()) {
+                                // Cross-function propagation (docs/qualifiers.md's "Inferring
+                                // 'actor'task/'guard'task"): the callee's own signature already
+                                // demands the 'task lock variant (either because it was inferred
+                                // from the callee's body — see `collect_with_await_signals` below
+                                // — or explicitly annotated). `coercible_from(ActorTask/GuardTask)`
+                                // only accepts the exact 'task variant, so without first widening
+                                // this argument's own candidate set the same way a task/closure
+                                // capture would (`promote_task_variants`), a caller whose value is
+                                // still only a plain `Actor`/`Guard` candidate would have its
+                                // candidate set intersected to empty here — a spurious "no valid
+                                // qualifier" conflict instead of the caller silently adopting the
+                                // 'task variant too (the two lock types are different concrete Rust
+                                // types; the caller MUST agree with the callee, it cannot just
+                                // decline). This is the only place a plain `Actor`/`Guard` candidate
+                                // is ever widened outside an actual task/closure capture — it never
+                                // fires unless some callee has already proven (or been told) it
+                                // needs the async lock, so it can never fire from mere absence of
+                                // proof (see the module doc comment's "direction 2" design note).
+                                if matches!(demanded, OwnerQual::ActorTask | OwnerQual::GuardTask) {
+                                    promote_task_variants(candidates, var_name, alias_of);
+                                }
                                 // Optional params require exact qualifier match: Option<T> cannot be
                                 // auto-coerced to Option<Arc<Mutex<T>>> at the call site.
                                 let compatible = if matches!(param_ty, Type::Optional(_)) {
@@ -749,6 +812,286 @@ impl Transpiler {
         }
     }
 
+    /// Local live-range analysis for the `'actor'task`/`'guard'task` inference (see
+    /// `docs/qualifiers.md`'s "Inferring `'actor'task`/`'guard'task` from task-method calls").
+    ///
+    /// A `with name[, name...]:` block conceptually holds each named value's lock for its
+    /// entire span (see `docs/scoped-access-blocks.md`) — so a genuine await *anywhere* in
+    /// that span, not just a call to a `task`-declared method on the guarded value itself, is
+    /// proof the async lock variant is required. This scans `stmts` for every `with` block
+    /// (recursing into `if`/`while`/`for`/`match`/`try`/`guard`/nested `with`/loop bodies —
+    /// the same boundary `ast::with_block_mutates` already uses for its own read/write scan —
+    /// and also into task/closure literal bodies, since that's exactly where a captured
+    /// actor/guard value is normally used) and, for each one found, checks whether its own
+    /// body (bounded the same way, but *not* crossing into a further-nested task/closure
+    /// literal — that spawns its own, separately scheduled async context and does not block
+    /// the current span) contains an unambiguous await point via `stmts_have_await`.
+    ///
+    /// Deliberately narrow, matching this module's "conservative toward sync" design: only
+    /// three syntactic forms count as an await point — an explicit `wait(...)`, a `join […]`,
+    /// or a direct call into an already-known `task`-declared function/method (`task_fns` /
+    /// `struct_task_methods`, both populated by pre-scan before any body is walked). A
+    /// blocking `.value`/`.wait` on a spawned task handle is a real await too, but recognizing
+    /// it needs type information (`task_vars` and friends) this early pre-pass doesn't have —
+    /// missing it just means staying on the plain sync variant, the safe direction, not a
+    /// silent wrong answer; see docs/qualifiers.md's residual-gap paragraph.
+    ///
+    /// Before/after:
+    /// ```boring
+    /// struct Counter:
+    ///     var int value = 0
+    ///     def inc():             # plain `def`, not `task` — today's own heuristic alone
+    ///         value += 1          # would leave `c` on the plain sync variant here
+    ///
+    /// task def void worker(Counter c):
+    ///     with c:
+    ///         c.inc()             # not a `task` method call — the OLD heuristic sees nothing
+    ///         wait(Duration.fromMillis(100))   # …but this NEW scan finds the await in the
+    ///                                          # same held span, so `c` still infers
+    ///                                          # 'actor'task, matching `docs/qualifiers.md`'s
+    ///                                          # example that used to need an explicit annotation.
+    /// ```
+    fn collect_with_await_signals(
+        &self,
+        stmts: &[Stmt],
+        anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        out: &mut WithSignals,
+    ) {
+        for stmt in stmts {
+            if let Stmt::With(w) = stmt {
+                let has_await = self.stmts_have_await(&w.body, var_struct_types);
+                for name in &w.names {
+                    if !anonymous_vars.contains(name.as_str()) { continue; }
+                    // Any `with`-block usage at all requires lock/interior-mutability
+                    // semantics — incompatible with a plain auto-ref borrow — regardless
+                    // of whether this particular block also proves an await.
+                    out.referenced.insert(name.clone());
+                    if has_await {
+                        out.awaited.insert(name.clone());
+                    }
+                }
+            }
+            self.collect_with_await_signals_stmt(stmt, anonymous_vars, var_struct_types, out);
+        }
+    }
+
+    fn collect_with_await_signals_stmt(
+        &self,
+        stmt: &Stmt,
+        anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        out: &mut WithSignals,
+    ) {
+        let b = |body: &[Stmt], out: &mut WithSignals| {
+            self.collect_with_await_signals(body, anonymous_vars, var_struct_types, out)
+        };
+        match stmt {
+            Stmt::With(w) => b(&w.body, out),
+            Stmt::If(s) => {
+                for (_, body) in &s.branches { b(body, out); }
+                if let Some(eb) = &s.else_body { b(eb, out); }
+            }
+            Stmt::IfLet(s) => {
+                b(&s.then_body, out);
+                for br in &s.elif_branches { b(&br.body, out); }
+                if let Some(eb) = &s.else_body { b(eb, out); }
+            }
+            Stmt::While(s) => b(&s.body, out),
+            Stmt::WhileLet(s) => b(&s.body, out),
+            Stmt::DoWhile(s) => b(&s.body, out),
+            Stmt::Loop(s) => b(&s.body, out),
+            Stmt::For(s) => b(&s.body, out),
+            Stmt::Match(s) => {
+                for arm in &s.arms {
+                    if let MatchBody::Block(body) = &arm.body { b(body, out); }
+                }
+            }
+            Stmt::Try(s) => {
+                b(&s.body, out);
+                for c in &s.catch_clauses { b(&c.body, out); }
+            }
+            Stmt::Guard(s) => b(&s.else_body, out),
+            Stmt::Defer(body) => b(body, out),
+            Stmt::KernelBlock(s) => b(&s.body, out),
+            // `let`/`return`/expr statements: a `with` block can't appear inline in an
+            // expression position (it's parsed only as a statement), but it CAN be nested
+            // inside a task/closure literal or an if/match *expression* carried by one of
+            // these — recurse into the expression to find those.
+            Stmt::Let(s) => { if let Some(v) = &s.value { self.collect_with_await_signals_expr(v, anonymous_vars, var_struct_types, out); } }
+            Stmt::Expr(e) => self.collect_with_await_signals_expr(e, anonymous_vars, var_struct_types, out),
+            Stmt::Return(r) => { if let Some(v) = &r.value { self.collect_with_await_signals_expr(v, anonymous_vars, var_struct_types, out); } }
+            _ => {}
+        }
+    }
+
+    fn collect_with_await_signals_expr(
+        &self,
+        expr: &Expr,
+        anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        out: &mut WithSignals,
+    ) {
+        let b = |body: &[Stmt], out: &mut WithSignals| {
+            self.collect_with_await_signals(body, anonymous_vars, var_struct_types, out)
+        };
+        let e = |ex: &Expr, out: &mut WithSignals| {
+            self.collect_with_await_signals_expr(ex, anonymous_vars, var_struct_types, out)
+        };
+        match &expr.kind {
+            ExprKind::Task(inner) => e(inner, out),
+            ExprKind::TaskWithTimeout(dur, inner) => { e(dur, out); e(inner, out); }
+            ExprKind::Closure(_, _, body, _, _) => match body {
+                crate::ast::ClosureBody::Expr(ex) => e(ex, out),
+                crate::ast::ClosureBody::Block(stmts) => b(stmts, out),
+            },
+            ExprKind::Block(stmts) | ExprKind::Do(stmts) => b(stmts, out),
+            ExprKind::If(s) => {
+                for (c, body) in &s.branches { e(c, out); b(body, out); }
+                if let Some(eb) = &s.else_body { b(eb, out); }
+            }
+            ExprKind::Match(s) => {
+                e(&s.subject, out);
+                for arm in &s.arms {
+                    match &arm.body {
+                        MatchBody::Expr(ex) => e(ex, out),
+                        MatchBody::Block(body) => b(body, out),
+                    }
+                }
+            }
+            ExprKind::TryElseBlock(body, els) => { b(body, out); b(els, out); }
+            ExprKind::Call(callee, args) | ExprKind::MethodCall(callee, _, args)
+            | ExprKind::OptionalMethodCall(callee, _, args) | ExprKind::GenericCall(callee, _, args)
+            | ExprKind::Pipe(callee, _, args) => {
+                e(callee, out);
+                for a in args { e(&a.value, out); }
+            }
+            ExprKind::BinOp(_, l, r) | ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r)
+            | ExprKind::Else(l, r) | ExprKind::TryElse(l, r) => { e(l, out); e(r, out); }
+            ExprKind::UnaryOp(_, inner) | ExprKind::Field(inner, _) | ExprKind::OptionalField(inner, _)
+            | ExprKind::Cast(inner, _) => e(inner, out),
+            ExprKind::Index(o, i) => { e(o, out); e(i, out); }
+            ExprKind::Array(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
+                for ex in es { e(ex, out); }
+            }
+            _ => {}
+        }
+    }
+
+    /// Bounded await-point scan for a `with` block's own body (the "held span"). Same
+    /// recursive boundary as `collect_with_await_signals_stmt` — control flow within the
+    /// SAME synchronous span — except it must NOT cross into a nested `task`/`TaskWithTimeout`/
+    /// `Closure` literal: that spawns a new, separately scheduled async context, so an await
+    /// inside it does not block whatever is holding the `with` block's lock.
+    fn stmts_have_await(&self, stmts: &[Stmt], var_struct_types: &std::collections::HashMap<String, String>) -> bool {
+        stmts.iter().any(|s| self.stmt_has_await(s, var_struct_types))
+    }
+
+    fn stmt_has_await(&self, stmt: &Stmt, vst: &std::collections::HashMap<String, String>) -> bool {
+        let e = |ex: &Expr| self.expr_has_await(ex, vst);
+        let b = |body: &[Stmt]| self.stmts_have_await(body, vst);
+        match stmt {
+            Stmt::Wait(_, _) => true,
+            Stmt::Let(s) => s.value.as_ref().is_some_and(e),
+            Stmt::LetDestructure(s) => e(&s.value),
+            Stmt::Return(r) => r.value.as_ref().is_some_and(e),
+            Stmt::Throw(t) => t.value.as_ref().is_some_and(e),
+            Stmt::Expr(ex) => e(ex),
+            Stmt::If(s) => s.branches.iter().any(|(c, body)| e(c) || b(body))
+                || s.else_body.as_ref().is_some_and(|body| b(body)),
+            Stmt::IfLet(s) => {
+                s.clauses.iter().any(|c| self.cond_clause_has_await(c, vst))
+                    || b(&s.then_body)
+                    || s.elif_branches.iter().any(|br| {
+                        br.clauses.iter().any(|c| self.cond_clause_has_await(c, vst)) || b(&br.body)
+                    })
+                    || s.else_body.as_ref().is_some_and(|body| b(body))
+            }
+            Stmt::Match(s) => e(&s.subject) || s.arms.iter().any(|arm| {
+                arm.guard.as_ref().is_some_and(e) || match &arm.body {
+                    MatchBody::Expr(ex) => e(ex),
+                    MatchBody::Block(body) => b(body),
+                }
+            }),
+            Stmt::While(s) => e(&s.condition) || b(&s.body),
+            Stmt::WhileLet(s) => e(&s.value) || b(&s.body),
+            Stmt::DoWhile(s) => b(&s.body) || e(&s.condition),
+            Stmt::Loop(s) => b(&s.body),
+            Stmt::For(s) => e(&s.iterable) || b(&s.body),
+            Stmt::Guard(s) => {
+                let cond_hit = match &s.cond {
+                    crate::ast::GuardCond::Expr(ex) => e(ex),
+                    crate::ast::GuardCond::Clauses(cs) => cs.iter().any(|c| self.cond_clause_has_await(c, vst)),
+                };
+                cond_hit || b(&s.else_body)
+            }
+            Stmt::Try(s) => b(&s.body) || s.catch_clauses.iter().any(|c| b(&c.body)),
+            Stmt::Defer(body) => b(body),
+            // Nested `with` — still the same held span (see `ast::with_block_mutates`'s
+            // identical treatment for its own read/write scan).
+            Stmt::With(s) => b(&s.body),
+            Stmt::Yield(ex, _) => e(ex),
+            Stmt::Break(_, v) => v.as_ref().is_some_and(e),
+            Stmt::KernelBlock(s) => b(&s.body),
+            _ => false,
+        }
+    }
+
+    fn cond_clause_has_await(&self, c: &crate::ast::CondClause, vst: &std::collections::HashMap<String, String>) -> bool {
+        match c {
+            crate::ast::CondClause::Expr(ex) => self.expr_has_await(ex, vst),
+            crate::ast::CondClause::Let(_, v) | crate::ast::CondClause::LetPat(_, v) => self.expr_has_await(v, vst),
+        }
+    }
+
+    fn expr_has_await(&self, expr: &Expr, vst: &std::collections::HashMap<String, String>) -> bool {
+        let e = |ex: &Expr| self.expr_has_await(ex, vst);
+        let b = |body: &[Stmt]| self.stmts_have_await(body, vst);
+        match &expr.kind {
+            // `join […]` always awaits every listed future.
+            ExprKind::JoinAll(_) => true,
+            // A direct call to an already-known `task`-declared free function, not spawned via
+            // the `task` keyword (that's `ExprKind::Task`, handled below), is an implicit await
+            // in the emitted Rust — see `emit_expr.rs`'s `is_task`/`self.task_fns` check.
+            ExprKind::Call(callee, args) => {
+                let direct = matches!(&callee.kind, ExprKind::Var(n) if self.task_fns.contains(n.as_str()));
+                direct || e(callee) || args.iter().any(|a| e(&a.value))
+            }
+            // Same, for a directly-called (not spawned) `task`-declared method — this is the
+            // existing "called-method-is-itself-task" signal, just reachable here too so an
+            // *unrelated* receiver's task-method call still counts as an await in this span.
+            // Only resolved for a bare-variable receiver whose struct type this pre-pass already
+            // tracks (`var_struct_types`) — a `self.field` receiver or an explicitly-qualified
+            // variable isn't resolvable this early; missing it just stays conservative (no
+            // upgrade), never a false positive.
+            ExprKind::MethodCall(recv, method, args) | ExprKind::OptionalMethodCall(recv, method, args) => {
+                let direct = matches!(&recv.kind, ExprKind::Var(n) if vst.get(n.as_str())
+                    .is_some_and(|struct_name| self.struct_task_methods.contains(&format!("{}::{}", struct_name, method))));
+                direct || e(recv) || args.iter().any(|a| e(&a.value))
+            }
+            ExprKind::BinOp(_, l, r) | ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r)
+            | ExprKind::Else(l, r) | ExprKind::TryElse(l, r) => e(l) || e(r),
+            ExprKind::UnaryOp(_, inner) | ExprKind::Field(inner, _) | ExprKind::OptionalField(inner, _)
+            | ExprKind::Cast(inner, _) => e(inner),
+            ExprKind::Index(o, i) => e(o) || e(i),
+            ExprKind::Array(es) | ExprKind::Tuple(es) | ExprKind::Set(es) => es.iter().any(e),
+            ExprKind::If(s) => s.branches.iter().any(|(c, body)| e(c) || b(body))
+                || s.else_body.as_ref().is_some_and(|body| b(body)),
+            ExprKind::Match(s) => e(&s.subject) || s.arms.iter().any(|arm| match &arm.body {
+                MatchBody::Expr(ex) => e(ex),
+                MatchBody::Block(body) => b(body),
+            }),
+            ExprKind::Block(stmts) | ExprKind::Do(stmts) => b(stmts),
+            ExprKind::Loop(s) => b(&s.body),
+            ExprKind::GenericCall(callee, _, args) | ExprKind::Pipe(callee, _, args) => {
+                e(callee) || args.iter().any(|a| e(&a.value))
+            }
+            // New async contexts — spawned separately, do not block the current span.
+            ExprKind::Task(_) | ExprKind::TaskWithTimeout(_, _) | ExprKind::Closure(_, _, _, _, _) => false,
+            _ => false,
+        }
+    }
+
     /// Infer qualifiers for private, unqualified struct fields by scanning all method bodies
     /// in the same struct, plus any `ext` block methods/setters for the same type declared in
     /// the same file. The same constraint-elimination algorithm used for local variables is
@@ -954,6 +1297,12 @@ impl Transpiler {
                             let Some(demanded) = param_types.get(i).and_then(qual_of_type) else { continue };
                             let Some(field_name) = self_field_name(&arg.value) else { continue };
                             if target_fields.contains_key(field_name) {
+                                // Same cross-function widening as the local-variable Call case
+                                // in `walk_expr_for_qualifiers` — see its comment for why this
+                                // is needed before intersecting, not just for symmetry.
+                                if matches!(demanded, OwnerQual::ActorTask | OwnerQual::GuardTask) {
+                                    promote_task_variants(candidates, field_name, alias_of);
+                                }
                                 constrain_candidates(candidates, field_name, &coercible_from(demanded), alias_of);
                             }
                         }
@@ -1548,7 +1897,8 @@ fn qual_of_type(ty: &Type) -> Option<OwnerQual> {
     match ty.without_mut() {
         Type::Qualified(_, q) => match q {
             OwnerQual::Inline | OwnerQual::Owned | OwnerQual::Shared
-            | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Atomic => Some(q.clone()),
+            | OwnerQual::Actor | OwnerQual::ActorTask
+            | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Atomic => Some(q.clone()),
             OwnerQual::Union(_) => None,
             _ => None,
         },
@@ -1688,6 +2038,11 @@ fn collect_receivers_in_stmt(stmt: &Stmt, out: &mut std::collections::HashMap<St
                     }
                 }
             }
+        }
+        // Same rationale as `collect_vars_in_stmt`'s `Stmt::With` arm (helpers.rs) —
+        // a `with c:` block's body is ordinary nested code still calling methods on `c`.
+        Stmt::With(w) => {
+            for st in &w.body { collect_receivers_in_stmt(st, out); }
         }
         _ => {}
     }

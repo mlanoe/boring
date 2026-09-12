@@ -107,6 +107,33 @@ impl Transpiler {
                 if self.var_atomic_types.contains(n.as_str()) {
                     return self.atomic_load(n);
                 }
+                // Scalar `'actor`/`'guard` bindings (`var_lock_scalar` — see its doc
+                // comment on the `Transpiler` struct): a struct-typed actor/guard
+                // binding correctly stays a bare handle here (the field-write/method-call
+                // paths already route mutation through the lock — see
+                // `emit_expr_assign`'s `Field`-target branches), but a *scalar* binding
+                // has no fields, so this bare read IS the only access point and must
+                // go through the lock itself.
+                if self.var_lock_scalar.contains(n.as_str()) {
+                    // Inside an open `with` block, `n` is already shadowed to the
+                    // acquired guard itself (`emit_stmt.rs`'s `emit_with` removes it
+                    // from `var_mutex_types`/`var_rwlock_types` for the block's
+                    // duration) — just deref the guard, don't re-lock.
+                    if self.with_open_names.contains(n.as_str()) {
+                        return format!("(*{})", n);
+                    }
+                    if self.var_mutex_types.contains(n.as_str()) || self.var_mutex_task_types.contains(n.as_str()) {
+                        return format!("*{}", self.mutex_var_read(n, n));
+                    }
+                    if self.var_rwlock_types.contains(n.as_str()) || self.var_rwlock_task_types.contains(n.as_str()) {
+                        let access = if self.var_rwlock_task_types.contains(n.as_str()) {
+                            self.guard_task_read_access(n)
+                        } else {
+                            self.guard_read_access(n)
+                        };
+                        return format!("*{}", access);
+                    }
+                }
                 // `var` primitive params are `&mut T` — auto-deref on use.
                 if self.var_primitive_params.contains(n.as_str()) {
                     return format!("(*{})", n);
@@ -2303,6 +2330,41 @@ impl Transpiler {
                 }
                 let val_s = self.emit_expr_owned(value);
                 return self.atomic_store(var_name, &val_s);
+            }
+            // Scalar `'actor`/`'guard` bindings (`var_lock_scalar` — see its doc
+            // comment on the `Transpiler` struct): same "no fields to route the
+            // mutation through" story as the bare-`Var` read above — this
+            // assignment IS the mutation point, so it must acquire the lock
+            // itself rather than falling through to a plain Rust assignment on
+            // the `Arc<Mutex<T>>`/`Arc<RwLock<T>>` handle (doesn't compile: no
+            // `AddAssign`/plain-assign target on the handle type itself).
+            if self.var_lock_scalar.contains(var_name.as_str()) {
+                // Inside an open `with` block the guard is already held for the
+                // block's duration (`emit_stmt.rs`'s `emit_with` shadows
+                // `var_name` to it) — just assign through the deref, no new lock.
+                if self.with_open_names.contains(var_name.as_str()) {
+                    let val_s = self.emit_expr_owned(value);
+                    return format!("*{} = {}", var_name, val_s);
+                }
+                if self.var_mutex_types.contains(var_name.as_str()) || self.var_mutex_task_types.contains(var_name.as_str()) {
+                    // Evaluate the RHS into a temp *before* taking the write guard: it
+                    // may itself read through the same lock (e.g. `x = x * 2`), and a
+                    // non-reentrant Mutex self-deadlocks if that read tries to lock
+                    // while the write guard above it is still held in the same
+                    // statement (same reasoning as the `Field`-target branches below).
+                    let val_s = self.emit_expr_owned(value);
+                    let guard = self.mutex_var_write(var_name, var_name);
+                    return format!("{{ let __v = {}; let mut __g = {}; *__g = __v; }}", val_s, guard);
+                }
+                if self.var_rwlock_types.contains(var_name.as_str()) || self.var_rwlock_task_types.contains(var_name.as_str()) {
+                    let val_s = self.emit_expr_owned(value);
+                    let guard = if self.var_rwlock_task_types.contains(var_name.as_str()) {
+                        self.guard_task_write_guard(var_name)
+                    } else {
+                        self.guard_write_guard(var_name)
+                    };
+                    return format!("{{ let __v = {}; let mut __wg = {}; *__wg = __v; }}", val_s, guard);
+                }
             }
         }
         if let ExprKind::Field(obj, field) = &target.kind {

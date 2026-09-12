@@ -1192,9 +1192,37 @@ impl Transpiler {
                 if Self::is_string_type(ty) {
                     self.string_vars.insert(p.name.clone());
                 }
+                // A bare (unqualified) param whose 'actor'/'actor'task/'guard'/'guard'task
+                // qualifier comes from inference rather than an explicit source-level
+                // annotation must still populate the mutex/rwlock/arc tracking sets below —
+                // otherwise the signature (emit_param, which already applies
+                // `inferred_qualifiers`) says `Arc<Mutex<T>>` but the body never routes
+                // through `.lock()`/`.lock().await`/`.read()`/`.write()`, producing invalid
+                // Rust (`no method named `foo` found for reference &Arc<Mutex<T>>`).
+                // Mirrors emit_param's `effective_ty`/`apply_inferred_qual` logic exactly —
+                // same `needs_inference` gate, same fallback to the declared type when no
+                // inference result exists for this param name.
+                let inferred_ty;
+                let needs_inference = !matches!(ty, Type::Qualified(..))
+                    || matches!(ty, Type::Qualified(_, OwnerQual::Owned))
+                    || matches!(ty, Type::Qualified(_, OwnerQual::Union(_)))
+                    || matches!(ty, Type::Optional(inner)
+                        if matches!(inner.as_ref(), Type::Named(_)
+                            | Type::Qualified(_, OwnerQual::Owned)
+                            | Type::Qualified(_, OwnerQual::Union(_))));
+                let effective_ty = if needs_inference {
+                    if let Some(qual) = self.inferred_qualifiers.get(&p.name) {
+                        inferred_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, qual.clone());
+                        &inferred_ty
+                    } else {
+                        ty
+                    }
+                } else {
+                    ty
+                };
                 // T'actor / T'actor'task params → mutex tracking.
-                if Self::is_mutex_binding(p.mutable, ty) {
-                    if Self::is_mutex_task_binding(p.mutable, ty) {
+                if Self::is_mutex_binding(p.mutable, effective_ty) {
+                    if Self::is_mutex_task_binding(p.mutable, effective_ty) {
                         self.var_mutex_task_types.insert(p.name.clone());
                     } else {
                         self.var_mutex_types.insert(p.name.clone());
@@ -1205,8 +1233,8 @@ impl Transpiler {
                     }
                 }
                 // T'guard / T'guard'task params → rwlock tracking.
-                if Self::is_rwlock_binding(p.mutable, ty) {
-                    if Self::is_rwlock_task_binding(p.mutable, ty) {
+                if Self::is_rwlock_binding(p.mutable, effective_ty) {
+                    if Self::is_rwlock_task_binding(p.mutable, effective_ty) {
                         self.var_rwlock_task_types.insert(p.name.clone());
                     } else {
                         self.var_rwlock_types.insert(p.name.clone());
@@ -1214,10 +1242,10 @@ impl Transpiler {
                     self.arc_vars.insert(p.name.clone());
                 }
                 // Arc/Rc-qualified and string params must be cloned before capture in `async move {}` blocks.
-                if Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) || Self::is_string_type(ty) {
+                if Self::is_arc_qualified(effective_ty) || Self::is_rc_qualified(effective_ty) || Self::is_string_type(ty) {
                     self.arc_vars.insert(p.name.clone());
                     // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone.
-                    if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                    if Self::is_rc_qualified(effective_ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                         self.rc_vars.insert(p.name.clone());
                     }
                     // Params are now by-value (owned clone), so single deref (*var) suffices for match.
