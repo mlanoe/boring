@@ -221,8 +221,8 @@ kernel Reduce:
     mut [float, 256]'actor   tile
 
     init(int n):
-        input  = [..n]
-        output = [..n / 256]
+        input  = [..<n]
+        output = [..<n / 256]
 
     def ():
         let tid = gpu.thread.x
@@ -246,8 +246,8 @@ kernel Reduce:
     mut [float]'actor    tile
 
     init(int n):
-        input  = [..n]
-        output = [..n / 256]
+        input  = [..<n]
+        output = [..<n / 256]
 
     def ():
         let tid = gpu.thread.x

@@ -297,7 +297,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Index access
         ExprKind.Index(obj_expr, idx_expr):
             match idx_expr.kind:
-                # Slice: a[M..N], a[..N], a[M..], a[..]
+                # Slice: a[M..<N], a[..<N], a[M..], a[..]
                 ExprKind.SliceRange(start_expr, end_expr, inclusive):
                     let obj = eval_expr(interp, obj_expr)
                     let items = match obj:
@@ -362,7 +362,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 _: throw "array fill count must be int, got {count_val.type_name()}"
             let v = eval_expr(interp, value_expr)
             var result = []
-            for _ in 0..n:
+            for _ in 0..<n:
                 result.push(v)
             Value.Array(result)
 
@@ -372,7 +372,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 Value.Int(n): n
                 _: throw "array comp count must be int, got {count_val.type_name()}"
             var result = []
-            for i in 0..n:
+            for i in 0..<n:
                 env_define(interp, var_name, Value.Int(i), false)
                 result.push(eval_expr(interp, comp_expr))
             Value.Array(result)
@@ -389,7 +389,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             Value.Array(result)
 
         # Labeled multi-dim array comprehension (docs/array-multidim-types.md)
-        # — both the chained-for form (`for w in ..W for h in ..H`) and the
+        # — both the chained-for form (`for w in ..<W for h in ..<H`) and the
         # shape-only fill shorthand (`for width = w, height = h`) parse to
         # this same node; clauses[0] is axis 0 (fastest-varying, matching
         # row-major storage).

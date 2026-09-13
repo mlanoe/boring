@@ -270,7 +270,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Int(start):
                             match end_val:
                                 Value.Int(end):
-                                    # Clamp exactly like the native `a[m..n]` slice syntax
+                                    # Clamp exactly like the native `a[m..<n]` slice syntax
                                     # (see ExprKind.SliceRange in eval.br) — negative indices
                                     # count from the end, out-of-bounds indices clamp to the
                                     # string's own bounds, and an empty/inverted range yields
@@ -564,7 +564,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Int(start):
                             match end_val:
                                 Value.Int(end):
-                                    # Clamp exactly like the native `a[m..n]` slice syntax
+                                    # Clamp exactly like the native `a[m..<n]` slice syntax
                                     # (see ExprKind.SliceRange in eval.br) — negative indices
                                     # count from the end, out-of-bounds indices clamp to the
                                     # array's own bounds, and an empty/inverted range yields

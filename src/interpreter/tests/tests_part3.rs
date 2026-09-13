@@ -2105,7 +2105,7 @@ let _result = u
 fn test_slice_m_to_n() {
     let src = r#"
 let a = [10, 20, 30, 40, 50]
-let _result = a[1..3]
+let _result = a[1..<3]
 "#;
     assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30)].into()));
 }
@@ -2114,7 +2114,7 @@ let _result = a[1..3]
 fn test_slice_from_start() {
     let src = r#"
 let a = [10, 20, 30, 40, 50]
-let _result = a[..3]
+let _result = a[..<3]
 "#;
     assert_eq!(run_src(src), Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)].into()));
 }
@@ -2150,7 +2150,7 @@ let _result = a[1..=3]
 fn test_slice_empty_range() {
     let src = r#"
 let a = [10, 20, 30]
-let _result = a[2..1]
+let _result = a[2..<1]
 "#;
     assert_eq!(run_src(src), Value::Array(vec![].into()));
 }
@@ -2159,7 +2159,7 @@ let _result = a[2..1]
 fn test_slice_out_of_bounds_clamps() {
     let src = r#"
 let a = [1, 2, 3]
-let _result = a[1..100]
+let _result = a[1..<100]
 "#;
     assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3)].into()));
 }
@@ -2170,7 +2170,7 @@ fn test_slice_with_var_bounds() {
 let a = [1, 2, 3, 4, 5]
 let lo = 1
 let hi = 4
-let _result = a[lo..hi]
+let _result = a[lo..<hi]
 "#;
     assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3), Value::Int(4)].into()));
 }
@@ -2180,7 +2180,7 @@ fn test_slice_in_for_loop() {
     let src = r#"
 let a = [10, 20, 30, 40, 50]
 var sum = 0
-for v in a[1..4]:
+for v in a[1..<4]:
     sum += v
 let _result = sum
 "#;
@@ -2216,7 +2216,7 @@ let _result = m[0][1]
 #[test]
 fn test_nested_array_comprehension() {
     let src = r#"
-let rows = [[float(i * j) for j in 0..4] for i in 0..3]
+let rows = [[float(i * j) for j in 0..<4] for i in 0..<3]
 let _result = rows
 "#;
     assert_eq!(
@@ -2239,8 +2239,8 @@ int findBestMerge([string] tokens, [[string]] merges):
     var int best_pos  = -1
     let n  = len(tokens)
     let n1 = n - 1
-    for i in 0..n1:
-        for rank in 0..len(merges):
+    for i in 0..<n1:
+        for rank in 0..<len(merges):
             if merges[rank][0] == tokens[i] and merges[rank][1] == tokens[i+1]:
                 if best_rank == -1 or rank < best_rank:
                     best_rank = rank
@@ -2301,8 +2301,8 @@ int findBestMerge([string] tokens, [[string]] merges):
     var int best_pos  = -1
     let n  = len(tokens)
     let n1 = n - 1
-    for i in 0..n1:
-        for rank in 0..len(merges):
+    for i in 0..<n1:
+        for rank in 0..<len(merges):
             if merges[rank][0] == tokens[i] and merges[rank][1] == tokens[i+1]:
                 if best_rank == -1 or rank < best_rank:
                     best_rank = rank

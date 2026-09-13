@@ -17,7 +17,7 @@ the more verbose, unambiguous option was taken instead.
 Boring's 1D arrays are unaffected by any of this:
 
 ```boring
-let [type] a = [ f(x) for x in ..N ]
+let [type] a = [ f(x) for x in ..<N ]
 let [type, N] a
 let v = a[x]
 ```
@@ -96,22 +96,27 @@ Never `[float'global, width, height]` or `[float, width'global, height]`.
 ### Comprehension
 
 ```boring
-let a = [ f(width, height) for width in ..W for height in ..H ]
-let a = [ f(width, height, depth) for width in ..W for height in ..H for depth in ..D ]
+let a = [ f(width, height) for width in ..<W for height in ..<H ]
+let a = [ f(width, height, depth) for width in ..<W for height in ..<H for depth in ..<D ]
 ```
 
 Type inference works exactly as it does for 1D comprehensions
-(`let squares = [i * i for i in ..5]` already infers `[int]`) — the labeled
+(`let squares = [i * i for i in ..<5]` already infers `[int]`) — the labeled
 multi-dim type, including its label names, is inferred from the chained
 `for` clauses.
 
-**Why not `for width, height in (..W, ..H)`?** That form reuses the existing
+**Why not `for width, height in (..<W, ..<H)`?** That form reuses the existing
 destructuring grammar `for IDENT ("," IDENT)* "in" expr`, whose natural
 meaning — destructuring pairs out of one iterable — is a **zip** (pairwise,
 truncated to `min(W, H)`), not a cartesian product. It would look
 interchangeable with the chained form for `W == H` and silently produce a
 `min(W, H)`-sized result instead of `W * H` the moment they differ. One
 canonical form (the chained `for`) avoids that trap.
+
+Each `..<W` clause also accepts the inclusive `..=W` spelling (`for width in
+..=W for height in ..=H`), sizing that axis to `W + 1` (indices `0..=W`) —
+the same relationship `..=`/`..<` already have for a plain 1D comprehension,
+extended per-axis here.
 
 ### Fill shorthand (no bound variable)
 
@@ -126,9 +131,12 @@ let a = [ 0.0 for width = w, height = h ]      # 2+ axes — labels required
 Both are pure surface sugar over the same AST nodes the comprehension form
 above already uses:
 
-- `[value for n]` (no `..` required, unlike the range form — there's no
+- `[value for n]` (no `..<` required, unlike the range form — there's no
   loop variable here to justify demanding explicit range syntax) is
-  identical to `[value for ..n]`.
+  identical to `[value for ..<n]`. The dotted form also accepts the
+  inclusive `[value for ..=n]` (`n + 1` elements) — there is no inclusive
+  flavor of the bare, dot-less `[value for n]` shorthand, since it never had
+  a `..`/`..<` marker to extend in the first place.
 - `[value for width = w, height = h]` uses each label directly as that
   axis's loop variable name in the exact same construct the chained-`for`
   comprehension produces — just with variable names nobody intends to
@@ -138,7 +146,7 @@ above already uses:
 `width`/`height` here are purely descriptive of shape, not loop variables —
 letting `value` reference them would make this a second way to write the
 same general per-position comprehension the chained `for...for...` form
-already covers (rejected above for the same reason `for a, b in (..W, ..H)`
+already covers (rejected above for the same reason `for a, b in (..<W, ..<H)`
 was). Keeping this form fill-only means it and the chained form serve
 genuinely different, non-overlapping purposes: constant fill vs.
 position-dependent computation. Referencing `width` inside `value` here
@@ -225,7 +233,7 @@ flat buffer under a shape is a real use case — mainly loading external data
 symmetric inverse:
 
 ```boring
-let flat = [f(i) for i in ..(W * H)]
+let flat = [f(i) for i in ..<(W * H)]
 let a    = flat.reshape(width = W, height = H)   # [T] → [T, width, height]
 let back = a.flatten()                           # [T, width, height] → [T]
 ```

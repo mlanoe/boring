@@ -171,7 +171,7 @@ kernel Grid:
 
     init([float]'global s, uint w, uint h):
         src = s.reshape(width = w, height = h)
-        out = [0.0 for ..(w * h)]
+        out = [0.0 for ..<(w * h)]
 
     def ():
         let tid = gpu.thread.x

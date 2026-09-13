@@ -131,7 +131,7 @@ task void add_tasks_in_parallel_with_semaphore(
     let semaphore'shared = Semaphore(max_concurrent)
     var futures = []
 
-    for i in 0..count:
+    for i in 0..<count:
         let future = task:
             _ = semaphore.acquire()
             let id = todo_list.add_task("Parallel task {i}")
@@ -158,7 +158,7 @@ task void complete_tasks_with_channels(
 
     let receiver'actor'task = receiver
     var futures = []
-    for 0..4:
+    for 0..<4:
         let future = task:
             while let task_id = receiver.recv():
                 try:
@@ -180,7 +180,7 @@ task void add_tasks_with_timeout_and_cancellation(
 ):
     var futures = []
 
-    for i in 0..3:
+    for i in 0..<3:
         let future = task:
             try:
                 let id = timeout(

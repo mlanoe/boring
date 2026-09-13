@@ -741,7 +741,7 @@ impl DeviceEmitter {
             }
             Stmt::For(f) => {
                 let var = f.vars.first().cloned().unwrap_or_else(|| "_i".into());
-                // Check for negated range: UnaryOp(Neg, Range{...}) — e.g. `for dy in -1..2`
+                // Check for negated range: UnaryOp(Neg, Range{...}) — e.g. `for dy in -1..<2`
                 let neg_range = if let ExprKind::UnaryOp(UnaryOp::Neg, ref inner) = f.iterable.kind {
                     if let ExprKind::Range { start, end, inclusive } = &inner.kind {
                         Some((format!("-{}", self.expr(start)), self.expr(end), *inclusive))
@@ -750,7 +750,7 @@ impl DeviceEmitter {
                 if let Some((lo, hi, inclusive)) = neg_range {
                     let op = if inclusive { "<=" } else { "<" };
                     // Wrapped in its own block: WGSL has no shadowing, so sibling for-loops
-                    // reusing the same loop-variable name (e.g. two `for j in ..n` in the
+                    // reusing the same loop-variable name (e.g. two `for j in ..<n` in the
                     // same enclosing scope) would otherwise emit two `var j` in one block,
                     // which naga rejects as a redefinition.
                     self.line("{");
@@ -982,7 +982,7 @@ impl DeviceEmitter {
                 // are substituted down to a concrete literal here — `monomorphise`/`monomorphise_type`
                 // only rewrites `type_params` references inside a kernel's `fields`, never inside
                 // `methods`/`inits` bodies (see `resolve_effective_kernels`'s doc comment), so a body
-                // expression like `0..W * H` still contains a bare `Var("W")`/`Var("H")` after
+                // expression like `0..<W * H` still contains a bare `Var("W")`/`Var("H")` after
                 // monomorphisation — checked first since a type-param name is never also a real
                 // buffer/field/top-level name in practice, and this is the single choke point every
                 // expression emission passes through, so no occurrence (however nested) is missed.

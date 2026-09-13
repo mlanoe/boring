@@ -1277,7 +1277,7 @@ kernel K:
 
 def main():
     let N = 4
-    mut k = K([0 for ..N])
+    mut k = K([0 for ..<N])
     kernel:
         k(block = N)
 ";

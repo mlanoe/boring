@@ -808,11 +808,18 @@ This is checked for a bare `Var` collection with an explicit type annotation (an
 Two shorthand forms create arrays without listing every element:
 
 ```boring
-let zeros  = [0 for ..10]             # fill: 10 zeros
-let squares = [i * i for i in ..5]   # comprehension: [0, 1, 4, 9, 16]
+let zeros  = [0 for ..<10]             # fill: 10 zeros
+let squares = [i * i for i in ..<5]   # comprehension: [0, 1, 4, 9, 16]
 ```
 
-The range must be `..n` (exclusive, starting at 0) or `0..n`. In the comprehension form, `i` is bound to the index (0-based, type `int`). Both forms produce a `[T]` (`Vec<T>`).
+The range must be `..<n` (exclusive, starting at 0) or `0..<n`. In the comprehension form, `i` is bound to the index (0-based, type `int`). Both forms produce a `[T]` (`Vec<T>`).
+
+An inclusive `..=n` (or `0..=n`) is also accepted in both forms, producing `n + 1` elements (indices `0..=n`):
+
+```boring
+let zeros_incl  = [0 for ..=10]           # fill: 11 zeros (indices 0..=10)
+let squares_incl = [i * i for i in ..=5] # comprehension: [0, 1, 4, 9, 16, 25]
+```
 
 **Rust equivalent**
 ```rust
@@ -826,7 +833,7 @@ A compile-time size can be given as a second element of the type, separated by a
 
 ```boring
 let [float, 4] v = [1.0, 2.0, 3.0, 4.0]
-let [int, 3]   z = [0 for ..3]
+let [int, 3]   z = [0 for ..<3]
 
 struct Mat2:
     [float, 4] data                   # inline in a struct field
@@ -875,7 +882,7 @@ let w = a.width                    # 3 — read-only shape-query property
 Chained `for` clauses build one directly, one clause per axis:
 
 ```boring
-let grid = [ f(width, height) for width in ..W for height in ..H ]
+let grid = [ f(width, height) for width in ..<W for height in ..<H ]
 ```
 
 Full reference — the fill shorthand (`[0.0 for width = w, height = h]`),
@@ -891,14 +898,16 @@ A sub-array can be extracted with slice syntax. The result is a new `[T]` contai
 ```boring
 let a = [10, 20, 30, 40, 50]
 
-let b = a[1..3]    # [20, 30]        — exclusive: indices 1 and 2
-let c = a[..3]     # [10, 20, 30]    — from start up to (not including) 3
+let b = a[1..<3]   # [20, 30]        — exclusive: indices 1 and 2
+let c = a[..<3]    # [10, 20, 30]    — from start up to (not including) 3
 let d = a[2..]     # [30, 40, 50]    — from index 2 to end
 let e = a[..]      # [10, 20, 30, 40, 50]  — full copy
 let f = a[1..=3]   # [20, 30, 40]   — inclusive: indices 1, 2 and 3
 ```
 
-Out-of-range bounds are clamped silently. An empty range (e.g. `a[3..1]`) produces `[]`.
+Exclusive ranges are spelled `..<` (Swift-style), never bare `..` — `a[1..3]` is a parse error pointing you at `a[1..<3]`. Inclusive ranges (`..=`) are unaffected. `a[M..]`/`a[..]` (no upper bound) also keep their bare `..` — there's nothing there for `..<` to disambiguate.
+
+Out-of-range bounds are clamped silently. An empty range (e.g. `a[3..<1]`) produces `[]`.
 
 **Rust equivalent**
 ```rust
@@ -1834,7 +1843,7 @@ for name in scores:
 for k in 1..=5:       # inclusive: 1, 2, 3, 4, 5
     print "{k}"
 
-for k in 1..5:        # exclusive: 1, 2, 3, 4
+for k in 1..<5:       # exclusive: 1, 2, 3, 4
     print "{k}"
 ```
 
@@ -7466,7 +7475,7 @@ unreachable("variant {v} should have been handled above")
 | `x ?= expr`                           | `x = x.unwrap_or_else(\|\| expr)` — assign if nil |
 | `let x = …` (name already in scope)   | `let x = …` — Rust shadowing; type may change freely |
 | `1..=5`                     | `1isize..=5`                                |
-| `1..4`                    | `1isize..5`                                 |
+| `1..<5`                   | `1isize..5`                                 |
 | `x?.field`                 | `x.map(\|v\| v.field)`                      |
 | `task fn(args)`            | `tokio::spawn(async move { fn(args).await })`  |
 | `future.value`             | `future.await.unwrap()`                     |
@@ -7532,8 +7541,9 @@ unreachable("variant {v} should have been handled above")
 | `for a, b in tuple_arr:`       | `for (a, b) in tuple_arr.iter() {` — tuple destructuring when elements are tuples |
 | `for k, v in dict:`            | `for (k, v) in dict.iter() {`          |
 | `for k in a..=b:`              | `for k in a..=b {`                     |
-| `for k in a..b:`               | `for k in a..b {`                      |
+| `for k in a..<b:`              | `for k in a..b {`                      |
 | `for a..=b:`                   | `for _ in a..=b {`                     |
+| `for a..<b:`                   | `for _ in a..b {`                      |
 | `loop:`                        | `loop {`                               |
 | `let x = loop: break v`        | `let x = loop { break v; }`            |
 | `do: … while c`                | `loop { …; if !c { break; } }`         |
@@ -8932,7 +8942,7 @@ kernel:
 
 let [int]'gpu'unified result = k.result   # compile-time alias — no transfer yet
 with result:                              # `result` is `let`-bound -> read-only
-    for i in 0..n:
+    for i in 0..<n:
         print "c[{i}] = {result[i]}"      # readback happens once, here
 ```
 
@@ -8943,7 +8953,7 @@ The `'gpu'unified`/`'gpu'global` annotation itself is optional here — it's inf
 ```boring
 let result = k.result   # qualifier inferred from k.result's own 'unified declaration
 with result:
-    for i in 0..n:
+    for i in 0..<n:
         print "c[{i}] = {result[i]}"
 ```
 

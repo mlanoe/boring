@@ -10,7 +10,7 @@ let [int] squares = [x * x for x in nums]
 print squares
 
 # map over result of another comprehension
-let [int] evens = [i * 2 for i in ..5]
+let [int] evens = [i * 2 for i in ..<5]
 let [int] evens_sq = [x * x for x in evens]
 print evens_sq
 

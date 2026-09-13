@@ -18,8 +18,8 @@ kernel Step:
     let Dimension dim
 
     init(Dimension d):
-        cells_in  = [0 for ..d.width * d.height]
-        cells_out = [0 for ..d.width * d.height]
+        cells_in  = [0 for ..<d.width * d.height]
+        cells_out = [0 for ..<d.width * d.height]
         dim       = d
 
     def ():
@@ -27,8 +27,8 @@ kernel Step:
         let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
         if col < dim.width and row < dim.height:
             var int n = 0
-            for dy in -1..2:
-                for dx in -1..2:
+            for dy in -1..<2:
+                for dx in -1..<2:
                     if dx == 0 and dy == 0:
                         continue
                     # toroidal wrap-around
@@ -50,8 +50,8 @@ kernel Render:
     let Dimension dim
 
     init(Dimension d):
-        cells  = [0 for ..d.width * d.height]
-        pixels = [0 for ..d.width * d.height]
+        cells  = [0 for ..<d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
 
     def ():

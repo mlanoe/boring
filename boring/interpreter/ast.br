@@ -458,7 +458,7 @@ enum ExprKind:
     ArrayCompIter(Expr expr, string varname, Expr iter)
     # Labeled multi-dim arrays (docs/array-multidim-types.md).
     LabeledIndex(Expr expr, [Arg] args)                    # a[width = w, height = h]
-    LabeledArrayComp(Expr expr, [(string, Expr)] clauses)  # [f(w,h) for w in ..W for h in ..H]
+    LabeledArrayComp(Expr expr, [(string, Expr)] clauses)  # [f(w,h) for w in ..<W for h in ..<H]
     RelabelCast(Expr expr, [(string, string)] pairs)       # a as [line = width, column = height]
     Tuple([Expr] elems)
     Dict([(Expr, Expr)] pairs)

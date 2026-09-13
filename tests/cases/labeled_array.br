@@ -1,7 +1,7 @@
 # Labeled multi-dimensional arrays (docs/array-multidim-types.md)
 
 # Chained-for comprehension (dynamic shape) — width is axis 0 (fastest-varying)
-let a = [width + height * 10 for width in ..3 for height in ..2]
+let a = [width + height * 10 for width in ..<3 for height in ..<2]
 print a[width = 2, height = 1]
 print a[height = 1, width = 2]   # order-free at the use site
 print a.width

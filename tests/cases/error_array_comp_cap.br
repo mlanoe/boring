@@ -1,5 +1,5 @@
-# `[expr for x in ..n]` (ArrayComp) is the bound-comprehension entry point
+# `[expr for x in ..<n]` (ArrayComp) is the bound-comprehension entry point
 # sharing the same unbounded-allocation risk as the fill/alloc forms — see
 # error_array_fill_alloc_cap.br.
-let a = [x for x in ..999999999999999]
+let a = [x for x in ..<999999999999999]
 print a.length()

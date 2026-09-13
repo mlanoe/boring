@@ -230,7 +230,7 @@ tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&
 <h3 id="sequential-stream">Sequential stream</h3>
 <p>If the body has no <code>wait</code> and no <code>task</code> calls, the stream compiles to a plain iterator — no workqueue involved.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span> <span class="kt">int</span> <span class="fn">range</span>(<span class="kt">int</span> n):
-    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>n:
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>&lt;n:
         <span class="kw">yield</span> i</code></pre></div>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
 <span class="kw">fn</span> <span class="fn">range</span>(n: i64) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;<span class="kt">Item</span> = i64&gt; {

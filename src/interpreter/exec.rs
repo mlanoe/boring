@@ -933,10 +933,10 @@ impl Interpreter {
     ///
     /// Recurses elementwise into `Value::Array`/`Value::Set` when the declared type is an
     /// array/set of a fixed-width numeric type (`Type::Array`/`ArrayN`/`LabeledArray`/`Set`)
-    /// — an array-comprehension literal like `[0.0 for ..N]` evaluates its elements with no
+    /// — an array-comprehension literal like `[0.0 for ..<N]` evaluates its elements with no
     /// knowledge of the binding's declared element type, so it always produces untyped
     /// `Int`/`Float64` elements (`eval_expr` has no target-type hint to thread through a
-    /// comprehension). Without this, `let [float32]'gpu'unified x = [0.0 for ..N]` left every
+    /// comprehension). Without this, `let [float32]'gpu'unified x = [0.0 for ..<N]` left every
     /// element a `Float64`, which `value_matches_type`'s per-element check then rejected
     /// outright (`cannot assign Array to 'x': expected [float32]'gpu'unified`) since neither
     /// this function's scalar-only `base()` dispatch below nor `cast_value` (also scalar-only)

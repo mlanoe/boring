@@ -68,12 +68,12 @@ def [int] colorize(float32 t):
 # PPM P6 encoding (ASCII header + binary RGB pixels)
 let header      = "P6\n{width} {height}\n255\n"
 let header_chars = header.chars()
-var [int] header_bytes = [ord(header_chars[i]) for i in ..header_chars.length]
-var [int] pixels = [0 for ..width * height * 3]
+var [int] header_bytes = [ord(header_chars[i]) for i in ..<header_chars.length]
+var [int] pixels = [0 for ..<width * height * 3]
 let total_pixels = width * height
 let flat_image = k.image.flatten()
 with flat_image:
-    for i in 0..total_pixels:
+    for i in 0..<total_pixels:
         let rgb = colorize(flat_image[i])
         pixels[i * 3]     = rgb[0]
         pixels[i * 3 + 1] = rgb[1]

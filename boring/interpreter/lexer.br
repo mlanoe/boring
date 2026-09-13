@@ -106,7 +106,7 @@ def string dedent_triple(string raw):
         else:
             result.push(ln)
     var out = ""
-    for ii in 0..result.length:
+    for ii in 0..<result.length:
         if ii > 0:
             out = out + "\n"
         out = out + result[ii]
@@ -627,6 +627,9 @@ struct Lexer:
                     if self.match_char("="):
                         self.consume()
                         return TokenKind.DotDotEq
+                    if self.match_char("<"):
+                        self.consume()
+                        return TokenKind.DotDotLt
                     return TokenKind.DotDot
                 return TokenKind.Dot
             "\"":

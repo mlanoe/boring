@@ -966,15 +966,19 @@ pub enum ExprKind {
 
     // Collections
     Array(Vec<Expr>),
-    /// `[v for ..n]` — fill array of length `count` with `value`
+    /// `[v for ..<n]` / `[v for ..=n]` — fill array of length `count` (or
+    /// `count + 1` for the inclusive `..=` form, folded in at parse time) with
+    /// `value`
     ArrayFill { value: Box<Expr>, count: Box<Expr> },
-    /// `[..n]` — allocate array of length `count` without initialisation
+    /// `[..<n]` / `[..=n]` — allocate array of length `count` (or `count + 1`
+    /// for `..=`) without initialisation
     ArrayAlloc { count: Box<Expr> },
-    /// `[f(i) for i in ..n]` — computed array of length `count` with `var` bound to index
+    /// `[f(i) for i in ..<n]` / `..=n` — computed array of length `count` (or
+    /// `count + 1` for `..=`) with `var` bound to index
     ArrayComp { expr: Box<Expr>, var: String, count: Box<Expr> },
     /// `[f(x) for x in collection]` — map over an existing collection
     ArrayCompIter { expr: Box<Expr>, var: String, iter: Box<Expr> },
-    /// `[f(w, h) for w in ..W for h in ..H]` — chained comprehension for a
+    /// `[f(w, h) for w in ..<W for h in ..<H]` — chained comprehension for a
     /// labeled multi-dim array (2+ `for` clauses; a single clause keeps using
     /// `ArrayComp` unchanged). `clauses[0]` is axis 1 — the **declaration**
     /// order of axes, i.e. the fastest-varying index in row-major storage —
@@ -982,10 +986,10 @@ pub enum ExprKind {
     /// iterates axis 1 innermost regardless of which `for` was written first,
     /// so `a[width=w, height=h]` addresses the same element the comprehension
     /// produced at `w + h*W`. Each clause is `(var, count)`, count always the
-    /// `..N` range-count expression (only the range form is chainable — a
-    /// collection-iteration clause stays a single-axis `ArrayCompIter`). See
-    /// docs/array-multidim-proposal.md's "Rejected shorthand" section for why
-    /// this is a chained `for...for...`, not a comma-separated clause list.
+    /// `..<N`/`..=N` range-count expression (only the range form is chainable
+    /// — a collection-iteration clause stays a single-axis `ArrayCompIter`).
+    /// See docs/array-multidim-proposal.md's "Rejected shorthand" section for
+    /// why this is a chained `for...for...`, not a comma-separated clause list.
     LabeledArrayComp { expr: Box<Expr>, clauses: Vec<(String, Box<Expr>)> },
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
@@ -997,7 +1001,7 @@ pub enum ExprKind {
     // Range literals
     Range { start: Box<Expr>, end: Box<Expr>, inclusive: bool },
 
-    // Slice index — only valid as the idx argument to Index: a[M..N], a[..N], a[M..], a[..]
+    // Slice index — only valid as the idx argument to Index: a[M..<N], a[..<N], a[M..], a[..]
     SliceRange { start: Option<Box<Expr>>, end: Option<Box<Expr>>, inclusive: bool },
 
     // Cast

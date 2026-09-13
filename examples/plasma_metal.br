@@ -15,7 +15,7 @@ kernel Plasma:
     var float t
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
         t      = 0.0
 

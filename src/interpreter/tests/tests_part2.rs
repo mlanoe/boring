@@ -1754,10 +1754,10 @@ let r3 = safe_sqrt(nil)
 
 #[test]
 fn test_for_range_no_var() {
-    // `for 1..4:` — exclusive range without variable (1, 2, 3)
+    // `for 1..<4:` — exclusive range without variable (1, 2, 3)
     let src = r#"
 var count = 0
-for 1..4:
+for 1..<4:
     count = count + 1
 "#;
     let (interp, res) = run(src);
@@ -1780,10 +1780,10 @@ for 1..=4:
 
 #[test]
 fn test_for_with_var_still_works() {
-    // `for i in 1..4:` — exclusive range with variable
+    // `for i in 1..<4:` — exclusive range with variable
     let src = r#"
 var sum = 0
-for i in 1..4:
+for i in 1..<4:
     sum = sum + i
 "#;
     let (interp, res) = run(src);

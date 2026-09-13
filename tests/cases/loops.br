@@ -1,5 +1,5 @@
 var count = 0
-for 1..4:
+for 1..<4:
     count = count + 1
 print count
 
@@ -9,7 +9,7 @@ for 1..=4:
 print count2
 
 var sum = 0
-for i in 1..4:
+for i in 1..<4:
     sum = sum + i
 print sum
 

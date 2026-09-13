@@ -226,7 +226,7 @@ fn equality_inside_index_not_misdetected_as_labeled() {
 
 #[test]
 fn slice_range_index_unaffected() {
-    let program = parse_program("let v = a[..n]");
+    let program = parse_program("let v = a[..<n]");
     match &let_value(&program).kind {
         ExprKind::Index(_, idx) => assert!(matches!(idx.kind, ExprKind::SliceRange { .. })),
         other => panic!("expected Index with SliceRange, got {:?}", other),
@@ -237,7 +237,7 @@ fn slice_range_index_unaffected() {
 
 #[test]
 fn chained_for_comprehension_two_axes() {
-    let program = parse_program("let a = [ f(width, height) for width in ..W for height in ..H ]");
+    let program = parse_program("let a = [ f(width, height) for width in ..<W for height in ..<H ]");
     match &let_value(&program).kind {
         ExprKind::LabeledArrayComp { clauses, .. } => {
             assert_eq!(clauses.len(), 2);
@@ -251,7 +251,7 @@ fn chained_for_comprehension_two_axes() {
 #[test]
 fn chained_for_comprehension_three_axes() {
     let program = parse_program(
-        "let a = [ f(width, height, depth) for width in ..W for height in ..H for depth in ..D ]"
+        "let a = [ f(width, height, depth) for width in ..<W for height in ..<H for depth in ..<D ]"
     );
     match &let_value(&program).kind {
         ExprKind::LabeledArrayComp { clauses, .. } => {
@@ -265,7 +265,7 @@ fn chained_for_comprehension_three_axes() {
 fn single_for_comprehension_unaffected() {
     // A single `for` clause must keep producing plain ArrayComp, not
     // LabeledArrayComp — no behavior change for today's 1D comprehensions.
-    let program = parse_program("let a = [ i * i for i in ..5 ]");
+    let program = parse_program("let a = [ i * i for i in ..<5 ]");
     match &let_value(&program).kind {
         ExprKind::ArrayComp { var, .. } => assert_eq!(var, "i"),
         other => panic!("expected ArrayComp, got {:?}", other),
@@ -280,7 +280,7 @@ fn single_for_over_collection_unaffected() {
 
 #[test]
 fn fill_comprehension_unaffected() {
-    let program = parse_program("let a = [ 0 for ..5 ]");
+    let program = parse_program("let a = [ 0 for ..<5 ]");
     assert!(matches!(&let_value(&program).kind, ExprKind::ArrayFill { .. }));
 }
 
@@ -315,9 +315,9 @@ fn bare_fill_count_accepts_an_arbitrary_expression() {
 
 #[test]
 fn dotted_and_bare_fill_counts_are_still_both_accepted() {
-    // `..n` (existing) and a bare `n` (new) must both keep working — purely
+    // `..<n` (existing) and a bare `n` (new) must both keep working — purely
     // additive, not a replacement.
-    let dotted = parse_program("let a = [ 0.0 for ..n ]");
+    let dotted = parse_program("let a = [ 0.0 for ..<n ]");
     let bare = parse_program("let b = [ 0.0 for n ]");
     assert!(matches!(&let_value(&dotted).kind, ExprKind::ArrayFill { .. }));
     assert!(matches!(&let_value(&bare).kind, ExprKind::ArrayFill { .. }));

@@ -2,7 +2,7 @@ let [float, 4] v = [1.0, 2.0, 3.0, 4.0]
 print v[0]
 print v[3]
 
-let [int, 3] z = [0 for ..3]
+let [int, 3] z = [0 for ..<3]
 print z[0]
 print z.length
 

@@ -20,14 +20,14 @@ kernel MatrixMul:
         let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
         if row < a.height and col < a.width:
             var float32 sum = 0.0
-            for i in 0..a.width:
+            for i in 0..<a.width:
                 sum += a[width = i, height = row] * b[width = col, height = i]
             c[width = col, height = row] = sum
 
 let width = 32
 let size = width * width
-var [float32] host_a = [float32(i % 100) / 100.0 for i in 0..size]
-var [float32] host_b = [float32(i % 50)  / 50.0  for i in 0..size]
+var [float32] host_a = [float32(i % 100) / 100.0 for i in 0..<size]
+var [float32] host_b = [float32(i % 50)  / 50.0  for i in 0..<size]
 
 var k = MatrixMul(host_a.reshape(width = width, height = width), host_b.reshape(width = width, height = width))
 kernel:
@@ -52,6 +52,6 @@ kernel:
 # through a `with` alias); flat indexing after `.flatten()` sidesteps it.
 let c = k.c.flatten()
 with c:
-    for i in 0..10:
-        for j in 0..10:
+    for i in 0..<10:
+        for j in 0..<10:
             print "C[{i}][{j}] = {c[i * width + j]:.4f}"

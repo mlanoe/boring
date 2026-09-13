@@ -185,7 +185,7 @@ print "range sum 1..=5 = {rsum}"
 
 # for exclusive range — no binding needed, just repeat
 var rep = 0
-for _ in 1..4:
+for _ in 1..<4:
     rep = rep + 1
 print "repeat count = {rep}"
 

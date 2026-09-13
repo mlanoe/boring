@@ -494,7 +494,7 @@ pub(crate) fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
 /// itself, unwrapped, when the object carries none (the common non-generic-kernel
 /// case) — avoids an env allocation on every launch of an ordinary kernel.
 ///
-/// This is what lets a kernel body do `for k in 0..W * H` and have `W`/`H`
+/// This is what lets a kernel body do `for k in 0..<W * H` and have `W`/`H`
 /// actually resolve: they're real per-instance values (from `Blur<3, 1>(...)`),
 /// not just type-level info the interpreter can erase like a regular `<T>`.
 fn bind_const_generic_fields(fields: &[(String, Value)], captured: &EnvRef) -> EnvRef {
@@ -1308,7 +1308,7 @@ impl Interpreter {
     /// bindings from a turbofish construction (`Blur<3, 1>(...)`) — see
     /// `resolve_const_generics`'s doc comment for why the interpreter (unlike
     /// regular type-param generics) can't erase these: `W`/`H` are read as
-    /// real values inside the kernel body (`for k in 0..W * H`), not just used
+    /// real values inside the kernel body (`for k in 0..<W * H`), not just used
     /// for compile-time dispatch. Empty for a non-generic kernel struct.
     /// Stashed as hidden `$`-prefixed fields on the returned object (see below)
     /// so a later `blur(block=...)` launch can recover them — an object is the

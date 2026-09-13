@@ -329,7 +329,7 @@ impl DeviceEmitter {
                 self.line("}");
             }
             Stmt::For(f) => {
-                // `for i in ..n` — range iteration only in kernel context.
+                // `for i in ..<n` — range iteration only in kernel context.
                 let var = f.vars.first().cloned().unwrap_or_else(|| "_i".into());
                 match &f.iterable.kind {
                     ExprKind::Range { start, end, inclusive } => {

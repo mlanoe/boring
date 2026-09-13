@@ -208,8 +208,8 @@ __global__ void lookup(float* output) {
     <span class="kw">mut</span> [<span class="kt">float</span>, <span class="nb">256</span>]<span class="lf">&#x27;actor</span>   tile
 
     <span class="kw">init</span>(<span class="kt">int</span> n):
-        input  = [..n]
-        output = [..n / <span class="nb">256</span>]
+        input  = [..&lt;n]
+        output = [..&lt;n / <span class="nb">256</span>]
 
     <span class="kw">def</span> ():
         <span class="kw">let</span> tid = gpu.thread.x
@@ -228,8 +228,8 @@ __global__ void lookup(float* output) {
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;actor</span>    tile
 
     <span class="kw">init</span>(<span class="kt">int</span> n):
-        input  = [..n]
-        output = [..n / <span class="nb">256</span>]
+        input  = [..&lt;n]
+        output = [..&lt;n / <span class="nb">256</span>]
 
     <span class="kw">def</span> ():
         <span class="kw">let</span> tid = gpu.thread.x

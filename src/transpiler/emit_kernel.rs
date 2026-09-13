@@ -56,7 +56,7 @@ fn is_gpu_buffer_ty(ty: &Type) -> bool {
 /// How a `'unified`/`'global` output field's initial device buffer contents are
 /// derived from its `init()`-body assignment — see `Transpiler::kernel_output_fill_map`.
 enum KernelOutputInit {
-    /// `field = [value for ..count]` — uniform fill.
+    /// `field = [value for ..<count]` — uniform fill.
     Fill(Expr, Box<Expr>),
     /// `field = [e0, e1, ...]` — literal elements, uploaded as-is.
     Literal(Vec<Expr>),
@@ -75,7 +75,7 @@ impl Transpiler {
     ///
     /// Otherwise returns `false` — this also covers a `'gpu'unified`/`'gpu'global`
     /// array *literal* (`examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for
-    /// ..N]`), which is just a plain host array today (freely indexed/assigned, no
+    /// ..<N]`), which is just a plain host array today (freely indexed/assigned, no
     /// `with` required) and falls through to ordinary `let` codegen unchanged.
     pub(crate) fn try_emit_gpu_resident_let(&mut self, s: &LetStmt) -> bool {
         if self.kernel_decls.is_empty() {
@@ -489,8 +489,8 @@ impl Transpiler {
         }
 
         // `'unified`/`'global` array fields the loop above never touched are outputs
-        // allocated in `init()` via `field = [value for ..count]` (e.g. `mel = [0.0 for
-        // ..n_mels * n_frames]`) or a plain bracketed literal (e.g. `out = [0.0, 0.0,
+        // allocated in `init()` via `field = [value for ..<count]` (e.g. `mel = [0.0 for
+        // ..<n_mels * n_frames]`) or a plain bracketed literal (e.g. `out = [0.0, 0.0,
         // 0.0]`), not fed by a constructor argument. `Kernel::new()` creates every
         // buffer at size 0 (see wgpu::host::emit_kernel_new) because it has no
         // host-side notion of this init expression — without this, the buffer stays 0
@@ -526,7 +526,7 @@ impl Transpiler {
         }
     }
 
-    /// Scan a kernel's (first) `init` body for `field = [value for ..count]`
+    /// Scan a kernel's (first) `init` body for `field = [value for ..<count]`
     /// (`ExprKind::ArrayFill`) or plain `field = [e0, e1, ...]` (`ExprKind::Array`)
     /// assignments — the two conventions this codebase's kernels use to size a
     /// `'unified` output buffer to its runtime size. Returns `field name ->
@@ -572,7 +572,7 @@ impl Transpiler {
         match &expr.kind {
             // An init()-param reference substitutes to the constructor call's own
             // arg expression; anything else (e.g. this kernel's `n` in `result =
-            // [0 for ..n]`, referring to a top-level `let n = 1000` rather than an
+            // [0 for ..<n]`, referring to a top-level `let n = 1000` rather than an
             // init param) must still go through `map_builtin_var` — a bare
             // `name.clone()` fallback used to reproduce the boring-source name
             // verbatim even when that top-level `let` was promoted to an
@@ -588,7 +588,7 @@ impl Transpiler {
                 let r_s = self.substitute_and_emit(r, subst, len_subst);
                 format!("({} {} {})", l_s, crate::transpiler::helpers::binop_str(op), r_s)
             }
-            // `init_param.length`/`.count` (e.g. `y = [0.0 for ..xs.length]`) — substitute
+            // `init_param.length`/`.count` (e.g. `y = [0.0 for ..<xs.length]`) — substitute
             // the object first, then `.len()`, same as the general `map_field` convention.
             // Falling through to `self.emit_expr(expr)` for this shape (the old
             // behavior) is wrong two ways over: it never applies the substitution (the

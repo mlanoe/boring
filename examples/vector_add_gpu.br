@@ -10,15 +10,15 @@ kernel VectorAdd:
     init([int]'global input_a, [int]'global input_b):
         a = input_a
         b = input_b
-        result = [0 for ..n]
+        result = [0 for ..<n]
 
     def ():
         let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
         if i < n:
             result[i] = a[i] + b[i]
 
-var [int] host_a = [i for i in 0..n]
-var [int] host_b = [i * 2 for i in 0..n]
+var [int] host_a = [i for i in 0..<n]
+var [int] host_b = [i * 2 for i in 0..<n]
 
 var k = VectorAdd(host_a, host_b)
 kernel:
@@ -35,5 +35,5 @@ kernel:
 # from `k.result` itself being declared `'unified` above; no annotation needed.
 let result = k.result
 with result:
-    for i in 0..n:
+    for i in 0..<n:
         print "c[{i}] = {result[i]}"

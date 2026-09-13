@@ -85,7 +85,7 @@ struct Binding {
     /// A `'gpu'unified`/`'gpu'global`-qualified variable initialized from anything
     /// else (an array literal/comprehension, a plain function call, ...) is just an
     /// ordinary host array up until it's passed into a kernel constructor — see
-    /// `examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for ..N]`, freely
+    /// `examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for ..<N]`, freely
     /// indexed and assigned on the host with no `with` wrapper anywhere. Gating
     /// opacity on the initializer's shape, rather than on the qualifier alone,
     /// is what keeps that existing, working pattern legal.

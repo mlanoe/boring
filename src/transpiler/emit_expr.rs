@@ -1328,7 +1328,7 @@ impl Transpiler {
     /// vars (`get_at`), dict/HashMap access (including `self.field[key]`), and plain
     /// array indexing (with `.clone()` unless this is itself an assignment target).
     fn emit_expr_index(&self, obj: &Expr, idx: &Expr) -> String {
-        // Slice: a[M..N], a[..N], a[M..], a[..]  →  obj[M..N].to_vec()
+        // Slice: a[M..<N], a[..<N], a[M..], a[..]  →  obj[M..N].to_vec()
         if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
             // Detect whether the receiver is a string to emit a char-safe slice.
             let is_str = match &obj.kind {

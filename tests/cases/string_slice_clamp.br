@@ -1,4 +1,4 @@
-# .slice() negative-index clamping (matches native a[m..n] slice syntax) —
+# .slice() negative-index clamping (matches native a[m..<n] slice syntax) —
 # self-hosted interpreter only (boring/interpreter/methods.br). NOT a shared
 # fixture with tests/transpile.rs: the main compiler's own native `.slice()`
 # builtin casts start/end straight to `usize` with no clamping at all, so a

@@ -43,7 +43,7 @@
 //!   equivalent/`a.axis` shape-query property reads fold directly into
 //!   `Index`/a literal at this pass, since the axis sizes are already
 //!   compile-time-known.
-//! - `[f(w,h) for w in ..W for h in ..H]` (`ExprKind::LabeledArrayComp`) —
+//! - `[f(w,h) for w in ..<W for h in ..<H]` (`ExprKind::LabeledArrayComp`) —
 //!   lowered to an `ArrayAlloc` + nested `for` loops (innermost = axis 1 =
 //!   `clauses[0]`, per its own doc comment) writing into the flat buffer.
 //! - `.reshape(...)` / `.flatten()` — identity at the value level (the
@@ -276,7 +276,7 @@ fn unknown_elem() -> Type {
 /// bindings, their values — from the explicit annotation if present,
 /// otherwise inferred directly from the initializer's own shape, so type
 /// inference works with **no annotation at all**, matching the design doc's
-/// own `let a = [f(w,h) for w in ..W for h in ..H]` example:
+/// own `let a = [f(w,h) for w in ..<W for h in ..<H]` example:
 /// - an explicit `[T, ...]` annotation (dynamic or fixed);
 /// - a chained-for comprehension — axis labels = the clause variable names;
 /// - a `.reshape(width = W, height = H)` call — axis labels = its named
@@ -941,8 +941,8 @@ fn labeled_comp_fill_stmts(
     stmts
 }
 
-/// Lowers `[expr for clauses[0].0 in ..clauses[0].1 for clauses[1].0 in
-/// ..clauses[1].1 ...]` to a `Block` wrapping `labeled_comp_fill_stmts`'
+/// Lowers `[expr for clauses[0].0 in ..<clauses[0].1 for clauses[1].0 in
+/// ..<clauses[1].1 ...]` to a `Block` wrapping `labeled_comp_fill_stmts`'
 /// alloc-plus-loop statements against a synthesized temp, then yielding it
 /// (a `Block`'s last statement, if an expression statement, is its value).
 /// Used for every EXPRESSION-position occurrence (e.g. `let a = [comp]`);

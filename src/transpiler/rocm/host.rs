@@ -729,7 +729,7 @@ struct HostEmitter {
     /// local (see this backend's own `top_level_kernel_touching` handling in
     /// `emit_program`, and the general (std/wgpu-shared) pipeline's `let`-to-
     /// local folding for the non-kernel-touching-top-level case) -- so a
-    /// kernel `init` referencing it (`result = [0 for ..n]`) previously
+    /// kernel `init` referencing it (`result = [0 for ..<n]`) previously
     /// emitted a bare `n` identifier with nothing in scope to resolve it, a
     /// real E0425. Mirrors `metal::host`'s (and `cuda::host`'s, after the
     /// same fix) identical `top_level_scalars` field/fix.

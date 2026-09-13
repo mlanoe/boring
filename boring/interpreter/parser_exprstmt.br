@@ -195,44 +195,58 @@ def Expr parse_pipe(mut Parser p) throws:
     lhs
 
 def Expr parse_comp_count(mut Parser p) throws:
-    if parser_eat(p, "DotDot"):
-        return parse_or(p)
+    if parser_check(p, "DotDotLt") or parser_check(p, "DotDotEq"):
+        let inclusive = parser_check(p, "DotDotEq")
+        parser_advance(p)
+        let count = parse_or(p)
+        if inclusive:
+            return make_inclusive_count(count, count.line)
+        return count
+    if parser_check(p, "DotDot"):
+        throw "array comprehension range is now `..<n`, not `..n` — use `..<` instead of bare `..`"
     let expr = parse_or(p)
     match expr.kind:
-        ExprKind.Range(start, end, false):
+        ExprKind.Range(start, end, inclusive):
             match start.kind:
                 ExprKind.Int(0):
+                    if inclusive:
+                        return make_inclusive_count(end, end.line)
                     return end
                 _:
-                    throw "array comprehension range must start at 0 — use `..n` or `0..n`"
-        ExprKind.Range(_, _, true):
-            throw "array comprehension does not accept inclusive range (`..=`)"
+                    throw "array comprehension range must start at 0 — use `..<n` or `0..<n`"
         _:
-            throw "expected `..n` or `0..n` in array comprehension"
+            throw "expected `..<n` or `0..<n` in array comprehension"
 
-# Like parse_comp_count, but also accepts a bare count with no `..` prefix —
+# Like parse_comp_count, but also accepts a bare count with no `..<` prefix —
 # the array-FILL shorthand (`[value for n]`, docs/array-multidim-types.md)
 # has no loop variable to justify demanding explicit range syntax, unlike a
-# real comprehension's `for i in ..n`.
+# real comprehension's `for i in ..<n`.
 def Expr parse_fill_count(mut Parser p) throws:
-    if parser_eat(p, "DotDot"):
-        return parse_or(p)
+    if parser_check(p, "DotDotLt") or parser_check(p, "DotDotEq"):
+        let inclusive = parser_check(p, "DotDotEq")
+        parser_advance(p)
+        let count = parse_or(p)
+        if inclusive:
+            return make_inclusive_count(count, count.line)
+        return count
+    if parser_check(p, "DotDot"):
+        throw "array fill range is now `..<n`, not `..n` — use `..<` instead of bare `..`"
     let expr = parse_or(p)
     match expr.kind:
-        ExprKind.Range(start, end, false):
+        ExprKind.Range(start, end, inclusive):
             match start.kind:
                 ExprKind.Int(0):
+                    if inclusive:
+                        return make_inclusive_count(end, end.line)
                     return end
                 _:
-                    throw "array fill range must start at 0 — use `..n`, `0..n`, or a bare `n`"
-        ExprKind.Range(_, _, true):
-            throw "array fill does not accept inclusive range (`..=`)"
+                    throw "array fill range must start at 0 — use `..<n`, `0..<n`, or a bare `n`"
         _:
             return expr
 
 # Collects axis clauses for a chained multi-dim comprehension
 # (docs/array-multidim-types.md) — `first_var`/`first_count` is the clause
-# already parsed by the caller; each further `for var in ..count` chained
+# already parsed by the caller; each further `for var in ..<count` chained
 # clause is one more axis. clauses[0] is axis 1 (fastest-varying).
 def [(string, Expr)] parse_chained_for_clauses(mut Parser p, string first_var, Expr first_count) throws:
     var clauses = [(first_var, first_count)]
@@ -493,15 +507,27 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 parser_expect(p, "RBracket")
                 expr = make_labeled_index(expr, args, line)
             else:
-                # Slice with no start: a[..N], a[..=N], a[..]
-                let idx = if parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
-                    let inclusive = parser_check(p, "DotDotEq")
+                # Slice with no start: a[..<N], a[..=N], a[..]
+                let idx = if parser_check(p, "DotDotLt"):
+                    # a[..<N] — no open-ended form, always needs an explicit end.
+                    parser_advance(p)
+                    let end_expr = parse_expr(p)
+                    make_slice_range(make_hole(line), end_expr, false, line)
+                elif parser_check(p, "DotDotEq"):
                     parser_advance(p)
                     let end_expr = if parser_check(p, "RBracket"): make_hole(line) else parse_expr(p)
-                    make_slice_range(make_hole(line), end_expr, inclusive, line)
+                    make_slice_range(make_hole(line), end_expr, true, line)
+                elif parser_check(p, "DotDot"):
+                    # Bare `..` here is only still legal as the full-copy a[..] —
+                    # a[..N] was renamed to a[..<N] (no alias for the old spelling).
+                    parser_advance(p)
+                    if parser_check(p, "RBracket"):
+                        make_slice_range(make_hole(line), make_hole(line), false, line)
+                    else:
+                        throw "exclusive slice is now `a[..<N]`, not `a[..N]` — use `..<` instead of bare `..`"
                 else:
                     let inner = parse_expr(p)
-                    # parse_expr may have consumed M..N as Range — convert to SliceRange
+                    # parse_expr may have consumed M..<N as Range — convert to SliceRange
                     # M.. (open-ended) is caught by the DotDot postfix arm below
                     match inner.kind:
                         ExprKind.Range(start, end, inclusive):
@@ -552,15 +578,26 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
             else:
                 let ty = parse_type(p)
                 expr = make_cast(expr, ty, line)
-        elif parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
+        elif parser_check(p, "DotDotLt") or parser_check(p, "DotDotEq"):
             let inclusive = parser_check(p, "DotDotEq")
             parser_advance(p)
-            # a[M..] — open-ended slice (next token is `]`)
-            if parser_check(p, "RBracket"):
+            # a[M..=] — open-ended inclusive slice (next token is `]`).
+            # (`M..<` has no open-ended form — `..<` always requires an explicit end.)
+            if inclusive and parser_check(p, "RBracket"):
                 expr = make_slice_range(expr, make_hole(line), inclusive, line)
             else:
                 let end = parse_primary(p)
                 expr = make_range(expr, end, inclusive, line)
+        elif parser_check(p, "DotDot"):
+            # Bare `..` is only still legal as the open-ended slice M.. — the
+            # exclusive-with-endpoint form was renamed to `..<` (no alias kept
+            # for the old spelling, matching the ownership-qualifier rename
+            # precedent).
+            parser_advance(p)
+            if parser_check(p, "RBracket"):
+                expr = make_slice_range(expr, make_hole(line), false, line)
+            else:
+                throw "exclusive range is now `x..<y`, not `x..y` — use `..<` instead of bare `..`"
         elif parser_peek_is_ident(p) and parser_peek_is_trailing_closure_no_paren(p):
             let args = parse_trailing_closure_no_paren(p, [])
             seen_trailing_closure = true
@@ -732,13 +769,14 @@ def Expr parse_primary(mut Parser p) throws:
         if not parser_check(p, "RBracket") and not parser_check(p, "Eof"):
             let first = parse_expr(p)
             if parser_eat(p, "For"):
-                # Comprehension: `[v for ..n]` or `[f(i) for i in ..n]` — or,
-                # chained (docs/array-multidim-types.md), `[f(w,h) for w in ..W
-                # for h in ..H]`, a labeled multi-dim array (2+ axes).
+                # Comprehension: `[v for ..<n]` or `[f(i) for i in ..<n]` — or,
+                # chained (docs/array-multidim-types.md), `[f(w,h) for w in ..<W
+                # for h in ..<H]`, a labeled multi-dim array (2+ axes). `..=n`
+                # (inclusive) is also accepted, everywhere `..<n` is.
                 if parser_check(p, "Ident") and parser_check2(p, "In"):
                     let var_name = parser_expect_ident(p)
                     parser_expect(p, "In")
-                    if parser_check(p, "DotDot"):
+                    if parser_check(p, "DotDotLt") or parser_check(p, "DotDotEq"):
                         let count = parse_comp_count(p)
                         if parser_check(p, "For"):
                             let clauses = parse_chained_for_clauses(p, var_name, count)
@@ -748,26 +786,27 @@ def Expr parse_primary(mut Parser p) throws:
                         parser_skip_newlines_and_indent(p)
                         parser_expect(p, "RBracket")
                         return make_array_comp(first, var_name, count, line)
+                    if parser_check(p, "DotDot"):
+                        throw "array comprehension range is now `..<n`, not `..n` — use `..<` instead of bare `..`"
                     let source = parse_or(p)
                     match source.kind:
-                        ExprKind.Range(start, end, false):
+                        ExprKind.Range(start, end, inclusive):
                             match start.kind:
                                 ExprKind.Int(0):
+                                    let count = if inclusive: make_inclusive_count(end, end.line) else: end
                                     if parser_check(p, "For"):
-                                        let clauses = parse_chained_for_clauses(p, var_name, end)
+                                        let clauses = parse_chained_for_clauses(p, var_name, count)
                                         parser_skip_newlines_and_indent(p)
                                         parser_expect(p, "RBracket")
                                         return make_labeled_array_comp(first, clauses, line)
                                     parser_skip_newlines_and_indent(p)
                                     parser_expect(p, "RBracket")
-                                    return make_array_comp(first, var_name, end, line)
+                                    return make_array_comp(first, var_name, count, line)
                                 _:
-                                    throw "array comprehension range must start at 0 — use `..n` or `0..n`"
-                        ExprKind.Range(_, _, true):
-                            throw "array comprehension does not accept inclusive range (`..=`)"
+                                    throw "array comprehension range must start at 0 — use `..<n` or `0..<n`"
                         _:
                             if parser_check(p, "For"):
-                                throw "chained multi-axis comprehension requires a `..N` range on every axis, not a generic iterable"
+                                throw "chained multi-axis comprehension requires a `..<N` range on every axis, not a generic iterable"
                             parser_skip_newlines_and_indent(p)
                             parser_expect(p, "RBracket")
                             return make_array_comp_iter(first, var_name, source, line)
@@ -865,7 +904,7 @@ def bool is_single_param_closure(Expr value):
 #   positional constructor args.
 def void check_default_rest_arg([Arg] args) throws:
     var idx = -1
-    for i in 0..args.length:
+    for i in 0..<args.length:
         if args[i].default_rest:
             idx = i
     if idx == -1:
@@ -873,7 +912,7 @@ def void check_default_rest_arg([Arg] args) throws:
     for a in args:
         if a.spread:
             throw "`_` cannot be combined with a `..spread` argument in the same call"
-    for i in 0..args.length:
+    for i in 0..<args.length:
         if i != idx:
             let a = args[i]
             if a.label == nil and not is_single_param_closure(a.value):

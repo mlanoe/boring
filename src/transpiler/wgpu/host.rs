@@ -784,7 +784,7 @@ impl<'a> HostEmitter<'a> {
             // need the same read-back/upload accessors to actually be usable from host code.
             // 'actor'unified needs the same accessors for the same reason (host-visible),
             // plus `kernel_output_fill_map`'s unconditional `copy_{field}_to_device` call
-            // for any `field = [value for ..count]` init — see `emit_kernel.rs`.
+            // for any `field = [value for ..<count]` init — see `emit_kernel.rs`.
             if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified) && is_buffer_array_ty(&f.ty) {
                 let inner_ty = array_inner(&f.ty);
                 let host_ty = host_scalar_type(&inner_ty);

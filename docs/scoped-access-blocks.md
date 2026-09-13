@@ -181,11 +181,11 @@ kernel:
 
 let [int]'gpu'unified result = k.result   # compile-time alias — no Rust binding, no transfer yet
 with result:                              # `result` is `let`-bound -> read-only, no write-back
-    for i in 0..n:
+    for i in 0..<n:
         print "c[{i}] = {result[i]}"      # readback happens once, here, however many times the loop indexes it
 ```
 
-Before this existed, `for i in 0..n: print "c[{i}] = {k.result[i]}"` read the *entire* buffer back from the GPU on every one of the `n` iterations.
+Before this existed, `for i in 0..<n: print "c[{i}] = {k.result[i]}"` read the *entire* buffer back from the GPU on every one of the `n` iterations.
 
 ### Example — the motivating whisper-boring case (inter-procedural — implemented)
 
@@ -327,12 +327,12 @@ match &x {
 
 `with` landed for the `'actor`/`'actor'task`/`'guard`/`'guard'task` side, end to end: AST (`Stmt::With`/`WithStmt`), parser, checker (opacity + double-acquire), interpreter (no-op), and transpiler codegen for every host target that shares the general `Transpiler`/`emit_stmt.rs` pipeline.
 
-The `'gpu'unified`/`'gpu'global` residency side is implemented for the **intra-procedural** case — a kernel constructed and its field read back within the same function/scope, which turns out to be the shape *every* real kernel-using example in this repo actually uses (`examples/vector_add_gpu.br`'s `for i in 0..n: print k.result[i]`, `matrix_mul_gpu.br`'s equivalent — both re-read the whole buffer on every loop iteration before this landed). The **inter-procedural** case (a resident value returned across a function call boundary, e.g. whisper-boring's `linear_gpu`) is still open — see below for exactly why, and what it needs.
+The `'gpu'unified`/`'gpu'global` residency side is implemented for the **intra-procedural** case — a kernel constructed and its field read back within the same function/scope, which turns out to be the shape *every* real kernel-using example in this repo actually uses (`examples/vector_add_gpu.br`'s `for i in 0..<n: print k.result[i]`, `matrix_mul_gpu.br`'s equivalent — both re-read the whole buffer on every loop iteration before this landed). The **inter-procedural** case (a resident value returned across a function call boundary, e.g. whisper-boring's `linear_gpu`) is still open — see below for exactly why, and what it needs.
 
 **What's real now:**
 
 - `Type::gpu_resident_qual()` (`src/ast/mod.rs`) identifies `'gpu'unified`/`'gpu'global` at the outermost qualifier layer.
-- The host-context placeholder is gone: `emit_top.rs`'s `OwnerQual::GpuUnified`/`GpuGlobal` used to emit a bare `*mut T` regardless of the initializing value's actual shape — a real bug, confirmed by transpiling `examples/saxpy.br` (`var [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned) for `--target wgpu` and watching `rustc` reject `let mut x: *mut Vec<f64> = vec![0.0; N as usize];` outright (E0308/E0599/E0608). It now emits the plain inner type — matching what every existing example already assumed a `'gpu'unified`/`'gpu'global` array *is*: an ordinary host `Vec`, right up until it's consumed by a kernel constructor (upload happens there, unrelated to `with`) or read from a kernel field.
+- The host-context placeholder is gone: `emit_top.rs`'s `OwnerQual::GpuUnified`/`GpuGlobal` used to emit a bare `*mut T` regardless of the initializing value's actual shape — a real bug, confirmed by transpiling `examples/saxpy.br` (`var [float]'gpu'unified x = [0.0 for ..<N]`, freely indexed/assigned) for `--target wgpu` and watching `rustc` reject `let mut x: *mut Vec<f64> = vec![0.0; N as usize];` outright (E0308/E0599/E0608). It now emits the plain inner type — matching what every existing example already assumed a `'gpu'unified`/`'gpu'global` array *is*: an ordinary host `Vec`, right up until it's consumed by a kernel constructor (upload happens there, unrelated to `with`) or read from a kernel field.
 - **`Binding::resident_from_field`** (checker): a `'gpu'unified`/`'gpu'global` binding is only actually opaque-outside-`with` when its initializer is syntactically a bare `k.field` read (`ExprKind::Field(Var(_), _)`) — a plain array literal/expression is unrestricted. This is what keeps `saxpy.br`'s pattern legal while still gating the genuinely-resident case; the check is purely syntactic (the checker never needs to know which names are real kernel instances).
 - **`gpu_resident_vars: HashMap<name, (kernel_var, field)>`** (transpiler): `emit_kernel::try_emit_gpu_resident_let` recognizes `let py'gpu'unified = k.y` (`kvar` must be a tracked kernel var — `self.kernel_vars`) and registers it as a **pure compile-time alias** — no Rust binding is ever emitted for `py`. Its only legal use is as the subject of `with`.
 - **The `'gpu'unified`/`'gpu'global` annotation is inferred, not required.** `let py = k.y` (no qualifier at all) behaves identically to the explicit form: both the checker (`Checker::infer_gpu_resident`, using a new `kernel_decls`/`Binding::kernel_type` pre-pass it didn't have before) and the transpiler (`try_emit_gpu_resident_let`'s untyped branch) recognize the same shape — a bare `k.field` read where `k` is a known kernel instance and `field` is actually declared `'unified`/`'global` on an array — and apply the exact same rules. An untyped read of a scalar or differently-qualified field is untouched (falls through to an ordinary field read, same as before this existed).

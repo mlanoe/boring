@@ -725,7 +725,7 @@ struct Counter:
 kernel Noop:
     mut [uint]'surface pixels
     init():
-        pixels = [0 for ..width * height]
+        pixels = [0 for ..<width * height]
     def ():
         let tid = gpu.thread.x
         pixels[tid] = 0
@@ -764,7 +764,7 @@ struct Ledger:
 kernel Noop:
     mut [uint]'surface pixels
     init():
-        pixels = [0 for ..width * height]
+        pixels = [0 for ..<width * height]
     def ():
         let tid = gpu.thread.x
         pixels[tid] = 0
@@ -1078,7 +1078,7 @@ kernel Reduce:
         if tid == 0:
             shared[0] = 0
         if true:
-            for i in 0..4:
+            for i in 0..<4:
                 shared[i] = shared[i] + 1
 "#);
     assert!(msl.contains("threadgroup_barrier(mem_flags::mem_threadgroup)"),

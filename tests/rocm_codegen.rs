@@ -248,13 +248,13 @@ kernel VectorAdd:
 
     init([int]'global input_a):
         a = input_a
-        result = [0 for ..n]
+        result = [0 for ..<n]
 
     def ():
         let i = gpu.thread.x
         result[i] = a[i]
 
-var host_a = [i for i in 0..n]
+var host_a = [i for i in 0..<n]
 var k = VectorAdd(host_a)
 kernel:
     k(block = 256)
@@ -1148,7 +1148,7 @@ kernel Plasma:
     var float t
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
         t      = 0.0
 
@@ -1202,7 +1202,7 @@ kernel Plasma:
     mut [uint]'surface pixels
     let Dimension dim
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
     def ():
         pixels[0] = 0xFF000000
@@ -1240,7 +1240,7 @@ kernel Reduce:
         if tid == 0:
             shared[0] = 0
         if true:
-            for i in 0..4:
+            for i in 0..<4:
                 shared[i] = shared[i] + 1
 "#);
     assert!(hip.contains("__syncthreads();"),

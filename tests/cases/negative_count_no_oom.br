@@ -8,8 +8,8 @@ let int n = -5
 let [int] filled = [42 for n]
 print "fill: {filled.length}"
 
-let [int] alloc = [..n]
+let [int] alloc = [..<n]
 print "alloc: {alloc.length}"
 
-let [int] comp = [i for i in ..n]
+let [int] comp = [i for i in ..<n]
 print "comp: {comp.length}"

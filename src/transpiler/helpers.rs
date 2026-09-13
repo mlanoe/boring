@@ -2580,7 +2580,7 @@ fn body_contains_loop(stmts: &[Stmt]) -> bool {
 /// before any thread starts a loop that reads that memory cross-thread.
 ///
 /// Previously only matched a bare top-level `Stmt::While`/`Stmt::For` directly, so a
-/// loop nested inside a top-level `if` (e.g. `if n > 0: for i in 0..n: ...` right after
+/// loop nested inside a top-level `if` (e.g. `if n > 0: for i in 0..<n: ...` right after
 /// the shared-memory initializer) was invisible to `.position()`: it fell through to
 /// `stmts.len()`, and every one of the 4 GPU backends emitted the *entire* body --
 /// including the loop's cross-thread reads -- with no barrier at all. Identical bug,

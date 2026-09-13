@@ -585,7 +585,7 @@ kernel Broadcast:
         out[tid] = tile[0]
 
 var [float] data = []
-for i in 0..256:
+for i in 0..<256:
     data.push(0.0)
 mut k = Broadcast(data)
 kernel:
@@ -639,8 +639,8 @@ kernel TileSum:
         if tid == 0:
             result[gpu.block.x] = tile[0]
 
-let data    = [i as float for i in ..1024]
-mut partial = [0.0 for ..4]
+let data    = [i as float for i in ..<1024]
+mut partial = [0.0 for ..<4]
 
 mut ts = TileSum(data, partial)
 kernel:
@@ -690,10 +690,10 @@ kernel MarkThreads:
         marks[i] = 1.0
 
 var [float] big = []
-for i in 0..1000:
+for i in 0..<1000:
     big.push(0.0)
 var [float] marks = []
-for i in 0..1024:
+for i in 0..<1024:
     marks.push(0.0)
 mut k = MarkThreads(big, marks)
 kernel:
@@ -728,7 +728,7 @@ kernel Sum3D:
         out[idx] = float(idx) * 10.0
 
 var [float] data = []
-for i in 0..4:
+for i in 0..<4:
     data.push(0.0)
 mut k = Sum3D(data)
 kernel:
@@ -993,7 +993,7 @@ let _h = d.height
 fn test_screen_present_increments_frame() {
     let src = r#"
 let screen = Screen(4, 4)
-let pixels = [0 for ..16]
+let pixels = [0 for ..<16]
 screen.present(pixels)
 screen.present(pixels)
 let _f = screen.frame
@@ -1040,7 +1040,7 @@ kernel Fill:
     var Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
 
     def ():
@@ -1073,7 +1073,7 @@ kernel Counter:
     var Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
 
     def ():
@@ -1107,7 +1107,7 @@ kernel Fill:
     var int iters
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
         iters = 0
 
@@ -1143,12 +1143,12 @@ kernel Zoom:
     var float zoom
 
     init(Dimension d, float zoom):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
         zoom   = zoom
 
     init(Zoom prev, Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
         zoom   = prev.zoom
 
@@ -1205,7 +1205,7 @@ kernel MatMul:
         let col = tid % cols
         if row < rows and col < cols:
             var float acc = 0.0
-            for k in 0..inner:
+            for k in 0..<inner:
                 acc += a[row * inner + k] * b[k * cols + col]
             out[row * cols + col] = acc
 
@@ -1264,7 +1264,7 @@ kernel MatMul:
         let col = tid % cols
         if row < rows and col < cols:
             var float acc = 0.0
-            for k in 0..inner:
+            for k in 0..<inner:
                 acc += a[row * inner + k] * b[k * cols + col]
             out[row * cols + col] = acc
 
@@ -1450,7 +1450,7 @@ kernel ScaledQKt:
         let col = tid % seq_len
         if row < seq_len and col < seq_len:
             var float acc = 0.0
-            for i in 0..d_k:
+            for i in 0..<d_k:
                 acc += q[row * d_k + i] * k[col * d_k + i]
             out[row * seq_len + col] = acc * scale
 
@@ -1497,7 +1497,7 @@ kernel MatMul:
         let col = tid % cols
         if row < rows and col < cols:
             var float acc = 0.0
-            for k in 0..inner:
+            for k in 0..<inner:
                 acc += a[row * inner + k] * b[k * cols + col]
             out[row * cols + col] = acc
 
@@ -1514,8 +1514,8 @@ mut qkt = ScaledQKt(q, k, scores, seq_len, d_k, scale)
 kernel:
     qkt(block = 4)
 
-let max_vals = [max([qkt.out[r * seq_len + c] for c in 0..seq_len]) for r in 0..seq_len]
-let sum_exps = [sum([exp(qkt.out[r * seq_len + c] - max_vals[r]) for c in 0..seq_len]) for r in 0..seq_len]
+let max_vals = [max([qkt.out[r * seq_len + c] for c in 0..<seq_len]) for r in 0..<seq_len]
+let sum_exps = [sum([exp(qkt.out[r * seq_len + c] - max_vals[r]) for c in 0..<seq_len]) for r in 0..<seq_len]
 
 var weights = [0.0, 0.0, 0.0, 0.0]
 mut sm = RowSoftmax(qkt.out, weights, max_vals, sum_exps, seq_len)
@@ -1791,7 +1791,7 @@ kernel LinearBias:
         let col = tid % cols
         if row < rows and col < cols:
             var float acc = 0.0
-            for k in 0..inner:
+            for k in 0..<inner:
                 acc += x[row * inner + k] * w[k * cols + col]
             out[row * cols + col] = acc + b[col]
 
@@ -1870,7 +1870,7 @@ let _o3 = lin2.out[3]
 // `src/interpreter/eval_expr.rs`), which is correct for a regular `<T>` type
 // parameter (no runtime value to erase). A kernel's const-generic params
 // (`<int W, int H>`) are the one exception: `W`/`H` are read as real values
-// inside the kernel body (`for k in 0..W * H`), not just used for
+// inside the kernel body (`for k in 0..<W * H`), not just used for
 // compile-time dispatch — so a `Blur<3, 1>(...)` construction used to fail
 // with `error: undefined variable 'W'` the moment the kernel body referenced
 // it. See `resolve_const_generics`/`instantiate_kernel_struct`'s doc comments
@@ -1880,7 +1880,7 @@ let _o3 = lin2.out[3]
 #[test]
 fn test_kernel_const_generic_binds_type_params() {
     // A 1D box-blur tap: `weights` has a const-generic size `W * H`, and the
-    // kernel body's `for k in 0..W * H` / `weights[k]` both need `W`/`H` bound
+    // kernel body's `for k in 0..<W * H` / `weights[k]` both need `W`/`H` bound
     // to their concrete turbofish values (3, 1) to run at all.
     let src = r#"
 kernel Blur<int W, int H>:
@@ -1896,15 +1896,15 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:
+        for k in 0..<W * H:
             let idx = i + k
             if idx < input.len():
                 acc = acc + weights[k] * input[idx]
         output[i] = acc
 
 let w      = [0.25, 0.5, 0.25]
-let pixels = [i as float for i in ..8]
-mut result = [0.0 for ..8]
+let pixels = [i as float for i in ..<8]
+mut result = [0.0 for ..<8]
 
 mut blur = Blur<3, 1>(w, pixels, result)
 kernel:
@@ -1949,7 +1949,7 @@ kernel Tile<int N>:
     def ():
         let i = gpu.thread.x
         var acc = 0.0
-        for k in 0..N:
+        for k in 0..<N:
             acc = acc + weights[k]
         output[i] = output[i] + acc
 

@@ -1,4 +1,4 @@
-# .slice() negative-index clamping (matches native a[m..n] slice syntax) —
+# .slice() negative-index clamping (matches native a[m..<n] slice syntax) —
 # self-hosted interpreter only (boring/interpreter/methods.br); see
 # string_slice_clamp.br's header comment for why this is a dedicated case
 # rather than added to the strings.br/collections.br fixtures shared with

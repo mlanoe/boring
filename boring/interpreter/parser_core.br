@@ -119,6 +119,7 @@ def string token_kind_name(TokenKind k):
         TokenKind.GtEq: "GtEq"
         TokenKind.Dot: "Dot"
         TokenKind.DotDot: "DotDot"
+        TokenKind.DotDotLt: "DotDotLt"
         TokenKind.DotDotEq: "DotDotEq"
         TokenKind.DotDotDot: "DotDotDot"
         TokenKind.Question: "Question"
@@ -1850,6 +1851,14 @@ def Expr make_tuple([Expr] elems, int line):
 
 def Expr make_range(Expr start, Expr end, bool inclusive, int line):
     Expr(kind= ExprKind.Range(start, end, inclusive), line= line)
+
+# Synthesize `count + 1` for an inclusive (`..=`) array-alloc/fill/comprehension
+# count — `[..=n]` allocates `n + 1` elements (indices `0..=n`), folded in at
+# parse time as a plain `BinOp.Add` so no downstream consumer (eval.br) needs
+# its own "is this inclusive" bookkeeping. Mirrors the Rust-hosted parser's
+# own `make_inclusive_count` (`src/parser/parse_expr.rs`).
+def Expr make_inclusive_count(Expr count, int line):
+    Expr(kind= ExprKind.BinOp(BinOp.Add, count, make_int_expr(1, line)), line= line)
 
 def Expr make_hole(int line):
     Expr(kind= ExprKind.Hole, line= line)

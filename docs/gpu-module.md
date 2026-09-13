@@ -408,8 +408,8 @@ kernel Saxpy:
         y[i] = alpha * x[i] + y[i]
 
 let n = 1024
-let xs = [i as float for i in ..n]
-mut ys = [1.0 for ..n]
+let xs = [i as float for i in ..<n]
+mut ys = [1.0 for ..<n]
 
 mut k = Saxpy(2.0, xs, ys)
 kernel:
@@ -470,7 +470,7 @@ kernel Reduce:
 
 #### Dynamic size — `[T]'actor`
 
-When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in `init()` using `[..n]`. The transpiler passes `block_dim.x * sizeof(T)` as the dynamic shared memory size automatically.
+When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in `init()` using `[..<n]`. The transpiler passes `block_dim.x * sizeof(T)` as the dynamic shared memory size automatically.
 
 > **wgpu limitation**: dynamic `[T]'actor` is not supported in WGSL — use `[T, N]'actor` with a const generic param instead.
 
@@ -482,7 +482,7 @@ kernel Reduce:
 
     init([float]'unified data, int block_size):
         input = data
-        tile  = [..block_size]   # allocate without initialization
+        tile  = [..<block_size]   # allocate without initialization
 
     def ():
         let tid = gpu.thread.x

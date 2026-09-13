@@ -215,7 +215,7 @@ If the body has no `wait` and no `task` calls, the stream compiles to a plain it
 
 ```boring
 stream int range(int n):
-    for i in 0..n:
+    for i in 0..<n:
         yield i
 ```
 

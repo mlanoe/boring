@@ -231,7 +231,7 @@ kernel Reduce:
         if tid == 0:
             shared[0] = 0
         if true:
-            for i in 0..4:
+            for i in 0..<4:
                 shared[i] = shared[i] + 1
 "#;
     let (wgsl, _rs) = wgpu_codegen("auto_sync_nested_if", src);
@@ -576,7 +576,7 @@ kernel Plasma:
     let Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim    = d
 
     def ():
@@ -608,7 +608,7 @@ kernel:
 // `let py'gpu'unified = k.y` followed by `with py:` should read the kernel field
 // back exactly once (`k.copy_y_to_host()`), regardless of how many times the
 // block's body indexes `py` — the actual bug this exists to fix, confirmed against
-// `examples/vector_add_gpu.br`'s `for i in 0..n: print k.result[i]`, which today
+// `examples/vector_add_gpu.br`'s `for i in 0..<n: print k.result[i]`, which today
 // re-reads the whole buffer on every loop iteration with no `with` available.
 
 #[test]
@@ -636,7 +636,7 @@ kernel:
 
 let [float]'gpu'unified py = k.y
 with py:
-    for i in 0..2:
+    for i in 0..<2:
         print "{py[i]}"
 "#;
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_read", src);
@@ -719,7 +719,7 @@ kernel:
 
 let py = k.y
 with py:
-    for i in 0..2:
+    for i in 0..<2:
         print "{py[i]}"
 "#;
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_inferred", src);
@@ -857,7 +857,7 @@ kernel Scale:
     init(float f, [float]'unified xs):
         factor = f
         x = xs
-        y = [0.0 for ..xs.length]
+        y = [0.0 for ..<xs.length]
 
     def ():
         let i = gpu.thread.x
@@ -882,7 +882,7 @@ def main() throws:
     let fc = scale_gpu(a, 2.0)
     let fc2 = scale_gpu(fc, 3.0)
     with fc2:
-        for i in 0..3:
+        for i in 0..<3:
             print "{{fc2[i]}}"
 "#);
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_dispatch_size", &src);
@@ -918,7 +918,7 @@ def main() throws:
     let fc = scale_gpu(a, 2.0)
     let fc2 = scale_gpu(fc, 3.0)
     with fc2:
-        for i in 0..3:
+        for i in 0..<3:
             print "{{fc2[i]}}"
 "#);
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_annotated_dispatch_size", &src);
@@ -946,7 +946,7 @@ kernel Scale:
     init(float f, [float]'unified xs):
         factor = f
         x = xs
-        y = [0.0 for ..xs.length]
+        y = [0.0 for ..<xs.length]
 
 def main() throws:
     var [float] a = [1.0, 2.0, 3.0]
@@ -961,7 +961,7 @@ def main() throws:
     let fc2 = k2.y
 
     with fc2:
-        for i in 0..3:
+        for i in 0..<3:
             print "{fc2[i]}"
 "#;
     let (_wgsl, rs) = wgpu_codegen("kernel_ctor_consumes_resident_local", src);
@@ -978,7 +978,7 @@ def main() throws:
     assert!(!rs.contains("&fc") && !rs.contains("(fc)") && !rs.contains("fc.iter()"),
         "`fc` has no Rust binding at all -- it must never appear as a bare identifier:\n{rs}");
 
-    // `Scale`'s own `y = [0.0 for ..xs.length]` zero-fill, for k2, must size off the
+    // `Scale`'s own `y = [0.0 for ..<xs.length]` zero-fill, for k2, must size off the
     // aliased buffer's own length -- not the nonexistent `xs` init-param identifier
     // (the `xs::length` bug) and not a stale reference to `fc`.
     assert!(rs.contains("k2.copy_y_to_device(&vec![(0) as f32; ((k1.y_buf.size() as usize / std::mem::size_of::<f32>())) as usize]);"),
@@ -1281,7 +1281,7 @@ def run() throws:
 #[test]
 fn test_kernel_output_field_plain_array_literal_sized_correctly() {
     // `out`'s init-body assignment is a plain bracketed literal (`ExprKind::Array`),
-    // not the `[value for ..count]` fill (`ExprKind::ArrayFill`) that
+    // not the `[value for ..<count]` fill (`ExprKind::ArrayFill`) that
     // `kernel_output_fill_map` used to be the only pattern recognized for. Before the
     // fix, this field's buffer was never covered by that map at all, so it stayed at
     // `new()`'s placeholder size (one `f32`, `4u64` bytes -- see wgpu::host's
@@ -1309,7 +1309,7 @@ kernel:
     k(block = 8)
 let result = k.out
 with result:
-    for i in 0..8:
+    for i in 0..<8:
         print "{i}: {result[i]}"
 "#;
     let (_wgsl, rs) = wgpu_codegen("kernel_output_field_plain_array_literal", src);
@@ -1627,7 +1627,7 @@ kernel Img:
         let row = gpu.thread.y
         c[width = col, height = row] = a[width = col, height = row] * 2.0
 
-var [float32] data = [float32(i) for i in 0..16]
+var [float32] data = [float32(i) for i in 0..<16]
 mut k = Img(data.reshape(width = 4, height = 4))
 kernel:
     k(block = (4, 4))
@@ -1656,7 +1656,7 @@ kernel Dummy:
         let tid = gpu.thread.x
         out[tid] = out[tid] * 2
 
-var [int] host = [i for i in 0..8]
+var [int] host = [i for i in 0..<8]
 mut k = Dummy(host)
 kernel:
     k(block = 8)
@@ -1670,7 +1670,7 @@ kernel:
 
 #[test]
 fn host_kernel_output_fill_count_resolves_promoted_top_level_const() {
-    // `result = [0 for ..n]` inside `init()` refers to a top-level `let n =
+    // `result = [0 for ..<n]` inside `init()` refers to a top-level `let n =
     // ...`, not an init parameter -- `substitute_and_emit`'s fallback used to
     // reproduce the boring-source name verbatim, but a GPU-target top-level
     // scalar `let` is promoted to an uppercased Rust `const`
@@ -1684,14 +1684,14 @@ kernel Filler:
 
     init([int]'global input_a):
         a = input_a
-        out = [0 for ..n]
+        out = [0 for ..<n]
 
     def ():
         let i = gpu.thread.x
         if i < n:
             out[i] = a[i]
 
-var [int] host_a = [i for i in 0..n]
+var [int] host_a = [i for i in 0..<n]
 mut k = Filler(host_a)
 kernel:
     k(block = 4)
@@ -1741,7 +1741,7 @@ kernel T:
     var float t
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
         t = 0.0
 
@@ -1790,7 +1790,7 @@ kernel T:
     var float t
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
         t = 0.0
 
@@ -1868,7 +1868,7 @@ kernel T:
     let Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
 
     def ():
@@ -1908,7 +1908,7 @@ kernel T:
     let Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
 
     def ():
@@ -1946,7 +1946,7 @@ kernel T:
     let Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
 
     def ():
@@ -1986,7 +1986,7 @@ kernel T:
     let Dimension dim
 
     init(Dimension d):
-        pixels = [0 for ..d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
         dim = d
 
     def ():
@@ -2055,15 +2055,15 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:
+        for k in 0..<W * H:
             let idx = i + k
             if idx < input.len():
                 acc = acc + weights[k] * input[idx]
         output[i] = acc
 
 let w = [0.25, 0.5, 0.25]
-let pixels = [i as float for i in ..1024]
-mut result = [0.0 for ..1024]
+let pixels = [i as float for i in ..<1024]
+mut result = [0.0 for ..<1024]
 
 mut blur = Blur<3, 1>(w, pixels, result)
 kernel:
@@ -2144,15 +2144,15 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:
+        for k in 0..<W * H:
             let idx = i + k
             if idx < input.len():
                 acc = acc + weights[k] * input[idx]
         output[i] = acc
 
 let w = [0.25, 0.5, 0.25]
-let pixels = [i as float for i in ..1024]
-mut result = [0.0 for ..1024]
+let pixels = [i as float for i in ..<1024]
+mut result = [0.0 for ..<1024]
 
 mut blur = Blur<3, 1>(w, pixels, result)
 kernel:
@@ -2184,7 +2184,7 @@ kernel:
 /// assertions below hold, which they trivially would even if the substitution were
 /// subtly wrong (e.g. swapped W/H).
 ///
-/// 1. `for k in 0..W * H` (and any other body reference to a `kernel Blur<int W, int
+/// 1. `for k in 0..<W * H` (and any other body reference to a `kernel Blur<int W, int
 ///    H>` const-generic param) used to stay a bare, unsubstituted `Var("W")`/`Var("H")`
 ///    after monomorphisation -- `monomorphise`/`monomorphise_type` only rewrites
 ///    `type_params` references inside a kernel's `fields`, never inside its
@@ -2231,15 +2231,15 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:
+        for k in 0..<W * H:
             let idx = i + k
             if idx < input.len():
                 acc = acc + weights[k] * input[idx]
         output[i] = acc
 
 let w = [0.25, 0.5, 0.25]
-let pixels = [i as float for i in ..1024]
-mut result = [0.0 for ..1024]
+let pixels = [i as float for i in ..<1024]
+mut result = [0.0 for ..<1024]
 
 mut blur = Blur<3, 1>(w, pixels, result)
 kernel:
@@ -2249,7 +2249,7 @@ kernel:
 
     // Bug 1: the loop bound is the concrete product, not the bare type-param names.
     assert!(wgsl.contains("if !(k < (3 * 1)) { break; }"),
-        "expected the monomorphised loop bound `0..W * H` to substitute down to the \
+        "expected the monomorphised loop bound `0..<W * H` to substitute down to the \
          concrete `3 * 1`, generated WGSL:\n{wgsl}");
     assert!(!wgsl.contains("(W * H)"),
         "generated WGSL still references the const-generic params `W`/`H` verbatim -- \
@@ -2334,13 +2334,13 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:
+        for k in 0..<W * H:
             acc = acc + weights[k] * input[i + k]
         output[i] = acc
 
 let w = [0.25, 0.5, 0.25]
-let pixels = [i as float32 for i in ..8]
-mut result = [0.0 for ..8]
+let pixels = [i as float32 for i in ..<8]
+mut result = [0.0 for ..<8]
 
 mut blur = Blur<3, 1>(w, pixels, result)
 kernel:
@@ -2425,15 +2425,15 @@ kernel Sum2:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..2:
+        for k in 0..<2:
             let idx = i + k
             if idx < x.len():
                 acc = acc + x[idx]
         y[i] = acc
 
 let n = 8
-let xs = [i as float for i in ..n]
-mut ys = [0.0 for ..n]
+let xs = [i as float for i in ..<n]
+mut ys = [0.0 for ..<n]
 
 mut k = Sum2(xs, ys)
 kernel:

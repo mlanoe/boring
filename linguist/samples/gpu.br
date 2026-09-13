@@ -20,8 +20,8 @@ kernel Saxpy:
         y[i] = alpha * x[i] + y[i]
 
 let n = 1024
-let xs = [i as float for i in ..n]
-let ys = [1.0 for ..n]
+let xs = [i as float for i in ..<n]
+let ys = [1.0 for ..<n]
 
 mut k = Saxpy(2.0, xs, ys)
 kernel:
@@ -50,15 +50,15 @@ kernel Blur<int W, int H>:
     def ():
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         var acc = 0.0
-        for k in 0..W * H:                  # tap offsets — clamp at the array edge
+        for k in 0..<W * H:                  # tap offsets — clamp at the array edge
             let idx = i + k
             if idx < input.len():
                 acc = acc + weights[k] * input[idx]
         output[i] = acc
 
 let w = [0.25, 0.5, 0.25]
-let pixels = [i as float for i in ..1024]
-mut result = [0.0 for ..1024]
+let pixels = [i as float for i in ..<1024]
+mut result = [0.0 for ..<1024]
 
 mut blur = Blur<3, 1>(w, pixels, result)
 kernel:
@@ -89,8 +89,8 @@ kernel TileSum:
         if tid == 0:
             result[gpu.block.x] = tile[0]
 
-let data    = [i as float for i in ..1024]
-mut partial = [0.0 for ..4]
+let data    = [i as float for i in ..<1024]
+mut partial = [0.0 for ..<4]
 
 mut ts = TileSum(data, partial)
 kernel:

@@ -325,7 +325,7 @@ impl Transpiler {
     /// (the same conversion `emit_kernel::try_emit_kernel_field_read` already does
     /// for a bare `k.y`), regardless of how many times the block's body indexes it —
     /// which is the actual round-trip-per-access problem this whole feature exists to
-    /// fix (`examples/vector_add_gpu.br`'s `for i in 0..n: print k.result[i]` reads
+    /// fix (`examples/vector_add_gpu.br`'s `for i in 0..<n: print k.result[i]` reads
     /// the whole buffer back on *every* iteration today). Write-back (`copy_y_to_device`)
     /// happens once at block close, only if the body's own mutation scan finds an
     /// index-assignment into it.

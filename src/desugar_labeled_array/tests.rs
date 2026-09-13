@@ -47,7 +47,7 @@ kernel Grid:
     assert!(matches!(&k.fields[0].ty, Type::Array(inner) if matches!(&**inner, Type::Named(n) if n == "float")));
     // Type::Int, not Uint — see desugar_kernel_decl's own note (matches a
     // shadow value's typical `int`-typed source, and the Int/Int bounds a
-    // `for i in 0..field.width` range requires).
+    // `for i in 0..<field.width` range requires).
     assert!(matches!(k.fields[1].ty, Type::Int));
     assert!(matches!(k.fields[1].binding, FieldBinding::Let));
     assert!(matches!(k.fields[1].qual, GpuQual::Const));
@@ -146,14 +146,14 @@ kernel Grid:
 #[test]
 fn chained_for_comprehension_lowers_to_alloc_plus_nested_loops() {
     let src = r#"
-let [float, width, height] a = [width for width in ..2 for height in ..3]
+let [float, width, height] a = [width for width in ..<2 for height in ..<3]
 "#;
     let program = desugared(src);
     let Item::Let(s) = &program.items[0] else { panic!("expected Item::Let") };
     let value = s.value.as_ref().expect("initializer");
     let ExprKind::Block(stmts) = &value.kind else { panic!("expected Block, got {:?}", value.kind) };
-    // declare tmp (deferred) ; tmp = alloc ; for height in ..3: for width in
-    // ..2: buf[...] = width ; buf — the declare/alloc split (rather than a
+    // declare tmp (deferred) ; tmp = alloc ; for height in ..<3: for width in
+    // ..<2: buf[...] = width ; buf — the declare/alloc split (rather than a
     // single `let tmp = alloc`) is deliberate: it lets `labeled_comp_fill_
     // stmts` share the exact same alloc+loop shape with the
     // kernel-field-reassignment path, which assigns into an EXISTING name
@@ -194,7 +194,7 @@ let [float, width, height] a = [width for width in ..2 for height in ..3]
 fn labeled_array_type_inferred_with_no_annotation() {
     // No `[float, width, height]` annotation at all — shape must still be
     // inferred from the comprehension itself (design doc's own example).
-    let src = "let a = [width for width in ..2 for height in ..3]";
+    let src = "let a = [width for width in ..<2 for height in ..<3]";
     let program = desugared(src);
     assert_eq!(program.items.len(), 3, "expected let a, __a_axis0, __a_axis1 (inferred)");
 }
@@ -202,7 +202,7 @@ fn labeled_array_type_inferred_with_no_annotation() {
 #[test]
 fn relabel_cast_reuses_source_shadow_bindings_no_new_lets() {
     let src = r#"
-let [float, width, height] a = [width for width in ..2 for height in ..3]
+let [float, width, height] a = [width for width in ..<2 for height in ..<3]
 let b = a as [line = width, column = height]
 "#;
     let program = desugared(src);
@@ -216,7 +216,7 @@ let b = a as [line = width, column = height]
 #[test]
 fn relabeled_indexing_resolves_using_source_shadow_bindings() {
     let src = r#"
-let [float, width, height] a = [width + height * 10.0 for width in ..2 for height in ..3]
+let [float, width, height] a = [width + height * 10.0 for width in ..<2 for height in ..<3]
 let b = a as [line = width, column = height]
 let _result = b[line = 1, column = 2]
 "#;
@@ -229,7 +229,7 @@ let _result = b[line = 1, column = 2]
 #[test]
 fn comprehension_then_labeled_index_round_trips_row_major() {
     let src = r#"
-let [float, width, height] a = [width + height * 10.0 for width in ..3 for height in ..4]
+let [float, width, height] a = [width + height * 10.0 for width in ..<3 for height in ..<4]
 let _result = a[width = 2, height = 3]
 "#;
     assert_eq!(run_desugared(src), Value::Float64(32.0));
@@ -238,20 +238,20 @@ let _result = a[width = 2, height = 3]
 #[test]
 fn axis_property_on_local_returns_correct_axis_value() {
     let src = r#"
-let [float, width, height] a = [0.0 for width in ..3 for height in ..4]
+let [float, width, height] a = [0.0 for width in ..<3 for height in ..<4]
 let _result = a.height
 "#;
     // Value::Int, not Uint — dynamic-shape shadow bindings are Type::Int
     // (see desugar_kernel_decl's note: matches a shadow value's typical
     // int/uint-mixed source uniformly, and the Int/Int bounds a `for i in
-    // 0..field.width` range requires).
+    // 0..<field.width` range requires).
     assert_eq!(run_desugared(src), Value::Int(4));
 }
 
 #[test]
 fn reshape_threads_shadow_values_through_labeled_indexing() {
     let src = r#"
-let flat = [i for i in ..6]
+let flat = [i for i in ..<6]
 let a = flat.reshape(width = 2, height = 3)
 let _result = a[width = 1, height = 2]
 "#;
@@ -262,7 +262,7 @@ let _result = a[width = 1, height = 2]
 #[test]
 fn fixed_shape_local_labeled_index_resolves_at_desugar_time() {
     let src = r#"
-let [float, width = 3, height = 4] a = [width + height * 10.0 for width in ..3 for height in ..4]
+let [float, width = 3, height = 4] a = [width + height * 10.0 for width in ..<3 for height in ..<4]
 let _result = a[width = 2, height = 3]
 "#;
     assert_eq!(run_desugared(src), Value::Float64(32.0));

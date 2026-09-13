@@ -736,7 +736,7 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                   | "[" IDENT "=" expr ("," IDENT "=" expr)* ","? "]"        # labeled index (2+ axes; see array-multidim-types.md):
                                                                              #   a[width = w, height = h] — every arg mandatorily
                                                                              #   labeled, order free at the use site (names disambiguate)
-                  | "[" slice_range "]"                                     # slice: a[M..N], a[..N], a[M..], a[..]
+                  | "[" slice_range "]"                                     # slice: a[M..<N], a[..<N], a[M..], a[..]
                   | "as" type                                                # cast
                   | "as" "[" IDENT "=" IDENT ("," IDENT "=" IDENT)* ","? "]" # relabel cast (array-multidim-types.md):
                                                                              #   img as [line = width, column = height] —
@@ -759,22 +759,28 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | "(" expr ")"            # grouping — newlines inside ignored
                   | "(" expr "," expr ("," expr)* ")"   # tuple
                   | "[" (expr ("," expr)*)? "]"          # array literal
-                  | "[" ".." expr "]"                    # array alloc: [..n] — allocate n elements without init
-                  | "[" expr "for" ".." expr "]"                    # fill: [v for ..n]
-                  | "[" expr "for" expr "]"                         # fill, bare count: [v for n] — `..` optional
-                                                                     #   here (no bound loop var to justify requiring it);
-                                                                     #   see array-multidim-types.md, "Fill shorthand"
-                  | "[" expr "for" IDENT "in" (".." expr | expr) "]"
-                                                                     # comprehension: [f(i) for i in ..n] (range, start
-                                                                     #   must be 0 — `..n` or `0..n`) or
+                  | "[" ("..<" | "..=") expr "]"          # array alloc: [..<n] — allocate n elements without init;
+                                                                     #   [..=n] — inclusive, allocate n+1 elements
+                  | "[" expr "for" ("..<" | "..=") expr "]"          # fill: [v for ..<n] (n elements) or
+                                                                     #   [v for ..=n] (inclusive, n+1 elements)
+                  | "[" expr "for" expr "]"                         # fill, bare count: [v for n] — no `..</..=`
+                                                                     #   marker here (no bound loop var to justify
+                                                                     #   requiring it); see array-multidim-types.md,
+                                                                     #   "Fill shorthand"
+                  | "[" expr "for" IDENT "in" (("..<" | "..=") expr | expr) "]"
+                                                                     # comprehension: [f(i) for i in ..<n] (range,
+                                                                     #   exclusive, start must be 0 — `..<n` or
+                                                                     #   `0..<n`), [f(i) for i in ..=n] (same, inclusive
+                                                                     #   — `..=n`/`0..=n`, n+1 elements), or
                                                                      #   [f(x) for x in xs] (iterate a collection)
-                  | "[" expr ("for" IDENT "in" ".." expr)+ "]"       # chained comprehension (2+ clauses) → a labeled
-                                                                     #   multi-dim array (array-multidim-types.md): the
-                                                                     #   FIRST clause is axis 1 (fastest-varying in
+                  | "[" expr ("for" IDENT "in" ("..<" | "..=") expr)+ "]"  # chained comprehension (2+ clauses) → a
+                                                                     #   labeled multi-dim array (array-multidim-types.md):
+                                                                     #   the FIRST clause is axis 1 (fastest-varying in
                                                                      #   row-major storage), regardless of syntactic
                                                                      #   nesting order — see "Axis order is fixed at
                                                                      #   declaration". A single clause stays the plain
-                                                                     #   comprehension form above, unchanged.
+                                                                     #   comprehension form above, unchanged. Each
+                                                                     #   clause may independently use `..<` or `..=`.
                   | "[" expr "for" IDENT "=" const_expr ("," IDENT "=" const_expr)+ "]"
                                                                      # labeled shape-only fill (2+ axes):
                                                                      #   [v for width = w, height = h] — the labels are
@@ -799,12 +805,17 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
 # Each element of the list must be a `Future<T>`; the result type is `[T]`.
 join_expr       ::= "join" "[" expr ("," expr)* "]"
 
-range_expr      ::= expr ".." expr      # exclusive range  [start, end)
+# Exclusive range is spelled `..<` (Swift-style), never bare `..` — a bare
+# `x..y` is a parse error pointing at `..<`. `..=` (inclusive) is unaffected
+# and unrelated to this rename.
+range_expr      ::= expr "..<" expr     # exclusive range  [start, end)
                   | expr "..=" expr     # inclusive range  [start, end]
 
-slice_range     ::= expr ".." expr      # a[M..N]  — exclusive sub-array
+# `a[M..]`/`a[..]` (no upper bound — nothing for `..<` to disambiguate) keep
+# their bare `..`; every form with an upper bound uses `..<`/`..=` only.
+slice_range     ::= expr "..<" expr     # a[M..<N] — exclusive sub-array
                   | expr "..=" expr     # a[M..=N] — inclusive sub-array
-                  | ".." expr           # a[..N]   — from index 0
+                  | "..<" expr          # a[..<N]  — from index 0
                   | "..=" expr          # a[..=N]  — from index 0, inclusive
                   | expr ".."           # a[M..]   — to end of array
                   | ".."               # a[..]    — full copy

@@ -369,7 +369,7 @@ pub enum TokenKind {
     Eq,
     EqEq, EqEqEq, BangEq,
     Lt, Gt, LtEq, GtEq,
-    Dot, DotDot, DotDotEq, DotDotDot,
+    Dot, DotDot, DotDotLt, DotDotEq, DotDotDot,
     Question, QuestionDot, Bang,
     Tick,
     // Bitwise operators
@@ -865,6 +865,9 @@ fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
                 } else if chars.peek().map(|(_, c)| *c == '=').unwrap_or(false) {
                     chars.next();
                     TokenKind::DotDotEq
+                } else if chars.peek().map(|(_, c)| *c == '<').unwrap_or(false) {
+                    chars.next();
+                    TokenKind::DotDotLt
                 } else {
                     TokenKind::DotDot
                 }
@@ -1366,6 +1369,12 @@ mod tests {
     fn test_range_inclusive_tokens() {
         let k = kinds("0..=3");
         assert!(k.contains(&TokenKind::DotDotEq));
+    }
+
+    #[test]
+    fn test_range_exclusive_lt_tokens() {
+        let k = kinds("0..<3");
+        assert!(k.contains(&TokenKind::DotDotLt));
     }
 
     #[test]

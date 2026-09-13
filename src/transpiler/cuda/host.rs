@@ -140,7 +140,7 @@ struct HostEmitter {
     /// local (see this backend's own `top_level_kernel_touching` handling in
     /// `emit_program`, and the general (std/wgpu-shared) pipeline's `let`-to-
     /// local folding for the non-kernel-touching-top-level case) -- so a
-    /// kernel `init` referencing it (`result = [0 for ..n]`) previously
+    /// kernel `init` referencing it (`result = [0 for ..<n]`) previously
     /// emitted a bare `n` identifier with nothing in scope to resolve it, a
     /// real E0425 confirmed via `cargo check`. Mirrors `metal::host`'s
     /// identical `top_level_scalars` field/fix.
@@ -2484,7 +2484,7 @@ impl HostEmitter {
                     let key_s = self.expr(idx);
                     return format!("{}.get(&({})).cloned()", obj_s, key_s);
                 }
-                // Slice: a[M..N] / a[..N] / a[M..] / a[..] -- a proper Rust range index
+                // Slice: a[M..<N] / a[..<N] / a[M..] / a[..] -- a proper Rust range index
                 // returning an owned Vec (matches how a sliced array is always consumed
                 // here: bound to a `let`/`var` of array type -- e.g. math.br's
                 // layer_norm_seq). Previously fell through to the plain-index case below,

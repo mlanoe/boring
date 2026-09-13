@@ -2334,7 +2334,7 @@ impl HostEmitter {
                     let key_s = self.expr(idx);
                     return format!("{}.get(&({})).cloned()", obj_s, key_s);
                 }
-                // Slice: a[M..N] / a[..N] / a[M..] / a[..] -- a proper Rust range index
+                // Slice: a[M..<N] / a[..<N] / a[M..] / a[..] -- a proper Rust range index
                 // returning an owned Vec. See `cuda::host`'s identical case for the full
                 // rationale (this is the `layer_norm_seq` slice-indexing bug this fixes).
                 if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {

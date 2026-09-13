@@ -199,7 +199,7 @@ pub(super) type GenericKernelNamesMap = HashMap<String, Vec<(Vec<i64>, String)>>
 /// `{"W": 3, "H": 1}`) — `monomorphise` only substitutes `type_params` references
 /// inside a kernel's `fields` (via `monomorphise_type`), never inside its
 /// `methods`/`inits` bodies (copied unchanged via `..decl.clone()`), so a body
-/// statement like `for k in 0..W * H` still contains bare `Var("W")`/`Var("H")`
+/// statement like `for k in 0..<W * H` still contains bare `Var("W")`/`Var("H")`
 /// after monomorphisation. `device::emit_device_wgsl` consults this map to
 /// substitute those identifiers with their concrete literal when emitting WGSL
 /// (see its `DeviceEmitter::expr`'s `ExprKind::Var` case) — unlike metal/cuda,

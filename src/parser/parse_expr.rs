@@ -577,7 +577,7 @@ impl Parser {
     /// The range's end is parsed via `parse_mul` (not `parse_unary_no_range`), so
     /// a bare product/quotient binds into the end without needing parens —
     /// `0..W * H` is `0..(W * H)`, matching Rust's range precedence (looser than
-    /// `*`/`/`/`%`) and this same function's own doc above. `for k in 0..W * H:`
+    /// `*`/`/`/`%`) and this same function's own doc above. `for k in 0..<W * H:`
     /// (a real kernel body, see `linguist/samples/gpu.br`) used to mis-parse as
     /// `(0..W) * H` — a `Range * Int` type error — before this fix.
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
@@ -585,11 +585,12 @@ impl Parser {
         let col = self.col();
         let start = self.parse_unary_no_range()?;
         match self.peek() {
-            TokenKind::DotDot | TokenKind::DotDotEq => {
+            TokenKind::DotDotLt | TokenKind::DotDotEq => {
                 let inclusive = self.peek() == &TokenKind::DotDotEq;
                 self.advance();
-                // `M..` inside `[M..]` — open-ended slice (next token is `]`)
-                if self.check(&TokenKind::RBracket) {
+                // `M..=` inside `[M..=]` — open-ended inclusive slice (next token is `]`).
+                // (`M..<` has no open-ended form — `..<` always requires an explicit end.)
+                if inclusive && self.check(&TokenKind::RBracket) {
                     Ok(Expr {
                         kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive },
                         line, col, len: self.span_len(line, col),
@@ -599,6 +600,23 @@ impl Parser {
                     Ok(Expr {
                         kind: ExprKind::Range { start: Box::new(start), end: Box::new(end), inclusive },
                         line, col, len: self.span_len(line, col),
+                    })
+                }
+            }
+            // Bare `..` is only still legal as the open-ended slice `M..]` — the
+            // exclusive-with-endpoint form was renamed to `..<` (no alias kept for
+            // the old spelling, matching the ownership-qualifier rename precedent).
+            TokenKind::DotDot => {
+                self.advance();
+                if self.check(&TokenKind::RBracket) {
+                    Ok(Expr {
+                        kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive: false },
+                        line, col, len: self.span_len(line, col),
+                    })
+                } else {
+                    Err(ParseError::Generic {
+                        line, col, len: self.span_len(line, col),
+                        msg: "exclusive range is now `x..<y`, not `x..y` — use `..<` instead of bare `..`".to_string(),
                     })
                 }
             }
@@ -793,7 +811,7 @@ impl Parser {
                     // docs/array-multidim-proposal.md, "Indexing"). Same `Ident`
                     // followed by `=` (not `==`) lookahead already used to detect
                     // labeled call arguments in `parse_arg`, so `a[i]`/`a[i == j]`/
-                    // `a[..n]` etc. are never misdetected as this form.
+                    // `a[..<n]` etc. are never misdetected as this form.
                     let is_labeled_index = matches!(self.peek(), TokenKind::Ident(_))
                         && self.check2(&TokenKind::Eq)
                         && !matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Eq));
@@ -807,16 +825,32 @@ impl Parser {
                         expr = Expr { kind: ExprKind::LabeledIndex(Box::new(expr), args), line, col, len: self.span_len(line, col) };
                         continue;
                     }
-                    // Slice with no start: `a[..N]`, `a[..=N]`, `a[..]`
-                    let idx = if self.check(&TokenKind::DotDot) || self.check(&TokenKind::DotDotEq) {
-                        let inclusive = self.peek() == &TokenKind::DotDotEq;
+                    // Slice with no start: `a[..<N]`, `a[..=N]`, `a[..]`
+                    let idx = if self.check(&TokenKind::DotDotLt) {
+                        // `a[..<N]` — no open-ended form, always needs an explicit end.
+                        self.advance();
+                        let end = Some(Box::new(self.parse_expr()?));
+                        Expr { kind: ExprKind::SliceRange { start: None, end, inclusive: false }, line, col, len: self.span_len(line, col) }
+                    } else if self.check(&TokenKind::DotDotEq) {
                         self.advance();
                         let end = if self.check(&TokenKind::RBracket) {
                             None
                         } else {
                             Some(Box::new(self.parse_expr()?))
                         };
-                        Expr { kind: ExprKind::SliceRange { start: None, end, inclusive }, line, col, len: self.span_len(line, col) }
+                        Expr { kind: ExprKind::SliceRange { start: None, end, inclusive: true }, line, col, len: self.span_len(line, col) }
+                    } else if self.check(&TokenKind::DotDot) {
+                        // Bare `..` here is only still legal as the full-copy `a[..]` —
+                        // `a[..N]` was renamed to `a[..<N]` (no alias for the old spelling).
+                        self.advance();
+                        if self.check(&TokenKind::RBracket) {
+                            Expr { kind: ExprKind::SliceRange { start: None, end: None, inclusive: false }, line, col, len: self.span_len(line, col) }
+                        } else {
+                            return Err(ParseError::Generic {
+                                line, col, len: self.span_len(line, col),
+                                msg: "exclusive slice is now `a[..<N]`, not `a[..N]` — use `..<` instead of bare `..`".to_string(),
+                            });
+                        }
                     } else {
                         let inner = self.parse_expr()?;
                         // `parse_expr` consumed `M..N` → Range; convert to SliceRange.
@@ -1031,7 +1065,7 @@ impl Parser {
                 | TokenKind::Pipe | TokenKind::PipeEq
                 | TokenKind::Caret | TokenKind::CaretEq => return false,
                 // Range operators:
-                TokenKind::DotDot | TokenKind::DotDotEq | TokenKind::DotDotDot => return false,
+                TokenKind::DotDot | TokenKind::DotDotLt | TokenKind::DotDotEq | TokenKind::DotDotDot => return false,
                 // Literal values (can never be a param name):
                 TokenKind::Int(_) | TokenKind::UInt64(_) | TokenKind::Float(_) | TokenKind::Bool(_)
                 | TokenKind::Nil => return false,
@@ -1672,11 +1706,17 @@ impl Parser {
             TokenKind::LBracket => {
                 self.advance();
                 self.skip_newlines_and_indent();
-                // `[..n]` — allocate array of length n without initialization
-                if self.check(&TokenKind::DotDot) {
+                // `[..<n]` / `[..=n]` — allocate array of length n (or n+1) without initialization
+                if self.check(&TokenKind::DotDotLt) || self.check(&TokenKind::DotDotEq) {
                     return self.parse_array_alloc(line, col);
                 }
-                // Comprehension forms: `[v for ..n]` or `[f(i) for i in ..n]`
+                if self.check(&TokenKind::DotDot) {
+                    return Err(ParseError::Generic {
+                        line, col, len: self.span_len(line, col),
+                        msg: "array alloc is now `[..<n]`, not `[..n]` — use `..<` instead of bare `..`".to_string(),
+                    });
+                }
+                // Comprehension forms: `[v for ..<n]` or `[f(i) for i in ..<n]`
                 if !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
                     // Parse first expression (value or computed expr)
                     let first = self.parse_expr()?;
@@ -1687,8 +1727,8 @@ impl Parser {
                         // by `=` immediately following the identifier instead of `in`.
                         // The labels are NOT bound as usable variables in `value` — purely
                         // descriptive of shape, unlike the bound chained-for comprehension.
-                        // Desugars identically to `[value for width in ..w for height in
-                        // ..h]` by construction (same `LabeledArrayComp` node, using the
+                        // Desugars identically to `[value for width in ..<w for height in
+                        // ..<h]` by construction (same `LabeledArrayComp` node, using the
                         // label text directly as the loop variable name) — keeps this a
                         // pure parser-level convenience, no new desugar/interpreter/
                         // transpiler work: a name that's never referenced in `value` is
@@ -1708,33 +1748,37 @@ impl Parser {
                             let kind = ExprKind::LabeledArrayComp { expr: Box::new(first), clauses };
                             return Ok(Expr { kind, line, col, len: self.span_len(line, col) });
                         }
-                        // `[v for i in ..n]` or `[f(x) for x in collection]` — computed form
+                        // `[v for i in ..<n]` or `[f(x) for x in collection]` — computed form
                         let kind = if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::In) {
                             let var = self.expect_ident()?;
                             self.expect(&TokenKind::In)?;
-                            if self.check(&TokenKind::DotDot) {
-                                // `[f(i) for i in ..n]` — range form
+                            if self.check(&TokenKind::DotDotLt) || self.check(&TokenKind::DotDotEq) {
+                                // `[f(i) for i in ..<n]` / `..=n` — range form
                                 let count = self.parse_comprehension_count(line, col)?;
                                 ExprKind::ArrayComp { expr: Box::new(first), var, count: Box::new(count) }
+                            } else if self.check(&TokenKind::DotDot) {
+                                return Err(ParseError::Generic {
+                                    msg: "array comprehension range is now `..<n`, not `..n` — use `..<` instead of bare `..`".to_string(),
+                                    line, col, len: self.span_len(line, col),
+                                });
                             } else {
-                                // Parse the source — could be `0..n` (range) or a collection expr
+                                // Parse the source — could be `0..<n`/`0..=n` (range) or a collection expr
                                 let source = self.parse_or()?;
                                 match source.kind {
-                                    ExprKind::Range { ref start, ref end, inclusive: false }
+                                    ExprKind::Range { ref start, ref end, inclusive }
                                         if matches!(start.kind, ExprKind::Int(0)) =>
                                     {
-                                        // `[f(i) for i in 0..n]` — treat as range form
-                                        ExprKind::ArrayComp { expr: Box::new(first), var, count: end.clone() }
-                                    }
-                                    ExprKind::Range { inclusive: true, .. } => {
-                                        return Err(ParseError::Generic {
-                                            msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
-                                            line, col, len: self.span_len(line, col),
-                                        });
+                                        // `[f(i) for i in 0..<n]` / `0..=n` — treat as range form
+                                        let count = if inclusive {
+                                            make_inclusive_count((**end).clone(), line, col)
+                                        } else {
+                                            (**end).clone()
+                                        };
+                                        ExprKind::ArrayComp { expr: Box::new(first), var, count: Box::new(count) }
                                     }
                                     ExprKind::Range { .. } => {
                                         return Err(ParseError::Generic {
-                                            msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
+                                            msg: "array comprehension range must start at 0 — use `..<n` or `0..<n`".to_string(),
                                             line, col, len: self.span_len(line, col),
                                         });
                                     }
@@ -1745,14 +1789,14 @@ impl Parser {
                                 }
                             }
                         } else {
-                            // `[v for ..n]` or `[v for n]` — fill form. Unlike the bound
-                            // comprehension above, a bare count with no `..`/`0..` wrapper
-                            // is also accepted here — there's no loop variable to justify
+                            // `[v for ..<n]`, `[v for ..=n]`, or `[v for n]` — fill form. Unlike
+                            // the bound comprehension above, a bare count with no `..</0..<`
+                            // wrapper is also accepted here — there's no loop variable to justify
                             // requiring explicit range syntax (see `parse_fill_count`'s doc).
                             let count = self.parse_fill_count(line, col)?;
                             ExprKind::ArrayFill { value: Box::new(first), count: Box::new(count) }
                         };
-                        // Chained `for`: [f(w,h) for w in ..W for h in ..H] — a labeled
+                        // Chained `for`: [f(w,h) for w in ..<W for h in ..<H] — a labeled
                         // multi-dim comprehension (docs/array-multidim-proposal.md). Only
                         // the range form (`ArrayComp`) chains; a collection-iteration or
                         // fill clause stays single-axis, unchanged. `clauses[0]` is axis 1
@@ -2085,41 +2129,55 @@ impl Parser {
         Ok(Expr { kind: ExprKind::Task(Box::new(inner)), line, col, len: self.span_len(line, col)})
     }
 
-    /// Parse the count expression in an array comprehension (`[v for ..n]` or `[f(i) for i in ..n]`).
-    /// Accepts `..n` (sugar for `0..n`) and `0..n`. Rejects any non-zero start.
+    /// Parse the count operand of `[..<n]` / `[..=n]` (array alloc). The leading
+    /// `..<`/`..=` token has already been peeked (not consumed) by the caller.
+    /// `..=n` allocates `n + 1` elements (indices `0..=n`) — folded in here as
+    /// a synthesized `count + 1`, so every downstream consumer (interpreter,
+    /// transpiler, GPU backends) sees a plain count expression and needs no
+    /// separate "inclusive" bookkeeping of its own.
     #[inline(never)]
     fn parse_array_alloc(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
-        self.advance(); // consume `..`
+        let inclusive = self.check(&TokenKind::DotDotEq);
+        self.advance(); // consume `..<` or `..=`
         let count = self.parse_expr()?;
         self.skip_newlines_and_indent();
         self.expect(&TokenKind::RBracket)?;
+        let count = if inclusive { make_inclusive_count(count, line, col) } else { count };
         Ok(Expr { kind: ExprKind::ArrayAlloc { count: Box::new(count) }, line, col, len: self.span_len(line, col) })
     }
 
+    /// Parse the count expression in an array comprehension (`[v for ..<n]`,
+    /// `[v for ..=n]`, or `[f(i) for i in ..<n]`/`..=n`). Accepts `..<n` /
+    /// `..=n` (sugar for `0..<n` / `0..=n`) and `0..<n` / `0..=n`. Rejects any
+    /// non-zero start and the old bare `..n` spelling.
     fn parse_comprehension_count(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
-        if self.eat(&TokenKind::DotDot) {
-            // `..n` — implicit start 0
-            return self.parse_or();
+        if self.check(&TokenKind::DotDotLt) || self.check(&TokenKind::DotDotEq) {
+            let inclusive = self.check(&TokenKind::DotDotEq);
+            self.advance();
+            let count = self.parse_or()?;
+            return Ok(if inclusive { make_inclusive_count(count, line, col) } else { count });
         }
-        // Parse the full expression — `parse_or` will consume `0..n` as a Range node.
+        if self.check(&TokenKind::DotDot) {
+            return Err(ParseError::Generic {
+                msg: "array comprehension range is now `..<n`, not `..n` — use `..<` instead of bare `..`".to_string(),
+                line, col, len: self.span_len(line, col),
+            });
+        }
+        // Parse the full expression — `parse_or` will consume `0..<n`/`0..=n` as a Range node.
         let expr = self.parse_or()?;
         match expr.kind {
-            ExprKind::Range { ref start, ref end, inclusive: false } => {
+            ExprKind::Range { ref start, ref end, inclusive } => {
                 if matches!(start.kind, ExprKind::Int(0)) {
-                    Ok(*end.clone())
+                    Ok(if inclusive { make_inclusive_count((**end).clone(), line, col) } else { (**end).clone() })
                 } else {
                     Err(ParseError::Generic {
-                        msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
+                        msg: "array comprehension range must start at 0 — use `..<n` or `0..<n`".to_string(),
                         line, col, len: self.span_len(line, col),
                     })
                 }
             }
-            ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
-                msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
-                line, col, len: self.span_len(line, col),
-            }),
             _ => Err(ParseError::Generic {
-                msg: "expected `..n` or `0..n` in array comprehension".to_string(),
+                msg: "expected `..<n` or `0..<n` in array comprehension".to_string(),
                 line, col, len: self.span_len(line, col),
             }),
         }
@@ -2128,32 +2186,49 @@ impl Parser {
     /// Count for the two "no bound variable" fill forms
     /// (docs/array-multidim-proposal.md): `[value for n]` and, via the
     /// labeled shape branch above, `label = n`. Mirrors
-    /// `parse_comprehension_count` (`..n` / `0..n`) but additionally accepts
-    /// a bare expression with no range wrapper at all — unlike the bound
-    /// comprehension forms, there's no loop variable here to justify
-    /// requiring explicit range syntax; `[0.0 for n]` and `[0.0 for ..n]`
-    /// both mean "fill n elements with 0.0".
+    /// `parse_comprehension_count` (`..<n` / `0..<n`, plus the `..=n`/`0..=n`
+    /// inclusive variants) but additionally accepts a bare expression with no
+    /// range wrapper at all — unlike the bound comprehension forms, there's no
+    /// loop variable here to justify requiring explicit range syntax;
+    /// `[0.0 for n]` and `[0.0 for ..<n]` both mean "fill n elements with 0.0".
     fn parse_fill_count(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
-        if self.eat(&TokenKind::DotDot) {
-            return self.parse_or();
+        if self.check(&TokenKind::DotDotLt) || self.check(&TokenKind::DotDotEq) {
+            let inclusive = self.check(&TokenKind::DotDotEq);
+            self.advance();
+            let count = self.parse_or()?;
+            return Ok(if inclusive { make_inclusive_count(count, line, col) } else { count });
+        }
+        if self.check(&TokenKind::DotDot) {
+            return Err(ParseError::Generic {
+                msg: "array fill range is now `..<n`, not `..n` — use `..<` instead of bare `..`".to_string(),
+                line, col, len: self.span_len(line, col),
+            });
         }
         let expr = self.parse_or()?;
         match expr.kind {
-            ExprKind::Range { ref start, ref end, inclusive: false } => {
+            ExprKind::Range { ref start, ref end, inclusive } => {
                 if matches!(start.kind, ExprKind::Int(0)) {
-                    Ok(*end.clone())
+                    Ok(if inclusive { make_inclusive_count((**end).clone(), line, col) } else { (**end).clone() })
                 } else {
                     Err(ParseError::Generic {
-                        msg: "array fill range must start at 0 — use `..n`, `0..n`, or a bare `n`".to_string(),
+                        msg: "array fill range must start at 0 — use `..<n`, `0..<n`, or a bare `n`".to_string(),
                         line, col, len: self.span_len(line, col),
                     })
                 }
             }
-            ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
-                msg: "array fill does not accept inclusive range (`..=`)".to_string(),
-                line, col, len: self.span_len(line, col),
-            }),
             _ => Ok(expr),
         }
+    }
+}
+
+/// Synthesize `count + 1` for an inclusive (`..=`) array-alloc/fill/comprehension
+/// count — `[..=n]` allocates `n + 1` elements (indices `0..=n`), folded in at
+/// parse time as a plain `BinOp::Add` so no AST node downstream (interpreter,
+/// transpiler, GPU backends) needs its own "is this inclusive" bookkeeping.
+fn make_inclusive_count(count: Expr, line: usize, col: usize) -> Expr {
+    let len = count.len;
+    Expr {
+        kind: ExprKind::BinOp(BinOp::Add, Box::new(count), Box::new(Expr { kind: ExprKind::Int(1), line, col, len: 0 })),
+        line, col, len,
     }
 }

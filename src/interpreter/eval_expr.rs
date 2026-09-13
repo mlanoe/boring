@@ -999,10 +999,10 @@ impl Interpreter {
         Ok(result)
     }
 
-    /// `obj[idx]` — slice ranges (`a[M..N]`/`a[..N]`/`a[M..]`/`a[..]`, negative-index-aware,
+    /// `obj[idx]` — slice ranges (`a[M..<N]`/`a[..<N]`/`a[M..]`/`a[..]`, negative-index-aware,
     /// on `Array` or `Str`) and plain single-index access via `get_index`.
     fn eval_expr_index(&mut self, obj_expr: &Expr, idx_expr: &Expr, env: EnvRef, line: usize) -> Eval {
-        // Slice: a[M..N], a[..N], a[M..], a[..]
+        // Slice: a[M..<N], a[..<N], a[M..], a[..]
         if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
             let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
             match obj {
@@ -1209,7 +1209,7 @@ impl Interpreter {
         }
         // A `kernel Foo<int W, int H>:` construction (`Blur<3, 1>(...)`) is the one
         // exception to the type-erasure philosophy above: `W`/`H` are const generics,
-        // read as real values inside the kernel body (`for k in 0..W * H`), not just
+        // read as real values inside the kernel body (`for k in 0..<W * H`), not just
         // used for compile-time dispatch — so their concrete turbofish values must
         // survive into the interpreter. See `resolve_const_generics`'s and
         // `instantiate_kernel_struct`'s doc comments for how they're threaded through.
@@ -1638,7 +1638,7 @@ impl Interpreter {
                 let s = self.eval_expr(start, Rc::clone(&env))?;
                 let e = self.eval_expr(end, Rc::clone(&env))?;
                 // Accept any integer-kind bound (Int/Uint/fixed-width), not just a bare
-                // `Value::Int` on both sides — `for i in 0..count:` where `count` is a
+                // `Value::Int` on both sides — `for i in 0..<count:` where `count` is a
                 // `uint` parameter (a very ordinary length/count value) used to be
                 // rejected outright here even though both sides are plainly integers;
                 // `expect_int` already normalizes every integer Value variant to i64
