@@ -1482,10 +1482,12 @@ impl Type {
 
     /// True if a `Set` (`{T}`) appears anywhere in this type's structure with a
     /// `mut`-qualified element type (`{mut T}`) — illegal unconditionally, per
-    /// docs/book.md: `std::collections::HashSet<T>` exposes no
-    /// mutable element access in Rust at all (no `iter_mut()`, no `get_mut()`),
-    /// because mutating an element in place could change its `Hash`/`Eq`
-    /// behavior and silently corrupt the set's buckets. Unlike
+    /// docs/book.md: mutating a set element in place could change its
+    /// hash/equality behavior and silently corrupt the set's internal bucket
+    /// placement — a universal invariant of hash-based sets, not a fact about
+    /// Rust's `HashSet<T>` specifically (which happens to be how today's Rust
+    /// backend realizes it: no `iter_mut()`/`get_mut()` at all — see
+    /// docs/design-notes/checker-portability-draft.md). Unlike
     /// `nested_slot_grants_mut` (which tracks which slot needs a Rust-level
     /// `let mut` for an otherwise-legal `mut` placement), this is a pure
     /// well-formedness scan — `{mut T}` has no legal transpiler target at all,

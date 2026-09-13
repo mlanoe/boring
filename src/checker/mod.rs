@@ -11,11 +11,16 @@
 
 // Semantic checker — runs after parsing, before interpretation or transpilation.
 //
-// Current checks:
-//   1. Immutability: assignment to a `let` or `lazy` binding.
-//   2. Qualifier constraint: `mut 'shared` is always an error.
-//   3. `lazy` misuse: `lazy` binding assigned via `=` after declaration
-//      (the correct operator is `?=`).
+// This file (`mod.rs`) holds the `Checker` struct/state and every check whose
+// rule is universal to Boring's own semantics — portable as-is to any future
+// transpilation backend (Swift, Kotlin, ...), not just Rust. Checks whose
+// reasoning is instead an artifact of Rust's ownership/borrow model, or of the
+// current Rust-only GPU codegen pipeline, live in `rust_checks.rs` (same
+// `Checker` struct, same scope/binding-tracking state, split purely to keep the
+// universal/Rust-specific line visible at the file level). See
+// `docs/design-notes/checker-portability-draft.md` for the full inventory.
+
+mod rust_checks;
 
 use std::collections::HashMap;
 use crate::ast::*;
@@ -98,6 +103,27 @@ struct Binding {
     kernel_type: Option<String>,
 }
 
+/// Enough of a free function's signature to validate a call's arity and
+/// labeled arguments — collected once in `collect_fn_signature`, alongside
+/// (but independent of) `fn_param_types`. See `check_call_arity`'s doc
+/// comment for how this is used.
+#[derive(Clone)]
+struct FnArity {
+    /// Declared parameter names in order, EXCLUDING a trailing variadic
+    /// parameter (tracked separately in `variadic`) — index into this vec is
+    /// the position a labeled argument resolves to.
+    param_names: Vec<String>,
+    /// Per position (same indexing as `param_names`): does this parameter
+    /// have a default value, making it legal to omit at a call site?
+    has_default: Vec<bool>,
+    /// `Some(name)` when the function's last parameter is variadic (`T...`,
+    /// docs/book.md's "Advanced — Variadic parameters") — absorbs any number
+    /// (including zero) of extra positional arguments beyond `param_names`,
+    /// so it is never itself "missing" and never caps how many positional
+    /// arguments a call may pass.
+    variadic: Option<String>,
+}
+
 struct Checker {
     errors:   Vec<CheckError>,
     warnings: Vec<CheckWarning>,
@@ -145,6 +171,17 @@ struct Checker {
     /// `Type::LabeledArray`. See docs/array-multidim-proposal.md,
     /// "Cross-label compatibility between same-shape types".
     fn_param_types: HashMap<String, Vec<Option<Type>>>,
+    /// Free function name -> arity/labeled-argument info, for `check_call_arity`.
+    /// Absent, or present but also listed in `fn_overloaded`, means "don't
+    /// check" — see that check's own doc comment for both guards.
+    fn_arity: HashMap<String, FnArity>,
+    /// Free function names with more than one `FnDecl` — Boring resolves an
+    /// overload by real argument *type* at the call site (docs/book.md's
+    /// "Function overloading"), which this checker cannot do without type
+    /// inference it doesn't have, so `check_call_arity` skips these entirely.
+    /// Mirrors `struct_ctor_owned`'s identical "more than one `init` -> skip"
+    /// precedent for the same kind of ambiguity.
+    fn_overloaded: std::collections::HashSet<String>,
     /// Struct name -> ordered `(param name, is-committed-'owned)` pairs for that
     /// struct's constructor, used by the use-after-move check
     /// (`check_move_read`/`owned_target_for_arg`) — see that section's header
@@ -218,6 +255,8 @@ impl Checker {
             fn_gpu_arg_params: HashMap::new(),
             fn_returns_resident_tuple: HashMap::new(),
             fn_param_types: HashMap::new(),
+            fn_arity: HashMap::new(),
+            fn_overloaded: std::collections::HashSet::new(),
             struct_ctor_owned: HashMap::new(),
             moved: vec![HashMap::new()],
             kernel_dispatch_only: false,
@@ -378,6 +417,23 @@ impl Checker {
         let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_var_params.insert(f.name.clone(), var_flags);
         self.fn_param_types.insert(f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect());
+        {
+            let mut param_names = Vec::new();
+            let mut has_default = Vec::new();
+            let mut variadic = None;
+            for p in &f.params {
+                if p.variadic {
+                    variadic = Some(p.name.clone());
+                } else {
+                    param_names.push(p.name.clone());
+                    has_default.push(p.default.is_some());
+                }
+            }
+            let arity = FnArity { param_names, has_default, variadic };
+            if self.fn_arity.insert(f.name.clone(), arity).is_some() {
+                self.fn_overloaded.insert(f.name.clone());
+            }
+        }
         if let Some(rt) = &f.return_ty {
             if rt.gpu_resident_qual().is_some() {
                 self.fn_returns_resident.insert(f.name.clone(), rt.clone());
@@ -559,154 +615,6 @@ impl Checker {
         self.check_scalar_mut_constraint(binding, var_mut, ty, value, line, col);
     }
 
-    fn check_qualifier_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, line: usize, col: usize) {
-        if self.kernel_dispatch_only { return; }
-        if !Self::requests_mut(binding, var_mut) { return; }
-        let Some(ty) = ty else { return };
-        // `mut` always wraps the parsed type in `Type::Mut` now (§1) — strip it
-        // before inspecting the shape.
-        let ty = ty.without_mut();
-        if self.type_has_shared(ty) {
-            self.error(
-                "cannot combine `mut` with `'shared`: shared references are immutable by design; use `'actor` for interior mutability",
-                line, col,
-            );
-        }
-        // `'static` (`&'static T`) has exactly as little interior mutability as
-        // `'shared` (`Rc`/`Arc<T>`) — a bare reference, nothing for `mut` to unlock.
-        // See docs/qualifiers.md's `'static` section, "No interior mutability".
-        if self.type_has_static(ty) {
-            self.error(
-                "cannot combine `mut` with `'static`: a &'static reference has no interior mutability to unlock",
-                line, col,
-            );
-        }
-        // A `'weak` reference has no operations besides `.upgrade()`/`.clone()`
-        // (both non-mutating) until it's upgraded — nothing for `mut` to unlock
-        // on the weak reference itself, regardless of what the *upgraded* value
-        // would allow (`T'shared'weak`, `T'actor'weak`, `T'guard'weak` alike —
-        // docs/book.md's rejection table). Checked on the
-        // *outermost* qualifier only — `'weak` is always the last link in the
-        // chain (`T'actor'weak`, never `T'weak'actor`).
-        if matches!(ty, Type::Qualified(_, OwnerQual::Weak)) {
-            self.error(
-                "cannot combine `mut` with `'weak`: a weak reference has no operations besides `.upgrade()`/`.clone()` until upgraded — there is nothing for `mut` to unlock",
-                line, col,
-            );
-        }
-    }
-
-    fn type_has_shared(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Qualified(_, OwnerQual::Shared) => true,
-            Type::Qualified(inner, _) => self.type_has_shared(inner),
-            // NOT Type::Array/Dict/Set: `mut [T] arr` grants *structural* mutation
-            // (push/pop) on the collection itself, entirely independent of whatever
-            // `mut` would or wouldn't unlock on its element type — recursing into the
-            // element here rejected `mut [Point'shared] arr = []`, which is valid and
-            // compiles fine, as if it were `mut Point'shared p` (content mutation on a
-            // single 'shared value, which really has nothing for `mut` to unlock).
-            Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
-                self.type_has_shared(inner)
-            }
-            _ => false,
-        }
-    }
-
-    // ── `'static` provenance gate ────────────────────────────────────────────
-    //
-    // docs/qualifiers.md's `'static` section: a `T'static NAME = Ctor(...)` constructor-call
-    // initializer is legal only at top level or inside `main` (tracked via
-    // `in_authorized_static_site`, set in `check_fn`) — the two authorized
-    // construction sites this check covers (the third, `type let`, is implicit and
-    // has no `'static` annotation to check here at all). Anywhere else, the
-    // initializer must already be a reference to an existing 'static-typed value
-    // (a bare `Var` whose own declared type is itself `'static`) — never a fresh
-    // construction.
-    //
-    // Fixed gap (previously): this used to recognize "fresh construction" only via
-    // `is_constructor_call_expr`'s syntactic heuristic (an uppercase-first-letter
-    // callee, e.g. `A(...)`) — so `let x'static = create()`, where `create()` is an
-    // ordinary lowercase function/method that itself returns a freshly constructed
-    // value, sailed through unrejected at a non-authorized site, silently violating
-    // the same provenance guarantee this gate exists to enforce. Knowing for certain
-    // whether an arbitrary call's return value is "fresh" would need a real
-    // expression-type/provenance-inference pass this checker doesn't have. Rather
-    // than special-case more callee shapes (always one indirection away from the
-    // next false negative), this now follows `check_static_arg_provenance`'s
-    // existing, already-conservative model: at a non-authorized site, only a bare
-    // `Var` provably typed `'static` is accepted as the initializer; every `Call`,
-    // `MethodCall`, or anything else this checker cannot positively prove is a
-    // reference to an existing `'static` binding is rejected — erring towards
-    // rejecting an as-yet-unrecognized-but-valid pattern rather than letting an
-    // unsound one through.
-    fn check_static_provenance(&mut self, ty: &Option<Type>, value: Option<&Expr>, line: usize, col: usize) {
-        let Some(Type::Qualified(_, OwnerQual::Static)) = ty else { return };
-        let Some(value) = value else { return };
-        if self.in_authorized_static_site { return; }
-        let is_provably_static_ref = match &value.kind {
-            ExprKind::Var(name) => matches!(
-                self.lookup(name).and_then(|b| b.ty.as_ref()),
-                Some(Type::Qualified(_, OwnerQual::Static))
-            ),
-            _ => false,
-        };
-        if !is_provably_static_ref {
-            self.error(
-                "cannot construct a 'static instance here — 'static values may only be constructed \
-                 at top level or inside `main`; elsewhere the initializer must already be a \
-                 reference to an existing 'static-typed binding (a name whose own type is \
-                 T'static), not a fresh construction, a call, or a field read",
-                line, col,
-            );
-        }
-    }
-
-    /// The provenance gate's other half: `check_static_provenance` only covers a
-    /// `let`'s own initializer — it says nothing about passing an *existing*,
-    /// non-`'static` value into a call argument whose parameter demands `'static`.
-    /// A local `Config`, or `self.field`, or a fresh `Config(...)` written inline
-    /// as the argument, all produce real `cargo build` failures (or worse, would
-    /// be unsound if they somehow compiled) once the callee treats the parameter
-    /// as genuinely program-lifetime. Only a bare `Var` whose own declared type is
-    /// already `'static` is accepted — a `self.field`, a method-call result, or
-    /// any other expression this checker can't statically type as `'static` is
-    /// rejected rather than risked (conservative by design: nothing depends on
-    /// `'static` yet, so erring towards rejecting an as-yet-unrecognized-but-valid
-    /// pattern is the safer default than silently letting an unsound one through).
-    fn check_static_arg_provenance(&mut self, target_ty: Option<&Type>, arg: &Expr, line: usize, col: usize) {
-        if !matches!(target_ty, Some(Type::Qualified(_, OwnerQual::Static))) { return; }
-        let is_provably_static = match &arg.kind {
-            ExprKind::Var(name) => matches!(
-                self.lookup(name).and_then(|b| b.ty.as_ref()),
-                Some(Type::Qualified(_, OwnerQual::Static))
-            ),
-            _ => false,
-        };
-        if !is_provably_static {
-            self.error(
-                "cannot pass a non-'static value where 'static is expected — the argument must \
-                 already be a 'static-typed binding (a name whose own type is T'static), not a \
-                 local value, a fresh construction, or a field read",
-                line, col,
-            );
-        }
-    }
-
-    fn type_has_static(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Qualified(_, OwnerQual::Static) => true,
-            Type::Qualified(inner, _) => self.type_has_static(inner),
-            // See type_has_shared's comment just above — same reasoning applies here:
-            // `mut [T] arr` is structural, independent of the element type's own
-            // qualifier, so `mut [Point'static] arr = []` must not be rejected either.
-            Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
-                self.type_has_static(inner)
-            }
-            _ => false,
-        }
-    }
-
     // ── Qualifier constraint: `mut` on a tuple-typed binding ───────────────────
     //
     // A tuple has no in-place mutation surface — no field-index assignment
@@ -784,107 +692,31 @@ impl Checker {
 
     // ── Qualifier constraint: `{mut T}` (set element mutability) ───────────────
     //
-    // `HashSet<T>` exposes no mutable element access in Rust at all — no
-    // `iter_mut()`, no `get_mut()` — because mutating an element in place could
-    // change its `Hash`/`Eq` behavior and silently corrupt the set's buckets
+    // Universal invariant, not a Rust artifact: mutating a set element in place
+    // can change its hash/equality behavior and silently corrupt the set's
+    // internal bucket placement — true of any hash-based set on any backend, not
+    // a fact about Rust's `HashSet<T>` specifically (which happens to be how
+    // today's Rust backend realizes it: no `iter_mut()`/`get_mut()` at all).
     // (docs/book.md's "Sets — `{T}`" section documents the resulting rule —
     // this was, for a long time, the one item in this whole area that was
-    // documented as rejected but never actually wired up). Unlike `check_tuple_mut_constraint`/
-    // `check_scalar_mut_constraint`, this does NOT gate on whether the *outer*
-    // binding itself requests `mut` (`Self::requests_mut`) — `let {mut Point}
-    // pts = {}` is illegal even though `pts` is a plain `let`, because the
-    // illegality lives on the Set's element type, wherever it's nested, not on
-    // the binding. `mut {T}` (mutable on the set itself — structural
-    // add/remove) is a different axis entirely and is unaffected.
+    // documented as rejected but never actually wired up). See
+    // docs/design-notes/checker-portability-draft.md for why this distinction
+    // matters. Unlike `check_tuple_mut_constraint`/`check_scalar_mut_constraint`,
+    // this does NOT gate on whether the *outer* binding itself requests `mut`
+    // (`Self::requests_mut`) — `let {mut Point} pts = {}` is illegal even though
+    // `pts` is a plain `let`, because the illegality lives on the Set's element
+    // type, wherever it's nested, not on the binding. `mut {T}` (mutable on the
+    // set itself — structural add/remove) is a different axis entirely and is
+    // unaffected.
     fn check_set_mut_constraint(&mut self, ty: &Option<Type>, line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
         if let Some(ty) = ty {
             if ty.contains_illegal_mut_set() {
                 self.error(
-                    "cannot use `mut` on a set's element type (`{mut T}`): `HashSet<T>` has no mutable element access in Rust (no `iter_mut`/`get_mut`) — `mut {T}` (mutable on the set itself, for structural add/remove) is unaffected",
+                    "cannot use `mut` on a set's element type (`{mut T}`): mutating a set element in place could change its hash/equality behavior and silently corrupt the set's internal bucket placement — sets never expose mutable element access for this reason; `mut {T}` (mutable on the set itself, for structural add/remove) is unaffected",
                     line, col,
                 );
             }
-        }
-    }
-
-    // ── `'atomic` type-compatibility gate ─────────────────────────────────────
-    //
-    // `'atomic` may only wrap the scalar int/bool family (`Type::is_atomic_eligible_scalar`)
-    // — never a float (no stable `std::sync::atomic` equivalent) and never a
-    // struct/enum/collection (no atomic representation at all). Checked at every
-    // declared-type site this checker already visits for `check_set_mut_constraint`
-    // (let/var/mut bindings, destructured bindings, fn/init/setter params, struct/enum
-    // fields) — see that function's call sites, which this mirrors exactly, since both
-    // are unconditional type-shape legality checks independent of `mut`-ness.
-    fn check_atomic_compatibility(&mut self, ty: &Option<Type>, line: usize, col: usize) {
-        if self.kernel_dispatch_only { return; }
-        let Some(ty) = ty else { return };
-        if let Some(bad_inner) = ty.find_atomic_incompatibility() {
-            self.error(
-                format!(
-                    "cannot combine `'atomic` with `{}`: `'atomic` only wraps a scalar integer or `bool` type \
-                     (`int`, `uint`, `bool`, `int8`/`int16`/`int32`/`int64`, `uint8`/`uint16`/`uint32`/`uint64`) — \
-                     floats have no stable `std::sync::atomic` equivalent, `int128`/`uint128` have no `AtomicI128`/`AtomicU128` \
-                     in stable `std`, and structs/enums have no atomic representation at all; use `'actor` or `'guard` \
-                     for interior mutability on this type",
-                    Self::describe_type_for_atomic_error(bad_inner),
-                ),
-                line, col,
-            );
-        }
-    }
-
-    fn describe_type_for_atomic_error(ty: &Type) -> String {
-        match ty {
-            Type::Float32 => "float32".to_string(),
-            Type::Float64 => "float64 (`float`)".to_string(),
-            Type::Int128 => "int128".to_string(),
-            Type::Uint128 => "uint128".to_string(),
-            // `_` is the unresolved-placeholder base type left behind when a
-            // name-position `x'atomic = <initializer>` couldn't infer a concrete
-            // base type at parse time (an initializer more complex than a bare
-            // literal) — not a real named type to surface verbatim.
-            Type::Named(n) if n == "_" => "this type".to_string(),
-            Type::Named(n) => n.clone(),
-            _ => "this type".to_string(),
-        }
-    }
-
-    // ── Kernel dispatch: reject a `'shared`/`'actor`/`'guard`-qualified instance ──
-
-    /// A kernel struct instance dispatched via `kernel:` is launched through
-    /// `__boring_launch(mut self, ...)` — it needs direct, exclusive ownership on
-    /// the host side. `'shared`/`'actor`(`'task`)/`'guard`(`'task`) wrap the value in
-    /// `Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock`, none of which the generated dispatch
-    /// code knows how to unwrap; nothing previously rejected this combination at
-    /// compile time (see `docs/cuda-module.md`'s "Known limitations").
-    fn qualifier_name_for_kernel_dispatch(&self, ty: &Type) -> Option<&'static str> {
-        match ty {
-            Type::Qualified(_, OwnerQual::Shared)    => Some("'shared"),
-            Type::Qualified(_, OwnerQual::Actor)     => Some("'actor"),
-            Type::Qualified(_, OwnerQual::ActorTask) => Some("'actor'task"),
-            Type::Qualified(_, OwnerQual::Guard)     => Some("'guard"),
-            Type::Qualified(_, OwnerQual::GuardTask) => Some("'guard'task"),
-            Type::Qualified(inner, _) => self.qualifier_name_for_kernel_dispatch(inner),
-            _ => None,
-        }
-    }
-
-    fn check_kernel_dispatch_qualifier(&mut self, kernel: &Expr, line: usize, col: usize) {
-        let ExprKind::Var(name) = &kernel.kind else { return };
-        let Some(binding) = self.lookup(name) else { return };
-        if binding.kernel_type.is_none() { return; }
-        let Some(ty) = &binding.ty else { return };
-        if let Some(qual) = self.qualifier_name_for_kernel_dispatch(ty) {
-            self.error(
-                format!(
-                    "cannot dispatch `{name}` via `kernel:` — it is `{qual}`-qualified; \
-                     kernel dispatch needs direct, exclusive ownership, not a shared/actor/guard \
-                     wrapper, so declare `{name}` without a wrapping qualifier"
-                ),
-                line, col,
-            );
         }
     }
 
@@ -906,42 +738,6 @@ impl Checker {
             Item::Kernel(k) => self.check_kernel_decl(k),
             Item::Trait(t)  => self.check_trait(t),
             Item::Use(_) | Item::Alias(_) => {}
-        }
-    }
-
-    // ── Kernel field types: `LabeledArray` shape ────────────────────────────────
-    //
-    // Deliberately narrow: only `Type::labeled_array_shape_error` on each field's
-    // declared type. Not gated behind `kernel_dispatch_only` — this must fire for
-    // every real target (`boring run`, `boring build`, and `--target
-    // cuda`/`rocm`/`metal`/`wgpu` via `check_kernel_dispatch_only`), unlike this
-    // checker's other rules, which are `boring run`/`boring build`-only. Kernel
-    // bodies (methods/inits) are intentionally not walked here — that's
-    // unrelated, pre-existing scope this pass has never covered, and adding it
-    // isn't this check's job.
-
-    fn check_kernel_decl(&mut self, k: &KernelDecl) {
-        for field in &k.fields {
-            if let Some(msg) = field.ty.labeled_array_shape_error() {
-                self.error(msg, field.line, field.col);
-            }
-            // Axis-count cap is kernel-field-specific (GPU thread.x/y/z), not a
-            // property of the type itself — CPU-side labeled arrays are unbounded
-            // (docs/array-multidim-proposal.md, "Generalizing beyond 3 axes"), so
-            // this lives here rather than inside labeled_array_shape_error.
-            if let Some((_, axes)) = field.ty.as_labeled_array() {
-                if axes.len() > 3 {
-                    self.error(
-                        format!(
-                            "kernel fields support at most 3 axes (GPU thread.x/y/z) — \
-                             got {} ({})",
-                            axes.len(),
-                            axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", "),
-                        ),
-                        field.line, field.col,
-                    );
-                }
-            }
         }
     }
 
@@ -1126,6 +922,7 @@ impl Checker {
             self.define_typed(&p.name, kind, p.ty.clone());
             if let Some(def) = &p.default { self.check_expr(def); }
         }
+        self.check_dead_code(&init.body);
         for stmt in &init.body { self.check_stmt(stmt); }
         self.pop_scope();
     }
@@ -1138,6 +935,7 @@ impl Checker {
         self.check_set_mut_constraint(&Some(sd.param_ty.clone()), sd.line, sd.col);
         self.check_atomic_compatibility(&Some(sd.param_ty.clone()), sd.line, sd.col);
         self.define_typed(&sd.param_name, BindingKind::Let, Some(sd.param_ty.clone()));
+        self.check_dead_code(&sd.body);
         for stmt in &sd.body { self.check_stmt(stmt); }
         self.pop_scope();
     }
@@ -1146,6 +944,7 @@ impl Checker {
     /// the body was never walked. No parameters (the conversion body only
     /// sees `self`, already in scope via the enclosing struct/enum/ext).
     fn check_as_decl(&mut self, conv: &AsDecl) {
+        self.check_dead_code(&conv.body);
         for stmt in &conv.body { self.check_stmt(stmt); }
     }
 
@@ -1175,9 +974,166 @@ impl Checker {
             self.check_atomic_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
+        self.check_dead_code(&f.body);
         for stmt in &f.body { self.check_stmt(stmt); }
         self.in_authorized_static_site = prev_static_site;
         self.pop_scope();
+        self.check_missing_return(f);
+    }
+
+    // ── Missing return on some path ─────────────────────────────────────────────
+    //
+    // Universal to Boring's own control-flow model: a function that declares a
+    // return type must produce a value on every path, independent of how (or
+    // whether) the target language enforces that on its own. Today this exact
+    // gap surfaces very differently per backend for the exact same bug: a
+    // path-dependent runtime `RuntimeError` in `boring run` — only if the buggy
+    // path actually executes, see `interpreter::call::call_fn_inner`'s
+    // `value_matches_type` check — or a guaranteed but unfriendly rustc
+    // E0317/E0308 in `boring build --emit-rust` (`emit_if` computes
+    // `use_value_body` without requiring the tail `if` to have an `else` at
+    // all — see `transpiler::emit_match`). This check surfaces it once,
+    // uniformly, at the real Boring source line, before either backend sees it.
+    //
+    // Deliberately permissive/optimistic wherever true exhaustiveness can't be
+    // proven from AST shape alone (see `stmt_settles`'s own doc comment) —
+    // getting it wrong in the "assume it's fine" direction only costs a missed
+    // detection here (match/enum exhaustiveness is a separate, not-yet-written
+    // check); getting it wrong in the other direction would warn on correct
+    // code, which this check must never do. A non-fatal warning for the same
+    // reason — shipped conservatively pending more real-world exposure before
+    // ever being considered for promotion to a hard error.
+    //
+    // Scope: `FnDecl` only (free functions, struct/enum methods, trait default
+    // methods — everything that already routes through `check_fn`). Not yet
+    // extended to `TypeMethod`/`AsDecl`, which have the same "must produce a
+    // value" shape but weren't worth the extra surface for a first version.
+    // Skips `f.is_native` (the body is a placeholder — the real implementation
+    // lives in the runtime) and `f.stream` (produces values via `yield` over
+    // time, not `return`/a tail expression — a completion model this check
+    // doesn't model at all).
+    fn check_missing_return(&mut self, f: &FnDecl) {
+        if self.kernel_dispatch_only { return; }
+        if f.is_native || f.stream { return; }
+        // The parser defaults an omitted return type to `Some(Type::Void)`, not
+        // `None` (see `parse_fn.rs`'s `return_ty.or(Some(Type::Void))`) — `None`
+        // only occurs on a different, narrower parse path. Both spellings of
+        // "no return value" must be excluded here.
+        match &f.return_ty {
+            None | Some(Type::Void) => return,
+            _ => {}
+        }
+        if block_settles(&f.body, true) { return; }
+        self.warning(
+            format!(
+                "function '{}' declares a return type but not every path returns a value \
+                 — `boring build` may fail to compile the generated Rust, or `boring run` may \
+                 raise a runtime type error, only on whichever path falls through",
+                f.name,
+            ),
+            f.line, f.col,
+        );
+    }
+
+    // ── Function-call arity / labeled-argument validation ───────────────────────
+    //
+    // Universal to Boring's own call semantics — labeled arguments, defaults,
+    // and variadics are Boring language features with a meaning independent of
+    // any backend (docs/book.md's "Labeled arguments" / "Default parameters" /
+    // "Advanced — Variadic parameters"); a wrong-arity or bad-label call is
+    // wrong regardless of target. Today this is checked nowhere for a plain
+    // function call: extra positional arguments and unknown labels are
+    // silently dropped by both `boring run` (`interpreter::call::
+    // call_fn_inner`'s best-effort binding) and `boring build`
+    // (`transpiler::emit_methods::emit_args_coerced`), and a missing required
+    // argument surfaces only as a misleading runtime "expected T, got Nil"
+    // error, or — worse — a raw rustc E0061, or a literal `/* missing arg */`
+    // comment injected straight into the generated Rust (a downstream parse
+    // error). This check surfaces the four unambiguous, purely structural
+    // cases — unknown label, an argument bound twice, too many positional
+    // arguments, a missing required argument — at the real call site, before
+    // either backend sees it. A non-fatal warning for now, same as
+    // `check_missing_return`: shipped conservatively pending more real-world
+    // exposure before ever being considered for promotion to a hard error.
+    //
+    // Scoped to plain function calls only (`ExprKind::Call(Var(name), _)`) —
+    // method calls need the receiver's static type to resolve overloads, which
+    // this checker doesn't reliably have (`Binding.ty` is best-effort). Two
+    // guards keep this check from ever guessing:
+    //   - `fn_overloaded`: Boring allows overloading by parameter *type*,
+    //     resolved by the real argument types at the call site
+    //     (docs/book.md's "Function overloading") — this checker has no type
+    //     inference to pick the right overload, so a name with more than one
+    //     declaration is skipped entirely, mirroring `struct_ctor_owned`'s
+    //     identical "more than one `init` -> skip" precedent for the same
+    //     kind of ambiguity.
+    //   - `self.lookup(name)`: a local binding shadowing a global function
+    //     name (a closure or function-typed variable/parameter) is called
+    //     through the exact same `ExprKind::Call(Var(name), _)` shape — if
+    //     `name` resolves to a local variable at all, this bails out rather
+    //     than risk checking the call against the wrong (global) signature.
+    // A spread/default-rest argument (`..expr`/bare `_`) is a struct-
+    // construction-only feature (see `Arg`'s own doc comment) that shouldn't
+    // reach a plain function call at all; if one somehow does, this bails out
+    // rather than guess what it means here.
+    fn check_call_arity(&mut self, callee: &Expr, args: &[Arg], line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        let ExprKind::Var(name) = &callee.kind else { return };
+        if self.fn_overloaded.contains(name.as_str()) { return; }
+        if self.lookup(name).is_some() { return; }
+        // Cloned rather than borrowed: every branch below needs `&mut self`
+        // (via `self.warning`), which a live borrow of `self.fn_arity` would
+        // otherwise conflict with.
+        let Some(arity) = self.fn_arity.get(name.as_str()).cloned() else { return };
+        if args.iter().any(|a| a.spread || a.default_rest) { return; }
+
+        let n_pos = args.iter().filter(|a| a.label.is_none()).count();
+
+        if arity.variadic.is_none() && n_pos > arity.param_names.len() {
+            self.warning(
+                format!(
+                    "too many positional arguments in call to '{}': expected at most {}, got {}",
+                    name, arity.param_names.len(), n_pos,
+                ),
+                line, col,
+            );
+            // Positional overflow alone already makes every position-based
+            // conclusion below unreliable — stop rather than pile on a second,
+            // less useful diagnostic about the same call.
+            return;
+        }
+
+        let mut bound = vec![false; arity.param_names.len()];
+        for slot in bound.iter_mut().take(n_pos) { *slot = true; }
+
+        for a in args {
+            let Some(label) = &a.label else { continue };
+            if arity.variadic.as_deref() == Some(label.as_str()) { continue; }
+            match arity.param_names.iter().position(|n| n == label) {
+                None => {
+                    self.warning(
+                        format!("unknown labeled argument '{}' in call to '{}'", label, name),
+                        line, col,
+                    );
+                }
+                Some(p) if bound[p] => {
+                    self.warning(
+                        format!("argument '{}' is bound twice in call to '{}'", label, name),
+                        line, col,
+                    );
+                }
+                Some(p) => bound[p] = true,
+            }
+        }
+
+        for (i, pname) in arity.param_names.iter().enumerate() {
+            if !bound[i] && !arity.has_default[i] {
+                self.warning(
+                    format!("missing required argument '{}' in call to '{}'", pname, name),
+                    line, col,
+                );
+            }
+        }
     }
 
     // ── Statements ────────────────────────────────────────────────────────────
@@ -1249,7 +1205,10 @@ impl Checker {
             Stmt::Enum(e)      => self.check_enum(e),
             Stmt::Mod(m)       => { for i in &m.items { self.check_item(i); } }
             Stmt::Continue(_) | Stmt::Alias(_) | Stmt::Comment(_) => {}
-            Stmt::KernelBlock(s) => { for stmt in &s.body { self.check_stmt(stmt); } }
+            Stmt::KernelBlock(s) => {
+                self.check_dead_code(&s.body);
+                for stmt in &s.body { self.check_stmt(stmt); }
+            }
             Stmt::With(s) => self.check_with_stmt(s),
         }
     }
@@ -1370,8 +1329,119 @@ impl Checker {
         }
     }
 
+    // ── Match exhaustiveness (`bool` / optional subjects) ───────────────────────
+    //
+    // Universal to Boring's own control-flow model: a non-exhaustive match
+    // silently no-ops as a statement (`interpreter::exec::exec_match` falls
+    // through and returns `Ok(())`) or silently evaluates to `Nil` as an
+    // expression (`interpreter::eval_expr::eval_match_expr`) in `boring run`,
+    // and raises rustc E0004 in `boring build` — a real behavioral divergence
+    // between the two backends for the same bug (see
+    // docs/design-notes/checker-portability-draft.md's match-exhaustiveness
+    // section). Scoped to the two subject shapes this checker can verify
+    // without real type inference — a subject statically known to be `bool`
+    // (a boolean literal, a comparison/logical/identity expression, or a
+    // `Var` whose declared type is `bool`) or an optional (`T?`, a `Var` whose
+    // declared type is `Type::Optional`). Full user-declared enum
+    // exhaustiveness needs a variant-list registry this checker doesn't have
+    // yet — deliberately not attempted here, see the same design-notes
+    // section for why.
+    //
+    // An arm with a `guard` clause never counts toward covering its
+    // pattern(s) — the guard may reject it at runtime, exactly like real
+    // Rust's own match-guard semantics (a guarded arm alone never satisfies
+    // rustc's exhaustiveness check either). A guard-free `Pattern::Wildcard`/
+    // `Pattern::Bind(_)` anywhere covers every remaining case unconditionally
+    // — deliberately not required to be the *last* arm, since this checker
+    // has no reachability analysis and reachability of earlier arms isn't
+    // this check's job.
+    fn check_match_exhaustiveness(&mut self, m: &MatchStmt) {
+        if self.kernel_dispatch_only { return; }
+        match self.static_bool_or_optional_subject(&m.subject) {
+            Some(true) => self.check_bool_match_exhaustiveness(m),
+            Some(false) => self.check_optional_match_exhaustiveness(m),
+            None => {}
+        }
+    }
+
+    /// `Some(true)` for a subject statically known to be `bool`, `Some(false)`
+    /// for one statically known to be an optional (`T?`), `None` when this
+    /// checker can't tell (not a type-checker — best-effort, same limitation
+    /// as `Binding.ty` elsewhere in this file).
+    fn static_bool_or_optional_subject(&self, expr: &Expr) -> Option<bool> {
+        match &expr.kind {
+            ExprKind::Bool(_) => Some(true),
+            ExprKind::BinOp(op, _, _) if matches!(op,
+                BinOp::Eq | BinOp::NotEq | BinOp::RefEq | BinOp::Lt | BinOp::Gt
+                | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or
+                | BinOp::Is | BinOp::IsNot) => Some(true),
+            ExprKind::UnaryOp(UnaryOp::Not, _) => Some(true),
+            ExprKind::Var(name) => {
+                let ty = self.lookup(name)?.ty.as_ref()?.without_mut();
+                match ty {
+                    Type::Bool => Some(true),
+                    Type::Named(n) if n == "bool" => Some(true),
+                    Type::Optional(_) => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn check_bool_match_exhaustiveness(&mut self, m: &MatchStmt) {
+        let (mut has_true, mut has_false, mut has_wild) = (false, false, false);
+        for arm in &m.arms {
+            if arm.guard.is_some() { continue; }
+            for pat in &arm.patterns {
+                match pat {
+                    Pattern::Lit(LitPattern::Bool(true))  => has_true = true,
+                    Pattern::Lit(LitPattern::Bool(false)) => has_false = true,
+                    Pattern::Wildcard | Pattern::Bind(_)  => has_wild = true,
+                    _ => {}
+                }
+            }
+        }
+        if has_wild || (has_true && has_false) { return; }
+        let missing = match (has_true, has_false) {
+            (true, false) => "false",
+            (false, true) => "true",
+            _ => "true and false",
+        };
+        self.warning(
+            format!("non-exhaustive match over `bool`: missing case `{}`", missing),
+            m.line, m.col,
+        );
+    }
+
+    fn check_optional_match_exhaustiveness(&mut self, m: &MatchStmt) {
+        let (mut has_some, mut has_none, mut has_wild) = (false, false, false);
+        for arm in &m.arms {
+            if arm.guard.is_some() { continue; }
+            for pat in &arm.patterns {
+                match pat {
+                    Pattern::Some(_)                     => has_some = true,
+                    Pattern::None                         => has_none = true,
+                    Pattern::Wildcard | Pattern::Bind(_)  => has_wild = true,
+                    _ => {}
+                }
+            }
+        }
+        if has_wild || (has_some && has_none) { return; }
+        let missing = match (has_some, has_none) {
+            (true, false) => "nil",
+            (false, true) => "a present value",
+            _ => "a present value and nil",
+        };
+        self.warning(
+            format!("non-exhaustive match over an optional: missing case `{}`", missing),
+            m.line, m.col,
+        );
+    }
+
     fn check_match_stmt(&mut self, s: &MatchStmt) {
         self.check_expr(&s.subject);
+        self.check_match_exhaustiveness(s);
         for arm in &s.arms {
             if let Some(g) = &arm.guard { self.check_expr(g); }
             self.push_scope();
@@ -1391,13 +1461,84 @@ impl Checker {
     // ── Block helpers ─────────────────────────────────────────────────────────
 
     fn check_block(&mut self, stmts: &[Stmt]) {
+        self.check_dead_code(stmts);
         self.push_scope();
         for stmt in stmts { self.check_stmt(stmt); }
         self.pop_scope();
     }
 
     fn check_block_in_current_scope(&mut self, stmts: &[Stmt]) {
+        self.check_dead_code(stmts);
         for stmt in stmts { self.check_stmt(stmt); }
+    }
+
+    // ── Dead / unreachable code ─────────────────────────────────────────────────
+    //
+    // Universal to Boring's own control-flow model, not a Rust artifact: a
+    // statement that structurally can never run is a real bug (or at best a
+    // leftover) regardless of target language. Purely structural — no type
+    // inference needed, see `stmt_always_exits`'s own doc comment for exactly
+    // what is and isn't recognized as "always exits". A non-fatal warning
+    // (`Checker::warning`, previously a ready-but-unused extension point — see
+    // its own doc comment) rather than a hard error: unlike e.g. the
+    // `'owned`-use-after-move check, dead code doesn't by itself make a Boring
+    // program fail to run or transpile, so this stays advisory. Called from
+    // `check_block`/`check_block_in_current_scope` (covering every nested
+    // block — if/elif/else branches, loop bodies, match-arm blocks, `try`/
+    // `catch`/`guard`/`defer`/`with` bodies) plus every top-level body walk
+    // that doesn't route through either of those (`check_fn`, `check_init`,
+    // `check_set_decl`, `check_as_decl`, `Stmt::KernelBlock`).
+    fn check_dead_code(&mut self, stmts: &[Stmt]) {
+        if self.kernel_dispatch_only { return; }
+        for (i, stmt) in stmts.iter().enumerate() {
+            if stmt_always_exits(stmt) {
+                if let Some(next) = stmts.get(i + 1) {
+                    let (line, col) = stmt_line_col(next);
+                    // `while true:`/`do...while true:` are dead-in-Boring-semantics the
+                    // same way a bare `loop:` with no break is (see `stmt_settles`), but
+                    // unlike `loop:` — which the transpiler lowers straight to a Rust
+                    // `loop { }` that rustc itself recognizes as diverging (`!`) — a Boring
+                    // `while true:` transpiles to a literal Rust `while true { }`, which
+                    // rustc's own divergence analysis never gives the `!` treatment to
+                    // regardless of the condition (a well-known Rust quirk); a `do...while`
+                    // lowers to `loop { ...; if !(cond) { break; } }`, so it always carries
+                    // a syntactic `break` rustc sees, denying `!` there too. So today,
+                    // deleting the dead statement after one of these two forms specifically
+                    // would currently break `boring build`, even though the statement never
+                    // runs — confirmed against real code: scratch-boring's
+                    // `interpreter.br` keeps exactly such a trailing fallback with a comment
+                    // explaining this exact tradeoff. Say so, rather than giving advice that
+                    // would regress a real `boring build`.
+                    let caveat = match stmt {
+                        Stmt::While(w) if is_literal_true(&w.condition) => Some(
+                            "; note: unlike a bare `loop:`, today's transpiler lowers `while \
+                             true:` to a literal Rust `while true { }`, which rustc does not \
+                             recognize as diverging — removing this statement may currently \
+                             break `boring build` even though it never runs",
+                        ),
+                        Stmt::DoWhile(d) if is_literal_true(&d.condition) => Some(
+                            "; note: today's transpiler's `do...while` lowering always emits a \
+                             Rust `break`, so rustc does not recognize this loop as diverging \
+                             either — removing this statement may currently break `boring \
+                             build` even though it never runs",
+                        ),
+                        _ => None,
+                    };
+                    self.warning(
+                        format!(
+                            "unreachable code: control flow can never reach this statement — \
+                             the statement above it always returns, throws, breaks, or \
+                             continues{}",
+                            caveat.unwrap_or(""),
+                        ),
+                        line, col,
+                    );
+                }
+                // One warning per dead-code region is enough — don't cascade a
+                // warning for every further statement in the same now-dead tail.
+                return;
+            }
+        }
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────
@@ -1456,6 +1597,7 @@ impl Checker {
                 // call sites -- they parse as an ordinary `Call`, confirmed by
                 // grepping every parser file for `KernelLaunch` construction (none).
                 self.check_kernel_dispatch_qualifier(callee, expr.line, expr.col);
+                self.check_call_arity(callee, args, expr.line, expr.col);
                 // A resident value passed as a bare argument at a position the callee
                 // is known to consume residently (`fn_gpu_arg_params`, populated by
                 // `scan_fn_gpu_arg_params`) is legal without `with` first — that's the
@@ -1669,184 +1811,168 @@ impl Checker {
         // requires type information not yet available at this pass.
     }
 
-    // ── `with` scoped-access blocks ─────────────────────────────────────────────
-    // See docs/scoped-access-blocks.md. Two things are checked here (both target-
-    // independent, so they fire under `boring run` too, not just `boring build`):
-    //   - nesting a `with` block on the same name inside itself (double-acquire);
-    //   - using a `'gpu'unified`/`'gpu'global` value's host-materializing operations
-    //     (indexing, `.length`, iteration, string interpolation) outside a `with`
-    //     wrapper that opens it.
-    // The two-step read/write access scan itself (`with_block_mutates` in ast::mod)
-    // doesn't produce an error here — nothing about a block's chosen access level is
-    // ever illegal — it's consumed by the transpiler at `with` codegen time to pick
-    // map-for-read vs map-for-read-write / a shared vs exclusive lock.
-
-    fn check_with_stmt(&mut self, s: &WithStmt) {
-        let mut newly_opened = Vec::new();
-        for name in &s.names {
-            if self.open_with_names.contains(name.as_str()) {
-                if !self.kernel_dispatch_only {
-                    self.error(
-                        format!("nested `with {name}:` block on the same name is not allowed (double-acquire)"),
-                        s.line, s.col,
-                    );
-                }
-            } else {
-                // `'atomic` bindings have no lock/guard object to hold across a scoped
-                // critical section — every access is already a single, independent
-                // atomic operation (load/store/fetch_add/...), so `with x: ...` on an
-                // `'atomic`-qualified `x` is a hard compile error, not a silent
-                // fallback to per-access codegen. See docs/qualifiers.md's `'atomic`
-                // section, "with-block incompatibility".
-                if self.lookup(name).and_then(|b| b.ty.as_ref()).is_some_and(Self::type_is_atomic_qualified) {
-                    self.error(
-                        format!(
-                            "cannot use `with {name}:` — `{name}` is `'atomic`-qualified; atomics have no \
-                             lock/guard object to hold across a scoped block (each access is already a single, \
-                             independent atomic operation) — remove the `with` wrapper and access `{name}` directly"
-                        ),
-                        s.line, s.col,
-                    );
-                }
-                self.open_with_names.insert(name.clone());
-                newly_opened.push(name.clone());
-            }
-        }
-        self.check_block(&s.body);
-        for name in &newly_opened { self.open_with_names.remove(name); }
-    }
-
-    fn type_is_atomic_qualified(ty: &Type) -> bool {
-        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Atomic))
-    }
-
-    /// If `name` is a `'gpu'unified`/`'gpu'global` binding sourced from a bare
-    /// kernel-field read (`resident_from_field` — see `Binding`) and isn't currently
-    /// open in an enclosing `with` block, records a compile error: any use at all
-    /// (indexing, `.length`, iteration, string interpolation, passed as an argument,
-    /// ...) requires a `with` wrapper first. A `'gpu'unified`/`'gpu'global` binding
-    /// that is just a plain array (not sourced from a kernel field) is unrestricted —
-    /// see `examples/saxpy.br`.
-    fn check_gpu_opacity(&mut self, name: &str, line: usize, col: usize) {
-        if self.kernel_dispatch_only { return; }
-        if self.open_with_names.contains(name) { return; }
-        let Some(binding) = self.lookup(name) else { return };
-        if !binding.resident_from_field { return; }
-        let Some(ty) = &binding.ty else { return };
-        if ty.gpu_resident_qual().is_some() {
-            self.error(
-                format!("`{name}` is GPU-resident (sourced from a kernel field) and cannot be used outside a `with {name}:` block"),
-                line, col,
-            );
-        }
-    }
-
-    // ── Use-after-move: committed-`'owned` struct-constructor arguments ────────
-    //
-    // Scope note: `'owned` (`Box<T>`) is the one qualifier where Boring's normal
-    // "everything is passed by reference, the caller keeps ownership" model
-    // (docs/book.md's parameter-passing rules) doesn't hold outright — but even
-    // there, only ONE call shape is a genuine, exclusive Rust move: a struct
-    // *constructor* call storing the argument straight into an `'owned` field
-    // (`Holder(ac)`, `init(...)`'s body doing `oc = c`, or the implicit
-    // all-fields constructor when there's no explicit `init` at all) — the field
-    // is the value's new, sole, longer-lived owner, so the source variable is
-    // gone for good (confirmed empirically against a clean `main` checkout:
-    // `boring build --emit-rust` + `cargo build` on `let h1 = Holder(ac); let h2
-    // = Holder(ac)` fails with a raw `E0382`, pointing at *generated* code the
-    // user never wrote, not the actual Boring source line — this check moves
-    // that diagnostic to the real source line, before the Rust step ever runs).
-    //
-    // A PLAIN FUNCTION CALL to an `'owned` parameter is deliberately NOT a move
-    // source, even though the parameter itself is `Param.owned` too — see
-    // `tests/cases/owned_call_arg_no_double_box.br`'s own header comment: unless
-    // that parameter is also `mut`/`var`, the transpiler clones the box at the
-    // call site instead of moving it (`bump(ac.clone())`), specifically so the
-    // caller's variable stays usable afterward — reusing it is correct,
-    // documented, tested behavior, not a bug. Treating every `'owned` function
-    // parameter as a move (this check's first draft did) is a confirmed false
-    // positive against that exact, already-passing regression test — a real
-    // lesson from building this feature, not a hypothetical: the mere fact that
-    // a Rust `Box<T>` gets passed somewhere doesn't by itself mean Boring's own
-    // ownership model treats it as consumed; only construction genuinely does.
-    //
-    // What's covered: an argument that is a bare local variable (`ExprKind::Var`),
-    // passed positionally or by label, to a struct-constructor call, at an
-    // init-param/field position this checker can statically resolve to committed
-    // `'owned` (`struct_ctor_owned` — reusing `Param.owned`'s exact predicate,
-    // `Type::Qualified(_, OwnerQual::Owned)`). Once moved, *any* subsequent read
-    // of that name — a call argument (to a function OR another constructor), a
-    // method-call receiver, a field access, a bare mention in an expression — is
-    // flagged, because every one of those bottoms out at the same
-    // `ExprKind::Var` leaf `check_expr` already visits (see
-    // `check_gpu_opacity`'s identical shape).
-    //
-    // What's NOT covered (documented gaps, not silent unsoundness — this never
-    // produces a false positive on legal code, only misses some illegal code):
-    //   - `'new` (`T'new`, or `new Ctor()`) — a candidate-set qualifier that only
-    //     *becomes* `Owned` after the transpiler's own per-usage inference
-    //     (`infer_qualifiers.rs`) runs, which happens well after this checker.
-    //     Duplicating that inference here would be a much larger project;
-    //     `'new` values are silently skipped rather than guessed at.
-    //   - A method-call argument (`obj.method(ac)`) — this checker doesn't track
-    //     per-struct method parameter ownership.
-    //   - Anything that isn't straight-line code in the *same* block: a move in
-    //     one `if`/`match` branch followed by a reuse after the branch, a reuse
-    //     across a loop's iterations, a move inside a closure — see `moved`'s own
-    //     doc comment for why (each nested block gets its own fresh move-frame).
-    //   - A spread (`..expr`) or `_` (default-rest) constructor argument is never
-    //     treated as a move source — matching those back to a specific field
-    //     needs more than positional/label matching.
-    //   - A struct with more than one `init` overload is skipped entirely
-    //     (ambiguous which one a given call resolves to without real overload
-    //     resolution) — see `struct_ctor_owned`'s own doc.
-
-    /// Records `name` as moved-away in the *current* (innermost) move-frame only
-    /// — see `moved`'s doc comment for why this is deliberately not visible to
-    /// an enclosing or sibling block.
-    fn record_move(&mut self, name: &str, line: usize, col: usize) {
-        if self.kernel_dispatch_only { return; }
-        if let Some(frame) = self.moved.last_mut() {
-            frame.insert(name.to_string(), (line, col));
-        }
-    }
-
-    /// If `name` was already moved in the current move-frame, a compile error:
-    /// a value can only be moved once. See this section's header comment for
-    /// exactly what is and isn't caught.
-    fn check_move_read(&mut self, name: &str, line: usize, col: usize) {
-        if self.kernel_dispatch_only { return; }
-        if self.moved.last().and_then(|f| f.get(name)).is_some() {
-            self.error(
-                format!(
-                    "`{name}` was already moved (passed to an owned parameter) here; \
-                     a value can only be moved once — clone it explicitly first if you \
-                     need to use it again"
-                ),
-                line, col,
-            );
-        }
-    }
-
-    /// Is the init-param/field at `callee`'s constructor-argument position
-    /// `index` (or, for a labeled argument, named `label`) committed `'owned`?
-    /// `callee` must be a bare `Var` naming a known, unambiguous struct
-    /// constructor (`struct_ctor_owned`) — anything else (a plain function call
-    /// — deliberately not a move source, see this section's header comment — a
-    /// method call, an unknown/overloaded struct name, a computed callee)
-    /// returns `false`, matching this check's best-effort, never-false-positive
-    /// design.
-    fn owned_target_for_arg(&self, callee: &Expr, index: usize, label: Option<&str>) -> bool {
-        let ExprKind::Var(name) = &callee.kind else { return false };
-        let Some(params) = self.struct_ctor_owned.get(name.as_str()) else { return false };
-        if let Some(label) = label {
-            return params.iter().find(|(n, _)| n == label).map(|(_, o)| *o).unwrap_or(false);
-        }
-        params.get(index).map(|(_, o)| *o).unwrap_or(false)
-    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// ── Control-flow terminator analysis (dead code + missing return) ────────────
+//
+// Shared by `check_dead_code` and `check_missing_return` — see both functions'
+// own doc comments for how each one uses this and why it's deliberately
+// conservative in opposite directions for the two (never claim dead code that
+// might not be; never claim a missing return that might actually be covered).
+
+/// Does `stmt`, when reached, unconditionally leave the enclosing block —
+/// `return`/`throw`/`break`/`continue`, a fully-covered `if`/`if let`/`match`
+/// whose every branch itself always exits, or a `loop`/`while true`/
+/// `do...while true` with no `break` at its own nesting level (a deeper
+/// nested loop's own `break` doesn't count — see `loop_body_has_own_break`)?
+/// Purely structural, no type inference. Thin wrapper over `stmt_settles`
+/// with `tail == false` — see that function's doc comment for the shared
+/// engine and the exhaustiveness caveat.
+fn stmt_always_exits(stmt: &Stmt) -> bool {
+    stmt_settles(stmt, false)
+}
+
+/// Shared engine behind `stmt_always_exits` (dead-code detection, `tail ==
+/// false` everywhere) and `check_missing_return` (`tail == true` only for the
+/// statement in a function body's own tail position, propagated down into the
+/// tail position of each branch of a tail `if`/`if let`/`match`, mirroring
+/// Boring's own implicit-tail-expression-return sugar — see book.md's
+/// `int add(int a, int b): a + b`). `tail` is what lets a bare `Stmt::Expr`
+/// count as "produces the function's return value" only when it's genuinely
+/// the last thing that runs — mid-block, a bare expression statement settles
+/// nothing (its value, if any, is simply discarded).
+///
+/// Deliberately does NOT require a `match`'s arms/guards, or an `if`/`if let`
+/// chain, to be *provably* exhaustive beyond "there is an `else`" — proving
+/// real exhaustiveness needs type information this checker doesn't reliably
+/// have (see docs/design-notes/checker-portability-draft.md's match-
+/// exhaustiveness section) and isn't either of these checks' job. Assuming the
+/// arms/branches as written already cover every real case is the deliberately
+/// optimistic default: for `check_dead_code` it only costs a missed detection
+/// (a false negative — fine); for `check_missing_return` it's what keeps that
+/// check from false-positiving on ordinary, correct pattern matches (a false
+/// positive there would warn on correct code, which it must never do).
+fn stmt_settles(stmt: &Stmt, tail: bool) -> bool {
+    match stmt {
+        Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(_, _) | Stmt::Continue(_) => true,
+        Stmt::Expr(_) => tail,
+        Stmt::If(s) => {
+            s.else_body.is_some()
+                && s.branches.iter().all(|(_, body)| block_settles(body, tail))
+                && block_settles(s.else_body.as_ref().unwrap(), tail)
+        }
+        Stmt::IfLet(s) => {
+            s.else_body.is_some()
+                && block_settles(&s.then_body, tail)
+                && s.elif_branches.iter().all(|b| block_settles(&b.body, tail))
+                && block_settles(s.else_body.as_ref().unwrap(), tail)
+        }
+        Stmt::Match(s) => {
+            !s.arms.is_empty()
+                && s.arms.iter().all(|arm| match &arm.body {
+                    MatchBody::Block(stmts) => block_settles(stmts, tail),
+                    MatchBody::Expr(_) => tail,
+                })
+        }
+        Stmt::Loop(l) => !loop_body_has_own_break(&l.body),
+        Stmt::While(w) if is_literal_true(&w.condition) => !loop_body_has_own_break(&w.body),
+        Stmt::DoWhile(d) if is_literal_true(&d.condition) => !loop_body_has_own_break(&d.body),
+        _ => false,
+    }
+}
+
+/// Does this statement list, run start to end, always settle (per
+/// `stmt_settles`) before falling off its own end? Any non-tail statement that
+/// settles makes the whole list settle (whatever follows never runs); the
+/// list's own last statement is checked with the caller's `tail` flag, so a
+/// tail call into an empty block (e.g. a `match` arm with no body — not
+/// possible today — or a genuinely empty function body) correctly reports
+/// `false`, matching that an empty body can never satisfy a declared
+/// non-void return type.
+fn block_settles(stmts: &[Stmt], tail: bool) -> bool {
+    match stmts.split_last() {
+        None => false,
+        Some((last, init)) => init.iter().any(|s| stmt_settles(s, false)) || stmt_settles(last, tail),
+    }
+}
+
+fn is_literal_true(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::Bool(true))
+}
+
+/// Does `stmts` contain a `break` that targets THIS loop specifically — i.e.
+/// found without crossing into a nested loop's own body first? Boring's
+/// `Stmt::Break` carries no loop label (`Stmt::Break(usize, Option<Expr>)` —
+/// the `usize` is a line number, not a label, confirmed against every existing
+/// call site), so any break found this way unambiguously belongs to the loop
+/// being scanned, and any break inside a nested loop unambiguously doesn't —
+/// this is exact, not an approximation. Used only to decide whether a bare
+/// `loop:`/`while true:`/`do...while true:` can fall through by breaking, for
+/// `stmt_settles`'s purposes.
+fn loop_body_has_own_break(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Break(_, _) => true,
+        Stmt::If(s) => s.branches.iter().any(|(_, body)| loop_body_has_own_break(body))
+            || s.else_body.as_ref().is_some_and(|b| loop_body_has_own_break(b)),
+        Stmt::IfLet(s) => loop_body_has_own_break(&s.then_body)
+            || s.elif_branches.iter().any(|b| loop_body_has_own_break(&b.body))
+            || s.else_body.as_ref().is_some_and(|b| loop_body_has_own_break(b)),
+        Stmt::Match(s) => s.arms.iter().any(|arm| match &arm.body {
+            MatchBody::Block(stmts) => loop_body_has_own_break(stmts),
+            MatchBody::Expr(_) => false,
+        }),
+        Stmt::Try(t) => loop_body_has_own_break(&t.body)
+            || t.catch_clauses.iter().any(|c| loop_body_has_own_break(&c.body)),
+        Stmt::Guard(g) => loop_body_has_own_break(&g.else_body),
+        Stmt::Defer(body) => loop_body_has_own_break(body),
+        Stmt::KernelBlock(s) => loop_body_has_own_break(&s.body),
+        Stmt::With(s) => loop_body_has_own_break(&s.body),
+        // A nested loop's own `break` targets that loop, never this one — its
+        // body is deliberately not scanned.
+        Stmt::While(_) | Stmt::WhileLet(_) | Stmt::DoWhile(_) | Stmt::Loop(_) | Stmt::For(_) => false,
+        _ => false,
+    })
+}
+
+/// Best-effort line/col for an arbitrary `Stmt`, used only to place the
+/// dead-code warning's caret. Mirrors `transpiler::wgpu::host::stmt_line_col`
+/// (duplicated rather than shared — the checker doesn't depend on the
+/// transpiler, an explicit design boundary elsewhere in this file).
+/// `Stmt::Comment`/`Stmt::Defer` carry no position of their own; `(0, 0)`
+/// matches `SourceError::at_line`'s "position unknown" convention.
+fn stmt_line_col(stmt: &Stmt) -> (usize, usize) {
+    match stmt {
+        Stmt::Let(s) => (s.line, s.col),
+        Stmt::LetDestructure(s) => (s.line, s.col),
+        Stmt::Return(s) => (s.line, s.col),
+        Stmt::Break(line, _) => (*line, 0),
+        Stmt::Continue(line) => (*line, 0),
+        Stmt::Throw(s) => (s.line, s.col),
+        Stmt::If(s) => (s.line, s.col),
+        Stmt::IfLet(s) => (s.line, s.col),
+        Stmt::Match(s) => (s.line, s.col),
+        Stmt::While(s) => (s.line, s.col),
+        Stmt::WhileLet(s) => (s.line, s.col),
+        Stmt::DoWhile(s) => (s.line, s.col),
+        Stmt::Loop(s) => (s.line, s.col),
+        Stmt::Wait(e, line) => (*line, e.col),
+        Stmt::For(s) => (s.line, s.col),
+        Stmt::Guard(s) => (s.line, s.col),
+        Stmt::Try(s) => (s.line, s.col),
+        Stmt::Expr(e) => (e.line, e.col),
+        Stmt::Fn(s) => (s.line, s.col),
+        Stmt::Struct(s) => (s.line, s.col),
+        Stmt::Enum(s) => (s.line, s.col),
+        Stmt::Mod(s) => (s.line, s.col),
+        Stmt::Alias(s) => (s.line, s.col),
+        Stmt::Yield(e, line) => (*line, e.col),
+        Stmt::KernelBlock(s) => (s.line, s.col),
+        Stmt::With(s) => (s.line, s.col),
+        Stmt::Defer(_) | Stmt::Comment(_) => (0, 0),
+    }
+}
 
 /// Does `expr` look like a bare kernel-field read (`k.field`)? Purely syntactic —
 /// the checker doesn't track which names are kernel instances (that's transpiler
@@ -2408,5 +2534,319 @@ mod check_stmt_depth_tests {
             msgs.iter().any(|m| m.contains("nested too deeply")),
             "expected a 'nested too deeply' checker error, got {msgs:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod dead_code_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn warnings_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).warnings.into_iter().map(|w| w.message).collect()
+    }
+
+    #[test]
+    fn code_after_unconditional_return_is_flagged() {
+        let src = "def void f():\n    return\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("unreachable")), "expected an unreachable-code warning, got {warns:?}");
+    }
+
+    #[test]
+    fn code_after_if_else_both_returning_is_flagged() {
+        let src = "def void f(bool cond):\n    if cond:\n        return\n    else:\n        return\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("unreachable")), "expected an unreachable-code warning, got {warns:?}");
+    }
+
+    #[test]
+    fn code_after_if_with_no_else_is_not_flagged() {
+        // No `else` — the "fall through without returning" path is real, so
+        // whatever follows is genuinely reachable.
+        let src = "def void f(bool cond):\n    if cond:\n        return\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().all(|w| !w.contains("unreachable")), "expected no unreachable-code warning, got {warns:?}");
+    }
+
+    #[test]
+    fn code_after_plain_conditional_while_is_not_flagged() {
+        let src = "def void f(bool cond):\n    while cond:\n        print \"loop\"\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().all(|w| !w.contains("unreachable")), "expected no unreachable-code warning, got {warns:?}");
+    }
+
+    #[test]
+    fn code_after_infinite_loop_with_no_break_is_flagged_without_caveat() {
+        let src = "def void f():\n    loop:\n        return\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("unreachable") && !w.contains("while true")), "expected a plain unreachable-code warning, got {warns:?}");
+    }
+
+    #[test]
+    fn code_after_while_true_with_no_break_is_flagged_with_transpiler_caveat() {
+        // Real-world-validated case (boring's own self-hosted interpreter and
+        // scratch-boring both keep this exact trailing statement on purpose) —
+        // see `check_dead_code`'s own doc comment for why the message must
+        // call this out rather than suggest an unqualified deletion.
+        let src = "def bool f():\n    while true:\n        return true\n    false\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("unreachable") && w.contains("while true")), "expected an unreachable-code warning with the while-true caveat, got {warns:?}");
+    }
+
+    #[test]
+    fn break_inside_loop_prevents_flagging_code_after_it() {
+        let src = "def void f(bool cond):\n    loop:\n        if cond:\n            break\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().all(|w| !w.contains("unreachable")), "expected no unreachable-code warning, got {warns:?}");
+    }
+
+    #[test]
+    fn nested_loop_break_does_not_count_for_the_outer_loop() {
+        // The inner `while true:`'s own `break` belongs to the inner loop, not
+        // the outer bare `loop:` — the outer loop still never falls through on
+        // its own, so code after IT is still genuinely unreachable.
+        let src = "def void f():\n    loop:\n        while true:\n            break\n    print \"after\"\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("unreachable")), "expected an unreachable-code warning, got {warns:?}");
+    }
+}
+
+#[cfg(test)]
+mod missing_return_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn warnings_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).warnings.into_iter().map(|w| w.message).collect()
+    }
+
+    fn has_missing_return_warning(warns: &[String]) -> bool {
+        warns.iter().any(|w| w.contains("not every path returns a value"))
+    }
+
+    #[test]
+    fn tail_expression_counts_as_implicit_return() {
+        let src = "int add(int a, int b):\n    a + b\n";
+        let warns = warnings_for(src);
+        assert!(!has_missing_return_warning(&warns), "expected no missing-return warning, got {warns:?}");
+    }
+
+    #[test]
+    fn if_else_both_branches_returning_counts_as_return() {
+        let src = "def int f(bool cond):\n    if cond:\n        return 1\n    else:\n        return 2\n";
+        let warns = warnings_for(src);
+        assert!(!has_missing_return_warning(&warns), "expected no missing-return warning, got {warns:?}");
+    }
+
+    #[test]
+    fn if_with_no_else_in_tail_position_is_flagged() {
+        let src = "def int f(bool cond):\n    if cond:\n        return 1\n";
+        let warns = warnings_for(src);
+        assert!(has_missing_return_warning(&warns), "expected a missing-return warning, got {warns:?}");
+    }
+
+    #[test]
+    fn match_with_every_arm_returning_counts_as_return() {
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef float f(Shape s):\n    match s:\n        Circle(r):\n            return r\n        Rect(w, h):\n            return w * h\n";
+        let warns = warnings_for(src);
+        assert!(!has_missing_return_warning(&warns), "expected no missing-return warning, got {warns:?}");
+    }
+
+    #[test]
+    fn plain_let_as_last_statement_is_flagged() {
+        let src = "def int f():\n    let x = 1\n";
+        let warns = warnings_for(src);
+        assert!(has_missing_return_warning(&warns), "expected a missing-return warning, got {warns:?}");
+    }
+
+    #[test]
+    fn void_function_is_never_flagged() {
+        let src = "def void f():\n    let x = 1\n";
+        let warns = warnings_for(src);
+        assert!(!has_missing_return_warning(&warns), "expected no missing-return warning on a void function, got {warns:?}");
+    }
+
+    #[test]
+    fn no_return_type_at_all_is_never_flagged() {
+        let src = "def f():\n    let x = 1\n";
+        let warns = warnings_for(src);
+        assert!(!has_missing_return_warning(&warns), "expected no missing-return warning with no declared return type, got {warns:?}");
+    }
+
+    #[test]
+    fn trailing_infinite_loop_with_no_break_counts_as_return() {
+        // Same idiom validated against real code in `dead_code_tests` — a
+        // `loop:` with no break never falls through, so it satisfies "every
+        // path returns" even with no trailing value after it.
+        let src = "def int f():\n    loop:\n        return 1\n";
+        let warns = warnings_for(src);
+        assert!(!has_missing_return_warning(&warns), "expected no missing-return warning, got {warns:?}");
+    }
+}
+
+#[cfg(test)]
+mod call_arity_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn warnings_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).warnings.into_iter().map(|w| w.message).collect()
+    }
+
+    #[test]
+    fn missing_required_argument_is_flagged() {
+        // The real-world regression this check closes — see
+        // tests/cases/error_variadic_too_few_args.br and
+        // tests/variadic_arity_no_panic.rs's own header comment: this exact
+        // call shape used to reach the transpiler unvalidated and panic it.
+        let src = "def void greet(string name, string tags...):\n    print name\ngreet()\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("missing required argument") && w.contains("name")), "expected a missing-argument warning, got {warns:?}");
+    }
+
+    #[test]
+    fn too_many_positional_arguments_is_flagged() {
+        let src = "def void f(int a):\n    print \"{a}\"\ndef main():\n    f(1, 2)\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("too many positional arguments")), "expected a too-many-arguments warning, got {warns:?}");
+    }
+
+    #[test]
+    fn unknown_labeled_argument_is_flagged() {
+        let src = "def void greet(string name):\n    print name\ndef main():\n    greet(namee = \"Bob\")\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("unknown labeled argument")), "expected an unknown-label warning, got {warns:?}");
+    }
+
+    #[test]
+    fn argument_bound_both_positionally_and_by_label_is_flagged() {
+        let src = "def void greet(string name):\n    print name\ndef main():\n    greet(\"Alice\", name = \"Bob\")\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().any(|w| w.contains("bound twice")), "expected a bound-twice warning, got {warns:?}");
+    }
+
+    #[test]
+    fn correct_positional_call_is_not_flagged() {
+        let src = "string greet(string name, string greeting):\n    \"{greeting}, {name}!\"\ndef main():\n    greet(\"Alice\", \"Hello\")\n";
+        let warns = warnings_for(src);
+        assert!(warns.is_empty(), "expected no warnings, got {warns:?}");
+    }
+
+    #[test]
+    fn labels_out_of_declaration_order_are_not_flagged() {
+        // book.md's own "Labeled arguments" example.
+        let src = "string greet(string name, string greeting):\n    \"{greeting}, {name}!\"\ndef main():\n    greet(greeting = \"Hi\", name = \"Bob\")\n";
+        let warns = warnings_for(src);
+        assert!(warns.is_empty(), "expected no warnings, got {warns:?}");
+    }
+
+    #[test]
+    fn omitting_a_defaulted_parameter_is_not_flagged() {
+        let src = "string say(string msg = \"hi\"):\n    msg\ndef main():\n    say()\n";
+        let warns = warnings_for(src);
+        assert!(warns.is_empty(), "expected no warnings, got {warns:?}");
+    }
+
+    #[test]
+    fn variadic_absorbs_any_number_of_extra_positional_arguments() {
+        let src = "int sum(int values...):\n    var total = 0\n    for v in values:\n        total = total + v\n    total\ndef main():\n    sum(1, 2, 3, 4, 5)\n";
+        let warns = warnings_for(src);
+        assert!(warns.is_empty(), "expected no warnings, got {warns:?}");
+    }
+
+    #[test]
+    fn overloaded_function_name_is_never_checked() {
+        // Real overload resolution needs argument *types* this checker
+        // doesn't infer — skip entirely rather than guess which declaration
+        // a given call resolves to (docs/book.md's "Function overloading").
+        let src = "string describe(int n):\n    \"{n}\"\nstring describe(string s, string extra):\n    \"{s}{extra}\"\ndef main():\n    describe(1, 2, 3)\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().all(|w| !w.contains("positional") && !w.contains("argument")), "expected no arity warning on an overloaded name, got {warns:?}");
+    }
+
+    #[test]
+    fn local_variable_shadowing_a_function_name_is_never_checked() {
+        // `f` here is a local closure-typed binding, not the global function
+        // `f` — calling it with a different arity than the global `f`'s
+        // signature must not be checked against that unrelated signature.
+        let src = "def void f(int a):\n    print \"{a}\"\ndef main():\n    let f = (): print \"local\"\n    f()\n";
+        let warns = warnings_for(src);
+        assert!(warns.iter().all(|w| !w.contains("positional") && !w.contains("argument")), "expected no arity warning on a shadowed name, got {warns:?}");
+    }
+}
+
+#[cfg(test)]
+mod match_exhaustiveness_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn warnings_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).warnings.into_iter().map(|w| w.message).collect()
+    }
+
+    fn has_exhaustiveness_warning(warns: &[String]) -> bool {
+        warns.iter().any(|w| w.contains("non-exhaustive match"))
+    }
+
+    #[test]
+    fn bool_match_missing_false_is_flagged() {
+        let src = "def string f(bool flag):\n    match flag:\n        true: \"yes\"\ndef main():\n    print f(true)\n";
+        let warns = warnings_for(src);
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+    }
+
+    #[test]
+    fn bool_match_covering_both_cases_is_not_flagged() {
+        let src = "def string f(bool flag):\n    match flag:\n        true: \"yes\"\n        false: \"no\"\ndef main():\n    print f(true)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn bool_match_with_wildcard_is_not_flagged() {
+        let src = "def string f(bool flag):\n    match flag:\n        true: \"yes\"\n        _: \"no\"\ndef main():\n    print f(true)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn optional_match_missing_none_is_flagged() {
+        let src = "def string f(int? n):\n    match n:\n        Some(v): \"{v}\"\ndef main():\n    print f(5)\n";
+        let warns = warnings_for(src);
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+    }
+
+    #[test]
+    fn optional_match_covering_both_cases_is_not_flagged() {
+        let src = "def string f(int? n):\n    match n:\n        Some(v): \"{v}\"\n        None: \"nothing\"\ndef main():\n    print f(5)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn guarded_arm_does_not_count_toward_coverage() {
+        // A guarded `true` arm may reject at runtime — a plain `false` arm
+        // alongside it still leaves `true` uncovered, exactly like real
+        // Rust's own match-guard semantics.
+        let src = "def string f(bool flag):\n    match flag:\n        true if flag: \"yes\"\n        false: \"no\"\ndef main():\n    print f(true)\n";
+        let warns = warnings_for(src);
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+    }
+
+    #[test]
+    fn unresolvable_subject_type_is_never_flagged() {
+        // No static-annotation signal at all — this checker doesn't guess.
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef string f(Shape s):\n    match s:\n        Circle(r): \"{r}\"\ndef main():\n    print f(Shape.Circle(1.0))\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning on an unresolvable (non-bool/non-optional) subject, got {warns:?}");
     }
 }
