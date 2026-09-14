@@ -1,0 +1,23 @@
+# Trailing array-block sugar: control-flow case with `for` -- one push per
+# iteration, desugared into the same imperative `Vec` builder as `if`.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let names = ["a", "b", "c"]
+    let c = Column:
+        Text("head")
+        for name in names:
+            Text(name)
+    print c.label()
+    print c.children[1].label()
+    print c.children[3].label()

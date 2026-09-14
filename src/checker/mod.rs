@@ -1710,6 +1710,18 @@ impl Checker {
                 self.check_expr(inner);
                 self.check_relabel_cast(inner, pairs, expr.line, expr.col);
             }
+            // Resolved and rewritten away by `desugar_array_block` right after
+            // parsing, before this checker ever runs (see
+            // `ExprKind::TrailingArrayBlock`'s own doc comment) — recursed into
+            // defensively anyway, same as `RelabelCast` above, so undefined-var/
+            // GPU-opacity checks still see every sub-expression if this is ever
+            // reached on a not-yet-desugared program. `body` is a plain
+            // `Vec<Stmt>` (same shape as `Block`/`Do`), so it reuses `check_block`.
+            ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+                self.check_expr(callee);
+                for a in args { self.check_expr(&a.value); }
+                self.check_block(body);
+            }
             ExprKind::Tuple(elems) => { for e in elems { self.check_expr(e); } }
             ExprKind::Dict(pairs)  => {
                 for (k, v) in pairs { self.check_expr(k); self.check_expr(v); }

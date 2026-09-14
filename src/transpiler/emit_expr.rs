@@ -585,7 +585,22 @@ impl Transpiler {
                 // complex statements (for loops, if, etc.) are rendered correctly.
                 // Do not inherit `in_throws` from the parent: the block's last expression
                 // is not a Result — it's the block's value, not a function return.
+                //
+                // `fn_returns_void`/`suppress_ok_wrap` must also NOT be inherited —
+                // `emit_body`'s tail-statement handling (`emit_stmt(stmt, is_last)`)
+                // consults `fn_returns_void` to decide whether the last plain-expression
+                // statement keeps its value (no trailing `;`) or is treated as a void
+                // side effect (semicolon added, block evaluates to `()`). `Do` documents
+                // itself as "last expression is the value" exactly like `Match`/`If` used
+                // as expressions, which already reset these two flags on their own
+                // sub-emitter for the same reason (see the `ExprKind::Match` arm above) —
+                // without this, `let x = do: ...complex stmt...; tail_expr` silently
+                // evaluated to `()` instead of `tail_expr` whenever the *enclosing*
+                // function happened to be void (e.g. `fn main()`), since the sub-emitter
+                // otherwise inherited that void-ness from `self.make_sub()`.
                 let mut sub = self.make_sub();
+                sub.fn_returns_void = false;
+                sub.suppress_ok_wrap = true;
                 sub.in_throws = false;
                 sub.emit_body(stmts);
                 format!("{{\n{}}}", sub.out)
@@ -613,6 +628,13 @@ impl Transpiler {
             // pass was skipped, an internal compiler bug.
             ExprKind::LabeledIndex(..) | ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
                 panic!("labeled multi-dim array expression reached codegen without being desugared first")
+            }
+            // Lowered away by `desugar_array_block` before codegen ever runs (see
+            // docs/book.md, "Trailing array-block sugar", and
+            // `ExprKind::TrailingArrayBlock`'s own doc comment) — reaching one here
+            // means that pass was skipped, an internal compiler bug.
+            ExprKind::TrailingArrayBlock { .. } => {
+                panic!("trailing array-block sugar reached codegen without being desugared first")
             }
         }
     }

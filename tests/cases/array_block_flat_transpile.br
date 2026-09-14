@@ -1,0 +1,38 @@
+# Trailing array-block sugar, flat case, real `rustc`-build guard (see
+# tests/transpile.rs's registration comment). Calls a struct constructor
+# whose last field is `[dyn Trait]`.
+#
+# An empty `@derive()` (omitting the `Debug`/`Clone`/`PartialEq` every
+# struct/enum with no explicit `@derive` at all otherwise gets automatically
+# — docs/book.md, "Advanced — derive-trait whitelist") works around a
+# pre-existing, unrelated transpiler gap filed separately: a `[Trait]`-typed
+# field always failed to compile under that automatic derive set (`dyn
+# Trait` implements none of `Debug`/`Clone`/`PartialEq` here). Also avoids a `for`
+# loop directly over the `[Trait]` field externally (a second, also
+# pre-existing and also separately filed transpiler gap: still uses
+# `.iter().cloned()` there) -- uses `.length`/indexing instead, which both
+# already work for a `[Trait]` field.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Button as Widget:
+    string caption
+    req string label(): "[{self.caption}]"
+
+@derive()
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let c = Column:
+        Text("hello")
+        Button("ok")
+    print c.label()
+    print c.children[0].label()
+    print c.children[1].label()

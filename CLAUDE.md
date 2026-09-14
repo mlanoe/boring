@@ -205,6 +205,23 @@ md["x"] = 99     # insert
 md["a"] = 100    # update
 ```
 
+## Trailing array-block sugar
+
+When a callee's last parameter is `[dyn Trait]` (a trait-object array — see "Traits as types" in book.md), a bare call name followed by `:` and an indented one-item-per-line block desugars to that trailing array argument (generalizes trailing closures, which key off `Fn(...)`-typed last params instead):
+
+```boring
+Column:
+    Text("{count}")
+    if show_details:
+        Text("more info")     # if/elif/else and for are allowed as lines
+    for item in items:
+        Text("{item}")
+```
+
+desugars to `Column([Text(...), ...])` (no `if`/`for`) or an imperative `Vec` builder (`if`/`for` present). Nesting works (a line that's itself another `Foo:` call resolves independently). No chaining after the block — pass modifiers as labeled args before the colon: `Column(spacing = 8): ...`.
+
+This shares its exact `Ident ":"` token shape with the pre-existing no-paren closure shorthand (`n: n * 2`) and, in its parenthesized form, with the pre-existing zero-arg trailing-body sugar (`timeout(...): body`) — disambiguated **by resolving the callee** against this file's own declarations, not by casing: last param `[dyn Trait]` → this sugar (a concrete `[T]` last param is a compile error, never silently misapplied); last param `Fn(...)`, or not a known callable at all *with* an explicit `(...)` argument list → the ordinary trailing-closure sugar (tail semantics); not a known callable and *no* parentheses at all → the closure-literal shorthand, unchanged. See [book.md](docs/book.md#trailing-array-block-sugar) for the full decision table.
+
 ## Project structure
 
 ```sh

@@ -1,0 +1,28 @@
+# Trailing array-block sugar: resolution redesign. `WithLog` is an
+# UPPERCASE-led callee (deliberately, to prove the fix) whose last
+# parameter is `Fn(...)`-typed, invoked via the bare block form with no
+# explicit `(params)`. Under the old uppercase-led casing gate, this would
+# have been forced into the array-block/collect interpretation and
+# rejected (`Fn(...)` isn't `[dyn Trait]`) -- the exact misrouting bug this
+# redesign fixes. It must instead resolve to the ordinary, pre-existing
+# trailing-closure sugar (tail semantics): exactly as if written
+# `WithLog((): body)`.
+#
+# Uses an explicit `def` (rather than the bare `int WithLog(...):` return-
+# type-first shorthand) -- an uppercase-led bare-shorthand function name
+# combined with a typed parameter hits a separate, pre-existing parser bug
+# unrelated to this feature (reproduces with e.g. `int WithLog(int x): x`,
+# same failure without any array-block/closure syntax involved at all);
+# not this task's to fix (see this crate's final report).
+
+def int WithLog(int action()):
+    print "before"
+    let r = action()
+    print "after"
+    r
+
+def main():
+    let r = WithLog:
+        print "doing work"
+        42
+    print r

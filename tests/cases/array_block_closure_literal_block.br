@@ -1,0 +1,14 @@
+# Regression: the pre-existing bare no-paren closure-literal shorthand,
+# MULTI-LINE block form (`x:` followed by an indented block), must still
+# work exactly as before when `x` is not a declared callable at all --
+# this is the resolution redesign's row-4 fallback (see
+# src/desugar_array_block.rs's module doc comment). Uses a `let` inside
+# the block to prove the body is parsed with the fully general statement
+# grammar (not a restricted "one collectible item per line" grammar)
+# regardless of which interpretation it ends up resolving to.
+
+def main():
+    let f = n:
+        let doubled = n * 2
+        doubled + 1
+    print f(5)

@@ -1,0 +1,28 @@
+# Regression: the pre-existing trailing-closure sugar (last param `Fn(...)`)
+# must keep working completely unaffected, including its lowercase no-paren
+# form (`n: n * 2`) -- which shares the exact `Ident Colon` token shape the
+# new, uppercase-gated trailing array-block sugar deliberately avoids
+# colliding with (see src/parser/parse_array_block.rs's module doc comment).
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let numbers = [1, 2, 3]
+    let doubled = numbers.map n: n * 2
+    print doubled
+
+    let doubled2 = numbers.map (x): x * 2
+    print doubled2
+
+    let c = Column:
+        Text("a")
+    print c.label()

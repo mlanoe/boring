@@ -489,6 +489,24 @@ impl KernelValidator {
                 if let Some(e) = end   { self.check_expr(e); }
             }
 
+            // Trailing array-block sugar (`Column:` / `Column(...):`), if resolved to
+            // collect semantics, means a `[dyn Trait]` last parameter (see
+            // docs/book.md, "Trailing array-block sugar") — `Box<dyn Trait>` dynamic
+            // dispatch needs `alloc` and a vtable this `no_std` kernel-module backend
+            // doesn't provide, same reasoning as the `KernelLaunch` rejection above.
+            // In practice `desugar_array_block` has already rewritten every instance
+            // of this node into a plain `Call`/`Do`/`Closure` before this validator
+            // ever runs (see `ExprKind::TrailingArrayBlock`'s own doc comment), so
+            // this arm is defense in depth, not a reachable path today — it rejects
+            // unconditionally rather than trying to guess the (already-gone)
+            // resolution outcome.
+            ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+                self.error(line, "trailing array-block sugar (dynamic dispatch) is not supported in kernel context (no heap allocation in a Rust-for-Linux module)");
+                self.check_expr(callee);
+                for a in args { self.check_expr(&a.value); }
+                for s in body { self.check_stmt(s); }
+            }
+
             // Leaf kinds — nothing to recurse into
             ExprKind::Int(_)
             | ExprKind::UInt64(_)

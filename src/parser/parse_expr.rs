@@ -866,8 +866,24 @@ impl Parser {
                     expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), line, col, len: self.span_len(line, col)};
                 }
                 TokenKind::LParen => {
-                    // Check for trailing closure FIRST before trying to parse as regular call
-                    if self.peek_is_trailing_closure() {
+                    // Trailing array-block sugar, parenthesized-args form:
+                    // `Column(spacing = 8):` followed by a real indented block. No
+                    // longer gated on the callee's casing — see
+                    // `parse_array_block.rs`'s module doc comment: which meaning this
+                    // ultimately has (collect / ordinary trailing closure / error) is
+                    // decided later, by `desugar_array_block`, once it can resolve the
+                    // callee. Only checked when what follows the matching `)` is `:`
+                    // then a newline (never a same-line inline body, which stays the
+                    // existing trailing-closure/trailing-body sugars unchanged). Must
+                    // be checked before `peek_is_trailing_closure()` below: `Column():`
+                    // would otherwise match that (an empty closure-param list) and be
+                    // swallowed as a zero-arg trailing closure instead.
+                    let is_block_array_candidate = matches!(&expr.kind, ExprKind::Var(_));
+                    if is_block_array_candidate && self.peek_is_block_array_call_after_parens() {
+                        let args = self.parse_call_args()?;
+                        expr = self.parse_array_block_tail(expr, args, true, line, col)?;
+                    } else if self.peek_is_trailing_closure() {
+                        // Check for trailing closure FIRST before trying to parse as regular call
                         let args = self.parse_trailing_closure(vec![])?;
                         seen_trailing_closure = true;
                         expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line, col, len: self.span_len(line, col)};
@@ -1551,6 +1567,25 @@ impl Parser {
                         vec![]
                     };
                     return Ok(Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col)});
+                }
+                // Trailing array-block sugar, bare (no-parens) form: `Column:` followed
+                // by a real indented block. This shares its exact token shape
+                // (`Ident Colon` then a real indented block) with the pre-existing
+                // no-paren closure shorthand just below — no longer disambiguated by
+                // the callee's casing (see `parse_array_block.rs`'s module doc
+                // comment): this always parses into the same generic, provisional
+                // node, and `desugar_array_block` decides afterwards — by resolving
+                // `name` against this file's own signature table — whether it means
+                // collecting into a `[dyn Trait]` array, an ordinary trailing closure,
+                // or (when `name` isn't a known callable at all) the closure literal
+                // this shorthand always meant before. Checked before that shorthand
+                // unconditionally: only the *multi-line block* shape (`Colon` then
+                // `Newline`) is ambiguous this way — `n: n * 2` on one line is
+                // untouched, handled by the unconditional fallback right below.
+                if self.peek_is_bare_block_array_call() {
+                    self.advance(); // consume ident
+                    let callee = Expr { kind: ExprKind::Var(name), line, col, len: self.span_len(line, col) };
+                    return self.parse_array_block_tail(callee, vec![], false, line, col);
                 }
                 // Single-param closure without parens: `x: body`
                 // Only when allow_noparen_closure is set — disabled in condition contexts

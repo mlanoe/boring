@@ -462,8 +462,18 @@ impl Transpiler {
             .map(|t| t.without_mut().clone());
         let is_borrowed_collection_field = self_field_ty.as_ref()
             .is_some_and(|t| matches!(t, Type::Dict(..) | Type::Array(_) | Type::Set(_)));
+        // `[Trait]` field (`Vec<Box<dyn Trait>>`, docs/book.md "Traits as types") reached
+        // through a field access (`some_struct_value.field`, including bare `self.field`) —
+        // same non-`Clone` reasoning as the local-variable exception below (`Box<dyn Trait>`
+        // has no object-safe blanket `Clone` impl), so this must be carved out of the
+        // generic `is_borrowed_collection_field` array/set/dict handling just below (which
+        // would otherwise emit `.iter().cloned()` — a hard compile error, E0277) and borrow
+        // instead, exactly like the local-variable case.
+        let is_trait_array_field = self_field_ty.as_ref().is_some_and(|t| matches!(t,
+            Type::Array(elem) if matches!(elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))));
         let iter_expr = match &s.iterable.kind {
             ExprKind::Range { .. } => iter,
+            _ if is_trait_array_field => format!("&{}", iter),
             _ if is_borrowed_collection_field => match &self_field_ty {
                 // Single var over a dict binds the key only (docs/book.md's "`for` over a
                 // dict" rule) — `.keys().cloned()` matches that arity directly.
@@ -494,12 +504,24 @@ impl Transpiler {
             // above, but `.into_iter()` would consume the collection — borrow instead
             // (`&{iter}`) so the loop var is `&Box<dyn Trait>` (auto-derefs to `&dyn
             // Trait` for method calls) and the source collection stays reusable.
+            // A `[Trait]`-typed function/method PARAMETER (as opposed to a local `let`/`var`
+            // binding) is already emitted as a reference in the generated signature —
+            // `&Vec<Box<dyn Trait>>` (see `emit_param`: arrays are always passed by
+            // reference, docs/book.md "Traits as types" / CLAUDE.md's parameter-passing
+            // table) — so `iter` here already names a reference. Wrapping it in another
+            // `&` would double the borrow (`&&Vec<Box<dyn Trait>>`), which fails to iterate
+            // as `Box<dyn Trait>` items the same way `&Vec<Box<dyn Trait>>` does. Only a
+            // local variable (an owned `Vec<Box<dyn Trait>>`) needs the explicit `&`.
             ExprKind::Var(v) if self.known_local_vars.contains(v.as_str())
                 && (s.vars.len() <= 1 || needs_auto_enumerate)
                 && matches!(self.resolve_iterable_type(&s.iterable),
                     Some(Type::Array(elem)) if matches!(elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) =>
             {
-                format!("&{}", iter)
+                if self.fn_current_params.contains_key(v.as_str()) {
+                    iter
+                } else {
+                    format!("&{}", iter)
+                }
             }
             ExprKind::Var(v) if self.known_local_vars.contains(v.as_str())
                 && (s.vars.len() <= 1 || needs_auto_enumerate)

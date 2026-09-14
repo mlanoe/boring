@@ -1,0 +1,46 @@
+# Regression: a multiline trailing closure/trailing body (docs/book.md,
+# "Closures" section) used as a bare expression-statement (not the RHS of a
+# `let`/`var`, not a `return` value) used to fail to parse when followed by
+# another statement in the same block, with "expected newline, got <token>".
+#
+# `parse_trailing_closure`/`parse_trailing_closure_no_paren` (in
+# src/parser/parse_expr.rs) recurse into `parse_block` for a multiline
+# (`ClosureBody::Block`) body, which consumes that block's own `Indent`, its
+# statements, and its closing `Dedent` -- so by the time they return, the
+# token stream sits right after that `Dedent`, not at a pending `Newline`.
+# `parse_stmt`'s default arm (src/parser/parse_stmt.rs) used to call the
+# strict `expect_newline()` unconditionally for every expression statement,
+# which choked on being positioned at the next statement's first token
+# instead. The exact same shape parsed fine as a `let`'s RHS, since `let`'s
+# own statement-termination check is already tolerant of this.
+#
+# Method calls (`recv.method (params): body`) are used here rather than bare
+# calls (`f(args): body`) because a bare call shares its token shape with the
+# trailing array-block sugar (docs/book.md, "Trailing array-block sugar"),
+# whose own pre-existing tolerant check (`ExprKind::TrailingArrayBlock`)
+# already covers that shape -- method calls exercise the fix on its own, via
+# `ends_with_multiline_trailing_closure` in src/parser/parse_stmt.rs.
+
+struct Runner:
+    req run(Fn() f):
+        f()
+
+    req each(Fn(int) f):
+        f(1)
+        f(2)
+
+def main():
+    let r = Runner()
+    print "start"
+
+    r.run ():
+        print "hi"
+    print "done"
+
+    r.each (n):
+        print "n={n}"
+    print "each done"
+
+    r.each n:
+        print "square={n * n}"
+    print "no-paren done"

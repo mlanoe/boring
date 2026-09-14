@@ -372,6 +372,28 @@ transpile_test!(trait_type_level_methods);
 // against, which already worked). See tests/cases/trait_dynamic_dispatch.br's own
 // doc comment.
 transpile_test!(trait_dynamic_dispatch);
+
+// `do: ...` used as a value (`let x = do: ...`) whose body contains a `for`
+// loop must evaluate to its tail expression, not silently degrade to `()`
+// — see tests/cases/do_expr_value_for_loop.br's own doc comment. Found and
+// fixed (`src/transpiler/emit_expr.rs`'s `ExprKind::Do` arm) while
+// implementing the trailing array-block sugar below, which relies on this.
+transpile_test!(do_expr_value_for_loop);
+
+// Trailing array-block sugar (docs/book.md, "Trailing array-block sugar") —
+// real `rustc`-build guard for both the flat (plain array-literal) and
+// control-flow (imperative `Vec` builder + `.push()` boxing) desugarings.
+// Deliberately callee = a free function, not a struct constructor: a struct
+// with a `[Trait]`-typed field hits a *pre-existing*, unrelated transpiler
+// gap (an unconditional `#[derive(Clone, PartialEq)]` that doesn't compile
+// for `dyn Trait` — see tests/cases/array_block_flat_transpile.br's own doc
+// comment and this crate's PR description for the filed follow-up). The
+// other array_block_* cases (nested, if, labeled-args, the wrong-type
+// negative test) are interpreter-only (tests/run.rs) — they exercise the
+// same desugaring paths already covered here in real Rust, so a full 4-way
+// rustc build per case would be redundant.
+transpile_test!(array_block_flat_transpile);
+transpile_test!(array_block_for_transpile);
 transpile_test!(numeric);
 transpile_test!(uint_int_cross_eq);
 transpile_test!(float_width_cross_eq);

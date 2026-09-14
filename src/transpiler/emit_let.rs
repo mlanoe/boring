@@ -1669,7 +1669,7 @@ impl Transpiler {
     /// already known to produce a `Box<dyn Trait>` value: a variable whose own declared
     /// type is the same trait (already boxed by this same rule at its own `let`), or an
     /// expression that already emitted a `Box::new(...)` wrapper.
-    fn box_if_trait_typed(&self, value: &Expr, trait_name: &str) -> String {
+    pub(crate) fn box_if_trait_typed(&self, value: &Expr, trait_name: &str) -> String {
         if let ExprKind::Var(v) = &value.kind {
             if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
                 if n.as_str() == trait_name {

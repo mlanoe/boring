@@ -751,7 +751,56 @@ arg             ::= (IDENT "=")? expr      # labeled or positional
                                             # Mutually exclusive with `..spread`; every other arg in
                                             # the same call must be labeled (`field = expr`).
 
+# ── Trailing array-block sugar ────────────────────────────────────────────────
+#
+# Generalizes the trailing-closure sugar above to a trailing `[dyn Trait]`
+# array argument: when the callee's last parameter type resolves to `[dyn
+# Trait]` (a declared `trait`, never a concrete `[T]` — see checker), a bare
+# call name (optionally with labeled args) followed by `:` and a real
+# indented block desugars to that trailing array argument. See docs/book.md,
+# "Trailing array-block sugar", for the full semantics (flat vs.
+# control-flow desugaring) and its complete resolution decision table.
+#
+#   Column:                          → Column([Text(...), Row([...])])
+#       Text("{count}")
+#       Row:
+#           Button("-")
+#
+#   Column(spacing = 8):              → Column(spacing = 8, [...])
+#       Text("a")
+#
+# Grammatically, `ambiguous_colon_block` below is indistinguishable from the
+# no-paren closure shorthand's `IDENT ":" fn_body` shape just above (bare
+# form) and from the zero-arg trailing-body sugar's `IDENT "(" arg_list? ")"
+# ":" fn_body` shape (parenthesized form) — plain IDENT is used here (not a
+# casing-restricted token class), because which of the two a given
+# `ambiguous_colon_block` actually is is NOT decided by this grammar at all.
+# It is a semantic resolution, made after parsing, by looking `IDENT` up
+# against this file's own top-level declarations: last param `[dyn Trait]` →
+# array-block/collect; last param `Fn(...)`, or not a known callable at all
+# when written with an explicit (even empty) `(...)` argument list → the
+# ordinary trailing-closure sugar (tail semantics); not a known callable and
+# no parentheses at all → the no-paren closure-literal shorthand, unchanged;
+# anything else → a compile error. The block's contents are therefore
+# ordinary `stmt`s (the same general grammar as any closure/function body —
+# not a restricted "one array element per line" grammar), reinterpreted
+# (never re-parsed) once resolution is known.
+#
+# No chaining is allowed after the block (`.method()` immediately after) —
+# same restriction, same reason, as a multiline trailing closure; pass
+# "modifier" arguments as ordinary labeled arguments before the colon
+# instead. Only ever legal in expression position — never at statement/item
+# level, so it can't shadow `struct`/`enum`/`trait`/`match`/`if`/`for`/
+# `while`/function-declaration grammar.
+
+ambiguous_colon_block ::= IDENT ":" NEWLINE stmt_block
+                       | IDENT "(" arg_list? ")" ":" NEWLINE stmt_block
+
+stmt_block            ::= INDENT stmt+ DEDENT   # the same block grammar every
+                                                 # closure/function body already uses
+
 primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
+                  | ambiguous_colon_block  # checked before the plain IDENT/call alternatives below
                   | IDENT
                   | "." IDENT "(" arg_list? ")"   # leading-dot static method: .fromSecs(5) — type inferred
                   | "." IDENT                     # leading-dot enum/field shorthand: .Red, .North

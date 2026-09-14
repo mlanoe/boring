@@ -521,6 +521,14 @@ impl KernelTranspiler {
             ExprKind::LabeledIndex(..) | ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
                 panic!("labeled multi-dim array expression reached codegen without being desugared first")
             }
+            // Lowered away by `desugar_array_block` before codegen ever runs (see
+            // docs/book.md, "Trailing array-block sugar") — reaching one here means
+            // that pass was skipped, an internal compiler bug. Also simply not
+            // meaningful for this target: `Box<dyn Trait>` dynamic dispatch needs
+            // `alloc`/a vtable this `no_std` kernel-module backend doesn't provide.
+            ExprKind::TrailingArrayBlock { .. } => {
+                panic!("trailing array-block sugar reached kernel codegen without being desugared first")
+            }
         }
     }
 

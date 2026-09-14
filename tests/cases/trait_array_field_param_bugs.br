@@ -1,0 +1,23 @@
+trait Drawable:
+    req string label()
+
+struct Circle as Drawable:
+    float r
+    req string label(): "circle"
+
+struct Square as Drawable:
+    float s
+    req string label(): "square"
+
+struct Scene:
+    [Drawable] shapes
+
+def describeParam([Drawable] shapes):
+    for s in shapes:
+        print s.label()
+
+def main():
+    let scene = Scene(shapes = [Circle(r = 1.0), Square(s = 2.0)])
+    for s in scene.shapes:
+        print s.label()
+    describeParam(scene.shapes)

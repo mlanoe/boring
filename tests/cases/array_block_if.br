@@ -1,0 +1,31 @@
+# Trailing array-block sugar: control-flow case with if/elif/else -- desugars
+# to an imperative `Vec` builder (conditional push per branch) instead of a
+# plain array literal.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def build(int level):
+    let c = Column:
+        Text("head")
+        if level == 0:
+            Text("zero")
+        elif level == 1:
+            Text("one")
+        else:
+            Text("many")
+    print c.label()
+    print c.children[1].label()
+
+def main():
+    build(0)
+    build(1)
+    build(2)

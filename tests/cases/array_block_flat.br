@@ -1,0 +1,31 @@
+# Trailing array-block sugar (docs/book.md, "Trailing array-block sugar"):
+# a bare, uppercase-led call name followed by `:` and an indented
+# one-item-per-line block desugars to a trailing `[dyn Trait]` array
+# argument. Flat case: no `if`/`for` in the block -> plain array-literal
+# desugaring (`Column([Text(...), Text(...)])`).
+#
+# Widget/Text/Button/Column below are minimal throwaway fixtures purely to
+# exercise this language mechanism in isolation -- not a GUI stdlib.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Button as Widget:
+    string caption
+    req string label(): "[{self.caption}]"
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let c = Column:
+        Text("hello")
+        Button("ok")
+    print c.label()
+    print c.children[0].label()
+    print c.children[1].label()

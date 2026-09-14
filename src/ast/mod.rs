@@ -1053,6 +1053,72 @@ pub enum ExprKind {
     /// Rust macro invocation: `name!(args)`, `name![args]`, or `name!{args}`.
     /// The delimiter is irrelevant at the AST level.
     MacroCall { name: String, args: Vec<Expr> },
+
+    /// Trailing array-block sugar / trailing-colon-block, still unresolved:
+    /// `CallName[(args)]:` followed by an indented block, e.g.
+    /// ```boring
+    /// Column:
+    ///     Text("{count}")
+    ///     Row:
+    ///         Button("-").on_click(Message.Decrement)
+    /// ```
+    /// Only ever produced by the parser (see `Parser::parse_array_block_tail`)
+    /// when a bare call name is immediately followed by `:` and a real
+    /// indented block — see docs/book.md, "Trailing array-block sugar". This
+    /// node is deliberately generic/provisional: the same `Ident Colon
+    /// <indented block>` token shape is shared by (at least) four different
+    /// meanings — collecting into a `[dyn Trait]` array, an ordinary
+    /// zero-arg trailing closure (tail semantics), a compile error, or (when
+    /// `callee` isn't a known callable at all and `has_parens` is false) the
+    /// pre-existing no-paren closure-literal shorthand — and which one
+    /// applies depends on how `callee` *resolves*, not on how it's spelled.
+    /// `body` is therefore parsed with the fully general statement grammar
+    /// (`Parser::parse_block`, same as any closure/function body), not a
+    /// restricted "one array element per line" grammar — the block is
+    /// re-interpreted, never re-parsed, once resolution is known.
+    /// `has_parens` distinguishes the bare form (`Column:`, `foo:`) from the
+    /// parenthesized form (`Column():`, `Column(spacing = 8):`) — both parse
+    /// to the same token shape once the (possibly empty) argument list is
+    /// consumed, but only the bare form can ever mean a closure literal (a
+    /// closure literal's implicit parameter comes from `callee`'s own name;
+    /// a parenthesized, call-shaped site can never be reinterpreted as one).
+    /// `desugar_array_block::desugar_array_block` resolves and rewrites every
+    /// instance of this node into a plain `Call` (collect/tail case),
+    /// `Do` (collect + control-flow case), or `Closure` (closure-literal
+    /// case) right after parsing, before the checker, interpreter or
+    /// transpiler ever run — no other consumer should need to match on this
+    /// variant; if one does, this pass failed to eliminate it.
+    TrailingArrayBlock { callee: Box<Expr>, args: Vec<Arg>, has_parens: bool, body: Vec<Stmt> },
+}
+
+/// One line inside a resolved-as-collect `TrailingArrayBlock` — see that
+/// variant's doc comment and docs/book.md, "Trailing array-block sugar".
+/// Structurally a tiny, dedicated statement-like list (not `Stmt`) because it
+/// means something different: every leaf `Item` becomes one element of the
+/// desugared array, rather than a side-effecting statement whose value is
+/// discarded. Never produced by the parser directly — only
+/// `desugar_array_block` builds this, by converting a `TrailingArrayBlock`
+/// node's plain `Vec<Stmt>` body once resolution has determined the block
+/// collects into an array (see `desugar_array_block::stmt_to_array_block_elem`
+/// for that conversion, including the statement kinds it rejects).
+#[derive(Debug, Clone)]
+pub enum ArrayBlockElem {
+    /// A plain expression — becomes one array element.
+    Item(Expr),
+    /// `if cond: ...` / `elif cond: ...` / `else: ...` inside the block —
+    /// each branch's body is itself a nested element list (conditionally
+    /// pushed at desugar time, control-flow case only).
+    If {
+        branches: Vec<(Expr, Vec<ArrayBlockElem>)>,
+        else_body: Option<Vec<ArrayBlockElem>>,
+    },
+    /// `for var[, var2] in iterable: ...` inside the block — its body is a
+    /// nested element list, pushed once per iteration (control-flow case only).
+    For {
+        vars: Vec<String>,
+        iterable: Expr,
+        body: Vec<ArrayBlockElem>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1980,6 +2046,17 @@ fn scan_expr_var_arg(
         ExprKind::ArrayCompIter { expr: ex, iter, .. } => { e!(iter); e!(ex); }
         ExprKind::LabeledArrayComp { expr: ex, clauses } => { for (_, count) in clauses { e!(count); } e!(ex); }
         ExprKind::RelabelCast(ex, _) => e!(ex),
+        // Resolved and rewritten away by `desugar_array_block` right after parsing
+        // (before this scan ever runs) — see that variant's own doc comment.
+        // Recursing defensively into its sub-expressions costs nothing and keeps
+        // this helper correct even if ever called on a not-yet-desugared program.
+        // `body` is a plain `Vec<Stmt>` (same shape as `Block`/`Do`), so it uses
+        // the same `b!` statement-list recursion as those.
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            e!(callee);
+            for a in args { e!(&a.value); }
+            b!(body);
+        }
         ExprKind::Dict(pairs) => { for (k, v) in pairs { e!(k); e!(v); } }
         ExprKind::Range { start, end, .. } => { e!(start); e!(end); }
         ExprKind::SliceRange { start, end, .. } => {
@@ -2103,6 +2180,14 @@ fn with_expr_mutates(
             clauses.iter().any(|(_, count)| e(count, ivp, imm)) || e(ex, ivp, imm)
         }
         ExprKind::RelabelCast(ex, _) => e(ex, ivp, imm),
+        // See the `scan_expr_var_arg` `TrailingArrayBlock` arm's doc comment —
+        // same defensive recursion, boolean-`any`-style instead of
+        // accumulator-style; `body` is a plain `Vec<Stmt>`, same as `Block`/`Do`.
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            e(callee, ivp, imm)
+                || args.iter().any(|a| e(&a.value, ivp, imm))
+                || b(body, ivp, imm)
+        }
         ExprKind::Dict(pairs) => pairs.iter().any(|(k, v)| e(k, ivp, imm) || e(v, ivp, imm)),
         ExprKind::Range { start, end, .. } => e(start, ivp, imm) || e(end, ivp, imm),
         ExprKind::SliceRange { start, end, .. } => {

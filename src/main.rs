@@ -17,6 +17,7 @@ pub mod lexer;
 pub mod ast;
 pub mod parser;
 pub mod desugar_labeled_array;
+pub mod desugar_array_block;
 pub mod interpreter;
 pub mod checker;
 mod git_deps;
@@ -69,6 +70,21 @@ fn report_error(path: &Path, source: &str, line: usize, col: usize, len: usize, 
         eprintln!("{} {} {}", pad, c.dim("|"), c.red(&format!("{}{}", " ".repeat(col.saturating_sub(1)), underline)));
     } else {
         eprintln!("{} {}", pad, c.dim("|"));
+    }
+}
+
+/// Runs `desugar_array_block` and reports+exits on its (rare) resolution
+/// error the same way every other pipeline stage here does, via
+/// `report_error`. Reused across every `boring run`/`boring build` entry
+/// point below — see `desugar_array_block`'s own module doc comment for what
+/// this pass does and why it can fail.
+fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
+    match desugar_array_block::desugar_array_block(program) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
+            process::exit(1);
+        }
     }
 }
 
@@ -2070,6 +2086,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
         }
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
+    let program = desugar_array_block_or_exit(&path, &source, program);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -2194,6 +2211,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
         Err(e) => { report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg()); process::exit(1); }
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
+    let program = desugar_array_block_or_exit(&path, &source, program);
     if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
     // Same [deps] resolution as emit_rust_to_dir, so `--emit-rust` (project mode or a
     // standalone file) resolves `use <name>.xxx` identically to a real `boring build`.
@@ -2284,6 +2302,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
         }
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
+    let program = desugar_array_block_or_exit(&path, &source, program);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -2524,7 +2543,14 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
         search_paths.extend(std::env::split_paths(&env_path));
     }
     merge_into(&path, &mut visited, &mut items, &search_paths, &deps);
-    desugar_labeled_array::desugar_labeled_array(ast::Program { items })
+    let program = desugar_labeled_array::desugar_labeled_array(ast::Program { items });
+    match desugar_array_block::desugar_array_block(program) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
+            process::exit(1);
+        }
+    }
 }
 
 fn merge_into(
@@ -3013,6 +3039,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
         }
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
+    let program = desugar_array_block_or_exit(&path, &source, program);
 
     // Validate for kernel-mode compatibility.
     let diags = validator::validate_kernel(&program);

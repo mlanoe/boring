@@ -1,0 +1,22 @@
+# Regression: `do: ...` used as a value (`let x = do: ...`) whose body
+# contains a "complex" statement (a `for` loop) must still evaluate to its
+# tail expression, not silently degrade to `()` — a transpiler-only bug (the
+# sub-emitter used for `ExprKind::Do` inherited the *enclosing* function's
+# own `fn_returns_void`/`suppress_ok_wrap`, so this broke specifically when
+# the enclosing function was itself void, e.g. `main()`). The interpreter
+# (`boring run`) already handled this correctly; only `boring build` was
+# affected. Found while implementing the trailing array-block sugar's
+# control-flow desugaring, which relies on exactly this `do:`-as-a-value
+# shape (see src/desugar_array_block.rs).
+
+def int sum_evens([int] xs):
+    let total = do:
+        var int acc = 0
+        for x in xs:
+            if x % 2 == 0:
+                acc = acc + x
+        acc
+    total
+
+def main():
+    print sum_evens([1, 2, 3, 4, 5, 6])

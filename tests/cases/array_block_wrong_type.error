@@ -1,0 +1,1 @@
+trailing array-block sugar: `Bag`'s last parameter is `[int]`, not a trait-object array `[dyn Trait]`

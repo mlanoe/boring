@@ -1575,6 +1575,16 @@ impl Interpreter {
                 Err(err("internal error: labeled multi-dim array expression reached the evaluator without being desugared first", expr.line))
             }
 
+            // Trailing array-block sugar (`Column:` / `Column(...):` — see
+            // docs/book.md, "Trailing array-block sugar") is resolved and
+            // rewritten away by `desugar_array_block` right after parsing,
+            // before the evaluator ever runs — see `ExprKind::TrailingArrayBlock`'s
+            // own doc comment. Reaching one here means that pass was skipped,
+            // an internal compiler bug, not a user-facing error.
+            ExprKind::TrailingArrayBlock { .. } => {
+                Err(err("internal error: trailing array-block sugar reached the evaluator without being desugared first", expr.line))
+            }
+
             ExprKind::Tuple(elems) => {
                 let mut vals = Vec::new();
                 for e in elems {

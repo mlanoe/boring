@@ -1,0 +1,28 @@
+# Trailing array-block sugar: resolution redesign (src/desugar_array_block.rs's
+# decision table) means the callee's casing must not matter -- a
+# LOWERCASE-named free function whose last parameter is `[dyn Trait]`,
+# invoked via the bare block form, must still trigger collect/array-block
+# semantics. This specifically exercises removal of the old uppercase-led
+# casing gate (see src/parser/parse_array_block.rs's module doc comment):
+# under that gate, `describe:` below (lowercase) could only ever have been
+# the pre-existing no-paren closure-literal shorthand, never this sugar.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Button as Widget:
+    string caption
+    req string label(): "[{self.caption}]"
+
+string describe([Widget] children):
+    "n={children.length}"
+
+def main():
+    let d = describe:
+        Text("hello")
+        Button("ok")
+    print d

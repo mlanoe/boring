@@ -695,6 +695,11 @@ struct Transpiler {
     /// trait_name → set of method names declared in that trait (signatures + defaults).
     /// Used to split struct body methods between `impl Trait for Struct {}` and `impl Struct {}`.
     pub(crate) trait_method_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// trait_name → its declared supertraits (`trait B as A, C:`'s `parents`, verbatim).
+    /// Used by `trait_requires_debug` to walk the supertrait chain (a `[Trait]`-typed
+    /// struct field's `Box<dyn Trait>` only satisfies an auto-derived `Debug` when the
+    /// trait itself — or one of its supertraits, transitively — requires `Debug`).
+    pub(crate) trait_parents: std::collections::HashMap<String, Vec<String>>,
     /// trait_name → set of type-level (associated-function, no `self`) method names declared
     /// via `type def`/`type req` in that trait's `type_signatures`. Mirrors
     /// `trait_method_names` but for the type-level side, so a struct's matching `type_methods`
@@ -1338,6 +1343,7 @@ impl Transpiler {
                     "introspect".to_string(),
                 ])),
             ]),
+            trait_parents: std::collections::HashMap::new(),
             trait_type_method_names: std::collections::HashMap::new(),
             // Seeding `Introspect`'s req/def signature here, once and globally, is what
             // lets `method_is_req_or_task` (emit_top.rs) recognize `p.introspect()` as
@@ -2968,6 +2974,47 @@ impl Transpiler {
         Self::KNOWN_DERIVABLE_TRAITS.contains(&name)
     }
 
+    /// Supertrait names that are real Rust std traits but NOT in the 2021 prelude for
+    /// ordinary name resolution — unlike the rest of `KNOWN_DERIVABLE_TRAITS`, which the
+    /// prelude does cover. `Debug`/`Hash` resolve fine as *derive macro* names (derive
+    /// macros are always in scope regardless of imports) but not as a plain trait-bound
+    /// name in `trait Foo: Debug { ... }`, which needs the real path — confirmed via a
+    /// real `cargo build`: a bare `Debug` supertrait bound resolves to the derive macro
+    /// instead ("expected trait, found derive macro `Debug`"), not the trait. Every other
+    /// whitelist entry (`Clone`, `Copy`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Default`)
+    /// is prelude-covered and needs no qualification here.
+    const NON_PRELUDE_TRAIT_PATHS: &[(&str, &str)] = &[
+        ("Debug", "std::fmt::Debug"),
+        ("Hash", "std::hash::Hash"),
+    ];
+
+    /// Fully qualifies a supertrait name (`trait B as A, C:`'s `parents`) that would
+    /// otherwise fail to resolve as a bare identifier — see `NON_PRELUDE_TRAIT_PATHS`. Any
+    /// other name (a user-declared trait, or an already prelude-covered built-in) passes
+    /// through verbatim.
+    fn qualify_supertrait_name(name: &str) -> &str {
+        Self::NON_PRELUDE_TRAIT_PATHS.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, path)| *path)
+            .unwrap_or(name)
+    }
+
+    /// Does `trait_name` (or one of its supertraits, transitively) require `Debug`? Used
+    /// to decide whether a struct's `[Trait]` field (`Box<dyn Trait>`) can still
+    /// participate in the struct's auto-derived `Debug` — `Box<dyn Trait>: Debug` only
+    /// holds when `Trait: Debug`, directly or transitively (docs/book.md "Traits as
+    /// types"; see `emit_struct.rs`'s derive computation for where this matters). `visited`
+    /// guards against a cyclic supertrait declaration (invalid Boring source already
+    /// rejected elsewhere, but this must not infinite-loop on it regardless).
+    fn trait_requires_debug(&self, trait_name: &str) -> bool {
+        fn walk(this: &Transpiler, name: &str, visited: &mut std::collections::HashSet<String>) -> bool {
+            if !visited.insert(name.to_string()) { return false; }
+            let Some(parents) = this.trait_parents.get(name) else { return false };
+            parents.iter().any(|p| p == "Debug" || walk(this, p, visited))
+        }
+        walk(self, trait_name, &mut std::collections::HashSet::new())
+    }
+
     /// The Rust type to declare a promoted external-call `let` with (see
     /// `top_level_let_external_call`) -- an explicit Boring type annotation
     /// (`let Vec2 PADDLE_SIZE = ...`) wins when present, otherwise falls back to the
@@ -3092,6 +3139,10 @@ impl Transpiler {
                     let mut ty = &f.ty;
                     while let Type::Mut(inner) = ty { ty = inner; }
                     matches!(ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
+                        // `[Trait]` field (`Vec<Box<dyn Trait>>`) — same non-Clone
+                        // reasoning as an atomic field; see emit_struct.rs's mirrored check.
+                        || matches!(ty, Type::Array(elem) if matches!(
+                            elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
                 })
             };
             if derives_clone { self.struct_derives_clone.insert(s.name.clone()); }
@@ -3970,6 +4021,7 @@ impl Transpiler {
                     for sig in &t.signatures { names.insert(sig.name.clone()); }
                     for d   in &t.defaults   { names.insert(d.name.clone()); }
                     self.trait_method_names.insert(t.name.clone(), names);
+                    self.trait_parents.insert(t.name.clone(), t.parents.clone());
                     let type_names: std::collections::HashSet<String> = t.type_signatures.iter()
                         .map(|sig| sig.name.clone())
                         .collect();

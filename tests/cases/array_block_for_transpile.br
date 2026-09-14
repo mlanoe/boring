@@ -1,0 +1,26 @@
+# Trailing array-block sugar, control-flow case (`for`), real `rustc`-build
+# guard (see tests/transpile.rs's registration comment and
+# array_block_flat_transpile.br's doc comment for why this uses an empty
+# `@derive()` and avoids a `for` loop over the `[Trait]` field itself).
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+@derive()
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let names = ["a", "b", "c"]
+    let c = Column:
+        Text("head")
+        for name in names:
+            Text(name)
+    print c.label()
+    print c.children[1].label()
+    print c.children[3].label()

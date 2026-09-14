@@ -980,6 +980,18 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         // Leaf nodes (no sub-expressions containing variable references)
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
+
+        // Normally eliminated by `desugar_array_block` before this capture-analysis
+        // pass ever runs (see `ExprKind::TrailingArrayBlock`'s own doc comment) —
+        // recursed into defensively anyway so a var reference inside it (needed for
+        // e.g. correct Arc-capture in an enclosing closure/task) is never silently
+        // missed if this is ever reached regardless. `body` is a plain `Vec<Stmt>`
+        // (same shape as `Block`/`Do`).
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            collect_vars_in(callee, out);
+            for a in args { collect_vars_in(&a.value, out); }
+            for s in body { collect_vars_in_stmt(s, out); }
+        }
     }
 }
 

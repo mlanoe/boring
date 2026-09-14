@@ -2454,7 +2454,28 @@ impl Transpiler {
                 _ => false,
             }
         } {
-            args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
+            // `.push(x)`/`.extend(x)` onto a `[dyn Trait]`-typed Vec (dynamic
+            // dispatch, `Vec<Box<dyn Trait>>` — see docs/book.md "Traits as
+            // types") needs `x` boxed the same way an array-literal element
+            // assigned into a `[Trait]`-typed slot already is
+            // (`box_if_trait_typed`) — nothing pushes into such a Vec in
+            // practice except the trailing array-block sugar's control-flow
+            // desugaring (`desugar_array_block`), which pushes each element
+            // raw and relies on this to box it.
+            let trait_name = match &obj.kind {
+                ExprKind::Var(v) => self.var_types.get(v.as_str()).and_then(|t| match t {
+                    Type::Array(inner) => match inner.as_ref() {
+                        Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => Some(n.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                }),
+                _ => None,
+            };
+            match trait_name {
+                Some(tn) => args.iter().map(|a| self.box_if_trait_typed(&a.value, tn.as_str())).collect(),
+                None => args.iter().map(|a| self.emit_expr_owned(&a.value)).collect(),
+            }
         } else {
             args.iter().map(|a| self.emit_expr(&a.value)).collect()
         };
@@ -3571,6 +3592,7 @@ impl Transpiler {
             fn_declared_void: self.fn_declared_void,
             suppress_ok_wrap: false,
             trait_method_names: self.trait_method_names.clone(),
+            trait_parents: self.trait_parents.clone(),
             trait_type_method_names: self.trait_type_method_names.clone(),
             user_conv_targets: self.user_conv_targets.clone(),
             string_arc_vars: self.string_arc_vars.clone(),

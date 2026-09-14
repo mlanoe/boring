@@ -107,6 +107,17 @@ fn expr_uses_gpu_warp(e: &Expr) -> bool {
         ExprKind::LabeledArrayComp { expr, clauses } =>
             expr_uses_gpu_warp(expr) || clauses.iter().any(|(_, count)| expr_uses_gpu_warp(count)),
         ExprKind::RelabelCast(x, _) => expr_uses_gpu_warp(x),
+        // GPU kernels never construct trait-object arrays (`dyn Trait` isn't
+        // meaningful in `no_std`/device code), so this is unreachable in
+        // practice — recursing defensively costs nothing. See
+        // `ExprKind::TrailingArrayBlock`'s own doc comment: `desugar_array_block`
+        // eliminates this node right after parsing, before any GPU analysis runs.
+        // `body` is a plain `Vec<Stmt>` (same shape as `Block`/`Do`), so it
+        // reuses `stmts_use_gpu_warp`.
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } =>
+            expr_uses_gpu_warp(callee)
+                || args.iter().any(|a| expr_uses_gpu_warp(&a.value))
+                || stmts_use_gpu_warp(body),
         ExprKind::Dict(pairs) =>
             pairs.iter().any(|(k, v)| expr_uses_gpu_warp(k) || expr_uses_gpu_warp(v)),
         ExprKind::Range { start, end, .. } => expr_uses_gpu_warp(start) || expr_uses_gpu_warp(end),

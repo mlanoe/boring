@@ -618,3 +618,35 @@ interp_test!(init_bare_field_assign_qualified);
 // semantics (source stays usable, prints the same value twice).
 interp_test!(owned_call_arg_no_double_box);
 interp_test!(new_owned_no_double_or_missing_box);
+
+// Trailing array-block sugar (docs/book.md, "Trailing array-block sugar") —
+// generalizes the existing trailing-closure sugar to a trailing `[dyn Trait]`
+// array argument. See src/parser/parse_array_block.rs and
+// src/desugar_array_block.rs for the implementation.
+interp_test!(do_expr_value_for_loop);
+interp_test!(array_block_flat);
+interp_test!(array_block_nested);
+interp_test!(array_block_if);
+interp_test!(array_block_for);
+interp_test!(array_block_labeled_args);
+interp_test!(array_block_trailing_closure_regression);
+interp_test!(array_block_flat_transpile);
+interp_test!(array_block_for_transpile);
+error_test!(array_block_wrong_type);
+
+// A multiline trailing closure/trailing body used as a bare expression-statement
+// (not a `let`/`var` RHS, not a `return` value) used to fail to parse when
+// followed by another statement in the same block ("expected newline, got
+// <token>") — see tests/cases/trailing_body_bare_stmt_multiline.br's own header
+// comment and `ends_with_multiline_trailing_closure` in src/parser/parse_stmt.rs.
+interp_test!(trailing_body_bare_stmt_multiline);
+
+// Resolution redesign (src/desugar_array_block.rs's decision table): the
+// disambiguation between collect/tail/closure-literal/error is now driven
+// by resolving the callee against this file's own signature table, not by
+// the callee's casing — see src/parser/parse_array_block.rs's module doc
+// comment for the full write-up of why the old uppercase-led gate was
+// wrong, and this crate's final report for the fix.
+interp_test!(array_block_lowercase_collect);
+interp_test!(array_block_tail_fn_last_param);
+interp_test!(array_block_closure_literal_block);

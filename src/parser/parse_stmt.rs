@@ -360,7 +360,24 @@ impl Parser {
                 } else {
                     lhs
                 };
-                self.expect_newline()?;
+                // Soft (tolerant) termination when `expr` is a not-yet-resolved
+                // trailing array-block node (`ExprKind::TrailingArrayBlock` — see
+                // its own doc comment and `parse_array_block.rs`'s module doc
+                // comment), or a call/method-call ending in a *multiline* trailing
+                // closure/trailing body (`parse_trailing_closure`/`parse_trailing_body`/
+                // `parse_trailing_closure_no_paren` — see `ends_with_multiline_trailing_closure`):
+                // parsing either already consumed its own trailing indented block
+                // (and, when nested — e.g. `Row:` as a bare line inside `Column:`'s
+                // body — its own enclosing block's Dedent too), so the current token
+                // here is often already a `Dedent`, not a `Newline`. Every other
+                // expression shape keeps the strict check unchanged.
+                if matches!(&expr.kind, ExprKind::TrailingArrayBlock { .. })
+                    || ends_with_multiline_trailing_closure(&expr)
+                {
+                    self.expect_newline_soft();
+                } else {
+                    self.expect_newline()?;
+                }
                 Ok(Stmt::Expr(expr))
             }
         }
@@ -1367,4 +1384,32 @@ impl Parser {
             Ok(vec![stmt])
         }
     }
+}
+
+/// True when `expr` is a call/method-call whose last argument is a *multiline*
+/// trailing closure or trailing body (`ClosureBody::Block`, produced by
+/// `parse_trailing_closure` / `parse_trailing_body` / `parse_trailing_closure_no_paren`
+/// in `parse_expr.rs`).
+///
+/// Those parsers, on a multiline body, recurse into `parse_block`, which consumes
+/// the block's own `Indent`, its statements (each ending on its own `Newline`),
+/// and finally the block's closing `Dedent` — so by the time they return, the
+/// token stream sits right after that `Dedent`, not at a pending `Newline` the
+/// way an inline-body call would. Used at statement level (see `parse_stmt`'s
+/// default arm) to relax the strict `expect_newline()` the same way the
+/// pre-existing `ExprKind::TrailingArrayBlock` check does, for the exact same
+/// reason: a single-line trailing closure/body (`ClosureBody::Expr`) never
+/// touches `Indent`/`Dedent` at all, so it keeps the strict check unchanged.
+fn ends_with_multiline_trailing_closure(expr: &Expr) -> bool {
+    let args = match &expr.kind {
+        ExprKind::Call(_, args)
+        | ExprKind::MethodCall(_, _, args)
+        | ExprKind::OptionalMethodCall(_, _, args)
+        | ExprKind::GenericCall(_, _, args) => args,
+        _ => return false,
+    };
+    matches!(
+        args.last().map(|a| &a.value.kind),
+        Some(ExprKind::Closure(_, _, ClosureBody::Block(_), _, _))
+    )
 }

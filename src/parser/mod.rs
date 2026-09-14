@@ -13,6 +13,7 @@ mod parse_fn;
 mod parse_stmt;
 mod parse_expr;
 mod parse_type;
+mod parse_array_block;
 
 use crate::ast::*;
 use crate::lexer::{LexError, Token, TokenKind};
@@ -71,6 +72,17 @@ impl ParseError {
 pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     let mut p = Parser::new(tokens);
     p.parse_program()
+}
+
+/// Free-function wrapper around `Parser::infer_throws_task`, callable from
+/// outside this module — `Parser` itself is private to `parser`, so nothing
+/// outside it can name `Parser::infer_throws_task` directly. Used by
+/// `desugar_array_block`, which builds a `ClosureBody::Block` *after*
+/// parsing (once resolving a `TrailingArrayBlock` node has determined it
+/// means an ordinary trailing closure or a closure literal) and needs the
+/// exact same `throws`/`task` inference every other closure body gets.
+pub(crate) fn infer_closure_throws_task(body: &ClosureBody) -> (bool, bool) {
+    Parser::infer_throws_task(body)
 }
 
 /// Maximum `not` chain depth. Each `not` creates ~15 Rust stack frames in the

@@ -48,6 +48,26 @@ impl Transpiler {
                 let mut ty = &f.ty;
                 while let Type::Mut(inner) = ty { ty = inner; }
                 matches!(ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
+                    // `[Trait]` (dynamic dispatch, `Vec<Box<dyn Trait>>` — docs/book.md
+                    // "Traits as types") — same non-Clone/non-PartialEq problem as an
+                    // atomic field above: `Box<dyn Trait>` has no object-safe blanket
+                    // `Clone`/`PartialEq` impl, so a struct holding one can't derive
+                    // either without a compile error.
+                    || matches!(ty, Type::Array(elem) if matches!(
+                        elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
+            });
+            // `Box<dyn Trait>: Debug` (needed for the struct's own auto-derived `Debug`,
+            // kept below even when `has_non_clone_field` drops `Clone`/`PartialEq`) only
+            // holds when `Trait` itself requires `Debug` (directly or transitively via its
+            // own supertraits — see `trait_requires_debug`). A `[Trait]` field whose trait
+            // doesn't guarantee that must drop `Debug` too, or the struct's `#[derive(Debug)]`
+            // fails to compile the same way an unconditional `Clone`/`PartialEq` would.
+            let has_non_debug_trait_array_field = s.fields.iter().any(|f| {
+                let mut ty = &f.ty;
+                while let Type::Mut(inner) = ty { ty = inner; }
+                matches!(ty, Type::Array(elem) if matches!(elem.as_ref(),
+                    Type::Named(n) if self.trait_method_names.contains_key(n.as_str())
+                        && !self.trait_requires_debug(n.as_str())))
             });
             // Don't derive PartialEq when the struct has any comparison operator method —
             // emit_operator_trait_impls will generate PartialEq/PartialOrd impls that would conflict.
@@ -66,7 +86,7 @@ impl Transpiler {
             // see `helpers::collect_default_rest_targets`) → that call lowers to a trailing
             // `..Default::default()`, so the struct needs `Default` too.
             let needs_default = self.structs_needing_default.contains(&s.name);
-            let mut names = vec!["Debug".to_string()];
+            let mut names: Vec<String> = if has_non_debug_trait_array_field { vec![] } else { vec!["Debug".to_string()] };
             if has_non_clone_field {
                 if needs_default { names.push("Default".to_string()); }
             } else if has_custom_cmp || has_sync_mutex_field {
@@ -2415,7 +2435,10 @@ impl Transpiler {
         let parents = if t.parents.is_empty() {
             String::new()
         } else {
-            format!(": {}", t.parents.join(" + "))
+            let qualified: Vec<String> = t.parents.iter()
+                .map(|p| Self::qualify_supertrait_name(p).to_string())
+                .collect();
+            format!(": {}", qualified.join(" + "))
         };
         let tp = type_params_str(&t.type_params);
         self.line(&format!("pub trait {}{}{} {{", t.name, tp, parents));

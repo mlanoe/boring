@@ -1,0 +1,33 @@
+# Trailing array-block sugar: nested case -- a block-array line that is
+# itself another block-array call (e.g. `Row:` inside `Column:`). Each
+# nested `TrailingArrayBlock` is resolved and desugared independently,
+# bottom-up, before its parent is examined.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Button as Widget:
+    string caption
+    req string label(): "[{self.caption}]"
+
+struct Row as Widget:
+    [Widget] children
+    req string label(): "Row({self.children.length})"
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let c = Column:
+        Text("count: 0")
+        Row:
+            Button("-")
+            Button("+")
+    print c.label()
+    print c.children[0].label()
+    print c.children[1].label()

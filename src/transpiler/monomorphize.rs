@@ -332,6 +332,16 @@ pub(crate) fn substitute_types_in_expr(expr: &mut Expr, subst: &HashMap<String, 
         ExprKind::Index(e, i) => { substitute_types_in_expr(e, subst); substitute_types_in_expr(i, subst); }
         ExprKind::LabeledIndex(e, args) => { substitute_types_in_expr(e, subst); substitute_types_in_args(args, subst); }
         ExprKind::Call(callee, args) => { substitute_types_in_expr(callee, subst); substitute_types_in_args(args, subst); }
+        // Normally eliminated by `desugar_array_block` before monomorphization
+        // ever runs (see `ExprKind::TrailingArrayBlock`'s own doc comment) —
+        // recursed into defensively so a generic type substitution inside it
+        // is never silently skipped if this is ever reached regardless. `body`
+        // is a plain `Vec<Stmt>` (same shape as `Block`/`Do`).
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            substitute_types_in_expr(callee, subst);
+            substitute_types_in_args(args, subst);
+            substitute_types_in_stmts(body, subst);
+        }
         ExprKind::MethodCall(obj, _, args) => { substitute_types_in_expr(obj, subst); substitute_types_in_args(args, subst); }
         ExprKind::GenericCall(callee, type_args, args) => {
             substitute_types_in_expr(callee, subst);
@@ -775,6 +785,13 @@ fn collect_in_expr(expr: &Expr, enclosing: &[String], ctx: &mut CollectCtx) {
         ExprKind::Index(e, i) => { collect_in_expr(e, enclosing, ctx); collect_in_expr(i, enclosing, ctx); }
         ExprKind::LabeledIndex(e, args) => { collect_in_expr(e, enclosing, ctx); collect_in_args(args, enclosing, ctx); }
         ExprKind::Call(callee, args) => { collect_in_expr(callee, enclosing, ctx); collect_in_args(args, enclosing, ctx); }
+        // See `substitute_types_in_expr`'s `TrailingArrayBlock` arm — same
+        // defensive-recursion rationale.
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            collect_in_expr(callee, enclosing, ctx);
+            collect_in_args(args, enclosing, ctx);
+            collect_in_stmts(body, enclosing, ctx);
+        }
         ExprKind::MethodCall(obj, _, args) => { collect_in_expr(obj, enclosing, ctx); collect_in_args(args, enclosing, ctx); }
         ExprKind::GenericCall(callee, type_args, args) => {
             collect_in_expr(callee, enclosing, ctx);
@@ -1148,6 +1165,13 @@ fn rewrite_in_expr(expr: &mut Expr, instantiations: &InstantiationMap, method_in
         ExprKind::Index(e, i) => { rewrite_in_expr(e, instantiations, method_instantiations); rewrite_in_expr(i, instantiations, method_instantiations); }
         ExprKind::LabeledIndex(e, args) => { rewrite_in_expr(e, instantiations, method_instantiations); rewrite_in_args(args, instantiations, method_instantiations); }
         ExprKind::Call(callee, args) => { rewrite_in_expr(callee, instantiations, method_instantiations); rewrite_in_args(args, instantiations, method_instantiations); }
+        // See `substitute_types_in_expr`'s `TrailingArrayBlock` arm — same
+        // defensive-recursion rationale.
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            rewrite_in_expr(callee, instantiations, method_instantiations);
+            rewrite_in_args(args, instantiations, method_instantiations);
+            rewrite_in_stmts(body, instantiations, method_instantiations);
+        }
         ExprKind::MethodCall(obj, _, args) => { rewrite_in_expr(obj, instantiations, method_instantiations); rewrite_in_args(args, instantiations, method_instantiations); }
         ExprKind::GenericCall(callee, _type_args, args) => {
             rewrite_in_expr(callee, instantiations, method_instantiations);

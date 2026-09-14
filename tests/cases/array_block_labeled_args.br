@@ -1,0 +1,21 @@
+# Trailing array-block sugar combined with labeled arguments before the
+# colon (scoping rule 2: no chaining after the block, so "modifier"
+# arguments must be ordinary labeled arguments instead).
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Column as Widget:
+    int spacing
+    [Widget] children
+    req string label(): "Column(spacing={self.spacing}, n={self.children.length})"
+
+def main():
+    let c = Column(spacing = 8):
+        Text("a")
+        Text("b")
+    print c.label()

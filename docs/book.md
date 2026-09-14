@@ -4583,6 +4583,81 @@ people.iter().filter(|p| p.age >= 18).cloned().collect::<Vec<_>>();
 words.iter().filter(|__x| __x.len() as isize > 3).cloned().collect::<Vec<_>>();
 ```
 
+### Trailing array-block sugar
+
+The trailing-closure sugar above is keyed on the *type of the callee's last parameter*: when it's `Fn(...)`-typed, a trailing `(params): body` is a closure. The same idea generalizes to a second case: when the last parameter is a **trait-object array** — `[dyn SomeTrait]` (see [Traits as types](#traits-as-types)) — a bare call name (optionally with other, labeled, arguments) followed by `:` and an indented block of **one item per line** desugars to that trailing array argument instead.
+
+```boring
+Column:
+    Text("{count}")
+    Row:
+        Button("-").on_click(Message.Decrement)
+        Button("+").on_click(Message.Increment)
+```
+
+is exactly equivalent to:
+
+```boring
+Column([
+    Text("{count}"),
+    Row([
+        Button("-").on_click(Message.Decrement),
+        Button("+").on_click(Message.Increment),
+    ]),
+])
+```
+
+`if`/`elif`/`else` and `for` are allowed as lines inside the block, desugaring to an imperative builder (push per line, conditional push for `if`, looped push for `for`) instead of a plain array literal:
+
+```boring
+Column:
+    Text("{count}")
+    if show_details:
+        Text("more info")
+    for item in items:
+        Text("{item}")
+```
+
+conceptually desugars to:
+
+```rust
+{
+    let mut __children: Vec<Box<dyn View>> = Vec::new();
+    __children.push(Box::new(Text::new(format!("{}", count))));
+    if show_details {
+        __children.push(Box::new(Text::new("more info")));
+    }
+    for item in items.iter() {
+        __children.push(Box::new(Text::new(format!("{}", item))));
+    }
+    Column::new(__children)
+}
+```
+
+Nesting works: a line inside the block that is itself another trailing array-block call (`Row:` above) is resolved the same way, independently, before its parent is.
+
+**Disambiguation is by resolution, not by spelling.** `Column:` (bare) shares its exact token shape — `Ident Colon` followed by a real indented block — with the pre-existing no-paren closure shorthand just above (`n: n * 2`'s multi-line form), and `Column(args):` shares its shape with the pre-existing "zero-arg trailing body" sugar (`timeout(...): body`). Rather than telling these apart by how the callee is spelled (an earlier revision required an uppercase-led name — abandoned, since PascalCase-for-types is a convention this compiler doesn't otherwise check as a semantic rule, and it wrongly forced *every* uppercase-led `Ident: <block>` into this sugar even when it should have been an ordinary trailing closure), the parser produces one generic node for the ambiguous shape and resolution decides its meaning by looking `callee` up in this file's own declarations:
+
+| `callee` resolves to... | Meaning |
+|---|---|
+| a known function/struct constructor whose **last parameter is `[dyn SomeTrait]`** | this sugar — collect into that trailing array argument |
+| a known function/struct constructor whose **last parameter is `Fn(...)`** | the ordinary, pre-existing trailing-closure sugar (tail semantics) — exactly `callee(...args, (): body)` |
+| a known function/struct constructor whose **last parameter is anything else** | a compile error naming the mismatched type — never silently misinterpreted |
+| not a known callable in this file at all, written **with** an (even empty) `(...)` argument list | the ordinary trailing-closure sugar (tail semantics) — this is what `Column():`/`timeout(...):` already meant before this sugar existed, for any callee this resolution step simply doesn't know about (a builtin, an external function, anything not declared in *this* file) |
+| not a known callable in this file at all, written **without** any parentheses | the pre-existing no-paren closure-literal shorthand, unchanged — `callee`'s own name becomes the closure's single implicit parameter |
+
+Only the "known callable, wrong last-parameter type" row is a hard error — every other outcome resolves to something runnable, so this sugar can never misfire on a call site whose callee it simply doesn't recognize (crucially, this keeps builtins/external functions used with the pre-existing zero-arg trailing-body sugar working exactly as before). The one limitation this carries over from the desugaring pass that implements it: resolution only sees *this file's* own top-level `fn`/`struct` declarations — a callee only reachable through a cross-file `use` resolves as "not a known callable" (see the table above), not a hard error.
+
+**Scoping rules**
+
+1. **No chaining after a multiline trailing array-block**, for the same parsing-ambiguity reason a multiline trailing closure can't be chained (see the note above). Pass any "modifier" arguments as ordinary labeled arguments before the colon instead:
+   ```boring
+   Column(spacing = 8):
+       Text("a")
+       Text("b")
+   ```
+2. **Expression position only, and only after a real indented block.** `Column: expr` on a single line (no block) is never this sugar — it stays the pre-existing closure shorthand's meaning unconditionally, regardless of resolution. This sugar is only ever considered for a call name (or call-with-labeled-args) directly followed by `:` and a newline-then-indented block, so it never shadows any statement/item-level construct (`struct`/`enum`/`trait` declarations, `match`, `if`/`for`/`while` statements, function/method definitions all keep their existing grammar unchanged).
+
 ---
 
 ## 15. Modules

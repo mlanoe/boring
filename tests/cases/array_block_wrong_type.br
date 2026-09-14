@@ -1,0 +1,13 @@
+# Negative test (scoping rule 1): the trailing array-block sugar must NOT
+# silently apply when the callee's last parameter is a concrete `[T]`
+# (not a trait-object array `[dyn Trait]`) -- this must be a clear compile
+# error, not silent misbehavior.
+
+struct Bag:
+    [int] items
+
+def main():
+    let b = Bag:
+        1
+        2
+    print b.items.length
