@@ -30,7 +30,9 @@ alias_decl      ::= "use" IDENT ("as" | "<" IDENT ("," IDENT)* ">" "as") type NE
 #
 # Attributes annotate item declarations for the transpiler.
 # They become `#[name(args)]` in Rust output; the interpreter ignores them.
-# Multiple attributes may be stacked, one per line, before the item.
+# Multiple attributes may be stacked one per line, or chained on the same
+# line by juxtaposition (no separator) — `@` always starts a new attribute,
+# so it also terminates the bare (paren-free) arg list of the previous one.
 #
 # Examples:
 #   @derive(Debug, Clone, PartialEq)
@@ -40,6 +42,9 @@ alias_decl      ::= "use" IDENT ("as" | "<" IDENT ("," IDENT)* ">" "as") type NE
 #   def int add(int x, int y): x + y
 #
 #   @serde(rename_all = "camelCase")
+#   struct Config:
+#
+#   @derive Debug, Clone @serde(rename_all = "camelCase")
 #   struct Config:
 
 attr            ::= "@" IDENT ("(" attr_arg ("," attr_arg)* ")")? NEWLINE?

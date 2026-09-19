@@ -691,7 +691,9 @@ impl Parser {
                     let arg = self.collect_attr_arg();
                     if !arg.is_empty() { args.push(arg); }
                     if !self.eat(&TokenKind::Comma) { break; }
-                    if matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof) { break; }
+                    // `@` starts a new annotation, not another bare arg — lets
+                    // `@derive Debug, Clone @serde(...)` chain on one line.
+                    if matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof | TokenKind::At) { break; }
                 }
             }
             // Skip optional newline between attributes
@@ -705,7 +707,7 @@ impl Parser {
         let mut parts = Vec::new();
         loop {
             match self.peek().clone() {
-                TokenKind::Comma | TokenKind::RParen | TokenKind::Eof | TokenKind::Newline | TokenKind::Semicolon => break,
+                TokenKind::Comma | TokenKind::RParen | TokenKind::Eof | TokenKind::Newline | TokenKind::Semicolon | TokenKind::At => break,
                 TokenKind::Ident(s) => { parts.push(s.clone()); self.advance(); }
                 TokenKind::Eq => { parts.push("=".to_string()); self.advance(); }
                 TokenKind::Str(s) => { parts.push(format!("\"{}\"", s)); self.advance(); }

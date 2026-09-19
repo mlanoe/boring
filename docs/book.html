@@ -2840,6 +2840,47 @@ words.<span class="fn">filter</span>(w: w.length &gt; <span class="nb">3</span> 
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>people.<span class="fn">iter</span>().<span class="fn">map</span>(|p| p.name.<span class="fn">clone</span>()).collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();
 people.<span class="fn">iter</span>().<span class="fn">filter</span>(|p| p.age &gt;= <span class="nb">18</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();
 words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<span class="fn">len</span>() <span class="kw">as</span> isize &gt; <span class="nb">3</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();</code></pre></div>
+<h3 id="trailing-array-block-sugar">Trailing array-block sugar</h3>
+<p>The trailing-closure sugar above is keyed on the <em>type of the callee&#x27;s last parameter</em>: when it&#x27;s <code>Fn(...)</code>-typed, a trailing <code>(params): body</code> is a closure. The same idea generalizes to a second case: when the last parameter is a <strong>trait-object array</strong> — <code>[dyn SomeTrait]</code> (see <a href="#traits-as-types">Traits as types</a>) — a bare call name (optionally with other, labeled, arguments) followed by <code>:</code> and an indented block of <strong>one item per line</strong> desugars to that trailing array argument instead.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Column:
+    <span class="fn">Text</span>(<span class="s">"<span class="si">{count}</span>"</span>)
+    Row:
+        <span class="fn">Button</span>(<span class="s">"-"</span>).<span class="fn">on_click</span>(Message.Decrement)
+        <span class="fn">Button</span>(<span class="s">"+"</span>).<span class="fn">on_click</span>(Message.Increment)</code></pre></div>
+<p>is exactly equivalent to:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">Column</span>([
+    <span class="fn">Text</span>(<span class="s">"<span class="si">{count}</span>"</span>),
+    <span class="fn">Row</span>([
+        <span class="fn">Button</span>(<span class="s">"-"</span>).<span class="fn">on_click</span>(Message.Decrement),
+        <span class="fn">Button</span>(<span class="s">"+"</span>).<span class="fn">on_click</span>(Message.Increment),
+    ]),
+])</code></pre></div>
+<p><code>if</code>/<code>elif</code>/<code>else</code> and <code>for</code> are allowed as lines inside the block, desugaring to an imperative builder (push per line, conditional push for <code>if</code>, looped push for <code>for</code>) instead of a plain array literal:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Column:
+    <span class="fn">Text</span>(<span class="s">"<span class="si">{count}</span>"</span>)
+    <span class="kw">if</span> show_details:
+        <span class="fn">Text</span>(<span class="s">"more info"</span>)
+    <span class="kw">for</span> item <span class="kw">in</span> items:
+        <span class="fn">Text</span>(<span class="s">"<span class="si">{item}</span>"</span>)</code></pre></div>
+<p>conceptually desugars to:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>{
+    <span class="kw">let</span> <span class="kw">mut</span> __children: <span class="kw">Vec</span>&lt;<span class="kw">Box</span>&lt;<span class="kw">dyn</span> <span class="kt">View</span>&gt;&gt; = <span class="kw">Vec</span>::<span class="fn">new</span>();
+    __children.<span class="fn">push</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Text</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;{}&quot;</span>, count))));
+    <span class="kw">if</span> show_details {
+        __children.<span class="fn">push</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Text</span>::<span class="fn">new</span>(<span class="s">&quot;more info&quot;</span>)));
+    }
+    <span class="kw">for</span> item <span class="kw">in</span> items.<span class="fn">iter</span>() {
+        __children.<span class="fn">push</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Text</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;{}&quot;</span>, item))));
+    }
+    <span class="kt">Column</span>::<span class="fn">new</span>(__children)
+}</code></pre></div>
+<p>Nesting works: a line inside the block that is itself another trailing array-block call (<code>Row:</code> above) is resolved the same way, independently, before its parent is.</p>
+<p><strong>Disambiguation is by resolution, not by spelling.</strong> <code>Column:</code> (bare) shares its exact token shape — <code>Ident Colon</code> followed by a real indented block — with the pre-existing no-paren closure shorthand just above (<code>n: n * 2</code>&#x27;s multi-line form), and <code>Column(args):</code> shares its shape with the pre-existing &quot;zero-arg trailing body&quot; sugar (<code>timeout(...): body</code>). Rather than telling these apart by how the callee is spelled (an earlier revision required an uppercase-led name — abandoned, since PascalCase-for-types is a convention this compiler doesn&#x27;t otherwise check as a semantic rule, and it wrongly forced <em>every</em> uppercase-led <code>Ident: &lt;block&gt;</code> into this sugar even when it should have been an ordinary trailing closure), the parser produces one generic node for the ambiguous shape and resolution decides its meaning by looking <code>callee</code> up in this file&#x27;s own declarations:</p>
+<table><thead><tr><th><code>callee</code> resolves to...</th><th>Meaning</th></tr></thead><tbody><tr><td>a known function/struct constructor whose <strong>last parameter is <code>[dyn SomeTrait]</code></strong></td><td>this sugar — collect into that trailing array argument</td></tr><tr><td>a known function/struct constructor whose <strong>last parameter is <code>Fn(...)</code></strong></td><td>the ordinary, pre-existing trailing-closure sugar (tail semantics) — exactly <code>callee(...args, (): body)</code></td></tr><tr><td>a known function/struct constructor whose <strong>last parameter is anything else</strong></td><td>a compile error naming the mismatched type — never silently misinterpreted</td></tr><tr><td>not a known callable in this file at all, written <strong>with</strong> an (even empty) <code>(...)</code> argument list</td><td>the ordinary trailing-closure sugar (tail semantics) — this is what <code>Column():</code>/<code>timeout(...):</code> already meant before this sugar existed, for any callee this resolution step simply doesn&#x27;t know about (a builtin, an external function, anything not declared in <em>this</em> file)</td></tr><tr><td>not a known callable in this file at all, written <strong>without</strong> any parentheses</td><td>the pre-existing no-paren closure-literal shorthand, unchanged — <code>callee</code>&#x27;s own name becomes the closure&#x27;s single implicit parameter</td></tr></tbody></table>
+<p>Only the &quot;known callable, wrong last-parameter type&quot; row is a hard error — every other outcome resolves to something runnable, so this sugar can never misfire on a call site whose callee it simply doesn&#x27;t recognize (crucially, this keeps builtins/external functions used with the pre-existing zero-arg trailing-body sugar working exactly as before). The one limitation this carries over from the desugaring pass that implements it: resolution only sees <em>this file&#x27;s</em> own top-level <code>fn</code>/<code>struct</code> declarations — a callee only reachable through a cross-file <code>use</code> resolves as &quot;not a known callable&quot; (see the table above), not a hard error.</p>
+<p><strong>Scoping rules</strong></p>
+<ol><li><strong>No chaining after a multiline trailing array-block</strong>, for the same parsing-ambiguity reason a multiline trailing closure can&#x27;t be chained (see the note above). Pass any &quot;modifier&quot; arguments as ordinary labeled arguments before the colon instead:</li></ol>
+<p>   <code></code><code>boring    Column(spacing = 8):        Text(&quot;a&quot;)        Text(&quot;b&quot;)    </code><code></code> 2. <strong>Expression position only, and only after a real indented block.</strong> <code>Column: expr</code> on a single line (no block) is never this sugar — it stays the pre-existing closure shorthand&#x27;s meaning unconditionally, regardless of resolution. This sugar is only ever considered for a call name (or call-with-labeled-args) directly followed by <code>:</code> and a newline-then-indented block, so it never shadows any statement/item-level construct (<code>struct</code>/<code>enum</code>/<code>trait</code> declarations, <code>match</code>, <code>if</code>/<code>for</code>/<code>while</code> statements, function/method definitions all keep their existing grammar unchanged).</p>
 <hr>
 <h2 id="15-modules">15. Modules</h2>
 <h3 id="defining-a-module">Defining a module</h3>
@@ -4108,6 +4149,15 @@ c.<span class="fn">write</span>().<span class="kw">await</span>.<span class="fn"
 
     <span class="at">@error</span>(<span class="s">"unsupported operation"</span>) <span class="co"># parentheses — also valid</span>
     Unsupported</code></pre></div>
+<p><strong>Multiple attributes on the same line</strong> are chained by juxtaposition — no separator between them:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@derive</span>(Debug, Clone) <span class="at">@serde</span>(rename_all = <span class="s">"camelCase"</span>)
+<span class="kw">struct</span> Config:
+    <span class="kt">int</span> level</code></pre></div>
+<p>This also works with the no-parentheses form, since <code>@</code> always starts a new attribute and therefore also ends the previous attribute&#x27;s bare (paren-free) argument list:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@derive</span> Debug, Clone <span class="at">@inline</span> <span class="at">@serde</span> rename_all = <span class="s">"camelCase"</span>
+<span class="kw">struct</span> Config:
+    <span class="kt">int</span> level</code></pre></div>
+<p>Both are equivalent to stacking the same attributes one per line — same-line chaining is purely a formatting choice.</p>
 <hr>
 <h2 id="25-format-specifiers">25. Format Specifiers</h2>
 <p>Format specifiers in Boring are <strong>identical to Rust&#x27;s</strong> <code>std::fmt</code> specifiers. They follow the colon inside an interpolation <code>{expr:spec}</code>.</p>

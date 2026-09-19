@@ -7101,6 +7101,24 @@ enum Shape:
     Unsupported
 ```
 
+**Multiple attributes on the same line** are chained by juxtaposition — no separator between them:
+
+```boring
+@derive(Debug, Clone) @serde(rename_all = "camelCase")
+struct Config:
+    int level
+```
+
+This also works with the no-parentheses form, since `@` always starts a new attribute and therefore also ends the previous attribute's bare (paren-free) argument list:
+
+```boring
+@derive Debug, Clone @inline @serde rename_all = "camelCase"
+struct Config:
+    int level
+```
+
+Both are equivalent to stacking the same attributes one per line — same-line chaining is purely a formatting choice.
+
 ---
 
 ## 25. Format Specifiers

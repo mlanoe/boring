@@ -639,6 +639,57 @@ fn test_attr_ast_multiple_args() {
     }
 }
 
+#[test]
+fn test_multiple_attrs_chained_same_line_parenthesized() {
+    // `@a(...) @b(...)` juxtaposed on one line, no separator.
+    let src = "@derive(Debug) @serde(rename_all = \"camelCase\")\nstruct Foo: pass\n";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let crate::ast::Item::Struct(decl) = &program.items[0] {
+        assert_eq!(decl.attrs.len(), 2);
+        assert_eq!(decl.attrs[0].name, "derive");
+        assert_eq!(decl.attrs[0].args, vec!["Debug"]);
+        assert_eq!(decl.attrs[1].name, "serde");
+        assert_eq!(decl.attrs[1].args, vec!["rename_all=\"camelCase\""]);
+    } else {
+        panic!("expected Struct item");
+    }
+}
+
+#[test]
+fn test_multiple_attrs_chained_same_line_bare_args() {
+    // `@` must terminate the previous attribute's bare (paren-free) arg list,
+    // not get swallowed as another argument — `@derive Debug, Clone @inline @serde ...`.
+    let src = "@derive Debug, Clone @inline @serde rename_all = \"camelCase\"\nstruct Foo: pass\n";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let crate::ast::Item::Struct(decl) = &program.items[0] {
+        assert_eq!(decl.attrs.len(), 3);
+        assert_eq!(decl.attrs[0].name, "derive");
+        assert_eq!(decl.attrs[0].args, vec!["Debug", "Clone"]);
+        assert_eq!(decl.attrs[1].name, "inline");
+        assert!(decl.attrs[1].args.is_empty());
+        assert_eq!(decl.attrs[2].name, "serde");
+        assert_eq!(decl.attrs[2].args, vec!["rename_all=\"camelCase\""]);
+    } else {
+        panic!("expected Struct item");
+    }
+}
+
+#[test]
+fn test_multiple_attrs_chained_same_line_runs() {
+    // End-to-end: chained attrs on one line must not affect interpreted output.
+    let src = r#"
+@derive(Debug) @derive(Clone) @serde(rename_all = "camelCase")
+struct Config:
+    int level
+
+let c = Config(42)
+let _result = c.level
+"#;
+    assert_eq!(run_src(src), Value::Int(42));
+}
+
 // ─── Enum bug fixes ──────────────────────────────────────────────────────────
 
 // Bug 1: Named field access on enum variants
