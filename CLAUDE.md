@@ -108,6 +108,29 @@ let Counter'actor c = Counter(0)
 let int'inline n = 10
 ```
 
+### `'observed` — composable sharing/notification suffix
+
+Chains onto a base qualifier, same shape as `'actor'task`/`'actor'weak`: `T'inline'observed`, `T'owned'observed`, `T'actor'observed`, `T'guard'observed` are all valid; `T'shared'observed` is a compile error (`'shared` has no interior mutability to notify about). Bare `T'observed` (no base written) resolves via qualifier inference — multi-owner usage → `'actor'observed`, else the size threshold decides `'inline'observed` vs `'owned'observed`, same as a bare struct.
+
+Method calls dispatch **transparently**, exactly like a bare `'actor`/`'guard` value already does elsewhere in Boring (`c.increment()` → `c.lock().unwrap().increment()`, no explicit step) — `'observed` piggybacks on that same convention and additionally notifies subscribers afterward:
+
+```boring
+struct FormModel:
+    var string name = ""
+    def setName(string s): name = s
+
+mut FormModel'actor'observed model = FormModel()
+let sub = model.subscribe(():
+    print "changed"
+)
+model.setName("Ada")         # prints "changed" — locks, calls, unlocks, THEN notifies
+model.value.setName("Ada")   # renames silently — `.value` is the explicit escape
+                              # hatch that skips notification even for a mutation
+# sub's Drop unsubscribes automatically when it goes out of scope.
+```
+
+`mut`/`var mut` requirements to call a `def` method (direct or through `.value`) follow the base qualifier's own row in "Binding × mutability" below — no exception for `'observed`. Scope: local `let`/`mut`/`var` bindings only (not struct fields, parameters, or return types). See [book.md](docs/book.md#observed--a-composable-sharingnotification-suffix) for the full design.
+
 ## Binding × mutability
 
 | Syntax | Rebindable | Content-mutable | Notes |

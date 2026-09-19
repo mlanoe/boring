@@ -1005,6 +1005,12 @@ struct Transpiler {
     /// No external crate dependency (pure std), so unlike `uses_serde` this never
     /// needs to reach `TranspileOutput`/Cargo.toml.
     pub(crate) uses_introspect: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Whether `'observed` appears anywhere in the program (see
+    /// `program_uses_observed`'s doc for why this gate exists — unlike most other
+    /// preamble support code in this file, `BoringObserved`'s generated text collides
+    /// with `tests/atomic_qualifier.rs`'s substring checks when emitted
+    /// unconditionally). Gates `emit_observed_prelude`.
+    pub(crate) uses_observed: std::rc::Rc<std::cell::Cell<bool>>,
     /// Functions that have multiple overloads — maps name to all FnDecl variants.
     pub(crate) fn_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Names of overloaded functions (quick lookup).
@@ -1063,6 +1069,17 @@ struct Transpiler {
     /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
     /// function body before emission. Cleared between function bodies.
     pub(crate) inferred_qualifiers: std::collections::HashMap<String, crate::ast::OwnerQual>,
+    /// `'observed`-qualified local variables (`let`/`mut`/`var`, not struct fields/params —
+    /// see docs/book.md's "'observed" section for the current scope) in the current
+    /// function body: name → (base struct type name, base qualifier). Populated two ways:
+    /// explicitly-annotated locals (`FormModel'actor'observed`) directly in `emit_let`, and
+    /// bare `'observed` locals (`FormModel'observed`) via `infer_qualifiers`'s bare-observed
+    /// resolution (which reuses the ordinary bare-struct candidate-elimination pipeline,
+    /// restricted to never resolve to `'shared` — see that file's `observed_bare` handling).
+    /// Consulted by `emit_let::emit_observed_let` (construction) and
+    /// `emit_methods::try_emit_observed_method` (`.value.method(...)` dispatch + mut-gating +
+    /// write-notification). Cleared between function bodies, same as `inferred_qualifiers`.
+    pub(crate) observed_locals: std::collections::HashMap<String, (String, crate::ast::OwnerQual)>,
     /// Temporary: local variables in the current function body that are assigned from a
     /// call whose declared return type is `'actor` or `'guard`. Populated by a pre-pass
     /// in `infer_qualifiers` and consumed by `walk_expr_for_qualifiers`. Cleared each call.
@@ -1435,6 +1452,7 @@ impl Transpiler {
             uses_tokio_util: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_serde: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_introspect: std::rc::Rc::new(std::cell::Cell::new(false)),
+            uses_observed: std::rc::Rc::new(std::cell::Cell::new(false)),
             fn_overload_decls: std::collections::HashMap::new(),
             overloaded_fn_names: std::collections::HashSet::new(),
             struct_method_overload_decls: std::collections::HashMap::new(),
@@ -1469,6 +1487,7 @@ impl Transpiler {
             ]),
             struct_method_throws: std::collections::HashSet::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
+            observed_locals: std::collections::HashMap::new(),
             infer_local_actor_vars: std::collections::HashSet::new(),
             task_method_call_vars: std::collections::HashSet::new(),
             task_method_call_fields: std::collections::HashSet::new(),
@@ -1860,6 +1879,11 @@ impl Transpiler {
             self.uses_introspect.set(true);
         }
 
+        // Same shallow-scan limitation as above — see `program_uses_observed`'s doc.
+        if program_uses_observed(program) {
+            self.uses_observed.set(true);
+        }
+
         // Standard prelude — emitted once only (skipped for inlined `use` files).
         if self.prelude_emitted { return self.emit_program_items(program, false); }
 
@@ -1901,6 +1925,14 @@ impl Transpiler {
         }
         if self.uses_introspect.get() {
             self.emit_introspect_prelude();
+        }
+        // `'observed` runtime support (docs/book.md's "'observed" section) — gated on
+        // actual usage (see `program_uses_observed`'s doc for why, unlike the
+        // collection-index traits/BoringFmt/BoringError support code just below,
+        // which really are always emitted unconditionally: this one's generated text
+        // collides with `tests/atomic_qualifier.rs`'s whole-file substring checks).
+        if self.uses_observed.get() {
+            self.emit_observed_prelude();
         }
         // Collection index traits — implement the boring Index API on Rust collections.
         // Three separate traits so each collection has its own natural index type:
@@ -4356,6 +4388,80 @@ fn program_uses_broadcast(program: &Program) -> bool {
 /// True when any struct/enum in `program` declares `as Introspect` (header protocol
 /// list). Recurses into `mod` blocks (unlike `program_uses_broadcast` above) since
 /// `emit_mod` flattens them into the same Rust scope anyway — see its doc comment.
+/// Whether `'observed` (bare or composed with an explicit base) appears *anywhere*
+/// in `program`'s type annotations — a shallow syntactic scan over the raw, parsed
+/// AST, before any qualifier inference has run. Gates `emit_observed_prelude`
+/// (unlike `BoringArrayIndex`/`BoringFmt`/`BoringError`, which are always emitted
+/// unconditionally): `BoringObserved`'s own generated Rust text contains the literal
+/// substrings `"Mutex<"` and `"Atomic"` (`std::sync::Mutex<...>`,
+/// `std::sync::atomic::AtomicU64`), which `tests/atomic_qualifier.rs`'s tests already
+/// grep the *whole* generated file for (`!generated.contains("Mutex<")`, etc.) to
+/// confirm the `'atomic` promotion pass fired — unconditional emission made those
+/// substrings always present regardless of whether promotion actually ran, breaking
+/// six pre-existing, unrelated tests (confirmed via a real `cargo test` run). Emitting
+/// only when `'observed` is genuinely used avoids that collision without needing to
+/// rename anything in the shared preamble-style convention this mirrors.
+fn program_uses_observed(program: &Program) -> bool {
+    use crate::ast::Item;
+    fn ty_has_observed(ty: &Type) -> bool {
+        match ty {
+            Type::Qualified(inner, OwnerQual::Observed) => { let _ = inner; true }
+            Type::Qualified(inner, _) => ty_has_observed(inner),
+            Type::Mut(inner) | Type::Optional(inner) | Type::Array(inner)
+                | Type::Set(inner) | Type::Dyn(inner) | Type::Impl(inner) => ty_has_observed(inner),
+            Type::Dict(k, v) => ty_has_observed(k) || ty_has_observed(v),
+            Type::Tuple(elems) => elems.iter().any(ty_has_observed),
+            _ => false,
+        }
+    }
+    fn stmt_has_observed(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Let(s) => s.ty.as_ref().is_some_and(ty_has_observed) || stmts_have_observed_in_value(s),
+            Stmt::If(s) => {
+                s.branches.iter().any(|(_, body)| body.iter().any(stmt_has_observed))
+                    || s.else_body.as_ref().is_some_and(|b| b.iter().any(stmt_has_observed))
+            }
+            Stmt::While(s) => s.body.iter().any(stmt_has_observed),
+            Stmt::For(s) => s.body.iter().any(stmt_has_observed),
+            Stmt::Match(s) => s.arms.iter().any(|arm| matches!(&arm.body, MatchBody::Block(b) if b.iter().any(stmt_has_observed))),
+            _ => false,
+        }
+    }
+    // A nested closure/task literal's own body can also declare an `'observed` local
+    // — not reachable through `Stmt` alone, so `Stmt::Let`'s *value* expression (and
+    // every other statement kind's sub-expressions) would need a full expression
+    // walk to catch every case. Scoped out for this shallow, presence-only scan
+    // (false negative only in the rare case where `'observed` is declared only
+    // inside a closure/task literal nested in an expression, never as a top-level
+    // statement in some function/method body) — see this session's report.
+    fn stmts_have_observed_in_value(_s: &crate::ast::LetStmt) -> bool { false }
+    fn fn_has_observed(f: &FnDecl) -> bool {
+        f.return_ty.as_ref().is_some_and(ty_has_observed)
+            || f.params.iter().any(|p| p.ty.as_ref().is_some_and(ty_has_observed))
+            || f.body.iter().any(stmt_has_observed)
+    }
+    fn items_use(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Fn(f) => fn_has_observed(f),
+            Item::Struct(s) => {
+                s.fields.iter().any(|fd| ty_has_observed(&fd.ty))
+                    || s.methods.iter().any(fn_has_observed)
+                    || s.inits.iter().any(|i| i.body.iter().any(stmt_has_observed))
+                    || s.setters.iter().any(|st| ty_has_observed(&st.param_ty) || st.body.iter().any(stmt_has_observed))
+            }
+            Item::Enum(e) => {
+                e.methods.iter().any(fn_has_observed)
+                    || e.setters.iter().any(|st| ty_has_observed(&st.param_ty) || st.body.iter().any(stmt_has_observed))
+            }
+            Item::Let(s) => s.ty.as_ref().is_some_and(ty_has_observed),
+            Item::Mod(m) => items_use(&m.items),
+            Item::Stmt(st) => stmt_has_observed(st),
+            _ => false,
+        })
+    }
+    items_use(&program.items)
+}
+
 fn program_uses_introspect(program: &Program) -> bool {
     use crate::ast::Item;
     fn items_use(items: &[Item]) -> bool {
@@ -4466,6 +4572,98 @@ impl Transpiler {
     /// unconsumable handle regardless. `get()` (read) + `set()` (rebind) cover everything
     /// actually reachable; `isMutable` stays on `Field` as informational metadata only
     /// (mirrors the field's own `mut`/`var mut` qualifier) and gates nothing.
+    /// `'observed` runtime support (docs/book.md's "'observed" section): `BoringObserved<V>`
+    /// (the `struct { value: V, subscribers: ... }` every `'*'observed` qualifier maps to —
+    /// `V` is exactly whatever `emit_type` already renders for the base qualifier alone,
+    /// so this one generic struct covers `'inline'observed` through `'guard'observed`
+    /// uniformly) and `BoringSubscription` (the opaque, `Drop`-based unsubscribe handle
+    /// `subscribe()` returns).
+    ///
+    /// `subscribers` is deliberately its OWN independently-locked/ref-counted storage,
+    /// separate from `value` (per the task spec's explicit requirement) — reading
+    /// `.value` is therefore always a plain, cheap field access that never touches
+    /// `subscribers` at all, regardless of the base qualifier. `BoringSubscription` holds
+    /// a clone of that same `subscribers` handle plus its own numeric id, so it can
+    /// outlive (or be dropped independently of) the `BoringObserved` it came from and
+    /// still correctly remove exactly its own callback on `Drop`.
+    ///
+    /// Threading: single-thread mode uses `Rc`/`RefCell`/`Cell` (matching every other
+    /// single-thread qualifier representation in this file); multi-thread mode uses
+    /// `Arc`/`Mutex`/`AtomicU64`. Neither variant requires `Send`/`Sync` on the
+    /// subscriber callback itself — `'observed` locals are function-local values in
+    /// every case this session supports (see the scope note in `emit_observed_let`),
+    /// never moved across a real OS thread or `tokio::spawn` boundary.
+    fn emit_observed_prelude(&mut self) {
+        if matches!(self.config.threading, ThreadingMode::Single) {
+            self.line("type BoringObservedSubs = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn FnMut()>)>>>;");
+            self.line("struct BoringObserved<V> {");
+            self.line("    pub value: V,");
+            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("    __boring_next_id: std::rc::Rc<std::cell::Cell<u64>>,");
+            self.line("}");
+            self.line("struct BoringSubscription {");
+            self.line("    __boring_id: u64,");
+            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("}");
+            self.line("impl Drop for BoringSubscription {");
+            self.line("    fn drop(&mut self) {");
+            self.line("        self.__boring_subs.borrow_mut().retain(|(id, _)| *id != self.__boring_id);");
+            self.line("    }");
+            self.line("}");
+            self.line("impl<V> BoringObserved<V> {");
+            self.line("    fn new(value: V) -> Self {");
+            self.line("        Self { value, __boring_subs: Default::default(), __boring_next_id: Default::default() }");
+            self.line("    }");
+            self.line("    fn subscribe(&self, callback: impl FnMut() + 'static) -> BoringSubscription {");
+            self.line("        let id = self.__boring_next_id.get();");
+            self.line("        self.__boring_next_id.set(id + 1);");
+            self.line("        self.__boring_subs.borrow_mut().push((id, Box::new(callback)));");
+            self.line("        BoringSubscription { __boring_id: id, __boring_subs: self.__boring_subs.clone() }");
+            self.line("    }");
+            self.line("    fn __boring_notify(&self) {");
+            self.line("        for (_, cb) in self.__boring_subs.borrow_mut().iter_mut() { cb(); }");
+            self.line("    }");
+            self.line("}");
+        } else {
+            self.line("type BoringObservedSubs = std::sync::Arc<std::sync::Mutex<Vec<(u64, Box<dyn FnMut() + Send + Sync>)>>>;");
+            self.line("struct BoringObserved<V> {");
+            self.line("    pub value: V,");
+            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("    __boring_next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,");
+            self.line("}");
+            self.line("struct BoringSubscription {");
+            self.line("    __boring_id: u64,");
+            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("}");
+            self.line("impl Drop for BoringSubscription {");
+            self.line("    fn drop(&mut self) {");
+            self.line("        if let Ok(mut subs) = self.__boring_subs.lock() {");
+            self.line("            subs.retain(|(id, _)| *id != self.__boring_id);");
+            self.line("        }");
+            self.line("    }");
+            self.line("}");
+            self.line("impl<V> BoringObserved<V> {");
+            self.line("    fn new(value: V) -> Self {");
+            self.line("        Self {");
+            self.line("            value,");
+            self.line("            __boring_subs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),");
+            self.line("            __boring_next_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),");
+            self.line("        }");
+            self.line("    }");
+            self.line("    fn subscribe(&self, callback: impl FnMut() + 'static + Send + Sync) -> BoringSubscription {");
+            self.line("        let id = self.__boring_next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);");
+            self.line("        self.__boring_subs.lock().unwrap().push((id, Box::new(callback)));");
+            self.line("        BoringSubscription { __boring_id: id, __boring_subs: self.__boring_subs.clone() }");
+            self.line("    }");
+            self.line("    fn __boring_notify(&self) {");
+            self.line("        let mut subs = self.__boring_subs.lock().unwrap();");
+            self.line("        for (_, cb) in subs.iter_mut() { cb(); }");
+            self.line("    }");
+            self.line("}");
+        }
+        self.blank();
+    }
+
     fn emit_introspect_prelude(&mut self) {
         let str_ty = if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" };
         self.line("// Introspect — handle-based read-only/write-through reflection for");

@@ -6077,7 +6077,136 @@ All ownership qualifiers:
 | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`           | `Weak<RefCell<T>>`    | Weak ref to `T'actor`                 |
 | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`          | `Weak<RefCell<T>>`    | Weak ref to `T'guard`                 |
 | `T'static`         | `&'static T`                          | `&'static T`          | Constant global instance, no refcount — see below |
+| `T'inline'observed`| `BoringObserved<T>`                   | `BoringObserved<T>`   | Observed, no sharing — see below      |
+| `T'owned'observed` | `BoringObserved<Box<T>>`              | `BoringObserved<Box<T>>` | Observed, exclusive heap — see below |
+| `T'actor'observed` | `BoringObserved<Arc<Mutex<T>>>`       | `BoringObserved<Rc<RefCell<T>>>` | Observed, shared mutable — see below |
+| `T'guard'observed` | `BoringObserved<Arc<RwLock<T>>>`      | `BoringObserved<Rc<RefCell<T>>>` | Observed, reader-writer — see below |
 | `T?`               | `Option<T>`                           | `Option<T>`           | Optional value                        |
+
+### `'observed` — a composable sharing/notification suffix
+
+`'observed` is a **composable suffix**, written the same way as the `'actor'task`/
+`'actor'weak` compound suffixes above — it always chains onto an existing base
+qualifier, never stands alone with one fixed mapping:
+
+```boring
+struct FormModel:
+    var string name = ""
+    def setName(string s): name = s
+
+def main():
+    mut FormModel'actor'observed model = FormModel()
+    let sub = model.subscribe(():
+        print "model changed"
+    )
+    model.setName("Ada")   # prints "model changed"
+```
+
+**Method calls dispatch transparently, exactly like `'actor`/`'guard` alone
+already do.** A `T'actor`/`T'guard` value normally acquires and releases its lock
+once per method call or field access with no explicit step (chapter 21's own
+example: `c.increment()` transpiles to `c.lock().unwrap().increment()`) — `'observed`
+follows the same convention rather than requiring anything extra for the ordinary
+case. `model.setName("Ada")` above locks `model`'s base value, calls `setName`,
+releases the lock, and *then* notifies every subscriber — all from that one,
+ordinary-looking call.
+
+**Representation.** `T'observed` adds an independently-locked subscriber list
+alongside the base value — conceptually:
+
+```rust
+struct BoringObserved<V> { value: V, subscribers: /* separate, independently-locked list of callbacks */ }
+```
+
+`V` is exactly whatever the base qualifier alone would already produce (see the table
+above) — `'inline'observed`/`'owned'observed` need no sharing at all, so `subscribers`
+is a plain local list; `'actor'observed`/`'guard'observed` need `subscribers` to be its
+own ref-counted, lockable storage too, kept **separate** from `value`'s own lock (if
+any) specifically so `.value` stays a plain, cheap field access that never touches
+`subscribers` — see below.
+
+| Base | Composition | Verdict |
+|---|---|---|
+| `'inline` | `'inline'observed` | valid — sole owner, but still observable |
+| `'owned` | `'owned'observed` | valid — same, plus heap indirection |
+| `'actor` | `'actor'observed` | valid — shared, exclusive-lock (`Mutex`) access |
+| `'guard` | `'guard'observed` | valid — shared, reader-writer (`RwLock`) access |
+| `'shared` | `'shared'observed` | **rejected** — compile error. `'shared` has no interior mutability at all (`Rc`/`Arc<T>`, no lock), so an observed cell wrapping one could never have anything to notify subscribers about — mirrors the existing `mut 'shared` rejection's style (`cannot combine 'observed with 'shared`). |
+
+**`.value` — the explicit, silent escape hatch.** `someObservedValue.value` reads or
+writes the underlying base value directly — ordinary field access, never a special
+method — and it *never* touches `subscribers` or triggers a notification, even for a
+deliberate mutation:
+
+```boring
+model.value.setName("Ada")   # renames silently — no subscriber fires
+```
+
+Whatever the base qualifier normally requires to call a `def` method or write a field
+still applies unchanged through `.value` — `model.value.setName(...)` locks
+`model.value` exactly the way a bare `FormModel'actor` variable's own `.setName(...)`
+call would; it just skips the notification step afterward. Reach for `.value` only
+when you specifically want a silent read or a silent mutation — the ordinary,
+everyday path is the direct call shown above.
+
+**Write notification.** A recognized mutation reaching the base value **directly**
+(not through `.value`) — a `def` method call, or (for `'inline'observed`/
+`'owned'observed`) a direct assignment — locks `subscribers` and invokes every
+registered callback synchronously, *after* the value's own lock (if any) has already
+been released. This is a plain, general-purpose primitive: the callbacks are
+arbitrary `fn ()` closures the subscriber provided, with no UI framework, scheduler,
+or async machinery involved.
+
+**`subscribe()` / `Subscription`.**
+
+```boring
+struct Subscription:
+    # opaque handle — dropping it removes its own callback from whatever it subscribed to
+
+def T'observed.subscribe(fn () callback) -> Subscription:
+    ...
+```
+
+`subscribe()` appends `callback` to the observed value's subscriber list and returns a
+`Subscription` — an opaque handle whose `Drop` removes exactly that callback from the
+list it came from (ordinary RAII, no manual unsubscribe call needed):
+
+```boring
+mut Counter'actor'observed c = Counter(0)
+let sub = c.subscribe(():
+    print "changed"
+)
+c.inc()      # prints "changed"
+# ... sub goes out of scope here ...
+c.inc()      # does NOT print "changed" — sub's callback was already removed
+```
+
+Multiple independent `subscribe()` calls on the same `'observed` value each get their
+own `Subscription`; a single write notifies every subscriber still registered at that
+moment.
+
+**Qualifier inference for bare `'observed`.** Written with no explicit base
+(`FormModel'observed model = ...`), `'observed` resolves through the same
+candidate-elimination / priority-fallback chain [chapter 30](#30-qualifier-inference)
+already used for an ordinary bare struct — `'shared` is simply never a candidate (it's
+never a legal `'observed` resolution). A genuine multi-owner usage signal (e.g. passed
+to something that demands `'actor`) narrows the candidate set down before the fallback
+even runs, so `'actor'observed` is chosen directly — mirroring how an otherwise-bare,
+unqualified struct already infers toward `'actor` today. Absent such a signal, the
+existing size-based `--inline-auto-bytes` threshold ([Size-based auto-boxing](transpilation-modes.md)) decides `'inline'observed` vs `'owned'observed`, the
+same way it already decides inline-vs-boxed for any other otherwise-unqualified
+struct — no separate inference algorithm.
+
+**Binding × qualifier — no new rule.** `'observed` falls into whatever row its base
+qualifier already occupies in [Binding × qualifier combinations](#binding--qualifier-combinations)
+below: `'actor'observed`/`'guard'observed` follow the existing `'actor`/`'guard` row
+(`var` alone is rebind-only and does not unlock a `def` call, direct or through
+`.value`; `mut`/`var mut` does) — the same rule that already applies to a bare
+`'actor`/`'guard` binding, unchanged.
+
+**Scope.** `'observed` is implemented for local `let`/`mut`/`var` bindings. Struct
+fields, function parameters, and return types are not covered by this
+implementation.
 
 ### `'static` — constant global instances
 

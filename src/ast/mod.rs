@@ -1259,6 +1259,24 @@ pub enum OwnerQual {
     GpuActorUnified,
     /// `T'surface` — pixel buffer with backend-differentiated placement.
     GpuSurface,
+    /// `T'observed` — composable suffix (same shape as `'actor'task`/`'actor'weak`)
+    /// layering an independently-locked subscriber-notification mechanism onto an
+    /// existing base qualifier. Always represented as a *second* `Qualified` layer
+    /// wrapping the base: `T'actor'observed` → `Qualified(Qualified(T, Actor), Observed)`,
+    /// exactly like `T'actor'weak` → `Qualified(Qualified(T, Actor), Weak)` — see
+    /// `Weak`'s doc above for the precedent this mirrors. Unlike `'weak` (which only
+    /// chains onto `Shared`/`Actor`/`Guard`), `'observed` also chains onto `Inline`/
+    /// `Owned` — see docs/book.md's "`'observed` — a composable sharing suffix"
+    /// section for the full composition table, including the `'shared'observed`
+    /// rejection (checker error, `rust_checks.rs`, mirroring the `mut 'shared`
+    /// rejection style — 'shared has no interior mutability for anything to notify
+    /// about).
+    ///
+    /// Bare `T'observed` (no explicit base written) is represented as a single-level
+    /// `Qualified(T, Observed)` — no inner `Qualified` yet — used as a marker that
+    /// `infer_qualifiers.rs`'s bare-qualifier resolution should pick the base (see
+    /// that file's `observed_bare` handling and `Transpiler::observed_locals`).
+    Observed,
     /// Qualifier union: `T'inline|owned|actor` — restricts which qualifiers callers may provide.
     /// At the Rust emission level this is a plain generic (no wrapping); the Boring compiler
     /// validates that every call site provides one of the listed qualifiers.
@@ -1686,6 +1704,11 @@ impl Type {
             Type::Qualified(_, OwnerQual::Borrow)       => false, // unknown until alias resolved — conservative
             Type::Qualified(_, OwnerQual::BorrowMut)    => false, // &mut T — conservative (target unknown)
             Type::Qualified(inner, OwnerQual::Union(_)) => inner.is_task_safe(), // union: delegate to inner
+            // 'observed always wraps a base-qualified inner type (`T'actor'observed` →
+            // Qualified(Qualified(T, Actor), Observed)) — delegate to the base qualifier's
+            // own task-safety, same as Union above. A still-bare `Qualified(Named, Observed)`
+            // (unresolved bare `'observed`) conservatively delegates to `Named`'s `false`.
+            Type::Qualified(inner, OwnerQual::Observed) => inner.is_task_safe(),
             Type::TypeParam(_) => true,
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
             // Unqualified, like Array/ArrayN — sharing semantics undefined without a qualifier.

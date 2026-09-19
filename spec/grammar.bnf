@@ -1058,6 +1058,18 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #                                          provenance-gated (see docs/qualifiers.md
 #                                          §"'static") — no chained sub-qualifier
 #                                          (T'static'weak is rejected, unlike 'actor/'guard)
+#   T'observed      →  <base>'observed     composable suffix (docs/book.md's "'observed"
+#                                          section) — chains onto any base above the same
+#                                          way 'task/'weak do: T'inline'observed,
+#                                          T'owned'observed, T'actor'observed,
+#                                          T'guard'observed all valid; T'shared'observed
+#                                          is a checker-time rejection (parses fine here,
+#                                          same treatment as `mut 'shared`), not a grammar
+#                                          restriction. Bare T'observed (no explicit base)
+#                                          resolves via qualifier inference. Adds an
+#                                          independently-locked subscriber list alongside
+#                                          the base value — see subscribe()/Subscription
+#                                          in docs/book.md.
 #
 # Built-in type aliases (use these instead of explicit qualifiers):
 #   str    →  String'const  →  &str
@@ -1068,7 +1080,7 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   float32 → Float32'copy  →  f32
 #   bool   →  Bool'copy     →  bool
 #
-owner_qual      ::= "owned" | "inline" | "copy" | "const" | "shared" | "actor" | "guard" | "atomic" | "weak"
+owner_qual      ::= "owned" | "inline" | "copy" | "const" | "shared" | "actor" | "guard" | "atomic" | "weak" | "observed"
                   | owner_qual "|" owner_qual   # qualifier union: T'inline|owned (resolved at inference time)
                   # NOTE: bare tick (no qualifier after `'`) is a parse error — write
                   # the qualifier explicitly, e.g. T'new for "any indirection, inferred".
@@ -1076,6 +1088,9 @@ owner_qual      ::= "owned" | "inline" | "copy" | "const" | "shared" | "actor" |
                   # this ident-string list, but are valid in this position — see
                   # T'new/T'guard/T'static above and borrow_qual below for the equivalent
                   # "guard" case.
+                  # "observed" additionally CHAINS onto a base qualifier already in this
+                  # list (T'actor'observed, T'guard'observed, …) — same shape as the
+                  # existing 'task/'weak chaining, not a separate grammar production.
 
 # ─── Caller-facing qualifier groups ───────────────────────────────────────────
 #

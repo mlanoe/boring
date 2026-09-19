@@ -206,6 +206,33 @@ impl Checker {
         }
     }
 
+    // ── `'observed` composability gate ────────────────────────────────────────
+    //
+    // `T'shared'observed` is rejected unconditionally (not just under `mut`, unlike
+    // `check_qualifier_constraint`'s `mut 'shared` check above) — `'shared` has no
+    // interior mutability at all (`Rc`/`Arc<T>`, no `Mutex`/`RwLock`/`RefCell`), so an
+    // observed cell wrapping one could never have anything to notify subscribers
+    // about, regardless of whether the binding itself is `mut`. Mirrors the
+    // `mut 'shared` rejection's style/reasoning (`check_qualifier_constraint` above)
+    // but fires independently of `mut` — see docs/book.md's "'observed" section,
+    // composition table, `'shared'observed` row.
+    pub(super) fn check_observed_compatibility(&mut self, ty: &Option<Type>, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        let Some(ty) = ty else { return };
+        let ty = ty.without_mut();
+        if let Type::Qualified(inner, OwnerQual::Observed) = ty {
+            if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Shared)) {
+                self.error(
+                    "cannot combine `'observed` with `'shared`: `'shared` has no interior \
+                     mutability at all (no `Mutex`/`RwLock`/`RefCell`) — an observed cell \
+                     wrapping it could never have anything to notify subscribers about; use \
+                     `'actor'observed` or `'guard'observed` for a shared, mutable, observed value",
+                    line, col,
+                );
+            }
+        }
+    }
+
     fn describe_type_for_atomic_error(ty: &Type) -> String {
         match ty {
             Type::Float32 => "float32".to_string(),

@@ -29,6 +29,7 @@ impl Transpiler {
     /// to either member are propagated to the whole group.
     pub(crate) fn infer_qualifiers(&mut self, stmts: &[Stmt]) {
         self.inferred_qualifiers.clear();
+        self.observed_locals.clear();
         self.task_method_call_vars.clear();
 
         let mut alias_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -107,6 +108,43 @@ impl Transpiler {
             collect_anonymous_vars(stmt, &mut anonymous_vars, &mut alias_of, &mut var_struct_types, &mut mut_bindings, &mut tick_bindings);
         }
 
+        // Bare `T'observed` locals (docs/book.md's "'observed" section, "Qualifier
+        // inference for bare `'observed`"): represented at parse time as a single-level
+        // `Qualified(Named(n), Observed)` — no base qualifier chosen yet. Judgment call
+        // (see the task's own note that this is the one part of the spec most likely to
+        // need one): rather than threading a whole new `Observed` member through this
+        // file's general candidate-elimination lattice (every `constrain_candidates`/
+        // `promote_task_variants`/`resolve_fallback` call site would need to learn about
+        // it), a bare-observed local is seeded into the *exact same* `anonymous_vars`/
+        // `var_struct_types`/`candidates` machinery as an ordinary bare struct local
+        // (using its inner `Named` type) — every existing usage signal (task capture,
+        // `def`-call, qualifier demand, `mut` binding, …) narrows it exactly as it would
+        // a plain bare `FormModel` local — with exactly one extra restriction applied
+        // below: `Shared` is eliminated from the candidate set up front, since
+        // `'shared'observed` is never a legal resolution (rejected by the checker for an
+        // explicit annotation — see `check_observed_compatibility` — and never a sane
+        // *inferred* default either, since a `'shared` value has nothing for `'observed`
+        // to notify about). With `Shared` gone, the existing fallback chain
+        // (`'owned` > `'shared` > `'actor` > `'atomic` > `'guard`, `docs/book.md` §30)
+        // already produces exactly the spec'd defaults for free: a genuine multi-owner
+        // usage signal (e.g. passed to something demanding `'actor`) narrows the
+        // candidate set down to `{Actor}` (or `{Actor, Guard}`) *before* the fallback
+        // even runs, so it's chosen directly as the sole survivor; absent such a signal,
+        // the untouched Step-1 size check (`'inline` vs continue) followed by the
+        // ordered chain (`'owned` first among what's left) reproduces "otherwise resolve
+        // 'inline'observed vs 'owned'observed via the size threshold" exactly. No
+        // separate resolution algorithm needed — see the follow-up loop after the main
+        // resolution loop below, which just reads back whatever `inferred_qualifiers`
+        // this ordinary pipeline already produced and records it in `observed_locals`.
+        let mut observed_bare: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for stmt in stmts {
+            collect_bare_observed_lets(stmt, &mut observed_bare);
+        }
+        for (name, struct_name) in &observed_bare {
+            anonymous_vars.insert(name.clone());
+            var_struct_types.insert(name.clone(), struct_name.clone());
+        }
+
         // Each anonymous variable starts as a candidate for every qualifier.
         // T' → indirection-only; T'<group> → Union members; bare T → full set.
         let mut candidates: std::collections::HashMap<String, Vec<OwnerQual>> = anonymous_vars
@@ -122,6 +160,38 @@ impl Transpiler {
                 (name.clone(), quals)
             })
             .collect();
+
+        // Bare `'observed` locals: eliminate `Shared` from the candidate set up front —
+        // see the long comment above `observed_bare`'s collection for why.
+        for name in observed_bare.keys() {
+            constrain_candidates(
+                &mut candidates, name,
+                &[OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask,
+                  OwnerQual::Guard, OwnerQual::GuardTask, OwnerQual::Atomic],
+                &alias_of,
+            );
+        }
+
+        // Bare `'observed` locals: multi-owner usage signal ("passed to something that
+        // demands `'actor`/`'guard`") — the spec's example for defaulting toward
+        // `'actor'observed`. Real usage of an `'observed` local's base value always goes
+        // through `.value` (`spawn_actor(c.value)`, never `spawn_actor(c)` — the bare
+        // name refers to the *wrapper*, not the base value) — a shape the general
+        // signal-collection walk below (`walk_expr_for_qualifiers`) does not recognize,
+        // since every one of its call-site-demand checks matches only a bare
+        // `ExprKind::Var` argument (see e.g. its own `Call` arm just below). Rather than
+        // teach that whole general walk (and every other bare-`Var`-keyed signal check
+        // alongside it — task captures, `with` blocks, …) about this one extra shape,
+        // this is a narrow, dedicated scan for exactly the shape the spec's own example
+        // needs: `<var>.value` passed as a direct call argument, at a statement's top
+        // level, to a function whose declared parameter at that position demands
+        // `'actor`/`'guard`. A deeper expression nesting (inside a binary op, a nested
+        // call, a closure body, …) is not covered — a real, intentional scope
+        // limitation of the bare-`'observed` inference judgment call (see this
+        // session's report).
+        for stmt in stmts {
+            scan_observed_bare_multi_owner_signal(self, stmt, &observed_bare, &mut candidates, &alias_of);
+        }
 
         // `mut` binding → mutation signal at declaration site: eliminates Shared.
         for var_name in &mut_bindings {
@@ -296,6 +366,18 @@ impl Transpiler {
                         self.inferred_qualifiers.insert(var_name.clone(), q);
                     }
                 }
+            }
+        }
+
+        // Bare `'observed` locals: read back whatever the ordinary bare-struct
+        // resolution above just produced (`Inline`/`Owned`/`Actor`/`ActorTask`/`Guard`/
+        // `GuardTask` — `Shared` was excluded up front, so it never appears here) and
+        // record it in `observed_locals` for `emit_let`/`emit_methods` to consume.
+        // `ActorTask`/`GuardTask` are treated the same as `Actor`/`Guard` by the
+        // consumers of this map (tokio-lock variants of the same representation).
+        for (name, struct_name) in &observed_bare {
+            if let Some(q) = self.inferred_qualifiers.get(name).cloned() {
+                self.observed_locals.insert(name.clone(), (struct_name.clone(), q));
             }
         }
     }
@@ -1876,6 +1958,118 @@ fn collect_anonymous_vars(
                         for st in stmts { collect_anonymous_vars(st, anonymous_vars, alias_of, var_struct_types, mut_bindings, tick_bindings); }
                     }
                     MatchBody::Expr(_) => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Narrow, dedicated scan for the bare-`'observed` "multi-owner usage" signal — see
+/// the long comment at its call site in `infer_qualifiers` for why this exists as its
+/// own small function instead of extending the general `walk_expr_for_qualifiers`.
+/// Only recognizes a top-level call-statement shape: `fn_name(..., var.value, ...)`
+/// where `fn_name`'s already-known signature (`self.fn_sigs`) demands `'actor`/
+/// `'guard`(`'task`) at that argument position. Recurses into the same nested-block
+/// `Stmt` shapes `collect_bare_observed_lets`/`collect_anonymous_vars` already do.
+fn scan_observed_bare_multi_owner_signal(
+    transpiler: &Transpiler,
+    stmt: &Stmt,
+    observed_bare: &std::collections::HashMap<String, String>,
+    candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    alias_of: &std::collections::HashMap<String, String>,
+) {
+    let mut scan_call = |callee: &Expr, args: &[crate::ast::Arg]| {
+        let ExprKind::Var(fn_name) = &callee.kind else { return };
+        let Some(param_types) = transpiler.fn_sigs.get(fn_name.as_str()) else { return };
+        for (i, arg) in args.iter().enumerate() {
+            let Some(param_ty) = param_types.get(i) else { continue };
+            let Some(demanded) = qual_of_type(param_ty) else { continue };
+            if !matches!(demanded, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask) {
+                continue;
+            }
+            if let ExprKind::Field(inner, field) = &arg.value.kind {
+                if field == "value" {
+                    if let ExprKind::Var(name) = &inner.kind {
+                        if observed_bare.contains_key(name.as_str()) {
+                            constrain_candidates(candidates, name, &[OwnerQual::Actor, OwnerQual::Guard], alias_of);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    match stmt {
+        Stmt::Expr(e) => {
+            match &e.kind {
+                ExprKind::Call(callee, args) => scan_call(callee, args),
+                ExprKind::MethodCall(_, _, _) => {} // receiver-based, not a plain fn-name call
+                _ => {}
+            }
+        }
+        Stmt::Let(s) => {
+            if let Some(ExprKind::Call(callee, args)) = s.value.as_ref().map(|v| &v.kind) {
+                scan_call(callee, args);
+            }
+        }
+        Stmt::If(s) => {
+            for (_, body) in &s.branches {
+                for st in body { scan_observed_bare_multi_owner_signal(transpiler, st, observed_bare, candidates, alias_of); }
+            }
+            if let Some(else_body) = &s.else_body {
+                for st in else_body { scan_observed_bare_multi_owner_signal(transpiler, st, observed_bare, candidates, alias_of); }
+            }
+        }
+        Stmt::While(s) => {
+            for st in &s.body { scan_observed_bare_multi_owner_signal(transpiler, st, observed_bare, candidates, alias_of); }
+        }
+        Stmt::For(s) => {
+            for st in &s.body { scan_observed_bare_multi_owner_signal(transpiler, st, observed_bare, candidates, alias_of); }
+        }
+        Stmt::Match(s) => {
+            for arm in &s.arms {
+                if let MatchBody::Block(stmts) = &arm.body {
+                    for st in stmts { scan_observed_bare_multi_owner_signal(transpiler, st, observed_bare, candidates, alias_of); }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collects `let`/`mut`/`var` locals whose declared type is a *bare* `'observed`
+/// annotation (`Type::Qualified(Type::Named(n), OwnerQual::Observed)`, single-level —
+/// no base qualifier chosen yet, e.g. `FormModel'observed model = FormModel()`) into
+/// `out` (var name → base struct type name). Mirrors `collect_anonymous_vars`'s
+/// recursive shape (same `Stmt` cases) rather than reusing it directly, since it needs
+/// a different, narrower match on `s.ty` and populates a different output shape.
+fn collect_bare_observed_lets(stmt: &Stmt, out: &mut std::collections::HashMap<String, String>) {
+    match stmt {
+        Stmt::Let(s) => {
+            if let Some(Type::Qualified(inner, OwnerQual::Observed)) = s.ty.as_ref().map(Type::without_mut) {
+                if let Type::Named(n) = inner.as_ref() {
+                    out.insert(s.name.clone(), n.clone());
+                }
+            }
+        }
+        Stmt::If(s) => {
+            for (_, body) in &s.branches {
+                for st in body { collect_bare_observed_lets(st, out); }
+            }
+            if let Some(else_body) = &s.else_body {
+                for st in else_body { collect_bare_observed_lets(st, out); }
+            }
+        }
+        Stmt::While(s) => {
+            for st in &s.body { collect_bare_observed_lets(st, out); }
+        }
+        Stmt::For(s) => {
+            for st in &s.body { collect_bare_observed_lets(st, out); }
+        }
+        Stmt::Match(s) => {
+            for arm in &s.arms {
+                if let MatchBody::Block(stmts) = &arm.body {
+                    for st in stmts { collect_bare_observed_lets(st, out); }
                 }
             }
         }

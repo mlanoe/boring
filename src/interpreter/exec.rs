@@ -1194,6 +1194,7 @@ impl Interpreter {
                     OwnerQual::GpuActorUnified => "'actor'unified".to_string(),
                     OwnerQual::GpuLocal     => "'local".to_string(),
                     OwnerQual::GpuConst     => "'gpu'const".to_string(),
+                    OwnerQual::Observed     => "'observed".to_string(),
                     // `'new` (candidate-set qualifier, replaces the old bare tick) is
                     // represented as this exact Union shape — display it as `'new`
                     // rather than spelling out its members, matching source syntax.

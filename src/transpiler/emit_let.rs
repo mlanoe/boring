@@ -58,6 +58,73 @@ impl Transpiler {
         self.line(&format!("{} {}: {} = {};", kw, name, atomic_ty, init));
     }
 
+    /// Emits a `'observed`-qualified local — `BoringObserved<V>` where `V` is exactly
+    /// what `emit_type`/`emit_*_new` would already produce for the base qualifier alone
+    /// (`Inline`/`Owned`/`Actor`(`Task`)/`Guard`(`Task`)) — see docs/book.md's
+    /// "'observed" section's composition table. `'shared` never reaches here: rejected
+    /// earlier by the checker (`check_observed_compatibility`).
+    ///
+    /// Scope note (see this session's report): only local `let`/`mut`/`var` bindings are
+    /// supported — not struct fields, function parameters, or return types. `caller`
+    /// (`emit_let`) has already recorded `(struct_name, base)` in `self.observed_locals`,
+    /// which `emit_methods::try_emit_observed_method_direct` (the primary, transparent
+    /// `obs.method(...)` path — locks, calls, unlocks, notifies, mirroring how
+    /// `'actor`/`'guard` already dispatch method calls transparently) and
+    /// `try_emit_observed_method` (the explicit, silent `.value.method(...)` escape
+    /// hatch — same lock/call, never notifies) both consult.
+    fn emit_observed_let(&mut self, s: &LetStmt, struct_name: &str, base: &OwnerQual, s_value: &Expr) {
+        let named = Type::Named(struct_name.to_string());
+        let raw_val = self.emit_let_value(Some(&named), s_value);
+        // Managed mode maps a bare `T'owned` over a user type to `Arc<Mutex<T>>`
+        // (multi) / `RefCell<T>` (single) instead of `Box<T>` (see `emit_type`'s own
+        // `OwnerQual::Owned` arm, which `BoringObserved<V>`'s `V` already picks up
+        // correctly via straight recursion) — the *value* construction here must
+        // mirror that same mode-dependent choice, or the annotation and the
+        // initializer disagree (confirmed via a real `cargo build` type mismatch:
+        // `BoringObserved::new` expecting `Arc<Mutex<Counter>>`, given `Box<Counter>`).
+        let owned_ty_for_mode_check = Type::Qualified(Box::new(named.clone()), OwnerQual::Owned);
+        let is_managed_owned = matches!(base, OwnerQual::Owned) && self.is_managed_owned_user(&owned_ty_for_mode_check);
+        let base_wrapped = match base {
+            OwnerQual::Inline => raw_val,
+            OwnerQual::Owned if is_managed_owned => self.wrap_managed(&raw_val),
+            OwnerQual::Owned => format!("Box::new({})", raw_val),
+            OwnerQual::Actor => self.emit_actor_new(&raw_val),
+            OwnerQual::ActorTask => self.emit_actor_task_new(&raw_val),
+            OwnerQual::Guard => self.emit_guard_new(&raw_val),
+            OwnerQual::GuardTask => self.emit_guard_task_new(&raw_val),
+            // Any other base composed with 'observed (e.g. a scalar 'atomic — not part
+            // of the required composition table) falls back to the raw value unwrapped;
+            // not a supported combination, but avoids silently discarding the value.
+            _ => raw_val,
+        };
+        let full_ty = Type::Qualified(
+            Box::new(Type::Qualified(Box::new(named), base.clone())),
+            OwnerQual::Observed,
+        );
+        let rust_ty = self.emit_type(&full_ty);
+        let init = format!("BoringObserved::new({})", base_wrapped);
+        // A `'observed` local's outer Rust binding is `let mut` whenever its `.value`
+        // field could ever need a plain, non-lock-mediated field write — `'inline`/
+        // strict-mode-`'owned` bases have no lock at all, so replacing `.value`
+        // wholesale (`c.value = newVal`) needs the *field holding it* to be `mut` —
+        // or the Boring binding itself is `mut`/`var mut` (`Arc<Mutex<T>>`'s own
+        // interior mutability doesn't require the field holding the Arc to be `mut`,
+        // but a plain `T`/`Box<T>` value replacement does). Matches the same
+        // forced-mut reasoning `emit_let`'s `Type::nested_slot_grants_mut` already
+        // applies elsewhere. (Whole-`.value`-replacement assignment itself is not
+        // implemented in this session's scope — see the report — this only ensures
+        // the emitted binding wouldn't block it if it existed.)
+        let kw = if s.binding.is_mutable()
+            || (matches!(base, OwnerQual::Inline) || (matches!(base, OwnerQual::Owned) && !is_managed_owned))
+        {
+            "let mut"
+        } else {
+            "let"
+        };
+        let name = escape_rust_keyword(&s.name);
+        self.line(&format!("{} {}: {} = {};", kw, name, rust_ty, init));
+    }
+
     fn try_emit_qualified_let(&mut self, s: &LetStmt, ty: &Type, s_value: &Expr) -> bool {
         // Automatic `'actor`/`'guard` → `'atomic` promotion (Part 2 — see
         // `promote_atomic.rs`): `scan_atomic_promotions` has already proven this exact
@@ -1298,6 +1365,27 @@ impl Transpiler {
             return;
         }
         let s_value = s.value.as_ref().expect("invariant: Let statement without type annotation must have an initializer value");
+        // `'observed`-qualified local (docs/book.md's "'observed" section) — an explicit
+        // annotation (`FormModel'actor'observed`) is recorded into `observed_locals` right
+        // here (it never goes through `infer_qualifiers`'s bare-struct machinery, since
+        // it's already fully concrete); a *bare* `'observed` local
+        // (`FormModel'observed`) was already resolved into `observed_locals` by
+        // `infer_qualifiers` before this function body's statements were emitted (see
+        // that file's `observed_bare` handling). Either way, once it's in
+        // `observed_locals`, emission is identical — `emit_observed_let` fully handles
+        // its own tracking + `self.line(...)` emission, same contract as
+        // `try_emit_qualified_let` below.
+        if let Some(Type::Qualified(base_qualified, OwnerQual::Observed)) = s.ty.as_ref().map(Type::without_mut) {
+            if let Type::Qualified(inner, base) = base_qualified.without_mut() {
+                if let Type::Named(n) = inner.without_mut() {
+                    self.observed_locals.insert(s.name.clone(), (n.clone(), base.clone()));
+                }
+            }
+        }
+        if let Some((struct_name, base)) = self.observed_locals.get(&s.name).cloned() {
+            self.emit_observed_let(s, &struct_name, &base, s_value);
+            return;
+        }
         // T'actor / T'guard / managed-mode T' bindings — locking wrapper types that are
         // emitted entirely differently from a plain `let`, and fully handle their own
         // tracking + `self.line(...)` emission.

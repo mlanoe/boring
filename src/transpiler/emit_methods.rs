@@ -784,6 +784,204 @@ impl Transpiler {
         Some(call)
     }
 
+    /// `<observedVar>.subscribe(callback)` — docs/book.md's "'observed" section. The
+    /// callback must be `'static` (it's stored in `BoringSubscribers`, which outlives
+    /// this statement — `BoringObserved::subscribe`'s own signature demands
+    /// `impl Fn() + 'static`), but Boring's ordinary closure-literal transpilation
+    /// (`emit_expr_closure`, reused here) produces a plain borrow-capturing `|| { ... }`
+    /// — correct for a short-lived callee like `forEach`/`map`, wrong here. Wrapped in
+    /// `move` plus explicit `Arc`/`Rc` clones for any captured actor/guard variable,
+    /// exactly the same technique `emit_task`'s blocking-spawn closure already uses for
+    /// the identical `'static` requirement (see the doc comment there).
+    fn try_emit_observed_subscribe(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if method != "subscribe" { return None; }
+        let ExprKind::Var(v) = &obj.kind else { return None };
+        if !self.observed_locals.contains_key(v.as_str()) { return None; }
+        let [arg] = args else { return None };
+        let ExprKind::Closure(params, _ret_ty, body, throws, task) = &arg.value.kind else { return None };
+        let inner = self.emit_expr_closure(params, body, *throws, *task);
+        // `inner` is `"|| { ... }"` or `"|| expr"` — NOT necessarily unit-returning:
+        // confirmed via a real `cargo build` E0308 that a closure body whose last
+        // statement is a bare `'atomic` compound-assign (`counter += 1`) emits as a
+        // single trailing expression with no `;` (`|| { counter.fetch_add(1, ...) }`),
+        // making the closure's inferred return type `isize` instead of `()` — harmless
+        // for an ordinary Boring closure (nothing else constrains its Rust type to a
+        // concrete zero-arg unit trait bound), but `subscribe`'s own signature demands
+        // exactly `impl FnMut()` (shorthand for `FnMut() -> ()`), so this is the first
+        // place that bound actually bites. Pre-existing, unrelated to `'observed`
+        // otherwise — flagged separately, not fixed at the root here. Worked around
+        // locally and robustly (regardless of `inner`'s own return type) by calling it
+        // as an inner closure and discarding the result as a statement, so the *outer*
+        // closure literal handed to `subscribe` is unconditionally unit-returning.
+        let captured = collect_var_names(&arg.value);
+        let arc_captures: Vec<&str> = captured.iter()
+            .filter(|name| self.arc_vars.contains(*name))
+            .map(String::as_str)
+            .collect();
+        let closure = if arc_captures.is_empty() {
+            format!("move || {{ let mut __boring_cb = {}; __boring_cb(); }}", inner)
+        } else {
+            let clones: String = arc_captures.iter()
+                .map(|name| {
+                    if self.rc_vars.contains(*name) {
+                        format!("let {} = Rc::clone(&{});", name, name)
+                    } else {
+                        format!("let {} = Arc::clone(&{});", name, name)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{{ {} move || {{ let mut __boring_cb = {}; __boring_cb(); }} }}", clones, inner)
+        };
+        Some(format!("{}.subscribe({})", escape_rust_keyword(v), closure))
+    }
+
+    /// `'observed` method dispatch (docs/book.md's "'observed" section): a `def`/`req`
+    /// call reaching into an `'observed` local's base value through `.value` —
+    /// `obs.value.method(args)`. `.value` is registered nowhere else as a "real" struct
+    /// field (`BoringObserved` isn't a Boring `struct`), so this must be its own
+    /// dedicated dispatch function rather than reusing the generic `recv.field.method()`
+    /// machinery elsewhere in this file (which keys off `self.struct_fields`).
+    ///
+    /// Lowering by base qualifier: `Inline`/`Owned` — plain passthrough (`Box<T>` auto-
+    /// derefs for method calls same as `T`, so both cases render identically); `Actor`/
+    /// `ActorTask` — `.lock().unwrap()` (multi) / `.borrow_mut()` (single); `Guard`/
+    /// `GuardTask` — `.write().unwrap()` (multi) / `.borrow_mut()` (single) — mirrors
+    /// `try_emit_mutex_method`/`try_emit_rwlock_method`'s own lowering exactly, just
+    /// rooted at `{v}.value` instead of `{v}` directly.
+    ///
+    /// Mut-gating mirrors those two functions' own rule: `'actor'observed`/
+    /// `'guard'observed` follow the same row as bare `'actor`/`'guard` (`var` alone does
+    /// not unlock a `def` call into `.value`; `mut`/`var mut` does — see
+    /// `content_mutable_local_vars`, populated from `crate::ast::binding_grants_mut`,
+    /// which already treats this uniformly regardless of the specific qualifier nested
+    /// inside `Type::Mut`).
+    ///
+    /// Write notification: a `def` (mutating) call fires every registered subscriber
+    /// callback synchronously, after the value's own lock (if any) has been released —
+    /// achieved by evaluating the call in an inner block, binding its result, THEN
+    /// calling `__notify()` as a separate statement (the temporary lock guard from
+    /// `.lock().unwrap()`/`.write().unwrap()`/`.borrow_mut()` is dropped at the end of
+    /// the `let` statement, strictly before the following `__notify()` statement runs).
+    /// A `req` (read-only) call never notifies — nothing was mutated.
+    /// `c.method(args)` — direct call on the `'observed`-qualified receiver itself, no
+    /// `.value` needed. Design correction (see this session's report): `'actor`/`'guard`
+    /// already dispatch method calls *transparently* (`c.increment()` →
+    /// `c.lock().unwrap().increment()`, docs/book.md §21 — no explicit unwrap/field
+    /// step). `'observed` must follow the same convention rather than requiring
+    /// `.value` for the ordinary case — this is the primary, everyday path; `.value`
+    /// (`try_emit_observed_method` below) becomes the explicit *silent* escape hatch
+    /// (skips the write-notification, for a deliberately-silent read/mutation) instead
+    /// of the only way to reach a method at all.
+    ///
+    /// Checked before `try_emit_observed_method` in the dispatch chain, and before
+    /// `try_emit_mutex_method`/`try_emit_rwlock_method` (which would otherwise never
+    /// match anyway — `v` here is `'observed`-registered, never in
+    /// `var_mutex_types`/`var_rwlock_types`, since those track the *base* qualifier
+    /// alone, not a `BoringObserved`-wrapped one).
+    fn try_emit_observed_method_direct(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ExprKind::Var(v) = &obj.kind else { return None };
+        let (struct_name, base) = self.observed_locals.get(v.as_str())?.clone();
+        let escaped_v = escape_rust_keyword(v);
+        let (call_expr, is_req) = self.observed_call_expr(obj, v, &escaped_v, &struct_name, &base, method, args, false);
+        if is_req {
+            Some(call_expr)
+        } else {
+            Some(format!("{{ let __boring_obs_r = {}; {}.__boring_notify(); __boring_obs_r }}", call_expr, escaped_v))
+        }
+    }
+
+    /// `c.value.method(args)` — the explicit, silent escape hatch: reaches into the
+    /// `'observed` local's base value exactly like the direct-call path above (same
+    /// lock/borrow lowering, same mut-gating), but **never** notifies subscribers —
+    /// see `try_emit_observed_method_direct`'s doc for why `.value` is the escape
+    /// hatch, not the primary path, after this session's design correction. `.value`
+    /// is registered nowhere else as a "real" struct field (`BoringObserved` isn't a
+    /// Boring `struct`), so this must be its own dedicated dispatch function rather
+    /// than reusing the generic `recv.field.method()` machinery elsewhere in this file
+    /// (which keys off `self.struct_fields`).
+    fn try_emit_observed_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ExprKind::Field(inner_obj, field_name) = &obj.kind else { return None };
+        if field_name != "value" { return None; }
+        let ExprKind::Var(v) = &inner_obj.kind else { return None };
+        let (struct_name, base) = self.observed_locals.get(v.as_str())?.clone();
+        let escaped_v = escape_rust_keyword(v);
+        let (call_expr, _is_req) = self.observed_call_expr(obj, v, &escaped_v, &struct_name, &base, method, args, true);
+        Some(call_expr)
+    }
+
+    /// Shared lowering for both `'observed` call shapes above: the mut-gating
+    /// diagnostic (mirrors `try_emit_mutex_method`/`try_emit_rwlock_method`'s own
+    /// rule) and the lock/borrow dance by base qualifier (`Actor`/`ActorTask` →
+    /// `.lock()`/`.borrow_mut()`; `Guard`/`GuardTask` → `.write()`/`.borrow_mut()`;
+    /// managed-mode `Owned` → same as `Actor`; everything else → plain passthrough,
+    /// `Box<T>` auto-derefs same as `T`). Returns `(call_expr, is_req)` — callers
+    /// decide whether/how to notify. `via_value` only changes the mut-gating error
+    /// message's wording (`"through .value"` vs plain).
+    fn observed_call_expr(
+        &self, obj: &Expr, v: &str, escaped_v: &str, struct_name: &str, base: &OwnerQual,
+        method: &str, args: &[Arg], via_value: bool,
+    ) -> (String, bool) {
+        let is_req = self.method_is_req_or_task(struct_name, method);
+        // Permissive when the struct type isn't even known (mirrors
+        // try_emit_mutex_method/try_emit_rwlock_method's own gate on
+        // `self.struct_fields.contains_key`).
+        if !is_req
+            && self.known_local_vars.contains(v)
+            && !self.content_mutable_local_vars.contains(v)
+            && self.mut_checked_local_vars.contains(v)
+            && self.struct_fields.contains_key(struct_name)
+        {
+            let msg = if via_value {
+                format!(
+                    "`{}` is not declared `mut` — cannot call `def` method `.{}()` through `.value` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`",
+                    v, method, struct_name, v, struct_name, v
+                )
+            } else {
+                format!(
+                    "`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`",
+                    v, method, struct_name, v, struct_name, v
+                )
+            };
+            self.push_error(obj.line, obj.col, msg);
+        }
+
+        let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+        // The generated Rust always needs the `.value` hop to reach `BoringObserved<V>`'s
+        // actual payload — `via_value` only changes the *Boring-source* spelling
+        // (`c.inc()` vs `c.value.inc()`) and whether the caller notifies afterward, not
+        // this internal lowering. Confirmed via a real `cargo build` E0599 (`no method
+        // named 'lock' found for struct 'BoringObserved<V>'`) when this used to branch
+        // on `via_value` here too.
+        let base_path = format!("{}.value", escaped_v);
+
+        // Managed mode maps `'owned` over a user type to `Arc<Mutex<T>>`/`RefCell<T>`
+        // (see `emit_type`'s own `OwnerQual::Owned` arm and `emit_observed_let`'s
+        // matching construction-side fix) — needs the same lock/borrow dance as
+        // `Actor` in that case, not a plain passthrough call.
+        let owned_ty_for_mode_check = Type::Qualified(Box::new(Type::Named(struct_name.to_string())), OwnerQual::Owned);
+        let is_managed_owned = matches!(base, OwnerQual::Owned) && self.is_managed_owned_user(&owned_ty_for_mode_check);
+        let call_expr = match base {
+            OwnerQual::Actor | OwnerQual::ActorTask => match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut().{}({})", base_path, rust_method, args_s.join(", ")),
+                crate::transpiler::ThreadingMode::Multi  => format!("{}.lock().unwrap().{}({})", base_path, rust_method, args_s.join(", ")),
+            },
+            OwnerQual::Guard | OwnerQual::GuardTask => match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut().{}({})", base_path, rust_method, args_s.join(", ")),
+                crate::transpiler::ThreadingMode::Multi  => format!("{}.write().unwrap().{}({})", base_path, rust_method, args_s.join(", ")),
+            },
+            OwnerQual::Owned if is_managed_owned => match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut().{}({})", base_path, rust_method, args_s.join(", ")),
+                crate::transpiler::ThreadingMode::Multi  => format!("{}.lock().unwrap().{}({})", base_path, rust_method, args_s.join(", ")),
+            },
+            // Inline/strict-mode-Owned — direct call; Box<T> auto-derefs, same syntax as plain T.
+            _ => format!("{}.{}({})", base_path, rust_method, args_s.join(", ")),
+        };
+        let call_expr = if let Some(wrap) = extra_wrap { format!("{}{}", call_expr, wrap) } else { call_expr };
+        (call_expr, is_req)
+    }
+
     /// `RwLock`-backed (`'guard`/`'guard'task`) method dispatch: a local var of type
     /// `T'guard` or a `self.field` of that type. `req` methods take a `.read()` lock,
     /// mutating (`def`) methods take `.write()`; `'guard'task` (tokio `RwLock`) awaits
@@ -2029,6 +2227,9 @@ impl Transpiler {
         if let Some(r) = self.try_emit_channel_method(obj, method, args) { return r; }
 
         if let Some(r) = self.try_emit_type_method_call(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_observed_subscribe(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_observed_method_direct(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_observed_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_atomic_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_rwlock_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_mutex_method(obj, method, args) { return r; }
@@ -3659,6 +3860,7 @@ impl Transpiler {
             uses_tokio_util: std::rc::Rc::clone(&self.uses_tokio_util),
             uses_serde: std::rc::Rc::clone(&self.uses_serde),
             uses_introspect: std::rc::Rc::clone(&self.uses_introspect),
+            uses_observed: std::rc::Rc::clone(&self.uses_observed),
             fn_overload_decls: self.fn_overload_decls.clone(),
             overloaded_fn_names: self.overloaded_fn_names.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
@@ -3682,6 +3884,7 @@ impl Transpiler {
             struct_method_return_types: self.struct_method_return_types.clone(),
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
+            observed_locals: self.observed_locals.clone(),
             infer_local_actor_vars: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
             deps: self.deps.clone(),

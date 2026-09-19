@@ -864,6 +864,7 @@ impl Checker {
         for f in &s.fields {
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
             self.check_atomic_compatibility(&Some(f.ty.clone()), f.line, f.col);
+            self.check_observed_compatibility(&Some(f.ty.clone()), f.line, f.col);
         }
         for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }
@@ -882,6 +883,7 @@ impl Checker {
             for f in &v.fields {
                 self.check_set_mut_constraint(&Some(f.ty.clone()), v.line, v.col);
                 self.check_atomic_compatibility(&Some(f.ty.clone()), v.line, v.col);
+                self.check_observed_compatibility(&Some(f.ty.clone()), v.line, v.col);
             }
         }
         for m in &e.methods { self.check_fn(m); }
@@ -919,6 +921,7 @@ impl Checker {
             }
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
             self.check_atomic_compatibility(&p.ty, p.line, p.col);
+            self.check_observed_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, kind, p.ty.clone());
             if let Some(def) = &p.default { self.check_expr(def); }
         }
@@ -934,6 +937,7 @@ impl Checker {
         self.push_scope();
         self.check_set_mut_constraint(&Some(sd.param_ty.clone()), sd.line, sd.col);
         self.check_atomic_compatibility(&Some(sd.param_ty.clone()), sd.line, sd.col);
+        self.check_observed_compatibility(&Some(sd.param_ty.clone()), sd.line, sd.col);
         self.define_typed(&sd.param_name, BindingKind::Let, Some(sd.param_ty.clone()));
         self.check_dead_code(&sd.body);
         for stmt in &sd.body { self.check_stmt(stmt); }
@@ -972,6 +976,7 @@ impl Checker {
             // is `mut` — the illegality lives on the Set's element type.
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
             self.check_atomic_compatibility(&p.ty, p.line, p.col);
+            self.check_observed_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
         self.check_dead_code(&f.body);
@@ -1218,6 +1223,7 @@ impl Checker {
         self.check_mut_constraints(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
         self.check_set_mut_constraint(&s.ty, s.line, s.col);
         self.check_atomic_compatibility(&s.ty, s.line, s.col);
+        self.check_observed_compatibility(&s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
@@ -1275,6 +1281,7 @@ impl Checker {
                 self.check_mut_constraints(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
                 self.check_set_mut_constraint(&b.ty, s.line, s.col);
                 self.check_atomic_compatibility(&b.ty, s.line, s.col);
+                self.check_observed_compatibility(&b.ty, s.line, s.col);
             }
             if b.name == "_" { continue; }
             let position_resident = tuple_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);

@@ -470,6 +470,13 @@ impl Parser {
                 "weak"   => { self.advance(); OwnerQual::Weak }
                 "inline" => { self.advance(); OwnerQual::Inline }
                 "owned"  => { self.advance(); OwnerQual::Owned }
+                // `T'observed` — composable suffix (docs/book.md's "'observed" section).
+                // Bare form (no preceding base qualifier already consumed) — the
+                // general chained-suffix handling below (after the whole match)
+                // covers `T'actor'observed`/`T'guard'observed`/etc.; this arm only
+                // covers the case where `'observed` is itself the *first* qualifier
+                // word, i.e. no explicit base — resolved later by qualifier inference.
+                "observed" => { self.advance(); OwnerQual::Observed }
                 // `T'atomic` — Arc<AtomicX> (multi) / Rc<Cell<X>> (single). Explicit only:
                 // never chosen by the plain priority-ordered fallback (see resolve_fallback
                 // in infer_qualifiers.rs) — only reachable via this explicit annotation or
@@ -517,12 +524,15 @@ impl Parser {
                     // memory by parse_kernel_field, replacing the old 'sync spelling).
                     // `T'actor'weak` is deliberately left un-consumed here — it's handled
                     // by the generic Shared|Actor|Guard chained-`'weak` logic below, which
-                    // expects to see the tick itself still unconsumed.
-                    let next_is_weak = matches!(
+                    // expects to see the tick itself still unconsumed. `T'actor'observed`
+                    // is likewise left un-consumed — handled by the generic chained-
+                    // `'observed` logic at the very end of this function, which runs
+                    // regardless of which base qualifier was matched.
+                    let next_is_weak_or_observed = matches!(
                         self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                        Some(TokenKind::Ident(s)) if s == "weak"
+                        Some(TokenKind::Ident(s)) if s == "weak" || s == "observed"
                     );
-                    if !next_is_weak && self.eat(&TokenKind::Tick) {
+                    if !next_is_weak_or_observed && self.eat(&TokenKind::Tick) {
                         if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "global") { self.advance(); OwnerQual::GpuActorGlobal }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "unified") { self.advance(); OwnerQual::GpuActorUnified }
@@ -566,13 +576,14 @@ impl Parser {
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>
             TokenKind::Guard => {
                 self.advance();
-                // `T'guard'task` → GuardTask. `T'guard'weak` is deliberately left
-                // un-consumed here — handled by the generic chained-`'weak` logic below.
-                let next_is_weak = matches!(
+                // `T'guard'task` → GuardTask. `T'guard'weak`/`T'guard'observed` are
+                // deliberately left un-consumed here — handled by the generic
+                // chained-`'weak`/`'observed` logic below.
+                let next_is_weak_or_observed = matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                    Some(TokenKind::Ident(s)) if s == "weak"
+                    Some(TokenKind::Ident(s)) if s == "weak" || s == "observed"
                 );
-                if !next_is_weak && self.eat(&TokenKind::Tick) {
+                if !next_is_weak_or_observed && self.eat(&TokenKind::Tick) {
                     if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::GuardTask }
                     else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line(), col: self.col(), len: self.tok_len() }); }
                 } else {
@@ -670,6 +681,20 @@ impl Parser {
                     return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
                 }
             }
+        // `T'observed` composable suffix (docs/book.md's "'observed" section) — chains
+        // onto ANY base qualifier just parsed above (`'inline`/`'owned`/`'shared`/
+        // `'actor`(`'task`)/`'guard`(`'task`)), unlike `'weak` above which only chains
+        // onto Shared/Actor/Guard. `T'shared'observed` parses fine here — rejected later
+        // by the checker (mirrors the `mut 'shared` rejection style), not here, since
+        // this is a structural/parse-time concern, not a legality one.
+        if self.check(&TokenKind::Tick) {
+            let after_tick = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+            if matches!(after_tick, Some(TokenKind::Ident(ref s)) if s == "observed") {
+                self.advance(); // consume `'`
+                self.advance(); // consume `observed`
+                return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Observed));
+            }
+        }
         Ok(qualified)
     }
 }

@@ -812,7 +812,13 @@ impl Transpiler {
 
     /// `(params): body` — plain closures and `task` closures (wrapped in `async move`,
     /// with Arc captures pre-cloned so an `FnMut` closure can be invoked more than once).
-    fn emit_expr_closure(&self, params: &[Param], body: &ClosureBody, throws: bool, task: bool) -> String {
+    // `pub(crate)` (not private) so `emit_methods::try_emit_observed_subscribe` can
+    // reuse the exact same closure-body emission and then wrap it in `move` + explicit
+    // Arc/Rc clones — `subscribe()` needs a `'static` closure (unlike the ordinary
+    // borrow-capturing closures this produces for `forEach`/`map`/etc.), the same
+    // 'static requirement `emit_task`'s spawn-closure handling already solves the same
+    // way just above this function.
+    pub(crate) fn emit_expr_closure(&self, params: &[Param], body: &ClosureBody, throws: bool, task: bool) -> String {
         let ps: Vec<String> = params.iter().map(|p| {
             let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
             if let Some(ty) = &p.ty {

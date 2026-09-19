@@ -1,0 +1,86 @@
+# Behavioral test for the `'observed` composable ownership-qualifier suffix
+# (docs/book.md's "'observed" section): construction + subscribe() + mutation +
+# notification for each of the four legal compositions ('inline/'owned/'actor/
+# 'guard'observed — 'shared'observed is a separate, checker-rejection test, see
+# tests/observed_qualifier.rs). Mutation happens via a DIRECT method call
+# (`a.inc()`, no `.value`) — 'actor/'guard already dispatch method calls
+# transparently elsewhere in Boring (docs/book.md §21), and 'observed follows the
+# same convention; `.value` is the explicit, silent escape hatch that skips
+# notification even for a deliberate mutation (see the `e`/`e_val` case below).
+# Also covers `Subscription`'s Drop genuinely unsubscribing, and multiple
+# independent subscribers all firing on one write. Runs identically under all
+# four mode/threading combinations.
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int current():
+        value
+
+def main():
+    # 1. Each legal composition: construct, mutate via a DIRECT call (no `.value` —
+    # 'actor/'guard already dispatch method calls transparently in Boring, and
+    # 'observed follows the same convention), confirm a subscribed callback fires.
+    mut Counter'inline'observed a = Counter(0)
+    var mut int'atomic a_calls = 0
+    let a_sub = a.subscribe(():
+        a_calls += 1
+    )
+    a.inc()
+
+    mut Counter'owned'observed b = Counter(0)
+    var mut int'atomic b_calls = 0
+    let b_sub = b.subscribe(():
+        b_calls += 1
+    )
+    b.inc()
+
+    mut Counter'actor'observed c = Counter(0)
+    var mut int'atomic c_calls = 0
+    let c_sub = c.subscribe(():
+        c_calls += 1
+    )
+    c.inc()
+
+    mut Counter'guard'observed d = Counter(0)
+    var mut int'atomic d_calls = 0
+    let d_sub = d.subscribe(():
+        d_calls += 1
+    )
+    d.inc()
+
+    # 3. `.value` is the explicit, silent escape hatch — neither a read nor a
+    # deliberate mutation reached through it ever notifies subscribers.
+    mut Counter'actor'observed e = Counter(9)
+    var mut int'atomic e_calls = 0
+    let e_sub = e.subscribe(():
+        e_calls += 1
+    )
+    let e_read = e.value.current()
+    e.value.inc()   # mutates, but silently — must NOT fire e_sub
+
+    # 4. `Subscription`'s `Drop` genuinely unsubscribes.
+    mut Counter'actor'observed f = Counter(0)
+    var mut int'atomic f_calls = 0
+    if true:
+        let f_sub = f.subscribe(():
+            f_calls += 1
+        )
+        f.inc()   # sub still alive -> fires
+    f.inc()        # sub dropped at end of `if true:` block -> must not fire again
+
+    # 5. Multiple independent subscribers on the same instance all fire on one write.
+    mut Counter'actor'observed g = Counter(0)
+    var mut int'atomic g_calls_1 = 0
+    var mut int'atomic g_calls_2 = 0
+    let g_sub_1 = g.subscribe(():
+        g_calls_1 += 1
+    )
+    let g_sub_2 = g.subscribe(():
+        g_calls_2 += 10
+    )
+    g.inc()
+
+    print "a={a_calls} b={b_calls} c={c_calls} d={d_calls} e_read={e_read} e_calls={e_calls} e_val={e.value.current()} f={f_calls} g1={g_calls_1} g2={g_calls_2}"

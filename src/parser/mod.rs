@@ -1060,11 +1060,22 @@ impl Parser {
                     _ => {}
                 }
             }
+            // `'weak` or `'observed` may trail `'actor`/`'guard`(`'task`) — see
+            // `parse_type_qualifier`'s matching chained-suffix handling. Needed here
+            // too (not just there) because `'actor`/`Guard`/`'task` are the only
+            // qualifier words this lookahead actually *consumes* above (every other
+            // bare-Ident qualifier, e.g. `'shared`, falls through unconsumed and
+            // "coincidentally" still lands on an Ident — see the doc above this
+            // function); leaving a chained `'observed` unhandled here left `i` sitting
+            // on the un-consumed tick before it, which is not an `Ident`, so the
+            // caller's own "is the next token an Ident" check misjudged
+            // `Counter'actor'observed name` as not being a type followed by a name at
+            // all (confirmed via a real parse failure — "expected Eq, got Ident(name)").
             if qual_is_auto_or_shared
                 && i < self.tokens.len()
                 && matches!(self.tokens[i].kind, TokenKind::Tick)
                 && matches!(self.tokens.get(i + 1).map(|t| &t.kind),
-                            Some(TokenKind::Ident(q)) if q == "weak")
+                            Some(TokenKind::Ident(q)) if q == "weak" || q == "observed")
             {
                 i += 2;
             }

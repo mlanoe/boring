@@ -1125,3 +1125,11 @@ transpile_test!(atomic_promotion_suppressed_with);
 // through the lock — both outside and inside a `with` block. See the fixture's
 // own doc comment and `src/transpiler/mod.rs`'s `var_lock_scalar`.
 transpile_test!(actor_guard_scalar_mutation);
+
+// `'observed` composable ownership-qualifier suffix (docs/book.md's "'observed"
+// section): all four legal compositions, `.value` read-only never notifying,
+// `Subscription`'s Drop genuinely unsubscribing, multiple subscribers all firing on
+// one write. `tests/observed_qualifier.rs` additionally covers the `'shared'observed`
+// checker rejection, the `mut`/`var` binding regression, and bare `'observed`
+// qualifier-inference resolution (representation-inspection tests, no full build).
+transpile_test!(observed_qualifier);

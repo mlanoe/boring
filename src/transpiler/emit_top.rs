@@ -3390,6 +3390,18 @@ impl Transpiler {
                 // Qualifier union / named group (`'one`, `'many`, `'mut`, `'req`, `T'a|b|c`).
                 // Emits as the plain inner type — the union is a Boring-level constraint only.
                 OwnerQual::Union(_) => self.emit_type(inner),
+                // `T'observed` — composable suffix (docs/book.md's "'observed" section).
+                // `inner` is already the fully base-qualified type (`T'actor'observed` →
+                // `Qualified(Qualified(T, Actor), Observed)`, so `inner` here is
+                // `Qualified(T, Actor)`) — recursing through `emit_type` reuses every
+                // existing base-qualifier representation decision (threading mode,
+                // managed mode, etc.) unchanged, then wraps it in the runtime support
+                // type emitted once per file by `emit_observed_prelude` (`mod.rs`).
+                // A still-bare `Qualified(Named, Observed)` (unresolved bare `'observed`)
+                // should never reach codegen — `infer_qualifiers.rs` resolves it to a
+                // concrete base first (see `Transpiler::observed_locals`) — but falls
+                // back to wrapping the bare inner type directly rather than panicking.
+                OwnerQual::Observed => format!("BoringObserved<{}>", self.emit_type(inner)),
                 // Host-context `'gpu'unified`/`'gpu'global`: emits as the plain inner
                 // type. Confirmed against real usage (`examples/saxpy.br`'s
                 // `var [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned
