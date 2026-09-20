@@ -218,7 +218,9 @@ fn explicit_atomic_emits_cell_single_threaded() {
     let bin = env!("CARGO_BIN_EXE_boring");
     let dir = tempfile_dir();
     let br_file = dir.join("main.br");
-    std::fs::write(&br_file, "def main():\n    var counter'atomic = 0\n    counter += 5\n    print \"{counter}\"\n").unwrap();
+    // `mut`, not `var` — see the binding-permission enforcement tests below:
+    // a bare `var'atomic` scalar is rebind-only, `+=` needs `mut`/`var mut`.
+    std::fs::write(&br_file, "def main():\n    mut counter'atomic = 0\n    counter += 5\n    print \"{counter}\"\n").unwrap();
     let out = Command::new(bin)
         .arg("build").arg(&br_file).arg("--emit-rust").arg("--threading").arg("single")
         .output().unwrap();
@@ -226,4 +228,125 @@ fn explicit_atomic_emits_cell_single_threaded() {
     let generated = String::from_utf8_lossy(&out.stdout);
     assert!(generated.contains("Rc<std::cell::Cell<isize>>"), "expected the single-thread Cell<T> collapse, got:\n{}", generated);
     assert!(!generated.contains("Atomic"), "single-thread mode must never emit a real atomic type, got:\n{}", generated);
+}
+
+// ── Binding permission: `let`/`mut`/`var`/`var mut` on an explicit `'atomic` ────
+//
+// `'atomic` is structurally in the same family as `'actor`/`'guard` (this file's
+// own header comment, docs/qualifiers.md's `'atomic` section) — a bare `let` must
+// be read-only, and (unlike `'actor`/`'guard`) bare `var` grants nothing extra
+// either, since a scalar `'atomic` binding has no separate rebind-the-pointer
+// operation: every one of `x = n`/`x += n`/`x -= n`/`x.swap(n)` is content-
+// mutation through the shared lock-free cell. See `src/checker/mod.rs`'s
+// `check_assign_target` (assignment-shaped ops) and
+// `src/transpiler/emit_methods.rs`'s `try_emit_atomic_method` (`.swap()`).
+
+#[test]
+fn atomic_bare_let_rejects_compound_assign() {
+    let out = emit_rust("def main():\n    let counter'atomic = 0\n    counter += 5\n    print \"{counter}\"\n");
+    assert!(!out.status.success(), "expected a bare `let` 'atomic compound-assign to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not declared `mut`") && stderr.contains("'atomic"),
+        "expected a clear mut-permission error naming 'atomic, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn atomic_bare_let_rejects_plain_store() {
+    let out = emit_rust("def main():\n    let counter'atomic = 0\n    counter = 10\n    print \"{counter}\"\n");
+    assert!(!out.status.success(), "expected a bare `let` 'atomic plain store to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not declared `mut`") && stderr.contains("'atomic"), "got:\n{}", stderr);
+}
+
+#[test]
+fn atomic_bare_let_rejects_swap() {
+    let out = emit_rust("def main():\n    let counter'atomic = 0\n    let old = counter.swap(100)\n    print \"{old}\"\n");
+    assert!(!out.status.success(), "expected a bare `let` 'atomic `.swap()` to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not declared `mut`") && stderr.contains(".swap()") && stderr.contains("'atomic"),
+        "expected a clear mut-permission error naming 'atomic and `.swap()`, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn atomic_bare_var_alone_also_rejects_compound_assign() {
+    // The one real structural difference from `'actor`/`'guard`: bare `var` is
+    // rebind-only for those (never content-mutable), but a scalar `'atomic` has
+    // no separate rebind operation at all, so `var` alone grants no more than
+    // `let` — it must ALSO be rejected, not merely fall back to `'actor`/`'guard`'s
+    // "rebind-only" semantics.
+    let out = emit_rust("def main():\n    var counter'atomic = 0\n    counter += 5\n    print \"{counter}\"\n");
+    assert!(!out.status.success(), "expected a bare `var` (no `mut`) 'atomic compound-assign to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not declared `mut`") && stderr.contains("'atomic"), "got:\n{}", stderr);
+}
+
+#[test]
+fn atomic_bare_var_alone_also_rejects_swap() {
+    let out = emit_rust("def main():\n    var counter'atomic = 0\n    let old = counter.swap(100)\n    print \"{old}\"\n");
+    assert!(!out.status.success(), "expected a bare `var` (no `mut`) 'atomic `.swap()` to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not declared `mut`") && stderr.contains(".swap()"), "got:\n{}", stderr);
+}
+
+#[test]
+fn atomic_mut_binding_permits_mutation() {
+    let src = "def main():\n    mut counter'atomic = 0\n    counter += 5\n    counter -= 1\n    counter = 10\n    let old = counter.swap(100)\n    print \"{counter} {old}\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected `mut x'atomic` to permit every mutating op, got:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(generated.contains("fetch_add") && generated.contains("fetch_sub") && generated.contains(".store(") && generated.contains(".swap("),
+        "expected the full 'atomic operation mapping to be emitted, got:\n{}", generated);
+}
+
+#[test]
+fn atomic_var_mut_binding_permits_mutation() {
+    let src = "def main():\n    var mut counter'atomic = 0\n    counter += 5\n    let old = counter.swap(100)\n    print \"{counter} {old}\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected `var mut x'atomic` to permit every mutating op, got:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(generated.contains("fetch_add") && generated.contains(".swap("), "got:\n{}", generated);
+}
+
+// ── Regression: the `'actor`/`'guard` → `'atomic` promotion pass must still ────
+// ── carry forward a mutation-permitting binding after the fix above ───────────
+//
+// Before this fix, a scalar `'actor`/`'guard` local's own compound-assign/`.swap()`
+// was gated only by the GENERIC rebind-permission rule (`var` sufficed, `mut`
+// alone was actually rejected — see `check_assign_target`'s `BindingKind::Mut`
+// arm, "mut is never rebindable") — never by a `'atomic`-style content-mutation
+// rule. The promotion pass (`promote_atomic.rs`) rewrites such a local's
+// *representation* to `'atomic` (`Arc<AtomicIsize>`/fetch_add/swap) without ever
+// re-running the checker against the new representation — so if the new
+// `'atomic` mut-gating added above had been applied indiscriminately to every
+// name in `var_atomic_types` (rather than skipping `promoted_atomic_vars`), a
+// promoted-but-not-`mut`-declared `'actor`/`'guard` local like the one below
+// would have started failing to compile — a real regression this test guards
+// against. See `try_emit_atomic_method`'s doc comment for the exact exemption.
+//
+// This is the codegen-inspection half; the true end-to-end compile-and-run half
+// (real `boring build` → `cargo run` → stdout comparison) is
+// `tests/cases/atomic_promotion_binding_permission_regression.br`, wired up via
+// `transpile_test!` in `tests/transpile.rs` — see that fixture's own doc comment.
+#[test]
+fn promotion_still_permits_mutation_on_a_bare_var_actor_source_after_binding_permission_fix() {
+    // Deliberately `var counter'actor` — bare `var`, no `mut`/`var mut` — exactly
+    // the shape every pre-existing promotion fixture/test in this file already
+    // uses (`promotion_fires_for_local_scalar_actor` above, `tests/cases/
+    // atomic_promotion_actor.br`). Promotion criteria all hold (atomic-eligible
+    // scalar, never escapes, every access is a recognized single primitive,
+    // never used in `with`), so this must build successfully post-fix, covering
+    // both a compound-assign AND a `.swap()` on the same promoted name.
+    let src = "def main():\n    var counter'actor = 0\n    counter += 5\n    counter -= 2\n    let old = counter.swap(100)\n    print \"{counter} {old}\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected the promoted program to build:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("AtomicIsize") && generated.contains("fetch_add") && generated.contains("fetch_sub") && generated.contains(".swap("),
+        "expected the promotion pass to still fire for both compound-assign and `.swap()`, got:\n{}", generated
+    );
+    assert!(!generated.contains("Mutex<"), "expected no leftover Mutex representation, got:\n{}", generated);
 }

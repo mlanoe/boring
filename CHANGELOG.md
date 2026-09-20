@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`'atomic` now gets the same `mut`/`var mut` binding-permission discipline as `'actor`/`'guard`** — a bare `let x'atomic = 0; x += 5` used to compile (no `mut`/`var mut` required at all for the mutating operation set: compound assignment, plain store, `.swap()`), inconsistent with `'atomic`'s documented membership in the `'actor`/`'guard` family, where a bare `let` is read-only. Enforced in `src/checker/mod.rs`'s `check_assign_target` (assignment-shaped ops) and `src/transpiler/emit_methods.rs`'s `try_emit_atomic_method` (`.swap()`); `var` alone now also requires promotion to `var mut` since a scalar `'atomic` binding has no separate rebind-the-pointer operation the way a struct `'actor`/`'guard` does. The automatic `'actor`/`'guard` → `'atomic` promotion pass (`promote_atomic.rs`) is unaffected — promoted names keep whatever permission their pre-promotion `'actor`/`'guard` declaration already had. See `docs/qualifiers.md`'s new "Binding permission" subsection and `docs/book.md` §21's "Binding × qualifier combinations" table (`'atomic` column added).
+
 ---
 
 ## [0.9.8] — 2026-09-13 *(cargo test: 1974/1974 passing across 38 suites, 8 ignored · clippy: clean · self-hosted interpreter functional: 83/83 × 4 modes)*

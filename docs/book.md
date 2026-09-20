@@ -6329,10 +6329,20 @@ genuinely lock-free `std::sync::atomic` type (`Rc<Cell<X>>` single-thread,
 since there's no real concurrency to protect against there):
 
 ```boring
-let counter'atomic = 0
+mut counter'atomic = 0
 counter += 5             # fetch_add — a single atomic instruction
 let old = counter.swap(100)
 ```
+
+`'atomic` gets no exception from Boring's own binding-permission discipline
+either, same as `'actor`/`'guard`: a bare `let counter'atomic = 0` is
+read-only — `counter += 5`/`.swap(...)` are compile errors — because a scalar
+`'atomic` binding has no separate "rebind the pointer" operation the way a
+struct `'actor`/`'guard` binding does; every assignment on it (`=`, `+=`,
+`-=`, `.swap()`) is content-mutation through the shared lock-free cell, so it
+needs `mut`/`var mut` exactly like `'actor`/`'guard`'s own `def`-method gate.
+`var` alone stays rebind-only, not content-mutable — see "Binding × qualifier
+combinations" below.
 
 **Scalar-only**: `int`/`uint`/`bool` and every fixed-width
 `int8`..`int64`/`uint8`..`uint64` — never `float`/`float32`/`float64` (no
@@ -6378,13 +6388,15 @@ Each qualifier imposes constraints on `mut`. `mut`/`var mut` are forbidden with 
 
 `'actor`/`'guard` get no special case in the table below — they're checked exactly like every other type ([§2](#2-variables-and-mutability)): `var` alone is rebind-only, never content-mutable, full stop. (An earlier revision of Boring let `var T'actor x` unlock `def` calls on the strength of the qualifier alone; that exception is retired — see `var mut`.)
 
-| Binding | `'shared` | `'actor` | `'guard` | `'inline` | `'owned` |
-|---|---|---|---|---|---|
-| `let` | yes | yes | yes | yes | yes |
-| `mut` | **error** | yes | yes | yes | yes |
-| `var` | yes | yes | yes | yes | yes |
-| `var mut` | **error** | yes | yes | yes | yes |
-| `lazy` | yes | yes | yes | yes | yes |
+`'atomic` gets the same treatment as `'actor`/`'guard`, not `'shared`'s — it has real interior mutability (a lock-free cell), it's just never a *lock*. Unlike a struct-typed `'actor`/`'guard` binding, a scalar `'atomic` binding has no separate "rebind the pointer" operation at all — `x = v`/`x += v`/`x.swap(v)` are all content-mutation through the shared cell — so `let`/bare `var` are read-only (any of those ops is a compile error) and `mut`/`var mut` are required to permit them, exactly mirroring `'actor`/`'guard`'s own `def`-method gate.
+
+| Binding | `'shared` | `'actor` | `'guard` | `'atomic` | `'inline` | `'owned` |
+|---|---|---|---|---|---|---|
+| `let` | yes | yes | yes | yes | yes | yes |
+| `mut` | **error** | yes | yes | yes | yes | yes |
+| `var` | yes | yes | yes | yes | yes | yes |
+| `var mut` | **error** | yes | yes | yes | yes | yes |
+| `lazy` | yes | yes | yes | yes | yes | yes |
 
 Qualifiers carry three kinds of information: Rust mapping, passing semantics, and mutability constraints:
 
@@ -6429,6 +6441,29 @@ c.get()       # OK — req (non-mutating) methods work fine
 var mut d'actor = Counter()
 d.inc()       # OK — var mut grants both rebind and content mutation
 d = Counter() # OK — rebind
+```
+
+`T'atomic` follows the same `mut`/`var mut`-gated pattern as `T'actor`/`T'guard` above, with one structural difference: a scalar `'atomic` binding has no operation that reassigns the pointer separately from mutating its content — `x = v`/`x += v`/`x -= v`/`x.swap(v)` are *all* content-mutation through the shared lock-free cell (there is no `x = Counter()`-style fresh construction the way a struct `'actor`/`'guard` binding has). So there is no `Reassign` column to fill in independently — every one of those operations is gated by the same single `mut`/`var mut` requirement, and bare `let`/`var` are read-only for all of them:
+
+| Declaration | Bare read | `+=`/`-=`/`=`/`.swap()` |
+|---|---|---|
+| `let T'atomic x` / `let x'atomic` | ✓ | ✗ |
+| `mut T'atomic x` / `mut x'atomic` | ✓ | ✓ |
+| `var T'atomic x` / `var x'atomic` | ✓ | ✗ — `var` alone no longer suffices; use `var mut` |
+| `var mut T'atomic x` | ✓ | ✓ |
+
+```boring
+mut e'atomic = 0
+e += 5        # OK — mut grants content mutation
+let old = e.swap(10)  # OK
+
+var f'atomic = 0
+# f += 5      # ERROR — `var` alone is rebind-only for every other qualifier,
+              #         but a scalar 'atomic has no separate rebind operation
+              #         to grant, so this is simply a compile error; use
+              #         `var mut` (or `mut`, if it never needs a `= newAtomic`
+              #         whole-value replacement, which for a scalar is the
+              #         same operation anyway)
 ```
 
 > Boring also has an **explicit borrow syntax**, `T&` — rarely needed, since structs and enums are already passed by reference automatically (see [Pass-by-reference — automatic](#pass-by-reference--automatic)). See [Advanced — Explicit borrow syntax: `T&`](#advanced--explicit-borrow-syntax-t) for when and how to use it.

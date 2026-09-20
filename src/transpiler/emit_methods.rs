@@ -32,6 +32,22 @@ fn transparent_wrapper_inner_name(ty: &Type) -> Option<&str> {
     }
 }
 
+/// Unwraps a field's declared `Type` down to a bare `Type::Named`'s name, stripping
+/// `mut` and one level of ownership qualifier — e.g. both `Type::Named("Counter")` and
+/// `Type::Qualified(Named("Counter"), Actor)` (an `'actor`/`'guard`-qualified field)
+/// yield `"Counter"`. Mirrors `resolve_receiver_type_name`'s identical unwrap for a
+/// local var's declared type (emit_top.rs), just for the `self.field`-declared-type
+/// shape instead of `var_types`. Used to check whether a `self.field`-rooted
+/// mutex/rwlock method receiver is a known user struct/enum before deciding whether to
+/// preserve the method name verbatim or run it through `map_method`'s builtin table.
+fn qualified_named_type_name(ty: &Type) -> Option<String> {
+    let inner = match ty.without_mut() {
+        Type::Qualified(inner, _) => inner.without_mut(),
+        other => other,
+    };
+    if let Type::Named(n) = inner { Some(n.clone()) } else { None }
+}
+
 impl Transpiler {
     /// Resolve the user struct type name of an expression, walking `self`/local-var roots
     /// and field chains (`self.encoder`, `a.b.c`). Also resolves bare implicit-self-field
@@ -993,9 +1009,15 @@ impl Transpiler {
         if let ExprKind::Var(v) = &obj.kind {
             if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                 let is_task = self.var_rwlock_task_types.contains(v.as_str());
-                let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let struct_name = self.resolve_receiver_type_name(v.as_str());
+                // Preserve the real method name for a known user struct/enum receiver —
+                // see the matching comment/fix in `try_emit_mutex_method`.
+                let (rust_method, extra_wrap) = if self.is_known_user_type(struct_name.as_str()) {
+                    (method.to_string(), None)
+                } else {
+                    map_method(method, args.len(), self.want_raw_option_pop.get())
+                };
+                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let is_req = self.method_is_req_or_task(&struct_name, method);
                 // `'guard` (RwLock) gets no exception from the general rule —
                 // docs/book.md: mutation goes through the lock
@@ -1042,7 +1064,20 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, rwlock_field));
                     if let Some(k) = key {
                         if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
-                            let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+                            // Preserve the real method name for a known user struct/enum
+                            // field — see the matching comment/fix in
+                            // `try_emit_mutex_method`'s struct-field branch.
+                            let field_struct_name = self.self_type.as_deref()
+                                .and_then(|sn| self.struct_fields.get(sn))
+                                .and_then(|fs| fs.iter().find(|(n, _)| n == rwlock_field))
+                                .and_then(|(_, ty)| qualified_named_type_name(ty));
+                            let is_known = field_struct_name.as_deref()
+                                .map(|n| self.is_known_user_type(n)).unwrap_or(false);
+                            let (rust_method, extra_wrap) = if is_known {
+                                (method.to_string(), None)
+                            } else {
+                                map_method(method, args.len(), self.want_raw_option_pop.get())
+                            };
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
                             let struct_type_name = self.self_type.as_deref().unwrap_or("");
                             let req_key = format!("{}::{}", struct_type_name, method);
@@ -1081,6 +1116,42 @@ impl Transpiler {
     fn try_emit_atomic_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Var(v) = &obj.kind else { return None };
         if !self.var_atomic_types.contains(v.as_str()) { return None; }
+        // Mut-gating: `.swap()` is a content-mutation on the shared atomic cell,
+        // same family as `'actor`/`'guard`'s own `def`-method gate
+        // (`try_emit_mutex_method`/`try_emit_rwlock_method` just below/above) — bare
+        // `let`/`var` is read-only, `mut`/`var mut` required. See
+        // `check_assign_target`'s matching gate on plain store/compound-assign
+        // (`src/checker/mod.rs`) for the other half of `'atomic`'s recognized
+        // mutating-operation set.
+        //
+        // Skipped for a name in `promoted_atomic_vars`: that name was NOT written
+        // as `'atomic` in the source at all — it's a `'actor`/`'guard` local the
+        // automatic promotion pass (`promote_atomic.rs`) rewrote to the atomic
+        // representation. That promotion is purely additive/behavior-preserving
+        // (docs/qualifiers.md's `'atomic` section) and must not retroactively
+        // impose a stricter permission than the pre-promotion `'actor`/`'guard`
+        // scalar already required — checked here rather than relying on the
+        // checker to have already rejected it, since the checker only sees the
+        // pre-promotion `'actor`/`'guard` qualifier, never `'atomic`, for these
+        // names. Also skipped for a parameter — the parameter mut/var model isn't
+        // enforced yet (see `content_mutable_local_vars`'s own doc comment),
+        // unchanged, same exclusion `try_emit_mutex_method` makes.
+        if method == "swap"
+            && !self.promoted_atomic_vars.contains(v.as_str())
+            && !self.fn_current_params.contains_key(v.as_str())
+            && self.mut_checked_local_vars.contains(v.as_str())
+            && !self.content_mutable_local_vars.contains(v.as_str())
+        {
+            self.push_error(
+                obj.line, obj.col,
+                format!(
+                    "`{}` is not declared `mut` — cannot call `.swap()` on an `'atomic` \
+                     binding on a non-mut binding; fix: declare it `mut` or `var mut` to \
+                     permit content mutation",
+                    v
+                ),
+            );
+        }
         match (method, args) {
             ("swap", [arg]) => {
                 let val_s = self.emit_expr_owned(&arg.value);
@@ -1094,6 +1165,9 @@ impl Transpiler {
         // Mutex local var method: w.method(args) → w.lock().await.method(args)
         if let ExprKind::Var(v) = &obj.kind {
             if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                // Resolved once up front — used both by the mut-gating diagnostic below
+                // and by the user-struct-name-preservation check just after it.
+                let struct_name = self.resolve_receiver_type_name(v.as_str());
                 // `'actor` gets no exception from the general rule either — see
                 // the matching check/comment in `try_emit_rwlock_method`.
                 // Params are excluded (unchanged, still-unenforced parameter
@@ -1104,7 +1178,6 @@ impl Transpiler {
                     && !self.content_mutable_local_vars.contains(v.as_str())
                     && self.mut_checked_local_vars.contains(v.as_str())
                 {
-                    let struct_name = self.resolve_receiver_type_name(v.as_str());
                     // If we can't even resolve the receiver's struct type (a
                     // real inference gap independent of this diagnostic — e.g.
                     // an inferred `let cur = interp.current_env` chained field
@@ -1120,7 +1193,19 @@ impl Transpiler {
                         self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
                     }
                 }
-                let (mut rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+                // A known user struct/enum receiver dispatches through its own declared
+                // members verbatim — mirrors `emit_method_call_fallback`'s
+                // `is_user_struct_receiver` handling (see that function's doc). Without
+                // this, any camelCase-named user method on an `'actor`/`'actor'task`
+                // local silently got run through `map_method`'s builtin
+                // camelCase→snake_case fallback instead, emitting a call to a method
+                // name the struct never declared (see bug report: `getValue()` on a
+                // `Counter'actor` local transpiled to a call on `get_value`, an E0599).
+                let (mut rust_method, extra_wrap) = if self.is_known_user_type(struct_name.as_str()) {
+                    (method.to_string(), None)
+                } else {
+                    map_method(method, args.len(), self.want_raw_option_pop.get())
+                };
                 // `append(xs)` where xs is a collection → use `extend` instead of `push`
                 // so that Vec<T> arguments are flattened into the actor collection.
                 if rust_method == "push" && args.len() == 1 {
@@ -1199,7 +1284,22 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, mutex_field));
                     if let Some(k) = key {
                         if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
-                            let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+                            // Preserve the real method name for a known user struct/enum
+                            // field, same as the local-var case above and
+                            // `emit_method_call_fallback`'s `is_user_struct_receiver` —
+                            // otherwise a camelCase-named method on a `self.field'actor`
+                            // silently mis-transpiles to `map_method`'s builtin mapping.
+                            let field_struct_name = self.self_type.as_deref()
+                                .and_then(|sn| self.struct_fields.get(sn))
+                                .and_then(|fs| fs.iter().find(|(n, _)| n == mutex_field))
+                                .and_then(|(_, ty)| qualified_named_type_name(ty));
+                            let is_known = field_struct_name.as_deref()
+                                .map(|n| self.is_known_user_type(n)).unwrap_or(false);
+                            let (rust_method, extra_wrap) = if is_known {
+                                (method.to_string(), None)
+                            } else {
+                                map_method(method, args.len(), self.want_raw_option_pop.get())
+                            };
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
                             let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                             let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
@@ -1256,7 +1356,16 @@ impl Transpiler {
                     let is_actor_field = matches!(&field_ty,
                         Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)));
                     if is_actor_field {
-                        let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+                        // Preserve the real method name for a known user struct/enum
+                        // field — see the matching comment/fix in `try_emit_mutex_method`.
+                        let field_struct_name = field_ty.as_ref().and_then(qualified_named_type_name);
+                        let is_known = field_struct_name.as_deref()
+                            .map(|n| self.is_known_user_type(n)).unwrap_or(false);
+                        let (rust_method, extra_wrap) = if is_known {
+                            (method.to_string(), None)
+                        } else {
+                            map_method(method, args.len(), self.want_raw_option_pop.get())
+                        };
                         let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                         let obj_s = self.emit_expr(obj);
                         let is_task_field = matches!(&field_ty,

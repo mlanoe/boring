@@ -1,0 +1,33 @@
+# Regression test: a camelCase-named user struct method called on an
+# 'actor/'guard-qualified local var must be preserved verbatim in the generated
+# Rust, not silently run through map_method's builtin camelCase->snake_case
+# fallback (which exists only for builtin/external-type method names). Before
+# this test's fix, `c.getValue()` on a `Counter'actor` local transpiled to a
+# call to `get_value` -- a method the struct never declared -- so the Rust
+# struct's own `fn getValue(&self)` never matched, a real `cargo build` E0599.
+
+struct Counter:
+    var int value = 0
+
+    def incrementValue():
+        value += 1
+
+    req int getValue():
+        value
+
+mut Counter'actor c = Counter(value = 5)
+c.incrementValue()
+print c.getValue()
+
+struct Store:
+    var int count = 0
+
+    def void setCount(int v):
+        count = v
+
+    req int getCount():
+        count
+
+mut Store'guard s = Store()
+s.setCount(42)
+print s.getCount()

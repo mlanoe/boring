@@ -1796,6 +1796,36 @@ impl Checker {
             // `_` is the discard wildcard — never an error as assignment target.
             if name == "_" { return; }
             if let Some(binding) = self.lookup(name) {
+                // ── `'atomic`-qualified scalar bindings ─────────────────────────
+                //
+                // A scalar `'atomic` var's own assignment — a plain store `x = v`,
+                // or a compound-assign `x += v`/`x -= v` (both desugar to this same
+                // `Assign(Var, ...)` node at parse time, see
+                // `src/transpiler/emit_expr.rs`'s `emit_expr_assign` `var_atomic_types`
+                // branch) — is a content-mutation through the shared lock-free cell,
+                // never a rebind of the Boring binding (see `Type::is_atomic_qualified`'s
+                // doc comment for why). Gate it the same way `'actor`/`'guard` gate a
+                // struct's `def` method calls: `mut`/`var mut` required, bare `let`/
+                // `var` is read-only. This bypasses the generic rebind-permission
+                // match below entirely — that rule would (and, before this fix, did)
+                // instead demand `var` and reject `mut`, backwards for a type whose
+                // only "assignment" IS the mutation.
+                if let Some(ty) = binding.ty.as_ref() {
+                    if ty.is_atomic_qualified() {
+                        if !ty.grants_mut() {
+                            self.error(
+                                format!(
+                                    "`{name}` is not declared `mut` — cannot mutate an `'atomic` \
+                                     binding (compound assignment or plain store) on a non-mut \
+                                     binding; fix: declare it `mut` or `var mut` to permit content \
+                                     mutation"
+                                ),
+                                assign_line, assign_col,
+                            );
+                        }
+                        return;
+                    }
+                }
                 match binding.kind {
                     BindingKind::Let => {
                         self.error(

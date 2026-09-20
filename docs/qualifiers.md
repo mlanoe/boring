@@ -865,6 +865,31 @@ Every generated atomic operation uses `std::sync::atomic::Ordering::SeqCst` — 
 
 **Deferred**: a recognizable compare-and-swap pattern (`if x == a: x = b`) is not pattern-matched into `compare_exchange` in this first version — left as a documented gap rather than a fragile heuristic. A binding that needs CAS semantics should stay on `'actor`/`'guard` (or use an explicit, hand-written pattern) for now.
 
+### Binding permission — `mut`/`var mut` required for every mutating op
+
+`'atomic` is structurally in the same family as `'actor`/`'guard` (see this section's own opening paragraph), so it gets the same Boring-level binding-permission discipline: a bare `let x'atomic = ...` is **read-only** — every op in the "Operation mapping" table above except the bare read (`x = n`, `x += n`, `x -= n`, `x.swap(n)`) is a compile error unless the binding also carries `mut`/`var mut`. This is enforced by `src/checker/mod.rs`'s `check_assign_target` (for the assignment-shaped ops — `x = n`/`x += n`/`x -= n`, which all desugar to the same `Assign` AST node) and `src/transpiler/emit_methods.rs`'s `try_emit_atomic_method` (for `.swap()`, a method call with no `Assign`-node equivalent to piggyback on).
+
+Unlike a struct-typed `'actor`/`'guard` binding, a scalar `'atomic` binding has no operation that reassigns the pointer independently of mutating its content — there is no `x = Counter()`-style fresh construction for a bare scalar the way there is for a struct. So `var` alone (rebind-only for every other qualifier in this family) grants **nothing** extra for `'atomic`: every one of `x = n`/`x += n`/`x -= n`/`x.swap(n)` needs `mut` or `var mut`, exactly the same requirement as bare `let`.
+
+| Declaration | Bare read | `x = n` / `x += n` / `x -= n` / `x.swap(n)` |
+|---|---|---|
+| `let x'atomic` | ✓ | ✗ |
+| `mut x'atomic` | ✓ | ✓ |
+| `var x'atomic` | ✓ | ✗ — `var` alone grants no more than `let` here; use `var mut` |
+| `var mut x'atomic` | ✓ | ✓ |
+
+```boring
+mut counter'atomic = 0
+counter += 5              # OK — mut grants content mutation
+let old = counter.swap(10)  # OK
+
+let readonly'atomic = 0
+# readonly += 1           # ERROR: `readonly` is not declared `mut` — cannot mutate
+                           # an `'atomic` binding on a non-mut binding
+```
+
+**Regression note**: the automatic `'actor`/`'guard` → `'atomic` promotion pass (below) rewrites the *representation* of an already-`'actor`/`'guard`-qualified local, never its Boring-level permission — a name in `self.promoted_atomic_vars` is exempted from both checks above, so a `var counter'actor = 0` that gets promoted keeps exactly the permission its original `'actor` declaration had (checked before promotion, against the `'actor` qualifier, never `'atomic`), not the new, stricter `'atomic`-specific rule. Only a name the source actually spelled `'atomic` is subject to this section's rule.
+
 ### Position in the priority-ordered fallback chain — inert by construction
 
 `'atomic` is inserted into the ordered chain (see "Priority-ordered fallback" above) immediately after `'actor`(/`'actor'task`):
@@ -883,7 +908,7 @@ A bare scalar whose only signals are ambiguous between `{Actor, Guard, Atomic}` 
 A `with`-block (see [chapter 21, Scoped access blocks — `with`](book.md#scoped-access-blocks--with) in `docs/book.md`, and `docs/scoped-access-blocks.md`) lets a `'actor`/`'guard` binding hold its lock across multiple operations instead of acquiring/releasing per access. `'atomic` has no lock/guard object to hold — every access already is a single, independent atomic operation — so `with x: ...` on an `'atomic`-qualified `x` is a **hard compile error**, not a silent fallback to per-access codegen:
 
 ```boring
-var counter'atomic = 0
+mut counter'atomic = 0
 with counter:              # ERROR: 'atomic has no lock/guard to hold across a `with` block
     counter += 1
 ```

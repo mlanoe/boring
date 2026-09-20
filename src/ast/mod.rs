@@ -1605,6 +1605,28 @@ impl Type {
             | "u8" | "u16" | "u32" | "u64" | "usize"))
     }
 
+    /// True if this is a (top-level, modulo an outer `Type::Mut` wrapper) `'atomic`-
+    /// qualified type — `Type::Qualified(_, OwnerQual::Atomic)`. `mut int'atomic x`/
+    /// `var mut int'atomic x` parse as `Type::Mut(Type::Qualified(Type::Int, Atomic))`
+    /// (`parse_let_stmt`'s `wrap_mut` step), so this looks through `without_mut()`
+    /// first — same shape as `grants_mut`'s own `Type::Mut` handling just above.
+    ///
+    /// Used by the checker's `check_assign_target` to gate a scalar `'atomic`
+    /// binding's own assignment (a plain store `x = v`, or a compound-assign
+    /// `x += v`/`x -= v` — both desugar to the same `Assign` node at parse time)
+    /// on `mut`/`var mut`, exactly like `'actor`/`'guard`'s own `def`-method
+    /// mutation gate (`src/transpiler/emit_methods.rs`'s `try_emit_mutex_method`/
+    /// `try_emit_rwlock_method`) — rather than `check_assign_target`'s generic
+    /// rebind-permission rule below, which is the wrong axis here: a scalar
+    /// `'atomic` binding has no separate "point the binding at a different
+    /// `Arc`/`Rc`" operation the way a struct `'actor`/`'guard` binding does
+    /// (`c = Counter()` truly reconstructs a fresh `Arc`) — every assignment
+    /// on it is a content-mutation through the shared lock-free cell
+    /// (`.store()`/`fetch_add`/`fetch_sub`), never a rebind.
+    pub fn is_atomic_qualified(&self) -> bool {
+        matches!(self.without_mut(), Type::Qualified(_, OwnerQual::Atomic))
+    }
+
     /// Recursively searches for a `Qualified(inner, Atomic)` node whose `inner` is
     /// NOT `is_atomic_eligible_scalar` — i.e. an illegal `'atomic` application
     /// (float, struct, enum, collection, ...). Returns the offending inner type for

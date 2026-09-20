@@ -1,0 +1,32 @@
+# Regression pin for the `'atomic` binding-permission fix (see CHANGELOG.md's
+# [Unreleased] entry and docs/qualifiers.md's `'atomic` "Binding permission"
+# section): `'atomic` now requires `mut`/`var mut` for every mutating op
+# (compound assign, plain store, `.swap()`), enforced in
+# `src/checker/mod.rs`'s `check_assign_target` and
+# `src/transpiler/emit_methods.rs`'s `try_emit_atomic_method`.
+#
+# That new rule must NOT retroactively apply to a name promoted from `'actor`/
+# `'guard` to the `'atomic` representation by the automatic promotion pass
+# (`src/transpiler/promote_atomic.rs`, docs/qualifiers.md's "Automatic
+# 'actor/'guard -> 'atomic promotion" section) — promotion is purely additive
+# and behavior-preserving, and must carry forward whatever permission the
+# pre-promotion `'actor`/`'guard` declaration already had, not the new,
+# stricter `'atomic`-specific rule. `counter` below is declared with a bare
+# `var` (no `mut`) — already legal for a scalar `'actor` under the pre-existing
+# generic rebind-permission rule — and every promotion criterion holds (atomic-
+# eligible scalar, never escapes the function, every access is a single
+# recognized primitive, never used inside a `with` block), so this must both
+# compile AND run to the documented result, exercising the promotion pass
+# end-to-end with BOTH a compound-assign and a `.swap()` on the same name.
+#
+# See tests/atomic_qualifier.rs's
+# `promotion_still_permits_mutation_on_a_bare_var_actor_source_after_binding_permission_fix`
+# for the matching codegen-inspection half (confirms the atomic representation
+# — Arc<AtomicIsize>/fetch_add/fetch_sub/swap — is really what gets emitted,
+# not just that this fixture's stdout happens to match).
+def main():
+    var counter'actor = 0
+    counter += 5
+    counter -= 2
+    let old = counter.swap(100)
+    print "{counter} {old}"

@@ -452,6 +452,11 @@ transpile_test!(task_timeout);
 transpile_test!(select);
 transpile_test!(auto_ref_infer);
 transpile_test!(qualifiers_actor);
+// Regression: a camelCase user struct method on an 'actor/'guard local var must
+// keep its real name in the generated Rust, not get rewritten by map_method's
+// builtin fallback -- see tests/cases/actor_guard_camel_case_method.br's own
+// doc comment and try_emit_mutex_method/try_emit_rwlock_method's fix.
+transpile_test!(actor_guard_camel_case_method);
 transpile_test!(qualified_ctor_positional_args);
 transpile_test!(qualified_struct_literal_positional_args);
 transpile_test!(pipe);
@@ -1119,6 +1124,16 @@ transpile_test!(atomic_promotion_actor);
 // Part 2: promotion conservatively suppressed by `with`-block usage (criterion 4) —
 // must produce the exact same result as the promoted version above.
 transpile_test!(atomic_promotion_suppressed_with);
+// Regression pin for the `'atomic` binding-permission fix (bare `let`/`var` are
+// now read-only for every mutating op — compound assign, plain store,
+// `.swap()` — `mut`/`var mut` required, see CHANGELOG.md's [Unreleased] entry
+// and docs/qualifiers.md's `'atomic` "Binding permission" section): the
+// automatic `'actor`/`'guard` → `'atomic` promotion pass must still carry
+// forward a mutation-permitting binding for a bare-`var`-declared `'actor`
+// source (never itself written as `'atomic`, so the new rule must not apply to
+// it) — end-to-end compile-and-run proof, complementing
+// `tests/atomic_qualifier.rs`'s codegen-inspection half of the same regression.
+transpile_test!(atomic_promotion_binding_permission_regression);
 
 // Regression: a *scalar* `'actor`/`'guard` local's own bare-`Var` read/write (no
 // fields to route a mutation through, unlike a struct-typed binding) must go
