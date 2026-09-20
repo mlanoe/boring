@@ -10,6 +10,15 @@
 # Also covers `Subscription`'s Drop genuinely unsubscribing, and multiple
 # independent subscribers all firing on one write. Runs identically under all
 # four mode/threading combinations.
+#
+# `subscribe()`'s callback takes exactly one parameter: a reference to the same
+# observed struct being subscribed to, supplied fresh at each notification — every
+# `.subscribe((obj): ...)` call site below exercises that shape, even where the
+# body never actually reads `obj` (the `a`/`b`/`c`/`d`/`e`/`f`/`g` cases just bump
+# an external counter, same as before this signature change). The `h`/`i` cases
+# further down are the ones that specifically prove the fix: they read `.value`
+# off the callback's own `obj` parameter instead of separately capturing the
+# observed variable itself.
 struct Counter:
     var int value = 0
 
@@ -25,28 +34,28 @@ def main():
     # 'observed follows the same convention), confirm a subscribed callback fires.
     mut Counter'inline'observed a = Counter(0)
     var mut int'atomic a_calls = 0
-    let a_sub = a.subscribe(():
+    let a_sub = a.subscribe((obj):
         a_calls += 1
     )
     a.inc()
 
     mut Counter'owned'observed b = Counter(0)
     var mut int'atomic b_calls = 0
-    let b_sub = b.subscribe(():
+    let b_sub = b.subscribe((obj):
         b_calls += 1
     )
     b.inc()
 
     mut Counter'actor'observed c = Counter(0)
     var mut int'atomic c_calls = 0
-    let c_sub = c.subscribe(():
+    let c_sub = c.subscribe((obj):
         c_calls += 1
     )
     c.inc()
 
     mut Counter'guard'observed d = Counter(0)
     var mut int'atomic d_calls = 0
-    let d_sub = d.subscribe(():
+    let d_sub = d.subscribe((obj):
         d_calls += 1
     )
     d.inc()
@@ -55,7 +64,7 @@ def main():
     # deliberate mutation reached through it ever notifies subscribers.
     mut Counter'actor'observed e = Counter(9)
     var mut int'atomic e_calls = 0
-    let e_sub = e.subscribe(():
+    let e_sub = e.subscribe((obj):
         e_calls += 1
     )
     let e_read = e.value.current()
@@ -65,7 +74,7 @@ def main():
     mut Counter'actor'observed f = Counter(0)
     var mut int'atomic f_calls = 0
     if true:
-        let f_sub = f.subscribe(():
+        let f_sub = f.subscribe((obj):
             f_calls += 1
         )
         f.inc()   # sub still alive -> fires
@@ -75,12 +84,41 @@ def main():
     mut Counter'actor'observed g = Counter(0)
     var mut int'atomic g_calls_1 = 0
     var mut int'atomic g_calls_2 = 0
-    let g_sub_1 = g.subscribe(():
+    let g_sub_1 = g.subscribe((obj):
         g_calls_1 += 1
     )
-    let g_sub_2 = g.subscribe(():
+    let g_sub_2 = g.subscribe((obj):
         g_calls_2 += 10
     )
     g.inc()
 
-    print "a={a_calls} b={b_calls} c={c_calls} d={d_calls} e_read={e_read} e_calls={e_calls} e_val={e.value.current()} f={f_calls} g1={g_calls_1} g2={g_calls_2}"
+    # 6. The actual fix: the callback reads `.value` off its OWN parameter, never
+    # separately capturing the observed variable itself. For 'actor'observed (and
+    # 'guard'observed), the OLD zero-arg-callback pattern happened to still work by
+    # just capturing `h` directly from the enclosing scope — this case proves the
+    # new parameter carries the exact same live value, without any such capture.
+    mut Counter'actor'observed h = Counter(0)
+    var mut int'atomic h_calls = 0
+    var mut int'atomic h_last_seen = 0
+    let h_sub = h.subscribe((obj):
+        h_calls += 1
+        h_last_seen = obj.value.current()
+    )
+    h.inc()
+    h.inc()
+
+    # 7. Same proof, but for 'inline'observed — the case that most concretely shows
+    # why the fix is necessary: `value` here is a bare `Counter` with no shareable
+    # handle at all (no `Rc`/`Arc`, no `Clone` guaranteed), so the old pattern of
+    # "just capture a long-lived handle and clone it inside the closure" was never
+    # even possible for this composition. Reading `obj.value` off the callback's own
+    # parameter is the only way this case could ever observe the current value.
+    mut Counter'inline'observed i = Counter(0)
+    var mut int'atomic i_last_seen = 0
+    let i_sub = i.subscribe((obj):
+        i_last_seen = obj.value.current()
+    )
+    i.inc()
+    i.inc()
+
+    print "a={a_calls} b={b_calls} c={c_calls} d={d_calls} e_read={e_read} e_calls={e_calls} e_val={e.value.current()} f={f_calls} g1={g_calls_1} g2={g_calls_2} h_calls={h_calls} h_last_seen={h_last_seen} i_last_seen={i_last_seen}"

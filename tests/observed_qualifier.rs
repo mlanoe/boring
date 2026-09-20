@@ -84,6 +84,51 @@ fn actor_guard_inline_owned_observed_are_accepted() {
     }
 }
 
+// ── `subscribe()`'s callback signature: `fn (T'observed) callback` ─────────────
+//
+// The fix this session implements (see the branch's report): `subscribe()`'s
+// callback now takes exactly one parameter — a reference to the same observed
+// struct (`value` + `subscribers`), supplied fresh at each notification — instead
+// of a zero-argument closure that forced a subscriber held long-term to separately
+// capture (by reference) the observed object itself, a real Rust lifetime problem
+// when `subscribe()` is called from inside a method of the type that owns the
+// observed field. These checker/codegen-level tests confirm the generated Rust
+// shape directly; the full read-`.value`-off-the-parameter behavioral proof (for
+// both an 'actor'observed case where the old capture pattern happened to still work,
+// and an 'inline'observed case where it never could have) lives in
+// tests/cases/observed_qualifier.br (run via tests/transpile.rs).
+
+#[test]
+fn subscribe_callback_takes_one_observed_ref_param() {
+    let src = "struct Counter:\n    var int value = 0\n    def inc():\n        value += 1\n    req int current():\n        value\n\ndef main():\n    mut Counter'actor'observed c = Counter(0)\n    let sub = c.subscribe((obj):\n        print \"{obj.value.current()}\"\n    )\n    c.inc()\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected a one-parameter subscribe() callback to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("fn subscribe(&self, callback: impl FnMut(&BoringObserved<V>)"),
+        "expected subscribe()'s generated signature to take a &BoringObserved<V> parameter, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("cb(self)"),
+        "expected __boring_notify to pass `self` into each stored callback, got:\n{}", generated
+    );
+}
+
+#[test]
+fn subscribe_callback_wrong_arity_is_rejected() {
+    // Zero parameters (the OLD signature, before this session's fix) must now be
+    // rejected with a clear diagnostic rather than silently emitting a callback that
+    // can never satisfy `subscribe()`'s real (one-parameter) signature.
+    let src = "struct Counter:\n    var int value = 0\n    def inc():\n        value += 1\n\ndef main():\n    mut Counter'actor'observed c = Counter(0)\n    let sub = c.subscribe(():\n        print \"changed\"\n    )\n    c.inc()\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a zero-parameter subscribe() callback to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("callback must take exactly one parameter"),
+        "expected the callback-arity diagnostic, got:\n{}", stderr
+    );
+}
+
 // ── Binding × qualifier regression (test category 6) ────────────────────────────
 //
 // `'actor'observed`/`'guard'observed` fall into the *existing* `'actor`/`'guard` row

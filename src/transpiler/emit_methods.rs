@@ -800,42 +800,86 @@ impl Transpiler {
         Some(call)
     }
 
-    /// `<observedVar>.subscribe(callback)` — docs/book.md's "'observed" section. The
-    /// callback must be `'static` (it's stored in `BoringSubscribers`, which outlives
-    /// this statement — `BoringObserved::subscribe`'s own signature demands
-    /// `impl Fn() + 'static`), but Boring's ordinary closure-literal transpilation
-    /// (`emit_expr_closure`, reused here) produces a plain borrow-capturing `|| { ... }`
-    /// — correct for a short-lived callee like `forEach`/`map`, wrong here. Wrapped in
-    /// `move` plus explicit `Arc`/`Rc` clones for any captured actor/guard variable,
-    /// exactly the same technique `emit_task`'s blocking-spawn closure already uses for
-    /// the identical `'static` requirement (see the doc comment there).
+    /// `<observedVar>.subscribe(callback)` — docs/book.md's "'observed" section.
+    /// `callback` takes exactly one parameter: a reference to the *same* observed
+    /// struct (`value` + `subscribers`) the receiver itself is, supplied fresh at
+    /// each notification call — see `BoringObserved::subscribe`'s generated
+    /// signature (`mod.rs`'s `emit_observed_prelude`), `impl FnMut(&BoringObserved<V>)
+    /// + 'static` (+ `Send + Sync` in multi-thread mode). A reference, deliberately
+    /// not a clone: `'actor'observed`/`'guard'observed` could cheaply clone an
+    /// Arc-based handle, but `'inline'observed`/`'owned'observed` have no shareable
+    /// handle at all (`value` is a bare `T`/`Box<T>`, no `Clone` guaranteed) — a
+    /// borrow is the only representation that works uniformly across all four legal
+    /// base compositions.
+    ///
+    /// The callback must itself be `'static` (it's stored in `BoringObservedSubs`,
+    /// which outlives this statement), but Boring's ordinary closure-literal
+    /// transpilation (`emit_expr_closure`, reused here via
+    /// `emit_expr_closure_with_observed`) produces a plain borrow-capturing
+    /// `|param| { ... }` — correct for a short-lived callee like `forEach`/`map`,
+    /// wrong here. Wrapped in `move` plus explicit `Arc`/`Rc` clones for any captured
+    /// actor/guard variable, exactly the same technique `emit_task`'s blocking-spawn
+    /// closure already uses for the identical `'static` requirement (see the doc
+    /// comment there).
+    ///
+    /// `emit_expr_closure_with_observed` registers the callback's own parameter name
+    /// in the closure body's `observed_locals`, keyed on the exact same
+    /// `(struct_name, base)` entry the receiver `v` itself resolved to — this is what
+    /// lets the callback body read `<param>.value...` (and dispatch method calls
+    /// transparently) without ever needing to separately capture `v` or any handle
+    /// to it.
     fn try_emit_observed_subscribe(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         if method != "subscribe" { return None; }
         let ExprKind::Var(v) = &obj.kind else { return None };
-        if !self.observed_locals.contains_key(v.as_str()) { return None; }
+        let entry = self.observed_locals.get(v.as_str())?.clone();
         let [arg] = args else { return None };
         let ExprKind::Closure(params, _ret_ty, body, throws, task) = &arg.value.kind else { return None };
-        let inner = self.emit_expr_closure(params, body, *throws, *task);
-        // `inner` is `"|| { ... }"` or `"|| expr"` — NOT necessarily unit-returning:
-        // confirmed via a real `cargo build` E0308 that a closure body whose last
-        // statement is a bare `'atomic` compound-assign (`counter += 1`) emits as a
-        // single trailing expression with no `;` (`|| { counter.fetch_add(1, ...) }`),
-        // making the closure's inferred return type `isize` instead of `()` — harmless
-        // for an ordinary Boring closure (nothing else constrains its Rust type to a
-        // concrete zero-arg unit trait bound), but `subscribe`'s own signature demands
-        // exactly `impl FnMut()` (shorthand for `FnMut() -> ()`), so this is the first
-        // place that bound actually bites. Pre-existing, unrelated to `'observed`
-        // otherwise — flagged separately, not fixed at the root here. Worked around
-        // locally and robustly (regardless of `inner`'s own return type) by calling it
-        // as an inner closure and discarding the result as a statement, so the *outer*
-        // closure literal handed to `subscribe` is unconditionally unit-returning.
+        // `subscribe()`'s callback must take exactly one parameter — the observed
+        // value reference — per the fix described above. A malformed call (wrong
+        // arity) still transpiles as best-effort (falls back to the plain,
+        // unregistered closure emission) so this diagnostic is the only failure,
+        // rather than a confusing downstream Rust type error.
+        if params.len() != 1 {
+            self.push_error(arg.value.line, arg.value.col, format!(
+                "`subscribe()`'s callback must take exactly one parameter (a reference \
+                 to the observed value itself, e.g. `.subscribe((obj): ...)`) — got {} \
+                 parameter(s)",
+                params.len()
+            ));
+        }
+        let param_name = params.first().map(|p| p.name.as_str());
+        let inner = match param_name {
+            Some(name) => self.emit_expr_closure_with_observed(params, body, *throws, *task, Some((name, entry))),
+            None => self.emit_expr_closure(params, body, *throws, *task),
+        };
+        // `inner` is `"|param| { ... }"` or `"|param| expr"` — even after
+        // `emit_stmt_inline`'s own `Assign`/`QuestionAssign` void-suppression (see its
+        // doc comment), don't rely on `inner` being unit-returning here: an `Expr`
+        // closure body (`(param): expr`, no block) is always emitted as a bare tail
+        // expression regardless of its shape, and any future non-Assign
+        // statement-like construct could reintroduce the same gap.
+        // `subscribe`'s own signature demands exactly `impl FnMut(&BoringObserved<V>)`
+        // (shorthand for `FnMut(&BoringObserved<V>) -> ()`), so this is the first
+        // place such a bound actually bites.
+        // Worked around locally and robustly (regardless of `inner`'s own return type)
+        // by calling it as an inner closure and discarding the result as a statement,
+        // so the *outer* closure literal handed to `subscribe` is unconditionally
+        // unit-returning.
         let captured = collect_var_names(&arg.value);
         let arc_captures: Vec<&str> = captured.iter()
             .filter(|name| self.arc_vars.contains(*name))
             .map(String::as_str)
             .collect();
+        // The outer closure's own parameter — reuses the same (unescaped) name as the
+        // inner closure's, matching how `emit_expr_closure`'s own `ps` list never
+        // escapes a param name either; shadowing between the two nested closures is
+        // fine, they're never both in scope at once.
+        let outer_param = param_name.unwrap_or("__boring_obs_v");
         let closure = if arc_captures.is_empty() {
-            format!("move || {{ let mut __boring_cb = {}; __boring_cb(); }}", inner)
+            format!(
+                "move |{p}| {{ let mut __boring_cb = {}; __boring_cb({p}); }}",
+                inner, p = outer_param
+            )
         } else {
             let clones: String = arc_captures.iter()
                 .map(|name| {
@@ -847,7 +891,10 @@ impl Transpiler {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!("{{ {} move || {{ let mut __boring_cb = {}; __boring_cb(); }} }}", clones, inner)
+            format!(
+                "{{ {} move |{p}| {{ let mut __boring_cb = {}; __boring_cb({p}); }} }}",
+                clones, inner, p = outer_param
+            )
         };
         Some(format!("{}.subscribe({})", escape_rust_keyword(v), closure))
     }
@@ -4041,6 +4088,21 @@ impl Transpiler {
 
     pub(crate) fn emit_stmt_inline(&self, stmt: &Stmt) -> String {
         match stmt {
+            // `Assign`/`QuestionAssign` are statement-like in Boring's own semantics —
+            // never a value a caller reads — but some lowerings are non-unit Rust
+            // expressions (`'atomic` `x += n` → `x.fetch_add(n, ..)`, which returns the
+            // *previous* value; `lazy ?= v` → `x.get_or_init(|| v)`, which returns `&T`).
+            // A trailing `;` here forces the block back to `()`, matching how a `def`
+            // function with no declared return type already treats its own last
+            // statement (see `emit_stmt.rs`'s "Void function or non-last" branch) — a
+            // closure literal has no declared return type to consult, so this is the
+            // only place that distinction can be recovered for it. Without it, a closure
+            // literal like `(): counter += 1` (from `try_emit_observed_subscribe` or any
+            // other consumer requiring a concrete `Fn()`/`FnMut()` bound) fails to compile
+            // with E0308 the moment its body's last statement is one of these.
+            Stmt::Expr(e) if matches!(&e.kind, ExprKind::Assign(_, _) | ExprKind::QuestionAssign(_, _)) => {
+                format!("{};", self.emit_expr(e))
+            }
             Stmt::Expr(e) => self.emit_expr(e),
             Stmt::Return(s) => match &s.value {
                 Some(e) => format!("return {};", self.emit_expr(e)),

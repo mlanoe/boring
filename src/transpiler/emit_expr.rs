@@ -819,9 +819,55 @@ impl Transpiler {
     // 'static requirement `emit_task`'s spawn-closure handling already solves the same
     // way just above this function.
     pub(crate) fn emit_expr_closure(&self, params: &[Param], body: &ClosureBody, throws: bool, task: bool) -> String {
+        self.emit_expr_closure_inner(params, body, throws, task, None)
+    }
+
+    /// Same as `emit_expr_closure`, plus registers `observed_param` (the callback
+    /// parameter name paired with the `(struct_name, base)` entry
+    /// `try_emit_observed_subscribe` already looked up for the observed receiver
+    /// itself) into the sub-transpiler's `observed_locals` before emitting the body —
+    /// this is what lets `subscribe()`'s callback body read `<param>.value...` (and
+    /// dispatch `.value`-free method calls transparently, same as any other
+    /// `'observed` local) even though the parameter is a fresh name never itself bound
+    /// by a `let`/`mut`/`var`. Only `try_emit_observed_subscribe` needs this; every
+    /// other caller of `emit_expr_closure` goes through the plain wrapper above with
+    /// `None`.
+    pub(crate) fn emit_expr_closure_with_observed(
+        &self, params: &[Param], body: &ClosureBody, throws: bool, task: bool,
+        observed_param: Option<(&str, (String, OwnerQual))>,
+    ) -> String {
+        self.emit_expr_closure_inner(params, body, throws, task, observed_param)
+    }
+
+    fn emit_expr_closure_inner(
+        &self, params: &[Param], body: &ClosureBody, throws: bool, task: bool,
+        observed_param: Option<(&str, (String, OwnerQual))>,
+    ) -> String {
+        // The observed-param's own Rust type (`&BoringObserved<V>`, `V` being exactly
+        // what `emit_type` renders for `struct_name'base` — same recursion
+        // `emit_top.rs`'s `OwnerQual::Observed` arm and `emit_let.rs`'s
+        // `emit_observed_let` already use) is computed and spelled out explicitly on
+        // this closure's parameter — never left to Rust's own inference. Confirmed
+        // necessary via a real `cargo build` E0282 ("type annotations needed"): body
+        // usage alone (`obj.value...`) doesn't pin `obj`'s type for THIS closure,
+        // since `try_emit_observed_subscribe`'s outer wrapper only calls it (as
+        // `__boring_cb(obj)`) after this closure's own type is already fixed — unlike
+        // the outer closure passed straight to `subscribe()`, whose param type Rust
+        // infers fine from that call's `impl FnMut(&BoringObserved<V>)` bound alone.
+        let observed_ty = observed_param.as_ref().map(|(_, (struct_name, base))| {
+            self.emit_type(&Type::Qualified(
+                Box::new(Type::Named(struct_name.clone())),
+                base.clone(),
+            ))
+        });
         let ps: Vec<String> = params.iter().map(|p| {
             let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
-            if let Some(ty) = &p.ty {
+            let is_observed_param = observed_param
+                .as_ref()
+                .is_some_and(|(obs_name, _)| p.name == *obs_name);
+            if is_observed_param {
+                format!("{}: &BoringObserved<{}>", name, observed_ty.as_ref().unwrap())
+            } else if let Some(ty) = &p.ty {
                 format!("{}: {}", name, self.emit_type(ty))
             } else {
                 name
@@ -837,6 +883,9 @@ impl Transpiler {
             // variable named `p` (e.g. `p: Parrot`), causing field accesses like
             // `p.name` to be incorrectly emitted as getter calls `p.name()`.
             sub.var_struct_types.remove(&p.name);
+        }
+        if let Some((name, entry)) = observed_param {
+            sub.observed_locals.insert(name.to_string(), entry);
         }
         // `task` closures: wrap body in `async move { ... }` so they return a Future.
         // `throws` closures: wrap return value in Ok(...).

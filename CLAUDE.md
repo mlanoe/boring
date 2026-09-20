@@ -120,7 +120,7 @@ struct FormModel:
     def setName(string s): name = s
 
 mut FormModel'actor'observed model = FormModel()
-let sub = model.subscribe(():
+let sub = model.subscribe((obj):
     print "changed"
 )
 model.setName("Ada")         # prints "changed" — locks, calls, unlocks, THEN notifies
@@ -128,6 +128,8 @@ model.value.setName("Ada")   # renames silently — `.value` is the explicit esc
                               # hatch that skips notification even for a mutation
 # sub's Drop unsubscribes automatically when it goes out of scope.
 ```
+
+`subscribe()`'s callback takes exactly one parameter — a *reference* to the same observed value (`obj` above), supplied fresh at each notification, never a zero-argument closure: this lets a subscriber read `obj.value` without ever needing to separately capture `model` itself (a real Rust lifetime problem when `subscribe()` is called from inside a method of the type that owns the observed field). It's a reference rather than a clone because `'inline'observed`/`'owned'observed` have no shareable handle to clone in the first place.
 
 `mut`/`var mut` requirements to call a `def` method (direct or through `.value`) follow the base qualifier's own row in "Binding × mutability" below — no exception for `'observed`. Scope: local `let`/`mut`/`var` bindings only (not struct fields, parameters, or return types). See [book.md](docs/book.md#observed--a-composable-sharingnotification-suffix) for the full design.
 

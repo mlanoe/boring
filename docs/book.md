@@ -6096,7 +6096,7 @@ struct FormModel:
 
 def main():
     mut FormModel'actor'observed model = FormModel()
-    let sub = model.subscribe(():
+    let sub = model.subscribe((obj):
         print "model changed"
     )
     model.setName("Ada")   # prints "model changed"
@@ -6154,8 +6154,8 @@ everyday path is the direct call shown above.
 `'owned'observed`) a direct assignment — locks `subscribers` and invokes every
 registered callback synchronously, *after* the value's own lock (if any) has already
 been released. This is a plain, general-purpose primitive: the callbacks are
-arbitrary `fn ()` closures the subscriber provided, with no UI framework, scheduler,
-or async machinery involved.
+arbitrary `fn (T'observed)` closures the subscriber provided, with no UI framework,
+scheduler, or async machinery involved.
 
 **`subscribe()` / `Subscription`.**
 
@@ -6163,23 +6163,52 @@ or async machinery involved.
 struct Subscription:
     # opaque handle — dropping it removes its own callback from whatever it subscribed to
 
-def T'observed.subscribe(fn () callback) -> Subscription:
+def T'observed.subscribe(fn (T'observed) callback) -> Subscription:
     ...
 ```
 
 `subscribe()` appends `callback` to the observed value's subscriber list and returns a
 `Subscription` — an opaque handle whose `Drop` removes exactly that callback from the
-list it came from (ordinary RAII, no manual unsubscribe call needed):
+list it came from (ordinary RAII, no manual unsubscribe call needed). `callback` takes
+exactly one parameter: a reference to the *same* observed value (the one holding both
+`value` and `subscribers`), supplied fresh at each notification call — not a
+zero-argument closure. This matters because a `Subscription` is meant to be held
+long-term, potentially well past the scope where `subscribe()` was called: if
+`subscribe()` is invoked from inside a method of the type that owns the observed field
+(`self.name.subscribe((obj): ...)`), a zero-argument callback would have to separately
+capture `self` to reach the current value at notification time — a real Rust lifetime
+problem (`self` must then remain valid for the `Subscription`'s entire lifetime), not
+just an inconvenience. Taking the observed value as a parameter sidesteps that
+entirely: the callback never needs to pre-capture anything.
+
+It's a **reference**, never a clone, and deliberately so: `'actor'observed`/
+`'guard'observed` could cheaply clone their Arc-based handle to `value`, but
+`'inline'observed`/`'owned'observed` have no shareable handle at all (`value` is a
+bare `T`/`Box<T>`, with no `Clone` bound anywhere in the picture) — cloning simply
+isn't an option for those two, so a borrow is the one representation that works
+uniformly across all four legal base compositions. This falls out of Boring's own
+existing rule that structs are already passed by reference automatically (see
+["Parameter passing"](#parameter-passing) — "Structs, enums, arrays, dicts, sets —
+always passed by reference (`&T`) automatically. Never write `&`.") — declaring the
+callback parameter as `T'observed` already means "receives a reference", the same as
+any other struct-shaped parameter:
 
 ```boring
 mut Counter'actor'observed c = Counter(0)
-let sub = c.subscribe(():
-    print "changed"
+let sub = c.subscribe((obj):
+    print "changed, now {obj.value.current()}"
 )
-c.inc()      # prints "changed"
+c.inc()      # prints "changed, now 1"
 # ... sub goes out of scope here ...
-c.inc()      # does NOT print "changed" — sub's callback was already removed
+c.inc()      # does NOT print anything — sub's callback was already removed
 ```
+
+Reading `.value` off the callback's own parameter (`obj.value.current()` above) works
+exactly like `.value` anywhere else on an `'observed` value — same lock/borrow
+lowering as the base qualifier, and it never itself re-triggers notification. This is
+what actually proves the fix: for `'inline'observed`/`'owned'observed` in particular,
+`obj.value` is the *only* way the callback could ever reach the current value — there
+was never a separate shareable handle it could have captured instead.
 
 Multiple independent `subscribe()` calls on the same `'observed` value each get their
 own `Subscription`; a single write notifies every subscriber still registered at that

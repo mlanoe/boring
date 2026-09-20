@@ -4582,30 +4582,42 @@ impl Transpiler {
     /// `subscribers` is deliberately its OWN independently-locked/ref-counted storage,
     /// separate from `value` (per the task spec's explicit requirement) — reading
     /// `.value` is therefore always a plain, cheap field access that never touches
-    /// `subscribers` at all, regardless of the base qualifier. `BoringSubscription` holds
-    /// a clone of that same `subscribers` handle plus its own numeric id, so it can
-    /// outlive (or be dropped independently of) the `BoringObserved` it came from and
-    /// still correctly remove exactly its own callback on `Drop`.
+    /// `subscribers` at all, regardless of the base qualifier. `BoringSubscription`
+    /// holds a clone of that same `subscribers` handle plus its own numeric id, so it
+    /// can outlive (or be dropped independently of) the `BoringObserved` it came from
+    /// and still correctly remove exactly its own callback on `Drop`.
+    ///
+    /// `subscribe()`'s callback receives, as its one argument, a plain `&BoringObserved<V>`
+    /// borrow of the *same* observed struct (`self`), supplied fresh at each
+    /// `__boring_notify()` call — never a clone. This is deliberate, not an
+    /// oversight: `'actor'observed`/`'guard'observed` could cheaply clone their
+    /// Arc-based `value` handle, but `'inline'observed`/`'owned'observed` have no
+    /// shareable handle at all (`value` is a bare `V`, no `Clone` bound anywhere on
+    /// this struct) — a borrow is the only representation that works uniformly across
+    /// every base composition. `BoringObservedSubs` (and `BoringSubscription`) are
+    /// therefore generic over `V` too now, purely so the stored callback type
+    /// (`Box<dyn FnMut(&BoringObserved<V>)>`) can name `V` at all.
     ///
     /// Threading: single-thread mode uses `Rc`/`RefCell`/`Cell` (matching every other
     /// single-thread qualifier representation in this file); multi-thread mode uses
-    /// `Arc`/`Mutex`/`AtomicU64`. Neither variant requires `Send`/`Sync` on the
-    /// subscriber callback itself — `'observed` locals are function-local values in
-    /// every case this session supports (see the scope note in `emit_observed_let`),
-    /// never moved across a real OS thread or `tokio::spawn` boundary.
+    /// `Arc`/`Mutex`/`AtomicU64`. Neither variant requires `Send`/`Sync` on `V` itself
+    /// (only on the subscriber callback) — `'observed` locals are function-local
+    /// values in every case this session supports (see the scope note in
+    /// `emit_observed_let`), never moved across a real OS thread or `tokio::spawn`
+    /// boundary.
     fn emit_observed_prelude(&mut self) {
         if matches!(self.config.threading, ThreadingMode::Single) {
-            self.line("type BoringObservedSubs = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn FnMut()>)>>>;");
+            self.line("type BoringObservedSubs<V> = std::rc::Rc<std::cell::RefCell<Vec<(u64, Box<dyn FnMut(&BoringObserved<V>)>)>>>;");
             self.line("struct BoringObserved<V> {");
             self.line("    pub value: V,");
-            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("    __boring_subs: BoringObservedSubs<V>,");
             self.line("    __boring_next_id: std::rc::Rc<std::cell::Cell<u64>>,");
             self.line("}");
-            self.line("struct BoringSubscription {");
+            self.line("struct BoringSubscription<V> {");
             self.line("    __boring_id: u64,");
-            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("    __boring_subs: BoringObservedSubs<V>,");
             self.line("}");
-            self.line("impl Drop for BoringSubscription {");
+            self.line("impl<V> Drop for BoringSubscription<V> {");
             self.line("    fn drop(&mut self) {");
             self.line("        self.__boring_subs.borrow_mut().retain(|(id, _)| *id != self.__boring_id);");
             self.line("    }");
@@ -4614,28 +4626,28 @@ impl Transpiler {
             self.line("    fn new(value: V) -> Self {");
             self.line("        Self { value, __boring_subs: Default::default(), __boring_next_id: Default::default() }");
             self.line("    }");
-            self.line("    fn subscribe(&self, callback: impl FnMut() + 'static) -> BoringSubscription {");
+            self.line("    fn subscribe(&self, callback: impl FnMut(&BoringObserved<V>) + 'static) -> BoringSubscription<V> {");
             self.line("        let id = self.__boring_next_id.get();");
             self.line("        self.__boring_next_id.set(id + 1);");
             self.line("        self.__boring_subs.borrow_mut().push((id, Box::new(callback)));");
             self.line("        BoringSubscription { __boring_id: id, __boring_subs: self.__boring_subs.clone() }");
             self.line("    }");
             self.line("    fn __boring_notify(&self) {");
-            self.line("        for (_, cb) in self.__boring_subs.borrow_mut().iter_mut() { cb(); }");
+            self.line("        for (_, cb) in self.__boring_subs.borrow_mut().iter_mut() { cb(self); }");
             self.line("    }");
             self.line("}");
         } else {
-            self.line("type BoringObservedSubs = std::sync::Arc<std::sync::Mutex<Vec<(u64, Box<dyn FnMut() + Send + Sync>)>>>;");
+            self.line("type BoringObservedSubs<V> = std::sync::Arc<std::sync::Mutex<Vec<(u64, Box<dyn FnMut(&BoringObserved<V>) + Send + Sync>)>>>;");
             self.line("struct BoringObserved<V> {");
             self.line("    pub value: V,");
-            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("    __boring_subs: BoringObservedSubs<V>,");
             self.line("    __boring_next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,");
             self.line("}");
-            self.line("struct BoringSubscription {");
+            self.line("struct BoringSubscription<V> {");
             self.line("    __boring_id: u64,");
-            self.line("    __boring_subs: BoringObservedSubs,");
+            self.line("    __boring_subs: BoringObservedSubs<V>,");
             self.line("}");
-            self.line("impl Drop for BoringSubscription {");
+            self.line("impl<V> Drop for BoringSubscription<V> {");
             self.line("    fn drop(&mut self) {");
             self.line("        if let Ok(mut subs) = self.__boring_subs.lock() {");
             self.line("            subs.retain(|(id, _)| *id != self.__boring_id);");
@@ -4650,14 +4662,14 @@ impl Transpiler {
             self.line("            __boring_next_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),");
             self.line("        }");
             self.line("    }");
-            self.line("    fn subscribe(&self, callback: impl FnMut() + 'static + Send + Sync) -> BoringSubscription {");
+            self.line("    fn subscribe(&self, callback: impl FnMut(&BoringObserved<V>) + 'static + Send + Sync) -> BoringSubscription<V> {");
             self.line("        let id = self.__boring_next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);");
             self.line("        self.__boring_subs.lock().unwrap().push((id, Box::new(callback)));");
             self.line("        BoringSubscription { __boring_id: id, __boring_subs: self.__boring_subs.clone() }");
             self.line("    }");
             self.line("    fn __boring_notify(&self) {");
             self.line("        let mut subs = self.__boring_subs.lock().unwrap();");
-            self.line("        for (_, cb) in subs.iter_mut() { cb(); }");
+            self.line("        for (_, cb) in subs.iter_mut() { cb(self); }");
             self.line("    }");
             self.line("}");
         }
