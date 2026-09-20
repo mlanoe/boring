@@ -206,24 +206,31 @@ fine there.
 
 | Syntax | Qualifier constraint | Notes |
 |---|---|---|
-| `let x'actor = …` | `'actor` | immutable binding, interior mutability via lock |
-| `mut x'actor = …` | `'actor` | mutable binding (same Arc, rebindable) |
-| `var x'actor = …` | `'actor` | rebindable Arc pointer |
+| `let x'actor = …` | `'actor` | read-only — no `def` method calls, same rule as any other type |
+| `mut x'actor = …` | `'actor` | not rebindable; unlocks `def` method calls via the lock |
+| `var x'actor = …` | `'actor` | rebindable Arc pointer only — `var` alone still does not unlock `def` calls |
+| `var mut x'actor = …` | `'actor` | rebindable Arc pointer, and unlocks `def` method calls |
 | `let x'shared = …` | `'shared` | read-only, no `def` methods |
-| `mut x'shared` | compile error | `'shared` + mutability is incoherent |
+| `mut x'shared` | compile error | `'shared` has no interior mutability for `mut` to unlock |
 
-### `'actor` and `'guard` on `let` bindings
+### `'actor` and `'guard` on `let`/`mut`/`var` bindings
 
-`let` bindings are normally immutable. `'actor` and `'guard` are exceptions: they provide **interior mutability**, so `def` methods may be called even on a `let`-bound variable. The lock/borrow is acquired automatically.
+`'actor` and `'guard` provide **interior mutability** — a `def` method dispatches through the lock automatically. But this does not bypass Boring's ordinary binding-permission rules: `'actor`/`'guard` are checked exactly like every other type (see `book.md`'s "[Binding × qualifier combinations](book.md#binding--qualifier-combinations)") — a bare `let` or bare `var` binding is read-only, and only `mut`/`var mut` unlock `def` calls. (An earlier revision of Boring let the qualifier's own interior mutability substitute for the `mut` check on its own; that exception has been retired.)
 
 ```boring
-let Counter'actor c = Counter()
-c.inc()    # OK — def method, interior mutability via Mutex
+mut Counter'actor c = Counter()
+c.inc()    # OK — def method; `mut` unlocks it, the Mutex only provides the mechanism
 c.inc()
 print c.get()    # → 2
 ```
 
-This is distinct from `var`/`mut` binding mutability — the `let` binding is not rebindable, but the inner value is mutable through the lock.
+```boring
+let Counter'actor c = Counter()
+c.inc()    # error: `c` is not declared `mut` — cannot call `def` method `.inc()`
+           # on a non-mut binding
+```
+
+`req` methods and direct field reads remain callable on a bare `let`/`var` binding regardless of qualifier — only `def` calls (content mutation) require `mut`/`var mut`.
 
 ---
 
@@ -232,7 +239,7 @@ This is distinct from `var`/`mut` binding mutability — the `let` binding is no
 Use `'actor` / `'guard` when the code does not use `.await` while the lock is held:
 
 ```boring
-let Counter'actor c = Counter()
+mut Counter'actor c = Counter()
 c.inc()                   # std::sync::Mutex — no await needed
 ```
 
@@ -340,11 +347,11 @@ The practical consequence: a value that genuinely does need the async lock, but 
 ### On local variables
 
 ```boring
-let Store'guard s = Store()
+mut Store'guard s = Store()
 s.write(42)      # def → RwLock::write().unwrap()
 s.read()         # req → RwLock::read().unwrap()
 
-let Store'guard'task st = Store()
+mut Store'guard'task st = Store()
 st.write(42)     # def → RwLock::write().await
 st.read()        # req → RwLock::read().await
 ```
@@ -558,11 +565,13 @@ def reset(mut Counter& c):
     c.value = 0
 
 mut a'inline = Counter(0)
-let b'actor = Counter(0)
+mut b'actor = Counter(0)
 
 reset(a)   # &mut a
 reset(b)   # { let mut g = b.lock()?; reset(&mut *g) }
 ```
+
+Passing into a `mut Counter&` parameter demands the same permission a direct `def` call would: the argument binding must itself be `mut`/`var mut` — a bare `let`/`var` `'actor`/`'guard` binding is rejected here too (`cannot pass ... to a mut parameter — ... is immutable`), not just for direct method calls.
 
 `'shared` (`Arc<T>` without interior mutability) cannot produce `&mut T` — passing a `Counter'shared` to a `mut Counter&` parameter is a compile error.
 
@@ -1066,7 +1075,7 @@ A `let` binding's qualifier can be written on the type (`let Counter'actor c = �
 
 ### Interior mutability in the interpreter
 
-The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables declared with an interior-mutable qualifier. Calls to `def` methods on these variables skip the "cannot call mutating method on immutable binding" check, matching the transpiler's semantics.
+The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables declared with an interior-mutable qualifier (`'actor`, `'guard`, task variants). This flag does **not** bypass the mut/content-mutable check — a `def` method call on a non-`mut` `'actor`/`'guard` binding is rejected exactly like any other type, matching the transpiler's current semantics (retiring the earlier exception described above under "`'actor` and `'guard` on `let`/`mut`/`var` bindings"). `is_actor` is consulted only to pick the right error message: it suppresses the separate "shared binding" error so a non-mut `'actor`/`'guard` binding gets the ordinary non-mut error instead of being misreported as `'shared`.
 
 ### Inference implementation status
 
