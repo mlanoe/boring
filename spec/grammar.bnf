@@ -1066,7 +1066,15 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #                                          is a checker-time rejection (parses fine here,
 #                                          same treatment as `mut 'shared`), not a grammar
 #                                          restriction. Bare T'observed (no explicit base)
-#                                          resolves via qualifier inference. Adds an
+#                                          resolves via qualifier inference — a bare *local*
+#                                          binding runs the full usage-based inference
+#                                          pipeline; a bare struct field / function-or-
+#                                          method parameter / return type (this position is
+#                                          reachable via `type` from any of those, no
+#                                          separate grammar production per position)
+#                                          defaults straight to 'actor'observed instead — a
+#                                          simpler rule for positions with no single-body
+#                                          usage signal of their own to analyze. Adds an
 #                                          independently-locked subscriber list alongside
 #                                          the base value — see subscribe()/Subscription
 #                                          in docs/book.md.

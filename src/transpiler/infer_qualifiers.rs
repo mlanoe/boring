@@ -32,6 +32,31 @@ impl Transpiler {
         self.observed_locals.clear();
         self.task_method_call_vars.clear();
 
+        // Re-seed `'observed`-qualified parameters right after the clear above (not in
+        // `seed_param_locals`, which runs *before* this function's first call for the
+        // enclosing function body — `emit_body`/`emit_body_optional_last` call
+        // `infer_qualifiers` again for nested blocks too, each time clearing
+        // `observed_locals` unconditionally, so registering params anywhere upstream of
+        // this point would just get wiped out again here). `fn_current_params` is
+        // populated once per function (name → declared type, set in `emit_fn` before
+        // `emit_body` runs) and stays valid across every nested `infer_qualifiers` call
+        // within the same function body, so re-seeding here on every call is redundant
+        // but harmless — same idempotent shape as `observed_bare`'s own per-call
+        // resolution further down. A bare (no explicit base) `'observed` param defaults
+        // to `'actor'observed` via `Transpiler::resolve_bare_observed` — see that
+        // function's doc for why params/fields/returns get this simpler default instead
+        // of the local-binding usage-based inference the rest of this function
+        // implements for bare *local* `'observed` bindings.
+        for (name, ty) in self.fn_current_params.clone() {
+            if let Type::Qualified(base_qualified, OwnerQual::Observed) = Self::resolve_bare_observed(&ty) {
+                if let Type::Qualified(inner, base) = *base_qualified {
+                    if let Type::Named(n) = *inner {
+                        self.observed_locals.insert(name, (n, base));
+                    }
+                }
+            }
+        }
+
         let mut alias_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut anonymous_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut var_struct_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();

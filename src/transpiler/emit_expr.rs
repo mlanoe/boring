@@ -3500,6 +3500,25 @@ impl Transpiler {
                 return format!("Box::new({})", result);
             }
         }
+        // A function/method whose declared return type is `'observed` (docs/book.md's
+        // "'observed" section, return-type support) and whose tail/return expression is
+        // a DIRECT constructor call for that exact struct (`FormModel()`, matching
+        // exactly the same shape the `is_owned_or_new()` branch above already handles
+        // for `'owned`/`'new`) gets wrapped here too — `self.fn_return_ty` is already
+        // fully resolved by this point (`promote_bare_return_ty` calls
+        // `Transpiler::resolve_bare_observed`, defaulting a bare `'observed` return to
+        // `'actor'observed` — see that function's doc), so no bare-form handling is
+        // needed here. Scope note: a tail expression that isn't itself a direct
+        // constructor call (e.g. `return m` for a plain already-built local `m`) is NOT
+        // covered — see this session's report.
+        if let Some(Type::Qualified(base_qualified, OwnerQual::Observed)) = &self.fn_return_ty {
+            if let Type::Qualified(inner, base) = base_qualified.as_ref() {
+                if matches!(inner.as_ref(), Type::Named(n) if n == name) {
+                    let wrapped = self.wrap_observed_base(name, base, &result);
+                    return format!("BoringObserved::new({})", wrapped);
+                }
+            }
+        }
         result
     }
 
@@ -3794,7 +3813,35 @@ impl Transpiler {
                     let mutex_key = format!("{}::{}", name, label);
                     // Same wrapping regardless of whether the qualifier is explicit (`T'actor`)
                     // or inferred from usage — both populate these sets identically.
-                    let val = if self.struct_mutex_fields.contains(&mutex_key) {
+                    let val = if let Some((inner_struct_name, base)) = self.observed_fields.get(&mutex_key).cloned() {
+                        // `'observed`-qualified field, constructed via a labeled-arg struct
+                        // literal call (`Container(model = ...)`, docs/book.md's
+                        // "'observed" section, "Construction"). Two shapes:
+                        //  - the value is ALREADY an `'observed` local/param of the exact
+                        //    same (struct, base) — the `@ObservedObject`-shaped case,
+                        //    `docs/design-notes/boring-ui-draft.md` — passed in from
+                        //    outside rather than constructed here: `.clone()` the whole
+                        //    `BoringObserved<V>` wrapper (cheap identity-sharing clone for
+                        //    `'actor'observed`/`'guard'observed`'s Arc-based `value` AND
+                        //    subscriber list; a real, independent deep clone for
+                        //    `'inline'observed`/`'owned'observed`, matching Boring's normal
+                        //    by-value struct-field semantics elsewhere in this same
+                        //    function — the caller's own binding is untouched either way,
+                        //    consistent with "the caller keeps ownership" for every other
+                        //    struct-shaped argument).
+                        //  - otherwise a fresh base-typed constructor expression
+                        //    (`Container(model = FormModel())`) — wrap it from scratch,
+                        //    initializing both `value` and an empty subscriber list.
+                        let already_observed = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.observed_locals.get(v.as_str()) == Some(&(inner_struct_name.clone(), base.clone())));
+                        if already_observed {
+                            format!("{}.clone()", self.emit_expr(eff_value))
+                        } else {
+                            let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), eff_value);
+                            let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+                            format!("BoringObserved::new({})", wrapped)
+                        }
+                    } else if self.struct_mutex_fields.contains(&mutex_key) {
                         // If the value is already an actor/rc variable, just clone the Rc pointer.
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
                             if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
@@ -3928,6 +3975,23 @@ impl Transpiler {
                     }
                 }
             }
+            // Append `'observed`-qualified fields missing from the call — the field's own
+            // declared default (`self.struct_field_defaults`) if it has one, otherwise a
+            // `Default::default()`-based base value, either way wrapped exactly like a
+            // local `'observed` `let` would (see the matching branch above for a value
+            // that *is* provided).
+            for (key, (inner_struct_name, base)) in &self.observed_fields.clone() {
+                if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
+                    if !provided.contains(field_name) {
+                        let raw = match self.struct_field_defaults.get(key) {
+                            Some(def) => self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def),
+                            None => "Default::default()".to_string(),
+                        };
+                        let wrapped = self.wrap_observed_base(inner_struct_name, base, &raw);
+                        fields.push(format!("{}: BoringObserved::new({})", field_name, wrapped));
+                    }
+                }
+            }
             // Append regular optional/T'auto/T'weak fields not provided — default to None.
             if let Some(known_fields) = self.struct_fields.get(name).cloned() {
                 for (fname, fty) in &known_fields {
@@ -3939,6 +4003,7 @@ impl Transpiler {
                             || self.struct_mutex_task_fields.contains(&tkey)
                             || self.struct_rwlock_fields.contains(&tkey)
                             || self.struct_rwlock_task_fields.contains(&tkey)
+                            || self.observed_fields.contains_key(&tkey)
                         {
                             continue;
                         }
@@ -4003,6 +4068,41 @@ impl Transpiler {
                                 let ty = &tys[i];
                                 if Self::is_arc_qualified(ty) {
                                     self.emit_let_value_arc_qualified(ty, &a.value)
+                                } else if let Type::Qualified(base_q, OwnerQual::Observed) = Self::resolve_bare_observed(ty) {
+                                    // `'observed` init param, positional call (the
+                                    // `@ObservedObject`-shaped case, e.g. `View(m)` calling
+                                    // `init(FormModel'actor'observed model): self.model = model`)
+                                    // — same "already observed → clone the whole wrapper;
+                                    // otherwise wrap a fresh constructor expression" logic as
+                                    // the labeled-arg struct-literal path above, needed for the
+                                    // identical reason: `emit_init`'s own by-value ::new()
+                                    // signature (unlike `emit_param`'s by-reference convention
+                                    // for an ordinary function parameter) means a caller passing
+                                    // an already-`&`-borrowed observed var/param straight through
+                                    // needs a `.clone()` to produce the owned value the
+                                    // constructor expects — Rust's own method-call autoderef
+                                    // makes `m.clone()` work whether `m` is itself a reference or
+                                    // an owned value, so one shape covers both.
+                                    let (struct_name, base) = match *base_q {
+                                        Type::Qualified(inner, base) => (
+                                            match *inner { Type::Named(n) => Some(n), _ => None },
+                                            base,
+                                        ),
+                                        _ => (None, OwnerQual::Inline),
+                                    };
+                                    let already_observed = struct_name.as_ref().is_some_and(|sn| {
+                                        matches!(&a.value.kind, ExprKind::Var(v)
+                                            if self.observed_locals.get(v.as_str()) == Some(&(sn.clone(), base.clone())))
+                                    });
+                                    if already_observed {
+                                        format!("{}.clone()", self.emit_expr(&a.value))
+                                    } else if let Some(struct_name) = struct_name {
+                                        let raw = self.emit_let_value(Some(&Type::Named(struct_name.clone())), &a.value);
+                                        let wrapped = self.wrap_observed_base(&struct_name, &base, &raw);
+                                        format!("BoringObserved::new({})", wrapped)
+                                    } else {
+                                        self.emit_let_value(Some(ty), &a.value)
+                                    }
                                 } else {
                                     self.emit_let_value(Some(ty), &a.value)
                                 }

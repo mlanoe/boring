@@ -28,6 +28,97 @@ struct Counter:
     req int current():
         value
 
+# ── Struct-field / parameter / return-type `'observed` support (this session's
+# extension — see docs/book.md's "'observed" section, now covering fields,
+# parameters and return types, not just local bindings). `self.field`-scoped
+# dispatch only (a pre-existing gap in the analogous `'actor` case for an
+# arbitrary `outer_var.field`, flagged separately in this session's report, means
+# this doesn't yet generalize to that shape).
+struct FormModel:
+    var string name = ""
+
+    def setName(string s):
+        name = s
+
+    req string getName():
+        name
+
+# `mut FormModel'actor'observed model = FormModel()` — declared and constructed
+# entirely inline (no explicit `init`), same as any local `'observed` binding.
+struct Container:
+    mut FormModel'actor'observed model = FormModel()
+
+    def mount():
+        let sub = self.model.subscribe((obj):
+            print "container saw {obj.value.getName()}"
+        )
+        self.model.setName("Ada")
+
+    req string currentName():
+        self.model.value.getName()
+
+# `mut FormModel'observed model` — bare (no explicit base), defaulting to
+# `'actor'observed` (docs/book.md's "'observed" section, "Qualifier inference for
+# bare parameters/fields/returns" — a deliberately simpler default than the
+# usage-based inference bare *local* bindings get, since a field/param/return has
+# no single-body usage signal of its own to analyze).
+struct BareContainer:
+    mut FormModel'observed model = FormModel()
+
+    def mount():
+        let sub = self.model.subscribe((obj):
+            print "bare-field saw {obj.value.getName()}"
+        )
+        self.model.setName("Zed")
+
+# `init(FormModel'actor'observed model): self.model = model` — a struct's own
+# constructor receiving an ALREADY-observed value from outside instead of only
+# ever constructing one inline (the `@ObservedObject`-shaped case,
+# docs/design-notes/boring-ui-draft.md's comparative table).
+struct View:
+    mut FormModel'actor'observed model
+
+    init(FormModel'actor'observed model):
+        self.model = model
+
+    def mount():
+        let sub = self.model.subscribe((obj):
+            print "view saw {obj.value.getName()}"
+        )
+        self.model.setName("Bea")
+
+# A function/method that constructs and hands back a fresh `'observed` value
+# (docs/book.md's "'observed" section, return-type support) — forwarded directly
+# into another function's matching `'observed` parameter (a known, documented
+# scope limit: re-binding the return value into an explicitly re-annotated local
+# double-wraps it instead of passing the already-observed value through — see
+# this session's report — so this proves the feature via direct forwarding,
+# the pattern that already works end to end).
+def FormModel'actor'observed makeModel():
+    FormModel()
+
+def useModel(FormModel'actor'observed m):
+    m.setName("FromParam")
+    print "param saw {m.value.getName()}"
+
+# A struct with an `'inline'observed` field must still get a correctly working
+# auto-derived `Clone` (docs/book.md's "'observed" section — `BoringObserved<V>`
+# itself has no derive at all pre-existing this session's fix; every struct with
+# ANY `'observed` field of ANY base broke `Clone`/`Debug`/`PartialEq` outright
+# before `emit_observed_derived_impls`, not just the "maybe non-Clone"
+# `'inline'observed`/`'owned'observed` case the task's own scope note called out).
+struct Position:
+    var float x = 0.0
+
+    req float getX():
+        x
+
+struct Canvas:
+    mut Position'inline'observed origin = Position()
+
+    req float originX():
+        self.origin.value.getX()
+
 def main():
     # 1. Each legal composition: construct, mutate via a DIRECT call (no `.value` —
     # 'actor/'guard already dispatch method calls transparently in Boring, and
@@ -122,3 +213,34 @@ def main():
     i.inc()
 
     print "a={a_calls} b={b_calls} c={c_calls} d={d_calls} e_read={e_read} e_calls={e_calls} e_val={e.value.current()} f={f_calls} g1={g_calls_1} g2={g_calls_2} h_calls={h_calls} h_last_seen={h_last_seen} i_last_seen={i_last_seen}"
+
+    # 8. Struct field, declared+constructed inline — self.field.subscribe() and a
+    # `def` method reached through the field both dispatch transparently and notify.
+    mut container = Container()
+    container.mount()
+    print "container currentName={container.currentName()}"
+
+    # 9. Bare `'observed` struct field — defaults to `'actor'observed`.
+    mut bare_container = BareContainer()
+    bare_container.mount()
+
+    # 10. `'observed` constructor parameter (`@ObservedObject`) — a struct receiving
+    # an already-observed value from outside rather than constructing one inline.
+    # `shared_model` is declared with an explicit `'observed` annotation directly
+    # (not via a function call's return value assigned to a local — see this
+    # session's report for that specific, separate, known scope gap) so it's a
+    # plain, already-registered `'observed` local going into `View`'s constructor.
+    mut FormModel'actor'observed shared_model = FormModel()
+    mut view = View(shared_model)
+    view.mount()
+
+    # 11. `'observed` return type, forwarded directly into a matching parameter.
+    useModel(makeModel())
+
+    # 12. `'inline'observed` struct field — the containing struct's auto-derived
+    # `Clone` must still work (regression: `BoringObserved<V>` itself has no
+    # derive at all without this session's fix, breaking Clone/Debug/PartialEq for
+    # ANY struct with an `'observed` field, not just this "maybe non-Clone" case).
+    mut canvas = Canvas()
+    let Canvas canvas2 = canvas.clone()
+    print "canvas clone originX={canvas2.originX()}"

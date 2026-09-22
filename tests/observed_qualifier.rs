@@ -237,6 +237,218 @@ fn bare_observed_resolves_inline_for_small_struct_no_signal() {
     );
 }
 
+// ── Struct fields / parameters / return types (this session's extension) ───────
+//
+// Full behavioral coverage (construct + subscribe + mutate-via-a-method-reached-
+// through-the-field + confirm notification, for a field, a constructor parameter,
+// and a return type) lives in tests/cases/observed_qualifier.br (run via
+// tests/transpile.rs, a real cargo build+run). These tests instead inspect the
+// generated Rust text directly — checker rejections and the bare-`'observed`
+// default-to-`'actor'observed` policy for these three new positions.
+//
+// Judgment call (see this session's report): a bare `'observed` field/parameter/
+// return type defaults straight to `'actor'observed`, unlike a bare *local*
+// binding (which runs the full usage-based candidate-elimination pipeline just
+// above). A field/param/return has no equally narrow, single-body usage signal
+// to analyze at its own declaration site — deferred as a simpler, safer default
+// for this extension rather than building three new cross-body/cross-call-site
+// inference passes.
+
+#[test]
+fn shared_observed_is_rejected_on_a_struct_field() {
+    let src = "struct Counter:\n    var int value = 0\n\nstruct Holder:\n    mut Counter'shared'observed c = Counter(0)\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected 'shared'observed to be rejected on a struct field");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot combine `'observed` with `'shared`"),
+        "expected the observed-compatibility error for a field, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn shared_observed_is_rejected_on_a_parameter() {
+    let src = "struct Counter:\n    var int value = 0\n\ndef useCounter(Counter'shared'observed c):\n    print \"ok\"\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected 'shared'observed to be rejected on a parameter");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot combine `'observed` with `'shared`"),
+        "expected the observed-compatibility error for a parameter, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn shared_observed_is_rejected_on_a_return_type() {
+    let src = "struct Counter:\n    var int value = 0\n\ndef Counter'shared'observed makeCounter():\n    Counter(0)\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected 'shared'observed to be rejected on a return type");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot combine `'observed` with `'shared`"),
+        "expected the observed-compatibility error for a return type, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn explicit_actor_observed_struct_field_renders_boring_observed() {
+    let src = "struct Counter:\n    var int value = 0\n\nstruct Holder:\n    mut Counter'actor'observed c = Counter(0)\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("c: BoringObserved<Arc<std::sync::Mutex<Counter>>>"),
+        "expected an explicit 'actor'observed field to render BoringObserved<Arc<Mutex<Counter>>>, got:\n{}", generated
+    );
+}
+
+#[test]
+fn bare_observed_struct_field_defaults_to_actor() {
+    let src = "struct Counter:\n    var int value = 0\n\nstruct Holder:\n    mut Counter'observed c = Counter(0)\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("c: BoringObserved<Arc<std::sync::Mutex<Counter>>>"),
+        "expected a bare 'observed field to default to 'actor'observed, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("BoringObserved::new(Arc::new(std::sync::Mutex::new(Counter { value: 0 })))"),
+        "expected the field's default-value construction to also wrap it, got:\n{}", generated
+    );
+}
+
+#[test]
+fn bare_observed_parameter_defaults_to_actor() {
+    let src = "struct Counter:\n    var int value = 0\n\ndef useCounter(Counter'observed c):\n    print \"ok\"\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("fn useCounter(c: &BoringObserved<Arc<std::sync::Mutex<Counter>>>)"),
+        "expected a bare 'observed parameter to default to a by-reference 'actor'observed, got:\n{}", generated
+    );
+}
+
+#[test]
+fn bare_observed_return_type_defaults_to_actor() {
+    let src = "struct Counter:\n    var int value = 0\n\ndef Counter'observed makeCounter():\n    Counter(0)\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("fn makeCounter() -> BoringObserved<Arc<std::sync::Mutex<Counter>>>"),
+        "expected a bare 'observed return type to default to 'actor'observed, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("BoringObserved::new(Arc::new(std::sync::Mutex::new(Counter { value: 0 })))"),
+        "expected the tail constructor call to be wrapped to match, got:\n{}", generated
+    );
+}
+
+// ── Auto-derive interaction: `BoringObserved<V>` needs its own Clone/Debug/
+// PartialEq/Default (test category: Clone-skip regression) ─────────────────────
+//
+// Judgment call (see this session's report): rather than adding a new recursive
+// "does the wrapped struct actually implement Clone" check to `emit_struct.rs`'s
+// auto-derive decision (`has_non_clone_field` and friends) — Boring has no such
+// recursive check for an ordinary NON-observed nested struct field either, a
+// pre-existing, orthogonal gap this extension doesn't need to fix to close its
+// own — `BoringObserved<V>` gets its own manual `Clone`/`Debug`/`PartialEq`/
+// `Default` impls, each bounded only on `V` (`emit_observed_derived_impls`,
+// `mod.rs`). Without these, ANY struct with an `'observed` field of ANY base
+// broke its own auto-derived `Debug`/`Clone`/`PartialEq` outright (no impl
+// existed on `BoringObserved<V>` at all, for any `V`) — this is the real,
+// guaranteed regression risk this test guards, not merely the narrower
+// "`'inline'observed`/`'owned'observed`'s `V` might not be `Clone`" case, which
+// doesn't need a new checker rule at all: an actually-non-Clone `V` simply fails
+// to satisfy `BoringObserved<V>`'s own `impl<V: Clone> Clone` bound, the same
+// unremarkable way any other generic field's non-Clone type would.
+#[test]
+fn struct_with_inline_observed_field_gets_working_clone_derive() {
+    let src = "struct Position:\n    var float x = 0.0\n\nstruct Canvas:\n    mut Position'inline'observed origin = Position()\n\ndef main():\n    mut c = Canvas()\n    let c2 = c.clone()\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected a struct with an 'inline'observed field to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("#[derive(Debug, Clone, PartialEq)]\nstruct Canvas {"),
+        "expected Canvas to still get Debug/Clone/PartialEq despite its 'inline'observed field, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("impl<V: Clone> Clone for BoringObserved<V>")
+            && generated.contains("impl<V: std::fmt::Debug> std::fmt::Debug for BoringObserved<V>")
+            && generated.contains("impl<V: PartialEq> PartialEq for BoringObserved<V>"),
+        "expected BoringObserved<V>'s own manual Clone/Debug/PartialEq impls to be emitted, got:\n{}", generated
+    );
+}
+
+#[test]
+fn struct_with_actor_observed_field_skips_partial_eq_in_sync_multi_mode() {
+    // Mirrors the pre-existing `has_sync_mutex_field` exclusion for a plain (non-
+    // observed) 'actor field in non-async multi-thread mode (Arc<Mutex<T>> has no
+    // PartialEq) — 'actor'observed has the exact same problem one level down
+    // (BoringObserved<Arc<Mutex<T>>>'s manual PartialEq needs V: PartialEq).
+    let src = "struct Counter:\n    var int value = 0\n\nstruct Holder:\n    mut Counter'actor'observed c = Counter(0)\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("#[derive(Debug, Clone)]\nstruct Holder {"),
+        "expected Holder to get Debug/Clone but NOT PartialEq (Arc<Mutex<T>> has none), got:\n{}", generated
+    );
+}
+
+// ── Field-level mut/var permission parity (test category: "mut/var field-
+// permission regression") ───────────────────────────────────────────────────────
+//
+// Finding (see this session's report): calling a `def` method through a struct
+// field (`self.field.method()`) does NOT currently push a "not declared mut"
+// diagnostic for ANY qualifier — not `'actor`/`'guard` alone, and not
+// `'actor'observed`/`'guard'observed` either. This is a pre-existing, general gap
+// (flagged separately as its own follow-up task, not fixed here) — the analogous
+// LOCAL BINDING check (`var_alone_does_not_unlock_direct_def_call` above) DOES
+// fire correctly, because that diagnostic lives in `observed_call_expr`, gated on
+// `known_local_vars`/`mut_checked_local_vars` (populated only for local bindings),
+// and neither `try_emit_mutex_method`/`try_emit_rwlock_method`'s own `self.field`
+// branch nor this session's new `try_emit_observed_field_method_direct` add an
+// equivalent field-scoped check. This test is therefore a PARITY regression, not
+// a rejection: an `'actor'observed` field must compile identically to a plain
+// (non-observed) `'actor` field in this same shape — i.e., this extension must
+// not make the pre-existing gap any worse, and must not spuriously start
+// rejecting a call the un-observed case already accepts either.
+//
+#[test]
+fn non_mut_observed_field_method_call_has_same_permissiveness_as_plain_actor_field() {
+    let observed_src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    Counter'actor'observed c = Counter(0)\n    def bump(): self.c.inc()\n\ndef main():\n    print \"ok\"\n";
+    let plain_src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    Counter'actor c = Counter(0)\n    def bump(): self.c.inc()\n\ndef main():\n    print \"ok\"\n";
+    let observed_out = emit_rust(observed_src);
+    let plain_out = emit_rust(plain_src);
+    assert_eq!(
+        observed_out.status.success(), plain_out.status.success(),
+        "expected a non-mut 'actor'observed field's def-method call through the field to succeed/fail exactly like the non-observed 'actor case (parity, not a new regression) — observed: {}, plain: {}",
+        observed_out.status.success(), plain_out.status.success()
+    );
+}
+
+// A `mut`-declared 'observed field DOES correctly unlock the direct transparent
+// call + notification — this is the actual, positive requirement (mirrors the
+// local-binding `plain_mut_unlocks_direct_def_call` test above, at field scope).
+#[test]
+fn mut_observed_field_unlocks_direct_def_call_and_notifies() {
+    let src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n    req int current(): value\n\nstruct Holder:\n    mut Counter'actor'observed c = Counter(0)\n    def bump():\n        let sub = self.c.subscribe((obj):\n            print \"{obj.value.current()}\"\n        )\n        self.c.inc()\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected a mut 'actor'observed field to unlock a direct def call + notify through self.field, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("__boring_notify"),
+        "expected the field-scoped direct call to still emit the notify step, got:\n{}", generated
+    );
+}
+
 #[test]
 fn bare_observed_resolves_owned_for_oversized_struct_no_signal() {
     // 33 `int` fields (isize, 8 bytes each on this platform) = 264 bytes, over the

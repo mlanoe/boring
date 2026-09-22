@@ -1069,17 +1069,47 @@ struct Transpiler {
     /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
     /// function body before emission. Cleared between function bodies.
     pub(crate) inferred_qualifiers: std::collections::HashMap<String, crate::ast::OwnerQual>,
-    /// `'observed`-qualified local variables (`let`/`mut`/`var`, not struct fields/params —
-    /// see docs/book.md's "'observed" section for the current scope) in the current
-    /// function body: name → (base struct type name, base qualifier). Populated two ways:
-    /// explicitly-annotated locals (`FormModel'actor'observed`) directly in `emit_let`, and
-    /// bare `'observed` locals (`FormModel'observed`) via `infer_qualifiers`'s bare-observed
-    /// resolution (which reuses the ordinary bare-struct candidate-elimination pipeline,
-    /// restricted to never resolve to `'shared` — see that file's `observed_bare` handling).
+    /// `'observed`-qualified local variables AND function/method parameters (name →
+    /// (base struct type name, base qualifier)) in the current function body — see
+    /// docs/book.md's "'observed" section. Populated three ways: explicitly-annotated
+    /// locals (`FormModel'actor'observed`) directly in `emit_let`; bare `'observed`
+    /// locals (`FormModel'observed`) via `infer_qualifiers`'s bare-observed resolution
+    /// (which reuses the ordinary bare-struct candidate-elimination pipeline, restricted
+    /// to never resolve to `'shared` — see that file's `observed_bare` handling); and
+    /// `'observed`-typed parameters, seeded by `seed_param_locals` (`emit_top.rs`) at
+    /// function entry — a parameter is just another named binding in the body's scope,
+    /// so it rides the exact same lookup here with zero extra dispatch code (see
+    /// `try_emit_observed_subscribe`/`try_emit_observed_method_direct`/
+    /// `try_emit_observed_method`, all keyed only on a bare `ExprKind::Var` name).
+    /// A bare (no explicit base) parameter or return type defaults to `'actor'observed`
+    /// (`Transpiler::resolve_bare_observed`) rather than running the local-binding
+    /// usage-based inference pipeline — a deliberate, simpler scope decision for this
+    /// extension (see this session's report) since a parameter's/return's real "usage"
+    /// spans caller sites, not just this one body.
     /// Consulted by `emit_let::emit_observed_let` (construction) and
     /// `emit_methods::try_emit_observed_method` (`.value.method(...)` dispatch + mut-gating +
     /// write-notification). Cleared between function bodies, same as `inferred_qualifiers`.
     pub(crate) observed_locals: std::collections::HashMap<String, (String, crate::ast::OwnerQual)>,
+    /// `'observed`-qualified STRUCT FIELDS (as opposed to `observed_locals` above, which
+    /// covers only local bindings and parameters): "StructName::field_name" → (base
+    /// struct type name, base qualifier). Populated once, during the same per-struct
+    /// pre-scan pass that fills `struct_mutex_fields`/`struct_rwlock_fields` (`mod.rs`,
+    /// near `pre_scan_struct_item`) — covers BOTH an explicitly fully-qualified field
+    /// (`mut FormModel'actor'observed model`) and a bare one (`mut FormModel'observed
+    /// model`, defaulted to `'actor'observed` via `Transpiler::resolve_bare_observed` —
+    /// see `observed_locals`'s doc for why fields get the same simpler default as
+    /// parameters/return types, not the local-binding usage-based inference pipeline).
+    /// Consulted by: `emit_struct.rs`'s field-type emission (renders `BoringObserved<V>`
+    /// for a bare field, which `f.ty` alone can't do — it's still single-level,
+    /// base-less, at that point); the three field-default construction sites there
+    /// (auto `new()`, `emit_init`'s no-body and all-self-assigns paths); the labeled-arg
+    /// struct-literal construction path in `emit_expr.rs`'s `emit_constructor_inner`; and
+    /// `emit_methods.rs`'s `self.field`-scoped observed dispatch
+    /// (`try_emit_observed_field_method_direct`/`try_emit_observed_field_method`/
+    /// `try_emit_observed_field_subscribe` — scoped to `self.field`, not an arbitrary
+    /// `outer_var.field`, matching a pre-existing gap in `try_emit_actor_field_method`
+    /// for the analogous `'actor` case, flagged separately, not fixed here).
+    pub(crate) observed_fields: std::collections::HashMap<String, (String, crate::ast::OwnerQual)>,
     /// Temporary: local variables in the current function body that are assigned from a
     /// call whose declared return type is `'actor` or `'guard`. Populated by a pre-pass
     /// in `infer_qualifiers` and consumed by `walk_expr_for_qualifiers`. Cleared each call.
@@ -1488,6 +1518,7 @@ impl Transpiler {
             struct_method_throws: std::collections::HashSet::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
             observed_locals: std::collections::HashMap::new(),
+            observed_fields: std::collections::HashMap::new(),
             infer_local_actor_vars: std::collections::HashSet::new(),
             task_method_call_vars: std::collections::HashSet::new(),
             task_method_call_fields: std::collections::HashSet::new(),
@@ -3379,6 +3410,29 @@ impl Transpiler {
                     self.struct_rwlock_fields.insert(key);
                 }
             }
+            // `'observed`-qualified struct field (docs/book.md's "'observed" section,
+            // struct-field support) — covers both an explicit fully-qualified field
+            // (`mut FormModel'actor'observed model`) and a bare one (`mut
+            // FormModel'observed model`, defaulted to `'actor'observed` via
+            // `Transpiler::resolve_bare_observed` — see `observed_fields`'s doc for why
+            // fields get this simpler default instead of the local-binding usage-based
+            // inference pipeline). Registered independently of the mutex/rwlock tracking
+            // above — an observed field's Rust representation is always `BoringObserved<V>`,
+            // never a bare `Arc<Mutex<V>>`/`Arc<RwLock<V>>` field, so it must NOT also land
+            // in `struct_mutex_fields`/`struct_rwlock_fields` (checked via `f.ty`'s outer
+            // qualifier being `Observed`, not `Actor`/`Guard` directly — `is_mutex_binding`/
+            // `is_rwlock_binding` already don't match on an `Observed`-qualified type, so no
+            // exclusion needed there).
+            if let Type::Qualified(_, OwnerQual::Observed) = f.ty.without_mut() {
+                let resolved = Self::resolve_bare_observed(f.ty.without_mut());
+                if let Type::Qualified(base_qualified, OwnerQual::Observed) = resolved {
+                    if let Type::Qualified(inner, base) = *base_qualified {
+                        if let Type::Named(n) = *inner {
+                            self.observed_fields.insert(format!("{}::{}", s.name, f.name), (n, base));
+                        }
+                    }
+                }
+            }
             // Note: infer_struct_field_qualifiers runs after this loop and may add
             // further entries to struct_mutex_fields / struct_rwlock_fields.
             // Collect arc-qualified inner type names for task fn method validation.
@@ -4636,6 +4690,7 @@ impl Transpiler {
             self.line("        for (_, cb) in self.__boring_subs.borrow_mut().iter_mut() { cb(self); }");
             self.line("    }");
             self.line("}");
+            self.emit_observed_derived_impls();
         } else {
             self.line("type BoringObservedSubs<V> = std::sync::Arc<std::sync::Mutex<Vec<(u64, Box<dyn FnMut(&BoringObserved<V>) + Send + Sync>)>>>;");
             self.line("struct BoringObserved<V> {");
@@ -4672,8 +4727,56 @@ impl Transpiler {
             self.line("        for (_, cb) in subs.iter_mut() { cb(self); }");
             self.line("    }");
             self.line("}");
+            self.emit_observed_derived_impls();
         }
         self.blank();
+    }
+
+    /// Manual `Clone`/`Debug`/`PartialEq`/`Default` impls for `BoringObserved<V>`,
+    /// bounded only on `V` (never on `__boring_subs`/`__boring_next_id`, which are
+    /// always Rc/Arc-based regardless of the base qualifier and so never need a bound
+    /// of their own to be cloned/defaulted). Needed because a `struct`/`enum` embedding
+    /// an `'observed` field is new in this session (the original local-bindings-only
+    /// pass never put a `BoringObserved<V>` value inside anything Boring's own
+    /// auto-derive (`emit_struct.rs`) would ever try to `#[derive(...)]`) — without
+    /// these, ANY struct with an `'observed` field of ANY base broke its own
+    /// auto-derived `Debug`/`Clone`/`PartialEq` outright (no impl existed at all, for
+    /// any `V`), not just the `'inline'observed`/`'owned'observed` "maybe non-Clone"
+    /// case the task's own scope note called out.
+    ///
+    /// A plain `#[derive(...)]` on `BoringObserved<V>` itself won't work for
+    /// `Debug`/`PartialEq`: the derive macro would also require
+    /// `BoringObservedSubs<V>`/`__boring_next_id` to implement those traits, and
+    /// `Box<dyn FnMut(...)>` (inside the subscriber list) implements neither — these
+    /// are hand-written instead, comparing/printing only `value` and ignoring the
+    /// subscriber machinery entirely (comparing subscriber lists wouldn't be
+    /// meaningful anyway: two observed values holding the same current value are
+    /// "equal" regardless of who happens to be watching either one).
+    ///
+    /// This is intentionally the ONLY fix applied for the auto-derive interaction this
+    /// session's task called out — see this session's report: no separate "does the
+    /// wrapped struct actually implement Clone/Debug" recursive check was added to
+    /// `emit_struct.rs`'s own auto-derive decision (`has_non_clone_field` and friends),
+    /// because Boring has no such recursive check for an ordinary nested (non-observed)
+    /// struct field either — a pre-existing, orthogonal gap, not something this
+    /// extension introduces or needs to fix to close its own gap.
+    fn emit_observed_derived_impls(&mut self) {
+        self.line("impl<V: Clone> Clone for BoringObserved<V> {");
+        self.line("    fn clone(&self) -> Self {");
+        self.line("        Self { value: self.value.clone(), __boring_subs: self.__boring_subs.clone(), __boring_next_id: self.__boring_next_id.clone() }");
+        self.line("    }");
+        self.line("}");
+        self.line("impl<V: std::fmt::Debug> std::fmt::Debug for BoringObserved<V> {");
+        self.line("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {");
+        self.line("        f.debug_struct(\"BoringObserved\").field(\"value\", &self.value).finish()");
+        self.line("    }");
+        self.line("}");
+        self.line("impl<V: PartialEq> PartialEq for BoringObserved<V> {");
+        self.line("    fn eq(&self, other: &Self) -> bool { self.value == other.value }");
+        self.line("}");
+        self.line("impl<V: Default> Default for BoringObserved<V> {");
+        self.line("    fn default() -> Self { Self::new(V::default()) }");
+        self.line("}");
     }
 
     fn emit_introspect_prelude(&mut self) {

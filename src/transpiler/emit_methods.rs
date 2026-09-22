@@ -832,6 +832,27 @@ impl Transpiler {
         if method != "subscribe" { return None; }
         let ExprKind::Var(v) = &obj.kind else { return None };
         let entry = self.observed_locals.get(v.as_str())?.clone();
+        self.observed_subscribe_expr(&escape_rust_keyword(v), entry, args)
+    }
+
+    /// `self.field.subscribe(callback)` — the struct-field equivalent of
+    /// `try_emit_observed_subscribe` above (see `observed_fields`'s doc in `mod.rs`).
+    /// Scoped to `self.field` only (not an arbitrary `outer_var.field`) — mirrors a
+    /// pre-existing gap in `try_emit_actor_field_method`'s own analogous `'actor` case
+    /// (confirmed via a real `cargo build`: `outer_var.field.method()` on a plain
+    /// `'actor` field mistranspiles to `.clone().method()`, an E0599 — flagged
+    /// separately as its own pre-existing bug, not fixed here; `self.field` access is
+    /// unaffected and already correctly supported for `'actor`/`'guard` today).
+    fn try_emit_observed_field_subscribe(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if method != "subscribe" { return None; }
+        let (receiver, entry) = self.resolve_observed_field_receiver(obj)?;
+        self.observed_subscribe_expr(&receiver, entry, args)
+    }
+
+    /// Shared lowering for `<observed>.subscribe(callback)`, where `<observed>` is
+    /// either a bare local/param (`escape_rust_keyword(v)`) or a `self.field` access
+    /// expression — see the two callers above.
+    fn observed_subscribe_expr(&self, receiver: &str, entry: (String, OwnerQual), args: &[Arg]) -> Option<String> {
         let [arg] = args else { return None };
         let ExprKind::Closure(params, _ret_ty, body, throws, task) = &arg.value.kind else { return None };
         // `subscribe()`'s callback must take exactly one parameter — the observed
@@ -896,7 +917,7 @@ impl Transpiler {
                 clones, inner, p = outer_param
             )
         };
-        Some(format!("{}.subscribe({})", escape_rust_keyword(v), closure))
+        Some(format!("{}.subscribe({})", receiver, closure))
     }
 
     /// `'observed` method dispatch (docs/book.md's "'observed" section): a `def`/`req`
@@ -973,6 +994,48 @@ impl Transpiler {
         Some(call_expr)
     }
 
+    /// Resolves `self.field` — deliberately only `self.field`, not an arbitrary
+    /// `outer_var.field` — to `(receiver Rust expr string, (struct_name, base))` when
+    /// `field` is a registered `'observed` field of the enclosing struct
+    /// (`self.observed_fields`, `mod.rs`). See `try_emit_observed_field_subscribe`'s
+    /// doc for why this is scoped to `self.field` only: a pre-existing gap already
+    /// affecting the analogous `'actor` case for an arbitrary `outer_var.field`
+    /// (`try_emit_actor_field_method`), confirmed via a real `cargo build`, flagged
+    /// separately rather than fixed/replicated here.
+    fn resolve_observed_field_receiver(&self, obj: &Expr) -> Option<(String, (String, OwnerQual))> {
+        let ExprKind::Field(inner_obj, field_name) = &obj.kind else { return None };
+        let ExprKind::Var(v) = &inner_obj.kind else { return None };
+        if v != "self" { return None; }
+        let struct_name = self.self_type.as_deref()?;
+        let key = format!("{}::{}", struct_name, field_name);
+        let entry = self.observed_fields.get(&key)?.clone();
+        Some((format!("self.{}", field_name), entry))
+    }
+
+    /// `self.field.method(args)` — the struct-field equivalent of
+    /// `try_emit_observed_method_direct` above (transparent dispatch: locks, calls,
+    /// unlocks, notifies).
+    fn try_emit_observed_field_method_direct(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let (receiver, (struct_name, base)) = self.resolve_observed_field_receiver(obj)?;
+        let (call_expr, is_req) = self.observed_call_expr(obj, &receiver, &receiver, &struct_name, &base, method, args, false);
+        if is_req {
+            Some(call_expr)
+        } else {
+            Some(format!("{{ let __boring_obs_r = {}; {}.__boring_notify(); __boring_obs_r }}", call_expr, receiver))
+        }
+    }
+
+    /// `self.field.value.method(args)` — the struct-field equivalent of the `.value`
+    /// escape hatch (`try_emit_observed_method` above) — same lock/borrow lowering,
+    /// never notifies.
+    fn try_emit_observed_field_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ExprKind::Field(field_obj, value_name) = &obj.kind else { return None };
+        if value_name != "value" { return None; }
+        let (receiver, (struct_name, base)) = self.resolve_observed_field_receiver(field_obj)?;
+        let (call_expr, _is_req) = self.observed_call_expr(obj, &receiver, &receiver, &struct_name, &base, method, args, true);
+        Some(call_expr)
+    }
+
     /// Shared lowering for both `'observed` call shapes above: the mut-gating
     /// diagnostic (mirrors `try_emit_mutex_method`/`try_emit_rwlock_method`'s own
     /// rule) and the lock/borrow dance by base qualifier (`Actor`/`ActorTask` →
@@ -1009,7 +1072,23 @@ impl Transpiler {
             self.push_error(obj.line, obj.col, msg);
         }
 
-        let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+        // Preserve the real method name for a known user struct/enum receiver — same
+        // fix as `try_emit_mutex_method`/`try_emit_rwlock_method`'s own
+        // `is_known_user_type` check. Pre-existing bug found and fixed here (blocking
+        // this extension's own field-dispatch verification, not merely cosmetic — the
+        // camelCase→snake_case fallback mapping produces a call to a method name the
+        // struct never declared, e.g. `.set_name(...)` for a real `setName` method, an
+        // E0599 that fails the build outright): `observed_call_expr` is the ONE shared
+        // lowering both the pre-existing local-binding dispatch AND this session's new
+        // `self.field` dispatch go through, and it never had this check at all — task
+        // report note in the codebase's own history flagged the identical class of bug
+        // for bare 'actor/'guard locals (task_6702019d) but this function's own
+        // independent `map_method` call was missed.
+        let (rust_method, extra_wrap) = if self.is_known_user_type(struct_name) {
+            (method.to_string(), None)
+        } else {
+            map_method(method, args.len(), self.want_raw_option_pop.get())
+        };
         let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
         // The generated Rust always needs the `.value` hop to reach `BoringObserved<V>`'s
         // actual payload — `via_value` only changes the *Boring-source* spelling
@@ -2386,6 +2465,9 @@ impl Transpiler {
         if let Some(r) = self.try_emit_observed_subscribe(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_observed_method_direct(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_observed_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_observed_field_subscribe(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_observed_field_method_direct(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_observed_field_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_atomic_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_rwlock_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_mutex_method(obj, method, args) { return r; }
@@ -3413,7 +3495,15 @@ impl Transpiler {
                     let is_actor_or_guard = matches!(param_ty,
                         Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
                     ) || is_unqualified_actor_source_param(param_ty, &self.actor_source_types);
-                    if is_actor_or_guard {
+                    // `'observed` param — `BoringObserved<V>` is a plain struct, never
+                    // itself Rc/Arc-wrapped at the top level (unlike 'actor/'guard
+                    // directly, whose OWN value is the Rc/Arc), so none of the
+                    // `.clone()`/`Rc::`/`Arc::` stripping below applies — just borrow
+                    // the argument expression directly.
+                    let is_observed_param = matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Observed)));
+                    if is_observed_param {
+                        if emitted.starts_with('&') { emitted } else { format!("&{}", emitted) }
+                    } else if is_actor_or_guard {
                         if emitted.starts_with('&') {
                             // Already a reference — pass through.
                             emitted
@@ -4041,6 +4131,7 @@ impl Transpiler {
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             observed_locals: self.observed_locals.clone(),
+            observed_fields: self.observed_fields.clone(),
             infer_local_actor_vars: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
             deps: self.deps.clone(),
@@ -4389,7 +4480,15 @@ impl Transpiler {
 fn is_auto_ref_param(ty: Option<&Type>) -> bool {
     matches!(ty,
         Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) |
-        Some(Type::Qualified(_, OwnerQual::Weak))
+        Some(Type::Qualified(_, OwnerQual::Weak)) |
+        // `'observed` param (docs/book.md's "'observed" section, function/method
+        // parameter support) — `BoringObserved<V>` is a plain struct (never itself
+        // Rc/Arc-wrapped, unlike 'actor/'guard directly), but the same "structs are
+        // always passed by reference automatically" rule applies, and matters more
+        // here than usual: passing it by value would move the caller's binding away,
+        // breaking the ordinary pattern of subscribing then continuing to mutate it
+        // from the caller's own scope.
+        Some(Type::Qualified(_, OwnerQual::Observed))
     )
 }
 

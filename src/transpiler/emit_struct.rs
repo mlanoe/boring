@@ -76,12 +76,25 @@ impl Transpiler {
             });
             // In non-async multi-thread mode, actor fields map to Arc<std::sync::Mutex<T>> which
             // does NOT implement PartialEq — skip the derive to avoid a compile error.
+            // `'actor'observed`/`'guard'observed` fields have the exact same problem one
+            // level down (docs/book.md's "'observed" section): `BoringObserved<V>`'s own
+            // manual `PartialEq` (`emit_observed_derived_impls`, `mod.rs`) requires
+            // `V: PartialEq`, and `V` is `Arc<Mutex<T>>`/`Arc<RwLock<T>>` here, same as a
+            // plain (non-observed) actor/guard field — `Self::is_arc_qualified` alone
+            // doesn't see it (it matches the field's OUTER qualifier directly, which is
+            // `Observed`, not `Actor`/`Guard`), so it's checked separately via
+            // `observed_fields` rather than trying to make `is_arc_qualified` itself
+            // recurse through an extra `Observed` layer.
             let has_sync_mutex_field = !self.use_async_actors()
                 && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-                && s.fields.iter().any(|f| {
+                && (s.fields.iter().any(|f| {
                     Self::is_arc_qualified(&f.ty)
                     || matches!(&f.ty, Type::Optional(inner) if Self::is_arc_qualified(inner))
-                });
+                }) || s.fields.iter().any(|f| {
+                    self.observed_fields.get(&format!("{}::{}", s.name, f.name))
+                        .is_some_and(|(_, base)| matches!(base,
+                            OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                }));
             // Constructed somewhere with the `_` fill-rest marker (`Transform(x = 1.0, _)`,
             // see `helpers::collect_default_rest_targets`) → that call lowers to a trailing
             // `..Default::default()`, so the struct needs `Default` too.
@@ -152,6 +165,23 @@ impl Transpiler {
                 // (confirmed via a real `cargo build`, reproduces with zero Introspect
                 // involvement — a plain `struct Outer: Inner'guard g` already hit this).
                 self.emit_guard_type(inner)
+            } else if let Some((inner_struct_name, base)) = self.observed_fields.get(&format!("{}::{}", s.name, f.name)).cloned() {
+                // `'observed`-qualified field (docs/book.md's "'observed" section, struct
+                // field support) — covers BOTH an explicit fully-qualified field (`f.ty`
+                // already fully concrete) and a bare one (`f.ty` still single-level,
+                // base-less at this point — `observed_fields` is what actually carries the
+                // resolved base; `f.ty` alone can't render it correctly, unlike the
+                // explicit case, which `emit_field_type`'s generic fallback further below
+                // would have handled fine on its own). Building the fully-qualified type
+                // fresh from `observed_fields` and reusing `emit_type`'s generic
+                // `OwnerQual::Observed` arm (`emit_top.rs`) keeps ONE rendering path for
+                // both cases instead of two.
+                let full = Type::Qualified(
+                    Box::new(Type::Qualified(Box::new(Type::Named(inner_struct_name)), base)),
+                    OwnerQual::Observed,
+                );
+                let fmut = if f.mutable { "/* var */ " } else { "" };
+                format!("{}{}", fmut, self.emit_type(&full))
             } else {
                 let rec_key = format!("{}::{}", s.name, f.name);
                 // Inferred actor/guard qualifier (from method/ext-block usage, no explicit
@@ -189,7 +219,7 @@ impl Transpiler {
                 for p in &init.params {
                     let fvis = if p.is_pub { "pub " } else { "" };
                     let fmut = if p.mutable { "/* var */ " } else { "" };
-                    let ty = p.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".into());
+                    let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| "/* unknown */".into());
                     self.line(&format!("{}{}{}: {},", fvis, fmut, p.name, ty));
                 }
             }
@@ -277,8 +307,19 @@ impl Transpiler {
                 let is_actor_task = self.struct_mutex_task_fields.contains(&key);
                 let is_guard = self.struct_rwlock_fields.contains(&key);
                 let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
+                let observed_entry = self.observed_fields.get(&key).cloned();
                 if let Some(def) = &f.default {
-                    if is_actor || is_actor_task {
+                    if let Some((inner_struct_name, base)) = observed_entry {
+                        // `'observed`-qualified field default (docs/book.md's "'observed"
+                        // section) — construct the raw base-typed value from the field's
+                        // own `= expr` default, then wrap it exactly like a local
+                        // `'observed` `let` would (`wrap_observed_base`), finally wrapping
+                        // in `BoringObserved::new(...)` to also initialize a fresh, empty
+                        // subscriber list — see docs/book.md's "Construction" note.
+                        let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
+                        let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+                        self.line(&format!("{}: BoringObserved::new({}),", f.name, wrapped));
+                    } else if is_actor || is_actor_task {
                         // Inferred fields carry the bare inner type already; explicit
                         // `T'actor`/`T'actor'task` fields need unwrapping via mutex_inner.
                         let inner = Self::mutex_inner(&f.ty).unwrap_or(&f.ty);
@@ -657,7 +698,7 @@ impl Transpiler {
         if init.body.is_empty() {
             // Auto-field init: fn new(x: T, y: T) -> Self { Self { x, y } }
             let params_s: Vec<String> = init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".into());
+                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| "/* unknown */".into());
                 let mut_kw = if p.mutable { "mut " } else { "" };
                 format!("{}{}:{}", mut_kw, p.name, ty)
             }).collect();
@@ -679,7 +720,13 @@ impl Transpiler {
                         let is_actor_task = self.struct_mutex_task_fields.contains(&key);
                         let is_guard = self.struct_rwlock_fields.contains(&key);
                         let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
-                        if is_actor || is_actor_task {
+                        if let Some((inner_struct_name, base)) = self.observed_fields.get(&key).cloned() {
+                            // `'observed`-qualified field default — see the matching
+                            // branch/doc in the auto-`new()` path above.
+                            let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
+                            let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+                            self.line(&format!("{}: BoringObserved::new({}),", f.name, wrapped));
+                        } else if is_actor || is_actor_task {
                             let inner = Self::mutex_inner(&f.ty).unwrap_or(&f.ty);
                             let raw = self.emit_let_value(Some(inner), def);
                             let init = if is_actor_task { self.emit_actor_task_new(&raw) } else { self.emit_actor_new(&raw) };
@@ -713,13 +760,33 @@ impl Transpiler {
         } else {
             // Body init: fn new(params) -> Self { body }
             let params_s: Vec<String> = init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".into());
+                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| "/* unknown */".into());
                 format!("{}: {}", p.name, ty)
             }).collect();
             self.line(&format!("pub fn new({}) -> Self {{", params_s.join(", ")));
             self.indent += 1;
             // Add init params to known_local_vars so bare param names don't resolve to self.field.
             for p in &init.params { self.known_local_vars.insert(p.name.clone()); }
+            // `'observed`-typed init params (the `@ObservedObject`-shaped case,
+            // docs/design-notes/boring-ui-draft.md — a constructor receiving an
+            // already-observed value from outside rather than only ever constructing
+            // one inline) — register into `observed_locals` so the init body can call
+            // `.subscribe(...)`/dispatch methods on the param directly, not just
+            // assign it straight into a field (the common case, needing no dispatch at
+            // all). `emit_init` bodies don't run through `infer_qualifiers` (unlike an
+            // ordinary fn/method body), so this doesn't fall out for free the way a
+            // plain function parameter's registration does (`infer_qualifiers.rs`).
+            for p in &init.params {
+                if let Some(ty) = &p.ty {
+                    if let Type::Qualified(base_qualified, OwnerQual::Observed) = Self::resolve_bare_observed(ty) {
+                        if let Type::Qualified(inner, base) = *base_qualified {
+                            if let Type::Named(n) = *inner {
+                                self.observed_locals.insert(p.name.clone(), (n, base));
+                            }
+                        }
+                    }
+                }
+            }
             // A statement's assignment target counts as a "field assign" for the fast-path
             // struct-literal codegen below when it's either `self.field = expr` OR a bare
             // `field = expr` — per book.md, bare assignment to a field name inside a method
@@ -777,7 +844,15 @@ impl Transpiler {
                 let mut extras: Vec<String> = Vec::new();
                 for f in fields {
                     if !assigned.contains(f.name.as_str()) {
-                        if let Some(def) = &f.default {
+                        let observed_entry = self.observed_fields.get(&format!("{}::{}", struct_name, f.name)).cloned();
+                        if let (Some(def), Some((inner_struct_name, base))) = (&f.default, observed_entry) {
+                            // `'observed`-qualified field default, not otherwise assigned by
+                            // this init's body — see the matching branch/doc in the
+                            // auto-`new()` path above.
+                            let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
+                            let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+                            extras.push(format!("{}: BoringObserved::new({})", f.name, wrapped));
+                        } else if let Some(def) = &f.default {
                             let val = self.emit_let_value(Some(&f.ty), def);
                             extras.push(format!("{}: {}", f.name, val));
                         } else if matches!(f.ty, Type::Optional(_)) {
@@ -922,14 +997,14 @@ impl Transpiler {
         let (fn_name, params_s) = match tm.kind {
             TypeMethodKind::Set => {
                 let p = tm.params.first().map(|p| {
-                    let ty = p.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_default();
+                    let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_default();
                     format!("{}: {}", p.name, ty)
                 }).unwrap_or_default();
                 (format!("set_{}", tm.name), p)
             }
             _ => {
                 let ps: Vec<String> = tm.params.iter().map(|p| {
-                    let ty = p.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_default();
+                    let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_default();
                     format!("{}: {}", p.name, ty)
                 }).collect();
                 (tm.name.clone(), ps.join(", "))

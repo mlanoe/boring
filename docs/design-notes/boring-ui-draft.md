@@ -1,9 +1,10 @@
 # Draft — boring-ui: a SwiftUI-flavored, custom-rendered GUI toolkit for Boring
 
-Status: **working draft**, not a spec. Nothing in this document is implemented yet except the one
-language mechanism explicitly marked as shipped below. This is a starting point to be enriched
-before any implementation work begins — several rows in the comparative table are deliberately left
-as open questions rather than guessed at.
+Status: **working draft**, not a spec. Nothing in this document is implemented yet except the
+language mechanisms explicitly marked as shipped below (§1's array-block sugar, and `'observed`
+in §3 — including, as of this update, struct fields/parameters/return types, not just local
+bindings). This is a starting point to be enriched before any implementation work begins — several
+rows in the comparative table are deliberately left as open questions rather than guessed at.
 
 ## Goal
 
@@ -98,7 +99,18 @@ Two questions turned out to be independent and are answered by two different mec
 `@state`). Earlier revisions of this section conflated them into one qualifier (`'state`); kept
 apart, each ends up simpler and each generalizes correctly beyond `boring-ui`.
 
-#### `'observed` — a general, composable sharing suffix (not GUI-specific)
+#### `'observed` — a general, composable sharing suffix (not GUI-specific) (**shipped**, including struct fields/parameters/return types)
+
+Language-mechanism status update: `'observed` shipped for local bindings first, then — specifically
+to unblock this design, which puts `'observed` on `view`/model *fields* below, not just locals — was
+extended to struct field declarations, function/method parameters (the `@ObservedObject`-shaped
+case, §4's comparative table), and return types. Every example in this section that reads
+`mut FormModel'observed model = FormModel()` as a struct field, or a parameter receiving an
+already-observed value from outside, is real, working syntax today, not a forward-looking sketch —
+see `docs/book.md`'s "'observed" section for the full spec (composition table, construction,
+`subscribe()`, the auto-derive interaction, and a short list of known remaining gaps, e.g. field-level
+`mut`/`var mut` permission not yet enforced the way a local binding's already is). `@state` (the rest
+of this section) remains an unimplemented design only.
 
 `'observed` adds an embedded, independently-locked notification mechanism to a value, without
 fixing what the value itself is stored as. Representationally:
@@ -322,7 +334,7 @@ reducer, but it isn't a first-class language feature here.
 | `var body: some View` | declarative body | `body():` method, returning a widget tree via the array-block sugar |
 | `@State private var x` | view-local observed state | `@state var x = ...` — exclusive by default (no `'observed`), private by construction (§3) |
 | `@Binding var x: T` | read/write reference to a parent's state, not owned here | a small stdlib `Binding<T>` struct (get/set closure pair) — needed for real, not free: an exclusive `@state` field genuinely can't be shared, so hand a child a *derived* accessor closing over the parent's own `self`, matching what SwiftUI's `$x` actually produces |
-| `@ObservedObject var model: Model` | external reference to a shared, not-owned-here model | struct + `mut Model'observed model` passed in as a parameter, not constructed by this view — subscribes at mount unconditionally, no `@state` needed |
+| `@ObservedObject var model: Model` | external reference to a shared, not-owned-here model | struct + `mut Model'observed model` field, populated via an `init(Model'actor'observed model): self.model = model` constructor parameter rather than constructed by this view — both the field and the parameter are real, shipped `'observed` syntax today (`docs/book.md`'s "'observed" section) — subscribes at mount unconditionally, no `@state` needed |
 | `@StateObject var model = Model()` | model *owned* by this view, created once, survives rebuilds | struct + `@state mut Model model = Model()` (no `'observed` — exclusive, and `@state`'s direct-call path is the entire mechanism) constructed inline in the view's own declaration — "created once" falls out for free from the identity-keyed persistent slot, not the throwaway rebuilt value |
 | `ObservableObject` / `@Published` | observable model, Combine-driven, property-level in the newer `@Observable` macro | plain `struct` + a `'observed`-qualified reference on the referencing view's field — see §3 |
 | `Text`, `Button`, `VStack`, `HStack` | base widgets | `Text`, `Button`, `Column`, `Row` — to be written as the actual `boring-ui` stdlib |

@@ -979,6 +979,13 @@ impl Checker {
             self.check_observed_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
+        // Return type — same `'shared'observed` rejection as params/fields/locals
+        // (`check_observed_compatibility`'s doc). Not covered by the field/param loop
+        // above (a return type isn't a `FieldDecl`/`Param`), so it needs its own call —
+        // extending `'observed` to return-type position (this session's report) is what
+        // makes this reachable at all; previously no return type could ever carry an
+        // `'observed` qualifier in the first place.
+        self.check_observed_compatibility(&f.return_ty, f.line, f.col);
         self.check_dead_code(&f.body);
         for stmt in &f.body { self.check_stmt(stmt); }
         self.in_authorized_static_site = prev_static_site;

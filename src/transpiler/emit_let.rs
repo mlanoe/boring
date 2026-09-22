@@ -58,23 +58,18 @@ impl Transpiler {
         self.line(&format!("{} {}: {} = {};", kw, name, atomic_ty, init));
     }
 
-    /// Emits a `'observed`-qualified local — `BoringObserved<V>` where `V` is exactly
-    /// what `emit_type`/`emit_*_new` would already produce for the base qualifier alone
-    /// (`Inline`/`Owned`/`Actor`(`Task`)/`Guard`(`Task`)) — see docs/book.md's
-    /// "'observed" section's composition table. `'shared` never reaches here: rejected
-    /// earlier by the checker (`check_observed_compatibility`).
-    ///
-    /// Scope note (see this session's report): only local `let`/`mut`/`var` bindings are
-    /// supported — not struct fields, function parameters, or return types. `caller`
-    /// (`emit_let`) has already recorded `(struct_name, base)` in `self.observed_locals`,
-    /// which `emit_methods::try_emit_observed_method_direct` (the primary, transparent
-    /// `obs.method(...)` path — locks, calls, unlocks, notifies, mirroring how
-    /// `'actor`/`'guard` already dispatch method calls transparently) and
-    /// `try_emit_observed_method` (the explicit, silent `.value.method(...)` escape
-    /// hatch — same lock/call, never notifies) both consult.
-    fn emit_observed_let(&mut self, s: &LetStmt, struct_name: &str, base: &OwnerQual, s_value: &Expr) {
-        let named = Type::Named(struct_name.to_string());
-        let raw_val = self.emit_let_value(Some(&named), s_value);
+    /// Shared by every `'observed` construction site (local `let`, struct-field
+    /// defaults, labeled-arg struct-literal construction, a fresh-constructed return
+    /// value) — wraps an already-emitted raw base-typed expression (`raw_val`, exactly
+    /// what `emit_let_value(Some(&Type::Named(struct_name)), ...)` produces) into
+    /// whatever `V` the base qualifier alone would already be (`Inline`/`Owned`/
+    /// `Actor`(`Task`)/`Guard`(`Task`) — see docs/book.md's "'observed" composition
+    /// table). Does NOT wrap in `BoringObserved::new(...)` itself — callers do that
+    /// (some need the raw base value for a `.clone()`-of-an-existing-observed-value
+    /// shortcut instead, see `emit_constructor_inner`'s labeled-args handling).
+    /// `'shared` never reaches here: rejected earlier by the checker
+    /// (`check_observed_compatibility`).
+    pub(crate) fn wrap_observed_base(&self, struct_name: &str, base: &OwnerQual, raw_val: &str) -> String {
         // Managed mode maps a bare `T'owned` over a user type to `Arc<Mutex<T>>`
         // (multi) / `RefCell<T>` (single) instead of `Box<T>` (see `emit_type`'s own
         // `OwnerQual::Owned` arm, which `BoringObserved<V>`'s `V` already picks up
@@ -82,21 +77,41 @@ impl Transpiler {
         // mirror that same mode-dependent choice, or the annotation and the
         // initializer disagree (confirmed via a real `cargo build` type mismatch:
         // `BoringObserved::new` expecting `Arc<Mutex<Counter>>`, given `Box<Counter>`).
-        let owned_ty_for_mode_check = Type::Qualified(Box::new(named.clone()), OwnerQual::Owned);
+        let named = Type::Named(struct_name.to_string());
+        let owned_ty_for_mode_check = Type::Qualified(Box::new(named), OwnerQual::Owned);
         let is_managed_owned = matches!(base, OwnerQual::Owned) && self.is_managed_owned_user(&owned_ty_for_mode_check);
-        let base_wrapped = match base {
-            OwnerQual::Inline => raw_val,
-            OwnerQual::Owned if is_managed_owned => self.wrap_managed(&raw_val),
+        match base {
+            OwnerQual::Inline => raw_val.to_string(),
+            OwnerQual::Owned if is_managed_owned => self.wrap_managed(raw_val),
             OwnerQual::Owned => format!("Box::new({})", raw_val),
-            OwnerQual::Actor => self.emit_actor_new(&raw_val),
-            OwnerQual::ActorTask => self.emit_actor_task_new(&raw_val),
-            OwnerQual::Guard => self.emit_guard_new(&raw_val),
-            OwnerQual::GuardTask => self.emit_guard_task_new(&raw_val),
+            OwnerQual::Actor => self.emit_actor_new(raw_val),
+            OwnerQual::ActorTask => self.emit_actor_task_new(raw_val),
+            OwnerQual::Guard => self.emit_guard_new(raw_val),
+            OwnerQual::GuardTask => self.emit_guard_task_new(raw_val),
             // Any other base composed with 'observed (e.g. a scalar 'atomic — not part
             // of the required composition table) falls back to the raw value unwrapped;
             // not a supported combination, but avoids silently discarding the value.
-            _ => raw_val,
-        };
+            _ => raw_val.to_string(),
+        }
+    }
+
+    /// Emits a `'observed`-qualified local — `BoringObserved<V>` (see
+    /// `wrap_observed_base`'s doc for what `V` is). `caller` (`emit_let`) has already
+    /// recorded `(struct_name, base)` in `self.observed_locals`, which
+    /// `emit_methods::try_emit_observed_method_direct` (the primary, transparent
+    /// `obs.method(...)` path — locks, calls, unlocks, notifies, mirroring how
+    /// `'actor`/`'guard` already dispatch method calls transparently) and
+    /// `try_emit_observed_method` (the explicit, silent `.value.method(...)` escape
+    /// hatch — same lock/call, never notifies) both consult. This same map also now
+    /// covers `'observed`-typed parameters (see `observed_locals`'s doc in `mod.rs`) —
+    /// a parameter is just another named binding, so it needs no separate emission
+    /// function here at all.
+    fn emit_observed_let(&mut self, s: &LetStmt, struct_name: &str, base: &OwnerQual, s_value: &Expr) {
+        let named = Type::Named(struct_name.to_string());
+        let raw_val = self.emit_let_value(Some(&named), s_value);
+        let is_managed_owned = matches!(base, OwnerQual::Owned)
+            && self.is_managed_owned_user(&Type::Qualified(Box::new(named.clone()), OwnerQual::Owned));
+        let base_wrapped = self.wrap_observed_base(struct_name, base, &raw_val);
         let full_ty = Type::Qualified(
             Box::new(Type::Qualified(Box::new(named), base.clone())),
             OwnerQual::Observed,

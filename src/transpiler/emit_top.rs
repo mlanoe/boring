@@ -786,7 +786,7 @@ impl Transpiler {
     /// qualifier, not a bare name — see `docs/transpilation-modes.md` "Size-based
     /// auto-boxing").
     pub(crate) fn promote_bare_return_ty(&self, ty: Option<Type>) -> Option<Type> {
-        match ty {
+        let ty = match ty {
             Some(Type::Named(n))
                 if self.config.mode == crate::transpiler::TranspileMode::Strict
                     && !self.trait_method_names.contains_key(n.as_str())
@@ -796,6 +796,51 @@ impl Transpiler {
                 Some(Type::Qualified(Box::new(Type::Named(n)), OwnerQual::Owned))
             }
             other => other,
+        };
+        // A bare (no explicit base) `'observed` return type needs the same
+        // default-to-`'actor'observed` resolution as a bare field/param — see
+        // `resolve_bare_observed`'s doc. Composed with the promotion above via a
+        // second pass (harmless/no-op for anything the branch above already handled,
+        // since that never produces an `Observed`-qualified type).
+        ty.map(|t| Self::resolve_bare_observed(&t))
+    }
+
+    /// Resolves a *bare* (no explicit base written) `'observed` type —
+    /// `Type::Qualified(Type::Named(n), OwnerQual::Observed)`, single-level, exactly
+    /// what the parser produces for `FormModel'observed` with nothing before it (see
+    /// `OwnerQual::Observed`'s doc in `ast/mod.rs`) — to its fully concrete form,
+    /// defaulting the unwritten base qualifier to `'actor'observed`.
+    ///
+    /// This is a **narrower** rule than a bare `'observed` *local* binding gets: a
+    /// local (`FormModel'observed x = ...`) resolves its base through the full
+    /// usage-based candidate-elimination/priority-fallback pipeline in
+    /// `infer_qualifiers.rs` (multi-owner usage signal → `'actor'observed`, else the
+    /// size threshold decides `'inline'observed` vs `'owned'observed` — see
+    /// docs/book.md's "Qualifier inference for bare `'observed`"). A struct field,
+    /// function/method parameter, or return type has no equally narrow, single-body
+    /// usage signal to analyze at its OWN declaration site — a field's real "usage" is
+    /// external access from arbitrary call sites across the whole program (the same
+    /// reason `infer_struct_field_qualifiers` only infers a qualifier for a
+    /// *completely unqualified* field, never fires for one that already carries an
+    /// explicit qualifier suffix at all), and a parameter's/return's real "usage" spans
+    /// every caller, not just this one function body. Rather than build three new,
+    /// unproven cross-body/cross-call-site inference passes for this extension,
+    /// defaulting straight to the shared, lockable `'actor'observed` base is the
+    /// simpler, safe choice for exactly the positions most likely to cross an
+    /// ownership boundary in the first place (a field/param/return is definitionally
+    /// how a value moves between two different owners) — a deliberate, documented
+    /// scope decision for this extension, not an oversight. See this session's report.
+    ///
+    /// A no-op for any other type (an explicit-base `'observed` composition, or no
+    /// `'observed` at all) — `Type::Mut` is recursed into so `mut FormModel'observed x`
+    /// resolves its inner type the same way a bare (unwrapped) one does.
+    pub(crate) fn resolve_bare_observed(ty: &Type) -> Type {
+        match ty {
+            Type::Mut(inner) => Type::Mut(Box::new(Self::resolve_bare_observed(inner))),
+            Type::Qualified(inner, OwnerQual::Observed) if matches!(inner.as_ref(), Type::Named(_)) => {
+                Type::Qualified(Box::new(Type::Qualified(inner.clone(), OwnerQual::Actor)), OwnerQual::Observed)
+            }
+            other => other.clone(),
         }
     }
 
@@ -2015,6 +2060,15 @@ impl Transpiler {
                 } else {
                     ty
                 };
+                // A bare (no explicit base) `'observed` param type — `FormModel'observed
+                // model` — needs the same default-to-`'actor'observed` resolution as a
+                // bare return type (see `resolve_bare_observed`'s doc): otherwise this
+                // signature would render `BoringObserved<FormModel>` (missing the base
+                // wrapper entirely) instead of `&BoringObserved<Rc<RefCell<FormModel>>>`/
+                // `&BoringObserved<Arc<Mutex<FormModel>>>`. A no-op for an explicit-base
+                // `'observed` param or any other type.
+                let observed_resolved_ty = Self::resolve_bare_observed(effective_ty);
+                let effective_ty = &observed_resolved_ty;
                 // A bare trait name in parameter position means dynamic dispatch, same as
                 // return/local/field position (docs/book.md "Traits as types"): the value
                 // is heap-allocated, `Box<dyn TraitName>` — not `impl TraitName` (static
@@ -2037,6 +2091,11 @@ impl Transpiler {
                 let ty_s = match effective_ty {
                     Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask) => format!("&{}", ty_s),
                     Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask) => format!("&{}", ty_s),
+                    // `'observed` param (docs/book.md's "'observed" section) — passed by
+                    // reference, matching `is_auto_ref_param`'s matching call-site fix and
+                    // the "structs always pass by reference automatically" convention (see
+                    // that fn's doc for why this matters more than usual here).
+                    Type::Qualified(_, OwnerQual::Observed) => format!("&{}", ty_s),
                     Type::Qualified(_, OwnerQual::Shared | OwnerQual::Weak) => ty_s,
                     // Borrow/BorrowMut already carry their own &/&mut — don't double-wrap.
                     Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut) => ty_s,

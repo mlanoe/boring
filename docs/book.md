@@ -6233,9 +6233,113 @@ below: `'actor'observed`/`'guard'observed` follow the existing `'actor`/`'guard`
 `.value`; `mut`/`var mut` does) — the same rule that already applies to a bare
 `'actor`/`'guard` binding, unchanged.
 
-**Scope.** `'observed` is implemented for local `let`/`mut`/`var` bindings. Struct
-fields, function parameters, and return types are not covered by this
-implementation.
+**Scope.** `'observed` is implemented for local `let`/`mut`/`var` bindings, struct
+fields, function/method parameters, and return types.
+
+### `'observed` on struct fields, parameters, and return types
+
+Beyond a local binding, `'observed` also composes onto a struct field
+declaration, a function/method parameter, and a return type — this is what lets
+`boring-ui`'s design (`docs/design-notes/boring-ui-draft.md`) put `'observed` on a
+`view`/model *field*, and what unblocks the `@ObservedObject`-shaped case there
+(a view receiving an already-observed model from outside, not just constructing
+one inline):
+
+```boring
+struct FormModel:
+    var string name = ""
+    def setName(string s): name = s
+
+struct View:
+    mut FormModel'actor'observed model     # field — same composition rules as a local
+
+    init(FormModel'actor'observed model):  # parameter — an @ObservedObject-shaped
+        self.model = model                 # constructor receiving a shared model
+
+    def mount():
+        let sub = self.model.subscribe((obj):
+            print "view saw {obj.value.getName()}"
+        )
+        self.model.setName("Ada")           # dispatches transparently + notifies,
+                                             # exactly like a local 'observed binding
+
+def FormModel'actor'observed makeModel():   # return type — constructs and hands
+    FormModel()                             # back a fresh 'observed value
+```
+
+Every rule already documented above for a local binding — transparent method
+dispatch (`self.model.setName(...)`, locks/calls/unlocks/notifies), the `.value`
+silent escape hatch, `subscribe()`'s one-parameter callback, the `'shared'observed`
+rejection, and the `mut`/`var mut` binding × qualifier row — applies identically
+at these three new positions; nothing about the composition or the runtime
+representation (`BoringObserved<V>`) changes based on *where* the qualifier
+appears.
+
+**Bare `'observed` at these positions defaults to `'actor'observed`** — a
+deliberately **simpler** rule than a bare *local* binding gets. A bare local
+(`FormModel'observed x = ...`) resolves its base through the full usage-based
+candidate-elimination/priority-fallback pipeline (chapter 30) by analyzing how
+`x` is used within its own enclosing function body. A field, parameter, or return
+type has no equally narrow, single-body usage signal to analyze at its own
+declaration site — a field's real "usage" spans arbitrary external call sites
+across the whole program, and a parameter's/return's spans every caller — so
+rather than build three new cross-body/cross-call-site inference passes, a bare
+`'observed` field/parameter/return type resolves straight to the shared,
+lockable `'actor'observed` base (`Transpiler::resolve_bare_observed`). This is
+directionally the same choice the local pipeline's own multi-owner signal makes,
+just applied unconditionally instead of only on a detected signal — fields,
+parameters, and return types are exactly the shapes most likely to cross an
+ownership boundary in the first place.
+
+**Construction.** A field's own `= expr` default (or an explicit `init` param's
+assignment `self.field = param`) initializes both `value` and a fresh, empty
+subscriber list, the same as a local `'observed let`'s initializer — this falls
+out of `Transpiler::wrap_observed_base`, a helper factored out of the local-
+binding construction path and reused for field defaults, labeled-arg struct-
+literal construction (`Container(model = FormModel())`), and return-type
+wrapping alike. Passing an *already*-`'observed`-typed value into a matching
+field/parameter (the `@ObservedObject` case above: `View(m)` where `m` is already
+`FormModel'actor'observed`) clones the whole `BoringObserved<V>` wrapper instead
+of re-wrapping it — a cheap, identity-preserving clone for `'actor'observed`/
+`'guard'observed` (both `value` and the subscriber list are Arc/Rc-based), a real
+independent clone for `'inline'observed`/`'owned'observed`, matching Boring's
+normal by-value struct-argument semantics elsewhere.
+
+**Auto-derive interaction.** `BoringObserved<V>` has its own hand-written
+`Clone`/`Debug`/`PartialEq`/`Default` impls, each bounded only on `V` (never on
+its internal subscriber-list bookkeeping, which is always Rc/Arc-based
+regardless of base qualifier and so never needs a bound of its own). A
+containing struct's auto-derived `Clone`/`Debug`/`PartialEq` therefore works for
+an `'observed` field of any base exactly when `V` itself satisfies the same
+trait — always true for `'actor'observed`/`'guard'observed` (`V` is
+`Arc<Mutex<T>>`/`Arc<RwLock<T>>`, never conditional on `T`), and true for
+`'inline'observed`/`'owned'observed` whenever the wrapped struct `T` itself would
+already get that trait (the ordinary case). No separate "does the wrapped struct
+actually implement Clone" recursive check was added for this — Boring has no
+such recursive check for an ordinary non-observed nested struct field either (a
+pre-existing, orthogonal gap, not something this extension needs to fix to close
+its own). In non-async multi-thread mode specifically, a struct with an
+`'actor'observed`/`'guard'observed` field skips `PartialEq` (mirroring the
+pre-existing exclusion for a plain `'actor`/`'guard` field in that same mode —
+`Arc<Mutex<T>>`/`Arc<RwLock<T>>` has none there either).
+
+**Known gaps, not covered by this pass** (see the codebase's own tracked
+follow-ups): field-level `mut`/`var mut` permission is not yet *enforced* for a
+`def` call reached through `self.field` for any qualifier (`'actor`/`'guard`/
+`'observed` alike) — only a local binding's own permission is checked today, same
+pre-existing gap either way, not something this extension introduced or made
+worse. Dispatch through a field is scoped to `self.field`; an arbitrary
+`outer_var.field.method()` has a separate, pre-existing mistranspile for a plain
+`'actor` field too. Reading a bare field (not calling a method) through `.value`
+on an `'actor'observed`/`'guard'observed` value doesn't route through the lock —
+use a `req` getter method through `.value` instead. Reassigning an entire
+`'observed` field wholesale (`self.model = aFreshValue`) doesn't re-wrap the
+right-hand side — same pre-existing gap as a plain `'actor`/`'guard` field.
+Assigning a function call's `'observed`-typed return value into an explicitly
+re-annotated local double-wraps it — call the function once and use its result
+directly (assign straight into a matching field/parameter, or a plain, ordinary
+local with no `'observed` annotation of its own) instead of re-declaring an
+`'observed`-annotated local for it.
 
 ### `'static` — constant global instances
 
