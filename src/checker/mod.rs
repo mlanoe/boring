@@ -729,7 +729,7 @@ impl Checker {
     fn check_item(&mut self, item: &Item) {
         match item {
             Item::Let(s)    => self.check_let_stmt(s),
-            Item::Fn(f)     => self.check_fn(f),
+            Item::Fn(f)     => { self.check_di_provider_attrs(f); self.check_fn(f); }
             Item::Struct(s) => self.check_struct(s),
             Item::Enum(e)   => self.check_enum(e),
             Item::Ext(e)    => self.check_ext(e),
@@ -865,6 +865,17 @@ impl Checker {
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
             self.check_atomic_compatibility(&Some(f.ty.clone()), f.line, f.col);
             self.check_observed_compatibility(&Some(f.ty.clone()), f.line, f.col);
+            // `@inject` (docs/design-notes/boring-di-draft.md §1) has no resolution/
+            // registry pass implemented yet — reject explicitly rather than letting the
+            // transpiler's generic attribute fallback emit an invalid `#[inject]` Rust
+            // attribute, or worse, silently compile as an ordinary *required* field.
+            if let Some(attr) = f.attrs.iter().find(|a| a.name == "inject") {
+                self.error(
+                    "`@inject` is not implemented yet (docs/design-notes/boring-di-draft.md) — \
+                     this field must be supplied explicitly at construction for now",
+                    attr.line, attr.col,
+                );
+            }
         }
         for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }
@@ -957,6 +968,71 @@ impl Checker {
     /// signatures (`t.signatures`/`t.type_signatures`) have no body to walk.
     fn check_trait(&mut self, t: &TraitDecl) {
         for def in &t.defaults { self.check_fn(def); }
+    }
+
+    // ── Dependency injection (`@inject`/`@provide`/`@singleton`) ────────────────
+    //
+    // docs/design-notes/boring-di-draft.md. First implementation slice: `@singleton`
+    // (a general, DI-independent memoization attribute, §4) and `@provide`'s `pub`
+    // requirement (§3) are enforced here, on **top-level** `Item::Fn` declarations
+    // only (called from `check_item`, not from `check_fn` itself, precisely so it
+    // never fires on a struct method or trait default method — `@provide`/
+    // `@singleton` are restricted to top-level functions for now, the same
+    // restriction `'static` construction already has, docs/design-notes/
+    // boring-di-draft.md §3). `@inject` itself has no resolution/registry pass
+    // implemented yet, so it is rejected explicitly (`check_struct`'s field loop)
+    // rather than silently compiling into a *required* constructor argument —
+    // the opposite of its entire point, which is to make that argument optional.
+    fn check_di_provider_attrs(&mut self, f: &FnDecl) {
+        if self.kernel_dispatch_only { return; }
+        if let Some(attr) = f.attrs.iter().find(|a| a.name == "singleton") {
+            if f.qualifier.is_some() {
+                self.error(
+                    "`@singleton` is not yet supported on a method (`def Type.name()`) — only \
+                     free top-level functions, for now",
+                    attr.line, attr.col,
+                );
+            }
+            if !f.params.is_empty() {
+                self.error(
+                    "`@singleton` requires a zero-parameter function — memoizing a function \
+                     that takes arguments would silently ignore every argument after the first \
+                     call",
+                    attr.line, attr.col,
+                );
+            }
+            if f.throws {
+                self.error(
+                    "`@singleton` does not support `throws` yet — the memoized value is shared \
+                     via `.clone()`, and most error types used with `throws` are not `Clone`",
+                    attr.line, attr.col,
+                );
+            }
+            if f.task || f.stream {
+                self.error(
+                    "`@singleton` does not support `task`/`stream` functions yet",
+                    attr.line, attr.col,
+                );
+            }
+            self.check_singleton_owned_return(f);
+        }
+        if let Some(attr) = f.attrs.iter().find(|a| a.name == "provide") {
+            if f.qualifier.is_some() {
+                self.error(
+                    "`@provide` is not yet supported on a method (`def Type.name()`) — only \
+                     free top-level functions, for now",
+                    attr.line, attr.col,
+                );
+            }
+            if !f.is_pub {
+                self.error(
+                    "`@provide` requires `pub` — a private provider could never be found by an \
+                     `@inject` site outside its own module, which is `@provide`'s entire reason \
+                     to exist (docs/design-notes/boring-di-draft.md §3)",
+                    attr.line, attr.col,
+                );
+            }
+        }
     }
 
     // ── Functions ─────────────────────────────────────────────────────────────

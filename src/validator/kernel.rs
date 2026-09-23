@@ -754,6 +754,23 @@ impl KernelValidator {
     fn check_fn(&mut self, fn_decl: &FnDecl) {
         let line = fn_decl.line;
 
+        // `@inject`/`@provide`/`@singleton` (docs/design-notes/boring-di-draft.md) assume a
+        // full std runtime — dynamic dispatch (`Box<dyn Trait>`/`Arc<dyn Trait>`) and a
+        // composition-root-style provider graph — that a `no_std` Rust-for-Linux kernel
+        // module never has, the same reason `boring-ui` itself excludes `--target kernel`.
+        for attr in &fn_decl.attrs {
+            if matches!(attr.name.as_str(), "inject" | "provide" | "singleton") {
+                self.error(
+                    line,
+                    format!(
+                        "`@{}` is not supported on the Rust-for-Linux kernel target — \
+                         dependency injection assumes a full std runtime this target never has",
+                        attr.name
+                    ),
+                );
+            }
+        }
+
         // Check return type
         if let Some(ty) = &fn_decl.return_ty {
             self.check_type(ty, line);
@@ -842,6 +859,15 @@ impl KernelValidator {
             self.check_type(&field.ty, field.line);
             if let Some(def) = &field.default {
                 self.check_expr(def);
+            }
+            // `@inject` (docs/design-notes/boring-di-draft.md) — same std-runtime
+            // assumption rejection as `check_fn`'s `@provide`/`@singleton` above.
+            if field.attrs.iter().any(|a| a.name == "inject") {
+                self.error(
+                    field.line,
+                    "`@inject` is not supported on the Rust-for-Linux kernel target — \
+                     dependency injection assumes a full std runtime this target never has",
+                );
             }
         }
         for init in &s.inits {

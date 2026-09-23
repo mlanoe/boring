@@ -1,0 +1,30 @@
+struct Counter:
+    var int value = 0
+    def inc():
+        value += 1
+
+# `@singleton` (docs/design-notes/boring-di-draft.md §4): memoizes the function's
+# result behind a compiler-synthesized LazyLock — the body runs at most once, and
+# every call thereafter clones out the same shared instance. Uses an explicit local
+# `'actor` binding as the tail expression rather than a bare `Counter(0)` return —
+# see task_b8f97224 (spawned this session) for the separate, pre-existing gap where
+# a bare constructor-call tail expression isn't wrapped to match a qualified return
+# type at all, `@singleton` or not.
+@singleton
+Counter'actor makeCounter():
+    print "constructing counter"
+    mut Counter'actor c = Counter(0)
+    c
+
+def main():
+    let c1 = makeCounter()
+    c1.inc()
+    let c2 = makeCounter()
+    c2.inc()
+    # Read one at a time -- c1/c2 alias the same underlying `'actor` cell (that's
+    # the whole point of this test), and `std::sync::Mutex` isn't reentrant: locking
+    # both inside one `print` interpolation would try to lock the same mutex twice
+    # in the same statement and deadlock.
+    let v1 = c1.value
+    let v2 = c2.value
+    print "c1={v1} c2={v2}"

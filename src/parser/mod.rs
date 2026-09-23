@@ -286,6 +286,16 @@ impl Parser {
                     TokenKind::Req => Ok(Item::Fn(self.parse_fn_decl_with_attrs(is_pub, false, attrs)?)),
                     TokenKind::Struct => Ok(Item::Struct(self.parse_struct_decl_with_attrs(is_pub, attrs)?)),
                     TokenKind::Enum => Ok(Item::Enum(self.parse_enum_decl_with_attrs(is_pub, attrs)?)),
+                    // Return-type-first function shorthand with no explicit `def`/`req`
+                    // (`NetworkClient'shared networkClient(): ...`) — previously fell through
+                    // to the discard branch below, silently dropping any attribute written
+                    // above it (found via `@singleton`/`@provide`, which the DI design
+                    // (docs/design-notes/boring-di-draft.md) writes almost exclusively in
+                    // this shorthand form — a `@provide`/`@singleton`/`@derive`/etc. above
+                    // such a function compiled with zero errors and zero effect).
+                    _ if self.is_fn_decl_shorthand() => {
+                        Ok(Item::Fn(self.parse_fn_decl_with_attrs(is_pub, true, attrs)?))
+                    }
                     _ => {
                         // Attrs on item kinds with no AST slot to attach them to
                         // (e.g. `@cfg(test)` / `@test` before `mod`/`task` in

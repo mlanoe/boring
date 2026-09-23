@@ -233,6 +233,26 @@ impl Checker {
         }
     }
 
+    // ── `@singleton` / `'owned` incompatibility ─────────────────────────────────
+    //
+    // docs/design-notes/boring-di-draft.md §2: `@singleton` promises one shared,
+    // referenceable instance; `'owned` (`Box<T>`) is exclusive by construction and
+    // can never be referenced by more than one holder, `@provide` or not.
+    pub(super) fn check_singleton_owned_return(&mut self, f: &FnDecl) {
+        if self.kernel_dispatch_only { return; }
+        let Some(attr) = f.attrs.iter().find(|a| a.name == "singleton") else { return };
+        let Some(ret_ty) = &f.return_ty else { return };
+        if matches!(ret_ty.without_mut(), Type::Qualified(_, OwnerQual::Owned)) {
+            self.error(
+                "`@singleton`'s return type cannot be `'owned`: `Box<T>` is exclusive by \
+                 definition and cannot be referenced by more than one caller — drop \
+                 `@singleton` for a fresh instance per call, or change the return qualifier to \
+                 `'shared`/`'actor`/`'guard`/`'observed` (docs/design-notes/boring-di-draft.md §2)",
+                attr.line, attr.col,
+            );
+        }
+    }
+
     fn describe_type_for_atomic_error(ty: &Type) -> String {
         match ty {
             Type::Float32 => "float32".to_string(),

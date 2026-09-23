@@ -6,6 +6,15 @@ impl Transpiler {
     pub(crate) fn emit_item(&mut self, item: &Item) {
         match item {
             Item::Use(u)    => self.emit_use(u),
+            Item::Fn(f) if f.attrs.iter().any(|a| a.name == "singleton") => {
+                // `@singleton` (docs/design-notes/boring-di-draft.md §4) — the checker
+                // (`check_di_provider_attrs`) already guarantees, by this point, that `f` is
+                // a free top-level function (`f.qualifier.is_none()`, never `main`), takes no
+                // parameters, doesn't `throw`/`task`/`stream`, and its return type isn't
+                // `'owned` — see that function for why each of those is required for the
+                // `LazyLock` + `.clone()` codegen below to be sound.
+                self.emit_singleton_fn(f);
+            }
             Item::Fn(f) => {
                 // Top-level `def TypeName.method():` → emit inside its own `impl TypeName {}`.
                 // Multiple impl blocks for the same type are valid in Rust.
@@ -844,6 +853,64 @@ impl Transpiler {
         }
     }
 
+    /// `@singleton` (docs/design-notes/boring-di-draft.md §4) — memoizes a function's
+    /// result behind a compiler-synthesized `LazyLock`, first-call-wins from anywhere
+    /// (an `@inject` site once that exists, or an ordinary direct call, identically).
+    ///
+    /// Implementation shape, deliberately the least invasive one available: emit the
+    /// *original* function body completely unchanged, under a mangled, private name
+    /// (reusing 100% of `emit_fn`'s existing machinery — async detection, overloads,
+    /// GPU residency, etc. — none of which needs to know `@singleton` exists at all),
+    /// then add two small new lines: a module-level `LazyLock` static that calls the
+    /// renamed function exactly once, and a public wrapper under the function's real
+    /// name that just clones out of it. This is the exact "Illustrative Rust
+    /// equivalent" the design doc itself shows for `@provide`+`@singleton`, generalized
+    /// to any function. `check_di_provider_attrs` (checker/mod.rs) is what guarantees,
+    /// before this ever runs, that `f` is a zero-parameter, non-generic, non-throwing,
+    /// non-task/stream free function whose return type isn't `'owned` — every one of
+    /// those is required for `.clone()` on a `LazyLock<RetTy>` to even compile.
+    fn emit_singleton_fn(&mut self, f: &FnDecl) {
+        let ret_ty = self.compute_fn_return_type(f);
+        // A `static`/`LazyLock<T>` requires `T: Sync` regardless of `--threading` —
+        // exactly the same constraint `'static` already enforces (`static_sync_violation`,
+        // just below), reused verbatim rather than duplicated: under `--threading single`,
+        // `'actor`/`'guard`/`'shared` collapse to `Rc`/`RefCell`-based forms, none of them
+        // `Sync`, so a `@singleton` return type built on any of them can't back a
+        // `LazyLock` in this mode. Caught here, at the one place that actually emits the
+        // `LazyLock`, rather than earlier in the checker (which has no `--threading`
+        // config to consult at all).
+        if let Some(reason) = self.static_sync_violation(
+            f.return_ty.as_ref().unwrap_or(&Type::Void),
+            &mut std::collections::HashSet::new(),
+        ) {
+            self.push_error(f.line, f.col, format!(
+                "'{}' cannot be `@singleton` under --threading single -- {} is not thread-safe \
+                 (Rc/RefCell) in this mode; build with --threading multi instead",
+                f.name, reason
+            ));
+        }
+        let internal_name = format!("__boring_singleton_impl_{}", f.name);
+        let static_name = format!("__BORING_SINGLETON_{}", f.name.to_uppercase());
+        let internal_f = FnDecl {
+            name: internal_name.clone(),
+            is_pub: false,
+            attrs: Vec::new(),
+            ..f.clone()
+        };
+        self.emit_fn(&internal_f, None);
+        self.blank();
+        self.line(&format!(
+            "static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {}());",
+            static_name, ret_ty, internal_name
+        ));
+        let vis = if f.is_pub { "pub " } else { "" };
+        self.line(&format!(
+            "{}fn {}() -> {} {{ {}.clone() }}",
+            vis, f.name, ret_ty, static_name
+        ));
+        self.blank();
+    }
+
     /// Computes a function's Rust return-type string: GPU-resident substitution
     /// (`BoringGpuArg<T>`, including the resident-tuple-slot variant), `impl Trait`
     /// for a return type that names a known trait, `throws` → `Result<T, Box<dyn Error>>`,
@@ -1384,8 +1451,15 @@ impl Transpiler {
             return;
         }
 
-        // Attributes → #[...]
+        // Attributes → #[...]. `singleton`/`provide`/`inject` (docs/design-notes/
+        // boring-di-draft.md) carry compiler-synthesized meaning, not pass-through Rust
+        // attribute syntax — `singleton` is handled entirely by `emit_singleton_fn`
+        // (which renames the function before delegating to `emit_fn`, so this loop never
+        // even sees it under its original name in practice); `provide` never needs any
+        // Rust-side marker at all (`@inject` — not yet implemented — is the only thing
+        // that will ever consult it, purely at the Boring-compiler level).
         for attr in &f.attrs {
+            if matches!(attr.name.as_str(), "singleton" | "provide" | "inject") { continue; }
             let args_s = if attr.args.is_empty() {
                 String::new()
             } else {

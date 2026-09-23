@@ -1154,3 +1154,19 @@ transpile_test!(actor_field_method_outer_var);
 // checker rejection, the `mut`/`var` binding regression, and bare `'observed`
 // qualifier-inference resolution (representation-inspection tests, no full build).
 transpile_test!(observed_qualifier);
+
+// `@singleton` (docs/design-notes/boring-di-draft.md §4): first-call-wins memoization
+// behind a compiler-synthesized LazyLock, proven end-to-end — the constructor's side
+// effect (`print`) runs exactly once despite two calls, and both call sites end up
+// holding the *same* shared `'actor` cell (a mutation through either handle is visible
+// through the other). `tests/dependency_injection.rs` covers the checker-rejection and
+// generated-Rust-text-inspection half of this feature (no full build).
+//
+// `ignore_single`: under `--threading single`, `'actor` collapses to `Rc<RefCell<T>>`,
+// which isn't `Sync` — a `static`/`LazyLock<T>` (what `@singleton` compiles to)
+// requires `T: Sync` regardless of threading mode, exactly the same constraint
+// `'static` already enforces (`Transpiler::static_sync_violation`, reused verbatim by
+// `emit_singleton_fn`). This is a real, permanent restriction, not a TODO — see
+// `tests/dependency_injection.rs`'s `singleton_rejects_under_threading_single` for the
+// compile-error-message assertion this case exists to complement.
+transpile_test!(singleton_di, ignore_single);
