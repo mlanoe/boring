@@ -1,0 +1,29 @@
+# Regression test: calling a method on a struct field through a plain outer LOCAL
+# VARIABLE (not `self`) used to mis-transpile `outer_var.field.method(args)` into
+# `outer_var.field.clone().method(args)` instead of routing through the lock/borrow
+# guard (`.lock().unwrap()` multi-thread, `.borrow_mut()` single-thread) — a real
+# E0599 ("no method named `inc` found for struct `Arc<Mutex<Counter>>`"), since
+# `.clone()` on the Arc/Rc handle just produces another handle, never the inner value.
+#
+# `self.field.method()` (inside the owning struct's own methods) already routed
+# through the lock correctly via a dedicated self-scoped branch in
+# `try_emit_mutex_method` — this fixture exercises the sibling `outer_var.field...`
+# shape (`try_emit_actor_field_method`'s first branch), which was declared but never
+# actually fired: the field's stored type is `Type::Mut(Qualified(_, Actor))` (fields
+# need their own `mut`/`var mut` permission to allow `def` calls at all), not a bare
+# `Type::Qualified(_, Actor)`, so the `is_actor_field` check always missed and the call
+# fell through to the generic fallback's `.clone()`-producing path instead.
+struct Counter:
+    var int value = 0
+    def inc(): value += 1
+    req int get(): value
+
+struct Holder:
+    mut Counter'actor c = Counter()
+
+def main():
+    mut h = Holder()
+    h.c.inc()
+    h.c.inc()
+    h.c.inc()
+    print "{h.c.get()}"

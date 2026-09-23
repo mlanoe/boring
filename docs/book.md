@@ -6324,11 +6324,12 @@ pre-existing exclusion for a plain `'actor`/`'guard` field in that same mode —
 `Arc<Mutex<T>>`/`Arc<RwLock<T>>` has none there either).
 
 **Known gaps, not covered by this pass** (see the codebase's own tracked
-follow-ups): field-level `mut`/`var mut` permission is not yet *enforced* for a
-`def` call reached through `self.field` for any qualifier (`'actor`/`'guard`/
-`'observed` alike) — only a local binding's own permission is checked today, same
-pre-existing gap either way, not something this extension introduced or made
-worse. Dispatch through a field is scoped to `self.field`; an arbitrary
+follow-ups): field-level `mut`/`var mut` permission for a `def` call reached
+through `self.field` (`'actor`/`'guard`/`'observed` alike) IS now enforced —
+`Transpiler::check_field_def_call_mut_gate` (src/transpiler/emit_methods.rs)
+closes what used to be a gap here, pushing the same "not declared `mut`"
+diagnostic a local binding's own permission check already produced. Dispatch
+through a field is still scoped to `self.field`; an arbitrary
 `outer_var.field.method()` has a separate, pre-existing mistranspile for a plain
 `'actor` field too. Reading a bare field (not calling a method) through `.value`
 on an `'actor'observed`/`'guard'observed` value doesn't route through the lock —

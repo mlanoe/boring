@@ -33,19 +33,28 @@ fn transparent_wrapper_inner_name(ty: &Type) -> Option<&str> {
 }
 
 /// Unwraps a field's declared `Type` down to a bare `Type::Named`'s name, stripping
-/// `mut` and one level of ownership qualifier — e.g. both `Type::Named("Counter")` and
-/// `Type::Qualified(Named("Counter"), Actor)` (an `'actor`/`'guard`-qualified field)
-/// yield `"Counter"`. Mirrors `resolve_receiver_type_name`'s identical unwrap for a
-/// local var's declared type (emit_top.rs), just for the `self.field`-declared-type
-/// shape instead of `var_types`. Used to check whether a `self.field`-rooted
-/// mutex/rwlock method receiver is a known user struct/enum before deciding whether to
-/// preserve the method name verbatim or run it through `map_method`'s builtin table.
+/// `mut` and every level of ownership qualifier — e.g. `Type::Named("Counter")`,
+/// `Type::Qualified(Named("Counter"), Actor)` (an `'actor`/`'guard`-qualified field),
+/// and the doubly-nested `Type::Qualified(Qualified(Named("Counter"), Actor),
+/// Observed)` an `'actor'observed` field parses to (see `OwnerQual::Observed`'s doc)
+/// all yield `"Counter"`. Peels an arbitrary number of `Qualified` layers, not just
+/// one — a single-level strip used to leave a still-`Qualified` (never `Named`) type
+/// for any qualifier chain of two or more, silently resolving to `None` instead of
+/// the real struct name (confirmed missing `check_field_def_call_mut_gate`
+/// enforcement for exactly this shape before this fix). Mirrors
+/// `resolve_receiver_type_name`'s identical unwrap for a local var's declared type
+/// (emit_top.rs), just for the `self.field`-declared-type shape instead of
+/// `var_types`. Used to check whether a `self.field`-rooted mutex/rwlock/observed
+/// method receiver is a known user struct/enum before deciding whether to preserve
+/// the method name verbatim or run it through `map_method`'s builtin table, and by
+/// `check_field_def_call_mut_gate` to resolve the field's content type for its own
+/// `req`-vs-`def` lookup.
 fn qualified_named_type_name(ty: &Type) -> Option<String> {
-    let inner = match ty.without_mut() {
-        Type::Qualified(inner, _) => inner.without_mut(),
-        other => other,
-    };
-    if let Type::Named(n) = inner { Some(n.clone()) } else { None }
+    let mut cur = ty.without_mut();
+    while let Type::Qualified(inner, _) = cur {
+        cur = inner.without_mut();
+    }
+    if let Type::Named(n) = cur { Some(n.clone()) } else { None }
 }
 
 impl Transpiler {
@@ -1017,6 +1026,12 @@ impl Transpiler {
     /// unlocks, notifies).
     fn try_emit_observed_field_method_direct(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let (receiver, (struct_name, base)) = self.resolve_observed_field_receiver(obj)?;
+        // Same field-scoped mut-gating as a plain (non-observed) 'actor/'guard
+        // field — see `check_field_def_call_mut_gate`'s doc for why this was
+        // previously missing here (and there) alike.
+        if let ExprKind::Field(_, field_name) = &obj.kind {
+            self.check_field_def_call_mut_gate(obj, field_name, method);
+        }
         let (call_expr, is_req) = self.observed_call_expr(obj, &receiver, &receiver, &struct_name, &base, method, args, false);
         if is_req {
             Some(call_expr)
@@ -1032,6 +1047,12 @@ impl Transpiler {
         let ExprKind::Field(field_obj, value_name) = &obj.kind else { return None };
         if value_name != "value" { return None; }
         let (receiver, (struct_name, base)) = self.resolve_observed_field_receiver(field_obj)?;
+        // Same field-scoped mut-gating as the direct-dispatch path above — the
+        // `.value` escape hatch skips notification, not the mut/var-mut
+        // permission check itself.
+        if let ExprKind::Field(_, field_name) = &field_obj.kind {
+            self.check_field_def_call_mut_gate(field_obj, field_name, method);
+        }
         let (call_expr, _is_req) = self.observed_call_expr(obj, &receiver, &receiver, &struct_name, &base, method, args, true);
         Some(call_expr)
     }
@@ -1097,31 +1118,117 @@ impl Transpiler {
         // named 'lock' found for struct 'BoringObserved<V>'`) when this used to branch
         // on `via_value` here too.
         let base_path = format!("{}.value", escaped_v);
-
-        // Managed mode maps `'owned` over a user type to `Arc<Mutex<T>>`/`RefCell<T>`
-        // (see `emit_type`'s own `OwnerQual::Owned` arm and `emit_observed_let`'s
-        // matching construction-side fix) — needs the same lock/borrow dance as
-        // `Actor` in that case, not a plain passthrough call.
-        let owned_ty_for_mode_check = Type::Qualified(Box::new(Type::Named(struct_name.to_string())), OwnerQual::Owned);
-        let is_managed_owned = matches!(base, OwnerQual::Owned) && self.is_managed_owned_user(&owned_ty_for_mode_check);
-        let call_expr = match base {
-            OwnerQual::Actor | OwnerQual::ActorTask => match self.config.threading {
-                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut().{}({})", base_path, rust_method, args_s.join(", ")),
-                crate::transpiler::ThreadingMode::Multi  => format!("{}.lock().unwrap().{}({})", base_path, rust_method, args_s.join(", ")),
-            },
-            OwnerQual::Guard | OwnerQual::GuardTask => match self.config.threading {
-                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut().{}({})", base_path, rust_method, args_s.join(", ")),
-                crate::transpiler::ThreadingMode::Multi  => format!("{}.write().unwrap().{}({})", base_path, rust_method, args_s.join(", ")),
-            },
-            OwnerQual::Owned if is_managed_owned => match self.config.threading {
-                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut().{}({})", base_path, rust_method, args_s.join(", ")),
-                crate::transpiler::ThreadingMode::Multi  => format!("{}.lock().unwrap().{}({})", base_path, rust_method, args_s.join(", ")),
-            },
+        let call_expr = match self.observed_locked_base(escaped_v, struct_name, base) {
+            Some(locked) => format!("{}.{}({})", locked, rust_method, args_s.join(", ")),
             // Inline/strict-mode-Owned — direct call; Box<T> auto-derefs, same syntax as plain T.
-            _ => format!("{}.{}({})", base_path, rust_method, args_s.join(", ")),
+            None => format!("{}.{}({})", base_path, rust_method, args_s.join(", ")),
         };
         let call_expr = if let Some(wrap) = extra_wrap { format!("{}{}", call_expr, wrap) } else { call_expr };
         (call_expr, is_req)
+    }
+
+    /// The locked/borrowed path to an `'observed` base value's inner struct payload
+    /// (`c.value.lock().unwrap()`-shaped) — factored out of `observed_call_expr` above
+    /// so the `.value` escape hatch's field-read/write dispatch below can share the
+    /// exact same lock/borrow dance a method call already gets. Returns `None` for
+    /// `'inline`/strict-mode `'owned` (a bare `T`/`Box<T>` with real fields directly on
+    /// `.value` — no lock needed, and the ordinary field-access/assignment emission
+    /// already handles that shape correctly), so callers can fall through to it rather
+    /// than reimplementing the passthrough case.
+    ///
+    /// Managed mode maps `'owned` over a user type to `Arc<Mutex<T>>`/`RefCell<T>` (see
+    /// `emit_type`'s own `OwnerQual::Owned` arm and `emit_observed_let`'s matching
+    /// construction-side fix) — needs the same lock/borrow dance as `Actor` in that
+    /// case, not a plain passthrough.
+    pub(crate) fn observed_locked_base(&self, escaped_v: &str, struct_name: &str, base: &OwnerQual) -> Option<String> {
+        let base_path = format!("{}.value", escaped_v);
+        let owned_ty_for_mode_check = Type::Qualified(Box::new(Type::Named(struct_name.to_string())), OwnerQual::Owned);
+        let is_managed_owned = matches!(base, OwnerQual::Owned) && self.is_managed_owned_user(&owned_ty_for_mode_check);
+        match base {
+            OwnerQual::Actor | OwnerQual::ActorTask => Some(match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut()", base_path),
+                crate::transpiler::ThreadingMode::Multi  => format!("{}.lock().unwrap()", base_path),
+            }),
+            OwnerQual::Guard | OwnerQual::GuardTask => Some(match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut()", base_path),
+                crate::transpiler::ThreadingMode::Multi  => format!("{}.write().unwrap()", base_path),
+            }),
+            OwnerQual::Owned if is_managed_owned => Some(match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{}.borrow_mut()", base_path),
+                crate::transpiler::ThreadingMode::Multi  => format!("{}.lock().unwrap()", base_path),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Resolves the `.value`-escape-hatch base of a field-read/write target
+    /// (`c.value` or `self.field.value`, i.e. `value_field_obj` is the `Field(_, "value")`
+    /// expression) to `(receiver Rust expr, struct_name, base qualifier)` — shared by
+    /// the read side (`try_emit_observed_value_field_read` below) and the write side
+    /// (`emit_expr_assign` in `emit_expr.rs`) of the field-access fix. `None` when
+    /// `value_field_obj` isn't actually a `.value` hop off a registered `'observed`
+    /// local or `self.field`.
+    pub(crate) fn resolve_observed_value_base(&self, value_field_obj: &Expr) -> Option<(String, String, OwnerQual)> {
+        let ExprKind::Field(inner_obj, value_name) = &value_field_obj.kind else { return None };
+        if value_name != "value" { return None; }
+        if let ExprKind::Var(v) = &inner_obj.kind {
+            if let Some((struct_name, base)) = self.observed_locals.get(v.as_str()).cloned() {
+                return Some((escape_rust_keyword(v), struct_name, base));
+            }
+        }
+        if let Some((receiver, (struct_name, base))) = self.resolve_observed_field_receiver(inner_obj) {
+            return Some((receiver, struct_name, base));
+        }
+        None
+    }
+
+    /// `c.value.field` / `self.field.value.field2` — the field-*read* counterpart of
+    /// the `.value` method-call escape hatch's transparent dispatch. A bare field read
+    /// through `.value` previously fell straight through to a plain `obj.value.field`
+    /// emission, which is wrong when `value`'s Rust type is `Arc<Mutex<T>>`/
+    /// `Arc<RwLock<T>>` (no such field exists directly on the wrapper — E0609/E0599).
+    /// This routes it through the same lock/borrow as a method call already gets.
+    /// Returns `None` (letting the caller fall through to the ordinary field-access
+    /// emission) both when the base isn't a registered `'observed` value at all, and
+    /// when it is but needs no lock (`'inline`/strict `'owned` — see
+    /// `observed_locked_base`'s doc).
+    pub(crate) fn try_emit_observed_value_field_read(&self, obj: &Expr, field: &str) -> Option<String> {
+        let (receiver, struct_name, base) = self.resolve_observed_value_base(obj)?;
+        let locked = self.observed_locked_base(&receiver, &struct_name, &base)?;
+        Some(format!("{}.{}", locked, field))
+    }
+
+    /// Field-scoped mut-gating for a `def` (mutating) method dispatched through
+    /// `self.field` — the struct-field counterpart of the mut-gating diagnostic
+    /// `try_emit_mutex_method`/`try_emit_rwlock_method`'s own *local-var* branches
+    /// already push (via `known_local_vars`/`mut_checked_local_vars`, which only
+    /// ever track local bindings, never a struct field). Content-mutation
+    /// permission for a field comes from the field's own declared *type*
+    /// (`ty.grants_mut()`, i.e. `mut`/`var mut Field` — docs/book.md's "Mutable
+    /// fields"), independent of the `'actor`/`'guard` lock/borrow mechanism
+    /// itself, exactly as `FieldDecl::mutable`'s doc distinguishes reassignment
+    /// from content mutation. Used by `try_emit_mutex_method`/
+    /// `try_emit_rwlock_method`'s `self.field` branches and by the `'observed`
+    /// field-dispatch functions below (`try_emit_observed_field_method_direct`/
+    /// `try_emit_observed_field_method`), which previously deliberately skipped
+    /// this check for parity with those two — see this function's callers for the
+    /// fix that closed that gap.
+    ///
+    /// Permissive (pushes no error) whenever the enclosing struct, the field, or
+    /// the field's element type can't be resolved, or the method is `req`/task —
+    /// same "permissive on unknown" convention every other gate in this file
+    /// follows.
+    fn check_field_def_call_mut_gate(&self, obj: &Expr, field_name: &str, method: &str) {
+        let Some(owner) = self.self_type.as_deref() else { return };
+        let Some(fields) = self.struct_fields.get(owner) else { return };
+        let Some((_, ty)) = fields.iter().find(|(n, _)| n == field_name) else { return };
+        if ty.grants_mut() { return; }
+        let Some(field_struct_name) = qualified_named_type_name(ty) else { return };
+        if self.method_is_req_or_task(&field_struct_name, method) { return; }
+        self.push_error(obj.line, obj.col, format!(
+            "`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut field; fix: declare it `mut {} {}` or `var mut {} {}`",
+            field_name, method, field_struct_name, field_name, field_struct_name, field_name
+        ));
     }
 
     /// `RwLock`-backed (`'guard`/`'guard'task`) method dispatch: a local var of type
@@ -1190,6 +1297,7 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, rwlock_field));
                     if let Some(k) = key {
                         if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
+                            self.check_field_def_call_mut_gate(obj, rwlock_field, method);
                             // Preserve the real method name for a known user struct/enum
                             // field — see the matching comment/fix in
                             // `try_emit_mutex_method`'s struct-field branch.
@@ -1410,6 +1518,7 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, mutex_field));
                     if let Some(k) = key {
                         if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
+                            self.check_field_def_call_mut_gate(obj, mutex_field, method);
                             // Preserve the real method name for a known user struct/enum
                             // field, same as the local-var case above and
                             // `emit_method_call_fallback`'s `is_user_struct_receiver` —
@@ -1479,7 +1588,17 @@ impl Transpiler {
                     let field_ty = self.struct_fields.get(struct_name.as_str())
                         .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
                         .map(|(_, ty)| ty.clone());
-                    let is_actor_field = matches!(&field_ty,
+                    // Fields are commonly declared `mut Counter'actor field` (the field
+                    // needs its own `mut`/`var mut` permission to allow `def` calls at
+                    // all — see book.md's field mutability table), so the stored type is
+                    // `Type::Mut(Qualified(_, Actor))`, not a bare `Qualified` — strip the
+                    // wrapper before matching, same as `qualified_named_type_name` already
+                    // does a few lines below. Without this, `outer_var.field.method(args)`
+                    // (any non-`self` receiver) fell all the way through to the generic
+                    // fallback, which emits a `.clone()` instead of a lock/borrow guard —
+                    // a real E0599 in the generated Rust (confirmed via `boring build` +
+                    // `cargo build`).
+                    let is_actor_field = matches!(field_ty.as_ref().map(|t| t.without_mut()),
                         Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)));
                     if is_actor_field {
                         // Preserve the real method name for a known user struct/enum
@@ -1493,8 +1612,19 @@ impl Transpiler {
                             map_method(method, args.len(), self.want_raw_option_pop.get())
                         };
                         let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                        let obj_s = self.emit_expr(obj);
-                        let is_task_field = matches!(&field_ty,
+                        // Build the field path directly (`v.field_name`) rather than through
+                        // `self.emit_expr(obj)` — the generic field-read path adds an
+                        // `Arc::clone`/`Rc::clone` to any Arc-qualified field so it's safe to
+                        // read out as a standalone value (see its own doc: "so the value is
+                        // not moved out of the struct"). That's unneeded here: `.lock()`/
+                        // `.borrow_mut()` only needs `&self` on the field in place, never
+                        // moves it, so cloning first just pays for an extra atomic
+                        // refcount bump on every call. Mirrors the `self.field.method()`
+                        // branch above, which already builds its base the same direct way
+                        // (`format!("self.{}", mutex_field)`) for the same reason.
+                        let obj_s = format!("{}.{}", self.emit_expr(inner_obj), field_name);
+                        // Same `Type::Mut` wrapper as `is_actor_field` above — strip it here too.
+                        let is_task_field = matches!(field_ty.as_ref().map(|t| t.without_mut()),
                             Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::ActorTask)));
                         let call = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                             format!("{}.borrow_mut().{}({})", obj_s, rust_method, args_s.join(", "))

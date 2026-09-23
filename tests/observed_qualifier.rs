@@ -401,33 +401,87 @@ fn struct_with_actor_observed_field_skips_partial_eq_in_sync_multi_mode() {
 // ── Field-level mut/var permission parity (test category: "mut/var field-
 // permission regression") ───────────────────────────────────────────────────────
 //
-// Finding (see this session's report): calling a `def` method through a struct
-// field (`self.field.method()`) does NOT currently push a "not declared mut"
+// Finding (see the bug report this fixed): calling a `def` method through a
+// struct field (`self.field.method()`) used to push NO "not declared mut"
 // diagnostic for ANY qualifier — not `'actor`/`'guard` alone, and not
-// `'actor'observed`/`'guard'observed` either. This is a pre-existing, general gap
-// (flagged separately as its own follow-up task, not fixed here) — the analogous
-// LOCAL BINDING check (`var_alone_does_not_unlock_direct_def_call` above) DOES
-// fire correctly, because that diagnostic lives in `observed_call_expr`, gated on
-// `known_local_vars`/`mut_checked_local_vars` (populated only for local bindings),
-// and neither `try_emit_mutex_method`/`try_emit_rwlock_method`'s own `self.field`
-// branch nor this session's new `try_emit_observed_field_method_direct` add an
-// equivalent field-scoped check. This test is therefore a PARITY regression, not
-// a rejection: an `'actor'observed` field must compile identically to a plain
-// (non-observed) `'actor` field in this same shape — i.e., this extension must
-// not make the pre-existing gap any worse, and must not spuriously start
-// rejecting a call the un-observed case already accepts either.
-//
+// `'actor'observed`/`'guard'observed` either — while the analogous LOCAL BINDING
+// check (`var_alone_does_not_unlock_direct_def_call` above) already fired
+// correctly (that one lives in `observed_call_expr`, gated on
+// `known_local_vars`/`mut_checked_local_vars`, which only ever track local
+// bindings, never a struct field). Fixed by
+// `Transpiler::check_field_def_call_mut_gate` (src/transpiler/emit_methods.rs),
+// called from `try_emit_mutex_method`/`try_emit_rwlock_method`'s own
+// `self.field` branches and from the `'observed` field-dispatch functions
+// (`try_emit_observed_field_method_direct`/`try_emit_observed_field_method`)
+// alike — the shared helper is what keeps the two families in parity now that
+// both actually enforce the rule, rather than both silently accepting it.
 #[test]
-fn non_mut_observed_field_method_call_has_same_permissiveness_as_plain_actor_field() {
+fn non_mut_observed_field_method_call_is_rejected_same_as_plain_actor_field() {
     let observed_src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    Counter'actor'observed c = Counter(0)\n    def bump(): self.c.inc()\n\ndef main():\n    print \"ok\"\n";
     let plain_src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    Counter'actor c = Counter(0)\n    def bump(): self.c.inc()\n\ndef main():\n    print \"ok\"\n";
     let observed_out = emit_rust(observed_src);
     let plain_out = emit_rust(plain_src);
-    assert_eq!(
-        observed_out.status.success(), plain_out.status.success(),
-        "expected a non-mut 'actor'observed field's def-method call through the field to succeed/fail exactly like the non-observed 'actor case (parity, not a new regression) — observed: {}, plain: {}",
-        observed_out.status.success(), plain_out.status.success()
+    assert!(!observed_out.status.success(), "expected a non-mut 'actor'observed field's def-method call through the field to be rejected, got:\n{}", String::from_utf8_lossy(&observed_out.stdout));
+    assert!(!plain_out.status.success(), "expected a non-mut plain 'actor field's def-method call through the field to be rejected, got:\n{}", String::from_utf8_lossy(&plain_out.stdout));
+    let observed_stderr = String::from_utf8_lossy(&observed_out.stderr);
+    let plain_stderr = String::from_utf8_lossy(&plain_out.stderr);
+    for stderr in [&observed_stderr, &plain_stderr] {
+        assert!(
+            stderr.contains("`c` is not declared `mut`") && stderr.contains("non-mut field"),
+            "expected the field-scoped mut-gating diagnostic, got:\n{}", stderr
+        );
+    }
+}
+
+// The `.value` escape hatch shares the same lowering (`observed_call_expr`) as the
+// direct-dispatch path above, so it must be gated identically — skipping
+// notification is not license to skip the mut/var-mut permission check too.
+#[test]
+fn non_mut_observed_field_method_call_through_value_escape_hatch_is_rejected() {
+    let src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    Counter'actor'observed c = Counter(0)\n    def bump(): self.c.value.inc()\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a non-mut 'actor'observed field's def-method call through .value to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`c` is not declared `mut`") && stderr.contains("non-mut field"),
+        "expected the field-scoped mut-gating diagnostic through .value, got:\n{}", stderr
     );
+}
+
+// A plain (non-observed) 'guard field gets the same enforcement as 'actor — both
+// go through try_emit_rwlock_method's/try_emit_mutex_method's own `self.field`
+// branches, which both call the shared `check_field_def_call_mut_gate` helper.
+#[test]
+fn non_mut_plain_guard_field_method_call_is_rejected() {
+    let src = "struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    Counter'guard c = Counter(0)\n    def bump(): self.c.inc()\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a non-mut plain 'guard field's def-method call through the field to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("`c` is not declared `mut`") && stderr.contains("non-mut field"),
+        "expected the field-scoped mut-gating diagnostic, got:\n{}", stderr
+    );
+}
+
+// A `mut`/`var mut`-declared plain (non-observed) 'actor/'guard field must keep
+// compiling — this fix must not regress the already-correct permissive case.
+#[test]
+fn mut_plain_actor_and_guard_field_method_calls_still_succeed() {
+    for qual in ["'actor", "'guard"] {
+        let src = format!("struct Counter:\n    var int value = 0\n    def inc(): value += 1\n\nstruct Holder:\n    mut Counter{qual} c = Counter(0)\n    def bump(): self.c.inc()\n\ndef main():\n    print \"ok\"\n");
+        let out = emit_rust(&src);
+        assert!(out.status.success(), "expected a mut {qual} field's def-method call through the field to still succeed, got:\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+// A non-mutating `req` method through a non-mut field must NOT be rejected — the
+// gate only applies to `def` (mutating) methods, exactly like the local-binding
+// checks elsewhere in this file.
+#[test]
+fn req_method_through_non_mut_plain_actor_field_is_not_rejected() {
+    let src = "struct Counter:\n    var int value = 0\n    req int current(): value\n\nstruct Holder:\n    Counter'actor c = Counter(0)\n    def bump():\n        let n = self.c.current()\n        print \"{n}\"\n\ndef main():\n    print \"ok\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected a req method through a non-mut field to be permitted, got:\n{}", String::from_utf8_lossy(&out.stderr));
 }
 
 // A `mut`-declared 'observed field DOES correctly unlock the direct transparent
@@ -465,5 +519,145 @@ fn bare_observed_resolves_owned_for_oversized_struct_no_signal() {
     assert!(
         generated.contains("let mut c: BoringObserved<Box<Big>>"),
         "expected bare 'observed to resolve to 'owned'observed for an oversized struct with no narrowing signal, got:\n{}", generated
+    );
+}
+
+// ── `.value` escape hatch: bare field read/write (not a method call) ───────────
+//
+// The escape hatch's method-call dispatch (`try_emit_observed_method`/
+// `try_emit_observed_field_method`) always routed `obj.value.method()` through the
+// base qualifier's lock/borrow. A bare field read/write through `.value`
+// (`obj.value.field`, `obj.value.field = v`) did not — it fell straight through to a
+// plain `obj.value.field` emission, which is wrong once `value`'s Rust type is
+// `Arc<Mutex<T>>`/`Arc<RwLock<T>>` (no such field exists directly on the wrapper —
+// E0609/E0599). This section confirms the fix: both read and write now route through
+// the same lock a method call already gets, for both locking bases, in a
+// `subscribe()` callback (the shape that surfaced the bug — a subscriber reading
+// `obj.value.field` straight off the callback parameter) and as a plain local/field.
+
+#[test]
+fn value_field_read_routes_through_actor_lock_in_subscribe_callback() {
+    let src = "struct FormModel:\n    var string name = \"\"\n    def setName(string s): name = s\n\ndef main():\n    mut FormModel'actor'observed model = FormModel()\n    let sub = model.subscribe((obj):\n        print \"{obj.value.name}\"\n    )\n    model.setName(\"Ada\")\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("obj.value.lock().unwrap().name"),
+        "expected the bare field read through `.value` to route through the Mutex lock, got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_read_routes_through_guard_lock_in_subscribe_callback() {
+    let src = "struct FormModel:\n    var string name = \"\"\n    def setName(string s): name = s\n\ndef main():\n    mut FormModel'guard'observed model = FormModel()\n    let sub = model.subscribe((obj):\n        print \"{obj.value.name}\"\n    )\n    model.setName(\"Ada\")\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("obj.value.write().unwrap().name"),
+        "expected the bare field read through `.value` to route through the RwLock write lock (same lock a method call already takes through this escape hatch — `observed_call_expr` never distinguishes read vs write access), got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_write_routes_through_actor_lock_in_subscribe_callback() {
+    let src = "struct FormModel:\n    var string name = \"\"\n    def setName(string s): name = s\n\ndef main():\n    mut FormModel'actor'observed model = FormModel()\n    let sub = model.subscribe((obj):\n        obj.value.name = \"silent\"\n    )\n    model.setName(\"Ada\")\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("let mut __g = obj.value.lock().unwrap(); __g.name = __v;"),
+        "expected the bare field write through `.value` to route through the Mutex lock, got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_write_routes_through_guard_lock_in_subscribe_callback() {
+    let src = "struct FormModel:\n    var string name = \"\"\n    def setName(string s): name = s\n\ndef main():\n    mut FormModel'guard'observed model = FormModel()\n    let sub = model.subscribe((obj):\n        obj.value.name = \"silent\"\n    )\n    model.setName(\"Ada\")\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("let mut __g = obj.value.write().unwrap(); __g.name = __v;"),
+        "expected the bare field write through `.value` to route through the RwLock write lock, got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_read_and_write_route_through_actor_lock_as_a_plain_local() {
+    // Same fix, outside a subscribe() callback — a plain `mut`-declared
+    // `'actor'observed` local, read and written through `.value` directly (no method
+    // call involved at all).
+    let src = "struct FormModel:\n    var string name = \"\"\n\ndef main():\n    mut FormModel'actor'observed model = FormModel()\n    model.value.name = \"Ada\"\n    print \"{model.value.name}\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("let mut __g = model.value.lock().unwrap(); __g.name = __v;"),
+        "expected the plain-local field write through `.value` to route through the Mutex lock, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("model.value.lock().unwrap().name"),
+        "expected the plain-local field read through `.value` to route through the Mutex lock, got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_read_and_write_route_through_guard_lock_as_a_plain_local() {
+    let src = "struct FormModel:\n    var string name = \"\"\n\ndef main():\n    mut FormModel'guard'observed model = FormModel()\n    model.value.name = \"Ada\"\n    print \"{model.value.name}\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("let mut __g = model.value.write().unwrap(); __g.name = __v;"),
+        "expected the plain-local field write through `.value` to route through the RwLock write lock, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("model.value.write().unwrap().name"),
+        "expected the plain-local field read through `.value` to route through the RwLock write lock, got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_read_and_write_route_through_actor_lock_via_self_field() {
+    // Struct-field-scoped variant (`self.field.value.field2`) — the write-position
+    // counterpart of `mut_observed_field_unlocks_direct_def_call_and_notifies` above,
+    // for the bare field-read/write shape rather than a method call.
+    let src = "struct Inner:\n    var string name = \"\"\n\nstruct Outer:\n    var mut Inner'actor'observed model = Inner()\n    def touch():\n        print \"{self.model.value.name}\"\n        self.model.value.name = \"from-self\"\n\ndef main():\n    mut Outer o = Outer()\n    o.touch()\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        generated.contains("self.model.value.lock().unwrap().name"),
+        "expected the self.field-scoped read through `.value` to route through the Mutex lock, got:\n{}", generated
+    );
+    assert!(
+        generated.contains("let mut __g = self.model.value.lock().unwrap(); __g.name = __v;"),
+        "expected the self.field-scoped write through `.value` to route through the Mutex lock, got:\n{}", generated
+    );
+}
+
+#[test]
+fn value_field_access_on_inline_observed_still_falls_through_to_plain_field_emission() {
+    // Regression guard: `'inline'observed` (and strict-mode `'owned'observed`) must
+    // keep emitting a plain field access through `.value` — no lock needed there
+    // (`value`'s Rust type is a bare `T`, with real fields directly on it), and this
+    // fix's new dispatch must return `None` for that base rather than intercepting it
+    // (see `observed_locked_base`'s doc for why).
+    let src = "struct FormModel:\n    var string name = \"\"\n\ndef main():\n    mut FormModel'inline'observed model = FormModel()\n    model.value.name = \"Ada\"\n    print \"{model.value.name}\"\n";
+    let out = emit_rust(src);
+    assert!(out.status.success(), "expected this program to transpile:\n{}", String::from_utf8_lossy(&out.stderr));
+    let generated = String::from_utf8_lossy(&out.stdout);
+    // Scope the negative check to `fn main()`'s own body — the shared `BoringObserved`
+    // prelude legitimately uses a `Mutex` (`.lock()`) internally for its subscriber
+    // list, unrelated to this struct's own field access.
+    let main_body = generated.split("fn main() -> ()").nth(1).unwrap_or("");
+    assert!(
+        main_body.contains("model.value.name = Arc::<str>::from(\"Ada\")"),
+        "expected 'inline'observed field write to stay a plain field assignment, got:\n{}", generated
+    );
+    assert!(
+        !main_body.contains("lock()") && !main_body.contains(".write()"),
+        "expected no lock/borrow call for 'inline'observed field access in main(), got:\n{}", generated
     );
 }

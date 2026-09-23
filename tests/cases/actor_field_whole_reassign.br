@@ -1,0 +1,22 @@
+# Regression case for tests/actor_guard_field_whole_reassign.rs's end-to-end
+# test — see that file's own header comment for the bug this pins.
+
+struct FormModel:
+    var string name = ""
+    def setName(string s):
+        name = s
+    req string currentName():
+        name
+
+struct Container:
+    mut FormModel'actor model = FormModel()
+    def replace(string newName):
+        self.model = FormModel()
+        self.model.setName(newName)
+    req string modelName():
+        self.model.currentName()
+
+def main():
+    mut c = Container()
+    c.replace("Ada")
+    print c.modelName()

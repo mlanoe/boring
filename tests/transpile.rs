@@ -1141,6 +1141,12 @@ transpile_test!(atomic_promotion_binding_permission_regression);
 // own doc comment and `src/transpiler/mod.rs`'s `var_lock_scalar`.
 transpile_test!(actor_guard_scalar_mutation);
 
+// Regression: `outer_var.field.method(args)` (a plain, non-`self` local variable)
+// through an `'actor`-qualified struct field must route through the lock/borrow
+// guard, same as the already-working `self.field.method()` case — see the fixture's
+// own doc comment and `try_emit_actor_field_method` (src/transpiler/emit_methods.rs).
+transpile_test!(actor_field_method_outer_var);
+
 // `'observed` composable ownership-qualifier suffix (docs/book.md's "'observed"
 // section): all four legal compositions, `.value` read-only never notifying,
 // `Subscription`'s Drop genuinely unsubscribing, multiple subscribers all firing on

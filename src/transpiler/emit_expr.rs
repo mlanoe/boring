@@ -2016,6 +2016,13 @@ impl Transpiler {
         if let Some(code) = self.try_emit_kernel_field_read(obj, field) {
             return code;
         }
+        // `c.value.field` / `self.field.value.field2` — `'observed`'s `.value` escape
+        // hatch, field-read position. See `try_emit_observed_value_field_read`'s doc
+        // (emit_methods.rs) for why this can't just fall through to the plain field
+        // emission below for an `'actor'observed`/`'guard'observed` base.
+        if let Some(code) = self.try_emit_observed_value_field_read(obj, field) {
+            return code;
+        }
         // Special case: `(task expr).value` / `(task expr).wait` where the task body
         // captures non-Arc local variables.  We cannot safely `tokio::spawn(async move {})`
         // because that would move the variable — leaving the outer scope without it.
@@ -2568,6 +2575,79 @@ impl Transpiler {
                             }
                         }
                     }
+                }
+            }
+        }
+        // Whole-field reassignment of an 'actor/'guard(/'observed)-qualified field:
+        // `self.field = expr` (or `outer_var.field = expr` for a mut/var mut struct
+        // param/local) — `field` itself IS the wrapped value being replaced, unlike
+        // the "self.worker.field = v" / "self.data.field = v" branches above (which
+        // write into a field *reached through* an already-locked mutex/rwlock field)
+        // or the `.value`-escape-hatch branch below (which writes into an 'observed
+        // field's *inner* field). Without this, the RHS falls through to a plain,
+        // unwrapped assignment that doesn't type-check against the field's real
+        // `Arc<Mutex<T>>`/`Arc<RwLock<T>>`/`BoringObserved<V>` Rust type — confirmed
+        // via a real `cargo build` E0308 (`self.model = FormModel::new();` against a
+        // field whose Rust type is `Arc<Mutex<FormModel>>`). Wrap the RHS the same way
+        // construction already does (`emit_actor_new`/`emit_guard_new`/
+        // `wrap_observed_base` — see emit_struct.rs's per-field-default init).
+        //
+        // Guarded against double-wrapping the one case that already worked before
+        // this fix: assigning an existing actor/guard/observed-typed *variable*
+        // straight into the field (`self.model = otherActorVar`) — that RHS is
+        // already the wrapped handle, not a raw base value, and the generic fallback
+        // further below already special-cases it (auto-`.clone()` for the mutex-var
+        // case; observed-local reassignment isn't otherwise supported yet either way).
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let Some(sn) = self.resolve_struct_name(obj) {
+                let key = format!("{}::{}", sn, field);
+                let rhs_already_wrapped = matches!(&value.kind, ExprKind::Var(vn)
+                    if self.var_mutex_types.contains(vn.as_str())
+                        || self.var_mutex_task_types.contains(vn.as_str())
+                        || self.var_rwlock_types.contains(vn.as_str())
+                        || self.var_rwlock_task_types.contains(vn.as_str())
+                        || self.observed_locals.contains_key(vn.as_str()));
+                if !rhs_already_wrapped {
+                    if let Some((inner_struct_name, base)) = self.observed_fields.get(&key).cloned() {
+                        let obj_s = self.emit_expr(obj);
+                        let raw = self.emit_expr_owned(value);
+                        let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+                        return format!("{}.{} = BoringObserved::new({})", obj_s, field, wrapped);
+                    }
+                    let is_actor = self.struct_mutex_fields.contains(&key);
+                    let is_actor_task = self.struct_mutex_task_fields.contains(&key);
+                    let is_guard = self.struct_rwlock_fields.contains(&key);
+                    let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
+                    if is_actor || is_actor_task || is_guard || is_guard_task {
+                        let obj_s = self.emit_expr(obj);
+                        let raw = self.emit_expr_owned(value);
+                        let wrapped = if is_actor_task {
+                            self.emit_actor_task_new(&raw)
+                        } else if is_actor {
+                            self.emit_actor_new(&raw)
+                        } else if is_guard_task {
+                            self.emit_guard_task_new(&raw)
+                        } else {
+                            self.emit_guard_new(&raw)
+                        };
+                        return format!("{}.{} = {}", obj_s, field, wrapped);
+                    }
+                }
+            }
+        }
+        // Observed field write via the `.value` escape hatch: `c.value.field = v` /
+        // `self.field.value.field2 = v` — the write-position counterpart of
+        // `try_emit_observed_value_field_read` (emit_methods.rs); see its doc for why
+        // this needs its own dispatch rather than falling through to a plain
+        // `obj.value.field = v` emission for an `'actor'observed`/`'guard'observed`
+        // base. Evaluate the RHS into a temp *before* taking the lock/borrow guard,
+        // same reasoning as the Mutex/RwLock field-write branches above (a self-read
+        // through the same lock in the RHS would otherwise deadlock).
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let Some((receiver, struct_name, base)) = self.resolve_observed_value_base(obj) {
+                if let Some(locked) = self.observed_locked_base(&receiver, &struct_name, &base) {
+                    let val_s = self.emit_expr_owned(value);
+                    return format!("{{ let __v = {}; let mut __g = {}; __g.{} = __v; }}", val_s, locked, field);
                 }
             }
         }
