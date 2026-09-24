@@ -282,6 +282,56 @@ impl Transpiler {
         collect_actor_lets(self, stmts, &mut local_actor_vars);
         self.infer_local_actor_vars = local_actor_vars;
 
+        // Pre-pass: collect local variables assigned from 'shared-returning calls — the
+        // 'shared counterpart of `collect_actor_lets` above. Checks `fn_return_types`
+        // directly (a plain bool predicate, unlike `expr_returns_actor_qual`, since this
+        // is the only caller and there's no reuse benefit to a shared helper here) rather
+        // than folding into `collect_actor_lets`/`infer_local_actor_vars`: a 'shared source
+        // is unambiguous (see `infer_local_shared_vars`'s doc in mod.rs) and gets
+        // constrained straight to `[Shared]` below, not the `{Actor, Guard}` pair.
+        self.infer_local_shared_vars.clear();
+        fn collect_shared_lets(transpiler: &Transpiler, stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+            fn returns_shared(transpiler: &Transpiler, val: &Expr) -> bool {
+                matches!(&val.kind, ExprKind::Call(callee, _)
+                    if matches!(&callee.kind, ExprKind::Var(fn_name)
+                        if matches!(transpiler.fn_return_types.get(fn_name.as_str()),
+                            Some(Type::Qualified(_, OwnerQual::Shared)))))
+            }
+            for stmt in stmts {
+                match stmt {
+                    Stmt::Let(s) => {
+                        if let Some(val) = &s.value {
+                            if returns_shared(transpiler, val) {
+                                out.insert(s.name.clone());
+                            }
+                        }
+                    }
+                    Stmt::If(s) => {
+                        for (_, body) in &s.branches { collect_shared_lets(transpiler, body, out); }
+                        if let Some(eb) = &s.else_body { collect_shared_lets(transpiler, eb, out); }
+                    }
+                    Stmt::IfLet(s) => {
+                        collect_shared_lets(transpiler, &s.then_body, out);
+                        for branch in &s.elif_branches { collect_shared_lets(transpiler, &branch.body, out); }
+                        if let Some(eb) = &s.else_body { collect_shared_lets(transpiler, eb, out); }
+                    }
+                    Stmt::While(s) => { collect_shared_lets(transpiler, &s.body, out); }
+                    Stmt::For(s) => { collect_shared_lets(transpiler, &s.body, out); }
+                    Stmt::Match(s) => {
+                        for arm in &s.arms {
+                            if let crate::ast::MatchBody::Block(body) = &arm.body {
+                                collect_shared_lets(transpiler, body, out);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut local_shared_vars = std::collections::HashSet::new();
+        collect_shared_lets(self, stmts, &mut local_shared_vars);
+        self.infer_local_shared_vars = local_shared_vars;
+
         // Direct 'actor constraint: any anonymous var (local or param) that is known to hold an
         // 'actor value (from infer_local_actor_vars) is constrained to {Actor, Guard} immediately.
         for var_name in self.infer_local_actor_vars.iter() {
@@ -289,6 +339,20 @@ impl Transpiler {
                 constrain_candidates(
                     &mut candidates, var_name,
                     &[OwnerQual::Actor, OwnerQual::Guard],
+                    &alias_of,
+                );
+                has_qualifier_constraint.insert(var_name.clone());
+            }
+        }
+
+        // Direct 'shared constraint: unambiguous (unlike Actor/Guard above), so this
+        // resolves straight to a single candidate without needing a later disambiguating
+        // signal (e.g. a call-site demand) to pick between multiple survivors.
+        for var_name in self.infer_local_shared_vars.iter() {
+            if anonymous_vars.contains(var_name.as_str()) {
+                constrain_candidates(
+                    &mut candidates, var_name,
+                    &[OwnerQual::Shared],
                     &alias_of,
                 );
                 has_qualifier_constraint.insert(var_name.clone());

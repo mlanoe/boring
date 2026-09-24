@@ -1,0 +1,54 @@
+# Regression test: a function whose declared return type carries an
+# ownership qualifier (`'actor`, `'guard`, `'shared`) never wrapped a bare
+# constructor-call return value in the qualifier's own Rust representation
+# (`Arc<Mutex<T>>`/`Arc<RwLock<T>>`/`Arc<T>`) — neither a bare tail expression
+# nor an explicit `return` — so the generated Rust failed to compile (E0308,
+# expected the wrapped type, found the bare struct). See
+# `src/transpiler/emit_stmt.rs`'s `wrap_return_for_qualifier` doc for the fix
+# (the return-type-driven counterpart of `emit_let.rs`'s
+# `try_emit_qualified_let`, which already wrapped a local `let`/`mut`
+# binding's own initializer correctly — that workaround is covered below too,
+# to guard against a double-wrap regression).
+struct Counter:
+    var int value = 0
+    def inc():
+        value += 1
+
+# Bare tail-expression return.
+Counter'actor makeActorTail():
+    Counter(1)
+
+# Explicit `return` statement.
+def Counter'actor makeActorReturn():
+    return Counter(2)
+
+def Counter'guard makeGuard():
+    Counter(3)
+
+Counter'shared makeShared():
+    Counter(4)
+
+# Confirmed workaround, kept as its own regression guard: a local `'actor`
+# binding then a bare-`Var` tail expression must NOT be wrapped a second time.
+Counter'actor makeActorViaLocal():
+    mut Counter'actor c = Counter(5)
+    c
+
+def main():
+    let a1 = makeActorTail()
+    a1.inc()
+    print "a1={a1.value}"
+
+    let a2 = makeActorReturn()
+    a2.inc()
+    print "a2={a2.value}"
+
+    let g = makeGuard()
+    print "g={g.value}"
+
+    let s = makeShared()
+    print "s={s.value}"
+
+    let a3 = makeActorViaLocal()
+    a3.inc()
+    print "a3={a3.value}"

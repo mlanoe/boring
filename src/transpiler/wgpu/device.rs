@@ -109,6 +109,9 @@ struct DeviceEmitter {
     /// comment for why the body needs this even though `fields` are already
     /// substituted by `monomorphise_type`. Empty for a non-generic kernel.
     current_kernel_consts: std::collections::HashMap<String, i64>,
+    /// True while emitting the body of a `void`-returning device function/method --
+    /// see `metal::device`'s identical field.
+    current_fn_is_void: bool,
 }
 
 impl DeviceEmitter {
@@ -127,6 +130,7 @@ impl DeviceEmitter {
             program_uses_warp: false,
             warp_tmp_counter: 0,
             current_kernel_consts: std::collections::HashMap::new(),
+            current_fn_is_void: true,
         }
     }
 
@@ -231,7 +235,9 @@ impl DeviceEmitter {
         }).collect();
         self.line(&format!("fn {}({}) -> {} {{", decl.name, params.join(", "), ret));
         self.indent += 1;
-        for stmt in &decl.body { self.emit_stmt(stmt); }
+        self.current_fn_is_void = ret == "void";
+        let last_idx = decl.body.len().saturating_sub(1);
+        for (i, stmt) in decl.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
         self.line("}");
     }
@@ -424,12 +430,16 @@ impl DeviceEmitter {
             self.line(&format!("fn {}({}) -> {} {{", fn_name, params.join(", "), ret));
         }
         self.indent += 1;
-        for stmt in &method.body { self.emit_stmt(stmt); }
+        self.current_fn_is_void = ret == "void";
+        let last_idx = method.body.len().saturating_sub(1);
+        for (i, stmt) in method.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
         self.line("}");
     }
 
     fn emit_entry_point(&mut self, decl: &KernelDecl, entry: &FnDecl) {
+        // The entry point is always `void` (a GPU kernel entry has no return value).
+        self.current_fn_is_void = true;
         let fn_name = format!("{}_main", decl.name);
         let uses_warp = self.program_uses_warp && super::kernel_uses_gpu_warp(decl);
 
@@ -506,13 +516,13 @@ impl DeviceEmitter {
 
         if self.auto_sync {
             let split = first_loop_index(&entry.body);
-            for stmt in &entry.body[..split] { self.emit_stmt(stmt); }
+            for stmt in &entry.body[..split] { self.emit_stmt(stmt, false); }
             if split < entry.body.len() {
                 self.line("workgroupBarrier();");
             }
-            for stmt in &entry.body[split..] { self.emit_stmt(stmt); }
+            for stmt in &entry.body[split..] { self.emit_stmt(stmt, false); }
         } else {
-            for stmt in &entry.body { self.emit_stmt(stmt); }
+            for stmt in &entry.body { self.emit_stmt(stmt, false); }
         }
 
         self.indent -= 1;
@@ -609,7 +619,7 @@ impl DeviceEmitter {
         Expr { kind, line: e.line, col: e.col, len: e.len }
     }
 
-    fn emit_stmt(&mut self, stmt: &Stmt) {
+    fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
             Stmt::Let(s) => {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
@@ -695,7 +705,11 @@ impl DeviceEmitter {
                     }
                     _ => {
                         let s = self.expr(e);
-                        self.line(&format!("{};", s));
+                        if is_last && !self.current_fn_is_void {
+                            self.line(&format!("return {};", s));
+                        } else {
+                            self.line(&format!("{};", s));
+                        }
                     }
                 }
             }
@@ -713,13 +727,15 @@ impl DeviceEmitter {
                     if idx == 0 { self.line(&format!("if ({}) {{", c)); }
                     else        { self.line(&format!("}} else if ({}) {{", c)); }
                     self.indent += 1;
-                    for s in body { self.emit_stmt(s); }
+                    let last_idx = body.len().saturating_sub(1);
+                    for (j, s) in body.iter().enumerate() { self.emit_stmt(s, is_last && j == last_idx); }
                     self.indent -= 1;
                 }
                 if let Some(else_body) = &i.else_body {
                     self.line("} else {");
                     self.indent += 1;
-                    for s in else_body { self.emit_stmt(s); }
+                    let last_idx = else_body.len().saturating_sub(1);
+                    for (j, s) in else_body.iter().enumerate() { self.emit_stmt(s, is_last && j == last_idx); }
                     self.indent -= 1;
                 }
                 self.line("}");
@@ -735,7 +751,7 @@ impl DeviceEmitter {
                 if self.auto_sync && body_accesses_sync_field(&w.body, &self.current_fields) {
                     self.line("workgroupBarrier();");
                 }
-                for s in &w.body { self.emit_stmt(s); }
+                for s in &w.body { self.emit_stmt(s, false); }
                 self.indent -= 1;
                 self.line("}");
             }
@@ -762,7 +778,7 @@ impl DeviceEmitter {
                     if self.auto_sync && body_accesses_sync_field(&f.body, &self.current_fields) {
                         self.line("workgroupBarrier();");
                     }
-                    for s in &f.body { self.emit_stmt(s); }
+                    for s in &f.body { self.emit_stmt(s, false); }
                     self.line(&format!("{var} = {var} + 1;"));
                     self.indent -= 1;
                     self.line("}");
@@ -783,7 +799,7 @@ impl DeviceEmitter {
                         if self.auto_sync && body_accesses_sync_field(&f.body, &self.current_fields) {
                             self.line("workgroupBarrier();");
                         }
-                        for s in &f.body { self.emit_stmt(s); }
+                        for s in &f.body { self.emit_stmt(s, false); }
                         self.line(&format!("{var} = {var} + 1;"));
                         self.indent -= 1;
                         self.line("}");

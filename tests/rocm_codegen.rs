@@ -1356,3 +1356,75 @@ kernel:
          (`blur.__boring_launch(...)`), not a bogus ordinary function call;\ngot:\n{rs}"
     );
 }
+
+// ─── kernel/free-function tail expression → explicit `return` ────────────────
+//
+// Regression tests for a silent-correctness bug: a device function/method's
+// implicit tail expression (the last statement, with no explicit `return`)
+// used to be emitted as a bare, discarded statement instead of `return <expr>;`
+// — compiles cleanly, runs, and produces silently wrong results (the caller
+// always got the pre-call value back). HIP C++ requires an explicit `return`
+// for a non-void function, unlike Rust's own implicit-tail-return convention.
+
+#[test]
+fn device_kernel_helper_method_tail_expression_emits_return() {
+    let (hip, _) = rocm_codegen("kernel_helper_tail_return", r#"
+kernel AddOneF32:
+    mut [float32]'unified data
+
+    def float32 helper(float32 x):
+        x + 1.0
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = self.helper(data[i])
+"#);
+    assert!(
+        hip.contains("return (x + 1.0);") || hip.contains("return x + 1.0;"),
+        "expected the kernel helper method's tail expression to be emitted as \
+         an explicit `return ...;`, not a discarded bare statement;\ngot:\n{hip}"
+    );
+    // A trimmed-line-equality check (not a plain substring check) — the bad
+    // bare form `(x + 1.0);` is itself a substring of the good `return (x +
+    // 1.0);` line, so a naive `!hip.contains(...)` would always incorrectly
+    // pass once the fix's own `return ` prefix is present.
+    let has_bad_bare_stmt = hip.lines().any(|l| {
+        let t = l.trim();
+        t == "(x + 1.0);" || t == "x + 1.0;"
+    });
+    assert!(
+        !has_bad_bare_stmt,
+        "the old discarded bare-statement form must not still be present \
+         alongside the `return` (that would mean the tail statement was \
+         duplicated, not fixed);\ngot:\n{hip}"
+    );
+}
+
+#[test]
+fn device_free_function_tail_expression_emits_return() {
+    let (hip, _) = rocm_codegen("free_fn_tail_return", r#"
+def float32 addOne(float32 x):
+    x + 1.0
+
+kernel AddOneF32:
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = addOne(data[i])
+"#);
+    assert!(
+        hip.contains("return (x + 1.0);") || hip.contains("return x + 1.0;"),
+        "expected the free function's tail expression to be emitted as an \
+         explicit `return ...;`, not a discarded bare statement;\ngot:\n{hip}"
+    );
+    let has_bad_bare_stmt = hip.lines().any(|l| {
+        let t = l.trim();
+        t == "(x + 1.0);" || t == "x + 1.0;"
+    });
+    assert!(
+        !has_bad_bare_stmt,
+        "the old discarded bare-statement form must not still be present \
+         alongside the `return`;\ngot:\n{hip}"
+    );
+}

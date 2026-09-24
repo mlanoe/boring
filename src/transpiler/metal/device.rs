@@ -26,6 +26,10 @@ struct DeviceEmitter {
     auto_sync: bool,
     // Top-level scalar lets inlined into MSL (not in scope in kernel functions).
     top_level_scalars: std::collections::HashMap<String, String>,
+    /// True while emitting the body of a `void`-returning device function/method --
+    /// the tail statement of such a body must stay a bare expression statement
+    /// (nothing to return), unlike a non-void function's tail expression.
+    current_fn_is_void: bool,
 }
 
 impl DeviceEmitter {
@@ -37,6 +41,7 @@ impl DeviceEmitter {
             current_kernel: String::new(),
             auto_sync: false,
             top_level_scalars: std::collections::HashMap::new(),
+            current_fn_is_void: true,
         }
     }
 
@@ -113,7 +118,9 @@ impl DeviceEmitter {
         }).collect();
         self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
-        for stmt in &decl.body { self.emit_stmt(stmt); }
+        self.current_fn_is_void = ret == "void";
+        let last_idx = decl.body.len().saturating_sub(1);
+        for (i, stmt) in decl.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
         self.line("}");
     }
@@ -149,12 +156,16 @@ impl DeviceEmitter {
         }
         self.line(&format!("static {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
-        for stmt in &method.body { self.emit_stmt(stmt); }
+        self.current_fn_is_void = ret == "void";
+        let last_idx = method.body.len().saturating_sub(1);
+        for (i, stmt) in method.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
         self.line("}");
     }
 
     fn emit_entry_point(&mut self, decl: &KernelDecl, entry: &FnDecl) {
+        // The entry point is always `void` (a GPU kernel entry has no return value).
+        self.current_fn_is_void = true;
         let fn_name = format!("{}_kernel", decl.name);
 
         // Build parameter list with [[buffer(N)]] and [[threadgroup(N)]] indices.
@@ -327,13 +338,13 @@ impl DeviceEmitter {
             // Emit initial write-phase barrier after the first block of statements that
             // write to 'sync fields, before any loop that reads them cross-thread.
             let split = first_loop_index(&entry.body);
-            for stmt in &entry.body[..split] { self.emit_stmt(stmt); }
+            for stmt in &entry.body[..split] { self.emit_stmt(stmt, false); }
             if split < entry.body.len() {
                 self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
             }
-            for stmt in &entry.body[split..] { self.emit_stmt(stmt); }
+            for stmt in &entry.body[split..] { self.emit_stmt(stmt, false); }
         } else {
-            for stmt in &entry.body { self.emit_stmt(stmt); }
+            for stmt in &entry.body { self.emit_stmt(stmt, false); }
         }
         self.indent -= 1;
         self.line("}");
@@ -341,7 +352,7 @@ impl DeviceEmitter {
 
     // ── Statements ────────────────────────────────────────────────────────────
 
-    fn emit_stmt(&mut self, stmt: &Stmt) {
+    fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
             Stmt::Let(s) => {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
@@ -371,7 +382,11 @@ impl DeviceEmitter {
                     }
                     _ => {
                         let s = self.expr(e);
-                        self.line(&format!("{};", s));
+                        if is_last && !self.current_fn_is_void {
+                            self.line(&format!("return {};", s));
+                        } else {
+                            self.line(&format!("{};", s));
+                        }
                     }
                 }
             }
@@ -389,13 +404,15 @@ impl DeviceEmitter {
                     if idx == 0 { self.line(&format!("if ({}) {{", c)); }
                     else        { self.line(&format!("}} else if ({}) {{", c)); }
                     self.indent += 1;
-                    for s in body { self.emit_stmt(s); }
+                    let last_idx = body.len().saturating_sub(1);
+                    for (j, s) in body.iter().enumerate() { self.emit_stmt(s, is_last && j == last_idx); }
                     self.indent -= 1;
                 }
                 if let Some(else_body) = &i.else_body {
                     self.line("} else {");
                     self.indent += 1;
-                    for s in else_body { self.emit_stmt(s); }
+                    let last_idx = else_body.len().saturating_sub(1);
+                    for (j, s) in else_body.iter().enumerate() { self.emit_stmt(s, is_last && j == last_idx); }
                     self.indent -= 1;
                 }
                 self.line("}");
@@ -409,7 +426,9 @@ impl DeviceEmitter {
                 if self.auto_sync && body_accesses_sync_field(&w.body, &self.current_fields) {
                     self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
                 }
-                for s in &w.body { self.emit_stmt(s); }
+                // A loop body statement is never the function's own tail value, even if
+                // this `while` is itself the function's last statement.
+                for s in &w.body { self.emit_stmt(s, false); }
                 self.indent -= 1;
                 self.line("}");
             }
@@ -432,7 +451,7 @@ impl DeviceEmitter {
                 if self.auto_sync && body_accesses_sync_field(&f.body, &self.current_fields) {
                     self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
                 }
-                for s in &f.body { self.emit_stmt(s); }
+                for s in &f.body { self.emit_stmt(s, false); }
                 self.indent -= 1;
                 self.line("}");
             }

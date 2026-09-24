@@ -354,6 +354,34 @@ let _result = c.doubled()
 }
 
 #[test]
+fn test_self_can_call_own_mutating_method() {
+    // A method body calling another `def` method of the same struct via
+    // explicit `self.method()` must succeed under `boring run`, exactly like
+    // real Rust's `&mut self` always permits calling another `&mut self`
+    // method on the same receiver. Regression test: the interpreter's
+    // mutability gate in eval_expr.rs used to check `is_content_mutable(self)`
+    // for any bare-`Var` receiver including "self" — but no `define_mut("self",
+    // ...)` call site ever marks "self" content-mutable (only rebindable), so
+    // every `self.someDefMethod()` call from within another method incorrectly
+    // failed with "cannot call mutating method ... on non-mut binding 'self'".
+    let src = r#"
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    def bump():
+        self.inc()
+
+mut c = Counter()
+c.bump()
+let _result = c.value
+"#;
+    assert_eq!(run_src(src), Value::Int(1));
+}
+
+#[test]
 fn test_def_requires_var() {
     // Calling `def` on a `let` binding must be rejected — now by BOTH backends
     // (the transpiler gained this same enforcement, which it didn't have

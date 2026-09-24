@@ -4263,6 +4263,7 @@ impl Transpiler {
             observed_locals: self.observed_locals.clone(),
             observed_fields: self.observed_fields.clone(),
             infer_local_actor_vars: std::collections::HashSet::new(),
+            infer_local_shared_vars: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
             deps: self.deps.clone(),
             loaded: self.loaded.clone(),

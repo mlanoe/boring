@@ -24,7 +24,7 @@ use super::helpers::*;
 /// this before enum variant fields could carry `mut` (docs/book.md); the enum
 /// shape needs its own case since it's a `MethodCall`, not a `Call`, and so never matched
 /// the struct-only pattern this mirrors.
-fn constructor_type_name(value: &Expr) -> Option<&str> {
+pub(crate) fn constructor_type_name(value: &Expr) -> Option<&str> {
     match &value.kind {
         ExprKind::Call(callee, _) => {
             if let ExprKind::Var(type_name) = &callee.kind { Some(type_name.as_str()) } else { None }
@@ -2125,6 +2125,22 @@ impl Transpiler {
             Some(Type::Qualified(_, OwnerQual::Shared)) => {
                 let inner = self.emit_expr(value);
                 let is_heap = self.arg_is_heap_var(value);
+                // A bare (unannotated) local assigned from a call to a `'shared`-returning
+                // function (`let s = makeShared()`, no `Counter'shared` annotation) never
+                // gets `s` recorded into `var_types`/`arc_vars`/`rc_vars` — those are only
+                // ever populated from an EXPLICIT `'shared` annotation or a bare struct-
+                // constructor RHS (see `compute_let_ty_and_value`'s "Priority 5" doc), never
+                // from a plain function-call RHS. `infer_qualifiers.rs`'s candidate-narrowing
+                // pass DOES correctly resolve such a local's `inferred_qualifiers` entry to
+                // `Shared` (the same call-site-demand signal that already lets the
+                // `'actor`/`'guard` arms below check `inferred_qualifiers` for exactly this
+                // reason) — this arm just never consulted it, so `s` looked like a fresh,
+                // un-shared value here and got wrapped a second time
+                // (`Arc::new(s.clone())` on top of `s`'s own already-`Arc<Counter>`
+                // representation) — a confirmed E0308 at the call site. Checking it here
+                // too closes that gap the same way the other qualified arms already do.
+                let is_inferred_shared = matches!(&value.kind, ExprKind::Var(v)
+                    if matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Shared)));
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => {
                         let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(");
@@ -2133,7 +2149,8 @@ impl Transpiler {
                                     Some(Type::Qualified(_, OwnerQual::Shared))));
                         if already_rc_expr {
                             inner
-                        } else if is_existing_shared_var || matches!(&value.kind, ExprKind::Var(v) if self.rc_vars.contains(v.as_str())) {
+                        } else if is_existing_shared_var || is_inferred_shared
+                            || matches!(&value.kind, ExprKind::Var(v) if self.rc_vars.contains(v.as_str())) {
                             format!("Rc::clone(&{})", inner)
                         } else if is_heap {
                             format!("Rc::new(*{})", inner)
@@ -2148,7 +2165,7 @@ impl Transpiler {
                             return inner;
                         }
                         let is_existing_arc = matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
-                        if is_existing_arc {
+                        if is_existing_arc || is_inferred_shared {
                             format!("Arc::clone(&{})", inner)
                         } else if is_heap {
                             format!("Arc::new(*{})", inner)

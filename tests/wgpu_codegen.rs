@@ -2484,3 +2484,130 @@ print "y[7] = {k.y[7]}"
     assert!(stdout.contains("y[6] = 13"), "expected y[6] = x[6]+x[7] = 6+7 = 13, got:\n{stdout}");
     assert!(stdout.contains("y[7] = 7"), "expected y[7] = x[7] (k=1 tap out of bounds) = 7, got:\n{stdout}");
 }
+
+// ─── kernel/free-function tail expression → explicit `return` ────────────────
+//
+// Regression tests for a silent-correctness bug: a device function/method's
+// implicit tail expression (the last statement, with no explicit `return`)
+// used to be emitted as a bare, discarded statement instead of `return <expr>;`
+// — compiles cleanly, runs, and produces silently wrong results (the caller
+// always got the pre-call value back). WGSL requires an explicit `return`
+// for a non-void function, unlike Rust's own implicit-tail-return convention.
+
+#[test]
+fn device_kernel_helper_method_tail_expression_emits_return() {
+    let (wgsl, _rs) = wgpu_codegen("kernel_helper_tail_return", r#"
+kernel AddOneF32:
+    mut [float32]'unified data
+
+    def float32 helper(float32 x):
+        x + 1.0
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = self.helper(data[i])
+"#);
+    assert!(
+        wgsl.contains("return (x + 1.0);") || wgsl.contains("return x + 1.0;"),
+        "expected the kernel helper method's tail expression to be emitted as \
+         an explicit `return ...;`, not a discarded bare statement;\ngot:\n{wgsl}"
+    );
+    // A trimmed-line-equality check (not a plain substring check) — the bad
+    // bare form `(x + 1.0);` is itself a substring of the good `return (x +
+    // 1.0);` line, so a naive `!wgsl.contains(...)` would always incorrectly
+    // pass once the fix's own `return ` prefix is present.
+    let has_bad_bare_stmt = wgsl.lines().any(|l| {
+        let t = l.trim();
+        t == "(x + 1.0);" || t == "x + 1.0;"
+    });
+    assert!(
+        !has_bad_bare_stmt,
+        "the old discarded bare-statement form must not still be present \
+         alongside the `return` (that would mean the tail statement was \
+         duplicated, not fixed);\ngot:\n{wgsl}"
+    );
+}
+
+#[test]
+fn device_free_function_tail_expression_emits_return() {
+    let (wgsl, _rs) = wgpu_codegen("free_fn_tail_return", r#"
+def float32 addOne(float32 x):
+    x + 1.0
+
+kernel AddOneF32:
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = addOne(data[i])
+"#);
+    assert!(
+        wgsl.contains("return (x + 1.0);") || wgsl.contains("return x + 1.0;"),
+        "expected the free function's tail expression to be emitted as an \
+         explicit `return ...;`, not a discarded bare statement;\ngot:\n{wgsl}"
+    );
+    let has_bad_bare_stmt = wgsl.lines().any(|l| {
+        let t = l.trim();
+        t == "(x + 1.0);" || t == "x + 1.0;"
+    });
+    assert!(
+        !has_bad_bare_stmt,
+        "the old discarded bare-statement form must not still be present \
+         alongside the `return`;\ngot:\n{wgsl}"
+    );
+}
+
+/// Real end-to-end value assertion, against a real GPU adapter (this repo's CI runs
+/// on macOS/Metal — see `test_len_comparison_against_i32_index_real_shader_validation`'s
+/// doc comment above): the strongest possible regression test for the tail-expression
+/// `return`-emission bug, since it exercises the real generated WGSL through an actual
+/// compute pipeline dispatch and checks the *numeric* result, not just "compiles" or
+/// "contains return". Before the fix, this ran to completion with no error (the bug is
+/// silent-correctness, not a crash) and printed the original, unmodified input
+/// (`data[i] = 1, 2, 3`) instead of `data[i] + 1`.
+#[test]
+fn test_kernel_helper_method_real_shader_value() {
+    let src = r#"
+kernel AddOneF32:
+    mut [float32]'unified data
+
+    init([float32]'unified d):
+        data = d
+
+    def float32 helper(float32 x):
+        x + 1.0
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = self.helper(data[i])
+
+mut k = AddOneF32([1.0, 2.0, 3.0])
+kernel:
+    k(block = 3)
+
+print "data[0] = {k.data[0]}"
+print "data[1] = {k.data[1]}"
+print "data[2] = {k.data[2]}"
+"#;
+    let (_wgsl, _emulated, _rs, _toml) = run_wgpu("kernel_helper_real_shader_value", src);
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("kernel_helper_real_shader_value");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(stdout.contains("data[0] = 2"), "expected data[0] = 1+1 = 2, got:\n{stdout}");
+    assert!(stdout.contains("data[1] = 3"), "expected data[1] = 2+1 = 3, got:\n{stdout}");
+    assert!(stdout.contains("data[2] = 4"), "expected data[2] = 3+1 = 4, got:\n{stdout}");
+}

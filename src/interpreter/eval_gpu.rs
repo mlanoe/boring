@@ -626,6 +626,7 @@ fn run_kernel_parallel(
     // derefs through these the same as it would a plain `&T` — no behavior
     // change there.
     let captured_snapshot = Arc::new(snapshot_env(captured));
+    let decl_name         = Arc::new(decl.name.clone());
     let decl_fields       = Arc::new(decl.fields.clone());
     let decl_methods      = Arc::new(decl.methods.clone());
     let traits            = Arc::new(interp.traits.clone());
@@ -685,6 +686,7 @@ fn run_kernel_parallel(
         gpu_profile: &gpu_profile::GpuProfile,
         captured_snapshot: &[(String, ThreadValue)],
         entry_body: &[Stmt],
+        decl_name: &str,
         decl_fields: &[crate::ast::KernelFieldDecl],
         decl_methods: &[FnDecl],
         initial_fields: &[(String, ThreadValue)],
@@ -746,12 +748,45 @@ fn run_kernel_parallel(
             }
         }
 
+        // Register a synthetic struct decl for the kernel type under its own name, so
+        // `self.helper(...)` (a kernel's own additional `def <method>`) dispatches the
+        // same way an ordinary struct's `self.method()` call does (`call_method` in
+        // `methods.rs` looks up `self`'s type name in `ti.global` and expects a
+        // `Value::Struct`). `ti.global` here is a brand-new per-thread env with no user
+        // types registered at all (see `Interpreter::new_for_kernel`) — only the fields
+        // `call_method`'s struct-dispatch path actually reads (`methods`, `type_params`,
+        // `assoc_type_defs`) need real values; everything else is a harmless default,
+        // since a `KernelDecl` has no equivalent for most of `StructDecl`'s other fields.
+        let synthetic_decl = crate::ast::StructDecl {
+            name: decl_name.to_string(),
+            is_pub: false,
+            is_native: false,
+            protocols: vec![],
+            fields: vec![],
+            inits: vec![],
+            methods: decl_methods.to_vec(),
+            conversions: vec![],
+            type_params: vec![],
+            where_clause: vec![],
+            setters: vec![],
+            type_methods: vec![],
+            type_vars: vec![],
+            assoc_type_defs: vec![],
+            attrs: vec![],
+            line: 0,
+            col: 0,
+        };
+        ti.global.borrow_mut().define(decl_name, Value::Struct {
+            decl: synthetic_decl,
+            captured: Rc::clone(&ti.global),
+        });
+
         // Reconstruct the kernel object as `self`.
         let self_fields: Vec<(String, Value)> = initial_fields.iter()
             .map(|(n, tv)| (n.clone(), from_thread_value(tv.clone(), &thread_env)))
             .collect();
         let self_obj = Value::Object(Rc::new(RefCell::new(ObjectInner {
-            type_name: decl_fields.first().map(|_| "".to_string()).unwrap_or_default(),
+            type_name: decl_name.to_string(),
             fields: self_fields,
         })));
         thread_env.borrow_mut().define("self", self_obj);
@@ -848,7 +883,7 @@ fn run_kernel_parallel(
 
                 run_one_kernel_thread(
                     &traits, &enums_map, &aliases, &gpu_profile,
-                    &captured_snapshot, &entry_body, &decl_fields, &decl_methods,
+                    &captured_snapshot, &entry_body, &decl_name, &decl_fields, &decl_methods,
                     &initial_fields, &mutable_names,
                     block_x, block_y, block_z, grid_x, grid_y, grid_z,
                     block_idx_x, block_idx_y, block_idx_z,
@@ -907,6 +942,7 @@ fn run_kernel_parallel(
         let gpu_profile_r       = gpu_profile.as_ref();
         let captured_snapshot_r = captured_snapshot.as_ref();
         let entry_body_r        = entry_body.as_ref();
+        let decl_name_r         = decl_name.as_ref();
         let decl_fields_r       = decl_fields.as_ref();
         let decl_methods_r      = decl_methods.as_ref();
         let initial_fields_r    = initial_fields.as_ref();
@@ -969,7 +1005,7 @@ fn run_kernel_parallel(
                             .spawn_scoped(scope, move || {
                                 run_one_kernel_thread(
                                     traits_r, enums_map_r, aliases_r, gpu_profile_r,
-                                    captured_snapshot_r, entry_body_r, decl_fields_r, decl_methods_r,
+                                    captured_snapshot_r, entry_body_r, decl_name_r, decl_fields_r, decl_methods_r,
                                     initial_fields_r, mutable_names_r,
                                     block_x, block_y, block_z, grid_x, grid_y, grid_z,
                                     block_idx_x, block_idx_y, block_idx_z,

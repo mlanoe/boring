@@ -776,7 +776,15 @@ impl Interpreter {
                     // now, not from `is_mutable` (rebind axis) alone — a plain
                     // `var Point p` no longer suffices, `'actor`/`'guard`
                     // included with no exception (docs/book.md).
-                    if is_mutating && !env.borrow().is_content_mutable(binding_name) {
+                    //
+                    // `self` is excluded — same exemption as the field-mutation
+                    // gate right below in this file and in methods.rs's `assign`
+                    // (see methods.rs's "self is excluded" comment): `self` is
+                    // always bound via `define_mut` regardless of `def`/`req`, so
+                    // this flag was never a meaningful signal for it, and real
+                    // Rust's `&mut self` always permits calling another `&mut
+                    // self` method on the same receiver.
+                    if is_mutating && binding_name != "self" && !env.borrow().is_content_mutable(binding_name) {
                         return Err(err(
                             format!("cannot call mutating method '{}' on non-mut binding '{}' — declare it with `mut` or `var mut` to permit content mutation", method, binding_name),
                             line,

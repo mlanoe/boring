@@ -1114,6 +1114,21 @@ struct Transpiler {
     /// call whose declared return type is `'actor` or `'guard`. Populated by a pre-pass
     /// in `infer_qualifiers` and consumed by `walk_expr_for_qualifiers`. Cleared each call.
     pub(crate) infer_local_actor_vars: std::collections::HashSet<String>,
+    /// Local variables in the current function body that are assigned from a call whose
+    /// declared return type is `'shared` — the `'shared` counterpart of
+    /// `infer_local_actor_vars` above, kept as its own set rather than folded into it
+    /// because a `'shared`-returning call is unambiguous (constrains straight to
+    /// `[OwnerQual::Shared]`, no further disambiguating signal needed), unlike
+    /// `infer_local_actor_vars`'s `{Actor, Guard}` pair, which still needs a later
+    /// call-site-demand signal to pick one. Populated by a pre-pass in `infer_qualifiers`
+    /// and consumed there directly. Cleared each call. Without this, a bare
+    /// `let s = makeShared()` (no explicit `'shared` annotation) never got `s`'s inferred
+    /// qualifier resolved to `Shared` at all — its candidate set stayed at every
+    /// qualifier, and the generic size-based fallback picked `Inline` instead — so a
+    /// later `emit_let_value`'s `'shared` arm (which checks `inferred_qualifiers` the
+    /// same way the `'actor`/`'guard` arms already do) never recognized `s` as already
+    /// wrapped, and doubly wrapped it at a `'shared`-typed call site (confirmed E0308).
+    pub(crate) infer_local_shared_vars: std::collections::HashSet<String>,
     /// Local variables (task/closure captures) on which a `task`-declared method was called
     /// during the current function's qualifier-inference pass. When both the plain and
     /// `'task` variant of 'actor/'guard remain candidates, presence in this set picks the
@@ -1520,6 +1535,7 @@ impl Transpiler {
             observed_locals: std::collections::HashMap::new(),
             observed_fields: std::collections::HashMap::new(),
             infer_local_actor_vars: std::collections::HashSet::new(),
+            infer_local_shared_vars: std::collections::HashSet::new(),
             task_method_call_vars: std::collections::HashSet::new(),
             task_method_call_fields: std::collections::HashSet::new(),
             lazy_vars: std::collections::HashSet::new(),

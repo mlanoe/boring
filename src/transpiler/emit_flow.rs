@@ -116,6 +116,11 @@ impl Transpiler {
                         // emit_expr_owned's flat "last enum registered wins" DotIdent lookup,
                         // which can silently pick the wrong enum when variant names collide.
                         self.emit_let_value(Some(ret_ty), e)
+                    } else if let Some(wrapped) = self.wrap_return_for_qualifier(ret_ty, e) {
+                        // `return`ing a bare `'actor`/`'guard`/`'shared`/`'observed`-qualified
+                        // value (e.g. `return Counter(0)` from a `Counter'actor`-returning
+                        // fn) — see `wrap_return_for_qualifier`'s doc.
+                        wrapped
                     } else {
                         self.emit_expr_owned(e)
                     }

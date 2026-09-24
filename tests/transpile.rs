@@ -1170,3 +1170,20 @@ transpile_test!(observed_qualifier);
 // `tests/dependency_injection.rs`'s `singleton_rejects_under_threading_single` for the
 // compile-error-message assertion this case exists to complement.
 transpile_test!(singleton_di, ignore_single);
+
+// Regression test: a function's own declared `'actor`/`'guard`/`'shared` return-type
+// qualifier was never applied to a bare constructor-call return value — neither a bare
+// tail expression nor an explicit `return` — so the generated Rust failed to compile
+// (E0308: expected e.g. `Arc<Mutex<Counter>>`, found the bare `Counter` struct literal).
+// Found while implementing `@singleton` (docs/design-notes/boring-di-draft.md), which
+// uses exactly this bare-constructor-return shape for every `@provide` worked example.
+// See `src/transpiler/emit_stmt.rs`'s `wrap_return_for_qualifier` doc for the fix.
+transpile_test!(actor_guard_shared_return_qualifier);
+
+// Regression test: a bare (unannotated) local assigned from a call to a
+// `'shared`-returning function got the wrong inferred qualifier (`Inline` instead of
+// `Shared`), so passing it to a `'shared`-typed parameter re-wrapped it a second time
+// (E0308). Found while verifying `'guard`/`'actor` (already correct via
+// `infer_local_actor_vars`) had no `'shared` counterpart. See
+// `src/transpiler/infer_qualifiers.rs`'s `infer_local_shared_vars` doc for the fix.
+transpile_test!(shared_return_callsite_no_double_wrap);

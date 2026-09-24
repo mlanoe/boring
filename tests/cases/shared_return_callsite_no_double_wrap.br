@@ -1,0 +1,40 @@
+# Regression test: a bare (unannotated) local assigned from a call to a
+# `'shared`-returning function -- `let s = makeShared()`, no explicit
+# `Counter'shared` annotation -- never got its qualifier inferred at all, so
+# passing it to a `'shared`-typed parameter re-wrapped it a second time
+# (`Arc::new(s.clone())` on top of `s`'s own already-`Arc<Counter>`
+# representation) -- a confirmed E0308 ("expected `Counter`, found
+# `Arc<Counter>`").
+#
+# Root cause: `infer_qualifiers.rs`'s pre-pass that recognizes "this bare local
+# comes from a lock-qualified-returning function call" (`collect_actor_lets` /
+# `expr_returns_actor_qual`, feeding `infer_local_actor_vars`) only checked
+# `'actor`/`'guard` return types, never `'shared` -- so `s`'s candidate set
+# never got the early single-candidate narrowing `'actor`/`'guard` locals get,
+# and the later call-site-demand signal alone leaves 3 candidates
+# (`{Inline, Owned, Shared}`, see `coercible_from`), which the generic
+# size-based fallback resolved to `Inline` instead of `Shared`.
+# `emit_let.rs`'s own `'shared` codegen arm then never recognized `s` as
+# already wrapped (unlike its `'actor`/`'guard` siblings, which already
+# consulted `inferred_qualifiers` for exactly this reason) and wrapped it a
+# second time.
+#
+# Fixed by a `'shared` counterpart pre-pass (`infer_local_shared_vars`,
+# `src/transpiler/infer_qualifiers.rs`) that resolves such a local straight to
+# `Shared` (unambiguous, unlike the `{Actor, Guard}` pair), and by teaching
+# `emit_let.rs`'s `'shared` arm to also check `inferred_qualifiers` before
+# deciding a value needs wrapping.
+struct Counter:
+    var int value = 0
+
+Counter'shared makeShared():
+    Counter(4)
+
+def useShared(Counter'shared c):
+    print "shared={c.value}"
+
+def main():
+    let s = makeShared()
+    useShared(s)
+    useShared(s)
+    print "s={s.value}"

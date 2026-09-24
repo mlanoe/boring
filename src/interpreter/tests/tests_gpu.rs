@@ -484,6 +484,65 @@ let _result = k.buf
     );
 }
 
+// ─── kernel method called via explicit `self.` from entry point ─────────────
+
+#[test]
+fn test_kernel_helper_method_via_self() {
+    // Regression test: unlike the bare `apply(tid)` call in
+    // `test_kernel_helper_method` above (which resolves via the free-function
+    // injection `run_one_kernel_thread` does for every named kernel method),
+    // calling a kernel's own helper method via the idiomatic, explicit
+    // `self.helper(...)` form (see CLAUDE.md's "implicit self" note: bare
+    // calls to another method of the same type are never auto-resolved) used
+    // to fail outright with `no method 'helper' on type ''` under `boring
+    // run` — `self`'s `ObjectInner.type_name` was hardcoded to `""` and the
+    // kernel type was never registered in the per-thread interpreter's own
+    // (fresh, empty) global env, so `call_method`'s struct-dispatch lookup
+    // could never succeed regardless of the type name. This also blocked
+    // using `boring run` as a GPU-free correctness check for kernel helper
+    // methods, since only the GPU-codegen paths (Metal/CUDA/ROCm/wgpu) ever
+    // exercised `self.helper()`-shaped calls successfully.
+    //
+    // `helper` is declared `req` (not `def`) deliberately: a `def` (mutating)
+    // method called via explicit `self.method()` hits a separate, pre-existing,
+    // and unrelated interpreter bug (the mutability gate in
+    // `eval_expr.rs::eval_expr_method_call` never marks `self` content-mutable
+    // in a method's own `fn_env`, so `self.someDefMethod()` fails with "cannot
+    // call mutating method ... on non-mut binding 'self'" even for an ordinary,
+    // non-kernel struct — reproduces with a plain `Counter` struct too). That
+    // bug is out of scope here; this test isolates the actual fix (dispatch
+    // resolution), not that separate mutability-permission bug.
+    let src = r#"
+kernel AddOneF32:
+    mut [float32]'unified data
+
+    init([float32]'unified d):
+        data = d
+
+    req float32 helper(float32 x):
+        x + 1.0
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = self.helper(data[i])
+
+let d = [1.0, 2.0, 3.0]
+mut k = AddOneF32(d)
+kernel:
+    k(block = 3)
+let _result = k.data
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    assert_eq!(
+        val,
+        Value::Array(vec![
+            Value::Float32(2.0), Value::Float32(3.0), Value::Float32(4.0),
+        ].into())
+    );
+}
+
 // ─── unassigned fixed-size 'actor fields default to zero, not Nil ───────────
 
 #[test]

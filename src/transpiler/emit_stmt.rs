@@ -275,6 +275,14 @@ impl Transpiler {
                         // Tuple/Array/Dict return: use emit_let_value for per-element
                         // coercion (string literals → Arc<str> in the right slots).
                         self.emit_let_value(self.fn_return_ty.as_ref(), e)
+                    } else if let Some(wrapped) = self.fn_return_ty.clone()
+                        .and_then(|ret_ty| self.wrap_return_for_qualifier(&ret_ty, e))
+                    {
+                        // Bare tail expression of a `'actor`/`'guard`/`'shared`/`'observed`-
+                        // qualified fn (e.g. `Counter'actor makeCounter(): Counter(0)`) —
+                        // see `wrap_return_for_qualifier`'s doc, this is `emit_return`'s
+                        // twin for the no-explicit-`return` tail-expression shape.
+                        wrapped
                     } else {
                         self.emit_expr_owned(e)
                     };
@@ -626,6 +634,91 @@ impl Transpiler {
             crate::transpiler::ThreadingMode::Single =>
                 format!("RefCell::new({})", val),
         }
+    }
+
+    /// True when `e` is a bare struct-constructor call (`TypeName(args)`) or enum-variant
+    /// constructor (`TypeName.Variant(args)`) whose `TypeName` names a Boring-declared
+    /// struct/enum — the "fresh, unwrapped value" shape `wrap_return_for_qualifier` needs
+    /// to distinguish from an already-qualified value (an existing `'actor`/`'guard`/
+    /// `'shared` variable, a nested call to another such-qualified function, etc.), which
+    /// must NOT be re-wrapped — those already reach the caller's default
+    /// `emit_expr_owned` fallback correctly. Mirrors the same known-struct/enum check
+    /// `try_emit_qualified_let` runs on `constructor_type_name` for its own `var_struct_types`
+    /// bookkeeping.
+    fn is_fresh_struct_ctor(&self, e: &Expr) -> bool {
+        crate::transpiler::emit_let::constructor_type_name(e).is_some_and(|type_name| {
+            type_name.chars().next().is_some_and(|c| c.is_uppercase())
+                && (self.struct_fields.contains_key(type_name)
+                    || self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", type_name))))
+        })
+    }
+
+    /// Wraps a bare, freshly-constructed return/tail-expression value to match the
+    /// function's own declared `'actor`/`'actor'task`/`'guard`/`'guard'task`/`'shared`
+    /// return-type qualifier — the return-type-driven counterpart of `emit_let.rs`'s
+    /// `try_emit_qualified_let`, which performs the identical wrap for a `let`/
+    /// `mut Type'actor c = ...` local binding's own initializer. (`'observed` needs no
+    /// arm here — see the dedicated comment below.)
+    ///
+    /// Without this, `Counter'actor makeCounter(): Counter(0)` (bare tail expression) or
+    /// `return Counter(0)` emitted the raw, unwrapped `Counter { .. }` struct literal where
+    /// the declared return type requires `Arc<Mutex<Counter>>` — a confirmed E0308
+    /// (mismatched types). See the bug report this fixes for the full repro and the
+    /// confirmed workaround (`mut Counter'actor c = Counter(0); c`, which already worked —
+    /// `try_emit_qualified_let` already wraps a local's own initializer correctly).
+    ///
+    /// Gated on `is_fresh_struct_ctor`: `'actor`/`'guard` have no reusable "is this value
+    /// already Arc<Mutex<T>>-shaped?" detector the way `emit_let_value`'s `'shared` arm
+    /// does (see below) — unconditionally wrapping a `Var` or nested call result here would
+    /// double-wrap an already-qualified value (e.g. the tail `c` in the workaround above).
+    /// Restricting to a bare constructor call is exactly the shape the report's own
+    /// `@provide`-style worked examples use, and leaves every other (already-correct) shape
+    /// completely untouched.
+    ///
+    /// `'shared` is handled unconditionally instead — `emit_let_value`'s own
+    /// `OwnerQual::Shared` arm already detects an already-Rc/Arc-shaped source (an existing
+    /// `'shared` variable, `.clone()` of one, etc.) and skips re-wrapping it, so reusing it
+    /// directly here (as-is, no gating) is safe for any expression shape, not just a fresh
+    /// constructor call.
+    ///
+    /// Returns `None` for any other qualifier (managed-mode `T'`/`'owned`/`'new` are already
+    /// handled by both call sites separately, before this is ever reached) — callers fall
+    /// through to their own default `emit_expr_owned` in that case.
+    pub(crate) fn wrap_return_for_qualifier(&self, ret_ty: &Type, e: &Expr) -> Option<String> {
+        let ty = ret_ty.without_mut();
+        if matches!(ty, Type::Qualified(_, OwnerQual::Shared)) {
+            return Some(self.emit_let_value(Some(ty), e));
+        }
+        if !self.is_fresh_struct_ctor(e) {
+            return None;
+        }
+        if let Some(inner) = Self::mutex_inner(ty) {
+            let raw = self.emit_let_value(Some(inner), e);
+            return Some(if Self::is_mutex_task_binding(false, ty) {
+                self.emit_actor_task_new(&raw)
+            } else {
+                self.emit_actor_new(&raw)
+            });
+        }
+        if let Some(inner) = Self::rwlock_inner(ty) {
+            let raw = self.emit_let_value(Some(inner), e);
+            return Some(if Self::is_rwlock_task_binding(false, ty) {
+                self.emit_guard_task_new(&raw)
+            } else {
+                self.emit_guard_new(&raw)
+            });
+        }
+        // Deliberately no `OwnerQual::Observed` arm here: unlike 'actor/'guard/'shared,
+        // a bare-constructor `'observed` return value is already wrapped correctly by
+        // `emit_expr.rs`'s `emit_constructor` (its own `OwnerQual::Observed` arm, gated
+        // the same way on `self.fn_return_ty` matching the constructed type) — every
+        // `self.emit_expr_owned(e)` call along the way to emitting `e` itself already
+        // goes through `emit_constructor` for a bare `TypeName(args)`, so adding a second
+        // wrap here would double-wrap (`BoringObserved::new(Arc::new(Mutex::new(
+        // BoringObserved::new(Arc::new(Mutex::new(...))))))` — confirmed while testing
+        // this fix). `'actor`/`'guard`/`'shared` have no equivalent existing arm in
+        // `emit_constructor`, which is the actual gap this function closes.
+        None
     }
 
     /// Infer whether an expression's result type is a managed-mode owned user type.
