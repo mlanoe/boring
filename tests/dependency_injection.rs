@@ -1,12 +1,17 @@
 // Copyright (C) 2026 Mickaël LANOË
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Checker and codegen tests for the first implementation slice of the
-// dependency-injection design (docs/design-notes/boring-di-draft.md): the
-// `@singleton` attribute (a general, DI-independent memoization mechanism, §4)
-// and `@provide`'s `pub` requirement (§3). `@inject` itself has no
-// resolution/registry pass yet and is expected to be rejected with a clear
-// "not implemented yet" error rather than silently compiling.
+// Checker and codegen tests for the dependency-injection design
+// (docs/design-notes/boring-di-draft.md): `@singleton` (a general,
+// DI-independent memoization mechanism, §4), `@provide`'s `pub` requirement
+// (§3), and `@inject` itself (§1-§2) — resolved and desugared into a
+// synthesized `init` by `src/desugar_inject.rs`, reusing Boring's existing
+// labeled-argument-with-defaults call-site machinery rather than any new
+// transpiler codegen. Current `@inject` scope (see that file's own doc
+// comment for the full list): same-`Program` providers only (no `[deps]`
+// cross-project resolution yet), no `id`/`env`, explicit field qualifier
+// required (no bare-field inference yet), and a struct with an `@inject`
+// field can't also declare its own `init`.
 //
 // Run with:
 //   cargo test --test dependency_injection
@@ -301,13 +306,58 @@ def main():
     );
 }
 
-// ── `@inject` — not implemented yet, must fail loudly, never silently ──────────
+// ── `@inject` — resolution against the `@provide` registry ─────────────────────
 
 #[test]
-fn inject_is_rejected_as_not_yet_implemented() {
+fn inject_resolves_transient_provider_at_zero_arg_call_site() {
+    // `desugar_inject.rs` synthesizes an `init` for `Greeting`; the omitting
+    // `Greeting()` call site should be rewritten to call the resolved
+    // provider directly, exactly like an ordinary defaulted-parameter call.
+    let src = "\
+trait Greeter:
+    req string greet()
+
+struct EnglishGreeter as Greeter:
+    req string greet(): \"hello\"
+
+struct Greeting:
+    @inject
+    Greeter'shared greeter
+
+    req string say():
+        self.greeter.greet()
+
+@provide
+pub Greeter'shared greeterProvider():
+    EnglishGreeter()
+
+def main():
+    let g = Greeting()
+    print g.say()
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected a resolvable @inject field to compile, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Greeting::new(greeterProvider())"),
+        "expected the omitted @inject argument to be filled in with a call to the resolved \
+         provider, got:\n{}", stdout
+    );
+    assert!(
+        !stdout.contains("#[inject]"),
+        "the `@inject` attribute must never be emitted verbatim as a Rust attribute:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_no_provider_found_is_rejected() {
     let src = "\
 trait NetworkClient:
-    req [byte] fetch(string url) throws
+    req string fetch()
 
 struct UserRepository:
     @inject
@@ -317,11 +367,168 @@ def main():
     print \"ok\"
 ";
     let out = emit_rust(src);
-    assert!(!out.status.success(), "expected @inject to be rejected (not implemented yet)");
+    assert!(!out.status.success(), "expected @inject with no matching provider to be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("`@inject` is not implemented yet"),
-        "expected the not-yet-implemented error, got:\n{}", stderr
+        stderr.contains("no `@provide` found for type `NetworkClient`"),
+        "expected the no-provider-found error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_ambiguous_providers_rejected() {
+    let src = "\
+trait Logger:
+    req void log(string msg)
+
+struct FileLogger as Logger:
+    def void log(string msg): print msg
+
+struct ConsoleLogger as Logger:
+    def void log(string msg): print msg
+
+@provide
+pub Logger'shared fileLoggerProvider():
+    FileLogger()
+
+@provide
+pub Logger'shared consoleLoggerProvider():
+    ConsoleLogger()
+
+struct Service:
+    @inject
+    Logger'shared logger
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected two @provide functions for the same type to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous provider for `Logger`"),
+        "expected the ambiguity error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_bare_field_without_qualifier_is_rejected() {
+    let src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+struct UserRepository:
+    @inject
+    NetworkClient client
+
+@provide
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a bare (unqualified) @inject field to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("has no qualifier"),
+        "expected the bare-qualifier error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_singleton_qualifier_mismatch_is_rejected() {
+    let src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+struct UserRepository:
+    @inject
+    NetworkClient'actor client
+
+@provide
+@singleton
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a qualifier mismatch against a @singleton provider to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must be matched exactly"),
+        "expected the singleton-qualifier-mismatch error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_owned_rejected_when_provider_is_singleton() {
+    let src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+struct UserRepository:
+    @inject
+    NetworkClient'owned client
+
+@provide
+@singleton
+pub NetworkClient'owned networkClient():
+    RealNetworkClient()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected 'owned + a @singleton provider to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be `'owned`"),
+        "expected the owned/singleton-provider rejection, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_rejects_struct_with_existing_init() {
+    let src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+    init():
+        self.client = RealNetworkClient()
+
+@provide
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected @inject on a struct with its own init to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already declares its own `init`"),
+        "expected the existing-init-conflict error, got:\n{}", stderr
     );
 }
 
@@ -348,13 +555,23 @@ def main():
 
 #[test]
 fn inject_is_rejected_under_kernel_target() {
+    // A matching `@provide` is required so `desugar_inject` (which runs before the
+    // kernel-target checker pass) resolves this field successfully instead of
+    // failing earlier with an unrelated "no provider found" error.
     let src = "\
 trait NetworkClient:
-    req [byte] fetch(string url) throws
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
 
 struct UserRepository:
     @inject
     NetworkClient'shared client
+
+@provide
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
 
 def main():
     print \"ok\"

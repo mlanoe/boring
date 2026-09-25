@@ -865,17 +865,10 @@ impl Checker {
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
             self.check_atomic_compatibility(&Some(f.ty.clone()), f.line, f.col);
             self.check_observed_compatibility(&Some(f.ty.clone()), f.line, f.col);
-            // `@inject` (docs/design-notes/boring-di-draft.md §1) has no resolution/
-            // registry pass implemented yet — reject explicitly rather than letting the
-            // transpiler's generic attribute fallback emit an invalid `#[inject]` Rust
-            // attribute, or worse, silently compile as an ordinary *required* field.
-            if let Some(attr) = f.attrs.iter().find(|a| a.name == "inject") {
-                self.error(
-                    "`@inject` is not implemented yet (docs/design-notes/boring-di-draft.md) — \
-                     this field must be supplied explicitly at construction for now",
-                    attr.line, attr.col,
-                );
-            }
+            // `@inject` itself (docs/design-notes/boring-di-draft.md §1) is fully resolved
+            // and desugared away before the checker ever runs — see `desugar_inject.rs`,
+            // which either synthesizes a real `init` for this struct or exits with a clear
+            // resolution error. Nothing left for the checker to reject here.
         }
         for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }

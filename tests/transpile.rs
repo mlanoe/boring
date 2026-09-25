@@ -1171,6 +1171,14 @@ transpile_test!(observed_qualifier);
 // compile-error-message assertion this case exists to complement.
 transpile_test!(singleton_di, ignore_single);
 
+// `@inject` (docs/design-notes/boring-di-draft.md §1): two independent structs,
+// each with an `@inject` field of the same type, resolved against one
+// `@provide` + `@singleton` provider — both end up sharing the same underlying
+// instance with no parameter threaded through by hand. `ignore_single`: same
+// `@singleton`/`--threading single` `Sync` restriction as `singleton_di` above
+// (the provider here is also `@singleton`).
+transpile_test!(inject_di, ignore_single);
+
 // Regression test: a function's own declared `'actor`/`'guard`/`'shared` return-type
 // qualifier was never applied to a bare constructor-call return value — neither a bare
 // tail expression nor an explicit `return` — so the generated Rust failed to compile

@@ -18,6 +18,7 @@ pub mod ast;
 pub mod parser;
 pub mod desugar_labeled_array;
 pub mod desugar_array_block;
+pub mod desugar_inject;
 pub mod interpreter;
 pub mod checker;
 mod git_deps;
@@ -80,6 +81,20 @@ fn report_error(path: &Path, source: &str, line: usize, col: usize, len: usize, 
 /// this pass does and why it can fail.
 fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
     match desugar_array_block::desugar_array_block(program) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
+            process::exit(1);
+        }
+    }
+}
+
+/// Runs `desugar_inject` (docs/design-notes/boring-di-draft.md's `@inject`
+/// resolution/desugaring pass) and reports+exits on a resolution error the
+/// same way every other pipeline stage here does — mirrors
+/// `desugar_array_block_or_exit` immediately above, for the identical reason.
+fn desugar_inject_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
+    match desugar_inject::desugar_inject(program) {
         Ok(p) => p,
         Err(e) => {
             report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
@@ -2087,6 +2102,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
+    let program = desugar_inject_or_exit(&path, &source, program);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -2212,6 +2228,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
+    let program = desugar_inject_or_exit(&path, &source, program);
     if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
     // Same [deps] resolution as emit_rust_to_dir, so `--emit-rust` (project mode or a
     // standalone file) resolves `use <name>.xxx` identically to a real `boring build`.
@@ -2303,6 +2320,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
+    let program = desugar_inject_or_exit(&path, &source, program);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -2544,7 +2562,14 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     }
     merge_into(&path, &mut visited, &mut items, &search_paths, &deps);
     let program = desugar_labeled_array::desugar_labeled_array(ast::Program { items });
-    match desugar_array_block::desugar_array_block(program) {
+    let program = match desugar_array_block::desugar_array_block(program) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
+            process::exit(1);
+        }
+    };
+    match desugar_inject::desugar_inject(program) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
@@ -3040,6 +3065,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
+    let program = desugar_inject_or_exit(&path, &source, program);
 
     // Validate for kernel-mode compatibility.
     let diags = validator::validate_kernel(&program);

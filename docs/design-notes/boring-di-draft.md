@@ -1,7 +1,14 @@
 # Draft — a general-purpose dependency-injection / inversion-of-control mechanism for Boring
 
-Status: **working draft**, not a spec. Nothing in this document is implemented. This is a
-standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
+Status: **partially implemented**. `@singleton` (§4), `@provide`'s `pub` requirement (§3), and a
+first slice of `@inject` (§1-§2 — same-`Program` providers only, no `id`/`env`, explicit field
+qualifier required, no bare-field inference, a struct can't combine `@inject` with its own `init`
+yet) are real and tested (`src/desugar_inject.rs`, `src/checker/mod.rs`'s
+`check_di_provider_attrs`, `tests/dependency_injection.rs`, `tests/cases/{singleton,inject}_di.br`).
+Still design-only: `'static` under `@provide`/`@inject` (§2, blocked on a `docs/book.md` §21
+amendment), `id`/`env` (§5-§6), cross-project (`[deps]`) resolution, cycle detection (§7), and
+`boring run`/the self-hosted interpreter (deferred to v2/v3 by design). This is a standalone design
+topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
 
 ## Goal
 
@@ -1264,27 +1271,31 @@ rough priority order.
 
 **Actually blocking — settle before writing checker/transpiler code:**
 
-1. ~~Is "singleton only" an acceptable permanent scope?~~ **Resolved (§4)**: transient is the
-   default, `@singleton` (a separate, stackable attribute — not a `@provide` argument, §4) opts
-   into memoizing — confirm the checker actually enforces `'owned` + `@singleton` as a compile error
-   (§2) before shipping, since that's the one qualifier/attribute combination that's meaningless
-   (`Box<T>` can't be referenced by more than one consumer) and would otherwise silently compile
-   into something nonsensical.
+1. ~~Is "singleton only" an acceptable permanent scope?~~ **Resolved and shipped (§4)**: transient
+   is the default, `@singleton` (a separate, stackable attribute — not a `@provide` argument, §4)
+   opts into memoizing — `'owned` + `@singleton` is enforced as a compile error
+   (`check_di_provider_attrs`, `src/checker/mod.rs`; `check_singleton_owned_return`,
+   `src/checker/rust_checks.rs`), tested in `tests/dependency_injection.rs`.
 2. **`'static` under `@provide` needs a fourth legal construction site added to `docs/book.md` §21
    itself** (currently three: top level, `main`, `type let` field) — a small amendment to the *core*
    qualifier system, not just this feature, and a prerequisite for `'static` being usable under
-   `@inject`/`@provide` at all.
-3. ~~Cross-project visibility default for `@provide`?~~ **Resolved (§3)**: `@provide` requires
-   `pub`, unconditionally — no conditional/module-scoped visibility to design at all. Confirm the
-   checker actually rejects a non-`pub` `@provide` before shipping.
+   `@inject`/`@provide` at all. **Still not done** — `'static` is not yet in `@inject`'s/`@provide`'s
+   accepted set in the actual implementation (`desugar_inject.rs`/`check_di_provider_attrs` both
+   currently accept `'shared`/`'actor`/`'guard`/`'observed`/`'owned` only).
+3. ~~Cross-project visibility default for `@provide`?~~ **Resolved and shipped (§3)**: `@provide`
+   requires `pub`, unconditionally — the checker rejects a non-`pub` `@provide`
+   (`check_di_provider_attrs`), tested in `tests/dependency_injection.rs`.
 4. ~~`boring run` vs. `boring build` parity?~~ **Resolved: `boring build` in v1, `boring run` in v2,
-   the self-hosted-in-Boring interpreter (`boring/interpreter/*.br`) not before v3.**
-5. ~~Eager vs. lazy construction for `@singleton`?~~ **Resolved (§4): lazy** — avoids constructing
-   unused providers and sidesteps provider-to-provider ordering entirely (no topological sort needed,
-   each `@singleton` is its own independent `LazyLock`). Non-`@singleton` providers don't need this
-   decision at all — they're just ordinary function calls.
-6. **Explicitly reject `@inject`/`@provide` under `--target kernel`** in the validator from the first
-   commit — cheap, but easy to forget since nothing else about kernel mode would naturally catch it.
+   the self-hosted-in-Boring interpreter (`boring/interpreter/*.br`) not before v3.** `@inject`'s
+   actual v1 implementation (`desugar_inject.rs`) runs entirely as an AST-level desugaring pass
+   before the checker/transpiler — `boring run`'s tree-walking interpreter never sees `@inject`/
+   `@provide` at all yet (v2 scope, unchanged).
+5. ~~Eager vs. lazy construction for `@singleton`?~~ **Resolved and shipped (§4): lazy** —
+   `emit_singleton_fn` (`src/transpiler/emit_top.rs`) compiles to a `std::sync::LazyLock`, each
+   `@singleton` its own independent static. Non-`@singleton` providers don't need this decision at
+   all — they're just ordinary function calls.
+6. ~~Explicitly reject `@inject`/`@provide` under `--target kernel`~~ **Resolved and shipped** —
+   `src/validator/kernel.rs` rejects all three attributes, tested in `tests/dependency_injection.rs`.
 
 **Real new implementation work to scope, not just "reuse existing infrastructure":**
 
@@ -1293,12 +1304,21 @@ rough priority order.
   technique as the recursion-depth guard" (as this document puts it) is a design analogy, not
   existing code to call into.
 - **The whole-program (now same-project-only, §2) collection pass** that must complete before a
-  struct with a bare `@inject` field can have its Rust layout finalized — confirm whether today's
-  compiler already has a "collect this project's whole AST before resolving anything" phase to hook
-  into, or whether introducing one is itself part of this feature's cost.
-- **Ambiguity and unresolved-provider diagnostics** — the algorithm is settled (§ "Ambiguity UX":
-  single deterministic scan, error anchored at the second colliding declaration, note at the first);
-  what's left is message wording and formatting quality, not detection logic.
+  struct with a bare `@inject` field can have its Rust layout finalized — **sidestepped for v1, not
+  solved**: `desugar_inject.rs` requires an explicit qualifier on every `@inject` field (rejects a
+  bare one outright), so it never needs to know a `@singleton` provider's return-type qualifier
+  before a struct's own layout is fixed. Still a real gap to close for bare-field ergonomics later —
+  `desugar_inject.rs` already builds the same-project `(base type) -> provider` registry this would
+  need, so widening it to also support the bare case is additive, not a redesign.
+- **Ambiguity and unresolved-provider diagnostics** — **basic version shipped**:
+  `desugar_inject.rs`'s `collect_providers` scans the whole `Program` once, erroring at the second
+  colliding declaration for a given base type (no `id`/`env` yet, so any two `@provide` functions for
+  the same type collide unconditionally) and naming the type/no-provider case clearly when nothing
+  matches at all. What's genuinely still missing, per § "Ambiguity UX"'s fuller design: a `note:`
+  pointing back at the *first* declaration as a separate structured diagnostic (folded into one
+  message for now, since this pass reuses `ParseError`, which has no note/multi-span shape), the
+  distance-based priority ranking (§ "Resolution is keyed by..." — no cross-project `[deps]`
+  resolution exists yet for it to rank against), and `env`-filtering ahead of the collision check.
 - **`@provide(env = "...")`'s CLI shape (§6)** — decide how `env` actually reaches the compiler (a
   `--env <value>` flag on `boring build`/`boring run` is the leading candidate). No dependency on
   Cargo/Rust build profiles either way — `env` is read once by Boring's own CLI, before any
@@ -1316,8 +1336,28 @@ rough priority order.
 - Per-subtree ambient overrides — explicitly `boring-ui`'s own follow-up design, not this document's;
   the one constraint pinned down here is that any such provider is necessarily transient, never
   `@singleton` (§ "Per-subtree ambient overrides").
+- **`@inject` combined with a struct's own hand-written `init`** — the v1 implementation
+  (`desugar_inject.rs`) rejects this combination outright ("already declares its own `init`") rather
+  than merging a synthesized parameter into a user-written one; every worked example in this document
+  has no custom `init` at all, so this cost nothing yet. Revisit once a real case needs both.
 - The `id`-based "action at a distance" risk (§ "Resolution is keyed by...") — accepted for now;
   revisit the diagnostic and default scope if it causes real pain.
+
+**Pre-existing transpiler bugs found while validating this implementation, unrelated to this
+design and filed separately rather than fixed here** (none of them are `@inject`/`@provide`/
+`@singleton`-specific — each reproduces with plain, hand-written Boring source):
+- A function whose return type carries `'actor`/`'guard`/`'shared` never wrapped a bare
+  constructor-call return value in the qualifier's Rust representation — **fixed** on `main` during
+  this work (found via `@provide`'s own worked examples, which use exactly this shape).
+- Bare (implicit-self) field access skips lock dispatch for an `'actor`/`'guard`/`'observed`-qualified
+  struct field, and even bypasses the mut-permission checker — explicit `self.field` already works
+  correctly for the identical code. Blocks the natural, bare-field spelling of every worked example
+  in this document that mutates or reads a shared model from inside its own struct's methods (all of
+  them currently need to spell out `self.` explicitly as a workaround). Filed, not fixed here.
+- An explicit `init` parameter typed `Trait'owned` emits a doubly-boxed Rust type
+  (`Box<Box<dyn Trait>>`) and doesn't wrap a bare-typed default expression in `Box::new(...)` —
+  blocks `@inject`'s `'owned` + transient-provider case specifically (§2's "natural qualifier for a
+  genuinely transient dependency"). Filed, not fixed here.
 
 ## Where this came from
 

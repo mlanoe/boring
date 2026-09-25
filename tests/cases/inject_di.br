@@ -1,0 +1,45 @@
+# `@inject` (docs/design-notes/boring-di-draft.md §1) end-to-end: two independent
+# structs each declare an `@inject`-annotated field of the same type, resolved
+# against the same `@provide` + `@singleton` provider (§4). Neither struct
+# constructs or names the provider — `AccountMenu()`/`ProfileBadge()` are both
+# zero-argument calls, the omitted `@inject` argument filled in by
+# `desugar_inject.rs` exactly like an ordinary defaulted parameter. Because the
+# provider is `@singleton`, both structs end up sharing the *same* underlying
+# `UserSession'actor` cell — a mutation through one is visible through the other,
+# which is the whole point of the `@EnvironmentObject`-shaped motivating example
+# this design traces back to.
+#
+# Uses explicit `self.session` throughout (not bare `session`) — task_9f777ebf
+# (spawned this session) tracks a separate, pre-existing bug where the bare
+# implicit-self form skips lock dispatch for an `'actor`-qualified field.
+
+struct UserSession:
+    var mut int loginCount = 0
+    def recordLogin():
+        self.loginCount += 1
+
+struct AccountMenu:
+    @inject
+    mut UserSession'actor session
+
+    def logIn():
+        self.session.recordLogin()
+
+struct ProfileBadge:
+    @inject
+    mut UserSession'actor session
+
+    req int loginCount():
+        self.session.loginCount
+
+@provide
+@singleton
+pub UserSession'actor currentUserSession():
+    UserSession()
+
+def main():
+    mut menu = AccountMenu()
+    let badge = ProfileBadge()
+    menu.logIn()
+    menu.logIn()
+    print "{badge.loginCount()}"
