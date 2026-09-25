@@ -5,16 +5,15 @@ struct Counter:
 
 # `@singleton` (docs/design-notes/boring-di-draft.md §4): memoizes the function's
 # result behind a compiler-synthesized LazyLock — the body runs at most once, and
-# every call thereafter clones out the same shared instance. Uses an explicit local
-# `'actor` binding as the tail expression rather than a bare `Counter(0)` return —
-# see task_b8f97224 (spawned this session) for the separate, pre-existing gap where
-# a bare constructor-call tail expression isn't wrapped to match a qualified return
-# type at all, `@singleton` or not.
+# every call thereafter clones out the same shared instance. Bare constructor-call
+# tail expression, matching the design doc's own @provide examples verbatim (this
+# used to need a local-`'actor`-binding workaround — task_b8f97224 fixed the
+# underlying gap, wrapping a bare constructor return to match a qualified return
+# type, unrelated to @singleton itself).
 @singleton
 Counter'actor makeCounter():
     print "constructing counter"
-    mut Counter'actor c = Counter(0)
-    c
+    Counter(0)
 
 def main():
     let c1 = makeCounter()
