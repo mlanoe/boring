@@ -86,6 +86,16 @@ kernel void scale(
 
 ---
 
+## Naming restrictions
+
+Unlike Rust, MSL's builtin scalar type names (`half`, `float`, `int`, `long`, `size_t`, ...), its builtin vector/matrix types (`float4`, `half2x2`, ...), and its real C++/MSL keywords (`class`, `template`, `kernel`, `device`, `threadgroup`, ...) live in the *same identifier namespace* as ordinary variables — declaring a variable literally named `half` is a genuine MSL parse error, not merely a style warning.
+
+A kernel field, a `def()`-body local, a for-loop variable, or a function/method parameter that collides with one of these reserved words is automatically renamed (a trailing `_` appended) by `msl_safe_ident` (`src/transpiler/metal/device.rs`), consistently at both its declaration and every later reference — this is transparent and requires no action from Boring source. `half` is the motivating real-world case (an unremarkable name for a RoPE positional-encoding kernel's `d_head / 2`), but the same mangling covers the entire reserved-word list, not just that one name.
+
+Without this, the failure would be especially confusing: `boring build --target metal` transpiles successfully with no warning, since this backend never parses the MSL it emits — the collision only surfaces later, at runtime, when the generated binary compiles its own MSL source via `newLibraryWithSource`, as a wall of unrelated-looking parse errors cascading from the single bad declaration.
+
+---
+
 ## MSL compilation
 
 MSL is compiled at runtime via `newLibraryWithSource` — the Metal compiler is built into macOS. No external toolchain (`xcrun`, LLVM) is needed.

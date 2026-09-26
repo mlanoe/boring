@@ -1321,3 +1321,96 @@ kernel AddOneF32:
          alongside the `return`;\ngot:\n{msl}"
     );
 }
+
+// ─── MSL reserved-word identifier collisions ──────────────────────────────────
+//
+// An ordinary Boring identifier (no special meaning in the language) can
+// collide with one of MSL's own builtin scalar type names — `half` (16-bit
+// float) is the real-world case that motivated this: a kernel field or local
+// named `half` (e.g. `half = d_head / 2` in a RoPE positional-encoding
+// kernel) used to be emitted verbatim, producing a confusing MSL *parse*
+// error at runtime (`newLibraryWithSource`) rather than a Boring-level error
+// — `boring build --target metal` itself always reported success. Fixed by
+// `msl_safe_ident` (`src/transpiler/metal/device.rs`): any identifier that
+// collides with an MSL reserved word gets a trailing underscore, applied
+// consistently at both its declaration and every reference. Verified
+// end-to-end against a real Metal compiler (not just these snapshot
+// assertions): `boring build --target metal` + `cargo build` + running the
+// resulting binary on real Apple Silicon hardware, both before this fix
+// (reproducing the exact MSL compile error from the bug report) and after
+// (produces the expected output).
+
+#[test]
+fn device_field_named_half_is_mangled_not_left_colliding_with_msl_builtin_type() {
+    let (msl, _) = metal_codegen("field_named_half", r#"
+kernel HalfKernel:
+    let [float32]'unified x
+    mut [float32]'unified out
+    let int'const         half
+
+    init([float32]'unified xs, int h):
+        x    = xs
+        half = h
+        out  = [0.0 for ..<8]
+
+    def ():
+        let cell = gpu.thread.x
+        if cell < half:
+            out[cell] = x[cell]
+"#);
+    // Declaration and every use must agree on the same mangled name — a bare,
+    // unmangled `half` declaration is exactly the collision this test guards
+    // against (MSL parses it as its own builtin `half` type, not a variable).
+    assert!(msl.contains("const int64_t half_ = *__half;"),
+        "expected the deref'd local to be declared as `half_`;\ngot:\n{msl}");
+    assert!(msl.contains("cell < half_"),
+        "expected the read of the field inside the kernel body to use the \
+         same mangled name `half_` as its declaration;\ngot:\n{msl}");
+}
+
+#[test]
+fn device_local_let_named_half_is_mangled() {
+    let (msl, _) = metal_codegen("local_let_named_half", r#"
+kernel LocalHalf:
+    let int                n
+    mut [float32]'unified  out
+
+    init(int nn):
+        n   = nn
+        out = [0.0 for ..<nn]
+
+    def ():
+        let half = n / 2
+        let tid = gpu.thread.x
+        if tid < half:
+            out[tid] = 1.0
+"#);
+    assert!(!msl.contains("int64_t half ="),
+        "a local `let half = ...` must not be emitted as a bare `half` \
+         identifier (collides with MSL's builtin `half` type);\ngot:\n{msl}");
+    assert!(msl.contains("half_ ="),
+        "expected the local to be mangled to `half_`;\ngot:\n{msl}");
+    assert!(msl.contains("tid < half_"),
+        "expected the later read of the local to use the same mangled name \
+         as its declaration;\ngot:\n{msl}");
+}
+
+#[test]
+fn device_for_loop_var_named_half_is_mangled() {
+    let (msl, _) = metal_codegen("for_loop_var_named_half", r#"
+kernel LoopHalf:
+    mut [float32]'unified out
+
+    def ():
+        for half in 0..<4:
+            out[half] = 1.0
+"#);
+    assert!(!msl.contains("int64_t half ="),
+        "a for-loop variable named `half` must not be emitted verbatim \
+         (collides with MSL's builtin `half` type);\ngot:\n{msl}");
+    assert!(msl.contains("int64_t half_ ="),
+        "expected the loop variable to be mangled to `half_`;\ngot:\n{msl}");
+    assert!(msl.contains("out[half_]"),
+        "expected the loop body's reference to the loop variable to use the \
+         same mangled name as its declaration;\ngot:\n{msl}");
+}

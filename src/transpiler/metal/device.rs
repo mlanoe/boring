@@ -16,6 +16,92 @@ pub(super) fn emit_device_msl(program: &Program) -> String {
     e.out
 }
 
+// ── Reserved-word-safe identifiers ────────────────────────────────────────────
+//
+// MSL's builtin scalar type names (`half`, `float`, `int`, ...) live in the same
+// namespace as ordinary identifiers -- unlike Rust, where `f32`/`i64`/etc. can never
+// collide with a variable name. An ordinary Boring identifier with no special
+// meaning in the language (a kernel field or a `def()`-body local named `half`,
+// motivated by a real RoPE positional-encoding kernel -- see CHANGELOG.md) can
+// therefore collide with an MSL builtin type, producing a confusing MSL *parse*
+// error at runtime (inside `newLibraryWithSource`) rather than a Boring-level
+// error -- `boring build --target metal` itself always reports success, since
+// this backend never parses the MSL it emits. See docs/metal-backend.md's
+// "Naming restrictions" section.
+
+/// MSL builtin scalar type names (`<metal_stdlib>`'s own fixed-width aliases,
+/// plus the two 64-bit typedefs `emit_program` itself always emits at the top
+/// of every generated file -- `int64_t`/`uint64_t` are just as reserved as any
+/// other builtin once declared).
+const MSL_SCALAR_TYPES: &[&str] = &[
+    "bool", "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong",
+    "half", "float", "double", "void",
+    "size_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "atomic_int", "atomic_uint", "atomic_bool", "atomic_float", "atomic_ulong",
+];
+
+/// Real C++14/MSL reserved keywords not already covered by `MSL_SCALAR_TYPES`
+/// above -- control flow, storage-class specifiers, and MSL's own
+/// address-space/function-type qualifiers (`device`, `threadgroup`, `kernel`, ...),
+/// which this backend's own generated signatures already treat as reserved.
+const MSL_KEYWORDS: &[&str] = &[
+    "and", "and_eq", "alignas", "alignof", "asm", "auto", "bitand", "bitor",
+    "break", "case", "catch", "class", "compl", "const", "constexpr",
+    "const_cast", "continue", "decltype", "default", "delete", "do",
+    "dynamic_cast", "else", "enum", "explicit", "export", "extern", "false",
+    "for", "friend", "goto", "if", "inline", "mutable", "namespace", "new",
+    "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
+    "private", "protected", "public", "register", "reinterpret_cast",
+    "return", "signed", "sizeof", "static", "static_assert", "static_cast",
+    "struct", "switch", "template", "this", "thread_local", "throw", "true",
+    "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+    "virtual", "volatile", "wchar_t", "char16_t", "char32_t", "while", "xor",
+    "xor_eq",
+    "kernel", "vertex", "fragment", "constant", "device", "thread",
+    "threadgroup", "threadgroup_imageblock", "ray_data", "object_data",
+    "patch_control_point", "main",
+];
+
+/// `half4`, `float3`, `int2x2`, ... -- MSL's vector/matrix type names, built
+/// from the scalar bases that actually support them (MSL has no `double`
+/// vectors/matrices, and only `half`/`float` have matrix forms).
+fn is_msl_vector_or_matrix_type(name: &str) -> bool {
+    const VECTOR_BASES: &[&str] = &[
+        "bool", "char", "uchar", "short", "ushort", "int", "uint", "long", "ulong", "half", "float",
+    ];
+    const MATRIX_BASES: &[&str] = &["half", "float"];
+    for base in VECTOR_BASES {
+        for n in 2..=4 {
+            if name == format!("{base}{n}") { return true; }
+        }
+    }
+    for base in MATRIX_BASES {
+        for n in 2..=4 {
+            for m in 2..=4 {
+                if name == format!("{base}{n}x{m}") { return true; }
+            }
+        }
+    }
+    false
+}
+
+fn is_msl_reserved(name: &str) -> bool {
+    MSL_SCALAR_TYPES.contains(&name) || MSL_KEYWORDS.contains(&name) || is_msl_vector_or_matrix_type(name)
+}
+
+/// Renames a Boring identifier that collides with an MSL reserved word so the
+/// generated MSL still parses. A trailing underscore is a no-op for every
+/// identifier that ISN'T reserved (the overwhelming majority), so this can be
+/// applied unconditionally at every point a Boring field/local/parameter name
+/// is emitted as MSL text, both at its declaration and at every later
+/// reference -- the mangling is a pure function of the name alone, so a
+/// declaration and its uses always agree without needing a rename table.
+fn msl_safe_ident(name: &str) -> String {
+    if is_msl_reserved(name) { format!("{name}_") } else { name.to_string() }
+}
+
 struct DeviceEmitter {
     out: String,
     indent: usize,
@@ -114,7 +200,7 @@ impl DeviceEmitter {
         let ret = decl.return_ty.as_ref().map(msl_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
             let ty = p.ty.as_ref().map(msl_type).unwrap_or_else(|| "int64_t".into());
-            format!("{} {}", ty, p.name)
+            format!("{} {}", ty, msl_safe_ident(&p.name))
         }).collect();
         self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
@@ -152,7 +238,7 @@ impl DeviceEmitter {
         let mut params = buffer_field_params(fields);
         for p in &method.params {
             let ty = p.ty.as_ref().map(msl_type).unwrap_or_else(|| "int64_t".into());
-            params.push(format!("{} {}", ty, p.name));
+            params.push(format!("{} {}", ty, msl_safe_ident(&p.name)));
         }
         self.line(&format!("static {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
@@ -186,7 +272,7 @@ impl DeviceEmitter {
                         let elem = elem_msl_type(inner);
                         let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
                         params.push(format!("device {}{}* {} [[buffer({})]]",
-                            constness, elem, f.name, buf_idx));
+                            constness, elem, msl_safe_ident(&f.name), buf_idx));
                         buf_idx += 1;
                     }
                 }
@@ -194,7 +280,7 @@ impl DeviceEmitter {
                 GpuQual::Surface => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
-                            params.push(format!("device uint* {} [[buffer({})]]", f.name, buf_idx));
+                            params.push(format!("device uint* {} [[buffer({})]]", msl_safe_ident(&f.name), buf_idx));
                             buf_idx += 1;
                         }
                         _ => {}
@@ -213,11 +299,11 @@ impl DeviceEmitter {
                 match &f.ty {
                     Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                         // Array: use the field name directly — accessed as name[i] in the kernel body.
-                        params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
+                        params.push(format!("constant {}* {} [[buffer({})]]", elem, msl_safe_ident(&f.name), buf_idx));
                     }
                     ty if ty.as_labeled_array().is_some() => {
                         // Fixed-shape LabeledArray: same direct-pointer treatment.
-                        params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
+                        params.push(format!("constant {}* {} [[buffer({})]]", elem, msl_safe_ident(&f.name), buf_idx));
                     }
                     _ => {
                         // Scalar: param named __name, dereferenced into a local below.
@@ -244,7 +330,7 @@ impl DeviceEmitter {
             if matches!(f.qual, GpuQual::Actor)
                 && matches!(f.ty, Type::Array(_)) {
                     let elem = elem_msl_type(&f.ty);
-                    params.push(format!("threadgroup {}* {} [[threadgroup({})]]", elem, f.name, tg_idx));
+                    params.push(format!("threadgroup {}* {} [[threadgroup({})]]", elem, msl_safe_ident(&f.name), tg_idx));
                     tg_idx += 1;
                 }
         }
@@ -277,12 +363,12 @@ impl DeviceEmitter {
             if matches!(f.qual, GpuQual::Actor) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     let elem = elem_msl_type(inner);
-                    self.line(&format!("threadgroup {} {}[{}];", elem, f.name, n));
+                    self.line(&format!("threadgroup {} {}[{}];", elem, msl_safe_ident(&f.name), n));
                 } else if let Some((elem, _)) = f.ty.as_labeled_array() {
                     // See cuda::device's identical `labeled_array_len()` note:
                     // `None` (a const-generic axis) isn't handled here yet.
                     if let Some(len) = f.ty.labeled_array_len() {
-                        self.line(&format!("threadgroup {} {}[{}];", elem_msl_type(elem), f.name, len));
+                        self.line(&format!("threadgroup {} {}[{}];", elem_msl_type(elem), msl_safe_ident(&f.name), len));
                     }
                 }
             }
@@ -299,7 +385,7 @@ impl DeviceEmitter {
                     ty if ty.as_labeled_array().is_some() => {}
                     _ => {
                         let ty = msl_type(&f.ty);
-                        self.line(&format!("const {} {} = *__{};", ty, f.name, f.name));
+                        self.line(&format!("const {} {} = *__{};", ty, msl_safe_ident(&f.name), f.name));
                     }
                 }
             }
@@ -311,13 +397,13 @@ impl DeviceEmitter {
                 match &f.ty {
                     Type::ArrayN(inner, n) => {
                         let elem = elem_msl_type(inner);
-                        self.line(&format!("{} {}[{}];", elem, f.name, n));
+                        self.line(&format!("{} {}[{}];", elem, msl_safe_ident(&f.name), n));
                     }
                     Type::Array(_) => {}
                     ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
                         let (elem, _) = ty.as_labeled_array().unwrap();
                         let len = ty.labeled_array_len().unwrap();
-                        self.line(&format!("{} {}[{}];", elem_msl_type(elem), f.name, len));
+                        self.line(&format!("{} {}[{}];", elem_msl_type(elem), msl_safe_ident(&f.name), len));
                     }
                     // A LabeledArray whose length isn't computable (const-generic
                     // axis) falls here rather than into the scalar branch below —
@@ -326,7 +412,7 @@ impl DeviceEmitter {
                     _ => {
                         // Scalar 'local: initialize from the constant buffer parameter.
                         let ty = msl_type(&f.ty);
-                        self.line(&format!("{} {} = *__{}_init;", ty, f.name, f.name));
+                        self.line(&format!("{} {} = *__{}_init;", ty, msl_safe_ident(&f.name), f.name));
                     }
                 }
             }
@@ -360,7 +446,7 @@ impl DeviceEmitter {
                 let kw = if mutable { "" } else { "const " };
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
-                    self.line(&format!("{}{} {} = {};", kw, ty, s.name, rhs));
+                    self.line(&format!("{}{} {} = {};", kw, ty, msl_safe_ident(&s.name), rhs));
                 } else {
                     self.line(&format!("{}{};", kw, ty));
                 }
@@ -433,7 +519,7 @@ impl DeviceEmitter {
                 self.line("}");
             }
             Stmt::For(f) => {
-                let var = f.vars.first().cloned().unwrap_or_else(|| "_i".into());
+                let var = msl_safe_ident(&f.vars.first().cloned().unwrap_or_else(|| "_i".into()));
                 match &f.iterable.kind {
                     ExprKind::Range { start, end, inclusive } => {
                         let lo = self.expr(start);
@@ -652,9 +738,9 @@ impl DeviceEmitter {
                 // no compile error, just a wrong-value bug (confirmed via
                 // `boring build --target metal examples/saxpy.br`).
                 if self.current_fields.iter().any(|f| f.name == *name) {
-                    name.clone()
+                    msl_safe_ident(name)
                 } else {
-                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| msl_safe_ident(name))
                 }
             }
 
@@ -684,7 +770,7 @@ impl DeviceEmitter {
                     self.current_fields.iter().find(|f| &f.name == name)
                         .and_then(|field| field.ty.as_labeled_array())
                         .and_then(|(_, axes)| labeled_array_at_index(axes, &pairs))
-                        .map(|offset| format!("{}[{}]", name, offset))
+                        .map(|offset| format!("{}[{}]", msl_safe_ident(name), offset))
                 } else {
                     None
                 };
@@ -770,17 +856,17 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 let elem = elem_msl_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
-                Some(format!("device {}{}* {}", constness, elem, f.name))
+                Some(format!("device {}{}* {}", constness, elem, msl_safe_ident(&f.name)))
             }
             GpuQual::Const => {
                 let elem = elem_msl_type(&f.ty);
                 match &f.ty {
                     Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                         // Array: direct pointer, no deref — same as in the entry point.
-                        Some(format!("constant {}* {}", elem, f.name))
+                        Some(format!("constant {}* {}", elem, msl_safe_ident(&f.name)))
                     }
                     ty if ty.as_labeled_array().is_some() => {
-                        Some(format!("constant {}* {}", elem, f.name))
+                        Some(format!("constant {}* {}", elem, msl_safe_ident(&f.name)))
                     }
                     _ => {
                         // Scalar: passed as __name pointer so helper can access it.
@@ -799,7 +885,7 @@ fn buffer_field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
         match f.qual {
             GpuQual::Actor | GpuQual::Local => None,
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
-                Some(f.name.clone())
+                Some(msl_safe_ident(&f.name))
             }
         }
     }).collect()
