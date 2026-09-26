@@ -698,6 +698,28 @@ impl Parser {
                 }
             } else if self.is_newline() {
                 break;
+            } else if self.pos > 0
+                && (matches!(self.tokens[self.pos - 1].kind, TokenKind::Dedent)
+                    || self.tokens[self.pos - 1].line != self.line())
+            {
+                // No `Newline` token sits here, yet the token we're about to match
+                // either follows a `Dedent` or starts on a later physical line than
+                // the one we just finished parsing. Both signal a statement boundary
+                // that this loop can no longer see directly: the primary we just
+                // parsed may be an inline `if/else`/`match` expression whose arm
+                // parsing (`parse_if_stmt`/`parse_match_arm`) scans ahead across the
+                // newline to check for a following `elif`/`else`/arm, and consumes
+                // that newline (and, for a block-form arm, its closing `Dedent`)
+                // whether or not a continuation was actually found there — a
+                // statement-level habit that's harmless for `Stmt::If`/`Stmt::Match`
+                // (callers already `skip_newlines` before the next statement) but
+                // would otherwise trick this loop into reading the next logical
+                // line's leading `(`/`[`/`.` as a postfix continuation of the
+                // if/else (or match) expression itself. Treat this exactly as if the
+                // `Newline` token were still physically present, matching the
+                // existing dot-chain rule that postfix continuation never crosses a
+                // `Dedent` (see `peek_dot_after_newlines_and_indents` above).
+                break;
             }
             let line = self.line();
             let col = self.col();

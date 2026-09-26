@@ -1217,3 +1217,17 @@ transpile_test!(actor_guard_shared_return_qualifier);
 // `infer_local_actor_vars`) had no `'shared` counterpart. See
 // `src/transpiler/infer_qualifiers.rs`'s `infer_local_shared_vars` doc for the fix.
 transpile_test!(shared_return_callsite_no_double_wrap);
+
+// Regression test: an inline `let v = if cond: a else: b` (or `let v = match
+// ...`) immediately followed on the next line by a tail expression starting
+// with `(`/`[` used to get fused onto the if/else (or match) expression as a
+// call/index/tuple — `parse_if_stmt`/`parse_match_stmt`'s inline-arm
+// lookahead eagerly consumed the statement's trailing newline while scanning
+// for a following `elif`/`else`/match-arm, leaving the postfix-continuation
+// loop no `Newline` token to recognize the statement boundary with. This is
+// the transpiler-side half: the original bug's actual failure mode here was
+// a real `cargo build` compile error (E0618, "expected function, found
+// isize") from a missing `;` after the fused-in if/else block, not just a
+// wrong runtime value — see tests/cases/inline_if_else_next_line_postfix.br's
+// own doc comment and `parse_postfix_inner` in src/parser/parse_expr.rs.
+transpile_test!(inline_if_else_next_line_postfix);

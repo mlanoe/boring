@@ -650,3 +650,15 @@ interp_test!(trailing_body_bare_stmt_multiline);
 interp_test!(array_block_lowercase_collect);
 interp_test!(array_block_tail_fn_last_param);
 interp_test!(array_block_closure_literal_block);
+
+// Regression: an inline `let v = if cond: a else: b` (or `let v = match ...`)
+// immediately followed on the next line by a tail expression starting with
+// `(`/`[` used to get fused onto the if/else (or match) expression as a
+// call/index/tuple, because `parse_if_stmt`/`parse_match_stmt`'s inline-arm
+// lookahead eagerly consumed the statement's trailing newline. See
+// tests/cases/inline_if_else_next_line_postfix.br's own doc comment and
+// `parse_postfix_inner` in src/parser/parse_expr.rs for the fix. Paired with
+// tests/transpile.rs's registration for the real-`cargo build` side (the
+// original bug's actual failure mode there was a compile error, not a wrong
+// value).
+interp_test!(inline_if_else_next_line_postfix);

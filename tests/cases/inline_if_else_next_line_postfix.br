@@ -1,0 +1,60 @@
+# Regression test: `let v = if cond: a else: b` (the single-line, colon-form
+# if/else expression) immediately followed on the *next line* by a tail
+# expression that starts with a postfix-continuation token (`(`, `[`) used to
+# get mis-parsed. `parse_if_stmt`'s inline-body path (`parse_else_body_stmts`/
+# `parse_match_arm`) scans ahead across the statement's own trailing newline
+# to check for a following `elif`/`else`/match-arm, and eagerly consumes that
+# newline whether or not a continuation was actually found — harmless for an
+# `if`/`match` used as a *statement* (the caller already skips newlines before
+# the next one), but when the same `parse_if_stmt`/`parse_match_stmt` is
+# reused to parse an `if`/`match` *expression* (e.g. a `let` initializer), the
+# swallowed newline left the postfix-continuation loop with no `Newline`
+# token to see — so whatever the next physical line started with got fused
+# onto the if/else (or match) expression as a call/index/tuple, instead of
+# being recognized as the start of a new statement.
+#
+# `boring run` (interpreter) symptom: "undefined variable 'v' — did you mean
+# 'Rc'?", because `v` got referenced inside its own initializer once the
+# following line was fused onto it as a call's argument list.
+#
+# `boring build` symptom: the transpiled Rust was missing the `;` that should
+# terminate the `let` statement, so rustc parsed `{ if-block }(args)` as a
+# block-expression immediately called with `(args)` — a real E0618 compile
+# error, not just a wrong runtime value.
+#
+# See src/parser/parse_expr.rs's `parse_postfix_inner` fix.
+
+# ── Tuple tail expression: `(v, 1)` on the next line ────────────────────────
+(int, int) tuple_tail(int u) throws:
+    let v = if u > 127: u - 256 else: u
+    (v, 1)
+
+# ── Indexing expression: `[...][0]` on the next line ────────────────────────
+int index_tail(int u) throws:
+    let v = if u > 127: u - 256 else: u
+    [v, 100][0]
+
+# ── Bare (single, non-tuple) parenthesized expression on the next line ──────
+# Without the fix, this is the shape the transpiled-Rust symptom above comes
+# from directly: a single-arg parenthesized expression is exactly a call's
+# argument list, so `if_expr` immediately followed by `(v)` fused into
+# `if_expr(v)` — a call of the if/else result with `v` as its sole argument.
+int call_tail(int u) throws:
+    let v = if u > 127: u - 256 else: u
+    (v)
+
+# ── Same bug, `match` used as an expression instead of `if`/`else` ──────────
+# `parse_match_stmt`'s block-form arm parsing (`parse_match_arm`'s inline-body
+# path) has the identical "scan ahead, eagerly consume the newline" habit.
+int match_tail(int u) throws:
+    let v = match u:
+        0: 10
+        _: 20
+    (v)
+
+let (ta, tb) = tuple_tail(200)
+print "{ta} {tb}"
+print index_tail(200)
+print call_tail(200)
+print match_tail(0)
+print match_tail(1)
