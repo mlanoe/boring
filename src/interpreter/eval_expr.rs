@@ -319,7 +319,7 @@ impl Interpreter {
         const FAST_MUTATING_ARRAY_METHODS: &[&str] =
             &["push", "append", "insert", "remove", "sort", "reverse"];
         if !FAST_MUTATING_ARRAY_METHODS.contains(&method)
-            || !matches!(env.borrow().get(name), Some(Value::Array(_)))
+            || !matches!(env.borrow().get(name), Some(Value::Array(_) | Value::ByteArray(_)))
         {
             return None;
         }
@@ -1044,6 +1044,37 @@ impl Interpreter {
                         arr[lo..hi.min(arr.len())].to_vec()
                     };
                     return Ok(Value::Array(slice.into()));
+                }
+                Value::ByteArray(arr) => {
+                    let len = arr.len() as i64;
+                    let resolve = |v: i64| -> usize {
+                        let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
+                        i as usize
+                    };
+                    let lo = match start.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice start must be an integer", line));
+                            };
+                            resolve(v)
+                        }
+                        None => 0,
+                    };
+                    let hi = match end.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice end must be an integer", line));
+                            };
+                            if *inclusive { (resolve(v) + 1).min(arr.len()) } else { resolve(v) }
+                        }
+                        None => arr.len(),
+                    };
+                    let slice = if lo >= arr.len() || lo >= hi {
+                        vec![]
+                    } else {
+                        arr[lo..hi.min(arr.len())].to_vec()
+                    };
+                    return Ok(Value::ByteArray(slice.into()));
                 }
                 Value::Str(s) => {
                     let chars: Vec<char> = s.chars().collect();
@@ -2158,6 +2189,11 @@ impl Interpreter {
                 let mut new_vec = Rc::try_unwrap(a).unwrap_or_else(|rc| (*rc).clone());
                 new_vec.extend(b.iter().cloned());
                 Ok(Value::Array(new_vec.into()))
+            }
+            (Value::ByteArray(a), Value::ByteArray(b)) => {
+                let mut new_vec = Rc::try_unwrap(a).unwrap_or_else(|rc| (*rc).clone());
+                new_vec.extend(b.iter());
+                Ok(Value::ByteArray(new_vec.into()))
             }
             (a, b) => {
                 if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Add, line, rcol, rlen) {

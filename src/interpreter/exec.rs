@@ -276,7 +276,7 @@ impl Interpreter {
                         }
                         // Evaluate the receiver once — never again.
                         let obj_val = self.eval_expr(obj_expr, Rc::clone(&env))?;
-                        let is_collection = matches!(&obj_val, Value::Array(_) | Value::Dict(_) | Value::Set(_));
+                        let is_collection = matches!(&obj_val, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_));
                         let is_coll_mutating = MUTATING_COLL_ONLY.contains(&method.as_str())
                             && matches!(&obj_val, Value::Dict(_) | Value::Set(_));
 
@@ -305,10 +305,10 @@ impl Interpreter {
                             //  (a) push/append/insert/sort/… → result IS the new collection
                             //  (b) pop/remove/removeAt → result is the extracted element;
                             //      call_method sets out_self to the shortened collection
-                            if matches!(result, Value::Array(_) | Value::Dict(_) | Value::Set(_)) {
+                            if matches!(result, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
                                 self.assign(obj_expr, result, Rc::clone(&env), line)?;
                             } else if let Some(new_coll) = out_self {
-                                if matches!(new_coll, Value::Array(_) | Value::Dict(_) | Value::Set(_)) {
+                                if matches!(new_coll, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
                                     self.assign(obj_expr, new_coll, Rc::clone(&env), line)?;
                                 }
                             }
@@ -648,34 +648,121 @@ impl Interpreter {
         if let Value::Object(_) = &iterable {
             return self.exec_for_iterator(iterable, s, env);
         }
+        // Ranges, strings and dicts each get a dedicated lazy loop instead of going
+        // through `collect_iterable`, which would eagerly materialize a full
+        // `Vec<Value>` up front (one 352-byte `Value` per element) before the loop
+        // body ran even once — see `docs/book.md`'s `for`-loop memory note. This
+        // matters most for `Range`/`Str` (a small handle that can represent an
+        // arbitrarily large logical sequence — `for i in 0..<n`, `for c in bigStr`);
+        // `Dict`'s own backing `Vec<(Value, Value)>` is already fully materialized
+        // either way, so its lazy path mainly saves the transient per-pair `Tuple`
+        // allocation and lets `break` skip wrapping the remaining entries.
+        if let Value::Range { start, end, inclusive } = iterable {
+            return self.exec_for_range(start, end, inclusive, s, env);
+        }
+        if let Value::Str(text) = iterable {
+            return self.exec_for_str(text, s, env);
+        }
+        if let Value::Dict(pairs) = iterable {
+            return self.exec_for_dict(pairs, s, env);
+        }
         let items = self.collect_iterable(iterable, s.iterable.line)?;
         for (idx, item) in items.into_iter().enumerate() {
             let child = Env::child(Rc::clone(&env));
-            if s.vars.len() == 1 {
-                child.borrow_mut().define(&s.vars[0], item);
-            } else {
-                match item {
-                    // Tuple (from dict, .enumerate(), .zip(), etc.) → destructure
-                    Value::Tuple(elems) => {
-                        for (i, var) in s.vars.iter().enumerate() {
-                            let val = elems.get(i).cloned().unwrap_or(Value::Nil);
-                            child.borrow_mut().define(var, val);
-                        }
+            Self::bind_for_item(&s.vars, idx as i64, item, &child);
+            match self.exec_block(&s.body, child) {
+                Ok(()) => {}
+                Err(Signal::Break(_)) => break,
+                Err(Signal::Continue) => continue,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
+    }
+
+    /// Shared binding logic for one `for`-loop iteration: single var gets the whole
+    /// item, a `Tuple` item (from a dict, `.enumerate()`, `.zip()`, …) destructures
+    /// across multiple vars, and any other scalar item + multiple vars auto-
+    /// enumerates (`vars[0]` = index, `vars[1]` = element, rest = `Nil`) — same
+    /// convention as `arr.enumerate()`. Factored out so each lazy loop below
+    /// (`exec_for_range`/`_str`/`_dict`) shares it with `exec_for`'s own eager-item
+    /// loop instead of re-deriving it.
+    fn bind_for_item(vars: &[String], idx: i64, item: Value, child: &EnvRef) {
+        if vars.len() == 1 {
+            child.borrow_mut().define(&vars[0], item);
+        } else {
+            match item {
+                Value::Tuple(elems) => {
+                    for (i, var) in vars.iter().enumerate() {
+                        let val = elems.get(i).cloned().unwrap_or(Value::Nil);
+                        child.borrow_mut().define(var, val);
                     }
-                    // Scalar value + multiple vars → auto-enumerate:
-                    //   `for i, v in arr:`  ≡  `for i, v in arr.enumerate():`
-                    //   vars[0] = index (int), vars[1] = element, rest = Nil
-                    other => {
-                        child.borrow_mut().define(&s.vars[0], Value::Int(idx as i64));
-                        if s.vars.len() >= 2 {
-                            child.borrow_mut().define(&s.vars[1], other);
-                        }
-                        for var in s.vars.iter().skip(2) {
-                            child.borrow_mut().define(var, Value::Nil);
-                        }
+                }
+                other => {
+                    child.borrow_mut().define(&vars[0], Value::Int(idx));
+                    if vars.len() >= 2 {
+                        child.borrow_mut().define(&vars[1], other);
+                    }
+                    for var in vars.iter().skip(2) {
+                        child.borrow_mut().define(var, Value::Nil);
                     }
                 }
             }
+        }
+    }
+
+    /// Lazy counterpart of `exec_for`'s main loop, for a `Value::Range` iterable —
+    /// produces one `Value::Int` per iteration and drops it after the body runs,
+    /// instead of `collect_iterable`'s eager `start..end → Vec<Value>` collection.
+    pub(crate) fn exec_for_range(&mut self, start: i64, end: i64, inclusive: bool, s: &ForStmt, env: EnvRef) -> Result<(), Signal> {
+        let iter: Box<dyn Iterator<Item = i64>> = if inclusive {
+            Box::new(start..=end)
+        } else {
+            Box::new(start..end)
+        };
+        for (idx, n) in iter.enumerate() {
+            let child = Env::child(Rc::clone(&env));
+            Self::bind_for_item(&s.vars, idx as i64, Value::Int(n), &child);
+            match self.exec_block(&s.body, child) {
+                Ok(()) => {}
+                Err(Signal::Break(_)) => break,
+                Err(Signal::Continue) => continue,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
+    }
+
+    /// Lazy counterpart of `exec_for`'s main loop, for a `Value::Str` iterable —
+    /// produces one single-char `Value::Str` per character and drops it after the
+    /// body runs, instead of `collect_iterable`'s eager char-by-char `Vec<Value>`
+    /// collection (the same 352-bytes-per-`Value` cost as `Range`, for any string
+    /// large enough to matter — e.g. iterating a big text file line-by-character).
+    pub(crate) fn exec_for_str(&mut self, text: String, s: &ForStmt, env: EnvRef) -> Result<(), Signal> {
+        for (idx, c) in text.chars().enumerate() {
+            let child = Env::child(Rc::clone(&env));
+            Self::bind_for_item(&s.vars, idx as i64, Value::Str(c.to_string()), &child);
+            match self.exec_block(&s.body, child) {
+                Ok(()) => {}
+                Err(Signal::Break(_)) => break,
+                Err(Signal::Continue) => continue,
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
+    }
+
+    /// Lazy counterpart of `exec_for`'s main loop, for a `Value::Dict` iterable —
+    /// wraps each `(key, value)` pair into a `Value::Tuple` just before it's bound
+    /// and drops it after the body runs, instead of `collect_iterable`'s eager
+    /// `Vec<Value>` of every pair's `Tuple` up front. The dict's own backing
+    /// `Vec<(Value, Value)>` is already fully materialized (it's the dict itself,
+    /// not something this loop allocates), so this mainly avoids the transient
+    /// double allocation and lets `break` skip wrapping the remaining entries.
+    pub(crate) fn exec_for_dict(&mut self, pairs: Vec<(Value, Value)>, s: &ForStmt, env: EnvRef) -> Result<(), Signal> {
+        for (idx, (k, v)) in pairs.into_iter().enumerate() {
+            let child = Env::child(Rc::clone(&env));
+            Self::bind_for_item(&s.vars, idx as i64, Value::Tuple(vec![k, v]), &child);
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,
@@ -729,6 +816,7 @@ impl Interpreter {
     pub(crate) fn collect_iterable(&mut self, val: Value, line: usize) -> Result<Vec<Value>, Signal> {
         match val {
             Value::Array(elems) => Ok(Value::rc_vec_into_owned(elems)),
+            Value::ByteArray(bytes) => Ok(bytes.iter().map(|&b| Value::Uint8(b)).collect()),
             Value::Set(elems) => Ok(elems),
             Value::Tuple(elems) => Ok(elems),
             Value::Dict(pairs) => Ok(pairs.into_iter().map(|(k, v)| Value::Tuple(vec![k, v])).collect()),
@@ -924,6 +1012,17 @@ impl Interpreter {
         }
     }
 
+    /// Strip `'qualifier`/`mut` wrappers and check whether the remaining type is
+    /// `uint8` — used to decide when a `[uint8]`-shaped type should pack/accept a
+    /// `Value::ByteArray` instead of a plain `Value::Array` of `Value::Uint8`s.
+    pub(crate) fn type_is_uint8(ty: &Type) -> bool {
+        match ty {
+            Type::Qualified(inner, _) | Type::Mut(inner) => Self::type_is_uint8(inner),
+            Type::Uint8 => true,
+            _ => false,
+        }
+    }
+
     /// Coerce a value to match a resolved type annotation when necessary.
     /// Currently handles Int → Uint coercion when the annotation is Uint (or Uint'copy).
     ///
@@ -949,6 +1048,36 @@ impl Interpreter {
             }
         }
         match (strip_wrapper(ty), &val) {
+            // `[uint8]`-typed array (including a comprehension's freshly-evaluated,
+            // not-yet-narrowed elements) — pack into a `ByteArray` instead of one
+            // `Value::Uint8` per element (352 bytes on a 64-bit target — see
+            // `Value::ByteArray`'s doc comment). Falls back to the general Array
+            // arm below (still coerced elementwise, so the existing "negative int
+            // not coerced" error-surfacing behavior documented above is preserved)
+            // if any element fails to coerce to `Uint8`.
+            (Type::Array(elem_ty), Value::Array(elems))
+                | (Type::ArrayN(elem_ty, _), Value::Array(elems))
+                | (Type::LabeledArray(elem_ty, _), Value::Array(elems))
+                if matches!(strip_wrapper(elem_ty), Type::Uint8) =>
+            {
+                let coerced: Vec<Value> = elems.iter().cloned().map(|e| Self::coerce_to_type(e, elem_ty)).collect();
+                if coerced.iter().all(|v| matches!(v, Value::Uint8(_))) {
+                    let bytes: Vec<u8> = coerced.into_iter().map(|v| match v {
+                        Value::Uint8(b) => b,
+                        _ => unreachable!(),
+                    }).collect();
+                    return Value::ByteArray(std::rc::Rc::new(bytes));
+                }
+                return Value::Array(std::rc::Rc::new(coerced));
+            }
+            // Already packed (e.g. straight from `fs.readBytes()`) — nothing to do.
+            (Type::Array(elem_ty), Value::ByteArray(_))
+                | (Type::ArrayN(elem_ty, _), Value::ByteArray(_))
+                | (Type::LabeledArray(elem_ty, _), Value::ByteArray(_))
+                if matches!(strip_wrapper(elem_ty), Type::Uint8) =>
+            {
+                return val;
+            }
             (Type::Array(elem_ty), Value::Array(elems))
                 | (Type::ArrayN(elem_ty, _), Value::Array(elems))
                 | (Type::LabeledArray(elem_ty, _), Value::Array(elems)) => {
@@ -1301,10 +1430,14 @@ impl Interpreter {
             },
             Type::Array(elem_ty) => match val {
                 Value::Array(elems) => elems.is_empty() || elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                // A `ByteArray` only ever holds `Uint8`s, so it matches `[uint8]`
+                // (and only `[uint8]`) unconditionally — no need to re-check elements.
+                Value::ByteArray(_) => Self::type_is_uint8(elem_ty),
                 _ => false,
             },
             Type::ArrayN(elem_ty, n) => match val {
                 Value::Array(elems) => elems.len() == *n && elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                Value::ByteArray(bytes) => bytes.len() == *n && Self::type_is_uint8(elem_ty),
                 _ => false,
             },
             // Runtime values carry no shape/label metadata (flat Value::Array, same as
@@ -1315,6 +1448,10 @@ impl Interpreter {
                 Value::Array(elems) => match ty.labeled_array_len() {
                     Some(n) => elems.len() as i64 == n && elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
                     None => elems.is_empty() || elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                },
+                Value::ByteArray(bytes) => Self::type_is_uint8(elem_ty) && match ty.labeled_array_len() {
+                    Some(n) => bytes.len() as i64 == n,
+                    None => true,
                 },
                 _ => false,
             },
@@ -1420,7 +1557,7 @@ impl Interpreter {
                 "string" => matches!(val, Value::Str(_)),
                 _ => self.value_matches_type(val, ty),
             },
-            Type::Array(_) => matches!(val, Value::Array(_)),
+            Type::Array(_) => matches!(val, Value::Array(_) | Value::ByteArray(_)),
             Type::Dict(_, _) => matches!(val, Value::Dict(_)),
             Type::Set(_)   => matches!(val, Value::Set(_)),
             _ => self.value_matches_type(val, ty),
@@ -1962,7 +2099,7 @@ impl Interpreter {
     /// Returns true if this runtime value is a heap type that's unsafe to share across tasks
     /// without an explicit qualifier ('rc, 'static, 'copy).
     pub(crate) fn is_unqualified_heap_type(val: &Value) -> bool {
-        matches!(val, Value::Array(_) | Value::Dict(_) | Value::Set(_) | Value::Object(_))
+        matches!(val, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_) | Value::Object(_))
     }
 
     /// Check that a task body does not capture unqualified heap types from the enclosing scope.

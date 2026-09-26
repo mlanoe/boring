@@ -492,6 +492,7 @@ impl Interpreter {
             Value::Str(s) => Json::String(s.clone()),
 
             Value::Array(a) => Json::Array(a.iter().map(|x| self.value_to_json(x, env)).collect()),
+            Value::ByteArray(a) => Json::Array(a.iter().map(|&b| Json::from(b)).collect()),
             Value::Tuple(t) => Json::Array(t.iter().map(|x| self.value_to_json(x, env)).collect()),
             Value::Set(s) => Json::Array(s.iter().map(|x| self.value_to_json(x, env)).collect()),
 

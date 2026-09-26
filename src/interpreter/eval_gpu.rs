@@ -442,6 +442,9 @@ pub(crate) fn to_thread_value(v: &Value) -> Option<ThreadValue> {
             let tvs: Option<Vec<_>> = arr.iter().map(to_thread_value).collect();
             tvs.map(ThreadValue::Array)
         }
+        Value::ByteArray(bytes)   => {
+            Some(ThreadValue::Array(bytes.iter().map(|&b| ThreadValue::Uint8(b)).collect()))
+        }
         Value::Object(inner)      => {
             let inner = inner.borrow();
             let fields: Option<Vec<_>> = inner.fields.iter()

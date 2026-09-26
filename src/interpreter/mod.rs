@@ -291,6 +291,17 @@ pub enum Value {
     Float64(f64),
     Str(String),
     Array(Rc<Vec<Value>>),
+    /// Packed backing store for a `[uint8]` array — one real `u8` per element
+    /// instead of one full `Value` (352 bytes on a 64-bit target, dominated by
+    /// the largest variants like `Screen`/`EnumNamespace`) wrapping a `u8`.
+    /// Produced by `fs.readBytes()` and by `[uint8]`-typed bindings/comprehensions
+    /// (see `coerce_to_type`), so a several-hundred-MB file read doesn't need an
+    /// equivalent multi-hundred-GB `Vec<Value>` to hold it under `boring run`.
+    /// Copy-on-write `Rc<Vec<u8>>`, same value semantics as `Array` — see
+    /// `Value::rc_bytes_into_owned`. Methods not explicitly handled on this
+    /// variant fall back to `Value::inflate_byte_array` + the normal `Array`
+    /// path, so it's always safe to treat one as an `Array` when convenient.
+    ByteArray(Rc<Vec<u8>>),
     Tuple(Vec<Value>),
     Dict(Vec<(Value, Value)>),
     Set(Vec<Value>),
@@ -419,6 +430,13 @@ impl PartialEq for Value {
             (Value::Float64(a), Value::Float64(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::ByteArray(a), Value::ByteArray(b)) => a == b,
+            (Value::Array(a), Value::ByteArray(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| matches!(x, Value::Uint8(n) if n == y))
+            }
+            (Value::ByteArray(a), Value::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| matches!(y, Value::Uint8(n) if n == x))
+            }
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Future(a), Value::Future(b)) => a == b,
             (Value::Dict(a), Value::Dict(b)) => {
@@ -469,6 +487,7 @@ impl fmt::Debug for Value {
             Value::Float64(n) => write!(f, "Float64({:?})", n),
             Value::Str(s) => write!(f, "Str({:?})", s),
             Value::Array(v) => write!(f, "Array({:?})", v),
+            Value::ByteArray(v) => write!(f, "ByteArray(len={})", v.len()),
             Value::Tuple(v) => write!(f, "Tuple({:?})", v),
             Value::Dict(_v) => write!(f, "Dict(...)"),
             Value::Set(v) => write!(f, "Set({:?})", v),
@@ -503,6 +522,19 @@ impl Value {
         Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
     }
 
+    /// Same copy-on-write unwrap as `rc_vec_into_owned`, for `ByteArray`'s packed
+    /// `Rc<Vec<u8>>` backing store.
+    pub(crate) fn rc_bytes_into_owned(rc: Rc<Vec<u8>>) -> Vec<u8> {
+        Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+    }
+
+    /// Expand a packed `ByteArray` into an ordinary `Array` of `Value::Uint8`
+    /// elements — the (expensive, ~352-byte-per-element) fallback used for any
+    /// array method/site that doesn't have a `ByteArray`-specific fast path.
+    pub(crate) fn inflate_byte_array(bytes: &Rc<Vec<u8>>) -> Value {
+        Value::Array(Rc::new(bytes.iter().map(|&b| Value::Uint8(b)).collect()))
+    }
+
     pub fn type_name(&self) -> String {
         match self {
             Value::Uninitialized => "Uninitialized".into(),
@@ -532,6 +564,7 @@ impl Value {
             Value::Float64(_) => "Float".into(),
             Value::Str(_) => "String".into(),
             Value::Array(_) => "Array".into(),
+            Value::ByteArray(_) => "Array".into(),
             Value::Tuple(_) => "Tuple".into(),
             Value::Dict(_) => "Dict".into(),
             Value::Set(_) => "Set".into(),
@@ -578,6 +611,10 @@ fn debug_repr(v: &Value) -> String {
         Value::Float64(n) => format!("{:?}", n),
         Value::Array(elems) => {
             let inner: Vec<String> = elems.iter().map(debug_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::ByteArray(bytes) => {
+            let inner: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
             format!("[{}]", inner.join(", "))
         }
         Value::Tuple(elems) => {
@@ -648,6 +685,14 @@ impl fmt::Display for Value {
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
                     write!(f, "{}", e)?;
+                }
+                write!(f, "]")
+            }
+            Value::ByteArray(bytes) => {
+                write!(f, "[")?;
+                for (i, b) in bytes.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", b)?;
                 }
                 write!(f, "]")
             }

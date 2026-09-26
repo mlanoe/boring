@@ -2331,3 +2331,5 @@ mod tests_part2;
 mod tests_part3;
 mod tests_gpu;
 mod tests_labeled_array;
+mod tests_bytearray;
+mod tests_for_lazy_iterables;

@@ -4,6 +4,21 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
+        // `ByteArray` method dispatch — the hot paths (len/first/last/push/slice/
+        // getAt/index-API/contains) stay packed; anything else inflates to a
+        // real `Array` and re-dispatches through the normal path below. See
+        // `Value::ByteArray`'s doc comment for why this variant exists.
+        if let Value::ByteArray(bytes) = &obj {
+            if let Some(result) = self.call_bytearray_method(Rc::clone(bytes), method, &args, line)? {
+                const MUTATING: &[&str] = &["push", "removeAt"];
+                if MUTATING.contains(&method) {
+                    out_self.replace(result.clone());
+                }
+                return Ok(result);
+            }
+            let inflated = Value::inflate_byte_array(bytes);
+            return self.call_method(inflated, method, args, line, out_self);
+        }
         // Screen built-in method dispatch.
         if let Value::Screen { width: _width, height: _height, frame, resized, keys, pixels, title: _title, .. } = &obj {
             match method {
@@ -1551,6 +1566,85 @@ impl Interpreter {
         }
     }
 
+    /// `ByteArray`-native fast paths — the operations a binary-format parser
+    /// actually uses in a tight loop over a large buffer. Returning `Ok(None)`
+    /// tells the caller (`call_method`) to inflate to a real `Array` and
+    /// re-dispatch, so every array method still works correctly on a
+    /// `ByteArray`, just without the packed-memory win for the rarer ones.
+    pub(crate) fn call_bytearray_method(&mut self, bytes: Rc<Vec<u8>>, method: &str, args: &[Value], line: usize) -> Result<Option<Value>, Signal> {
+        match method {
+            "len" | "length" | "count" if args.is_empty() => Ok(Some(Value::Int(bytes.len() as i64))),
+            "isEmpty" => Ok(Some(Value::Bool(bytes.is_empty()))),
+            "first" => Ok(Some(bytes.first().map(|&b| Value::Uint8(b)).unwrap_or(Value::Nil))),
+            "last" => Ok(Some(bytes.last().map(|&b| Value::Uint8(b)).unwrap_or(Value::Nil))),
+            "contains" => match args.first() {
+                Some(Value::Uint8(n)) => Ok(Some(Value::Bool(bytes.contains(n)))),
+                _ => Ok(None), // not a byte — let the inflate fallback compare it generically
+            },
+            "push" => match args.first() {
+                Some(Value::Uint8(n)) => {
+                    let mut new_arr = Value::rc_bytes_into_owned(bytes);
+                    new_arr.push(*n);
+                    Ok(Some(Value::ByteArray(Rc::new(new_arr))))
+                }
+                // Pushing a non-byte onto a `[uint8]` array degrades it to a plain
+                // `Array` — same permissiveness `call_array_method`'s own `push`
+                // already has (no element-type check there either).
+                _ => Ok(None),
+            },
+            "slice" => {
+                let len = bytes.len();
+                let resolve = |v: i64| -> usize {
+                    if v < 0 { (len as i64 + v).max(0) as usize } else { (v as usize).min(len) }
+                };
+                let start = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
+                let start = resolve(start);
+                let end = match args.get(1).cloned() {
+                    Some(v) => resolve(self.expect_int(v, line)?),
+                    None => len,
+                };
+                Ok(Some(Value::ByteArray(Rc::new(bytes[start..end.max(start)].to_vec()))))
+            }
+            "firstIndex" => {
+                if bytes.is_empty() {
+                    Ok(Some(Value::Nil))
+                } else {
+                    Ok(Some(Value::Index(IndexValue::Array(0))))
+                }
+            }
+            "nextIndex" => match args.first().cloned().unwrap_or(Value::Nil) {
+                Value::Index(IndexValue::Array(pos)) => {
+                    let next = pos + 1;
+                    if next < bytes.len() {
+                        Ok(Some(Value::Index(IndexValue::Array(next))))
+                    } else {
+                        Ok(Some(Value::Nil))
+                    }
+                }
+                _ => Err(err("nextIndex: expected an ArrayIndex value", line)),
+            },
+            "getAt" => match args.first().cloned().unwrap_or(Value::Nil) {
+                Value::Index(IndexValue::Array(pos)) => {
+                    bytes.get(pos).map(|&b| Some(Value::Uint8(b)))
+                        .ok_or_else(|| err(format!("getAt: index {} out of bounds (len {})", pos, bytes.len()), line))
+                }
+                _ => Err(err("getAt: expected an ArrayIndex value", line)),
+            },
+            "removeAt" => match args.first().cloned().unwrap_or(Value::Nil) {
+                Value::Index(IndexValue::Array(pos)) => {
+                    if pos >= bytes.len() {
+                        return Err(err(format!("removeAt: index {} out of bounds (len {})", pos, bytes.len()), line));
+                    }
+                    let mut new_arr = Value::rc_bytes_into_owned(bytes);
+                    new_arr.remove(pos);
+                    Ok(Some(Value::ByteArray(Rc::new(new_arr))))
+                }
+                _ => Err(err("removeAt: expected an ArrayIndex value", line)),
+            },
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn call_dict_method(&mut self, obj: &Value, method: &str, args: &[Value], line: usize) -> Result<Option<Value>, Signal> {
         let pairs = match obj {
             Value::Dict(p) => p.clone(),
@@ -1920,6 +2014,9 @@ impl Interpreter {
             Value::Array(ref arr) if field == "length" || field == "count" || field == "len" => {
                 Ok(Value::Int(arr.len() as i64))
             }
+            Value::ByteArray(ref arr) if field == "length" || field == "count" || field == "len" => {
+                Ok(Value::Int(arr.len() as i64))
+            }
             Value::Set(ref elems) if field == "length" || field == "count" || field == "len" => {
                 Ok(Value::Int(elems.len() as i64))
             }
@@ -1948,6 +2045,21 @@ impl Interpreter {
                     }
                 };
                 arr.get(pos).cloned()
+                    .ok_or_else(|| err_span(format!("array index {} out of bounds (len {})", pos, arr.len()), line, col, len))
+            }
+            Value::ByteArray(arr) => {
+                let pos: usize = match idx {
+                    Value::Index(IndexValue::Array(p)) => p,
+                    other => {
+                        let i = self.expect_int(other, line)?;
+                        let i = if i < 0 { arr.len() as i64 + i } else { i };
+                        if i < 0 || i as usize >= arr.len() {
+                            return Err(err_span(format!("array index {} out of bounds (len {})", i, arr.len()), line, col, len));
+                        }
+                        i as usize
+                    }
+                };
+                arr.get(pos).map(|&b| Value::Uint8(b))
                     .ok_or_else(|| err_span(format!("array index {} out of bounds (len {})", pos, arr.len()), line, col, len))
             }
             Value::Dict(pairs) => {
@@ -2010,6 +2122,12 @@ impl Interpreter {
         env: &EnvRef,
         line: usize,
     ) -> Option<Result<(), Signal>> {
+        // Packed `[uint8]` byte-buffer case — same rationale (avoid an O(n)
+        // deep clone per write), same fast path, but the backing store is
+        // `Rc<Vec<u8>>`, not `Rc<Vec<Value>>`.
+        if matches!(env.borrow().get(name), Some(Value::ByteArray(_))) {
+            return self.try_fast_bytearray_index_assign(name, idx_expr, val, env, line);
+        }
         if !matches!(env.borrow().get(name), Some(Value::Array(_))) {
             return None;
         }
@@ -2033,6 +2151,87 @@ impl Interpreter {
                 }
             };
             let mut arr = Value::rc_vec_into_owned(arr_rc);
+            let pos_result: Result<usize, Signal> = match idx {
+                Value::Index(IndexValue::Array(p)) => Ok(p),
+                other => {
+                    let i = self.expect_int(other, line)?;
+                    let i = if i < 0 { arr.len() as i64 + i } else { i };
+                    if i < 0 || i as usize >= arr.len() {
+                        Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line))
+                    } else {
+                        Ok(i as usize)
+                    }
+                }
+            };
+            match pos_result {
+                Ok(pos) => {
+                    if pos < arr.len() { arr[pos] = val; }
+                    env.borrow_mut().force_set(name, Value::Array(arr.into()));
+                    Ok(())
+                }
+                Err(e) => {
+                    env.borrow_mut().force_set(name, Value::Array(arr.into()));
+                    Err(e)
+                }
+            }
+        })())
+    }
+
+    /// `ByteArray` counterpart of `try_fast_array_index_assign`. A non-`Uint8`
+    /// value being written in (rare — e.g. `bytes[i] = someString`) degrades
+    /// the variable to a plain `Array`, mirroring `push`'s same fallback.
+    fn try_fast_bytearray_index_assign(
+        &mut self,
+        name: &str,
+        idx_expr: &Expr,
+        val: Value,
+        env: &EnvRef,
+        line: usize,
+    ) -> Option<Result<(), Signal>> {
+        if self.sync_fields.contains_key(name) {
+            return None;
+        }
+        Some((|| {
+            let idx = self.eval_expr(idx_expr, Rc::clone(env))?;
+            let taken = env.borrow_mut().take(name).unwrap_or(Value::Nil);
+            let arr_rc = match taken {
+                Value::ByteArray(rc) => rc,
+                other => {
+                    env.borrow_mut().force_set(name, other);
+                    return Err(err(format!("'{}' is no longer an array", name), line));
+                }
+            };
+            if let Value::Uint8(b) = val {
+                let mut arr = Value::rc_bytes_into_owned(arr_rc);
+                let pos_result: Result<usize, Signal> = match idx {
+                    Value::Index(IndexValue::Array(p)) => Ok(p),
+                    other => {
+                        let i = self.expect_int(other, line)?;
+                        let i = if i < 0 { arr.len() as i64 + i } else { i };
+                        if i < 0 || i as usize >= arr.len() {
+                            Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line))
+                        } else {
+                            Ok(i as usize)
+                        }
+                    }
+                };
+                return match pos_result {
+                    Ok(pos) => {
+                        if pos < arr.len() { arr[pos] = b; }
+                        env.borrow_mut().force_set(name, Value::ByteArray(arr.into()));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        env.borrow_mut().force_set(name, Value::ByteArray(arr.into()));
+                        Err(e)
+                    }
+                };
+            }
+            // Non-byte value: degrade to a plain Array before writing it in.
+            let mut arr = match Value::inflate_byte_array(&arr_rc) {
+                Value::Array(a) => Value::rc_vec_into_owned(a),
+                _ => unreachable!(),
+            };
             let pos_result: Result<usize, Signal> = match idx {
                 Value::Index(IndexValue::Array(p)) => Ok(p),
                 other => {
@@ -2335,6 +2534,43 @@ impl Interpreter {
                         };
                         if pos < arr.len() { arr[pos] = val; }
                         self.assign(obj_expr, Value::Array(arr.into()), env, line)?;
+                    }
+                    Value::ByteArray(arr_rc) => {
+                        if let Value::Uint8(b) = val {
+                            let mut arr = Value::rc_bytes_into_owned(arr_rc);
+                            let pos: usize = match idx {
+                                Value::Index(IndexValue::Array(p)) => p,
+                                other => {
+                                    let i = self.expect_int(other, line)?;
+                                    let i = if i < 0 { arr.len() as i64 + i } else { i };
+                                    if i < 0 || i as usize >= arr.len() {
+                                        return Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line));
+                                    }
+                                    i as usize
+                                }
+                            };
+                            if pos < arr.len() { arr[pos] = b; }
+                            self.assign(obj_expr, Value::ByteArray(arr.into()), env, line)?;
+                        } else {
+                            // Non-byte value: degrade to a plain Array (mirrors `push`'s fallback).
+                            let mut arr = match Value::inflate_byte_array(&arr_rc) {
+                                Value::Array(a) => Value::rc_vec_into_owned(a),
+                                _ => unreachable!(),
+                            };
+                            let pos: usize = match idx {
+                                Value::Index(IndexValue::Array(p)) => p,
+                                other => {
+                                    let i = self.expect_int(other, line)?;
+                                    let i = if i < 0 { arr.len() as i64 + i } else { i };
+                                    if i < 0 || i as usize >= arr.len() {
+                                        return Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line));
+                                    }
+                                    i as usize
+                                }
+                            };
+                            if pos < arr.len() { arr[pos] = val; }
+                            self.assign(obj_expr, Value::Array(arr.into()), env, line)?;
+                        }
                     }
                     Value::Dict(mut pairs) => {
                         let key = match idx {
@@ -3199,18 +3435,18 @@ impl Interpreter {
             "readBytes" => {
                 let path = str_arg!(0);
                 match std::fs::read(&path) {
-                    Ok(bytes) => {
-                        let arr = bytes.iter()
-                            .map(|&b| Value::Uint8(b))
-                            .collect::<Vec<_>>();
-                        Ok(Value::Array(arr.into()))
-                    }
+                    // Packed `ByteArray`, not one `Value::Uint8` per byte — a
+                    // several-hundred-MB file used to need a `Vec<Value>` at
+                    // ~352 bytes/element (hundreds of GB) to hold it. See
+                    // `Value::ByteArray`'s doc comment.
+                    Ok(bytes) => Ok(Value::ByteArray(Rc::new(bytes))),
                     Err(e) => fs_err!(e),
                 }
             }
             "writeBytes" => {
                 let path = str_arg!(0);
                 let bytes = match args.get(1) {
+                    Some(Value::ByteArray(arr)) => (**arr).clone(),
                     Some(Value::Array(arr)) => {
                         let mut out = Vec::with_capacity(arr.len());
                         for v in arr.iter() {

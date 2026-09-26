@@ -781,6 +781,10 @@ let numbers: Vec<isize> = vec![1, 2, 3, 4, 5];
 let empty: Vec<isize> = Vec::new();
 ```
 
+#### `boring run` memory note — `[uint8]`
+
+Under the tree-walk interpreter (`boring run`, not `boring build`), every array element is normally boxed as a full interpreter `Value` — several hundred bytes each on a 64-bit target, regardless of what the element actually holds — so a large generic array can cost far more memory than its logical size suggests. `[uint8]` is the one element type the interpreter special-cases with a packed backing store (a real `Vec<u8>`, one byte per element): `fs.readBytes()`'s result, and any `[uint8]`-typed `let`/`var`/comprehension, get this automatically, so reading and indexing through a multi-hundred-MB file no longer risks exhausting memory. Other element types (`[int]`, `[float]`, …) don't have a packed form yet — a very large array of those still pays the full per-`Value` cost. This is purely a `boring run` characteristic; `boring build`'s transpiled Rust always uses real `Vec<T>` regardless of element type.
+
 #### Element mutability — `[mut T]` vs `mut [T]`
 
 `mut` on the collection's own type (`mut [Point] arr`) and `mut` on the **element** type (`[mut Point] arr`) control two independent things — see [§2](#2-variables-and-mutability):
@@ -1852,6 +1856,10 @@ for k in 1..<5:       # exclusive: 1, 2, 3, 4
 for k in 1isize..=5 { println!("{}", k); }
 for k in 1isize..5  { println!("{}", k); }
 ```
+
+#### `boring run` memory note — `for` over a range, string, or dict
+
+Under the tree-walk interpreter (`boring run`, not `boring build`), `for i in 0..<n:`/`0..=n:`, `for c in someString:`, and `for k, v in someDict:` all iterate lazily — one `Value` produced and discarded per iteration, the same memory profile as an equivalent `while` loop — regardless of how large the range/string/dict is. Other iterables (`[T]` arrays, `{T}` sets, tuples) don't have a lazy form yet — they're already fully materialized collections to begin with, so iterating one walks its existing `Vec<Value>` at the same per-element cost noted in the `[T]` array section above, rather than an additional up-front collection step.
 
 ### `for` without a variable — repeat N times
 
@@ -7530,7 +7538,7 @@ def main() throws:
 |---|---|:---:|---|
 | `fs.read(path)` | `string` | ✓ | `tokio::fs::read_to_string(path).await?` |
 | `fs.readLines(path)` | `[string]` | ✓ | read + `.lines()` collect |
-| `fs.readBytes(path)` | `[int]` | ✓ | `tokio::fs::read(path).await?` |
+| `fs.readBytes(path)` | `[uint8]` | ✓ | `tokio::fs::read(path).await?` |
 | `fs.write(path, content)` | `void` | ✓ | `tokio::fs::write(path, …).await?` |
 | `fs.writeBytes(path, bytes)` | `void` | ✓ | `tokio::fs::write(path, &bytes).await?` |
 | `fs.append(path, content)` | `void` | ✓ | `OpenOptions::append(true).open(path).await?` |

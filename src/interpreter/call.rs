@@ -876,6 +876,9 @@ fn default_value_for_type(ty: &Type) -> Value {
         Type::Bool => Value::Bool(false),
         Type::Str => Value::Str(String::new()),
         Type::Optional(_) => Value::Nil,
+        Type::Array(elem) | Type::ArrayN(elem, _) | Type::LabeledArray(elem, _) if Interpreter::type_is_uint8(elem) => {
+            Value::ByteArray(Rc::new(Vec::new()))
+        }
         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => Value::Array(Rc::new(Vec::new())),
         Type::Dict(_, _) => Value::Dict(Vec::new()),
         Type::Set(_) => Value::Set(Vec::new()),
