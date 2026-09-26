@@ -3282,9 +3282,34 @@ impl Transpiler {
             if !init.body.is_empty() {
                 self.struct_has_init_body.insert(s.name.clone());
             }
-            // Collect defaults (for both body and body-less inits).
+            // Collect defaults (for both body and body-less inits). A `'owned`/`'new`
+            // -qualified param's default is rendered through the qualifier-aware
+            // `emit_let_value` (not a bare `emit_expr`) so it gets the same
+            // `Box::new(...)` wrap an ordinary `'owned`-qualified `let`/field
+            // assignment already gets — otherwise the omitting call site below
+            // substitutes this pre-rendered text verbatim and a default like
+            // `freshGreeter()` (returning bare `impl Greeter`, not `Box<dyn Greeter>`)
+            // never gets boxed to match the param's own qualified type. Scoped to just
+            // `'owned`/`'new` (not every qualifier) because `emit_let_value`'s
+            // `'shared`/`'actor`/`'guard` arm (`emit_let_value_arc_qualified`) has no
+            // equivalent "already Arc-returning call" recognition for a bare
+            // `Call(fn_name, ..)` the way `expr_already_owned_repr` has for `'owned` —
+            // routing a `'shared`-qualified `@inject` provider default like
+            // `greeterProvider()` (already declared to return `Greeter'shared`)
+            // through it double-wrapped it as `Arc::new(greeterProvider())` instead of
+            // passing the already-`Arc<dyn Greeter>` call through as-is (regressed
+            // `tests/dependency_injection.rs`'s
+            // `inject_resolves_transient_provider_at_zero_arg_call_site`).
             let defaults: Vec<Option<String>> = init.params.iter()
-                .map(|p| p.default.as_ref().map(|d| self.emit_expr(d)))
+                .map(|p| p.default.as_ref().map(|d| {
+                    let owned_or_new = p.ty.as_ref()
+                        .is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, q) if q.is_owned_or_new()));
+                    if owned_or_new {
+                        self.emit_let_value(p.ty.as_ref(), d)
+                    } else {
+                        self.emit_expr(d)
+                    }
+                }))
                 .collect();
             if defaults.iter().any(|d| d.is_some()) {
                 self.struct_init_defaults.insert(s.name.clone(), defaults);

@@ -1063,6 +1063,28 @@ transpile_test!(new_owned_no_double_or_missing_box, ignore_managed);
 // a `Arc<Mutex<Box2>>`/`RefCell<Box2>` orphan-rule error from the operator
 // trait impls being generated for the wrapper type directly).
 transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);
+// `init_owned_trait_param`: an explicit body-`init`'s `Trait'owned` parameter
+// (the `@inject`-relevant shape — docs/design-notes/boring-di-draft.md's
+// `'owned` transient-dependency case, `desugar_inject.rs`'s synthesized init)
+// — two compounding bugs, both pre-existing and unrelated to `@inject`
+// itself: (1) the param's own type got boxed twice (`Box<Box<dyn Greeter>>`)
+// because `emit_type`'s `Type::Qualified(_, OwnerQual::Owned)` arm wrapped
+// `emit_named_type`'s output in another `Box<...>` even when that output was
+// already `Box<dyn Trait>` (Priority 4, a trait name always self-boxes);
+// (2) the default expression (`freshGreeter()`, returning bare `impl
+// Greeter`) was never `Box::new(...)`-wrapped at the omitting call site,
+// because `struct_init_defaults` (`src/transpiler/mod.rs`) rendered each
+// default via the qualifier-blind `emit_expr` instead of the qualifier-aware
+// `emit_let_value`. Fixing both surfaced a third, previously-latent bug: a
+// bare/`'owned` trait field (`Box<dyn Trait>`) was never excluded from the
+// struct's auto-derived `Clone`/`PartialEq`/`Debug` the way a `[Trait]` array
+// field already was (`emit_struct.rs`'s `has_non_clone_field`/
+// `has_non_debug_trait_array_field`), so it still failed to compile
+// (E0277/E0369) even once the field carried the right, single-boxed type.
+// Managed mode hits the same pre-existing `'owned` call-site gap named in
+// `owned_call_arg_no_double_box`'s doc above (constructor call sites aren't
+// updated to emit `Arc::new(Mutex::new(...))` for a trait-typed default).
+transpile_test!(init_owned_trait_param, ignore_managed);
 
 // ── Strict-mode size-based return-type auto-boxing (docs/transpilation-modes.md
 //    "Size-based auto-boxing") ────────────────────────────────────────────────

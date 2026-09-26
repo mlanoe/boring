@@ -40,6 +40,26 @@ impl Transpiler {
                 .collect();
             self.qualify_serde_derive_args(&raw, s.line, s.col)
         } else {
+            // A single (non-array) field whose own type is a trait name — bare
+            // (`Greeter greeter`) or `'owned`-qualified (`Greeter'owned greeter`) — also
+            // renders to `Box<dyn Trait>` (see `emit_field_type`/`emit_type`'s Priority-4
+            // "dyn Trait positions" rule), same object-safe-derive problem as a `[Trait]`
+            // array field just below. Confirmed via a real `cargo build` on a plain
+            // `Greeter'owned greeter` field: E0277 (`dyn Greeter: Clone`/`Debug` not
+            // satisfied) and E0369 (`PartialEq`), same as the array case.
+            fn field_is_boxed_trait<'a>(
+                ty: &'a Type,
+                trait_method_names: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+            ) -> Option<&'a str> {
+                match ty {
+                    Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
+                    Type::Qualified(inner, OwnerQual::Owned) => match inner.as_ref() {
+                        Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
             let has_non_clone_field = s.fields.iter().any(|f| {
                 // `mut AtomicUsize` (docs/book.md) wraps the field type in
                 // `Type::Mut` to unlock `.fetch_add()`-style calls in Boring's own
@@ -55,11 +75,13 @@ impl Transpiler {
                     // either without a compile error.
                     || matches!(ty, Type::Array(elem) if matches!(
                         elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
+                    || field_is_boxed_trait(ty, &self.trait_method_names).is_some()
             });
             // `Box<dyn Trait>: Debug` (needed for the struct's own auto-derived `Debug`,
             // kept below even when `has_non_clone_field` drops `Clone`/`PartialEq`) only
             // holds when `Trait` itself requires `Debug` (directly or transitively via its
-            // own supertraits — see `trait_requires_debug`). A `[Trait]` field whose trait
+            // own supertraits — see `trait_requires_debug`). A `[Trait]` field (or a single
+            // bare/`'owned` trait field, see `field_is_boxed_trait` above) whose trait
             // doesn't guarantee that must drop `Debug` too, or the struct's `#[derive(Debug)]`
             // fails to compile the same way an unconditional `Clone`/`PartialEq` would.
             let has_non_debug_trait_array_field = s.fields.iter().any(|f| {
@@ -68,6 +90,7 @@ impl Transpiler {
                 matches!(ty, Type::Array(elem) if matches!(elem.as_ref(),
                     Type::Named(n) if self.trait_method_names.contains_key(n.as_str())
                         && !self.trait_requires_debug(n.as_str())))
+                    || field_is_boxed_trait(ty, &self.trait_method_names).is_some_and(|n| !self.trait_requires_debug(n))
             });
             // Don't derive PartialEq when the struct has any comparison operator method —
             // emit_operator_trait_impls will generate PartialEq/PartialOrd impls that would conflict.

@@ -3360,14 +3360,26 @@ impl Transpiler {
                     {
                         self.emit_managed_actor(inner)
                     } else if matches!(qual, OwnerQual::Owned) {
+                        // A trait name inner already renders as `Box<dyn Trait>` on its own
+                        // (Priority 4 in `emit_named_type`) — `'owned` on a trait type is
+                        // that exact same representation, not an extra layer of boxing, so
+                        // return it directly instead of falling into the `Box<{}>` wrap below
+                        // (which would otherwise produce `Box<Box<dyn Trait>>`, confirmed via
+                        // a real `cargo build` on `Trait'owned` — see docs/design-notes/
+                        // boring-di-draft.md's `'owned` transient-dependency case).
+                        if let Type::Named(n) = inner.as_ref() {
+                            if self.trait_method_names.contains_key(n.as_str()) {
+                                return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
+                            }
+                        }
                         // For a bare Named inner, go through `emit_named_type` with size-based
                         // auto-boxing suppressed: this qualifier already committed to `Box<T>`,
                         // so recursing through the ordinary `emit_type` path (which re-checks
                         // Priority 6 on `inner` itself) would double-box an oversized `T` as
                         // `Box<Box<T>>` — confirmed via a real `cargo build` on `T'owned` over
                         // a >256-byte struct. Still routes through `emit_named_type` (not a bare
-                        // `normalize_type_name`, unlike the `'inline` arm below) so a trait name
-                        // or `$`-const/type-alias inner still gets its ordinary treatment.
+                        // `normalize_type_name`, unlike the `'inline` arm below) so a
+                        // `$`-const/type-alias inner still gets its ordinary treatment.
                         let inner_s = match inner.as_ref() {
                             Type::Named(n) => self.emit_named_type(n, true),
                             _ => self.emit_type(inner),

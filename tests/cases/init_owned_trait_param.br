@@ -1,0 +1,52 @@
+# Regression fixture: an explicit `init` (body form) with a `Trait'owned`
+# parameter that defaults to a call returning a bare trait type. Mirrors the
+# `@inject` design doc's (docs/design-notes/boring-di-draft.md §2, §4)
+# `'owned` transient-dependency case — `@inject`'s own desugar_inject.rs
+# synthesizes exactly this shape (an init with an `'owned`-typed param), so
+# a bug in emitting it blocks `@inject` even though the bug has nothing to
+# do with dependency injection itself.
+#
+# Was two compounding transpiler bugs, both in `emit_init`'s "Body init"
+# path (`src/transpiler/emit_struct.rs`) and `struct_init_defaults`
+# (`src/transpiler/mod.rs`):
+#   1. The init param's own type got boxed twice: `Greeter'owned greeter`
+#      emitted as `Box<Box<dyn Greeter>>` instead of `Box<dyn Greeter>`
+#      (`emit_type`'s `Type::Qualified(_, OwnerQual::Owned)` arm called
+#      `emit_named_type` -- which already returns `Box<dyn Trait>` for a
+#      trait name -- and then wrapped that again in `Box<...>`).
+#   2. The default expression (`freshGreeter()`, returning bare `impl
+#      Greeter` static dispatch, not `Box<dyn Greeter>`) was never wrapped
+#      in `Box::new(...)` at the omitting call site, because
+#      `struct_init_defaults` rendered each default with the qualifier-blind
+#      `emit_expr` instead of the qualifier-aware `emit_let_value`.
+#
+# A third, previously-latent bug surfaced once the above two were fixed and
+# this could compile far enough to hit codegen's derive logic: a bare or
+# `'owned`-qualified trait field (`Box<dyn Trait>`) was never excluded from
+# the struct's auto-derived `Clone`/`PartialEq`/`Debug` the way a `[Trait]`
+# array field already was (`emit_struct.rs`'s `has_non_clone_field`/
+# `has_non_debug_trait_array_field`) -- `dyn Greeter` implements none of
+# those, so the struct failed to compile (E0277/E0369) even with a single,
+# correctly-typed `Box<dyn Greeter>` field.
+
+trait Greeter:
+    req string greet()
+
+struct EnglishGreeter as Greeter:
+    req string greet(): "hello"
+
+Greeter freshGreeter():
+    EnglishGreeter()
+
+struct Greeting:
+    Greeter'owned greeter
+
+    init(Greeter'owned greeter = freshGreeter()):
+        self.greeter = greeter
+
+    req string say():
+        self.greeter.greet()
+
+def main():
+    let g = Greeting()
+    print g.say()
