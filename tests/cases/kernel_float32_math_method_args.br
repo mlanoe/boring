@@ -1,0 +1,42 @@
+# Regression: a kernel field declared `[float32]` but constructed from
+# untyped float literals (`[1.0, 2.0, 3.0]`, which default to Float64) used
+# to keep the wrong runtime width under `boring run`'s kernel-simulation
+# path — `instantiate_kernel_struct` bound `init()` params and copied field
+# values directly, bypassing the param-type coercion an ordinary function
+# call gets from `call.rs`. A math method taking an argument (`.powf`,
+# `.atan2`, `.log`, `.clamp`) on an explicitly float32-typed receiver then
+# hard-errored ("pow: argument must be a number") because the argument read
+# back out of the field was still Float64, not Float32 — even though the
+# real compiled build (`boring build --target metal`, etc.) was always
+# correct, since Rust's static typing gives the literal the right width at
+# compile time regardless. See CHANGELOG.md.
+kernel PowKernel:
+    mut [float32]'unified data
+
+    init([float32] d):
+        data = d
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = (2.0 as float32).powf(data[i])
+
+kernel MathArgsKernel:
+    mut [float32]'unified data
+
+    init([float32] d):
+        data = d
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = data[i].atan2(1.0 as float32) + data[i].log(2.0 as float32) + data[i].clamp(0.0 as float32, 100.0 as float32)
+
+def main() throws:
+    mut k = PowKernel([1.0, 2.0, 3.0])
+    kernel:
+        k(block = 3)
+    print "{k.data[0]} {k.data[1]} {k.data[2]}"
+
+    mut m = MathArgsKernel([2.0, 4.0, 8.0])
+    kernel:
+        m(block = 3)
+    print "{m.data[0]:.4f} {m.data[1]:.4f} {m.data[2]:.4f}"

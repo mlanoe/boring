@@ -663,3 +663,17 @@ interp_test!(array_block_closure_literal_block);
 // original bug's actual failure mode there was a compile error, not a wrong
 // value).
 interp_test!(inline_if_else_next_line_postfix);
+
+// Regression: `instantiate_kernel_struct` (the kernel-struct constructor path,
+// eval_gpu.rs) used to bind `init()` params and copy field values straight
+// from the init env, without the param-type coercion an ordinary struct's
+// `init` gets for free by running through `call.rs`'s `call_function`. A
+// `[float32]` field constructed from untyped float literals therefore stayed
+// `Value::Float64` under `boring run`'s kernel-simulation path, and a math
+// method taking an argument (`.powf`, `.atan2`, `.log`, `.clamp`) on an
+// explicitly float32-typed value hard-errored with "pow: argument must be a
+// number" — while the real compiled build was always correct, since Rust's
+// static typing gives the literal the right width regardless. See
+// tests/cases/kernel_float32_math_method_args.br's own doc comment and
+// CHANGELOG.md.
+interp_test!(kernel_float32_math_method_args);

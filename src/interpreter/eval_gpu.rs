@@ -1403,6 +1403,18 @@ impl Interpreter {
                 init_decl.params.iter().map(|p| p.name.clone()).collect();
             for param in &init_decl.params {
                 let val = positional.pop_front().unwrap_or(Value::Nil);
+                // Coerce to the declared param type the same way an ordinary
+                // function call does (`call.rs`'s param-coercion pass) — this
+                // constructor path calls `exec_block` directly rather than
+                // going through `call_function`, so it would otherwise skip
+                // that coercion entirely (see the field-coercion pass below).
+                let val = match &param.ty {
+                    Some(ty) => {
+                        let resolved_ty = self.resolve_type(ty);
+                        Self::coerce_to_type(val, &resolved_ty)
+                    }
+                    None => val,
+                };
                 env.borrow_mut().define_mut(&param.name, val);
                 env.borrow_mut().mark_content_mutable(&param.name);
             }
@@ -1416,15 +1428,31 @@ impl Interpreter {
                 Ok(_) | Err(Signal::Return(_)) => {}
                 Err(e) => return Err(e),
             }
-            for (name, val) in fields.iter_mut() {
-                if let Some(new_val) = env.borrow().get(name) {
-                    *val = new_val;
+            // Coerce each field to its *declared* kernel-field type (e.g. an
+            // untyped `1.0` literal threaded through as `Float64` narrows to
+            // `Float32` for a `[float32]` field). Unlike an ordinary struct's
+            // `init`, this constructor path binds params directly (below)
+            // rather than through `call_function`'s param coercion — without
+            // this pass, kernel field data silently carries the wrong numeric
+            // width under `boring run`'s simulation, diverging from the real
+            // (statically-typed) compiled build. See CHANGELOG.md.
+            for (field_decl, (_, val)) in decl.fields.iter().zip(fields.iter_mut()) {
+                if let Some(new_val) = env.borrow().get(&field_decl.name) {
+                    let resolved_ty = self.resolve_type(&field_decl.ty);
+                    *val = Self::coerce_to_type(new_val, &resolved_ty);
                 }
             }
         } else if !args.is_empty() {
             for (i, arg) in args.into_iter().enumerate() {
+                let coerced = match decl.fields.get(i) {
+                    Some(field_decl) => {
+                        let resolved_ty = self.resolve_type(&field_decl.ty);
+                        Self::coerce_to_type(arg, &resolved_ty)
+                    }
+                    None => arg,
+                };
                 if let Some((_, v)) = fields.get_mut(i) {
-                    *v = arg;
+                    *v = coerced;
                 }
             }
         }

@@ -60,6 +60,12 @@ enum KernelOutputInit {
     Fill(Expr, Box<Expr>),
     /// `field = [e0, e1, ...]` — literal elements, uploaded as-is.
     Literal(Vec<Expr>),
+    /// `field = [value for i in ..<count]` / `[value for i in 0..<count]` — bound
+    /// comprehension form (`ExprKind::ArrayComp`). Unlike `Fill`, `value` may
+    /// reference the loop variable (a genuinely per-index expression, e.g. `[i * 2
+    /// for i in ..<n]`), so this can't reuse `Fill`'s single-value `vec![v; n]`
+    /// codegen — it needs an actual indexed loop.
+    Comp(String, Expr, Box<Expr>),
 }
 
 impl Transpiler {
@@ -522,15 +528,29 @@ impl Transpiler {
                         elems_rust.join(", ")
                     ));
                 }
+                KernelOutputInit::Comp(var, value, count) => {
+                    // `var` is a genuine loop variable, not an init parameter — it's
+                    // deliberately absent from `param_to_arg`/`param_to_len`, so
+                    // `substitute_and_emit`'s `Var` branch falls through to
+                    // `map_builtin_var`, which returns an unrecognized lowercase name
+                    // verbatim (`escape_rust_keyword`) — exactly the closure parameter
+                    // name used below, so `value`'s translation lines up whether or
+                    // not it actually references `var`.
+                    let value_rust = self.substitute_and_emit(&value, &param_to_arg, &param_to_len);
+                    let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
+                    self.line(&format!(
+                        "{var_name}.copy_{field_name}_to_device(&(0..({count_rust}) as usize).map(|{var}| ({value_rust}) as {inner}).collect::<Vec<{inner}>>());"
+                    ));
+                }
             }
         }
     }
 
     /// Scan a kernel's (first) `init` body for `field = [value for ..<count]`
-    /// (`ExprKind::ArrayFill`) or plain `field = [e0, e1, ...]` (`ExprKind::Array`)
-    /// assignments — the two conventions this codebase's kernels use to size a
-    /// `'unified` output buffer to its runtime size. Returns `field name ->
-    /// KernelOutputInit`.
+    /// (`ExprKind::ArrayFill`), `field = [value for i in ..<count]` (`ExprKind::
+    /// ArrayComp`), or plain `field = [e0, e1, ...]` (`ExprKind::Array`) assignments
+    /// — the conventions this codebase's kernels use to size a `'unified` output
+    /// buffer to its runtime size. Returns `field name -> KernelOutputInit`.
     fn kernel_output_fill_map(decl: &KernelDecl) -> std::collections::HashMap<String, KernelOutputInit> {
         let mut map = std::collections::HashMap::new();
         if let Some(init) = decl.inits.first() {
@@ -544,6 +564,9 @@ impl Transpiler {
                                 }
                                 ExprKind::Array(elems) => {
                                     map.insert(field.clone(), KernelOutputInit::Literal(elems.clone()));
+                                }
+                                ExprKind::ArrayComp { expr, var, count } => {
+                                    map.insert(field.clone(), KernelOutputInit::Comp(var.clone(), (**expr).clone(), count.clone()));
                                 }
                                 _ => {}
                             }

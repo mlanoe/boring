@@ -1323,6 +1323,103 @@ with result:
     );
 }
 
+#[test]
+fn test_kernel_output_field_array_comp_with_loop_var_sized_correctly() {
+    // `dst`'s init-body assignment is the *bound* comprehension form (`[0.0 for i in
+    // 0..<4]`, `ExprKind::ArrayComp`) — syntactically just as valid as the unbound
+    // fill form (`[0.0 for ..<4]`, `ExprKind::ArrayFill`) already covered above, and
+    // semantically identical here since `i` never appears in the value expression.
+    // Before this fix, `kernel_output_fill_map` recognized `ArrayFill`/`Array` but
+    // not `ArrayComp`, so this field's `copy_dst_to_device` resize call was silently
+    // dropped entirely — `dst_buf` stayed at `new()`'s one-`f32` placeholder size,
+    // a real "index out of bounds: the len is 1 but the index is 1" panic on
+    // readback, confirmed via a real `cargo run` against the generated project.
+    let src = r#"
+kernel Probe:
+    let [float32]'global src
+    mut [float32]'unified dst
+    let int a
+    let int b
+
+    init([float32]'global s, int aa, int bb):
+        src = s
+        a = aa
+        b = bb
+        dst = [0.0 for i in 0..<4]
+
+    def ():
+        let cell = gpu.thread.x
+        if cell < a * b:
+            dst[cell] = src[cell]
+
+let src = [1.0, 2.0, 3.0, 4.0]
+mut k = Probe(src, 2, 2)
+kernel:
+    k(block = 256, grid = 1)
+let result = k.dst
+with result:
+    for i in 0..<4:
+        print "{result[i]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("kernel_output_field_array_comp_loop_var", src);
+
+    assert!(
+        rs.contains("k.copy_dst_to_device(&(0..(4) as usize).map(|i| (0) as f32).collect::<Vec<f32>>());"),
+        "expected the bound-comprehension fill to resize+upload dst via copy_dst_to_device;\ngot:\n{rs}"
+    );
+}
+
+#[test]
+fn test_kernel_output_field_array_comp_inside_host_wrapper_fn() {
+    // Same fix as `test_kernel_output_field_array_comp_with_loop_var_sized_correctly`,
+    // but with the kernel constructed+dispatched *inside a separate `pub req ...
+    // throws` host wrapper function* returning a `'gpu'unified` value — the
+    // idiomatic pattern every kernel wrapper in boring-llm's `math_gpu.br` uses
+    // (`linear_gpu`, `rope_apply_gpu`, `transpose_gpu`, ...), as opposed to inline
+    // construction directly in `main()`/`boring_main()`. `emit_kernel_construction`
+    // is reached through the same statement emitter regardless of which function
+    // body it's in, so this must produce identical codegen to the top-level case —
+    // pinned here explicitly since that shared-codegen assumption is exactly what a
+    // regression could quietly break.
+    let src = r#"
+kernel Probe:
+    let [float32]'global src
+    mut [float32]'unified dst
+    let int a
+    let int b
+
+    init([float32]'global s, int aa, int bb):
+        src = s
+        a = aa
+        b = bb
+        dst = [0.0 for i in 0..<4]
+
+    def ():
+        let cell = gpu.thread.x
+        if cell < a * b:
+            dst[cell] = src[cell]
+
+pub req [float32]'gpu'unified probe_gpu([float32]'global src, int a, int b) throws:
+    mut k = Probe(src, a, b)
+    kernel:
+        k(block = 256, grid = 1)
+    k.dst
+
+def main() throws:
+    let src = [1.0, 2.0, 3.0, 4.0]
+    let result = probe_gpu(src, 2, 2)
+    with result:
+        for i in 0..<4:
+            print "{result[i]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("kernel_output_field_array_comp_host_wrapper", src);
+
+    assert!(
+        rs.contains("k.copy_dst_to_device(&(0..(4) as usize).map(|i| (0) as f32).collect::<Vec<f32>>());"),
+        "expected the bound-comprehension fill to resize+upload dst via copy_dst_to_device inside the host wrapper fn;\ngot:\n{rs}"
+    );
+}
+
 // ─── atomic pointer indexing: `u32(...)`, not `... as u32` ────────────────────
 
 #[test]

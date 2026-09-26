@@ -501,6 +501,49 @@ let k = new(g0) Scale(data)
         "expected an explicit f64->f32 cast before uploading the host array;\ngot:\n{rs}");
 }
 
+#[test]
+fn host_fn_float32_param_passed_directly_to_kernel_ctor_is_vec_f32_not_f64() {
+    // Regression test: a `pub req [T]'gpu'unified` host function whose
+    // `[float32]` parameter is passed DIRECTLY to a kernel struct's own
+    // constructor call (`AddKernel(a, n)`) used to have that parameter's
+    // Rust element type wrongly forced to `f64` (`is_float_array_param`
+    // didn't distinguish `float32` from bare `float`/`float64`, and the
+    // general pipeline's own convention for `float32` is already `f32` --
+    // there was never an f64/f32 mismatch to bridge for it in the first
+    // place). This produced `a: &Vec<f64>` in the generated signature, a
+    // real E0308 (`expected &Vec<f64>, found &Vec<f32>`) at every call site
+    // passing a genuine `[float32]`-typed Boring value -- confirmed via a
+    // real cross-compile `cargo build` before this fix, and via a real
+    // Metal run producing the correct output (`2 3 4` for inputs `1 2 3`)
+    // after it.
+    let (_, rs) = metal_codegen("host_fn_float32_direct_kernel_ctor", r#"
+kernel AddKernel:
+    let [float32]'global a
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global ai, int ni):
+        a = ai
+        n = ni
+        out = [0.0 for i in 0..<ni]
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = a[i] + 1.0
+
+pub req [float32]'gpu'unified add_gpu([float32] a, int n) throws:
+    mut k = AddKernel(a, n)
+    kernel:
+        k(block = n)
+    k.out
+"#);
+    assert!(rs.contains("pub fn add_gpu(a: &Vec<f32>, n: isize)"),
+        "expected the [float32] param to render as &Vec<f32>, not &Vec<f64>;\ngot:\n{rs}");
+    assert!(!rs.contains("a: &Vec<f64>") && !rs.contains("a: Vec<f64>"),
+        "the [float32] param must never be declared as a Vec<f64>;\ngot:\n{rs}");
+}
+
 // ─── host — __boring_launch ───────────────────────────────────────────────────
 
 #[test]

@@ -141,18 +141,26 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
     }
 }
 
-/// True for a `[float]` array param -- this backend's own kernel-touching-
-/// function signatures render these as `Vec<f32>` (`rust_type`'s Metal-native
-/// convention), but every general-spliced caller's own local is `Vec<f64>`
-/// (the general pass's fixed host convention, see `general_host_elem_type`'s
-/// doc) -- a real E0308 confirmed via a real cross-compile `cargo check`
-/// (`&Vec<f32>` vs `&Vec<f64>`). Such a param is instead DECLARED as
-/// `&Vec<f64>` and immediately shadow-rebound to an owned `Vec<f32>` local
-/// (see `emit_fn`).
+/// True for a bare `[float]`/`[float64]` array param -- this backend's own
+/// kernel-touching-function signatures render these as `Vec<f32>` (`rust_type`'s
+/// Metal-native convention), but every general-spliced caller's own local is
+/// `Vec<f64>` (the general pass's fixed host convention for `float`/`float64`,
+/// see `general_host_elem_type`'s doc) -- a real E0308 confirmed via a real
+/// cross-compile `cargo check` (`&Vec<f32>` vs `&Vec<f64>`). Such a param is
+/// instead DECLARED as `&Vec<f64>` and immediately shadow-rebound to an owned
+/// `Vec<f32>` local (see `emit_fn`).
+///
+/// Deliberately EXCLUDES `float32` -- the general pass's own convention for
+/// `float32` is already `f32` (see `general_host_elem_type`'s `Float32` arm),
+/// so there is no f64/f32 mismatch to bridge for it. Previously this matched
+/// `float32` too, which forced a `[float32]` param passed directly to a kernel
+/// constructor to be wrongly DECLARED `&Vec<f64>` in the emitted signature --
+/// a real E0308 at every call site passing a genuine `Vec<f32>` (confirmed via
+/// a real cross-compile `cargo check`, `expected &Vec<f64>, found &Vec<f32>`).
 fn is_float_array_param(ty: &Type) -> bool {
     fn is_float(ty: &Type) -> bool {
-        matches!(ty, Type::Float32 | Type::Float64)
-            || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64" | "f32" | "f64"))
+        matches!(ty, Type::Float64)
+            || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "f64"))
     }
     match ty {
         Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => is_float(inner),
