@@ -304,6 +304,14 @@ impl Interpreter {
                         let exp = args.first().cloned().unwrap_or(Value::Float32(1.0));
                         let e = match exp {
                             Value::Float32(e) => e,
+                            // A bare untyped literal argument (`v.x.pow(2.0)`) always
+                            // defaults to `Value::Float64` regardless of the receiver's
+                            // width — method-call arguments aren't coerced against any
+                            // declared param type the way a real typed parameter is, so
+                            // a genuinely `Value::Float32` receiver (now that struct/
+                            // kernel-field construction correctly coerces to it — see
+                            // CHANGELOG.md) must still accept a `Float64` exponent here.
+                            Value::Float64(e) => e as f32,
                             Value::Int(n)   => n as f32,
                             _ => return Err(err("pow: argument must be a number", line)),
                         };
@@ -313,6 +321,7 @@ impl Interpreter {
                         let base = args.first().cloned().unwrap_or(Value::Float32(std::f32::consts::E));
                         let b = match base {
                             Value::Float32(b) => b,
+                            Value::Float64(b) => b as f32,
                             Value::Int(n)   => n as f32,
                             _ => return Err(err("log: base must be a number", line)),
                         };
@@ -322,6 +331,7 @@ impl Interpreter {
                         let other = args.first().cloned().unwrap_or(Value::Float32(0.0));
                         let o = match other {
                             Value::Float32(o) => o,
+                            Value::Float64(o) => o as f32,
                             Value::Int(n)   => n as f32,
                             _ => return Err(err("atan2: argument must be a number", line)),
                         };
@@ -329,8 +339,8 @@ impl Interpreter {
                     }
                     "clamp" => {
                         if args.len() < 2 { return Err(err("clamp: requires two arguments (min, max)", line)); }
-                        let lo = match &args[0] { Value::Float32(v) => *v, Value::Int(n) => *n as f32, _ => return Err(err("clamp: min must be a number", line)) };
-                        let hi = match &args[1] { Value::Float32(v) => *v, Value::Int(n) => *n as f32, _ => return Err(err("clamp: max must be a number", line)) };
+                        let lo = match &args[0] { Value::Float32(v) => *v, Value::Float64(v) => *v as f32, Value::Int(n) => *n as f32, _ => return Err(err("clamp: min must be a number", line)) };
+                        let hi = match &args[1] { Value::Float32(v) => *v, Value::Float64(v) => *v as f32, Value::Int(n) => *n as f32, _ => return Err(err("clamp: max must be a number", line)) };
                         Some(Value::Float32(f.clamp(lo, hi)))
                     }
                     _ => None,
@@ -2165,7 +2175,9 @@ impl Interpreter {
             };
             match pos_result {
                 Ok(pos) => {
-                    if pos < arr.len() { arr[pos] = val; }
+                    if pos < arr.len() {
+                        arr[pos] = Self::coerce_array_elem_literal(val, &arr[pos]);
+                    }
                     env.borrow_mut().force_set(name, Value::Array(arr.into()));
                     Ok(())
                 }
@@ -2424,6 +2436,7 @@ impl Interpreter {
                         }
                         // Fall through to raw field write — check mutability first
                         // Do struct lookup BEFORE borrow_mut to avoid double borrow
+                        let mut field_ty: Option<crate::ast::Type> = None;
                         {
                             let struct_val = self.global.borrow().get(&type_name);
                             if let Some(Value::Struct { decl, .. }) = struct_val {
@@ -2439,9 +2452,24 @@ impl Interpreter {
                                             line,
                                         ));
                                     }
+                                    field_ty = Some(fd.ty.clone());
                                 }
                             }
                         }
+                        // Coerce to the field's declared type — a plain
+                        // `self.field = <bare literal>` assignment from inside
+                        // an ordinary (non-init) mutating method used to write
+                        // the literal's default numeric width straight through
+                        // (e.g. `Value::Float64` into a `var float32` field),
+                        // the same class of `boring run` simulation-fidelity
+                        // gap as struct construction — see CHANGELOG.md.
+                        let val = match field_ty {
+                            Some(ty) => {
+                                let resolved_ty = self.resolve_type(&ty);
+                                Self::coerce_to_type(val, &resolved_ty)
+                            }
+                            None => val,
+                        };
                         // Mutate in-place through the Rc<RefCell<>> — no write-back needed
                         let mut inner_mut = inner_rc.borrow_mut();
                         for (k, v) in &mut inner_mut.fields {
@@ -2532,7 +2560,9 @@ impl Interpreter {
                                 i as usize
                             }
                         };
-                        if pos < arr.len() { arr[pos] = val; }
+                        if pos < arr.len() {
+                            arr[pos] = Self::coerce_array_elem_literal(val, &arr[pos]);
+                        }
                         self.assign(obj_expr, Value::Array(arr.into()), env, line)?;
                     }
                     Value::ByteArray(arr_rc) => {

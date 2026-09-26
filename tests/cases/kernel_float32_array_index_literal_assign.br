@@ -1,0 +1,36 @@
+# Regression: assigning a bare numeric literal (`0.0`, no explicit `as
+# float32`) into an already-float32-typed array slot (`arr[i] = 0.0`) kept
+# the literal's default `Value::Float64` representation instead of
+# narrowing to match the array's real element type — `assign`'s
+# `ExprKind::Index` arm (and its `try_fast_array_index_assign` fast path,
+# both in src/interpreter/methods.rs) overwrote the slot with the raw
+# evaluated literal, with no coercion at all. A later arithmetic operation
+# mixing that slot with a genuine `Value::Float32` (read from a real
+# `[float32]'global` field, or just another untouched slot of the same
+# array) then hard-errored ("cannot multiply Float32 and Float") under
+# `boring run`'s kernel-simulation path, even though the real compiled
+# build was always correct (Rust's static typing gives the literal the
+# right width at compile time). Reproduces identically for a plain
+# `'unified` field and for an `'actor` shared-memory tile field — this
+# isn't qualifier-specific, just general to any float32 kernel array field
+# that ever zero-initializes (or otherwise literal-assigns into) part of an
+# array. See CHANGELOG.md.
+kernel MiniKernel:
+    let [float32]'global x
+    mut [float32]'unified out
+
+    init([float32]'global xi):
+        x = xi
+        out = [0.0, 0.0]
+
+    def ():
+        out[1] = 0.0
+        var float32 acc = 0.0
+        acc += x[0] * out[1]
+        out[0] = acc
+
+def main() throws:
+    mut k = MiniKernel([5.0, 6.0])
+    kernel:
+        k(block = 1)
+    print "{k.out[0]}"

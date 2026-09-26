@@ -1,0 +1,18 @@
+# Regression: constructing an ordinary (non-kernel) struct with no explicit
+# `init` never coerced field values to their declared field type under
+# `boring run` — `instantiate_struct_labeled` built its `fields: Vec<(String,
+# Value)>` directly from constructor args/labels/defaults with no
+# `coerce_to_type` call anywhere, so a bare `1.0` literal (defaulting to
+# `Value::Float64`) kept that width in a `float32` field. Invisible in
+# isolation (most arithmetic widens gracefully); surfaces the moment the
+# field collides with a genuine `Value::Float32` (here, a `var float32`
+# local, itself correctly coerced by the unrelated `Stmt::Let` path) —
+# `h.x * y` used to hard-error "cannot multiply Float and Float32" even
+# though the real compiled build was always correct. See CHANGELOG.md.
+struct Holder:
+    var float32 x
+
+def main() throws:
+    mut h = Holder(1.0)
+    var float32 y = 2.0
+    print "{h.x * y}"

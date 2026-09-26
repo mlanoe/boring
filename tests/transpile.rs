@@ -713,6 +713,13 @@ transpile_test!(option_owned_methods);
 // `error[E0599]: no method named 'trim' found for type 'f32'` and friends.
 // `(expr * struct.field) as T` already worked; only the bare form was broken.
 transpile_test!(cast_bare_field_index);
+// Regression: `(if cond: a else: b) as T`, where every branch is an ordinary
+// numeric expression — the if/else's own branches weren't recognized by any
+// of emit_expr_cast's numeric-source checks, so the cast fell through to the
+// string-parse fallback (`.trim().parse::<T>()`) — `error[E0599]: no method
+// named 'trim' found for type 'isize'` and friends. See
+// tests/cases/if_else_cast_numeric.br's own doc comment for the full repro.
+transpile_test!(if_else_cast_numeric);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 

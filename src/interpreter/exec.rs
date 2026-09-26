@@ -1170,6 +1170,38 @@ impl Interpreter {
         }
     }
 
+    /// `arr[i] = literal` has no declared element `Type` in hand at the call
+    /// site (unlike a `let`/field binding, which `coerce_to_type` narrows
+    /// from) — the array itself carries no static type at runtime. But when
+    /// the slot being overwritten already holds a definite narrow numeric
+    /// value (e.g. `Value::Float32`, coerced there earlier by construction or
+    /// a previous assignment), that value is a witness for the array's real
+    /// element type, and an untyped literal (`Value::Int`/`Value::Float64`)
+    /// being written into it should narrow to match — exactly like
+    /// `coerce_to_type` would if a `Type` were available. Without this, a
+    /// bare `0.0` written into a `[float32]` slot stays `Float64`, and later
+    /// arithmetic mixing it with a genuine `Float32` from the rest of the
+    /// array fails to typecheck at runtime (see CHANGELOG.md).
+    pub(crate) fn coerce_array_elem_literal(val: Value, existing: &Value) -> Value {
+        let witness_ty = match existing {
+            Value::Float32(_) => Type::Float32,
+            Value::Float64(_) => Type::Float64,
+            Value::Int8(_) => Type::Int8,
+            Value::Int16(_) => Type::Int16,
+            Value::Int32(_) => Type::Int32,
+            Value::Int64(_) => Type::Int64,
+            Value::Int128(_) => Type::Int128,
+            Value::Uint(_) => Type::Uint,
+            Value::Uint8(_) => Type::Uint8,
+            Value::Uint16(_) => Type::Uint16,
+            Value::Uint32(_) => Type::Uint32,
+            Value::Uint64(_) => Type::Uint64,
+            Value::Uint128(_) => Type::Uint128,
+            _ => return val,
+        };
+        Self::coerce_to_type(val, &witness_ty)
+    }
+
     // ─── Type utilities ──────────────────────────────────────────────────────
 
     /// Extracts the base struct / enum name from a type, stripping any ownership qualifier.

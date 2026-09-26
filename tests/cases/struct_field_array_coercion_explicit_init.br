@@ -1,0 +1,16 @@
+# Regression: same gap as struct_field_scalar_coercion_no_init.br, but for the
+# explicit-`init`-with-body path and an array field — `call_init`'s real-body
+# path binds `init` params as plain env locals and pre-populates `self` from
+# struct-body field defaults with no `coerce_to_type` call anywhere, so
+# `out = o` (assigning an untyped `[1.0, 2.0]` literal array param into a
+# `[float32]` field) kept every element `Value::Float64`. See CHANGELOG.md.
+struct Holder:
+    var [float32] out
+
+    init([float32] o):
+        out = o
+
+def main() throws:
+    mut h = Holder([1.0, 2.0])
+    var float32 y = 3.0
+    print "{h.out[0] * y}"

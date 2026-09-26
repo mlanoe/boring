@@ -1,0 +1,17 @@
+# Regression: same numeric-width gap, but for a plain `self.field = <bare
+# literal>` assignment from inside an ordinary (non-init) mutating method —
+# `assign`'s `ExprKind::Field` raw-field-write arm (`src/interpreter/
+# methods.rs`) mutated the object's field in place with no `coerce_to_type`
+# call, so `x = 1.0` inside `reset()` kept the literal's `Value::Float64`
+# width in a `var float32` field. See CHANGELOG.md.
+struct Holder:
+    var float32 x = 0.0
+
+    def reset():
+        x = 1.0
+
+def main() throws:
+    mut h = Holder()
+    h.reset()
+    var float32 y = 2.0
+    print "{h.x * y}"

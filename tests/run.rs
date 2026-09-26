@@ -519,6 +519,7 @@ interp_test!(self_field_loop_match_borrow);
 // matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
 interp_test!(qualifier_group_param);
 interp_test!(cast_bare_field_index);
+interp_test!(if_else_cast_numeric);
 
 // Regression: `boring run` (the interpreter) had the analogous bug to the
 // transpiler's `in_instance_setter` recursion guard (see
@@ -677,3 +678,27 @@ interp_test!(inline_if_else_next_line_postfix);
 // tests/cases/kernel_float32_math_method_args.br's own doc comment and
 // CHANGELOG.md.
 interp_test!(kernel_float32_math_method_args);
+
+// Regression: `arr[i] = <bare literal>` (in `assign`'s `ExprKind::Index` arm
+// and its `try_fast_array_index_assign` fast path, src/interpreter/methods.rs)
+// wrote the literal's default-width value (`Value::Int`/`Value::Float64`)
+// straight into the slot with no coercion, even when the array's other
+// elements already carried a narrower declared type (e.g. `Value::Float32`,
+// coerced there earlier by construction). A later arithmetic op mixing that
+// slot with a genuine narrow-typed value then hard-errored ("cannot multiply
+// Float32 and Float") under `boring run` — a general array-index-assignment
+// gap, not kernel-specific, but most visible in kernel code since kernel
+// arithmetic is strict about mixing numeric widths. Fixed via
+// `coerce_array_elem_literal` (src/interpreter/exec.rs), which uses the
+// slot's own pre-existing value as a type witness. See
+// tests/cases/kernel_float32_array_index_literal_assign.br's own doc comment
+// and CHANGELOG.md.
+interp_test!(kernel_float32_array_index_literal_assign);
+
+// Ordinary (non-kernel) struct construction/field-assignment never coerced
+// field values to their declared field type under `boring run` — see each
+// case's own doc comment and CHANGELOG.md.
+interp_test!(struct_field_scalar_coercion_no_init);
+interp_test!(struct_field_array_coercion_explicit_init);
+interp_test!(struct_field_scalar_coercion_init_shortcut);
+interp_test!(struct_field_scalar_coercion_method_assign);

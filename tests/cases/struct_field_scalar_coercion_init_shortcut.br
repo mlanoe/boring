@@ -1,0 +1,15 @@
+# Regression: same gap as struct_field_scalar_coercion_no_init.br, but for
+# the empty-body `init` shortcut (every `init` param declares a struct
+# field, e.g. `init(float32 x)`) — `call_init`'s empty-body branch built
+# `fields` straight from the bound param values with no `coerce_to_type`
+# call, so `float32 x` still kept a bare `1.0` literal's `Value::Float64`
+# width. See CHANGELOG.md.
+struct Holder:
+    var float32 x
+
+    init(float32 x)
+
+def main() throws:
+    mut h = Holder(1.0)
+    var float32 y = 2.0
+    print "{h.x * y}"

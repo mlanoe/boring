@@ -486,6 +486,15 @@ impl Interpreter {
             } else {
                 Value::Nil
             };
+            // Coerce to the field's declared type the same way an ordinary
+            // function call coerces its parameters (`call_fn_inner`'s "Write
+            // back the coerced value" step) — this no-`init` constructor path
+            // never routes through `call_function` at all, so without this an
+            // untyped literal (e.g. `1.0` defaulting to `Float64`) silently
+            // keeps the wrong numeric width for a narrow field type (e.g.
+            // `float32`) under `boring run`. See CHANGELOG.md.
+            let resolved_ty = self.resolve_type(&field_decl.ty);
+            let val = Self::coerce_to_type(val, &resolved_ty);
             fields.push((field_decl.name.clone(), val));
         }
         Ok(make_object(decl.name.clone(), fields))
@@ -527,6 +536,17 @@ impl Interpreter {
                 } else {
                     Value::Nil
                 };
+                // Coerce to the param's declared type — every param here IS a
+                // struct field (empty-body shortcut), and this path never goes
+                // through `call_function`'s param coercion. See the matching
+                // comment in `instantiate_struct_labeled` / CHANGELOG.md.
+                let val = match &param.ty {
+                    Some(ty) => {
+                        let resolved_ty = self.resolve_type(ty);
+                        Self::coerce_to_type(val, &resolved_ty)
+                    }
+                    None => val,
+                };
                 param_names.insert(param.name.clone());
                 fields.push((param.name.clone(), val));
             }
@@ -540,6 +560,8 @@ impl Interpreter {
                     } else {
                         Value::Nil
                     };
+                    let resolved_ty = self.resolve_type(&field_decl.ty);
+                    let val = Self::coerce_to_type(val, &resolved_ty);
                     fields.push((field_decl.name.clone(), val));
                 }
             }
@@ -562,6 +584,20 @@ impl Interpreter {
             } else {
                 Value::Nil
             };
+            // Coerce to the param's declared type at bind time (mirroring
+            // `call_fn_inner`'s "Write back the coerced value" step), so a
+            // `self.field = param` assignment in the body below already sees
+            // an already-correctly-typed value instead of an untyped literal's
+            // default width. This constructor path calls `exec_block` directly
+            // rather than through `call_function`, so it never got that
+            // coercion otherwise. See CHANGELOG.md.
+            let val = match &param.ty {
+                Some(ty) => {
+                    let resolved_ty = self.resolve_type(ty);
+                    Self::coerce_to_type(val, &resolved_ty)
+                }
+                None => val,
+            };
             if param.mutable {
                 env.borrow_mut().define_mut(&param.name, val);
                 // See the matching comment at this function's other call site.
@@ -580,6 +616,8 @@ impl Interpreter {
             } else {
                 Value::Nil
             };
+            let resolved_ty = self.resolve_type(&field_decl.ty);
+            let val = Self::coerce_to_type(val, &resolved_ty);
             init_fields.push((field_decl.name.clone(), val));
         }
         let self_obj = make_object(decl.name.clone(), init_fields);
@@ -604,6 +642,24 @@ impl Interpreter {
         let final_self = env.borrow().get("self").ok_or_else(|| {
             err("init body did not assign 'self'", 0)
         })?;
+
+        // Coerce every field of the resulting object to its *declared* struct
+        // field type (mirroring `instantiate_kernel_struct`'s equivalent pass
+        // in eval_gpu.rs) — the body may compute a field's value some other
+        // way than a direct `self.field = param` assignment (e.g. arithmetic
+        // on an untyped literal), which would otherwise still leave the wrong
+        // numeric width on `self` even with params now coerced above. See
+        // CHANGELOG.md.
+        if let Value::Object(inner_rc) = &final_self {
+            let mut inner = inner_rc.borrow_mut();
+            for field_decl in &decl.fields {
+                if let Some(entry) = inner.fields.iter_mut().find(|(name, _)| name == &field_decl.name) {
+                    let resolved_ty = self.resolve_type(&field_decl.ty);
+                    entry.1 = Self::coerce_to_type(std::mem::replace(&mut entry.1, Value::Nil), &resolved_ty);
+                }
+            }
+        }
+
         Ok(final_self)
     }
 

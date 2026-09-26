@@ -1,0 +1,27 @@
+# Regression test: `(if cond: a else: b) as T` — an `as` cast applied
+# directly to an inline if/else expression, where every branch is itself
+# an ordinary numeric expression, used to fall through to emit_expr_cast's
+# string-parse fallback (`.trim().parse::<T>()`) instead of a plain numeric
+# `as T` widen. `ExprKind::If` wasn't recognized by any of the cast's
+# numeric-source checks (which only covered BinOp/Call/UnaryOp/MethodCall,
+# a known-numeric bare Var/field/index, and `expr else default`), so it fell
+# all the way through — generating Rust that tried to `.trim()` an `isize`
+# (E0599: "no method named 'trim' found for type 'isize'").
+#
+# Reproduces the shape found dequantizing a signed value read from a byte
+# buffer: an int computed by an inline if/else, cast to a float to scale it.
+
+float32 dequantize32(int raw, float32 scale):
+    ((if raw > 127: raw - 256 else: raw) as float32) * scale
+
+float dequantize_float(int raw, float scale):
+    ((if raw > 127: raw - 256 else: raw) as float) * scale
+
+int clamp_to_int(int raw):
+    (if raw > 100: 100 else: raw) as int
+
+print dequantize32(200, 2.0)
+print dequantize32(10, 2.0)
+print dequantize_float(200, 2.0)
+print clamp_to_int(150)
+print clamp_to_int(50)

@@ -1018,10 +1018,39 @@ impl Transpiler {
         match &expr.kind {
             ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) => true,
             ExprKind::UnaryOp(_, inner) => self.is_definitely_numeric_expr(inner),
+            // An arithmetic/bitwise op between two definitely-numeric operands is
+            // itself definitely numeric (e.g. `raw - 256` inside an if/else branch
+            // below) — needed for `if_stmt_is_definitely_numeric` to recognize the
+            // common "arithmetic on a numeric param" shape as a branch tail, not
+            // just a bare literal or variable. Deliberately excludes comparison
+            // (`Eq`/`Lt`/...) and logical (`And`/`Or`) ops, which produce `bool`,
+            // not a number.
+            ExprKind::BinOp(op, l, r) if matches!(op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) =>
+                self.is_definitely_numeric_expr(l) && self.is_definitely_numeric_expr(r),
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .map(is_known_numeric_scalar_type).unwrap_or(false),
+            ExprKind::If(if_stmt) => self.if_stmt_is_definitely_numeric(if_stmt),
             _ => false,
         }
+    }
+
+    /// Is every branch of `if_stmt` (used as an expression) definitely numeric —
+    /// i.e. does each branch's (and the mandatory `else`'s) tail statement end in
+    /// a numeric expression per `is_definitely_numeric_expr`? Used by
+    /// `emit_expr_cast` to route `(if cond: a else: b) as T` through the plain
+    /// `as T` numeric-cast path instead of falling through to the string-parsing
+    /// `.trim().parse::<T>()` fallback meant for `string` sources — the if/else's
+    /// own codegen already produces a correct numeric Rust expression, so casting
+    /// it as a string never made sense. A missing `else_body` (only valid for a
+    /// statement-position `if`, never an expression) is treated as non-numeric.
+    fn if_stmt_is_definitely_numeric(&self, if_stmt: &IfStmt) -> bool {
+        let tail_is_numeric = |body: &[Stmt]| -> bool {
+            matches!(body.last(), Some(Stmt::Expr(tail)) if self.is_definitely_numeric_expr(tail))
+        };
+        if_stmt.branches.iter().all(|(_, body)| tail_is_numeric(body))
+            && if_stmt.else_body.as_deref().map(tail_is_numeric).unwrap_or(false)
     }
 
     /// Resolves the struct type name that `e` evaluates to, when known statically —
@@ -1268,6 +1297,21 @@ impl Transpiler {
         let src_is_numeric_else = matches!(&e.kind,
             ExprKind::Else(_, default) if self.is_definitely_numeric_expr(default));
         if src_is_numeric_else && (is_float_ty || is_fixed_int_ty) {
+            return format!("({} as {})", src, dst);
+        }
+
+        // `(if cond: a else: b) as T` where every branch is definitely numeric —
+        // e.g. `(if raw > 127: raw - 256 else: raw) as float32`. `ExprKind::If`
+        // isn't a Var/BinOp/Call/UnaryOp/MethodCall/Index/literal/Else, so without
+        // this check it falls through every branch above *and* below all the way
+        // to the string-parsing fallback near the bottom of this function, which
+        // wrongly appends `.trim().parse::<f64>()` after an already-numeric
+        // if/else block — that doesn't compile (`no method named 'trim' found for
+        // type 'isize'`), since the if/else's own codegen already produces a
+        // correct numeric Rust expression.
+        let src_is_numeric_if = matches!(&e.kind,
+            ExprKind::If(if_stmt) if self.if_stmt_is_definitely_numeric(if_stmt));
+        if src_is_numeric_if && (is_float_ty || is_fixed_int_ty) {
             return format!("({} as {})", src, dst);
         }
 
