@@ -1046,6 +1046,13 @@ impl Transpiler {
     fn try_emit_observed_field_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Field(field_obj, value_name) = &obj.kind else { return None };
         if value_name != "value" { return None; }
+        // `field_obj` is `Var("field")` for a bare implicit-self receiver
+        // (`field.value.method()`) rather than the `Field(Var("self"), "field")`
+        // shape `resolve_observed_field_receiver` matches on — normalize it first,
+        // same fix as `emit_method_call`'s own normalization for the non-`.value`
+        // call shape.
+        let normalized_field_obj = self.normalize_implicit_self_field(field_obj);
+        let field_obj = normalized_field_obj.as_ref().unwrap_or(field_obj.as_ref());
         let (receiver, (struct_name, base)) = self.resolve_observed_field_receiver(field_obj)?;
         // Same field-scoped mut-gating as the direct-dispatch path above — the
         // `.value` escape hatch skips notification, not the mut/var-mut
@@ -1176,6 +1183,12 @@ impl Transpiler {
                 return Some((escape_rust_keyword(v), struct_name, base));
             }
         }
+        // `inner_obj` is `Var("field")` for a bare implicit-self receiver
+        // (`field.value.property`) rather than the `Field(Var("self"), "field")`
+        // shape `resolve_observed_field_receiver` matches on — normalize it first,
+        // same fix as `emit_method_call`'s own normalization.
+        let normalized_inner = self.normalize_implicit_self_field(inner_obj);
+        let inner_obj = normalized_inner.as_ref().unwrap_or(inner_obj.as_ref());
         if let Some((receiver, (struct_name, base))) = self.resolve_observed_field_receiver(inner_obj) {
             return Some((receiver, struct_name, base));
         }
@@ -2585,7 +2598,50 @@ impl Transpiler {
         }
     }
 
+    /// Implicit self ("bare field access inside a method resolves to `self.field`
+    /// automatically" — see book.md/CLAUDE.md's "implicit self") is a source-level
+    /// convention only: the parser hands every shape-based receiver recognizer in
+    /// this file (`try_emit_mutex_method`/`try_emit_rwlock_method`/
+    /// `try_emit_actor_field_method`/`resolve_observed_field_receiver` and friends)
+    /// a bare `ExprKind::Var(name)` node, never the `ExprKind::Field(Var("self"),
+    /// name)` shape those recognizers actually pattern-match on — that shape only
+    /// exists when the source text itself wrote `self.field`. Left alone, a bare
+    /// `field.method()` on an `'actor`/`'guard`/`'observed` field silently misses
+    /// every one of those recognizers (and the `check_field_def_call_mut_gate` gate
+    /// they call), falls through to the plain fallback, and emits an unlocked,
+    /// unnotified call straight on the field's real wrapper type
+    /// (`Rc<RefCell<T>>`/`Arc<Mutex<T>>`/`BoringObserved<T>`) — usually a hard
+    /// `cargo build` E0599, but with the mut-gate diagnostic silently skipped even
+    /// when it should fire. This normalizes a bare implicit-self-field receiver into
+    /// the equivalent explicit `self.field` `Expr` shape up front, so the rest of
+    /// the dispatch chain (and the fallback) can't tell the two forms apart.
+    fn normalize_implicit_self_field(&self, obj: &Expr) -> Option<Expr> {
+        let ExprKind::Var(n) = &obj.kind else { return None };
+        if n == "self" { return None; }
+        if self.known_local_vars.contains(n.as_str()) { return None; }
+        let struct_name = self.self_type.as_deref()?;
+        let fields = self.struct_fields.get(struct_name)?;
+        if !fields.iter().any(|(f, _)| f == n) { return None; }
+        Some(Expr {
+            kind: ExprKind::Field(
+                Box::new(Expr {
+                    kind: ExprKind::Var("self".to_string()),
+                    line: obj.line, col: obj.col, len: 0,
+                }),
+                n.clone(),
+            ),
+            line: obj.line, col: obj.col, len: 0,
+        })
+    }
+
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        let normalized_self_field;
+        let obj = if let Some(f) = self.normalize_implicit_self_field(obj) {
+            normalized_self_field = f;
+            &normalized_self_field
+        } else {
+            obj
+        };
         if let Some(r) = self.try_emit_introspect_handle_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_clone_and_task_method(obj, method, args) { return r; }
