@@ -1,0 +1,39 @@
+# Regression test: the METHOD-CALL form of `pow` (`x.pow(y)`/`x.powf(y)`) on a `float32`/
+# `float64` receiver must transpile to Rust's real `x.powf(y)` — `f32`/`f64` have no
+# `.pow()` method at all (only `.powf(y: T) -> T` for a float exponent, and `.powi(n: i32)`
+# for an integer one), so the naive literal-passthrough `boring build` used to emit failed a
+# real `cargo build` with `E0599: no method named 'pow' found for type 'f32'`, even though
+# `boring run` (the interpreter) evaluated the exact same source correctly. This is only
+# caught by a real `rustc`/`cargo build` compile of the `--emit-rust` output (see
+# tests/transpile.rs), not by `boring run` alone — see `float32_math_builtins.br`'s own
+# note on the free-function `pow(x, y)` builtin, which was already correct here; this file
+# covers the separate method-call form, which wasn't.
+#
+# Root cause: the transpiler's method-call receiver-type detection only recognized the
+# canonical `Type::Float32`/`Type::Float64` enum variants, never the lowercase
+# `Type::Named("float32"|"float64"|"float")` shape ordinary `float32 x`/`float x`
+# declarations actually parse into — so a plain, ordinarily-declared `float32`/`float64`
+# function parameter, local, or struct field never hit the `pow`→`powf` rewrite at all.
+#
+# Covers a `float32` function PARAMETER (the exact shape that surfaced this bug), an
+# explicitly `float64`-typed local, and a `float32` struct field. An `int` receiver
+# (confirming this fix doesn't touch it) is covered separately in
+# `pow_method_int_unaffected.br` — `boring run` has no int `.pow()` case at all (errors
+# `no method 'pow' on Int`), so it can't share this file's `interp_test!` registration.
+
+struct Velocity:
+    float32 x
+    float32 y
+
+float32 powFloat32Param(float32 base, float32 exponent):
+    base.pow(exponent)
+
+def main() throws:
+    print "{powFloat32Param(2.0, 3.0)}"
+
+    let float64 base64 = 2.0
+    let float64 exponent64 = 10.0
+    print "{base64.pow(exponent64)}"
+
+    let v = Velocity(3.0, 4.0)
+    print "{v.x.pow(2.0) + v.y.pow(2.0)}"

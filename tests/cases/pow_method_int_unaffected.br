@@ -1,0 +1,19 @@
+# Confirms the float32/float64 `.pow()` → `.powf()` method-call fix
+# (`pow_method_float_width.br`) is scoped to float receivers only: an `int` receiver's
+# `.pow()` must keep transpiling to a literal `.pow(...)` call unchanged — Rust's own
+# `isize::pow(exp: u32)` already exists, so the pre-existing (unmodified) passthrough
+# emission is already correct Rust for it, unlike `f32`/`f64`, which have no `.pow()` at
+# all. Not registered in tests/run.rs — `boring run` (the interpreter) has no int `.pow()`
+# case at all and errors outright (`no method 'pow' on Int`), a separate, pre-existing
+# interpreter limitation this fix doesn't touch either way.
+#
+# The exponent argument is passed as a bare integer literal (`2`) rather than an
+# `int`-typed variable — Rust's own integer-literal type inference resolves it to the
+# `u32` `isize::pow` expects either way, so this stays a real, compiling, self-contained
+# regression case without also exercising the separate, pre-existing `int`-typed-exponent
+# widening gap (`isize` vs. `pow`'s required `u32`), which is unrelated to this fix.
+
+int powIntParam(int base):
+    base.pow(2)
+
+print powIntParam(2)

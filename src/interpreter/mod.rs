@@ -1719,6 +1719,17 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("pow", Value::NativeFn {
         name: "pow".into(),
         func: |args, line| {
+            // See the `abs`/`sqrt` free functions above — preserve float32 width
+            // instead of rejecting it as "not a number".
+            if let Some(Value::Float32(base)) = args.first() {
+                let exp = match args.get(1) {
+                    Some(Value::Float32(f)) => *f,
+                    Some(Value::Float64(f)) => *f as f32,
+                    Some(Value::Int(n))   => *n as f32,
+                    _ => return Err(err("pow: expected numeric exponent", line)),
+                };
+                return Ok(Value::Float32(base.powf(exp)));
+            }
             let base = match args.first() {
                 Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,

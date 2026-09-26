@@ -497,6 +497,9 @@ transpile_test!(ref_identity);
 transpile_test!(mut_scalar);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);
+transpile_test!(pow_method_float_width);
+transpile_test!(pow_method_int_unaffected);
+transpile_test!(pow_method_int_exponent_var);
 transpile_test!(float32_struct_method_math);
 // Same gap as float32_struct_method_math above, but for a plain `let`-bound local
 // variable computed from an unannotated arithmetic expression, in an ordinary

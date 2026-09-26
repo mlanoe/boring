@@ -335,6 +335,7 @@ interp_test!(ref_identity);
 interp_test!(mut_scalar);
 interp_test!(int_float_literal_compare);
 interp_test!(float32_math_builtins);
+interp_test!(pow_method_float_width);
 interp_test!(float32_struct_method_math);
 // Same gap as float32_struct_method_math above, but for a plain `let`-bound local
 // variable computed from an unannotated arithmetic expression, in an ordinary

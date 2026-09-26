@@ -2468,11 +2468,6 @@ impl Transpiler {
             let obj_s = self.emit_expr(obj);
             return Some(format!("({} as f64).{}()", obj_s, rust_name));
         }
-        if method == "pow" || method == "powf" {
-            let obj_s = self.emit_expr(obj);
-            let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1.0".to_string());
-            return Some(format!("({} as f64).powf({} as f64)", obj_s, exp));
-        }
         if method == "log" {
             let obj_s = self.emit_expr(obj);
             let base = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "std::f64::consts::E".to_string());
@@ -2490,6 +2485,139 @@ impl Transpiler {
             return Some(format!("({} as f64).clamp({} as f64, {} as f64)", obj_s, lo, hi));
         }
         None
+    }
+
+    /// `Some(true)` when `ty` is a known FLOAT scalar type, `Some(false)` for a known
+    /// INT/UINT scalar type, `None` for anything else (including a struct's own
+    /// `Type::Named`, which must fall through undisturbed so a real user-defined `.pow()`
+    /// method on it still dispatches normally via the generic fallback). Recognizes both
+    /// the canonical `Type` enum variants (`Type::Float32`, `Type::Int`, ...) — produced
+    /// only by the rare capitalized alias spelling in source (`Float32`, see
+    /// `parse_type_base`) — and the lowercase Boring source spelling (`Type::Named
+    /// ("float32")`, `Type::Named("int")`, ...) that ordinary `float32 x`/`int x`
+    /// declarations actually parse into; mirrors the equivalent int+float match already
+    /// used by `is_known_numeric_scalar_type` (`emit_expr.rs`).
+    fn numeric_scalar_is_float(ty: &Type) -> Option<bool> {
+        match ty {
+            Type::Float32 | Type::Float64 => Some(true),
+            Type::Int | Type::Uint | Type::Uint8
+            | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+            | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Some(false),
+            Type::Named(n) => match n.as_str() {
+                "float32" | "float64" | "float" | "f32" | "f64" => Some(true),
+                "int" | "uint" | "uint8" | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint16" | "uint32" | "uint64" | "uint128"
+                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `x.pow(y)`/`x.powf(y)` on a float receiver → Rust's `x.powf(y)` — `f32`/`f64` have
+    /// no `.pow()` method at all (only `.powf(y: T) -> T`), so the generic method-call
+    /// fallback's literal `.pow(...)` passthrough is invalid Rust for one. Boring documents
+    /// `.pow()`/the free-function `pow(x, y)` as a purely float operation (`docs/book.md`'s
+    /// Math table: `pow(x, y)` → `x.powf(y)`) and the interpreter agrees — it has no int
+    /// `.pow()` case at all (`no method 'pow' on Int`).
+    ///
+    /// A bare literal (`ExprKind::Float`) and an explicit cast (`ExprKind::Cast`, via
+    /// `numeric_scalar_is_float`) are checked directly; everything else (a typed or
+    /// untyped local, a function parameter, a struct field, an arithmetic expression, a
+    /// float-returning call/method-call, …) is delegated to `infer_float_width` — the
+    /// same width-inference walk the free-function `pow(x, y)` builtin already uses
+    /// (`emit_builtin_call`'s `"pow"` arm, via `math_builtin_float_ty`) — which only ever
+    /// returns `Some` when it can positively trace the expression to an actual
+    /// `float32`/`float64` type, so it never produces a false positive on an int- or
+    /// struct-typed receiver.
+    ///
+    /// Width-aware (`f32` vs `f64`, via `math_builtin_float_ty`) rather than a hardcoded
+    /// `f64` cast — hardcoding `f64` here would itself be a bug for a `float32`-returning
+    /// function (`expected f32, found f64` on the real `cargo build`), the same class of
+    /// issue already fixed for the free-function form — see CHANGELOG.
+    ///
+    /// An int/uint receiver's `.pow()` is a separate case, handled below by the same
+    /// function: Rust's real `isize::pow`/`usize::pow` (`pow(self, exp: u32) -> Self`)
+    /// already exists, so the generic fallback's literal passthrough of the receiver is
+    /// correct — but its passthrough of the EXPONENT argument is not. `isize`/`usize` are
+    /// not `u32`, so a non-literal exponent (a variable or parameter, not a bare integer
+    /// literal — see CHANGELOG) fails `cargo build` with `E0308: expected u32, found isize`;
+    /// only a bare literal exponent happens to compile, because Rust's untyped-integer-
+    /// literal inference resolves it to `u32` from context. Casting the exponent to `u32`
+    /// unconditionally fixes the variable/parameter case and is a no-op for the literal
+    /// case (`2 as u32` is still `2u32`), so there is no need to special-case literals.
+    /// Gated on `is_int_scalar_receiver` (not just "not float") so this never hijacks a call
+    /// to a user struct's own real `.pow()` method — `is_int_scalar_receiver` only returns
+    /// true when the receiver is POSITIVELY traced to an int/uint scalar type, the same
+    /// "positive trace, not just absence of the other" discipline `infer_float_width` uses
+    /// above.
+    ///
+    /// `as u32` truncates/wraps on a negative or out-of-`u32`-range exponent rather than
+    /// panicking, matching every other numeric narrowing cast this transpiler already emits
+    /// (Vec/array index coercion just above in `emit_method_call_fallback`, GPU dispatch
+    /// sizes in `emit_kernel.rs`, `bitsToFloat`/`chr` in `emit_expr.rs` — none of them use
+    /// `.try_into().expect(...)` either) rather than a novel panicking conversion introduced
+    /// just for this one call site.
+    fn try_emit_pow_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if method != "pow" && method != "powf" { return None; }
+        let is_float = match &obj.kind {
+            ExprKind::Float(_) => true,
+            ExprKind::Cast(_, ty) => Self::numeric_scalar_is_float(ty)?,
+            _ => self.infer_float_width(obj).is_some(),
+        };
+        if is_float {
+            let ty = self.math_builtin_float_ty(obj);
+            let obj_s = self.emit_expr(obj);
+            let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1.0".to_string());
+            return Some(format!("({} as {ty}).powf({} as {ty})", obj_s, exp));
+        }
+        if method == "pow" && self.is_int_scalar_receiver(obj) {
+            let obj_s = self.emit_expr(obj);
+            let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1".to_string());
+            return Some(format!("{}.pow(({}) as u32)", obj_s, exp));
+        }
+        None
+    }
+
+    /// `Some(true)`-equivalent counterpart to `numeric_scalar_is_float`'s use in the float
+    /// branch above — positively identifies an int/uint scalar `.pow()` RECEIVER (not the
+    /// exponent argument, which is cast unconditionally regardless of its own type) so
+    /// `try_emit_pow_method` can apply the `as u32` exponent fix only where it is actually
+    /// needed, never on a struct receiver with its own unrelated `.pow()` method. Mirrors
+    /// `infer_float_width_inner`'s `Var`/`Field` cases (`var_types` lookup, implicit-
+    /// `self`-field fallback via `self_type`/`struct_fields`, explicit `x.field` via
+    /// `resolve_struct_name`) but only needs to recognize "definitely int/uint", so it
+    /// doesn't need that function's full BinOp/UnaryOp/Index/Call recursion — those shapes
+    /// fall through to `false` (no cast applied), same pre-existing behavior as today for
+    /// any receiver this doesn't confidently classify.
+    fn is_int_scalar_receiver(&self, obj: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::Int(_) | ExprKind::UInt64(_) => true,
+            ExprKind::Cast(_, ty) => Self::numeric_scalar_is_float(ty) == Some(false),
+            ExprKind::Var(v) => {
+                if let Some(ty) = self.var_types.get(v.as_str()) {
+                    return Self::numeric_scalar_is_float(ty) == Some(false);
+                }
+                if !self.known_local_vars.contains(v.as_str()) {
+                    if let Some(struct_name) = &self.self_type {
+                        if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
+                            if let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == v) {
+                                return Self::numeric_scalar_is_float(fty) == Some(false);
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            ExprKind::Field(base, field) => {
+                let Some(struct_name) = self.resolve_struct_name(base) else { return false };
+                let Some(fields) = self.struct_fields.get(struct_name.as_str()) else { return false };
+                let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == field) else { return false };
+                Self::numeric_scalar_is_float(fty) == Some(false)
+            }
+            _ => false,
+        }
     }
 
     /// Intercepts the five reflection-handle method calls — `get`/`set` on a
@@ -2665,6 +2793,7 @@ impl Transpiler {
         if let Some(r) = self.try_emit_set_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_array_special_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_option_chain_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_pow_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_float_math_method(obj, method, args) { return r; }
 
         self.emit_method_call_fallback(obj, method, args)

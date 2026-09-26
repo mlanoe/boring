@@ -4336,7 +4336,7 @@ impl Transpiler {
     /// `Some("f32")`/`Some("f64")` when the expression's float width can be
     /// determined statically, `None` when it's ambiguous (e.g. an untyped literal)
     /// — used by `math_builtin_float_ty` below.
-    fn infer_float_width(&self, e: &Expr) -> Option<&'static str> {
+    pub(crate) fn infer_float_width(&self, e: &Expr) -> Option<&'static str> {
         let mut visiting = std::collections::HashSet::new();
         self.infer_float_width_inner(e, &mut visiting)
     }
@@ -4448,7 +4448,7 @@ impl Transpiler {
     /// float32/float64 are distinct runtime types with the same method surface,
     /// so the cast target just needs to match the argument's own width instead of
     /// always assuming 64-bit).
-    fn math_builtin_float_ty(&self, e: &Expr) -> &'static str {
+    pub(crate) fn math_builtin_float_ty(&self, e: &Expr) -> &'static str {
         self.infer_float_width(e).unwrap_or("f64")
     }
 

@@ -7,6 +7,13 @@
 # stays f32. This is only caught by a real `rustc`/`cargo build` compile of
 # the `--emit-rust` output (see tests/transpile.rs), not by `boring run`.
 #
+# `speed_pow` additionally covers the free-function `pow(x, y)` builtin,
+# which used to reject `float32` arguments outright under `boring run`
+# ("pow: expected numeric base") even though every other math builtin here
+# already accepted them and the method-call forms (`x.pow(y)`/`x.powf(y)`)
+# already worked — the interpreter's native `pow` dispatch had its own
+# narrower type check that drifted out of sync with the rest.
+#
 # Constructs are passed as inline constructor calls (`speed(Velocity(...))`)
 # rather than through an intermediate `let v = Velocity(...)` binding — the
 # latter trips an unrelated transpiler bug where a struct-typed local passed
@@ -23,5 +30,9 @@ pub def float32 speed(Velocity v):
 pub def float32 speed_abs(Velocity v):
     abs(v.x) + abs(v.y)
 
+pub def float32 speed_pow(Velocity v):
+    pow(v.x, 2.0) + pow(v.y, 2.0)
+
 print speed(Velocity(3.0, 4.0))
 print speed_abs(Velocity(3.0, 4.0))
+print speed_pow(Velocity(1.0, 2.0))
