@@ -1370,7 +1370,12 @@ impl Transpiler {
         // never just because the enclosing function returns Result.
         // This keeps `"42" as int` producing Option<isize> in normal code.
         if is_fixed_int_ty || is_float_ty {
-            let parse_ty = if is_float_ty { "f64" } else { dst.as_str() };
+            // `dst` (== self.emit_type(ty)) already resolves to "f32" or "f64" as
+            // appropriate for float types (see the is_float_ty comment above) — it must
+            // NOT be hardcoded to "f64" here, or `(s as float32)` silently parses as an
+            // f64 and then relies on an implicit narrowing that Rust's `.parse::<T>()`
+            // does not perform, producing a value of the wrong width.
+            let parse_ty = dst.as_str();
             return if self.in_try_body {
                 format!("{}.trim().parse::<{}>()?", src, parse_ty)
             } else {

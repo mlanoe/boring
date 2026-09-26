@@ -1499,3 +1499,57 @@ kernel LoopHalf:
         "expected the loop body's reference to the loop variable to use the \
          same mangled name as its declaration;\ngot:\n{hip}");
 }
+
+// ─── host — string indexing/slicing in a kernel-touching function ─────────────
+
+// `s[i]` (single-char index) and `s[a..<b]` (range slice) on a `string` local
+// previously compiled correctly under a plain (non-GPU) `boring build`, but
+// would fail `cargo build` under `--target rocm` (`E0277: the type str
+// cannot be indexed by usize` / a `.to_vec()` call on `str`, which doesn't
+// exist) as soon as the ENCLOSING function is "kernel-touching" -- see
+// `rocm::host.rs`'s own custom `expr()`/`ExprKind::Index` case, which (unlike
+// `emit_expr.rs`'s `emit_expr_index`, used by the general-pipeline splice for
+// every OTHER function) had no string-vs-array distinction at all and always
+// emitted Vec-style `[i as usize]`/`[range].to_vec()`. No real ROCm toolchain
+// available in this test environment (unlike `metal_codegen.rs`'s identical
+// real-build regression test for this same bug), so this asserts on the
+// generated Rust directly instead of compiling it.
+#[test]
+fn host_string_indexing_and_slicing_in_kernel_touching_fn_is_char_safe() {
+    let (_hip, rs) = rocm_codegen("string_indexing_kernel_touching_fn", r#"
+kernel NoopKernel:
+    mut [float]'unified out
+    init():
+        out = [0.0]
+    def ():
+        out[0] = 1.0
+
+def main() throws:
+    let s = "hello world"
+    let c = s[1]
+    let sub = s[0..<5]
+    print "{c}"
+    print "{sub}"
+    mut k = NoopKernel()
+    kernel:
+        k(block = 1)
+    print "{k.out[0]}"
+"#);
+    assert!(
+        rs.contains(".chars().nth(") && rs.contains(".expect(\"string index out of bounds\")"),
+        "expected `s[1]` to emit char-safe `.chars().nth(...)` access, not \
+         Vec-style `[i as usize]` indexing (which doesn't compile against a \
+         Rust `str`/`String`);\ngot:\n{rs}"
+    );
+    assert!(
+        rs.contains(".chars().skip(") && rs.contains(".collect::<String>()"),
+        "expected `s[0..<5]` to emit a char-safe `.chars().skip(...).take(...)\
+         .collect::<String>()` slice, not a Vec-style `[range].to_vec()` \
+         (which doesn't exist on `str`);\ngot:\n{rs}"
+    );
+    assert!(
+        !rs.contains("s[(1) as usize]") && !rs.contains(".to_vec()"),
+        "found leftover Vec-style string indexing/slicing that doesn't \
+         compile against `str`/`String`;\ngot:\n{rs}"
+    );
+}

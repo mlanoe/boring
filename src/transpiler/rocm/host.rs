@@ -641,6 +641,19 @@ struct HostEmitter {
     /// `self.field[key]`/`self.field[key] = v` get the same HashMap treatment as
     /// `dict_vars`. Populated once from every `Item::Struct` in the program.
     dict_fields: std::collections::HashSet<String>,
+    /// Local variable names (by name, unscoped) whose declared type or initializer
+    /// marks them as `string` -- used so `s[i]`/`s[a..<b]` emit char-safe
+    /// `.chars().nth(...)`/`.chars().skip().take().collect::<String>()` access
+    /// instead of Vec-style `s[i as usize]`/`s[a..b].to_vec()` indexing, which
+    /// doesn't compile at all against Rust's `str`/`String` (no `Index<usize>`,
+    /// no `.to_vec()`). Same scope limitation as `dict_vars` (Stmt::Let only, no
+    /// function-parameter tracking) -- see `track_string_var`/`is_str_obj`.
+    string_vars: std::collections::HashSet<String>,
+    /// Struct field names (flat, not namespaced by struct) declared with a
+    /// `string` type, so `self.field[i]`/`obj.field[i]` get the same char-safe
+    /// treatment as `string_vars`. Populated once from every `Item::Struct`,
+    /// mirrors `dict_fields`.
+    string_fields: std::collections::HashSet<String>,
     /// Names of every free (non-method) `throws` function — used so a call to one
     /// of them, from inside another `throws` function, gets `?` appended (see
     /// `in_throws`). Does NOT cover `throws` struct methods (`self.foo()` chains) —
@@ -775,6 +788,8 @@ impl HostEmitter {
             gpu_vars: std::collections::HashSet::new(),
             dict_vars: std::collections::HashSet::new(),
             dict_fields: std::collections::HashSet::new(),
+            string_vars: std::collections::HashSet::new(),
+            string_fields: std::collections::HashSet::new(),
             fn_throws: std::collections::HashSet::new(),
             in_throws: false,
             variant_to_enum: std::collections::HashMap::new(),
@@ -1231,6 +1246,36 @@ impl HostEmitter {
         }
     }
 
+    /// True when `obj` (an `Index` expression's receiver) is known to be a
+    /// `string` -- a literal, a tracked `string_vars` local, or a
+    /// `string_fields` struct field. See `is_dict_obj`'s identical shape.
+    fn is_str_obj(&self, obj: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::Str(_) => true,
+            ExprKind::Var(v) => self.string_vars.contains(v.as_str()),
+            ExprKind::Field(_, f) => self.string_fields.contains(f.as_str()),
+            _ => false,
+        }
+    }
+
+    /// Record `name` in `string_vars` when its declared type or initializer
+    /// marks it as a `string`. See `track_dict_var`'s identical shape.
+    fn track_string_var(&mut self, name: &str, ty: Option<&Type>, val: Option<&Expr>) {
+        fn ty_is_str(ty: &Type) -> bool {
+            match ty {
+                Type::Str => true,
+                Type::Named(n) => n == "string" || n == "str",
+                Type::Qualified(inner, _) => ty_is_str(inner),
+                _ => false,
+            }
+        }
+        let is_str = ty.is_some_and(ty_is_str)
+            || matches!(val.map(|v| &v.kind), Some(ExprKind::Str(_)));
+        if is_str {
+            self.string_vars.insert(name.to_string());
+        }
+    }
+
     fn line(&mut self, s: &str) {
         let ind = "    ".repeat(self.indent);
         self.out.push_str(&ind);
@@ -1269,6 +1314,9 @@ impl HostEmitter {
                 for f in &s.fields {
                     if matches!(f.ty, Type::Dict(..)) {
                         self.dict_fields.insert(f.name.clone());
+                    }
+                    if matches!(f.ty, Type::Str) || matches!(&f.ty, Type::Named(n) if n == "string" || n == "str") {
+                        self.string_fields.insert(f.name.clone());
                     }
                 }
                 self.struct_field_names.insert(
@@ -1384,6 +1432,7 @@ impl HostEmitter {
                         if let Some(val) = &s.value {
                             self.track_kernel_var(&s.name, val);
                             self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
+                            self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                             let rhs = self.expr(val);
                             let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                             if is_scalar {
@@ -2072,11 +2121,13 @@ impl HostEmitter {
                 if let Some(val) = &s.value {
                     self.track_kernel_var(&s.name, val);
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
+                    self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
                     let rhs = self.expr(val);
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
+                    self.track_string_var(&s.name, s.ty.as_ref(), None);
                     self.line(&format!("{} {}{};", binding, s.name, ty_ann));
                 }
             }
@@ -2411,6 +2462,8 @@ impl HostEmitter {
             gpu_vars: self.gpu_vars.clone(),
             dict_vars: self.dict_vars.clone(),
             dict_fields: self.dict_fields.clone(),
+            string_vars: self.string_vars.clone(),
+            string_fields: self.string_fields.clone(),
             fn_throws: self.fn_throws.clone(),
             in_throws: self.in_throws,
             variant_to_enum: self.variant_to_enum.clone(),
@@ -2508,6 +2561,36 @@ impl HostEmitter {
                     let obj_s = self.expr(arr);
                     let key_s = self.expr(idx);
                     return format!("{}.get(&({})).cloned()", obj_s, key_s);
+                }
+                // String-typed receiver (`s[i]`, `s[a..<b]`) -- Rust's `str`/`String`
+                // has no `Index<usize>` (UTF-8 isn't O(1) per-byte) and no `.to_vec()`,
+                // so the generic Vec-style codegen below doesn't compile at all against
+                // it (`the type str cannot be indexed by usize`) -- char-safe access via
+                // `.chars()` instead. See `emit_expr.rs`'s `emit_expr_index` for the
+                // general/std backend's version of this (which this backend's own
+                // custom emitter, used for kernel-touching functions only, doesn't
+                // share code with).
+                if self.is_str_obj(arr) {
+                    let obj_s = self.expr(arr);
+                    if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
+                        let lo_s = start.as_deref().map(|e| format!("({}) as usize", self.expr(e)));
+                        let hi_s = end.as_deref().map(|e| format!("({}) as usize", self.expr(e)));
+                        return match (lo_s, hi_s) {
+                            (Some(lo), Some(hi)) if *inclusive =>
+                                format!("{obj_s}.chars().skip({lo}).take({hi}+1-{lo}).collect::<String>()"),
+                            (Some(lo), Some(hi)) =>
+                                format!("{obj_s}.chars().skip({lo}).take({hi}-{lo}).collect::<String>()"),
+                            (Some(lo), None) => format!("{obj_s}.chars().skip({lo}).collect::<String>()"),
+                            (None, Some(hi)) if *inclusive =>
+                                format!("{obj_s}.chars().take({hi}+1).collect::<String>()"),
+                            (None, Some(hi)) => format!("{obj_s}.chars().take({hi}).collect::<String>()"),
+                            (None, None) => format!("{obj_s}.chars().collect::<String>()"),
+                        };
+                    }
+                    let idx_s = format!("({}) as usize", self.expr(idx));
+                    return format!(
+                        "{obj_s}.chars().nth({idx_s}).expect(\"string index out of bounds\").to_string()"
+                    );
                 }
                 if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
                     let obj_s = self.expr(arr);

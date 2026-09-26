@@ -233,3 +233,15 @@ struct OptDirectSelf:
 mut OptDirectSelf ods = OptDirectSelf(size = nil)
 ods.bump()
 print "{ods.size else -1.0}"
+
+# string → float32 parse cast: the transpiler's string-parse cast codegen used to
+# hardcode `f64` regardless of the cast's actual target type, so `(s as float32)`
+# emitted `s.trim().parse::<f64>().ok()` — a value that's the wrong Rust width
+# wherever `float32`/`f32` is expected (a compile error under `boring build`, not
+# just a runtime discrepancy). `boring run`'s interpreter was never affected —
+# this is a transpiler-codegen-only bug. See CHANGELOG.
+let ocg32  = "3.5" as float32
+let ocg32f = "oops" as float32
+print ocg32
+let ocg32fr = ocg32f else "nil"
+print ocg32fr

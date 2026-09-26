@@ -1545,3 +1545,146 @@ print "out[3] = {k.out[3]}"
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
 }
+
+// ─── host — string → numeric parse cast width ─────────────────────────────────
+
+// `(s as float32)` — the documented optional-parse cast form (same shape as
+// `(s as int)`) — used to transpile with the parsed value hardcoded to `f64`
+// regardless of the cast's actual target width, under EVERY target including
+// this one: `s.trim().parse::<f64>().ok()` instead of `::<f32>()`. Harmless as
+// long as the f64 value is only ever printed/compared, but a hard `E0308`
+// "expected f32, found f64" as soon as it flows into an `f32`-typed slot (a
+// function return type, a struct field, ...) -- exactly the shape a real
+// program hits parsing a numeric CLI argument or config value declared
+// `float32` throughout (matching GPU-facing buffer element types). No real
+// Metal GPU needed here: the buggy/fixed code lives entirely in the shared
+// host-side cast codegen, never touches device/kernel code.
+#[test]
+fn host_string_to_float32_cast_uses_f32_not_f64() {
+    let (_, rs) = metal_codegen("string_to_float32_cast", r#"
+float32 parse_float_arg(string name, string s) throws:
+    guard let f = (s as float32) else throw "invalid {name} value: '{s}'"
+    f
+"#);
+    assert!(
+        rs.contains("parse::<f32>()"),
+        "expected `(s as float32)` to parse as f32, not a hardcoded f64;\ngot:\n{rs}"
+    );
+    assert!(
+        !rs.contains("parse::<f64>()"),
+        "found a leftover hardcoded f64 parse for a float32 cast target;\ngot:\n{rs}"
+    );
+}
+
+// Real end-to-end verification of the above fix: `boring build --target metal` +
+// `cargo build` + running the resulting binary. This is the only way to catch
+// the compile-time symptom at all -- `boring build` always reports success, and
+// a codegen snapshot test alone wouldn't prove the generated Rust actually
+// type-checks. Confirmed this test fails to compile (`E0308: expected f32,
+// found f64`) against the pre-fix code, and prints the correctly-parsed value
+// after.
+#[test]
+fn real_metal_target_string_to_float32_cast_compiles_and_runs() {
+    let test_name = "string_to_float32_cast_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, r#"
+float32 parse_float_arg(string name, string s) throws:
+    guard let f = (s as float32) else throw "invalid {name} value: '{s}'"
+    f
+
+let v = parse_float_arg("x", "2.25")
+print "{v}"
+"#);
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected `parse_float_arg`'s generated Rust to compile and run cleanly \
+         under `--target metal` (no real GPU touched -- this function never \
+         dispatches a kernel), but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert_eq!(
+        stdout.trim_end(), "2.25",
+        "expected the correctly string-parsed float32 value;\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+}
+
+// ─── host — string indexing/slicing in a kernel-touching function ─────────────
+
+// `s[i]` (single-char index) and `s[a..<b]` (range slice) on a `string` local
+// previously compiled correctly under a plain (non-GPU) `boring build`, but
+// failed `cargo build` under `--target metal` (`E0277: the type str cannot be
+// indexed by usize` / a `.to_vec()` call on `str`, which doesn't exist) as
+// soon as the ENCLOSING function is "kernel-touching" (constructs/dispatches a
+// kernel, or takes a kernel-typed param) -- see `metal::host.rs`'s own custom
+// `expr()`/`ExprKind::Index` case, which (unlike `emit_expr.rs`'s
+// `emit_expr_index` used by the general-pipeline splice for every OTHER
+// function) had no string-vs-array distinction at all and always emitted
+// Vec-style `[i as usize]`/`[range].to_vec()`. A non-kernel-touching helper
+// function doing the exact same string indexing was NEVER affected (it's
+// spliced from the general pipeline, which already had correct char-safe
+// codegen) -- this test's `main` is deliberately the one doing both the
+// string indexing AND the kernel dispatch, so it's forced through the buggy
+// custom emitter. Real end-to-end verification (real Metal GPU dispatch),
+// same rationale as `real_metal_target_string_to_float32_cast_compiles_and_runs`
+// above -- a codegen snapshot alone wouldn't prove the generated Rust actually
+// compiles.
+#[test]
+fn real_metal_target_string_indexing_and_slicing_in_kernel_touching_fn_compiles_and_runs() {
+    let test_name = "string_indexing_kernel_touching_fn";
+    let (_msl, _rs, _toml) = run_metal(test_name, r#"
+kernel NoopKernel:
+    mut [float32]'unified out
+    init():
+        out = [0.0]
+    def ():
+        out[0] = 1.0
+
+def main() throws:
+    let s = "hello world"
+    let c = s[1]
+    let sub = s[0..<5]
+    print "{c}"
+    print "{sub}"
+    mut k = NoopKernel()
+    kernel:
+        k(block = 1)
+    print "{k.out[0]}"
+"#);
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected `main`'s string indexing/slicing to compile and run cleanly \
+         under `--target metal` even though `main` also dispatches a real \
+         kernel (which is what routes it through the backend's own custom \
+         emitter instead of the general pipeline), but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    let expected = "e\nhello\n1";
+    assert_eq!(
+        stdout.trim_end(), expected,
+        "expected the char-safe single-index result (\"e\"), the char-safe \
+         range-slice result (\"hello\"), and the kernel's own dispatched \
+         output (\"1\");\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+}

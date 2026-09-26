@@ -2911,3 +2911,50 @@ kernel Dequant2:
          instead of a silently generated, still-broken WGSL comment, got:\n{stderr}"
     );
 }
+
+// ─── host — string indexing/slicing in a kernel-touching function ─────────────
+
+// Unlike the Metal/CUDA/ROCm backends (which each have their own hand-written
+// custom host emitter for kernel-touching functions -- see e.g.
+// `metal_codegen.rs`'s regression test for this exact bug there), the wgpu
+// backend routes ALL non-Screen code, including kernel-touching functions,
+// through the SAME general pipeline the plain/std target uses (see
+// `wgpu::mod`'s doc comment) -- so it was never affected by the Metal/CUDA/
+// ROCm string-indexing bug in the first place. This test just confirms that
+// stays true: `s[i]`/`s[a..<b]` on a `string` local inside a function that
+// also dispatches a real kernel still emits the general pipeline's correct
+// char-safe codegen.
+#[test]
+fn host_string_indexing_and_slicing_in_kernel_touching_fn_is_char_safe() {
+    let (_wgsl, rs) = wgpu_codegen("string_indexing_kernel_touching_fn", r#"
+kernel NoopKernel:
+    mut [float]'unified out
+    init():
+        out = [0.0]
+    def ():
+        out[0] = 1.0
+
+def main() throws:
+    let s = "hello world"
+    let c = s[1]
+    let sub = s[0..<5]
+    print "{c}"
+    print "{sub}"
+    mut k = NoopKernel()
+    kernel:
+        k(block = 1)
+    print "{k.out[0]}"
+"#);
+    assert!(
+        rs.contains(".chars().nth(") || rs.contains("__strchars_"),
+        "expected `s[1]` to emit char-safe access -- either `.chars().nth(...)` \
+         directly, or the general pipeline's `__strchars_`-cached `Vec<char>` \
+         shadow (used when a string local is indexed more than once in the \
+         same function, as here);\ngot:\n{rs}"
+    );
+    assert!(
+        rs.contains(".chars().skip(") && rs.contains(".take("),
+        "expected `s[0..<5]` to emit a char-safe `.chars().skip(...).take(...)` \
+         slice;\ngot:\n{rs}"
+    );
+}
