@@ -44,6 +44,12 @@ HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__glob
 
 ---
 
+## Naming restrictions
+
+Same reserved-word collision as CUDA C — see [cuda-module.md](cuda-module.html)'s "Naming restrictions" section, which applies unchanged: HIP C++'s builtin scalar/vector types and real C++14 keywords occupy the same identifier namespace as ordinary variables, so a kernel field/local/loop-var/parameter named e.g. `half` is automatically mangled by `c_gpu_safe_ident` (`src/transpiler/helpers.rs`), the same shared function CUDA's device emitter uses (`rocm::device` is a near-verbatim clone of `cuda::device`, per this file's "Device-side mapping" section above). Verification here has the identical hardware gap CUDA's doc calls out (no local NVIDIA/AMD toolchain), covered instead by `tests/rocm_codegen.rs`'s equivalent three tests.
+
+---
+
 ## Host-side compilation model
 
 There is no mature, widely-used safe Rust crate for ROCm/HIP analogous to `cudarc` (the crate the CUDA backend's host code is built on). Rather than depend on an unverified or unmaintained third-party binding, this backend hand-rolls a small `extern "C"` FFI layer directly into the generated `src/main.rs`, linked against `libamdhip64` (ROCm's stable, documented HIP runtime C API — `hipModuleLoadData`, `hipModuleLaunchKernel`, `hipMemcpy*`, `hipStreamCreateWithPriority`, etc.), plus a safe wrapper around it that deliberately mirrors cudarc's own shape and method names:

@@ -4,6 +4,7 @@
 // WGSL device code emitter for the wgpu backend.
 
 use crate::ast::*;
+use crate::transpiler::TranspileError;
 use crate::transpiler::helpers::{
     collect_vars_in_stmt,
     labeled_array_at_index, labeled_array_dim_literal,
@@ -22,23 +23,38 @@ pub(super) fn emit_device_wgsl(
     program: &Program,
     effective_kernels: &[crate::ast::KernelDecl],
     kernel_consts: &super::KernelConstsMap,
-) -> (String, Option<String>) {
+) -> (String, Option<String>, Vec<TranspileError>) {
     let uses_warp = effective_kernels.iter().any(super::kernel_uses_gpu_warp);
 
     let mut real = DeviceEmitter::new(WarpMode::Real);
     real.program_uses_warp = uses_warp;
     real.emit_program(program, effective_kernels, kernel_consts);
 
+    let mut errors = real.errors;
+
     let emulated = if uses_warp {
         let mut e = DeviceEmitter::new(WarpMode::Emulated);
         e.program_uses_warp = true;
         e.emit_program(program, effective_kernels, kernel_consts);
+        // Both passes emit from the same kernel decls/bodies, so the same underlying
+        // issue (a bad field qualifier, an out-of-range literal, ...) is normally
+        // diagnosed identically by both — only append errors the emulated pass found
+        // that the real pass didn't, so a program with one real bug doesn't get the
+        // same diagnostic reported twice.
+        for err in e.errors {
+            let dup = errors.iter().any(|existing: &TranspileError| {
+                existing.message == err.message && existing.line == err.line && existing.col == err.col
+            });
+            if !dup {
+                errors.push(err);
+            }
+        }
         Some(e.out)
     } else {
         None
     };
 
-    (real.out, emulated)
+    (real.out, emulated, errors)
 }
 
 /// Which `gpu.warp.*` codegen path this emitter pass produces. wgpu is the
@@ -76,6 +92,236 @@ fn wgsl_safe_ident(name: &str) -> String {
     }
 }
 
+/// True when `ty` is a GPU-qualified array type (`[T]'global`, `'unified`, `'const`,
+/// `'actor'global`, `'actor'unified`, `'surface`) — i.e. `Type::Qualified(Array-like,
+/// OwnerQual::Gpu*)`, the shape a `[T]'global`/etc. *parameter* (not a kernel struct field
+/// — those are `KernelFieldDecl`, handled entirely differently by `wgsl_buffer_type`)
+/// parses to. `wgsl_type`/`wgsl_scalar` have no arm at all for this shape — `wgsl_scalar`'s
+/// final catch-all silently produces `i32`, the original bug this module fixes.
+///
+/// The naive-looking follow-up fix — give such a parameter a WGSL `ptr<storage,
+/// array<T>, access>` type and an explicit `&` at each call site, mirroring the Metal
+/// backend's analogous `msl_free_fn_param_type` fix for a `device T*` parameter — does
+/// **not** work on this backend: confirmed against real naga source (`naga-22.1.0` and
+/// `naga-29.0.4`, both), `valid::function::validate_function` unconditionally rejects any
+/// pointer function parameter whose address space isn't `Function`/`Private` — `Storage`
+/// is hard-rejected with "is a pointer of space Storage {..}, which can't be passed into
+/// functions". This isn't a naga gap that's since been closed either: WGSL's own spec
+/// names this exact capability `unrestricted_pointer_parameters`, and naga still lists it
+/// as `UnimplementedLanguageExtension` in its latest release (tracking issue
+/// gfx-rs/naga#5158, open). So a storage-buffer pointer can never be a function parameter
+/// on this backend, full stop — there is no `enable`/`requires` directive that lifts it.
+///
+/// The actual fix: a kernel's buffer-qualified field is *already* a module-scope WGSL
+/// global (`@group(0) @binding(N) var<storage, ...> name: array<T>;`, see
+/// `wgsl_buffer_type`) — visible to every function in the module without needing to be
+/// passed as a parameter at all. So a GPU-array-qualified parameter is dropped from the
+/// emitted signature and from every call site's argument list entirely, and every
+/// reference to it inside the function's own body is substituted with the resolved
+/// global's name instead (see `current_gpu_array_subst`). The one thing this needs that
+/// an ordinary parameter doesn't: knowing, for every such parameter, which single global
+/// it always resolves to — computed by `resolve_gpu_array_params` from a whole-program
+/// scan of every call site (see `ParamSlot`/`GpuBinding`'s own doc comments for the
+/// resolution rule and its deliberate scope limit).
+///
+/// `'local` (`OwnerQual::GpuLocal`) is deliberately excluded: it has no storage-buffer
+/// backing at all (a per-thread/private array), a materially different shape this fix
+/// doesn't attempt.
+fn is_gpu_array_qualified_type(ty: &Type) -> bool {
+    let Type::Qualified(inner, oq) = ty else { return false };
+    let is_array = matches!(inner.as_ref(), Type::Array(_) | Type::ArrayN(_, _))
+        || inner.as_labeled_array().is_some();
+    is_array && matches!(oq,
+        OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuConst
+        | OwnerQual::GpuActorGlobal | OwnerQual::GpuActorUnified | OwnerQual::GpuSurface)
+}
+
+/// How a device function/method parameter is emitted — see `is_gpu_array_qualified_type`'s
+/// doc comment for why a GPU-array-qualified parameter needs this at all.
+#[derive(Clone, PartialEq, Eq)]
+enum ParamSlot {
+    /// An ordinary parameter — kept in the emitted signature and every call site's
+    /// argument list unchanged, exactly as before this fix.
+    Plain,
+    /// A GPU-array-qualified parameter, along with what's known so far about which single
+    /// buffer it's always called with (see `GpuBinding`).
+    Gpu(GpuBinding),
+}
+
+/// Resolution state for one `ParamSlot::Gpu` parameter, accumulated by
+/// `resolve_gpu_array_params` scanning every call site of the owning function across the
+/// whole program. Deliberately scoped to the direct case only — a GPU-array-qualified
+/// parameter resolves *only* when every call site passes a literal kernel buffer field
+/// name (`Var(name)` where `name` is one of that call site's enclosing kernel's own
+/// buffer-qualified fields); anything else (a free function forwarding one of its own such
+/// parameters to another free function, a computed expression, or two call sites
+/// disagreeing on which buffer) is `Poisoned`. Forwarding chains are a real, valid Boring
+/// pattern this doesn't attempt to resolve — WGSL's own hard constraint (see
+/// `is_gpu_array_qualified_type`) means there is no way to represent an *unresolved*
+/// buffer-qualified parameter on this backend at all (unlike Metal/CUDA, where it's just
+/// another pointer), so "not directly bound to one field everywhere" and "genuinely
+/// unsupported here" are the same outcome for this backend, and get the same clear
+/// `/* ERROR: ... */` placeholder rather than silently wrong codegen.
+#[derive(Clone, PartialEq, Eq)]
+enum GpuBinding {
+    /// No call site has been examined yet.
+    Unbound,
+    /// Every call site examined so far passed this same kernel buffer field, whose
+    /// resolved WGSL global name (`{kernel}_{field}`, matching `current_buffer_renames`'s
+    /// own scheme) is this string.
+    Bound(String),
+    /// Two call sites disagreed, or some call site passed something this fix can't
+    /// resolve to a single buffer (a computed expression, a forwarded parameter, ...).
+    Poisoned,
+}
+
+impl GpuBinding {
+    fn resolved(&self) -> Option<&str> {
+        match self { GpuBinding::Bound(g) => Some(g.as_str()), _ => None }
+    }
+
+    /// Folds in one more call site's evidence for this parameter — `None` means
+    /// "unresolvable" (see `GpuBinding`'s doc comment), `Some(global)` a literal kernel
+    /// buffer field's resolved WGSL name.
+    fn merge(&mut self, evidence: Option<String>) {
+        *self = match (&*self, evidence) {
+            (GpuBinding::Poisoned, _) => GpuBinding::Poisoned,
+            (_, None) => GpuBinding::Poisoned,
+            (GpuBinding::Unbound, Some(g)) => GpuBinding::Bound(g),
+            (GpuBinding::Bound(existing), Some(g)) => {
+                if *existing == g { GpuBinding::Bound(existing.clone()) } else { GpuBinding::Poisoned }
+            }
+        };
+    }
+}
+
+/// One call site's evidence for a GPU-array-qualified argument: `Some(global)` only when
+/// `arg` is a bare `Var(name)` naming a buffer-qualified field of the kernel whose method
+/// body this call site appears in (`kernel_ctx`) — resolved to that field's WGSL global
+/// name, matching `current_buffer_renames`'s `{kernel}_{field}` scheme. `None` (meaning
+/// "unresolvable", per `GpuBinding::merge`) for everything else, including a free-function
+/// caller (`kernel_ctx: None` — a free function has no fields of its own to pass, only its
+/// own already-GPU-array-qualified parameters, and forwarding those is out of scope, see
+/// `GpuBinding`'s doc comment) and any non-`Var` argument expression.
+fn gpu_array_call_evidence(arg: &Expr, kernel_ctx: Option<&KernelDecl>) -> Option<String> {
+    let ExprKind::Var(name) = &arg.kind else { return None };
+    let kernel = kernel_ctx?;
+    let field = kernel.fields.iter().find(|f| &f.name == name)?;
+    if !is_buffer_field(field) { return None; }
+    Some(format!("{}_{}", kernel.name.to_lowercase(), name))
+}
+
+/// Scans every call site in `stmts` — recursing into every expression/statement shape
+/// `DeviceEmitter::expr`/`emit_stmt` actually support in device code (this backend already
+/// falls back to a `/* unsupported */` placeholder for anything else, so a call hidden
+/// inside an unsupported shape can never reach real codegen anyway) — folding each GPU-
+/// array-qualified argument's evidence into `bindings`. `kernel_ctx` is `Some(k)` while
+/// scanning one of kernel `k`'s own methods (including its entry point), `None` while
+/// scanning a free function's body (see `gpu_array_call_evidence`'s doc comment for why
+/// that distinction matters).
+fn resolve_calls_in_stmts(
+    stmts: &[Stmt],
+    kernel_ctx: Option<&KernelDecl>,
+    bindings: &mut std::collections::HashMap<String, Vec<ParamSlot>>,
+) {
+    for s in stmts { resolve_calls_in_stmt(s, kernel_ctx, bindings); }
+}
+
+fn resolve_calls_in_stmt(
+    stmt: &Stmt,
+    kernel_ctx: Option<&KernelDecl>,
+    bindings: &mut std::collections::HashMap<String, Vec<ParamSlot>>,
+) {
+    match stmt {
+        Stmt::Let(l) => { if let Some(v) = &l.value { resolve_calls_in_expr(v, kernel_ctx, bindings); } }
+        Stmt::Expr(e) => resolve_calls_in_expr(e, kernel_ctx, bindings),
+        Stmt::Return(r) => { if let Some(v) = &r.value { resolve_calls_in_expr(v, kernel_ctx, bindings); } }
+        Stmt::If(i) => {
+            for (cond, body) in &i.branches {
+                resolve_calls_in_expr(cond, kernel_ctx, bindings);
+                resolve_calls_in_stmts(body, kernel_ctx, bindings);
+            }
+            if let Some(b) = &i.else_body { resolve_calls_in_stmts(b, kernel_ctx, bindings); }
+        }
+        Stmt::For(f) => {
+            resolve_calls_in_expr(&f.iterable, kernel_ctx, bindings);
+            resolve_calls_in_stmts(&f.body, kernel_ctx, bindings);
+        }
+        Stmt::While(w) => {
+            resolve_calls_in_expr(&w.condition, kernel_ctx, bindings);
+            resolve_calls_in_stmts(&w.body, kernel_ctx, bindings);
+        }
+        _ => {}
+    }
+}
+
+fn resolve_calls_in_expr(
+    expr: &Expr,
+    kernel_ctx: Option<&KernelDecl>,
+    bindings: &mut std::collections::HashMap<String, Vec<ParamSlot>>,
+) {
+    /// Folds each arg's evidence into `key`'s tracked `ParamSlot::Gpu` positions, if `key`
+    /// is a tracked function at all (untracked names — builtins, non-reachable free
+    /// functions — are silently ignored, same as elsewhere in this file).
+    fn fold_call(
+        key: &str,
+        args: &[Arg],
+        kernel_ctx: Option<&KernelDecl>,
+        bindings: &mut std::collections::HashMap<String, Vec<ParamSlot>>,
+    ) {
+        let Some(slots) = bindings.get_mut(key) else { return };
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if let ParamSlot::Gpu(state) = slot {
+                let evidence = args.get(i).and_then(|a| gpu_array_call_evidence(&a.value, kernel_ctx));
+                state.merge(evidence);
+            }
+        }
+    }
+
+    match &expr.kind {
+        ExprKind::BinOp(_, l, r) => {
+            resolve_calls_in_expr(l, kernel_ctx, bindings);
+            resolve_calls_in_expr(r, kernel_ctx, bindings);
+        }
+        ExprKind::UnaryOp(_, v) => resolve_calls_in_expr(v, kernel_ctx, bindings),
+        ExprKind::Assign(l, r) => {
+            resolve_calls_in_expr(l, kernel_ctx, bindings);
+            resolve_calls_in_expr(r, kernel_ctx, bindings);
+        }
+        ExprKind::Index(a, i) => {
+            resolve_calls_in_expr(a, kernel_ctx, bindings);
+            resolve_calls_in_expr(i, kernel_ctx, bindings);
+        }
+        ExprKind::Field(o, _) => resolve_calls_in_expr(o, kernel_ctx, bindings),
+        ExprKind::Cast(inner, _) => resolve_calls_in_expr(inner, kernel_ctx, bindings),
+        ExprKind::Call(callee, args) => {
+            if let ExprKind::Var(name) = &callee.kind {
+                fold_call(name, args, kernel_ctx, bindings);
+            }
+            resolve_calls_in_expr(callee, kernel_ctx, bindings);
+            for a in args { resolve_calls_in_expr(&a.value, kernel_ctx, bindings); }
+        }
+        ExprKind::MethodCall(obj, method, args) => {
+            if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
+                if let Some(kernel) = kernel_ctx {
+                    let key = format!("{}_{}", kernel.name, method);
+                    fold_call(&key, args, kernel_ctx, bindings);
+                }
+            }
+            resolve_calls_in_expr(obj, kernel_ctx, bindings);
+            for a in args { resolve_calls_in_expr(&a.value, kernel_ctx, bindings); }
+        }
+        ExprKind::If(i) => {
+            for (cond, body) in &i.branches {
+                resolve_calls_in_expr(cond, kernel_ctx, bindings);
+                resolve_calls_in_stmts(body, kernel_ctx, bindings);
+            }
+            if let Some(b) = &i.else_body { resolve_calls_in_stmts(b, kernel_ctx, bindings); }
+        }
+        _ => {}
+    }
+}
+
 struct DeviceEmitter {
     out: String,
     indent: usize,
@@ -91,8 +337,13 @@ struct DeviceEmitter {
     current_buffer_renames: std::collections::HashMap<String, String>,
     /// Block sizes per kernel, extracted from call sites: kernel_name → (bx, by, bz).
     block_sizes: std::collections::HashMap<String, (u32, u32, u32)>,
-    /// Errors accumulated during emission (e.g. unsupported qualifiers).
-    pub errors: Vec<String>,
+    /// Errors accumulated during emission (e.g. unsupported qualifiers). Propagated up
+    /// through `emit_device_wgsl`'s return value and from there into `WgpuOutput::errors`
+    /// (see `transpile_wgpu`) — this used to be silently dropped at the `emit_device_wgsl`
+    /// boundary, so a program that tripped one of these pushes still built "successfully"
+    /// with silently broken generated WGSL instead of failing with the diagnostic already
+    /// computed here.
+    pub errors: Vec<TranspileError>,
     /// Real-subgroup vs. shared-memory-emulated `gpu.warp.*` codegen (see `WarpMode`).
     mode: WarpMode,
     /// Set once per program by `emit_device_wgsl`: does any kernel in this
@@ -112,6 +363,23 @@ struct DeviceEmitter {
     /// True while emitting the body of a `void`-returning device function/method --
     /// see `metal::device`'s identical field.
     current_fn_is_void: bool,
+    /// Emitted device-function name (`decl.name` for a free function, `"{kernel}_{method}"`
+    /// for a kernel struct's own device helper method) → per-position resolution of its
+    /// GPU-array-qualified parameters (`[T]'global`/`'unified`/`'const`/`'actor'global`/
+    /// `'actor'unified`/`'surface`). Built once, up front, in `emit_program` by two
+    /// whole-program passes (`ParamSlot`'s doc comment explains why this can't be answered
+    /// per-function the way an ordinary parameter type can).
+    gpu_array_params: std::collections::HashMap<String, Vec<ParamSlot>>,
+    /// Parameter name → WGSL substitution text, for the device function/method *currently
+    /// being emitted*'s own GPU-array-qualified parameters (see `ParamSlot`). Every
+    /// occurrence of such a parameter name inside this body (`expr()`'s `ExprKind::Var` arm)
+    /// is replaced by this text instead of being treated as an ordinary local — either the
+    /// resolved WGSL global variable name (used exactly like a kernel buffer field
+    /// reference, since that's genuinely what it is at that point) or an inline
+    /// `/* ERROR: ... */` placeholder. Reset (overwritten wholesale) at the top of
+    /// `emit_free_device_fn`/`emit_device_fn`/`emit_entry_point` — exactly one of those
+    /// three is ever "current" during body emission.
+    current_gpu_array_subst: std::collections::HashMap<String, String>,
 }
 
 impl DeviceEmitter {
@@ -131,6 +399,8 @@ impl DeviceEmitter {
             warp_tmp_counter: 0,
             current_kernel_consts: std::collections::HashMap::new(),
             current_fn_is_void: true,
+            gpu_array_params: std::collections::HashMap::new(),
+            current_gpu_array_subst: std::collections::HashMap::new(),
         }
     }
 
@@ -212,6 +482,47 @@ impl DeviceEmitter {
             if !reachable.insert(name.clone()) { continue; } // already visited
             collect_called_fn_names(&free_fns[name.as_str()].body, &mut frontier);
         }
+
+        // Pre-pass: resolve every GPU-array-qualified parameter's binding (see
+        // `is_gpu_array_qualified_type`'s doc comment for why this exists at all) — a
+        // single whole-program pass, up front, so it's ready before any function body
+        // (whose own emission needs it, via `current_gpu_array_subst`) is emitted.
+        let mut gpu_array_params: std::collections::HashMap<String, Vec<ParamSlot>> = std::collections::HashMap::new();
+        for name in &reachable {
+            let decl = free_fns[name.as_str()];
+            let slots = decl.params.iter()
+                .map(|p| if p.ty.as_ref().is_some_and(is_gpu_array_qualified_type) {
+                    ParamSlot::Gpu(GpuBinding::Unbound)
+                } else {
+                    ParamSlot::Plain
+                })
+                .collect();
+            gpu_array_params.insert(decl.name.clone(), slots);
+        }
+        for decl in effective_kernels {
+            for method in &decl.methods {
+                if method.name.is_empty() { continue; }
+                let key = format!("{}_{}", decl.name, method.name);
+                let slots = method.params.iter()
+                    .map(|p| if p.ty.as_ref().is_some_and(is_gpu_array_qualified_type) {
+                        ParamSlot::Gpu(GpuBinding::Unbound)
+                    } else {
+                        ParamSlot::Plain
+                    })
+                    .collect();
+                gpu_array_params.insert(key, slots);
+            }
+        }
+        for name in &reachable {
+            resolve_calls_in_stmts(&free_fns[name.as_str()].body, None, &mut gpu_array_params);
+        }
+        for decl in effective_kernels {
+            for method in &decl.methods {
+                resolve_calls_in_stmts(&method.body, Some(decl), &mut gpu_array_params);
+            }
+        }
+        self.gpu_array_params = gpu_array_params;
+
         for item in &program.items {
             if let Item::Fn(decl) = item {
                 if decl.qualifier.is_none() && !decl.task && reachable.contains(decl.name.as_str()) {
@@ -227,12 +538,70 @@ impl DeviceEmitter {
         }
     }
 
+    /// Builds `current_gpu_array_subst` for the device function/method named `key`
+    /// (`decl.name` for a free function, `"{kernel}_{method}"` for a kernel device
+    /// method) from its resolved `gpu_array_params` entry — see `current_gpu_array_subst`'s
+    /// doc comment for what the substitution text means in each case.
+    ///
+    /// An unresolved (`Poisoned`/`Unbound`) parameter still gets an inline `/* ERROR: ... */`
+    /// WGSL comment at its every reference (readable if someone inspects the generated
+    /// shader directly), but that alone doesn't fail the build — naga happily compiles the
+    /// comment plus whatever's emitted after it. So this also pushes a real error onto
+    /// `self.errors`, which `emit_device_wgsl`/`transpile_wgpu` surface as an actual build
+    /// failure with a clear diagnostic instead.
+    fn build_gpu_array_subst(&mut self, key: &str, params: &[Param]) -> std::collections::HashMap<String, String> {
+        let mut subst = std::collections::HashMap::new();
+        let slots = match self.gpu_array_params.get(key) {
+            Some(slots) => slots.clone(),
+            None => return subst,
+        };
+        for (p, slot) in params.iter().zip(slots.iter()) {
+            if let ParamSlot::Gpu(state) = slot {
+                let text = match state.resolved() {
+                    Some(global) => global.to_string(),
+                    None => {
+                        self.errors.push(TranspileError::at(format!(
+                            "`{}`'s GPU-array-qualified parameter `{}` is not supported on \
+                             --target wgpu here — WGSL forbids passing a storage buffer as a function \
+                             parameter at all (the `unrestricted_pointer_parameters` WGSL extension isn't \
+                             implemented by naga/wgpu — see gfx-rs/naga#5158); this parameter must be bound \
+                             to the exact same kernel buffer field at every call site in the program",
+                            key, p.name
+                        ), p.line, p.col));
+                        format!(
+                            "/* ERROR: `{}`'s GPU-array-qualified parameter `{}` is not supported on \
+                             --target wgpu here — see the reported diagnostic for details */ i32",
+                            key, p.name
+                        )
+                    }
+                };
+                subst.insert(p.name.clone(), text);
+            }
+        }
+        subst
+    }
+
+    /// Parameters of `key` that are GPU-array-qualified — such a parameter is dropped
+    /// entirely from the emitted signature (see `is_gpu_array_qualified_type`'s doc
+    /// comment): every reference to it inside the body is substituted via
+    /// `current_gpu_array_subst` instead, so it needs no parameter slot of its own.
+    fn plain_params_wgsl(&self, key: &str, params: &[Param]) -> Vec<String> {
+        let empty = Vec::new();
+        let slots = self.gpu_array_params.get(key).unwrap_or(&empty);
+        params.iter().enumerate().filter_map(|(i, p)| {
+            if matches!(slots.get(i), Some(ParamSlot::Gpu(_))) {
+                None
+            } else {
+                let ty = p.ty.as_ref().map(wgsl_type).unwrap_or_else(|| "i32".into());
+                Some(format!("{}: {}", p.name, ty))
+            }
+        }).collect()
+    }
+
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
         let ret = decl.return_ty.as_ref().map(wgsl_type).unwrap_or_else(|| "void".into());
-        let params: Vec<String> = decl.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(wgsl_type).unwrap_or_else(|| "i32".into());
-            format!("{}: {}", p.name, ty)
-        }).collect();
+        self.current_gpu_array_subst = self.build_gpu_array_subst(&decl.name, &decl.params);
+        let params: Vec<String> = self.plain_params_wgsl(&decl.name, &decl.params);
         self.line(&format!("fn {}({}) -> {} {{", decl.name, params.join(", "), ret));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
@@ -283,11 +652,11 @@ impl DeviceEmitter {
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Actor)
                 && matches!(f.ty, Type::Array(_)) {
-                    self.errors.push(format!(
+                    self.errors.push(TranspileError::at(format!(
                         "kernel {}: dynamic '[T]'sync field '{}' is not supported on --target wgpu — \
                          WGSL requires a compile-time workgroup size; use '[T, N]'sync' instead",
                         decl.name, f.name
-                    ));
+                    ), f.line, f.col));
                 }
         }
 
@@ -420,10 +789,8 @@ impl DeviceEmitter {
             .map(wgsl_type)
             .unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
-        let params: Vec<String> = method.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(wgsl_type).unwrap_or_else(|| "i32".into());
-            format!("{}: {}", p.name, ty)
-        }).collect();
+        self.current_gpu_array_subst = self.build_gpu_array_subst(&fn_name, &method.params);
+        let params: Vec<String> = self.plain_params_wgsl(&fn_name, &method.params);
         if ret == "void" {
             self.line(&format!("fn {}({}) {{", fn_name, params.join(", ")));
         } else {
@@ -440,6 +807,10 @@ impl DeviceEmitter {
     fn emit_entry_point(&mut self, decl: &KernelDecl, entry: &FnDecl) {
         // The entry point is always `void` (a GPU kernel entry has no return value).
         self.current_fn_is_void = true;
+        // The entry point never has its own GPU-array-qualified extra parameters (only
+        // kernel fields, already plain module-scope `var<storage, ...>` names) — clear
+        // whatever the last-emitted device helper method left behind.
+        self.current_gpu_array_subst.clear();
         let fn_name = format!("{}_main", decl.name);
         let uses_warp = self.program_uses_warp && super::kernel_uses_gpu_warp(decl);
 
@@ -976,10 +1347,10 @@ impl DeviceEmitter {
                 if *n > i32::MAX as i64 && *n <= u32::MAX as i64 {
                     format!("{}u", n)
                 } else if *n < i32::MIN as i64 || *n > u32::MAX as i64 {
-                    self.errors.push(format!(
+                    self.errors.push(TranspileError::at(format!(
                         "integer literal {} out of u32 range on --target wgpu",
                         n
-                    ));
+                    ), e.line, e.col));
                     n.to_string()
                 } else {
                     n.to_string()
@@ -1004,6 +1375,15 @@ impl DeviceEmitter {
                 // expression emission passes through, so no occurrence (however nested) is missed.
                 if let Some(v) = self.current_kernel_consts.get(name) {
                     return v.to_string();
+                }
+                // A GPU-array-qualified parameter of the function/method currently being
+                // emitted was dropped from the signature entirely (see
+                // `is_gpu_array_qualified_type`'s doc comment) — every occurrence of its
+                // name is substituted here instead, exactly like a kernel buffer field
+                // reference (which is genuinely what a resolved one is), before any of the
+                // ordinary lookups below get a chance to treat it as an unresolved local.
+                if let Some(sub) = self.current_gpu_array_subst.get(name) {
+                    return sub.clone();
                 }
                 // Buffer-qualified fields (`'unified`/`'global`/`'actor'global`) become WGSL
                 // module-level globals shared across every kernel in the same shader file —
@@ -1106,7 +1486,22 @@ impl DeviceEmitter {
                 }
             }
             ExprKind::Call(callee, args) => {
-                let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                // A GPU-array-qualified argument position is dropped entirely — the
+                // callee's own signature no longer has a parameter there either (see
+                // `is_gpu_array_qualified_type`'s doc comment), the callee body
+                // substitutes the resolved global directly instead.
+                let gpu_slots: Vec<ParamSlot> = if let ExprKind::Var(n) = &callee.kind {
+                    self.gpu_array_params.get(n).cloned().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let args_s: Vec<String> = args.iter().enumerate().filter_map(|(i, a)| {
+                    if matches!(gpu_slots.get(i), Some(ParamSlot::Gpu(_))) {
+                        None
+                    } else {
+                        Some(self.expr(&a.value))
+                    }
+                }).collect();
                 let fn_s = match &callee.kind {
                     ExprKind::Var(n) => map_builtin_fn(n),
                     _ => self.expr(callee),
@@ -1179,7 +1574,18 @@ impl DeviceEmitter {
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
                     let fn_name = format!("{}_{}", self.current_kernel, method);
-                    format!("{}({})", fn_name, args_s.join(", "))
+                    // See the free-function `ExprKind::Call` arm's identical comment — a
+                    // kernel struct's own helper method can have GPU-array-qualified
+                    // *extra* (non-field) parameters too, dropped the same way.
+                    let gpu_slots: Vec<ParamSlot> = self.gpu_array_params.get(&fn_name).cloned().unwrap_or_default();
+                    let call_args: Vec<String> = args.iter().enumerate().filter_map(|(i, a)| {
+                        if matches!(gpu_slots.get(i), Some(ParamSlot::Gpu(_))) {
+                            None
+                        } else {
+                            Some(self.expr(&a.value))
+                        }
+                    }).collect();
+                    format!("{}({})", fn_name, call_args.join(", "))
                 } else {
                     // Numeric builtin method call (`.sqrt()`, `.exp()`, `.tanh()`, `.pow(y)`,
                     // etc.) on a scalar expression — WGSL has no methods, only free

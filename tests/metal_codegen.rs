@@ -1414,3 +1414,134 @@ kernel LoopHalf:
         "expected the loop body's reference to the loop variable to use the \
          same mangled name as its declaration;\ngot:\n{msl}");
 }
+
+// ─── Free function with a GPU-qualified array parameter — MSL address space ──
+//
+// A free (non-kernel, non-method) function whose parameter type carries a GPU
+// array qualifier (`[T]'global`, `'unified`, `'const`, ...), called from inside a
+// kernel's `def()` body, used to transpile its parameter as a bare pointer with no
+// MSL address-space qualifier (`uchar* w_packed` instead of `device const uchar*
+// w_packed`). A kernel STRUCT FIELD of the identical qualifier already got the
+// right address space (`buffer_field_params`); only a free function's OWN
+// parameter list fell through `msl_type`'s generic `Type::Qualified(inner, _) =>
+// msl_type(inner)` arm, which unconditionally discards the qualifier.
+//
+// This is invisible to both `boring build --target metal` (reports success
+// regardless) and `cargo build`/`cargo run` on the generated Rust (compiles and
+// links fine — the Rust host code has no idea what's inside the MSL string
+// literal it embeds via `include_str!`). It only surfaces when the Metal API
+// actually compiles the embedded MSL source at process *runtime*
+// (`new_library_with_source`), with an opaque MSL error nowhere near the Boring
+// source: `error: pointer type must have explicit address space qualifier`.
+// Reproduced against a real fused-dequantization-style helper (read quantized
+// bytes out of a `'global` array from a free function, called from a kernel).
+//
+// Fixed by `msl_free_fn_param_type` (`src/transpiler/metal/device.rs`), used by
+// both `emit_free_device_fn` (free functions) and `emit_device_fn` (a kernel
+// method's own extra, non-field parameters — identical bug shape). It also
+// matches the `const` a kernel field of the same qualifier gets from a `let`
+// binding (`buffer_field_params`) — omitting that second-order fix still
+// compiles the MSL cleanly right up until a caller passes a `let`-bound (already
+// `device const T*`) field into the free function, which MSL then rejects for
+// discarding `const` — a second runtime-only shader-compile failure with the
+// exact same invisible-to-`cargo-build` failure mode as the missing address
+// space itself.
+
+#[test]
+fn device_free_fn_gpu_array_param_gets_address_space_and_constness() {
+    let (msl, _) = metal_codegen("free_fn_global_array_param", r#"
+float32 dequant_at([uint8]'global w_packed, int idx):
+    let b = w_packed[idx]
+    (b as float32) * 2.0
+
+kernel Dequant:
+    let [uint8]'global w_packed
+    mut [float32]'unified out
+
+    init([uint8] w, [float32] o):
+        w_packed = w
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = dequant_at(w_packed, tid)
+"#);
+    assert!(
+        msl.contains("inline float dequant_at(device const uchar* w_packed, int64_t idx)"),
+        "expected the free function's `[uint8]'global` parameter to be emitted \
+         with the `device` address space AND `const` (matching the `let`-bound \
+         kernel field of the same qualifier, `device const uchar* w_packed \
+         [[buffer(0)]]`) -- a bare `uchar* w_packed` compiles fine as Rust/MSL \
+         *text* but fails real Metal shader compilation at process runtime with \
+         \"pointer type must have explicit address space qualifier\", or (once \
+         only the address space is fixed but not constness) \"would lose const \
+         qualifier\";\ngot:\n{msl}"
+    );
+}
+
+// Real end-to-end verification of the above fix: `boring build --target metal` +
+// `cargo build` + actually running the resulting binary, which dispatches
+// `Dequant`'s kernel and reads back GPU-written results. This is the only way to
+// catch this bug class at all -- it is invisible to both `boring build` (always
+// reports success) and `cargo build`/`cargo run` on the generated Rust (the buggy
+// MSL is just an opaque string literal to Rust) up until the Metal API itself
+// compiles that embedded MSL source at runtime. Confirmed this test fails with
+// the exact MSL compiler error from the bug report against the pre-fix code, and
+// produces the correct GPU-computed values after.
+#[test]
+fn real_gpu_dispatch_free_fn_with_global_array_param() {
+    let test_name = "free_fn_global_array_param_dispatch";
+    let (_msl, _rs, _toml) = run_metal(test_name, r#"
+float32 dequant_at([uint8]'global w_packed, int idx):
+    let b = w_packed[idx]
+    (b as float32) * 2.0
+
+kernel Dequant:
+    let [uint8]'global w_packed
+    mut [float32]'unified out
+
+    init([uint8] w, [float32] o):
+        w_packed = w
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = dequant_at(w_packed, tid)
+
+let w = [1, 2, 3, 4]
+mut result = [0.0, 0.0, 0.0, 0.0]
+
+mut k = Dequant(w, result)
+kernel:
+    k(block = 4)
+
+print "out[0] = {k.out[0]}"
+print "out[1] = {k.out[1]}"
+print "out[2] = {k.out[2]}"
+print "out[3] = {k.out[3]}"
+"#);
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated Metal project to build AND run to completion \
+         against a real Metal GPU (dispatching a kernel whose body calls a free \
+         function taking a `[uint8]'global` parameter), but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    let expected = "out[0] = 2\nout[1] = 4\nout[2] = 6\nout[3] = 8";
+    assert_eq!(
+        stdout.trim_end(), expected,
+        "expected the GPU-computed dequantized values (w[i] * 2.0);\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+}

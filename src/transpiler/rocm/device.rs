@@ -15,7 +15,7 @@
 
 use crate::ast::*;
 use crate::transpiler::helpers::{
-    reachable_free_fns, float_unary_method_c,
+    reachable_free_fns, float_unary_method_c, c_gpu_safe_ident,
     labeled_array_at_index, labeled_array_dim_literal,
     first_loop_index,
 };
@@ -123,7 +123,7 @@ impl DeviceEmitter {
         let ret = decl.return_ty.as_ref().map(c_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
             let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
-            format!("{} {}", ty, p.name)
+            format!("{} {}", ty, c_gpu_safe_ident(&p.name))
         }).collect();
         self.line(&format!("__device__ {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
@@ -146,14 +146,14 @@ impl DeviceEmitter {
             if matches!(field.qual, GpuQual::Const) {
                 if let Type::ArrayN(inner, n) = &field.ty {
                     let elem = elem_c_type(inner);
-                    self.line(&format!("__constant__ {} {}[{}];", elem, field.name, n));
+                    self.line(&format!("__constant__ {} {}[{}];", elem, c_gpu_safe_ident(&field.name), n));
                 } else if let Some((elem, _)) = field.ty.as_labeled_array() {
                     // `labeled_array_len()` is `None` when an axis size
                     // references a kernel const-generic param rather than a
                     // literal int — not yet handled here (no real .br file
                     // needs it today).
                     if let Some(len) = field.ty.labeled_array_len() {
-                        self.line(&format!("__constant__ {} {}[{}];", c_type(elem), field.name, len));
+                        self.line(&format!("__constant__ {} {}[{}];", c_type(elem), c_gpu_safe_ident(&field.name), len));
                     }
                 }
             }
@@ -180,7 +180,7 @@ impl DeviceEmitter {
         let mut params = field_params(fields);
         for p in &method.params {
             let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
-            params.push(format!("{} {}", ty, p.name));
+            params.push(format!("{} {}", ty, c_gpu_safe_ident(&p.name)));
         }
         self.line(&format!("__device__ {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
@@ -203,16 +203,16 @@ impl DeviceEmitter {
             if matches!(field.qual, GpuQual::Actor) {
                 match &field.ty {
                     Type::ArrayN(inner, n) => {
-                        self.line(&format!("__shared__ {} {}[{}];", c_type(inner), field.name, n));
+                        self.line(&format!("__shared__ {} {}[{}];", c_type(inner), c_gpu_safe_ident(&field.name), n));
                     }
                     ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
                         let (elem, _) = ty.as_labeled_array().unwrap();
                         let len = ty.labeled_array_len().unwrap();
-                        self.line(&format!("__shared__ {} {}[{}];", c_type(elem), field.name, len));
+                        self.line(&format!("__shared__ {} {}[{}];", c_type(elem), c_gpu_safe_ident(&field.name), len));
                     }
                     _ => {
                         let elem = elem_c_type(&field.ty);
-                        self.line(&format!("extern __shared__ {} {}[];", elem, field.name));
+                        self.line(&format!("extern __shared__ {} {}[];", elem, c_gpu_safe_ident(&field.name)));
                     }
                 }
             }
@@ -222,7 +222,7 @@ impl DeviceEmitter {
             if matches!(field.qual, GpuQual::Local) {
                 match &field.ty {
                     Type::ArrayN(inner, n) => {
-                        self.line(&format!("{} {}[{}];", c_type(inner), field.name, n));
+                        self.line(&format!("{} {}[{}];", c_type(inner), c_gpu_safe_ident(&field.name), n));
                     }
                     Type::Array(_) => {
                         // Unsized local array — not representable; skip.
@@ -230,7 +230,7 @@ impl DeviceEmitter {
                     ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
                         let (elem, _) = ty.as_labeled_array().unwrap();
                         let len = ty.labeled_array_len().unwrap();
-                        self.line(&format!("{} {}[{}];", c_type(elem), field.name, len));
+                        self.line(&format!("{} {}[{}];", c_type(elem), c_gpu_safe_ident(&field.name), len));
                     }
                     // Scalar 'local: already a by-value kernel parameter (see
                     // `field_params`), seeded from the host's current field value each
@@ -270,9 +270,9 @@ impl DeviceEmitter {
                 let kw = if mutable { "" } else { "const " };
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
-                    self.line(&format!("{}{} {} = {};", kw, ty, s.name, rhs));
+                    self.line(&format!("{}{} {} = {};", kw, ty, c_gpu_safe_ident(&s.name), rhs));
                 } else {
-                    self.line(&format!("{}{} {};", kw, ty, s.name));
+                    self.line(&format!("{}{} {};", kw, ty, c_gpu_safe_ident(&s.name)));
                 }
             }
             Stmt::Expr(e) => {
@@ -346,7 +346,7 @@ impl DeviceEmitter {
             }
             Stmt::For(f) => {
                 // `for i in ..<n` — range iteration only in kernel context.
-                let var = f.vars.first().cloned().unwrap_or_else(|| "_i".into());
+                let var = c_gpu_safe_ident(&f.vars.first().cloned().unwrap_or_else(|| "_i".into()));
                 match &f.iterable.kind {
                     ExprKind::Range { start, end, inclusive } => {
                         let lo = self.expr(start);
@@ -540,9 +540,9 @@ impl DeviceEmitter {
                 // in examples/saxpy.br) -- the field is a real local/parameter in the
                 // generated device function, so it must win, not the outer literal.
                 if self.current_fields.iter().any(|f| f.name == *name) {
-                    name.clone()
+                    c_gpu_safe_ident(name)
                 } else {
-                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| c_gpu_safe_ident(name))
                 }
             }
 
@@ -572,7 +572,7 @@ impl DeviceEmitter {
                     self.current_fields.iter().find(|f| &f.name == name)
                         .and_then(|field| field.ty.as_labeled_array())
                         .and_then(|(_, axes)| labeled_array_at_index(axes, &pairs))
-                        .map(|offset| format!("{}[{}]", name, offset))
+                        .map(|offset| format!("{}[{}]", c_gpu_safe_ident(name), offset))
                 } else {
                     None
                 };
@@ -661,14 +661,14 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 let base = elem_c_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
-                Some(format!("{}{}* {}", constness, base, f.name))
+                Some(format!("{}{}* {}", constness, base, c_gpu_safe_ident(&f.name)))
             }
             GpuQual::Const => {
                 if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() {
                     None  // __constant__ arrays are file-scope globals, not parameters
                 } else {
                     let base = elem_c_type(&f.ty);
-                    Some(format!("const {} {}", base, f.name))
+                    Some(format!("const {} {}", base, c_gpu_safe_ident(&f.name)))
                 }
             }
         }
@@ -683,7 +683,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => None,
                         ty if ty.as_labeled_array().is_some() => None,
-                        _ => Some(format!("{} {}", c_type(&f.ty), f.name)),
+                        _ => Some(format!("{} {}", c_type(&f.ty), c_gpu_safe_ident(&f.name))),
                     }
                 }
                 _ => None,
@@ -699,13 +699,13 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
         match f.qual {
             GpuQual::Actor | GpuQual::Local => None,
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                Some(f.name.clone())
+                Some(c_gpu_safe_ident(&f.name))
             }
             GpuQual::Const => {
                 if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() {
                     None  // __constant__ arrays accessed via file-scope global, not as args
                 } else {
-                    Some(f.name.clone())
+                    Some(c_gpu_safe_ident(&f.name))
                 }
             }
         }
@@ -716,7 +716,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => None,
                         ty if ty.as_labeled_array().is_some() => None,
-                        _ => Some(f.name.clone()),
+                        _ => Some(c_gpu_safe_ident(&f.name)),
                     }
                 }
                 _ => None,

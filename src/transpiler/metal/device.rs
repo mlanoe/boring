@@ -199,8 +199,11 @@ impl DeviceEmitter {
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
         let ret = decl.return_ty.as_ref().map(msl_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(msl_type).unwrap_or_else(|| "int64_t".into());
-            format!("{} {}", ty, msl_safe_ident(&p.name))
+            let name = msl_safe_ident(&p.name);
+            match p.ty.as_ref() {
+                Some(ty) => msl_free_fn_param_type(ty, &name, p.mutable),
+                None => format!("int64_t {}", name),
+            }
         }).collect();
         self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
@@ -237,8 +240,11 @@ impl DeviceEmitter {
         let fn_name = format!("{}_{}", kernel, method.name);
         let mut params = buffer_field_params(fields);
         for p in &method.params {
-            let ty = p.ty.as_ref().map(msl_type).unwrap_or_else(|| "int64_t".into());
-            params.push(format!("{} {}", ty, msl_safe_ident(&p.name)));
+            let name = msl_safe_ident(&p.name);
+            params.push(match p.ty.as_ref() {
+                Some(ty) => msl_free_fn_param_type(ty, &name, p.mutable),
+                None => format!("int64_t {}", name),
+            });
         }
         self.line(&format!("static {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
@@ -974,6 +980,61 @@ fn elem_msl_type(ty: &Type) -> String {
         Type::LabeledArray(inner, _) => msl_type(inner),
         _                         => msl_type(ty),
     }
+}
+
+/// MSL parameter type for a device function's own parameter list -- either a free
+/// function (`emit_free_device_fn`) or a kernel struct's own helper method's *extra*
+/// (non-field) parameters (`emit_device_fn`). Neither is a kernel STRUCT FIELD (those
+/// go through `buffer_field_params`, which already assigns the right address space per
+/// `GpuQual`); both instead reach this backend as ordinary Boring function/method
+/// parameters, so a `[T]'global`/`'unified`/etc.-qualified array parameter arrives as
+/// a plain `Type::Qualified(Type::Array(T), OwnerQual::Gpu*)` — and `msl_type` above
+/// unconditionally discards the qualifier for every OTHER use of `Type::Qualified`
+/// (borrows, `'actor`, `'shared`, ...), which is correct there but silently drops the
+/// address-space requirement here. MSL requires every pointer parameter to declare one
+/// (`device`, `constant`, `threadgroup`, `thread`) — omitting it doesn't fail `cargo
+/// build` (the Rust host code has no idea), it fails only when the embedded MSL source
+/// is compiled by the Metal API at process *runtime* (`new_library_with_source`), with
+/// an opaque MSL parse error nowhere near the Boring source. Mirrors the address space
+/// `buffer_field_params` already assigns to a kernel struct field of the same qualifier
+/// -- including its `const` handling: a kernel field only gets `const` from a `let`
+/// binding (`FieldBinding::Let`), never from the qualifier alone, and a plain (no
+/// `mut`/`var`) function parameter is the exact same "not writable through here"
+/// signal (`Param::mutable` is false) -- omitting it, as an earlier version of this fix
+/// did, compiles the MSL cleanly right up until a caller passes a field the kernel
+/// itself declared `let` (already `device const T*`, per `buffer_field_params`): MSL
+/// then rejects the call for discarding a `const` qualifier, a second runtime-only
+/// shader-compile error with the same invisible-to-`cargo-build` failure mode as the
+/// missing address space itself.
+fn msl_free_fn_param_type(ty: &Type, name: &str, mutable: bool) -> String {
+    if let Type::Qualified(inner, oq) = ty {
+        let is_array = matches!(inner.as_ref(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _))
+            || inner.as_labeled_array().is_some();
+        if is_array {
+            let space = match oq {
+                OwnerQual::GpuUnified | OwnerQual::GpuGlobal
+                | OwnerQual::GpuActorGlobal | OwnerQual::GpuActorUnified
+                | OwnerQual::GpuSurface => Some("device"),
+                OwnerQual::GpuConst => Some("constant"),
+                // Bare 'local has no host-passed-pointer form in kernel-field position
+                // (it's declared as an inline per-thread array in the kernel body, see
+                // this file's "Declare 'local arrays" pass) -- but a free function is
+                // ordinary Boring syntax, so nothing stops a Boring author writing
+                // `[T]'local` as a parameter type. `thread` is MSL's address space for
+                // a plain per-thread/stack pointer, matching that same per-thread intent.
+                OwnerQual::GpuLocal => Some("thread"),
+                _ => None,
+            };
+            if let Some(space) = space {
+                let elem = elem_msl_type(inner);
+                // `constant` is already read-only by construction in MSL; the explicit
+                // `const` only matters (and is only needed) for `device`/`thread`.
+                let constness = if !mutable && space != "constant" { "const " } else { "" };
+                return format!("{} {}{}* {}", space, constness, elem, name);
+            }
+        }
+    }
+    format!("{} {}", msl_type(ty), name)
 }
 
 fn binop_msl(op: &BinOp) -> &'static str {

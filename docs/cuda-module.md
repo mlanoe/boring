@@ -145,6 +145,18 @@ The constant array is uploaded once via `cudaMemcpyToSymbol` before launch.
 
 ---
 
+## Naming restrictions
+
+Unlike Rust, CUDA C's builtin scalar type names (`half`, `float`, `int`, `long`, `size_t`, ...), its builtin vector types from `<vector_types.h>`/`<cuda_fp16.h>` (`float4`, `uchar2`, `half2`, ...), and its real C++14 keywords (`class`, `template`, `namespace`, ...) live in the *same identifier namespace* as ordinary variables — declaring a variable literally named `half` is a genuine CUDA C parse error, not merely a style warning.
+
+A kernel field, a `def()`-body local, a for-loop variable, or a function/method parameter that collides with one of these reserved words is automatically renamed (a trailing `_` appended) by `c_gpu_safe_ident` (`src/transpiler/helpers.rs`, shared with the ROCm/HIP backend below), consistently at both its declaration and every later reference — this is transparent and requires no action from Boring source. Mirrors the Metal backend's identical `msl_safe_ident` fix (see [metal-backend.md](metal-backend.html)'s own "Naming restrictions" section) — `half` is the same motivating real-world case there.
+
+Without this, the failure would be especially confusing: `boring build --target cuda` transpiles successfully with no warning, since this backend never parses the CUDA C it emits — the collision only surfaces later, when the generated `.cu` file is compiled by a separate `nvcc` invocation, as a wall of unrelated-looking parse errors cascading from the single bad declaration.
+
+**Verification note**: unlike Metal (whose MSL compiles at *runtime* via `newLibraryWithSource` and was verified end-to-end on this machine's own Apple Silicon GPU), exercising this fix against a real `nvcc` needs NVIDIA hardware and the CUDA toolchain, neither of which this development machine has. Verified as far as generated-text snapshot assertions allow (`tests/cuda_codegen.rs`'s `device_field_named_half_is_mangled_not_left_colliding_with_cuda_builtin_type`, `device_local_let_named_half_is_mangled`, `device_for_loop_var_named_half_is_mangled`) — the same honest caveat this backend's docs already carry elsewhere for untestable-locally codegen.
+
+---
+
 ## Dispatch parameters
 
 All dispatch parameters are passed inside a `kernel:` block as labeled args to the kernel variable.

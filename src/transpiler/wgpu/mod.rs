@@ -74,7 +74,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
         false
     });
 
-    let (device_wgsl, device_wgsl_emulated) = device::emit_device_wgsl(program, &effective_kernels, &kernel_consts);
+    let (device_wgsl, device_wgsl_emulated, device_errors) = device::emit_device_wgsl(program, &effective_kernels, &kernel_consts);
 
     // Non-kernel code (regular fn/struct/enum/dict logic, including the user's own
     // `def main()`, if any) is transpiled by the SAME general pipeline the std/Rust
@@ -111,6 +111,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
     let mut errors = general_out.errors;
+    errors.extend(device_errors);
     errors.extend(host_errors);
     WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors }
 }

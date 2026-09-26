@@ -1428,3 +1428,74 @@ kernel AddOneF32:
          alongside the `return`;\ngot:\n{hip}"
     );
 }
+
+// ─── Reserved-word-safe identifiers — `half` colliding with HIP C++'s own ────
+// builtin `half` type, mirroring `metal_codegen.rs`'s identical three tests
+// for `msl_safe_ident` (see `c_gpu_safe_ident` in `src/transpiler/helpers.rs`,
+// shared with `cuda::device` — HIP is source-compatible with CUDA C by design,
+// so this backend has the exact same collision risk).
+
+#[test]
+fn device_field_named_half_is_mangled_not_left_colliding_with_hip_builtin_type() {
+    let (hip, _) = rocm_codegen("field_named_half", r#"
+kernel HalfKernel:
+    mut [float]'unified out
+    let int'const       half
+
+    def ():
+        let cell = gpu.thread.x
+        if cell < half:
+            out[cell] = 1.0
+"#);
+    // Declaration and every use must agree on the same mangled name — a bare,
+    // unmangled `half` declaration is exactly the collision this test guards
+    // against (HIP C++ parses it as its own builtin `half` type, not a variable).
+    assert!(hip.contains("const int64_t half_"),
+        "expected the 'const scalar field to be declared as `half_`, not a bare \
+         `half` colliding with HIP C++'s own builtin `half` type;\ngot:\n{hip}");
+    assert!(hip.contains("cell < half_"),
+        "expected the read of the field inside the kernel body to use the \
+         same mangled name `half_` as its declaration;\ngot:\n{hip}");
+}
+
+#[test]
+fn device_local_let_named_half_is_mangled() {
+    let (hip, _) = rocm_codegen("local_let_named_half", r#"
+kernel LocalHalf:
+    mut [float]'unified out
+
+    def ():
+        let half = 4
+        let tid = gpu.thread.x
+        if tid < half:
+            out[tid] = 1.0
+"#);
+    assert!(!hip.contains("int64_t half ="),
+        "a local `let half = ...` must not be emitted as a bare `half` \
+         identifier (collides with HIP C++'s builtin `half` type);\ngot:\n{hip}");
+    assert!(hip.contains("half_ ="),
+        "expected the local to be mangled to `half_`;\ngot:\n{hip}");
+    assert!(hip.contains("tid < half_"),
+        "expected the later read of the local to use the same mangled name \
+         as its declaration;\ngot:\n{hip}");
+}
+
+#[test]
+fn device_for_loop_var_named_half_is_mangled() {
+    let (hip, _) = rocm_codegen("for_loop_var_named_half", r#"
+kernel LoopHalf:
+    mut [float]'unified out
+
+    def ():
+        for half in 0..<4:
+            out[half] = 1.0
+"#);
+    assert!(!hip.contains("int64_t half ="),
+        "a for-loop variable named `half` must not be emitted verbatim \
+         (collides with HIP C++'s builtin `half` type);\ngot:\n{hip}");
+    assert!(hip.contains("int64_t half_ ="),
+        "expected the loop variable to be mangled to `half_`;\ngot:\n{hip}");
+    assert!(hip.contains("out[half_]"),
+        "expected the loop body's reference to the loop variable to use the \
+         same mangled name as its declaration;\ngot:\n{hip}");
+}

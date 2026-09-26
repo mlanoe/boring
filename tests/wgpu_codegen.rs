@@ -501,15 +501,15 @@ fn test_screen_present_and_key() {
     // Minimal game-of-life-style program with Screen + kernel + render loop.
     let src = r#"
 kernel Step:
-    mut [int]'actor cells_in
-    mut [int]'actor cells_out
+    mut [int, 256]'actor cells_in
+    mut [int, 256]'actor cells_out
     let int w
 
     def ():
         cells_out[0] = cells_in[0]
 
 kernel Render:
-    mut [int]'actor pixels
+    mut [int, 256]'actor pixels
     let int w
 
     def ():
@@ -2707,4 +2707,207 @@ print "data[2] = {k.data[2]}"
     assert!(stdout.contains("data[0] = 2"), "expected data[0] = 1+1 = 2, got:\n{stdout}");
     assert!(stdout.contains("data[1] = 3"), "expected data[1] = 2+1 = 3, got:\n{stdout}");
     assert!(stdout.contains("data[2] = 4"), "expected data[2] = 3+1 = 4, got:\n{stdout}");
+}
+
+/// A free function taking a GPU-array-qualified parameter (`[T]'global`/`'unified`/etc.)
+/// used to transpile that parameter to a wholesale wrong scalar type (`w_packed: i32`) —
+/// see the CHANGELOG's Metal-backend entry for the original find. The naive follow-up fix
+/// (a WGSL `ptr<storage, ...>` parameter, `&` at the call site) turned out to be
+/// unsupportable on this backend at all: real naga unconditionally rejects any `Storage`-
+/// space pointer function parameter (confirmed against `naga-22.1.0` and `naga-29.0.4`;
+/// WGSL's own `unrestricted_pointer_parameters` extension is still `Unimplemented`,
+/// gfx-rs/naga#5158). The actual fix drops such a parameter from the signature and every
+/// call site entirely, substituting the resolved kernel buffer field's own WGSL global
+/// name for every reference to it inside the function body instead (a buffer field is
+/// already a module-scope global, visible without being passed as a parameter at all).
+#[test]
+fn device_free_fn_gpu_array_param_dropped_and_substituted_with_kernel_global() {
+    let (wgsl, _rs) = wgpu_codegen("free_fn_gpu_array_param_wgpu", r#"
+float32 dequant_at([int32]'global w_packed, int idx):
+    let b = w_packed[idx]
+    (b as float32) * 2.0
+
+kernel Dequant:
+    let [int32]'global w_packed
+    mut [float32]'unified out
+
+    init([int32] w, [float32] o):
+        w_packed = w
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = dequant_at(w_packed, tid)
+"#);
+    assert!(
+        wgsl.contains("fn dequant_at(idx: "),
+        "expected the GPU-array-qualified `w_packed` parameter to be dropped entirely \
+         from the emitted signature (WGSL forbids a storage-buffer pointer function \
+         parameter outright), leaving only the ordinary `idx` parameter;\ngot:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.lines().any(|l| l.contains("fn dequant_at(") && l.contains("w_packed")),
+        "the dropped parameter must not survive under any WGSL type at all in the \
+         signature — neither the original bug's wrong bare scalar (`w_packed: i32`), nor \
+         a `ptr<storage, ...>` type (rejected by naga as a function parameter outright);\n\
+         got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("dequant_w_packed[u32(idx)]"),
+        "expected every reference to the dropped parameter inside the function body to be \
+         substituted with the resolved kernel buffer field's own WGSL global name (the \
+         same `{{kernel}}_{{field}}` global the kernel's own entry point already uses for \
+         `w_packed`), not left as an unresolved bare identifier;\ngot:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("dequant_at(tid)"),
+        "expected the call site to drop the corresponding argument too, matching the \
+         callee's now-one-parameter-shorter signature;\ngot:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.contains("dequant_at(w_packed, tid)") && !wgsl.contains("dequant_at(&dequant_w_packed"),
+        "the call site must not still pass the dropped argument, bare or by reference — a \
+         `ptr<storage, ...>` argument position is itself invalid WGSL on this backend, a \
+         different and worse failure mode than the original wrong-scalar-type bug;\n\
+         got:\n{wgsl}"
+    );
+}
+
+/// Real end-to-end value assertion for the fix above, against a real GPU adapter (see
+/// `test_kernel_helper_method_real_shader_value`'s doc comment for why this backend's
+/// tests can verify against real hardware) — this bug class is invisible to `cargo build`
+/// on the generated Rust (the broken WGSL is just an embedded string literal) and only
+/// surfaces at real WGSL shader validation/dispatch time, so this is the only test that
+/// actually proves the fix rather than merely the generated text's shape.
+#[test]
+fn real_gpu_dispatch_free_fn_with_global_array_param() {
+    let src = r#"
+float32 dequant_at([int32]'global w_packed, int idx):
+    let b = w_packed[idx]
+    (b as float32) * 2.0
+
+kernel Dequant:
+    let [int32]'global w_packed
+    mut [float32]'unified out
+
+    init([int32] w, [float32] o):
+        w_packed = w
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = dequant_at(w_packed, tid)
+
+mut k = Dequant([1, 2, 3, 4], [0.0, 0.0, 0.0, 0.0])
+kernel:
+    k(block = 4)
+
+print "out[0] = {k.out[0]}"
+print "out[1] = {k.out[1]}"
+print "out[2] = {k.out[2]}"
+print "out[3] = {k.out[3]}"
+"#;
+    let (_wgsl, _emulated, _rs, _toml) = run_wgpu("free_fn_gpu_array_param_real_dispatch", src);
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("free_fn_gpu_array_param_real_dispatch");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(stdout.contains("out[0] = 2"), "expected out[0] = 1*2 = 2, got:\n{stdout}");
+    assert!(stdout.contains("out[1] = 4"), "expected out[1] = 2*2 = 4, got:\n{stdout}");
+    assert!(stdout.contains("out[2] = 6"), "expected out[2] = 3*2 = 6, got:\n{stdout}");
+    assert!(stdout.contains("out[3] = 8"), "expected out[3] = 4*2 = 8, got:\n{stdout}");
+}
+
+/// `DeviceEmitter::errors` (device.rs) accumulates real diagnostics -- a dynamic `'[T]'sync`
+/// field with no compile-time size, an out-of-u32-range integer literal, and (see the next
+/// test) a GPU-array-qualified parameter that can't be bound to one buffer -- but
+/// `emit_device_wgsl` used to return only `(String, Option<String>)`, silently dropping
+/// `.errors` at that boundary. `transpile_wgpu`'s own `errors` vec never included anything
+/// from the device emitter at all, so `boring build --target wgpu` exited 0 and wrote out a
+/// generated shader referencing an undeclared `scratch` variable (the dynamic `'sync` field
+/// was dropped from the WGSL entirely, since there's no way to emit a compile-time-sized
+/// `var<workgroup>` for it) -- a confusing naga validation failure at real dispatch time
+/// instead of this already-computed, much clearer diagnostic. `emit_device_wgsl` now returns
+/// its accumulated errors too, wired into the same top-level `errors` vec host/general
+/// errors already flow through.
+#[test]
+fn wgpu_dynamic_sync_field_is_rejected_not_silently_dropped() {
+    let src = r#"
+kernel S:
+    mut [float32]'unified out
+    let [float32]'actor  scratch
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = scratch[0]
+"#;
+    let stderr = run_wgpu_expect_failure("dynamic_sync_field_rejected", src);
+    assert!(
+        stderr.contains("dynamic '[T]'sync field 'scratch'") && stderr.contains("not supported on --target wgpu"),
+        "expected the pre-existing dynamic-'sync diagnostic to actually surface and fail \
+         the build, got:\n{stderr}"
+    );
+}
+
+/// Same silently-dropped-errors bug, different diagnostic source: `build_gpu_array_subst`
+/// resolves a GPU-array-qualified free-function parameter (`w_packed` here) to the single
+/// kernel buffer field it's always called with across the whole program (see
+/// `device_free_fn_gpu_array_param_dropped_and_substituted_with_kernel_global` above for the
+/// ordinary, resolvable case) -- when two call sites disagree (two kernels each binding
+/// `dequant_at`'s `w_packed` to a *different* field), the parameter is `Poisoned` and
+/// unresolvable, since WGSL has no way to represent an unbound storage-buffer parameter at
+/// all. That path used to only embed an inline `/* ERROR: ... */` WGSL comment (naga
+/// compiles straight through it) without registering a real error anywhere, so this was
+/// doubly silent -- dropped by the inline-comment-only path, and would have been dropped a
+/// second time by `emit_device_wgsl`'s old signature even if it had been registered.
+/// `build_gpu_array_subst` now also pushes a real error, on top of the fix above.
+#[test]
+fn wgpu_gpu_array_param_binding_conflict_is_rejected_not_silently_dropped() {
+    let src = r#"
+float32 dequant_at([int32]'global w_packed, int idx):
+    let b = w_packed[idx]
+    (b as float32) * 2.0
+
+kernel Dequant:
+    let [int32]'global w_packed
+    mut [float32]'unified out
+
+    init([int32] w, [float32] o):
+        w_packed = w
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = dequant_at(w_packed, tid)
+
+kernel Dequant2:
+    let [int32]'global other_packed
+    mut [float32]'unified out
+
+    init([int32] w, [float32] o):
+        other_packed = w
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = dequant_at(other_packed, tid)
+"#;
+    let stderr = run_wgpu_expect_failure("gpu_array_param_binding_conflict", src);
+    assert!(
+        stderr.contains("dequant_at") && stderr.contains("w_packed") && stderr.contains("not supported on --target wgpu"),
+        "expected a clear diagnostic naming the unresolvable GPU-array-qualified parameter \
+         instead of a silently generated, still-broken WGSL comment, got:\n{stderr}"
+    );
 }

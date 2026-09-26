@@ -1,5 +1,104 @@
 use super::*;
 
+// ── Reserved-word-safe identifiers (CUDA C / HIP C++) ─────────────────────────
+//
+// Same bug class as `metal::device`'s `msl_safe_ident` (see that function's doc
+// comment for the full rationale): CUDA C's and HIP C++'s builtin scalar type
+// names (`half`, `float`, `int`, ...), their builtin vector types from
+// `<vector_types.h>`/`<cuda_fp16.h>` (`float4`, `uchar2`, `half2`, ...), and
+// their real C++14 keywords all live in the same identifier namespace as
+// ordinary variables -- unlike Rust. An ordinary Boring kernel field, `def()`-body
+// local, for-loop variable, or function/method parameter named after one of
+// these collides, producing a device-compiler parse error that `boring build`
+// itself never sees (`cargo build` on the generated Rust succeeds regardless --
+// the `.cu`/`.hip.cpp` text is only ever compiled by a separate, external
+// `nvcc`/`hipcc` invocation, which this environment has neither of -- see
+// `docs/cuda-module.md`/`docs/rocm-backend.md`'s "Naming restrictions" section).
+//
+// Shared between `cuda::device` and `rocm::device` (rather than one table per
+// backend, unlike Metal which has no HIP-style sibling) because HIP C++ is
+// deliberately source-compatible with CUDA C -- both draw the exact same
+// builtin names from equivalent headers (see `rocm::device`'s own module doc
+// comment for the full "near-verbatim clone" rationale already established for
+// the rest of this emitter).
+
+/// CUDA C / HIP C++ builtin scalar type names and fixed-width `<cstdint>`
+/// aliases -- reserved as bare identifiers on their own (unlike the vector-only
+/// bases in `C_GPU_VECTOR_BASES` below, e.g. `uint`/`uchar`, which are never
+/// typedef'd bare, only as `uint2`/`uchar4`/etc.).
+pub(crate) const C_GPU_SCALAR_TYPES: &[&str] = &[
+    "bool", "char", "short", "int", "long", "float", "double", "void",
+    "half",
+    "size_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+];
+
+/// `<vector_types.h>`'s (CUDA) / HIP's equivalent scalar bases that support a
+/// `{base}{1,2,3,4}` vector-type suffix -- note the `1`-suffixed form CUDA/HIP
+/// have that MSL doesn't (e.g. `float1`, `uchar1`), and that `half2` comes from
+/// `<cuda_fp16.h>` rather than `<vector_types.h>` itself but occupies the same
+/// namespace. `ulonglong` is included alongside the `longlong` the task spec
+/// names explicitly -- `<vector_types.h>` defines both `longlong{1..4}` and
+/// `ulonglong{1..4}`.
+const C_GPU_VECTOR_BASES: &[&str] = &[
+    "half", "float", "double", "char", "uchar", "short", "ushort",
+    "int", "uint", "long", "ulong", "longlong", "ulonglong",
+];
+
+/// Real C++14 keywords -- identical set to `metal::device`'s `MSL_KEYWORDS`
+/// (both MSL's and CUDA/HIP's host-side compilers are Clang-based C++14) --
+/// plus CUDA/HIP's own execution-space qualifiers and launch-config types in
+/// place of MSL's address-space/function-type qualifiers.
+pub(crate) const C_GPU_KEYWORDS: &[&str] = &[
+    "and", "and_eq", "alignas", "alignof", "asm", "auto", "bitand", "bitor",
+    "break", "case", "catch", "class", "compl", "const", "constexpr",
+    "const_cast", "continue", "decltype", "default", "delete", "do",
+    "dynamic_cast", "else", "enum", "explicit", "export", "extern", "false",
+    "for", "friend", "goto", "if", "inline", "mutable", "namespace", "new",
+    "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq",
+    "private", "protected", "public", "register", "reinterpret_cast",
+    "return", "signed", "sizeof", "static", "static_assert", "static_cast",
+    "struct", "switch", "template", "this", "thread_local", "throw", "true",
+    "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+    "virtual", "volatile", "wchar_t", "char16_t", "char32_t", "while", "xor",
+    "xor_eq",
+    "__global__", "__device__", "__host__", "__shared__", "__constant__",
+    "dim3", "dim2",
+];
+
+/// `half4`, `float2`, `uchar1`, ... -- CUDA/HIP's builtin vector type names,
+/// built from the bases in `C_GPU_VECTOR_BASES`. Unlike MSL, CUDA/HIP's
+/// `<vector_types.h>` has no matrix forms, so there's no equivalent of
+/// `metal::device::is_msl_vector_or_matrix_type`'s matrix half.
+fn is_c_gpu_vector_type(name: &str) -> bool {
+    for base in C_GPU_VECTOR_BASES {
+        for n in 1..=4 {
+            if name == format!("{base}{n}") { return true; }
+        }
+    }
+    false
+}
+
+fn is_c_gpu_reserved(name: &str) -> bool {
+    C_GPU_SCALAR_TYPES.contains(&name) || C_GPU_KEYWORDS.contains(&name) || is_c_gpu_vector_type(name)
+}
+
+/// Renames a Boring identifier that collides with a CUDA C / HIP C++ reserved
+/// word so the generated device code still parses. Mirrors
+/// `metal::device::msl_safe_ident` exactly: a trailing `_` is a no-op for
+/// every identifier that ISN'T reserved (the overwhelming majority), so this
+/// is applied unconditionally at every point a kernel field, local `let`,
+/// for-loop variable, or function/method parameter name is emitted as CUDA
+/// C/HIP C++ text -- both at its declaration and at every later reference --
+/// the mangling is a pure function of the name alone, so a declaration and
+/// its uses always agree without needing a rename table. Never applied to an
+/// AST-level name *comparison* (`f.name == *name`-style field lookups) --
+/// only to text actually emitted into the generated `.cu`/`.hip.cpp` source.
+pub(crate) fn c_gpu_safe_ident(name: &str) -> String {
+    if is_c_gpu_reserved(name) { format!("{name}_") } else { name.to_string() }
+}
+
 /// Boring's built-in numeric methods (`x.exp()`, `x.sqrt()`, `x.tanh()`, ...) as
 /// CUDA C / HIP C++ device code -- both toolchains expose the same standard C
 /// math library function names in device code (`sqrt`, `exp`, `tanh`, etc.), so
