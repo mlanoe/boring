@@ -1,0 +1,18 @@
+# Regression case: a bare, untyped top-level constant (`let NAME = <int literal>`,
+# no explicit type annotation) used to transpile to a Rust `i64` const/static, while
+# every other `int`-typed value (including this file's `get_count()` return value)
+# transpiles to `isize` (CLAUDE.md's "Common types" table). Comparing the two failed
+# real `cargo build` with a `mismatched types` error even though `boring build`
+# itself reported success -- `boring run` never caught it since the interpreter's
+# dynamic values have no such width to mismatch in the first place.
+let LIMIT = 5
+
+int get_count():
+    5
+
+def main():
+    let count = get_count()
+    if count == LIMIT:
+        print "equal"
+    else:
+        print "not equal"

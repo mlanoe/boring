@@ -533,6 +533,12 @@ transpile_test!(pub_top_level_const);
 // only compiles if it was promoted to a real `pub const` despite never being
 // referenced anywhere in the `.br` file itself.
 transpile_test!(pub_top_level_const_unused);
+// A bare, untyped top-level int constant (`let LIMIT = 5`) must transpile to `isize`
+// (matching `int`'s own mapping and how a `let`-bound local already behaves), not
+// `i64` -- comparing it against an ordinary `int`-typed value used to fail real
+// `cargo build` with a type mismatch even though `boring build` reported success.
+// See `tests/cases/untyped_top_level_int_const.br`'s header comment for the full bug.
+transpile_test!(untyped_top_level_int_const);
 // `pub let`/used-elsewhere `let` STRING constants (`top_level_let_is_string_literal`,
 // src/transpiler/mod.rs) -- the scalar cases above never exercised this path at all, since
 // `top_level_let_is_const_safe` never matches a string. Unlike `pub_top_level_const_unused`

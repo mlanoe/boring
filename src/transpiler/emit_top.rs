@@ -151,9 +151,18 @@ impl Transpiler {
                         // first, same as `top_level_let_is_const_safe` itself, so a negative
                         // constant (`let x = -450.0`) still infers `f64` instead of falling
                         // through to the invalid `_` placeholder.
+                        //
+                        // An untyped integer literal defaults to `isize`, matching `int`'s own
+                        // `emit_type` mapping (Type::Int -> "isize") and how an ordinary untyped
+                        // local `let x = 5` already behaves -- NOT `i64`. An untyped top-level
+                        // constant is otherwise indistinguishable, at any comparison/arithmetic
+                        // site, from a `let`-bound `int` value (itself `isize`), so giving it a
+                        // narrower fixed-width Rust type here breaks type-checking the moment the
+                        // two are compared, even though `boring build` itself reports success and
+                        // only the later `cargo build` surfaces the mismatch.
                         fn literal_ty_str(v: &Expr) -> Option<&'static str> {
                             match &v.kind {
-                                ExprKind::Int(_)   => Some("i64"),
+                                ExprKind::Int(_)   => Some("isize"),
                                 ExprKind::Float(_) => Some("f64"),
                                 ExprKind::Bool(_)  => Some("bool"),
                                 ExprKind::UnaryOp(_, inner) => literal_ty_str(inner),
