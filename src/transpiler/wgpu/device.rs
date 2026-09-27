@@ -135,8 +135,18 @@ fn wgsl_safe_ident(name: &str) -> String {
 /// never itself spelled with the `array`/`atomic` type constructor as its own
 /// declared type. Reuses `wgsl_safe_ident`'s existing trailing-`_` convention
 /// rather than introducing a second one.
-fn wgsl_workgroup_array_ident(name: &str) -> String {
-    let safe = wgsl_safe_ident(name);
+///
+/// Kernel-prefixed (`{kernel}_{field}`, lowercased kernel name — matching
+/// `current_buffer_renames`'s own scheme) for the same reason buffer fields
+/// are: a `'sync`/`'actor` fixed-array field is *also* a module-scope WGSL
+/// declaration (`var<workgroup> {name}: array<...>;`), so two unrelated
+/// kernels that both happen to name their tile field the same thing (e.g.
+/// `tile_x` in two independently-written tiled-matmul kernels) previously
+/// collided at module scope — WGSL rejects the redefinition, but only at
+/// real shader-module compile time (`Device::create_shader_module`), which
+/// neither `boring build` nor `cargo build` reach. See CHANGELOG.md.
+fn wgsl_workgroup_array_ident(kernel: &str, name: &str) -> String {
+    let safe = format!("{}_{}", kernel.to_lowercase(), wgsl_safe_ident(name));
     if safe == "array" { format!("{safe}_") } else { safe }
 }
 
@@ -803,13 +813,13 @@ impl DeviceEmitter {
             if matches!(f.qual, GpuQual::Actor) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                        wgsl_workgroup_array_ident(&f.name), wgsl_scalar(inner), n));
+                        wgsl_workgroup_array_ident(&decl.name, &f.name), wgsl_scalar(inner), n));
                 } else if let Some((elem, _)) = f.ty.as_labeled_array() {
                     // See cuda::device's identical `labeled_array_len()` note:
                     // `None` (a const-generic axis) isn't handled here yet.
                     if let Some(len) = f.ty.labeled_array_len() {
                         self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                            wgsl_workgroup_array_ident(&f.name), wgsl_scalar(elem), len));
+                            wgsl_workgroup_array_ident(&decl.name, &f.name), wgsl_scalar(elem), len));
                     }
                 }
             }
@@ -830,7 +840,7 @@ impl DeviceEmitter {
                 let wg_len = bx * by * bz;
                 for ty in &elem_types {
                     self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                        warp_scratch_var_name(ty), ty, wg_len));
+                        warp_scratch_var_name(&decl.name, ty), ty, wg_len));
                 }
             }
         }
@@ -1024,7 +1034,7 @@ impl DeviceEmitter {
         let v = self.expr(&args[0].value);
         let operand = self.expr(&args[1].value);
         let elem_ty = infer_shuffle_elem_type(&args[0].value, &self.current_fields);
-        let scratch = warp_scratch_var_name(&elem_ty);
+        let scratch = warp_scratch_var_name(&self.current_kernel, &elem_ty);
         let n = self.warp_tmp_counter;
         self.warp_tmp_counter += 1;
 
@@ -1523,12 +1533,12 @@ impl DeviceEmitter {
                     // `wgsl_workgroup_array_ident` instead — it's declared as a
                     // module-scope `var<workgroup>` (see `emit_kernel_decl`'s
                     // "3. Workgroup" section), so a reference here must agree with
-                    // that declaration's own self-collision renaming or the two
+                    // that declaration's own kernel-prefixed renaming or the two
                     // would name-mismatch.
                     let is_sync_array = matches!(field.qual, GpuQual::Actor)
                         && (matches!(field.ty, Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some());
                     if is_sync_array {
-                        wgsl_workgroup_array_ident(name)
+                        wgsl_workgroup_array_ident(&self.current_kernel, name)
                     } else {
                         wgsl_safe_ident(name)
                     }
@@ -1993,8 +2003,14 @@ fn is_gpu_warp_shuffle(method: &str) -> bool {
     matches!(method, "shuffle_down" | "shuffle_up" | "shuffle_xor" | "shuffle")
 }
 
-fn warp_scratch_var_name(elem_ty: &str) -> String {
-    format!("bp_warp_scratch_{}", elem_ty)
+/// Kernel-prefixed (lowercased kernel name, matching `wgsl_workgroup_array_ident`'s
+/// and `current_buffer_renames`'s own scheme) — this is also a module-scope
+/// `var<workgroup>` declaration, so two unrelated kernels that both shuffle
+/// the same element type (e.g. two kernels both `gpu.warp.shuffle_down`-ing an
+/// `f32` accumulator) previously collided at module scope exactly like the
+/// `'sync` fixed-array field bug above. See CHANGELOG.md.
+fn warp_scratch_var_name(kernel: &str, elem_ty: &str) -> String {
+    format!("bp_warp_scratch_{}_{}", kernel.to_lowercase(), elem_ty)
 }
 
 /// Best-effort WGSL scalar element type for a `gpu.warp.shuffle_*` value

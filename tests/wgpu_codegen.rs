@@ -360,8 +360,8 @@ kernel WarpEmulated:
 "#;
     let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated", src);
 
-    assert!(emulated.contains("var<workgroup> bp_warp_scratch_f32"),
-        "expected a f32 workgroup scratch buffer;\ngot:\n{emulated}");
+    assert!(emulated.contains("var<workgroup> bp_warp_scratch_warpemulated_f32"),
+        "expected a kernel-prefixed f32 workgroup scratch buffer;\ngot:\n{emulated}");
     assert!(emulated.contains("workgroupBarrier()"), "expected workgroupBarrier();\ngot:\n{emulated}");
     assert!(emulated.contains("@builtin(local_invocation_index)"),
         "expected @builtin(local_invocation_index);\ngot:\n{emulated}");
@@ -1612,8 +1612,9 @@ kernel Tile:
         let r = gpu.thread.y
         out[0] = tile[width = c, height = r]
 "#);
-    assert!(wgsl.contains("var<workgroup> tile: array<f32, 16>;"),
-        "expected a module-scope var<workgroup> declaration sized width*height;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("var<workgroup> tile_tile: array<f32, 16>;"),
+        "expected a kernel-prefixed module-scope var<workgroup> declaration sized \
+         width*height;\ngot:\n{wgsl}");
 }
 
 // ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────
@@ -3035,10 +3036,18 @@ kernel ParamConst:
 // textually equals the type-constructor keyword spelling its own type, e.g.
 // `var<workgroup> array: array<f32, 4>;` fails with "declaration of `array` is
 // recursive", even though `var<workgroup> array: i32;` (same name, different
-// type) or a same-named *struct field* of any type compiles fine. The only place
-// this backend can reach it from valid Boring source is a `'actor` fixed-size
-// workgroup array field literally named `array` (see `wgsl_workgroup_array_ident`
-// in `src/transpiler/wgpu/device.rs` for why buffer/atomic fields can't).
+// type) or a same-named *struct field* of any type compiles fine.
+//
+// `wgsl_workgroup_array_ident` now also kernel-prefixes every workgroup-array
+// declaration (`{kernel}_{field}`, see the cross-kernel name-collision fix this
+// same function documents) -- which means a field literally named `array` is
+// no longer emitted bare at all; it's already disambiguated to `{kernel}_array`
+// before the self-recursion check ever gets a chance to matter, since a real
+// kernel name is never empty. The trailing-`_` mangling these tests originally
+// exercised is kept in the source as a defensive fallback (see the function's
+// own doc comment) but is not reachable from valid Boring source any more --
+// these tests now assert the (still correct, still non-recursive) prefixed
+// name instead.
 
 #[test]
 fn device_workgroup_array_field_named_array_is_mangled_not_left_self_recursive() {
@@ -3057,14 +3066,15 @@ kernel Tile:
         "a workgroup array field literally named `array` must not be emitted \
          verbatim -- naga rejects `var<workgroup> array: array<...>;` outright \
          with \"declaration of `array` is recursive\";\ngot:\n{wgsl}");
-    assert!(wgsl.contains("var<workgroup> array_: array<f32, 256>;"),
-        "expected the field to be mangled to `array_`;\ngot:\n{wgsl}");
-    assert!(wgsl.contains("array_[u32(i32(bp_tid.x))] = "),
-        "expected the kernel body's write to use the same mangled name \
-         `array_` as its declaration;\ngot:\n{wgsl}");
-    assert!(wgsl.contains("= array_[u32(i32(bp_tid.x))];"),
-        "expected the kernel body's read to use the same mangled name \
-         `array_` as its declaration;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("var<workgroup> tile_array: array<f32, 256>;"),
+        "expected the field to be kernel-prefixed to `tile_array` (which also \
+         happens to sidestep the self-recursive-`array` case);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("tile_array[u32(i32(bp_tid.x))] = "),
+        "expected the kernel body's write to use the same kernel-prefixed name \
+         `tile_array` as its declaration;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("= tile_array[u32(i32(bp_tid.x))];"),
+        "expected the kernel body's read to use the same kernel-prefixed name \
+         `tile_array` as its declaration;\ngot:\n{wgsl}");
 }
 
 #[test]
@@ -3082,8 +3092,9 @@ kernel LabeledTile:
         "a labeled workgroup array field literally named `array` must not be \
          emitted verbatim (same naga \"declaration is recursive\" rejection as \
          the fixed-size-array case);\ngot:\n{wgsl}");
-    assert!(wgsl.contains("var<workgroup> array_: array<f32, 16>;"),
-        "expected the labeled array field to be mangled to `array_`;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("var<workgroup> labeledtile_array: array<f32, 16>;"),
+        "expected the labeled array field to be kernel-prefixed to \
+         `labeledtile_array`;\ngot:\n{wgsl}");
 }
 
 // ─── host — string indexing/slicing in a kernel-touching function ─────────────
@@ -3219,4 +3230,103 @@ print "dst[5] = {k.dst[5]}"
     assert!(stdout.contains("dst[0] = 11"), "expected dst[0] = 1 + 10 = 11, got:\n{stdout}");
     assert!(stdout.contains("dst[1] = 12"), "expected dst[1] = 2 + 10 = 12, got:\n{stdout}");
     assert!(stdout.contains("dst[5] = 16"), "expected dst[5] = 6 + 10 = 16, got:\n{stdout}");
+}
+
+/// Regression test for a module-scope WGSL name collision between two unrelated
+/// kernels: a `'sync`/`'actor` fixed-array workgroup field (`var<workgroup> {name}:
+/// array<...>;`, `emit_kernel_decl`'s "3. Workgroup" section) used to be declared
+/// under its own bare field name, with no kernel-specific prefix -- unlike every
+/// other kernel-scoped WGSL declaration this backend emits (buffer fields go
+/// through `current_buffer_renames`'s `{kernel}_{field}` scheme, helper functions
+/// through `{kernel}_{method}`, params structs through `{Kernel}Params`). Two
+/// independently-written kernels that happen to name their tile field the same
+/// thing -- an entirely ordinary choice for two kernels doing a similar tiled
+/// operation, e.g. `tile_x` in two GEMM-shaped kernels -- silently combined into
+/// one shader module with two `var<workgroup> tile_x: ...;` declarations sharing
+/// one module-scope identifier.
+///
+/// `boring build --target wgpu` and `cargo build` on the generated project both
+/// succeed -- a Rust-level compile never parses the embedded WGSL string -- and
+/// the failure only surfaces as a real WGSL parse error at shader-module creation
+/// time, the first time the program actually dispatches a kernel:
+///   Shader '' parsing error: redefinition of `tile_x`
+/// followed by a Rust panic reflecting the (invalid) pipeline. Fixed by
+/// kernel-prefixing the declaration (`wgsl_workgroup_array_ident`) and its
+/// reference site the same way buffer fields already are. See CHANGELOG.md.
+#[test]
+fn two_kernels_sharing_actor_field_name_real_shader_validation() {
+    let src = r#"
+kernel KernelA:
+    mut [float32]'unified out
+    mut [float32, width=4, height=4]'actor tile_x
+
+    init():
+        out = [0.0]
+
+    def ():
+        tile_x[width=0, height=0] = 1.0
+        out[0] = tile_x[width=0, height=0]
+
+kernel KernelB:
+    mut [float32]'unified out
+    mut [float32, width=4, height=4]'actor tile_x
+
+    init():
+        out = [0.0]
+
+    def ():
+        tile_x[width=0, height=0] = 2.0
+        out[0] = tile_x[width=0, height=0]
+
+mut a = KernelA()
+kernel:
+    a(block = 1)
+mut b = KernelB()
+kernel:
+    b(block = 1)
+print "{a.out[0]} {b.out[0]}"
+"#;
+    let (wgsl, _emulated, _rs, _toml) = run_wgpu("two_kernels_sharing_actor_field_name", src);
+
+    // Codegen-level assertion: the two kernels' workgroup declarations must no
+    // longer share one bare identifier.
+    assert!(
+        wgsl.contains("var<workgroup> kernela_tile_x:") && wgsl.contains("var<workgroup> kernelb_tile_x:"),
+        "expected each kernel's `'actor` workgroup field to be declared under its own \
+         kernel-prefixed name, generated WGSL:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.contains("var<workgroup> tile_x:"),
+        "generated WGSL still declares the bare, un-prefixed `tile_x` -- two kernels \
+         sharing this field name would collide at module scope again, generated WGSL:\n{wgsl}"
+    );
+
+    // Real end-to-end run against a real GPU adapter (this repo's CI runs on
+    // macOS/Metal, see `test_const_generic_kernel_fixed_array_params_real_shader_validation`'s
+    // doc comment) -- `cargo build` alone can't catch this bug since it never parses
+    // the embedded WGSL string; only creating a real `wgpu::Device` shader module at
+    // runtime does.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("two_kernels_sharing_actor_field_name");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(
+        !stderr.contains("redefinition of") && !stderr.contains("parsing error"),
+        "the workgroup-variable name collision regressed -- generated program's \
+         stderr:\n{stderr}"
+    );
+    assert!(stdout.contains("1 2"), "expected \"1 2\" (each kernel's own tile write \
+        read back independently), got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
 }
