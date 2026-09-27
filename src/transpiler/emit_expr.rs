@@ -2951,6 +2951,42 @@ impl Transpiler {
                 return String::new();
             }
         }
+        // Range-index assignment into a non-string collection: `arr[a..<b] = [...]`.
+        // No existing documented semantics for this (new design surface — see
+        // CHANGELOG.md) -- chosen to mirror Python's `list[a:b] = [...]`, i.e. the
+        // replacement need not be the same length as the range (grows/shrinks the
+        // array). Rust's own `IndexMut`-based range assignment (`v[a..b] = *rhs`)
+        // requires the replacement to be an unsized slice of the *exact* same
+        // length (panics otherwise) -- `Vec::splice(range, replacement)` is the
+        // general lowering Rust actually offers for a Python-style resize.
+        // `idx_expr.kind` reaches here as a bare `ExprKind::SliceRange`, which
+        // `self.emit_expr` has no dispatch arm for (see its panic arm, "SliceRange
+        // cannot appear outside an index expression") -- this must build the range
+        // string itself, the same way `emit_expr_index`'s own dedicated
+        // `SliceRange` branch does, rather than recursing into `emit_expr`.
+        if let ExprKind::Index(arr_obj, idx_expr) = &target.kind {
+            if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
+                let cast_idx = |raw: String, e: &Expr| -> String {
+                    match &e.kind {
+                        ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                            format!("({}) as usize", raw),
+                        _ => raw,
+                    }
+                };
+                let start_s = start.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
+                let end_s   = end.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
+                let dots = if *inclusive { "..=" } else { ".." };
+                let range_s = match (start_s, end_s) {
+                    (Some(s), Some(e)) => format!("{s}{dots}{e}"),
+                    (Some(s), None)    => format!("{s}.."),
+                    (None,    Some(e)) => format!("{dots}{e}"),
+                    (None,    None)    => "..".to_string(),
+                };
+                let obj_s = self.emit_expr(arr_obj);
+                let val_s = self.emit_expr_owned(value);
+                return format!("{}.splice({}, {})", obj_s, range_s, val_s);
+            }
+        }
         // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
         if let ExprKind::Index(dict_obj, key) = &target.kind {
             if let ExprKind::Var(dict_name) = &dict_obj.kind {

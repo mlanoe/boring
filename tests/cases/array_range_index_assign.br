@@ -1,0 +1,43 @@
+# Regression fixture for range-index *assignment* on a non-string collection
+# (`arr[a..<b] = [...]`) — see tests/array_range_index_assign.rs for the full
+# writeup. Three shapes, on purpose, so a future change can't silently
+# regress any of them:
+#
+#   - same_length: replacement has the same element count as the range —
+#     the one case Rust's own `IndexMut` range assignment could in principle
+#     handle directly, kept as the control case.
+#   - grow: replacement is longer than the range — only `Vec::splice`
+#     (not direct range-index assignment) can do this; proves the lowering
+#     is Python-`list[a:b] = [...]`-style resize, not fixed-length swap.
+#   - self_field_inclusive: a struct field target (`self.items`, implicit
+#     self, no `self.` prefix) with an inclusive range (`..=`) — exercises
+#     both the struct-field-as-target path and the inclusive-bound codegen
+#     branch together.
+
+pub struct Holder:
+    var [int] items = [1, 2, 3, 4, 5]
+
+    pub def self_field_inclusive():
+        items[1..=2] = [9]
+
+def [int] same_length():
+    var [int] arr = [1, 2, 3, 4]
+    arr[0..<2] = [9, 9]
+    arr
+
+def [int] grow():
+    var [int] arr = [1, 2, 3, 4, 5]
+    arr[1..<3] = [8, 8, 8, 8]
+    arr
+
+def main():
+    let a = same_length()
+    for x in a:
+        print "{x}"
+    let b = grow()
+    for x in b:
+        print "{x}"
+    mut h = Holder()
+    h.self_field_inclusive()
+    for x in h.items:
+        print "{x}"
