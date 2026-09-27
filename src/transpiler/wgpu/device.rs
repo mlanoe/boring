@@ -781,6 +781,30 @@ impl DeviceEmitter {
                 }
         }
 
+        // Validate: reject storage-buffer fields whose element type WGSL can't represent
+        // at its native byte width (see `buffer_elem_unsupported_width_name`'s doc comment
+        // for why this is a hard error for buffers, unlike the same types on a scalar
+        // param — a `/* ERROR */`-commented type alone doesn't fail the naga build, so
+        // this must go through `self.errors` the same way the check above does.
+        for f in &decl.fields {
+            if is_buffer_field(f) {
+                if let Some(inner) = buffer_field_elem_ty(f) {
+                    if let Some(name) = buffer_elem_unsupported_width_name(inner) {
+                        self.errors.push(TranspileError::at(format!(
+                            "kernel {}: buffer field '{}' has element type `{}`, which is not \
+                             supported as a storage-buffer element on --target wgpu — WGSL has no \
+                             matching integer width, so this field would be declared as a 4-byte \
+                             `array<{}>` while the host uploads/sizes it at `{}`'s real (different) \
+                             byte width; every WGSL-side index beyond the first element would then \
+                             address the wrong bytes. Use `int32`/`uint32` (or `float32`) instead",
+                            decl.name, f.name, name,
+                            if name.starts_with('u') { "u32" } else { "i32" }, name
+                        ), f.line, f.col));
+                    }
+                }
+            }
+        }
+
         self.line(&format!("// ─── kernel {} ───", decl.name));
         self.blank();
 
@@ -1838,17 +1862,58 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
     }
 }
 
+/// The element type of a buffer field's array — factored out of `wgsl_buffer_type` so the
+/// unsupported-width validation in `emit_kernel_decl` can inspect the same element type
+/// without duplicating this match.
+fn buffer_field_elem_ty(f: &KernelFieldDecl) -> Option<&Type> {
+    match &f.ty {
+        Type::Array(inner) | Type::ArrayN(inner, _) => Some(inner.as_ref()),
+        ty if ty.as_labeled_array().is_some() => Some(ty.as_labeled_array().unwrap().0),
+        _ => None,
+    }
+}
+
+/// Names the element type when it's one `wgsl_scalar` can't represent at its native byte
+/// width (see `wgsl_unsupported_width`) — fine as a *scalar* kernel param (just a
+/// precision-narrowed 4-byte stand-in), but corrupting for a storage-*buffer* field: the
+/// WGSL side always declares `array<i32>`/`array<u32>` (4-byte stride) and indexes by
+/// 4-byte word, while the host side (`bytemuck::cast_slice`/`size_of::<T>()` in the
+/// generated Rust) uploads/sizes the buffer at the type's real, different byte width. Any
+/// element read/written beyond the first ends up at the wrong offset — not a narrowing,
+/// an outright stride mismatch. Returns `None` for types WGSL represents natively
+/// (`int32`/`uint32`/`float32`) or narrows self-consistently (`int`/`uint`/`float64`,
+/// handled by `wgsl_narrowed_width`/`wgsl_unsupported_f64` instead).
+fn buffer_elem_unsupported_width_name(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Uint8 => Some("uint8"),
+        Type::Int8 => Some("int8"),
+        Type::Int16 => Some("int16"),
+        Type::Uint16 => Some("uint16"),
+        Type::Int64 => Some("int64"),
+        Type::Uint64 => Some("uint64"),
+        Type::Int128 => Some("int128"),
+        Type::Uint128 => Some("uint128"),
+        Type::Named(n) => match n.as_str() {
+            "uint8" => Some("uint8"),
+            "int8" => Some("int8"),
+            "int16" => Some("int16"),
+            "uint16" => Some("uint16"),
+            "int64" | "i64" | "int128" | "i128" => Some("int64/int128"),
+            "uint64" | "u64" | "uint128" | "u128" => Some("uint64/uint128"),
+            _ => None,
+        },
+        Type::Qualified(inner, _) => buffer_elem_unsupported_width_name(inner),
+        _ => None,
+    }
+}
+
 /// Returns the WGSL storage access modifier and array type for a buffer field.
 fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     let access = match f.qual {
         GpuQual::ActorGlobal | GpuQual::ActorUnified => "read_write", // atomics need read_write
         _ => if matches!(f.binding, FieldBinding::Let) { "read" } else { "read_write" },
     };
-    let inner_ty: Option<&Type> = match &f.ty {
-        Type::Array(inner) | Type::ArrayN(inner, _) => Some(inner.as_ref()),
-        ty if ty.as_labeled_array().is_some() => Some(ty.as_labeled_array().unwrap().0),
-        _ => None,
-    };
+    let inner_ty: Option<&Type> = buffer_field_elem_ty(f);
     let elem = match inner_ty {
         Some(inner) => {
             if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {

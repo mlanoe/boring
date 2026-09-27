@@ -3055,6 +3055,47 @@ kernel S:
     );
 }
 
+/// `wgsl_scalar`'s `wgsl_unsupported_width` fallback (device.rs) narrows a genuinely
+/// unrepresentable-width element type (`uint8`/`int8`/`int16`/`uint16`/`int64`/`uint64`/
+/// `int128`/`uint128`) down to a 4-byte `i32`/`u32` with only an inline WGSL comment -- fine
+/// for a *scalar* kernel param (just a narrowed value, still 4 bytes on both host and
+/// device), but silently wrong for a storage-*buffer* field: the host side
+/// (`host_scalar_type` in host.rs) keeps that field's *real*, narrower-or-wider byte width
+/// (`u8`, `i16`, `u64`, ...) for its `Vec`/upload, while the device side's `array<u32>` still
+/// indexes by 4-byte word -- every element past the first is read from the wrong byte
+/// offset. Unlike the dynamic-'sync case above this was never caught anywhere: no error was
+/// pushed for buffer fields at all, just the inert WGSL comment, so the mismatched build
+/// compiled and ran with silently corrupted data. `emit_kernel_decl`'s new validation loop
+/// (device.rs) now rejects it outright, for every affected width, not just `uint8`.
+#[test]
+fn wgpu_narrow_width_buffer_field_is_rejected_not_silently_corrupted() {
+    for (decl, name) in [
+        ("mut [uint8]'unified w_packed", "uint8"),
+        ("mut [int8]'unified w_packed", "int8"),
+        ("mut [int16]'unified w_packed", "int16"),
+        ("mut [uint16]'unified w_packed", "uint16"),
+        ("mut [int64]'unified w_packed", "int64"),
+        ("mut [uint64]'unified w_packed", "uint64"),
+    ] {
+        let src = format!(
+            r#"
+kernel Q:
+    mut [float32]'unified out
+    {decl}
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = w_packed[tid] as float32
+"#
+        );
+        let stderr = run_wgpu_expect_failure(&format!("narrow_buffer_field_rejected_{name}"), &src);
+        assert!(
+            stderr.contains("buffer field 'w_packed'") && stderr.contains("not supported as a storage-buffer element"),
+            "[{name}] expected the narrow-width buffer field to be rejected with a clear \
+             diagnostic instead of silently corrupting data, got:\n{stderr}"
+        );
+    }
+}
+
 /// Same silently-dropped-errors bug, different diagnostic source: `build_gpu_array_subst`
 /// resolves a GPU-array-qualified free-function parameter (`w_packed` here) to the single
 /// kernel buffer field it's always called with across the whole program (see
