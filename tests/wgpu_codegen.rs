@@ -183,6 +183,199 @@ kernel Scale:
 }
 
 #[test]
+fn test_powf_maps_to_wgsl_pow_builtin() {
+    // Regression test: `.powf()` on a float32 used to pass straight through
+    // `map_builtin_fn`'s catch-all as a bare `powf(...)` call -- WGSL has no such
+    // builtin (only `pow(x, y)`), so the shader compiled fine through `boring
+    // build --target wgpu` + `cargo build` but failed at GPU-pipeline-creation
+    // time with "no definition in scope for identifier: 'powf'". Found via
+    // boring-llm's RoPE inverse-frequency kernel (`1.0 / base.powf(exp)`).
+    let src = r#"
+kernel Pow:
+    mut [float32]'unified data
+    let float32 alpha
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        data[i] = data[i].powf(alpha)
+"#;
+    let (wgsl, _rs) = wgpu_codegen("powf_builtin", src);
+
+    assert!(wgsl.contains("pow("), "expected WGSL `pow(...)` builtin;\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("powf("), "must not emit invalid WGSL `powf(...)`;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn test_ln_maps_to_wgsl_log_builtin() {
+    // Same bug class as `test_powf_maps_to_wgsl_pow_builtin`, a different missing
+    // `map_builtin_fn` entry: `.ln()` used to pass straight through as a bare
+    // `ln(...)` call -- WGSL has no `ln` identifier at all (its natural-log
+    // builtin is spelled `log`), so this compiled fine through `cargo build` but
+    // failed at GPU-pipeline-creation time ("no definition in scope for
+    // identifier: 'ln'"). Found via boring-llm's RoPE frequency kernel.
+    let src = r#"
+kernel Log:
+    mut [float32]'unified data
+    let float32 base
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        data[i] = base.ln()
+"#;
+    let (wgsl, _rs) = wgpu_codegen("ln_builtin", src);
+
+    assert!(wgsl.contains("log("), "expected WGSL `log(...)` builtin;\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("ln("), "must not emit invalid WGSL `ln(...)`;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn test_signum_maps_to_wgsl_sign_builtin() {
+    // Same bug class again: WGSL's builtin is spelled `sign`, not `signum`.
+    let src = r#"
+kernel Signum:
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        data[i] = data[i].signum()
+"#;
+    let (wgsl, _rs) = wgpu_codegen("signum_builtin", src);
+
+    assert!(wgsl.contains("sign("), "expected WGSL `sign(...)` builtin;\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("signum("), "must not emit invalid WGSL `signum(...)`;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn test_cbrt_expands_to_sign_preserving_pow() {
+    // WGSL has no `cbrt` builtin under any name, so this can't be fixed by a
+    // `map_builtin_fn` rename like `ln`/`signum` above -- it must expand to a
+    // compound expression instead.
+    let src = r#"
+kernel Cbrt:
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        data[i] = data[i].cbrt()
+"#;
+    let (wgsl, _rs) = wgpu_codegen("cbrt_expand", src);
+
+    assert!(wgsl.contains("sign(") && wgsl.contains("pow(abs("),
+        "expected the sign-preserving cbrt expansion `sign(x) * pow(abs(x), 1.0 / 3.0)`;\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("cbrt("), "must not emit invalid WGSL `cbrt(...)`;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn test_log10_expands_to_change_of_base() {
+    // Same story as `cbrt`: WGSL has no `log10` builtin, expand via the
+    // change-of-base identity using WGSL's own `log` (natural-log) builtin.
+    let src = r#"
+kernel Log10:
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        data[i] = data[i].log10()
+"#;
+    let (wgsl, _rs) = wgpu_codegen("log10_expand", src);
+
+    assert!(wgsl.contains("log(") && wgsl.contains("/ log(10.0)"),
+        "expected the change-of-base expansion `log(x) / log(10.0)`;\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("log10("), "must not emit invalid WGSL `log10(...)`;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn test_float_builtin_methods_real_shader_validation() {
+    // End-to-end companion to the four textual tests above (`ln`/`signum`/`cbrt`/
+    // `log10`) plus the pre-existing `powf` mapping -- a text-only assertion on the
+    // generated WGSL can't catch a codegen mistake that only naga's real shader
+    // parser/validator would reject (this is exactly how the original `ln` bug
+    // surfaced: `cargo build` succeeded, only real shader-module creation failed).
+    // Every input below is chosen so the *mathematically* expected result is a
+    // round number: ln(1)=0, signum(-5)=-1, cbrt(-1)=-1 (proves the
+    // sign-preserving expansion, not just that `cbrt` compiles -- a naive
+    // `pow(x, 1/3)` on a negative `x` is NaN), log10(10)=1, pow(2,3)=8. The
+    // `log10`/`cbrt` expansions go through the GPU's own approximate `log`/`pow`
+    // builtins twice (once on the runtime value, once on a same-valued literal
+    // for `log10`), so the result isn't always bit-exact -- compare with a small
+    // tolerance rather than an exact string match.
+    let src = r#"
+kernel FloatBuiltins:
+    mut [float32]'unified out
+    let float32 ln_in
+    let float32 signum_in
+    let float32 cbrt_in
+    let float32 log10_in
+    let float32 pow_base
+    let float32 pow_exp
+
+    init(float32 a, float32 b, float32 c, float32 d, float32 e, float32 f):
+        out = [0.0, 0.0, 0.0, 0.0, 0.0]
+        ln_in = a
+        signum_in = b
+        cbrt_in = c
+        log10_in = d
+        pow_base = e
+        pow_exp = f
+
+    def ():
+        out[0] = ln_in.ln()
+        out[1] = signum_in.signum()
+        out[2] = cbrt_in.cbrt()
+        out[3] = log10_in.log10()
+        out[4] = pow_base.powf(pow_exp)
+
+mut k = FloatBuiltins(1.0, -5.0, -1.0, 10.0, 2.0, 3.0)
+kernel:
+    k(block = 1)
+
+print "ln = {k.out[0]}"
+print "signum = {k.out[1]}"
+print "cbrt = {k.out[2]}"
+print "log10 = {k.out[3]}"
+print "pow = {k.out[4]}"
+"#;
+    let (_wgsl, _emulated, _rs, _toml) = run_wgpu("float_builtin_methods_real_shader", src);
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("float_builtin_methods_real_shader");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    fn parsed_value<'a>(stdout: &'a str, prefix: &str) -> f32 {
+        let line = stdout.lines().find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing '{prefix}' line in stdout:\n{stdout}"));
+        line[prefix.len()..].trim().parse::<f32>()
+            .unwrap_or_else(|e| panic!("failed to parse '{line}' as f32: {e}"))
+    }
+    let checks: [(&str, f32); 5] = [
+        ("ln = ", 0.0),
+        ("signum = ", -1.0),
+        ("cbrt = ", -1.0),
+        ("log10 = ", 1.0),
+        ("pow = ", 8.0),
+    ];
+    for (prefix, expected) in checks {
+        let actual = parsed_value(&stdout, prefix);
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected {prefix}~{expected}, got {actual} — full stdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn test_sync_barrier_fixed_array() {
     let src = r#"
 kernel Tile:
@@ -3329,4 +3522,92 @@ print "{a.out[0]} {b.out[0]}"
     );
     assert!(stdout.contains("1 2"), "expected \"1 2\" (each kernel's own tile write \
         read back independently), got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+}
+
+/// Regression test for literal float division-by-zero (the ordinary way to construct
+/// an IEEE-754 Inf/NaN sentinel value -- e.g. in an f16-to-f32 decoder, needed by any
+/// format storing f16 values such as GGUF) under `--target wgpu`. WGSL const-folds a
+/// literal/literal division at compile time, and the WGSL spec
+/// (https://www.w3.org/TR/WGSL/#floating-point-evaluation) makes a const-expression
+/// that evaluates to NaN/Inf a shader-creation error; naga enforces this, unlike
+/// Metal/CUDA/ROCm's C-family compilers, which treat float div-by-zero as ordinary
+/// runtime arithmetic. `boring build --target wgpu` and `cargo build` on the generated
+/// project both succeed -- a Rust-level compile never parses the embedded WGSL string
+/// -- and the failure only surfaced as a real naga panic at shader-module creation
+/// time, the first time the program actually dispatched the kernel:
+///   Shader '' parsing error: failed to convert expression to a concrete type: the
+///   concrete type `f32` cannot represent the abstract value `inf` accurately
+/// Fixed by detecting the literal-literal division pattern in `device::expr`'s
+/// `ExprKind::BinOp` `Div` case and emitting the sentinel via `bitcast<f32>` (a
+/// bit-preserving reinterpretation of an already-concrete integer literal, which WGSL
+/// does not const-fold the same way) instead of a real division. See CHANGELOG.md.
+#[test]
+fn literal_float_div_by_zero_nan_inf_real_shader_validation() {
+    let src = r#"
+kernel NanKernel:
+    mut [float32]'unified out
+    let int flag
+
+    init(int f):
+        out = [0.0]
+        flag = f
+
+    def ():
+        var float32 mag = 0.0
+        if flag == 0:
+            mag = 1.0 / 0.0
+        else:
+            mag = 0.0 / 0.0
+        out[0] = mag
+
+mut k = NanKernel(0)
+kernel:
+    k(block = 1)
+print "{k.out[0]}"
+"#;
+    let (wgsl, rs) = wgpu_codegen("literal_float_div_by_zero_nan_inf", src);
+
+    // Codegen-level assertion: the literal-literal division must no longer be emitted
+    // verbatim (which naga rejects as a compile-time-constant NaN/Inf) -- it must go
+    // through `bitcast<f32>` instead.
+    assert!(
+        wgsl.contains("bitcast<f32>(0x7f800000u)") && wgsl.contains("bitcast<f32>(0x7fc00000u)"),
+        "expected the Inf and NaN sentinel constructions to be emitted via \
+         `bitcast<f32>`, generated WGSL:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.contains("1.0 / 0.0") && !wgsl.contains("0.0 / 0.0"),
+        "generated WGSL still contains a literal-literal division that naga would \
+         reject at shader-creation time:\n{wgsl}"
+    );
+    let _ = &rs;
+
+    // Real end-to-end run against a real GPU adapter (this repo's CI runs on
+    // macOS/Metal, see `test_const_generic_kernel_fixed_array_params_real_shader_validation`'s
+    // doc comment) -- `cargo build` alone can't catch this bug since it never parses
+    // the embedded WGSL string; only creating a real `wgpu::Device` shader module at
+    // runtime does.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("literal_float_div_by_zero_nan_inf");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(
+        !stderr.contains("parsing error") && !stderr.contains("cannot represent the abstract value"),
+        "the literal-literal NaN/Inf division regressed -- generated program's \
+         stderr:\n{stderr}"
+    );
+    assert!(stdout.trim() == "inf", "expected the Inf branch's real IEEE-754 value \
+        printed back, got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
 }

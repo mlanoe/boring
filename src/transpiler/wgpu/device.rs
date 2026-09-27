@@ -1553,6 +1553,29 @@ impl DeviceEmitter {
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
+                // A literal/literal division whose result is NaN or +/-Inf (the ordinary
+                // way to construct an IEEE-754 sentinel value, e.g. in an f16-to-f32
+                // decoder) const-folds in WGSL, and WGSL treats a const-expression that
+                // evaluates to NaN/Inf as a shader-creation error (naga enforces this at
+                // runtime, unlike Metal/CUDA/ROCm's C-family compilers, which treat float
+                // div-by-zero as ordinary runtime arithmetic). Detect that specific literal
+                // pattern and emit the value via `bitcast<f32>` instead of a real division —
+                // a bit-preserving reinterpretation of an already-concrete integer literal,
+                // which WGSL does not const-fold the same way, so naga accepts it.
+                if matches!(op, BinOp::Div) {
+                    if let (Some(lv), Some(rv)) = (const_float_value(lhs), const_float_value(rhs)) {
+                        let result = lv / rv;
+                        if result.is_nan() {
+                            return "bitcast<f32>(0x7fc00000u)".to_string();
+                        } else if result.is_infinite() {
+                            return if result > 0.0 {
+                                "bitcast<f32>(0x7f800000u)".to_string()
+                            } else {
+                                "bitcast<f32>(0xff800000u)".to_string()
+                            };
+                        }
+                    }
+                }
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
                 format!("({} {} {})", l, binop_wgsl(op), r)
@@ -1726,6 +1749,22 @@ impl DeviceEmitter {
                         }
                     }).collect();
                     format!("{}({})", fn_name, call_args.join(", "))
+                } else if method == "cbrt" && args.is_empty() {
+                    // Unlike `ln`/`signum` above, WGSL has no `cbrt` builtin at all (not
+                    // even under a different name) — naga rejects any spelling of it, so
+                    // a `map_builtin_fn` rename can't fix this one. Expand to the standard
+                    // sign-preserving cube-root identity instead: `pow(abs(x), 1/3)` alone
+                    // would return NaN for negative `x` (a real cube root of a negative
+                    // number is negative, but `pow` requires a non-negative base in WGSL/
+                    // IEEE semantics), so the sign is split off and reapplied afterward.
+                    let obj_s = self.expr(obj);
+                    format!("(sign({obj}) * pow(abs({obj}), (1.0 / 3.0)))", obj = obj_s)
+                } else if method == "log10" && args.is_empty() {
+                    // Same story as `cbrt`: WGSL has no `log10` builtin. Rewritten via the
+                    // change-of-base identity (log10(x) = ln(x) / ln(10)) using WGSL's own
+                    // natural-log builtin, which — after the `ln` fix above — is `log`.
+                    let obj_s = self.expr(obj);
+                    format!("(log({obj}) / log(10.0))", obj = obj_s)
                 } else {
                     // Numeric builtin method call (`.sqrt()`, `.exp()`, `.tanh()`, `.pow(y)`,
                     // etc.) on a scalar expression — WGSL has no methods, only free
@@ -1924,6 +1963,21 @@ fn wgsl_zero(ty: &Type) -> &'static str {
         Type::Float32 | Type::Float64 | Type::Named(_) => "0.0",
         Type::Bool  => "0u",
         _           => "0",
+    }
+}
+
+/// The compile-time value of a literal-only floating-point sub-expression (a bare
+/// int/float literal, or a negation of one), if it is one — mirrors WGSL's own
+/// const-expression folding closely enough to predict when naga would reject a
+/// compile-time NaN/Inf division result (see `expr`'s `ExprKind::BinOp` `Div` case).
+/// Deliberately narrow: only the literal shapes that actually show up constructing an
+/// Inf/NaN sentinel (`1.0 / 0.0`, `-1.0 / 0.0`, `0.0 / 0.0`), not general constant folding.
+fn const_float_value(expr: &Expr) -> Option<f64> {
+    match &expr.kind {
+        ExprKind::Float(f) => Some(*f as f64),
+        ExprKind::Int(n) => Some(*n as f64),
+        ExprKind::UnaryOp(UnaryOp::Neg, inner) => const_float_value(inner).map(|v| -v),
+        _ => None,
     }
 }
 
@@ -2129,10 +2183,22 @@ fn map_builtin_fn(name: &str) -> String {
         "exp"   => "exp".into(),
         "log"   => "log".into(),
         "log2"  => "log2".into(),
-        "pow"   => "pow".into(),
+        // `.ln()` is Boring/Rust's name for natural log; WGSL's builtin for the
+        // same operation is spelled `log` (base-e), not `ln` — WGSL has no `ln`
+        // identifier at all, so leaving this unmapped (the `other` catch-all
+        // below) emits a bare `ln(x)` call that passes `cargo build` (this is
+        // just a string) but fails at GPU-pipeline-creation time with "no
+        // definition in scope for identifier: 'ln'". Same bug class as the
+        // `pow`/`powf` mapping just below.
+        "ln"    => "log".into(),
+        "pow" | "powf" => "pow".into(),
         "floor" => "floor".into(),
         "ceil"  => "ceil".into(),
         "round" => "round".into(),
+        // WGSL's sign builtin is spelled `sign`, not `signum` — same
+        // name-mismatch bug as `ln`/`pow` above (`methods.rs`'s interpreter
+        // accepts both `"sign"` and `"signum"` as aliases for the same op).
+        "sign" | "signum" => "sign".into(),
         other   => other.into(),
     }
 }
