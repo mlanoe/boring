@@ -1450,6 +1450,40 @@ impl Transpiler {
         Some(format!("{}::try_from({}).ok()", dst, src))
     }
 
+    /// True when `obj` (the receiver of an `Index` expr, e.g. the `s` in `s[i]`)
+    /// is statically known to be a `string` — a local var/param (by declared type
+    /// or the `string_vars` tracking set) or a struct field reached through
+    /// `expr.field[...]`. Shared by `emit_expr_index`'s own single-index/slice-
+    /// range string cases (each a separate inline check on the `Var` shape only)
+    /// and `emit_expr_assign`'s string-index-assignment diagnostic (which also
+    /// needs the `Field` shape — `self.field[i] = ...` — that neither of
+    /// `emit_expr_index`'s copies handle, since a read never needed it: reading
+    /// `self.field[i]` for a string field already falls through to the correct
+    /// char-safe emission via a recursive `emit_expr(obj)` call rather than
+    /// needing its own is-string test).
+    fn index_receiver_is_string(&self, obj: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::Str(_) => true,
+            ExprKind::Var(v) => {
+                self.string_vars.contains(v.as_str())
+                    || matches!(self.var_types.get(v.as_str()), Some(Type::Str))
+                    || matches!(self.var_types.get(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
+            }
+            ExprKind::Field(inner_obj, field_name) => self
+                .resolve_struct_name(inner_obj)
+                .and_then(|t| {
+                    self.struct_fields.get(t.as_str()).and_then(|fields| {
+                        fields.iter().find(|(n, _)| n == field_name).map(|(_, ty)| {
+                            matches!(ty.without_mut(), Type::Str)
+                                || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+                        })
+                    })
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// `obj[idx]` — slice ranges, char-safe string indexing, opaque collection-index
     /// vars (`get_at`), dict/HashMap access (including `self.field[key]`), and plain
     /// array indexing (with `.clone()` unless this is itself an assignment target).
@@ -2869,6 +2903,52 @@ impl Transpiler {
                         return format!("{} {} {}", target_s, op_str, rhs_s);
                     }
                 }
+            }
+        }
+        // Diagnostic: index-assignment into a `string` receiver (`s[i] = "x"`,
+        // `s[a..<b] = "..."`). docs/book.md says plainly "strings are immutable;
+        // every method returns a new value" -- Rust's own string types (`Arc<str>`/
+        // `Rc<str>`/`str`/`String`) back that up structurally: none of them
+        // implement `IndexMut`, so there is no in-place single-character (or
+        // range) mutation to lower this to. Before this check, `emit_expr_index`'s
+        // sibling logic just below (the array-index LHS case) had no
+        // string-vs-array distinction and silently emitted `Vec`-style
+        // `s[i as usize] = ...` codegen -- `boring build` reported success while
+        // the generated `cargo build` failed on `str`/`Arc<str>` not implementing
+        // `Index<usize>` (`SliceIndex<str>` is not implemented for `usize`), the
+        // same "confusing downstream rustc error" pattern this project has fixed
+        // repeatedly for other gaps. Rejecting it here instead gives a clear,
+        // boring-level compile error that halts `boring build` before cargo ever
+        // runs (see `main.rs`'s `!out.errors.is_empty()` checks) and points at the
+        // real fix: rebuild the string via slicing/concatenation.
+        if let ExprKind::Index(recv, idx) = &target.kind {
+            if self.index_receiver_is_string(recv) {
+                let is_range = matches!(&idx.kind, ExprKind::SliceRange { .. });
+                self.push_error(target.line, target.col, format!(
+                    "cannot assign into a `string` via index{} -- strings are immutable in \
+                     boring (every string method returns a new value, see docs/book.md); \
+                     fix: build a new string instead (e.g. slice out the parts you want to \
+                     keep and concatenate them with the replacement) and reassign it, rather \
+                     than mutating in place",
+                    if is_range { " range" } else { "" },
+                ));
+                // Return immediately rather than falling through to the generic
+                // index-assignment codegen below: for the range case (`idx` is a
+                // bare `SliceRange`), that codegen calls `self.emit_expr(idx)` on
+                // it directly -- valid only *inside* `emit_expr_index`'s own
+                // dedicated handling, which unwraps `SliceRange` itself rather
+                // than recursing into `emit_expr` for it (see its doc comment) --
+                // and `emit_expr`'s top-level dispatch has no arm for a bare
+                // `SliceRange`, so it hits an internal panic ("SliceRange cannot
+                // appear outside an index expression"). That panic is a
+                // pre-existing, string-independent gap (confirmed: it fires for
+                // `arr[a..<b] = [...]`  on a plain array too, not just strings) --
+                // out of scope here, but this `return` keeps this diagnostic from
+                // reaching it now that a string receiver takes this path too. The
+                // value returned is never used: `self.errors` is now non-empty, so
+                // `main.rs` reports the error and exits before this string sees a
+                // Rust compiler.
+                return String::new();
             }
         }
         // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
