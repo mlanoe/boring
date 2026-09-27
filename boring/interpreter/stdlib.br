@@ -4,7 +4,7 @@
 
 struct Interpreter:
     var Env'actor global_env
-    Env'actor current_env
+    var Env'actor current_env
     var {string=[FnDecl]} struct_methods
     var {string=FnDecl} fn_decls
     var {string=StructDecl} struct_decls

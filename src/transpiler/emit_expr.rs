@@ -2456,6 +2456,59 @@ impl Transpiler {
         if mapped.contains(" as ") { format!("({})", result) } else { result }
     }
 
+    /// Diagnostic: assigning to a non-reassignable (`let`/`mut`, not `var`/`var mut`)
+    /// struct field from outside the struct's own methods — `obj` is the receiver
+    /// (`w` in `w.field = ...`), `field` is the field name. A field can be legally
+    /// *reachable* through a `mut`/`var mut`/actor/guard-qualified owner and still not
+    /// be reassignable, if the field's own declaration is `let`/`mut` rather than
+    /// `var` — `boring run`'s interpreter already rejects this
+    /// (`methods.rs::assign`'s "cannot assign to immutable field" check); this mirrors
+    /// it here so `boring build` doesn't silently transpile an illegal reassignment
+    /// through a `let`/`mut` field with no diagnostic at all. `self.field = v` is
+    /// exempted (mirrors `methods.rs::assign`'s own `binding_name != "self"`
+    /// exemption) — every self-write path elsewhere already handles it or falls
+    /// through unchecked, matching today's behavior for in-method writes.
+    ///
+    /// Called both from the ordinary fallback path (`obj` a plain struct-typed
+    /// var/param) AND from the mutex/rwlock "whole outer var `w` is itself
+    /// actor/guard-qualified" fast paths (`w.field = v` where `w`'s own Rust type is
+    /// `Arc<Mutex<Struct>>`/`Arc<RwLock<Struct>>`) — those `return` a fast-path string
+    /// before ever reaching the ordinary fallback, which used to mean a `let`/bare
+    /// field reassigned through such a `w` compiled with no diagnostic at all (found
+    /// via `boring/interpreter/stdlib.br`'s `current_env` field, which was missing
+    /// `var` for a reassignment pattern used throughout `exec.br`/`eval.br`).
+    fn check_field_reassignable_via_var(&self, obj: &Expr, field: &str) {
+        // Unwraps a bare `Named` struct type OR an actor/guard-`Qualified` one down to
+        // its inner struct name — the mutex/rwlock fast-path call sites (see doc above)
+        // only ever run for a `Qualified(_, Actor|ActorTask|Guard|GuardTask)`-typed `v`,
+        // which the ordinary (non-fast-path) callers below never needed to unwrap.
+        let named = |t: &crate::ast::Type| -> Option<String> {
+            match t.without_mut() {
+                crate::ast::Type::Named(n) => Some(n.clone()),
+                crate::ast::Type::Qualified(inner, _) => match inner.as_ref() {
+                    crate::ast::Type::Named(n) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        if let ExprKind::Var(v) = &obj.kind {
+            if v == "self" { return; }
+            let owner_struct = self.var_struct_types.get(v.as_str()).cloned()
+                .or_else(|| self.var_types.get(v.as_str()).and_then(&named))
+                .or_else(|| self.fn_current_params.get(v.as_str()).and_then(&named));
+            if let Some(sn) = owner_struct {
+                let key = format!("{}::{}", sn, field);
+                if self.struct_field_reassignable.get(&key) == Some(&false) {
+                    self.push_error(obj.line, obj.col, format!(
+                        "cannot assign to field `.{}` on `{}` — declared `let`/`mut` (not reassignable); use `var`/`var mut` on the field's own declaration to allow `.{} = ...`",
+                        field, sn, field
+                    ));
+                }
+            }
+        }
+    }
+
     /// `target = value` — setter/property dispatch (instance/type setters, transient
     /// fields, mutex/rwlock field writes), the immutable-param diagnostic, compound-
     /// assignment desugaring (`x += y`), dict/array-index writes, and the general
@@ -2602,6 +2655,13 @@ impl Transpiler {
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
                 if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                    // Non-reassignable (`let`/`mut`, no `var`) field diagnostic — this branch
+                    // `return`s below, so without this check it would otherwise silently skip
+                    // past the "Diagnostic: assigning to a non-reassignable struct field" check
+                    // further down (a real gap: found via `boring/interpreter/stdlib.br`'s
+                    // `current_env` field, which was missing `var` and had its illegal-looking
+                    // reassignment silently transpiled with no diagnostic at all).
+                    self.check_field_reassignable_via_var(obj, field);
                     // Evaluate the RHS into a temp *before* taking the write guard: the RHS
                     // may itself read through the same mutex (e.g. `p.depth = p.depth + 1`),
                     // and a non-reentrant Mutex/RwLock self-deadlocks if that read tries to
@@ -2633,6 +2693,8 @@ impl Transpiler {
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
                 if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+                    // See the matching comment on the mutex branch above — same gap, same fix.
+                    self.check_field_reassignable_via_var(obj, field);
                     // See note above: evaluate RHS before taking the write guard.
                     let val_s = self.emit_expr_owned(value);
                     let guard = if self.var_rwlock_task_types.contains(v.as_str()) {
@@ -2810,27 +2872,11 @@ impl Transpiler {
         // (transient/mutex/rwlock fields) or falls through unchecked,
         // matching today's behavior for in-method writes (mirrors
         // `methods.rs::assign`'s own `binding_name != "self"` exemption).
+        // Shared with the mutex/rwlock "whole outer var is itself actor/guard
+        // qualified" fast paths above (`check_field_reassignable_via_var`) — those
+        // `return` before ever reaching here, so they call the same check directly.
         if let ExprKind::Field(obj, field) = &target.kind {
-            if let ExprKind::Var(v) = &obj.kind {
-                if v != "self" {
-                    let owner_struct = self.var_struct_types.get(v.as_str()).cloned()
-                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
-                            if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
-                        }))
-                        .or_else(|| self.fn_current_params.get(v.as_str()).and_then(|ty| {
-                            if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
-                        }));
-                    if let Some(sn) = owner_struct {
-                        let key = format!("{}::{}", sn, field);
-                        if self.struct_field_reassignable.get(&key) == Some(&false) {
-                            self.push_error(obj.line, obj.col, format!(
-                                "cannot assign to field `.{}` on `{}` — declared `let`/`mut` (not reassignable); use `var`/`var mut` on the field's own declaration to allow `.{} = ...`",
-                                field, sn, field
-                            ));
-                        }
-                    }
-                }
-            }
+            self.check_field_reassignable_via_var(obj, field);
         }
         // Compound assignment: `x = x op rhs` → `x op= rhs` (idiomatic Rust).
         // Detected by matching BinOp(op, lhs_copy, rhs) where lhs_copy emits the same

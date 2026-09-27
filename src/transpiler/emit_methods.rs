@@ -1635,7 +1635,28 @@ impl Transpiler {
                         // refcount bump on every call. Mirrors the `self.field.method()`
                         // branch above, which already builds its base the same direct way
                         // (`format!("self.{}", mutex_field)`) for the same reason.
-                        let obj_s = format!("{}.{}", self.emit_expr(inner_obj), field_name);
+                        //
+                        // BUT: when the outer variable itself is ALSO actor/managed-mutex
+                        // qualified (e.g. `outer_struct` was resolved via the var_mutex_types/
+                        // managed_* fallback a few lines up, not via var_struct_types), `v`'s
+                        // Rust type is itself `Arc<Mutex<Struct>>`/`Rc<RefCell<Struct>>`, not a
+                        // plain `&Struct` — `self.emit_expr(inner_obj)` deliberately returns
+                        // the bare handle name for such a var (see emit_expr.rs's `var_lock_scalar`
+                        // doc comment: "field-write/method-call paths already route mutation
+                        // through the lock"), so plain `v.field_name` is invalid Rust (no such
+                        // field on the Arc/Rc wrapper itself). Lock/borrow `v` first in that
+                        // case, mirroring the `MUTATING_COLLECTION_METHODS` branch just below,
+                        // which already does this correctly for the same shape of receiver.
+                        let outer_access = if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                            self.mutex_var_read(v.as_str(), v.as_str())
+                        } else if self.managed_mutex_vars.contains(v.as_str()) {
+                            format!("{}.lock().unwrap()", v)
+                        } else if self.managed_refcell_vars.contains(v.as_str()) {
+                            format!("{}.borrow()", v)
+                        } else {
+                            self.emit_expr(inner_obj)
+                        };
+                        let obj_s = format!("{}.{}", outer_access, field_name);
                         // Same `Type::Mut` wrapper as `is_actor_field` above — strip it here too.
                         let is_task_field = matches!(field_ty.as_ref().map(|t| t.without_mut()),
                             Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::ActorTask)));

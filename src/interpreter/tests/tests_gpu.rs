@@ -1116,8 +1116,9 @@ let _p = k.pixels[0]
 "#;
             let (interp, result) = run(src);
             result.expect("runtime error");
-            // 0xFF0000FF = 4278190335 — stored as Int literal in Boring
-            assert_eq!(get_var(&interp, "_p"), Value::Int(4278190335u64 as i64));
+            // `pixels` is declared `[uint]'surface`, so a literal assigned into it
+            // coerces to Value::Uint (its established element type), not Int.
+            assert_eq!(get_var(&interp, "_p"), Value::Uint(4278190335));
         })
         .unwrap()
         .join();
@@ -1154,7 +1155,9 @@ let _px    = k.pixels[0]
     let (interp, result) = run(src);
     result.expect("runtime error");
     assert_eq!(get_var(&interp, "_frame"), Value::Uint(1));
-    assert_eq!(get_var(&interp, "_px"),    Value::Int(42));
+    // `pixels` is declared `[uint]'surface`, so a literal assigned into it
+    // coerces to Value::Uint (its established element type), not Int.
+    assert_eq!(get_var(&interp, "_px"),    Value::Uint(42));
 }
 
 #[test]

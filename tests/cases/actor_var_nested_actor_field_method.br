@@ -1,0 +1,18 @@
+struct Counter:
+    var int value = 0
+    def inc():
+        value += 1
+    req int get():
+        value
+
+struct Outer:
+    var Counter'actor counter
+
+def bump(Outer'actor outer):
+    outer.counter.inc()
+    outer.counter.inc()
+
+def main():
+    var outer'actor = Outer(counter = Counter(0))
+    bump(outer)
+    print "{outer.counter.get()}"
