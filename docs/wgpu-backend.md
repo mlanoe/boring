@@ -212,6 +212,20 @@ An optional AOT path (`boring build --target wgpu --aot`) may be added in a futu
 
 ---
 
+## Naming restrictions
+
+Unlike the [Metal backend](metal-backend.md#naming-restrictions), WGSL has no builtin *scalar* type names sharing a namespace with ordinary identifiers — Boring has no primitive spelled like a WGSL keyword, so a field or local named e.g. `float` can never collide the way `half`/`float`/`int` do in MSL. WGSL does, however, have its own real reserved keywords (`const`, `fn`, `override`, `alias`, `discard`, `enable`, ...), which naga — the WGSL parser/validator bundled into the `wgpu` crate and used at runtime to compile the WGSL this backend emits — rejects outright as a plain identifier, regardless of syntactic position.
+
+A kernel field, a `def()`-body local, a for-loop variable, or a function/method parameter that collides with one of these reserved words is automatically renamed (a trailing `_` appended) by `wgsl_safe_ident` (`src/transpiler/wgpu/device.rs`), consistently at both its declaration and every later reference — this is transparent and requires no action from Boring source. The full reserved-word table (`WGSL_RESERVED`, same file) mirrors naga's own `RESERVED` list rather than the current WGSL spec's smaller "keyword summary" table, since naga reserves a considerably larger set for the language's own future growth (`class`, `import`, `std`, `crate`, `Self`, `NULL`, ... are all rejected today despite naming no current WGSL construct) — confirmed empirically against a real `naga::front::wgsl::parse_str`.
+
+This deliberately excludes naga's separate `BUILTIN_IDENTIFIERS` table (`array`, `atomic`, `ptr`, `bitcast`, `f32`, `vec2`, ...) — also confirmed via a real naga parse that none of these are actually rejected as a plain identifier outside of an actual type/builtin-call position, unlike `RESERVED`.
+
+A narrower, separate collision exists within that same `BUILTIN_IDENTIFIERS` set, though: a `'actor` fixed-size workgroup array field whose Boring name is literally `array` (e.g. `let [float32, 256]'actor array`) transpiles to `var<workgroup> array: array<f32, 256>;` — and naga rejects that *specific* shape outright with `declaration of \`array\` is recursive`, even though `array` is not itself a reserved word. This is not a general "`array`/`atomic` are secretly reserved" rule — the identical name with a *different* declared type (`var<workgroup> array: i32;`) or the identical name as a *struct field* of any type both compile fine; the rejection fires only when a declaration's own name textually equals the type-constructor keyword used to spell its own type. `wgsl_workgroup_array_ident` (`src/transpiler/wgpu/device.rs`) guards specifically against this, renaming such a field the same way (`array` → `array_`), consistently at its declaration and every later reference. No other field shape on this backend can actually reach the bug: a storage-buffer field's WGSL name is always `{kernel}_{field}`-prefixed before it's declared (so an atomic buffer field named `atomic` can't collide either — storage buffers are always spelled with the outer `array<...>` constructor, never a bare `atomic<...>` global), and every other bare-name declaration this backend emits is either a struct field (harmless, as above) or never itself spelled with the `array` type constructor.
+
+Without this, the failure would be especially confusing: `boring build --target wgpu` transpiles successfully with no warning, since this backend never parses the WGSL it emits — the collision only surfaces later, at pipeline-creation time, as an opaque naga validation error (e.g. `name "const" is a reserved keyword`) nowhere near the Boring source that caused it.
+
+---
+
 ## Scalar uniform fields
 
 All scalar kernel fields (`let float alpha`, `var float t`, `var Dimension dim`, inferred-`'const` scalars) are packed into a single generated WGSL struct bound as a `uniform` buffer:

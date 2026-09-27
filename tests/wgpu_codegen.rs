@@ -2912,6 +2912,180 @@ kernel Dequant2:
     );
 }
 
+// ─── Identifiers colliding with a real WGSL reserved keyword ─────────────────
+//
+// Same bug class as the Metal backend's `msl_safe_ident` fix (`device_field_named_half_is_mangled...`
+// and its two sibling tests in `tests/metal_codegen.rs`), narrowed to what actually reaches this
+// backend: WGSL has no builtin *scalar* type names sharing a namespace with ordinary identifiers
+// the way MSL's `half`/`float`/`int` do (Boring has no primitive spelled like a WGSL keyword), but
+// it does have real bare-word reserved keywords (naga's own `RESERVED` table — see
+// `wgsl_safe_ident`/`WGSL_RESERVED` in `src/transpiler/wgpu/device.rs`) that ARE valid, reachable
+// Boring identifiers. A kernel field, a `def()`-body local, a function/method parameter, or a
+// `for`-loop variable named e.g. `const` used to be emitted verbatim, producing WGSL naga rejects
+// at pipeline-creation time with "name `const` is a reserved keyword" -- invisible to `boring build
+// --target wgpu` itself (this backend never parses the WGSL it emits) and to `cargo build`/`cargo
+// run` on the generated Rust (the WGSL lives in a plain `include_str!`'d string).
+//
+// `const` is used throughout (mirroring the Metal tests' reuse of `half` for all three cases) --
+// confirmed via a real `naga::front::wgsl::parse_str` that it's genuinely rejected as a plain
+// identifier, unlike some of the words a first-pass investigation into this bug guessed at
+// (`array`, `atomic`, `ptr`, `bitcast` are NOT actually rejected by naga as plain identifiers --
+// they're `BUILTIN_IDENTIFIERS`, not `RESERVED`, and remain ordinary shadowable identifiers outside
+// an actual type/builtin-call position).
+
+#[test]
+fn device_field_named_const_is_mangled_not_left_colliding_with_wgsl_reserved_keyword() {
+    let (wgsl, _rs) = wgpu_codegen("field_named_const", r#"
+kernel ConstKernel:
+    mut [float32]'unified data
+    let float32 const
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = data[i] * const
+"#);
+    // Declaration and every use must agree on the same mangled name -- a bare,
+    // unmangled `const` declaration is exactly the collision this test guards
+    // against (naga rejects `const` as a plain identifier outright).
+    assert!(!wgsl.contains("const: f32,"),
+        "a params-struct field named `const` must not be emitted verbatim (a real \
+         WGSL reserved keyword);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("const_: f32,"),
+        "expected the params-struct field to be mangled to `const_`;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("let const_: f32 = constkernel_params.const_;"),
+        "expected the unpacked local to be declared under the same mangled name \
+         as the params-struct field;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("* const_)"),
+        "expected the kernel body's read of the field to use the same mangled \
+         name `const_` as its declaration;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_local_let_named_const_is_mangled() {
+    let (wgsl, _rs) = wgpu_codegen("local_let_named_const", r#"
+kernel LocalConst:
+    mut [float32]'unified out
+    let int n
+
+    def ():
+        let const = n / 2
+        let tid = gpu.thread.x
+        if tid < const:
+            out[tid] = 1.0
+"#);
+    assert!(!wgsl.contains("let const ="),
+        "a local `let const = ...` must not be emitted as a bare `const` \
+         identifier (a real WGSL reserved keyword);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("let const_ ="),
+        "expected the local to be mangled to `const_`;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("tid < const_"),
+        "expected the later read of the local to use the same mangled name \
+         as its declaration;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_for_loop_var_named_const_is_mangled() {
+    let (wgsl, _rs) = wgpu_codegen("for_loop_var_named_const", r#"
+kernel LoopConst:
+    mut [float32]'unified out
+
+    def ():
+        for const in 0..<4:
+            out[const] = 1.0
+"#);
+    assert!(!wgsl.contains("var const: i32"),
+        "a for-loop variable named `const` must not be emitted verbatim (a real \
+         WGSL reserved keyword);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("var const_: i32"),
+        "expected the loop variable to be mangled to `const_`;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("u32(const_)"),
+        "expected the loop body's reference to the loop variable to use the \
+         same mangled name as its declaration;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_fn_param_named_const_is_mangled() {
+    let (wgsl, _rs) = wgpu_codegen("fn_param_named_const", r#"
+kernel ParamConst:
+    mut [float32]'unified out
+
+    def float32 helper(float32 const):
+        const + 1.0
+
+    def ():
+        let i = gpu.thread.x
+        out[i] = self.helper(out[i])
+"#);
+    assert!(!wgsl.contains("fn ParamConst_helper(const: f32)"),
+        "a method parameter named `const` must not be emitted verbatim (a real \
+         WGSL reserved keyword);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("fn ParamConst_helper(const_: f32)"),
+        "expected the parameter to be mangled to `const_`;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("const_ + 1.0"),
+        "expected the method body's read of the parameter to use the same \
+         mangled name as its declaration;\ngot:\n{wgsl}");
+}
+
+// ─── Workgroup-array field self-collision with its own type's WGSL keyword ──
+//
+// Distinct bug class from the reserved-keyword tests just above (confirmed via a
+// real `naga::front::wgsl::parse_str`, naga 30.0.1): `array`/`atomic`/`vec2`/etc.
+// are NOT rejected as plain WGSL identifiers (they're `BUILTIN_IDENTIFIERS`, not
+// `RESERVED`) -- but naga DOES reject a *declaration* outright when its name
+// textually equals the type-constructor keyword spelling its own type, e.g.
+// `var<workgroup> array: array<f32, 4>;` fails with "declaration of `array` is
+// recursive", even though `var<workgroup> array: i32;` (same name, different
+// type) or a same-named *struct field* of any type compiles fine. The only place
+// this backend can reach it from valid Boring source is a `'actor` fixed-size
+// workgroup array field literally named `array` (see `wgsl_workgroup_array_ident`
+// in `src/transpiler/wgpu/device.rs` for why buffer/atomic fields can't).
+
+#[test]
+fn device_workgroup_array_field_named_array_is_mangled_not_left_self_recursive() {
+    let (wgsl, _rs) = wgpu_codegen("workgroup_array_field_named_array", r#"
+kernel Tile:
+    let [float32, 256]'actor array
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        array[gpu.thread.x] = data[i]
+        sync
+        data[i] = array[gpu.thread.x]
+"#);
+    assert!(!wgsl.contains("var<workgroup> array: array<f32, 256>;"),
+        "a workgroup array field literally named `array` must not be emitted \
+         verbatim -- naga rejects `var<workgroup> array: array<...>;` outright \
+         with \"declaration of `array` is recursive\";\ngot:\n{wgsl}");
+    assert!(wgsl.contains("var<workgroup> array_: array<f32, 256>;"),
+        "expected the field to be mangled to `array_`;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("array_[u32(i32(bp_tid.x))] = "),
+        "expected the kernel body's write to use the same mangled name \
+         `array_` as its declaration;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("= array_[u32(i32(bp_tid.x))];"),
+        "expected the kernel body's read to use the same mangled name \
+         `array_` as its declaration;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_workgroup_labeled_array_field_named_array_is_mangled() {
+    let (wgsl, _rs) = wgpu_codegen("workgroup_labeled_array_field_named_array", r#"
+kernel LabeledTile:
+    let [float32, width = 4, height = 4]'actor array
+    mut [float32]'unified data
+
+    def ():
+        let i = gpu.thread.x
+        data[i] = array[width = 0, height = 0]
+"#);
+    assert!(!wgsl.contains("var<workgroup> array: array<f32, 16>;"),
+        "a labeled workgroup array field literally named `array` must not be \
+         emitted verbatim (same naga \"declaration is recursive\" rejection as \
+         the fixed-size-array case);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("var<workgroup> array_: array<f32, 16>;"),
+        "expected the labeled array field to be mangled to `array_`;\ngot:\n{wgsl}");
+}
+
 // ─── host — string indexing/slicing in a kernel-touching function ─────────────
 
 // Unlike the Metal/CUDA/ROCm backends (which each have their own hand-written

@@ -85,12 +85,123 @@ const EMULATED_WARP_SIZE: u32 = 32;
 /// (single underscore) convention this file already applies elsewhere (see
 /// `try_emit_plain_index_method_stmt`'s discard-target rename) rather than
 /// introducing a second one.
+///
+/// Separately, a *bare* Boring identifier (a kernel field, a `def()`-body
+/// local, a function/method parameter, or a `for`-loop variable) can collide
+/// with a real WGSL reserved keyword — same bug class as the Metal backend's
+/// `msl_safe_ident` (`metal/device.rs`), except WGSL has no builtin *scalar*
+/// type names in the same namespace as MSL's (`half`, `float`, ... — Boring
+/// has no primitive spelled that way, so that specific risk doesn't reach this
+/// backend at all), only real bare-word keywords. See `WGSL_RESERVED`'s own
+/// doc comment for where that table comes from and `docs/wgpu-backend.md`'s
+/// "Naming restrictions" section.
 fn wgsl_safe_ident(name: &str) -> String {
-    match name.strip_prefix("__") {
+    let base = match name.strip_prefix("__") {
         Some(rest) => format!("bp_{rest}"),
         None => name.to_string(),
+    };
+    if WGSL_RESERVED.contains(&base.as_str()) {
+        format!("{base}_")
+    } else {
+        base
     }
 }
+
+/// A `'sync` fixed-size array workgroup field is always declared as
+/// `var<workgroup> {name}: array<{elem}, {n}>;` (see `emit_kernel_decl`'s
+/// "3. Workgroup" section) — module scope, and always typed with the literal
+/// `array` type constructor. If the field's own (already `wgsl_safe_ident`-
+/// sanitized) name is itself `array`, the declaration's *name* textually
+/// equals the *type constructor keyword* used to spell its own type, and naga
+/// rejects the whole declaration outright with `"declaration of `array` is
+/// recursive"` — a distinct diagnostic from the reserved-keyword rejection
+/// `wgsl_safe_ident` already guards against, and one that a same-named
+/// *differently*-typed declaration (`var<workgroup> array: i32;`) does NOT
+/// trigger, nor does a same-named *struct field* of any type (a struct
+/// member is not itself a naga "declaration" in the sense this error checks).
+/// Confirmed via a real naga parse (naga 30.0.1,
+/// `naga::front::wgsl::parse_str`) — see CHANGELOG.md and
+/// docs/wgpu-backend.md's "Naming restrictions" section.
+///
+/// This workgroup-array declaration is the *only* place this backend can
+/// actually reach the bug from valid Boring source: a storage-buffer field's
+/// WGSL name always goes through `current_buffer_renames`'s `{kernel}_{field}`
+/// prefixing first (`emit_kernel_decl`'s "1. Array buffer fields" —
+/// never bare `array`/`atomic`, so an atomic buffer field can't collide
+/// either, even though its own type nests the `atomic<...>` keyword), and
+/// every other bare-name declaration this backend emits (a params-uniform
+/// scalar/array field, a `def()`-body local, a function/method parameter, a
+/// `for`-loop variable) is either a struct field (verified harmless above) or
+/// never itself spelled with the `array`/`atomic` type constructor as its own
+/// declared type. Reuses `wgsl_safe_ident`'s existing trailing-`_` convention
+/// rather than introducing a second one.
+fn wgsl_workgroup_array_ident(name: &str) -> String {
+    let safe = wgsl_safe_ident(name);
+    if safe == "array" { format!("{safe}_") } else { safe }
+}
+
+/// WGSL reserved words, mirroring naga's own `RESERVED` table
+/// (`naga::keywords::wgsl::RESERVED` — the actual parser/validator `wgpu`
+/// uses at runtime to compile the WGSL text this backend emits, exactly the
+/// tool the Metal backend's `MSL_KEYWORDS` table was verified against for the
+/// analogous bug there) rather than the current WGSL spec's own "keyword
+/// summary" table (https://www.w3.org/TR/WGSL/#keyword-summary): naga reserves
+/// a considerably larger set than the spec's current grammar keywords, for
+/// the language's own future growth (e.g. `class`, `import`, `std`, `crate`,
+/// `Self`, `NULL` are all rejected as plain identifiers today despite naming
+/// no current WGSL construct). Verified empirically against a real `naga`
+/// parse (naga 30.0.1, `naga::front::wgsl::parse_str`) for a representative
+/// sample of these, including every entry this fix's own regression tests
+/// exercise — see CHANGELOG.md.
+///
+/// Deliberately does **not** include naga's separate `BUILTIN_IDENTIFIERS`
+/// table (`array`, `atomic`, `ptr`, `bitcast`, `f32`, `vec2`, ...) — confirmed
+/// via the same real `naga` parse that none of these are actually rejected as
+/// a plain identifier (`word_as_ident` only consults `RESERVED`); they're
+/// ordinary, shadowable identifiers outside of an actual type/builtin-call
+/// position. (One real but narrower bug surfaced by that same probing — a
+/// `'sync` fixed-array workgroup field named `array` hits a distinct naga
+/// "declaration is recursive" parse error, since its own declared type also
+/// spells `array` — is fixed separately by `wgsl_workgroup_array_ident`
+/// rather than folded into this keyword fix; see that function's doc comment
+/// for why an atomic-typed field can't reach the analogous case.)
+///
+/// Many entries below can never actually reach this backend as a Boring
+/// identifier at all — Boring's own keyword list (`src/lexer/mod.rs`) already
+/// reserves `let`/`var`/`struct`/`for`/`if`/`while`/`return`/etc. at the
+/// Boring-source level — but are kept here anyway for exact parity with
+/// naga's own source rather than hand-filtered, matching this file's
+/// `MSL_KEYWORDS` precedent (`metal/device.rs`), which does the same.
+const WGSL_RESERVED: &[&str] = &[
+    "alias", "break", "case", "const", "const_assert", "continue", "continuing",
+    "default", "diagnostic", "discard", "else", "enable", "false", "fn", "for",
+    "if", "let", "loop", "override", "requires", "return", "struct", "switch",
+    "true", "var", "while",
+    "NULL", "Self",
+    "abstract", "active", "alignas", "alignof", "as", "asm", "asm_fragment",
+    "async", "attribute", "auto", "await", "become", "cast", "catch", "class",
+    "co_await", "co_return", "co_yield", "coherent", "column_major", "common",
+    "compile", "compile_fragment", "concept", "const_cast", "consteval",
+    "constexpr", "constinit", "crate", "debugger", "decltype", "delete",
+    "demote", "demote_to_helper", "do", "dynamic_cast", "enum", "explicit",
+    "export", "extends", "extern", "external", "fallthrough", "filter",
+    "final", "finally", "friend", "from", "fxgroup", "get", "goto",
+    "groupshared", "highp", "impl", "implements", "import", "inline",
+    "instanceof", "interface", "layout", "lowp", "macro", "macro_rules",
+    "match", "mediump", "meta", "mod", "module", "move", "mut", "mutable",
+    "namespace", "new", "nil", "noexcept", "noinline", "nointerpolation",
+    "non_coherent", "noncoherent", "noperspective", "null", "nullptr", "of",
+    "operator", "package", "packoffset", "partition", "pass", "patch",
+    "pixelfragment", "precise", "precision", "premerge", "priv", "protected",
+    "pub", "public", "readonly", "ref", "regardless", "register",
+    "reinterpret_cast", "require", "resource", "restrict", "self", "set",
+    "shared", "sizeof", "smooth", "snorm", "static", "static_assert",
+    "static_cast", "std", "subroutine", "super", "target", "template", "this",
+    "thread_local", "throw", "trait", "try", "type", "typedef", "typeid",
+    "typename", "typeof", "union", "unless", "unorm", "unsafe", "unsized",
+    "use", "using", "varying", "virtual", "volatile", "wgsl", "where", "with",
+    "writeonly", "yield",
+];
 
 /// True when `ty` is a GPU-qualified array type (`[T]'global`, `'unified`, `'const`,
 /// `'actor'global`, `'actor'unified`, `'surface`) — i.e. `Type::Qualified(Array-like,
@@ -593,7 +704,7 @@ impl DeviceEmitter {
                 None
             } else {
                 let ty = p.ty.as_ref().map(wgsl_type).unwrap_or_else(|| "i32".into());
-                Some(format!("{}: {}", p.name, ty))
+                Some(format!("{}: {}", wgsl_safe_ident(&p.name), ty))
             }
         }).collect()
     }
@@ -692,13 +803,13 @@ impl DeviceEmitter {
             if matches!(f.qual, GpuQual::Actor) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                        wgsl_safe_ident(&f.name), wgsl_scalar(inner), n));
+                        wgsl_workgroup_array_ident(&f.name), wgsl_scalar(inner), n));
                 } else if let Some((elem, _)) = f.ty.as_labeled_array() {
                     // See cuda::device's identical `labeled_array_len()` note:
                     // `None` (a const-generic axis) isn't handled here yet.
                     if let Some(len) = f.ty.labeled_array_len() {
                         self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                            wgsl_safe_ident(&f.name), wgsl_scalar(elem), len));
+                            wgsl_workgroup_array_ident(&f.name), wgsl_scalar(elem), len));
                     }
                 }
             }
@@ -1007,15 +1118,15 @@ impl DeviceEmitter {
                     // real WGSL statements (no statement-expression in WGSL)
                     // — see `try_emit_plain_index_method_stmt`'s own doc.
                     let ty_suffix = s.ty.as_ref().map(|t| format!(": {}", wgsl_type(t))).unwrap_or_default();
-                    let name = s.name.clone();
+                    let name = wgsl_safe_ident(&s.name);
                     if self.try_emit_plain_index_method_stmt(Some((kw, &ty_suffix)), &name, val) {
                         return;
                     }
                     let rhs = self.expr(val);
                     if let Some(ty) = &s.ty {
-                        self.line(&format!("{} {}: {} = {};", kw, s.name, wgsl_type(ty), rhs));
+                        self.line(&format!("{} {}: {} = {};", kw, name, wgsl_type(ty), rhs));
                     } else {
-                        self.line(&format!("{} {} = {};", kw, s.name, rhs));
+                        self.line(&format!("{} {} = {};", kw, name, rhs));
                     }
                 }
             }
@@ -1050,7 +1161,8 @@ impl DeviceEmitter {
                                 let tmp = format!("bp_discard_{}", n);
                                 self.try_emit_plain_index_method_stmt(Some(("let", "")), &tmp, rhs)
                             } else {
-                                self.try_emit_plain_index_method_stmt(None, lhs_name, rhs)
+                                let name = wgsl_safe_ident(lhs_name);
+                                self.try_emit_plain_index_method_stmt(None, &name, rhs)
                             }
                         } else {
                             false
@@ -1127,7 +1239,7 @@ impl DeviceEmitter {
                 self.line("}");
             }
             Stmt::For(f) => {
-                let var = f.vars.first().cloned().unwrap_or_else(|| "_i".into());
+                let var = wgsl_safe_ident(&f.vars.first().cloned().unwrap_or_else(|| "_i".into()));
                 // Check for negated range: UnaryOp(Neg, Range{...}) — e.g. `for dy in -1..<2`
                 let neg_range = if let ExprKind::UnaryOp(UnaryOp::Neg, ref inner) = f.iterable.kind {
                     if let ExprKind::Range { start, end, inclusive } = &inner.kind {
@@ -1393,7 +1505,7 @@ impl DeviceEmitter {
                 // matching the params-uniform variable's existing `{kernel}_params` naming.
                 if let Some(prefixed) = self.current_buffer_renames.get(name) {
                     prefixed.clone()
-                } else if self.current_fields.iter().any(|f| f.name == *name) {
+                } else if let Some(field) = self.current_fields.iter().find(|f| f.name == *name) {
                     // A kernel field of the same name shadows the top-level scalar
                     // (e.g. `kernel Saxpy: let float alpha` vs. top-level `let alpha
                     // = 2.0` in examples/saxpy.br) -- the field is unpacked into a
@@ -1406,9 +1518,27 @@ impl DeviceEmitter {
                     // WGSL-sanitized (see `wgsl_safe_ident`) for fields whose Boring
                     // name is `__`-prefixed (e.g. a desugared labeled-array shadow
                     // axis) -- reference it under the same sanitized spelling.
-                    wgsl_safe_ident(name)
+                    //
+                    // A `'sync` fixed-array workgroup field needs the stricter
+                    // `wgsl_workgroup_array_ident` instead — it's declared as a
+                    // module-scope `var<workgroup>` (see `emit_kernel_decl`'s
+                    // "3. Workgroup" section), so a reference here must agree with
+                    // that declaration's own self-collision renaming or the two
+                    // would name-mismatch.
+                    let is_sync_array = matches!(field.qual, GpuQual::Actor)
+                        && (matches!(field.ty, Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some());
+                    if is_sync_array {
+                        wgsl_workgroup_array_ident(name)
+                    } else {
+                        wgsl_safe_ident(name)
+                    }
                 } else {
-                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                    // Not a kernel field or a top-level scalar: an ordinary `def()`-body
+                    // local, function/method parameter, or `for`-loop variable — same
+                    // reserved-keyword sanitization as the field-shadow case above, so a
+                    // reference always agrees with how `Stmt::Let`/`plain_params_wgsl`/
+                    // `Stmt::For` spelled its declaration.
+                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| wgsl_safe_ident(name))
                 }
             }
 
