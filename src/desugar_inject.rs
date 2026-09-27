@@ -46,11 +46,24 @@
 //!   below. `env` is read once, up front, from a `--env <value>` CLI flag
 //!   (`main.rs`'s `current_env_flag`) — a self-contained Boring-CLI concern,
 //!   no dependency on Cargo/Rust build profiles.
-//! - **`@inject` fields must write an explicit qualifier** — bare-field
-//!   qualifier inference (copying a `@singleton` provider's qualifier
-//!   verbatim, or running chapter 30's usual inference against a transient
-//!   one) needs the whole-program collection-pass-before-layout-is-fixed
-//!   machinery the design doc's §2 describes; not attempted yet.
+//! - **Bare `@inject` fields are supported, but only against a `@singleton`
+//!   provider** (§2's "single most likely real case" — `synthesize_init`
+//!   copies the provider's return type onto the field verbatim, skipping
+//!   chapter 30 inference entirely; sound here because `collect_providers`
+//!   always finishes building the whole registry before any struct is
+//!   processed, so the whole-program-collection-pass-before-layout-is-fixed
+//!   ordering concern §2 originally raised is satisfied by construction). A
+//!   bare field against a *transient* provider still requires an explicit
+//!   qualifier — not a design limitation, a real `boring build`-specific gap:
+//!   chapter 30 inference runs later, per function, at transpile time, but
+//!   the default expression substituted at an omitting call site is rendered
+//!   once, up front, when the struct's `init` is registered — before
+//!   inference has decided the field's actual representation, so it never
+//!   gets the wrap (`Box::new(...)`/`Arc::new(...)`) inference later
+//!   requires. Confirmed via a real `cargo build` failure; `boring run` has
+//!   no such ordering problem (the interpreter evaluates the default
+//!   expression fresh, with no static wrapping step to get out of sync), but
+//!   this is rejected either way to keep both backends behaving identically.
 //! - **A struct with an `@inject` field can't also declare its own `init`**
 //!   yet — keeps this first cut to the common case (no hand-written
 //!   constructor at all) rather than also merging synthesized and
@@ -311,22 +324,79 @@ fn resolve_provider<'a>(
 /// example uses), so this reuses `emit_init`'s already-correct body-init
 /// codegen and `emit_expr.rs`'s `try_emit_labeled_init_call` call-site
 /// defaulting verbatim — no new transpiler machinery.
-fn synthesize_init(s: &StructDecl, reg: &Registry, current_env: Option<&str>) -> Result<InitDecl, ParseError> {
+///
+/// Takes `s` mutably: a **bare** `@inject` field (no qualifier written)
+/// matched against a `@singleton` provider has its type rewritten in place to
+/// the provider's own return type, copied verbatim (§2 — "the field simply
+/// takes the provider's qualifier verbatim, since that's the one and only
+/// representation the shared value actually has"). This is exactly the
+/// whole-program-registry-before-any-struct-layout ordering the design doc's
+/// §2 worried a bare field would need — already satisfied for free here,
+/// since `collect_providers` always finishes before this function is ever
+/// called (`desugar_inject`'s two-pass structure). A bare field matched
+/// against a *transient* provider is left untouched — no fixed
+/// representation to copy, so it runs chapter 30's ordinary usage-based
+/// inference exactly like any other unqualified struct field, same as if
+/// `@inject` had never been written at all.
+fn synthesize_init(s: &mut StructDecl, reg: &Registry, current_env: Option<&str>) -> Result<InitDecl, ParseError> {
     let mut params = Vec::with_capacity(s.fields.len());
     let mut body = Vec::with_capacity(s.fields.len());
-    for f in &s.fields {
+    for f in &mut s.fields {
         let inject_attr = f.attrs.iter().find(|a| a.name == "inject");
         let default = if let Some(inject_attr) = inject_attr {
-            let Some(base) = base_type_name(&f.ty) else {
-                return Err(err(f.line, f.col, format!(
-                    "`@inject` field `{}` has no recognizable base type to resolve a provider \
-                     against", f.name,
-                )));
+            let is_bare = outer_qualifier(f.ty.without_mut()).is_none();
+            let id = attr_kv(&inject_attr.args, "id").map(str::to_string);
+            let base = {
+                let Some(base) = base_type_name(&f.ty) else {
+                    return Err(err(f.line, f.col, format!(
+                        "`@inject` field `{}` has no recognizable base type to resolve a provider \
+                         against", f.name,
+                    )));
+                };
+                base.to_string()
             };
-            let id = attr_kv(&inject_attr.args, "id");
-            let provider = resolve_provider(reg, base, id, current_env, f)?;
-            check_field_qualifier_accepted(f, provider)?;
-            check_singleton_qualifier_match(f, provider)?;
+            let provider = resolve_provider(reg, &base, id.as_deref(), current_env, f)?;
+            if is_bare && provider.is_singleton {
+                // §2: bare field, `@singleton` provider — copy verbatim, skip chapter 30
+                // inference entirely (not just narrow it). Runs the same acceptance/
+                // match checks afterward, against the now-copied type — this is also
+                // what correctly rejects a bare field copying a provider whose own
+                // return type has nothing for DI to abstract (e.g. a `@singleton`
+                // function that just happens to return a bare scalar, legal on its own
+                // — §4 — but meaningless as something to `@inject`).
+                f.ty = provider.return_ty.clone();
+                check_field_qualifier_accepted(f, provider)?;
+                check_singleton_qualifier_match(f, provider)?;
+            } else if !is_bare {
+                check_field_qualifier_accepted(f, provider)?;
+                check_singleton_qualifier_match(f, provider)?;
+            } else {
+                // Bare field, transient provider — §2 says this should run chapter 30's
+                // ordinary usage-based inference chain unmodified. In principle, yes; in
+                // this implementation, no, not yet: chapter 30 inference runs later, at
+                // transpile time, per function — but the default expression substituted at
+                // an omitting call site is rendered once, up front, when this struct's
+                // `init` is first registered (`struct_init_defaults`,
+                // `src/transpiler/mod.rs`), before inference has decided anything. By the
+                // time inference picks (say) `'owned` for this bare field, the plain
+                // `providerFn()` default text is already fixed with no `Box::new(...)`
+                // wrap — confirmed via a real `cargo build` failure (E0308: expected
+                // `Box<dyn Trait>`, found the provider's own bare return type). `boring run`
+                // has no such ordering problem at all (the interpreter evaluates the
+                // default expression fresh, at construction time, with no static wrapping
+                // step to get out of sync) — so this is a `boring build`-only gap, and
+                // rejecting it here keeps both backends honest rather than shipping a
+                // combination that silently works on one and not the other. Write an
+                // explicit qualifier for now; only the `@singleton` case above is affected
+                // by the ordering concern the design doc's §2 originally worried about.
+                return Err(err(f.line, f.col, format!(
+                    "`@inject` field `{}` needs an explicit qualifier for now when its provider \
+                     (`{}`) isn't `@singleton` — bare-field inference against a transient \
+                     provider isn't supported yet (a `boring build`-specific default-expression-\
+                     wrapping gap, not part of the design itself); write e.g. `{}'shared` instead",
+                    f.name, provider.fn_name, base,
+                )));
+            }
             Some(Expr {
                 kind: ExprKind::Call(
                     Box::new(Expr { kind: ExprKind::Var(provider.fn_name.clone()), line: f.line, col: f.col, len: 0 }),
@@ -378,7 +448,7 @@ fn desugar_struct(mut s: StructDecl, reg: &Registry, current_env: Option<&str>) 
             s.name,
         )));
     }
-    let init = synthesize_init(&s, reg, current_env)?;
+    let init = synthesize_init(&mut s, reg, current_env)?;
     s.inits.push(init);
     Ok(s)
 }

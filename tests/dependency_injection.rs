@@ -428,7 +428,13 @@ def main():
 }
 
 #[test]
-fn inject_bare_field_without_qualifier_is_rejected() {
+fn inject_bare_field_with_transient_provider_is_rejected() {
+    // Bare-field inference against a transient provider isn't supported yet (a real
+    // `boring build`-specific gap: the default expression substituted at the omitting
+    // call site is rendered before chapter 30 inference has decided the field's actual
+    // representation, so it never gets the `Box::new(...)`/`Arc::new(...)` wrap
+    // inference later requires) — confirmed via a real `cargo build` failure before
+    // this rejection was added. Only the `@singleton` case (below) is unaffected.
     let src = "\
 trait NetworkClient:
     req string fetch()
@@ -448,11 +454,76 @@ def main():
     print \"ok\"
 ";
     let out = emit_rust(src);
-    assert!(!out.status.success(), "expected a bare (unqualified) @inject field to be rejected");
+    assert!(!out.status.success(), "expected a bare @inject field with a transient provider to be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("has no qualifier"),
-        "expected the bare-qualifier error, got:\n{}", stderr
+        stderr.contains("needs an explicit qualifier for now"),
+        "expected the bare-transient rejection, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_bare_field_with_no_base_type_is_rejected() {
+    // A bare field whose type isn't even a recognizable named type at all (a scalar) —
+    // distinct code path from the transient-provider rejection above, exercised
+    // separately since there's no provider to resolve against in the first place.
+    let src = "\
+@provide
+pub int configValue():
+    42
+
+struct Config:
+    @inject
+    int value
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a bare scalar @inject field to be rejected");
+}
+
+#[test]
+fn inject_bare_field_copies_singleton_provider_qualifier_verbatim() {
+    // §2: a bare @inject field matched against a @singleton provider copies the
+    // provider's own qualifier verbatim, skipping chapter 30 inference entirely — the
+    // design doc's flagship case ("the single most likely real case"). No ordering
+    // problem here (unlike the transient case above): the field's final type is fixed
+    // immediately, before this struct's `init`/defaults are ever registered.
+    let src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+struct UserRepository:
+    @inject
+    NetworkClient client
+
+    req string fetchData():
+        self.client.fetch()
+
+@provide
+@singleton
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+
+def main():
+    let repo = UserRepository()
+    print repo.fetchData()
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected a bare field matched against a @singleton provider to compile, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("pub client: Arc<dyn NetworkClient>"),
+        "expected the bare field's type to be rewritten to the provider's own qualifier \
+         ('shared -> Arc<dyn NetworkClient>), got:\n{}", stdout
     );
 }
 

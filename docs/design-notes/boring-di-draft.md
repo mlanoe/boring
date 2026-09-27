@@ -2,7 +2,8 @@
 
 Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
 `@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), and a first slice of `@inject` (§1-§2 —
-same-`Program` providers only, explicit field qualifier required, no bare-field inference, a struct
+same-`Program` providers only, bare-field inference against a `@singleton` provider only (not yet
+against a transient one — a real `boring build`-specific gap, not a design limitation), a struct
 can't combine `@inject` with its own `init` yet) are real and tested on both backends
 (`src/desugar_inject.rs`, `src/checker/mod.rs`'s `check_di_provider_attrs`,
 `src/interpreter/call.rs`'s `singleton_cache`, `tests/dependency_injection.rs`,
@@ -1328,12 +1329,17 @@ rough priority order.
   technique as the recursion-depth guard" (as this document puts it) is a design analogy, not
   existing code to call into.
 - **The whole-program (now same-project-only, §2) collection pass** that must complete before a
-  struct with a bare `@inject` field can have its Rust layout finalized — **sidestepped for v1, not
-  solved**: `desugar_inject.rs` requires an explicit qualifier on every `@inject` field (rejects a
-  bare one outright), so it never needs to know a `@singleton` provider's return-type qualifier
-  before a struct's own layout is fixed. Still a real gap to close for bare-field ergonomics later —
-  `desugar_inject.rs` already builds the same-project `(base type) -> provider` registry this would
-  need, so widening it to also support the bare case is additive, not a redesign.
+  struct with a bare `@inject` field can have its Rust layout finalized — **resolved and shipped for
+  the `@singleton` case**: `desugar_inject.rs`'s two-pass structure (`collect_providers` builds the
+  whole registry, *then* `desugar_items` processes every struct) already satisfies this ordering by
+  construction, so a bare field matched against a `@singleton` provider copies its return type
+  verbatim with no special handling needed at all. The bare-field-against-a-*transient*-provider case
+  turned out to have a different, unrelated blocker instead (not the ordering problem this bullet
+  worried about) — see §2's own updated text and `synthesize_init`'s doc comment: a real `boring
+  build`-specific gap in how a defaulted `init` parameter's call-site value gets wrapped when its
+  representation is decided later, by chapter 30 inference, than when the default is rendered.
+  Rejected explicitly for now, `boring run`-vs-`boring build` parity kept intact rather than shipping
+  a combination that only works on one backend.
 - **Ambiguity and unresolved-provider diagnostics** — **basic version shipped**:
   `desugar_inject.rs`'s `collect_providers` scans the whole `Program` once, keyed by `(base type,
   id)` (§5) with `env`-filtering (§6) applied at resolution time (`resolve_provider`) rather than at
