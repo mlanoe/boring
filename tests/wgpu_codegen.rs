@@ -3132,3 +3132,91 @@ def main() throws:
          slice;\ngot:\n{rs}"
     );
 }
+
+/// `kernel_param_to_field_map` (emit_kernel.rs) scans a kernel's `init()` body for
+/// `field = param` assignments (after `desugar_labeled_array` has already expanded a
+/// `.reshape(...)` call into a plain `field = source` assignment plus one
+/// `__field_axisN = param` assignment per axis) to build a `param name -> field
+/// name(s)` map, later used to translate a constructor call's positional arguments
+/// into host-side field assignments. It used to map each param name to a single
+/// field (`HashMap<String, String>`), silently overwritten by `.insert()` whenever
+/// two different fields' shadow-axis assignments happened to reuse the same
+/// dimension parameter -- a common, idiomatic pattern (e.g. two `'global` input
+/// buffers reshaped with the same `cols`/`rows` params, or an output field's
+/// `[value for col = cols, row = rows]` fill reusing an input's own reshape
+/// params). The earlier field(s)' axis fields then permanently stayed at their
+/// `i32::default()` (`0`) with no error or warning anywhere -- `boring build`
+/// succeeds, `cargo build` on the generated project succeeds, and every WGSL
+/// labeled-index read computed with a silently-zero stride, aliasing every access
+/// onto the same handful of offsets. This is the single most impactful wgpu bug
+/// found auditing the `boring-llm` project against real hardware: `.reshape()` on
+/// a `'global` input field is the standard, idiomatic way to give a flat incoming
+/// buffer 2D/3D indexing semantics inside a kernel, and even the simplest possible
+/// kernel using it (a 2D transpose) returned all zeros.
+#[test]
+fn host_reshape_axis_fields_not_dropped_when_two_fields_share_dimension_params() {
+    let src = r#"
+kernel Reshaped2D:
+    let [float, col, row]'global src
+    let [float, col, row]'global other
+    mut [float, col, row]'unified dst
+    init([float]'global s, [float]'global o, uint cols, uint rows):
+        src = s.reshape(col = cols, row = rows)
+        other = o.reshape(col = cols, row = rows)
+        dst = [0.0 for col = cols, row = rows]
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        if c < 3 and r < 2:
+            dst[col = c, row = r] = src[col = c, row = r] + other[col = c, row = r]
+
+mut k = Reshaped2D([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [10.0, 10.0, 10.0, 10.0, 10.0, 10.0], 3, 2)
+kernel:
+    k(block = (4, 4, 1))
+print "dst[0] = {k.dst[0]}"
+print "dst[1] = {k.dst[1]}"
+print "dst[5] = {k.dst[5]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("reshape_axis_fields_two_fields_share_params", src);
+
+    // Codegen-level assertion: every one of `src`'s and `other`'s own two axis
+    // fields must be assigned from the constructor call -- not just declared,
+    // defaulted, and cloned (which they still are even when the assignment is
+    // missing, so those checks alone would pass on the broken code too).
+    for field in ["__src_axis0", "__src_axis1", "__other_axis0", "__other_axis1"] {
+        assert!(
+            rs.lines().any(|l| l.trim_start().starts_with(&format!("k.{field}")) && l.contains(" = ")),
+            "expected an assignment statement for '{field}' in the generated constructor \
+             call -- it must not be silently dropped just because another field's \
+             dynamic-shape assignment reuses the same `cols`/`rows` init params;\ngot:\n{rs}"
+        );
+    }
+
+    // Real end-to-end value assertion against a real GPU adapter (same rationale as
+    // `real_gpu_dispatch_free_fn_with_global_array_param`'s doc comment: this bug
+    // class is invisible to `cargo build` on the generated Rust -- the axis fields
+    // stay a validly-typed `0` -- and only surfaces as silently-wrong data at real
+    // dispatch time).
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("reshape_axis_fields_two_fields_share_params");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    // dst[i] = src[i] + other[i] = src[i] + 10 -- if either field's axis strides
+    // silently stayed 0, these reads would alias onto the wrong offsets (or read
+    // uninitialized/zeroed buffer contents) instead of the real per-element sum.
+    assert!(stdout.contains("dst[0] = 11"), "expected dst[0] = 1 + 10 = 11, got:\n{stdout}");
+    assert!(stdout.contains("dst[1] = 12"), "expected dst[1] = 2 + 10 = 12, got:\n{stdout}");
+    assert!(stdout.contains("dst[5] = 16"), "expected dst[5] = 6 + 10 = 16, got:\n{stdout}");
+}

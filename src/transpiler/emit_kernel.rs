@@ -362,7 +362,7 @@ impl Transpiler {
         let mut param_to_len: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
 
         for (i, arg) in args.iter().enumerate() {
-            // Each of these three lookups failing means this constructor argument would
+            // Each of these lookups failing means this constructor argument would
             // otherwise be silently dropped -- the field it should have initialized keeps
             // its zero-initialized default with no error or warning at all. Fail loudly
             // instead: the kernel's `init` needs to follow the plain `field = param`
@@ -374,123 +374,158 @@ impl Transpiler {
                 ));
                 continue;
             };
-            let Some(field_name) = param_to_field.get(param_name) else {
+            let Some(field_names) = param_to_field.get(param_name) else {
                 self.push_error(arg.value.line, arg.value.col, format!(
                     "kernel '{}': `init` parameter '{}' is never assigned to a field via a plain `field = {}` statement -- only that pattern is supported for kernel constructor codegen, so this argument would be silently dropped",
                     decl.name, param_name, param_name
                 ));
                 continue;
             };
-            let Some(field) = decl.fields.iter().find(|f| &f.name == field_name) else {
-                self.push_error(arg.value.line, arg.value.col, format!(
-                    "kernel '{}': `init` assigns parameter '{}' to '{}', which is not a declared field of this kernel",
-                    decl.name, param_name, field_name
-                ));
-                continue;
-            };
+            let mut fields: Vec<&KernelFieldDecl> = Vec::with_capacity(field_names.len());
+            let mut any_missing = false;
+            for field_name in field_names {
+                match decl.fields.iter().find(|f| &f.name == field_name) {
+                    Some(f) => fields.push(f),
+                    None => {
+                        self.push_error(arg.value.line, arg.value.col, format!(
+                            "kernel '{}': `init` assigns parameter '{}' to '{}', which is not a declared field of this kernel",
+                            decl.name, param_name, field_name
+                        ));
+                        any_missing = true;
+                    }
+                }
+            }
+            if any_missing || fields.is_empty() { continue; }
 
-            let is_buffer = matches!(field.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
-                && is_gpu_buffer_ty(&field.ty);
-
-            // A resident source for this argument — either a same-scope alias
-            // (`let fc = k1.y` — `gpu_resident_vars`, no Rust binding of its own) or a
-            // bare kernel-field read used *inline*, with no `let` at all
-            // (`Kernel2(k1.y, ...)`, e.g. `attention_heads_gpu`'s
-            // `SoftmaxRowsKernel(k_scores.c, ...)`) — see `resident_field_alias`'s doc
-            // for why both need the same check. Either way the source kernel's buffer
-            // is cloned straight across, no upload, no `with` required
-            // (docs/scoped-access-blocks.md's "no new syntax at all" rule). Must be
-            // checked before `self.emit_expr(&arg.value)` below — an alias has no Rust
-            // identifier to emit at all, and an inline field read would otherwise go
-            // through `try_emit_kernel_field_read`'s unconditional download.
-            let resident_alias = if is_buffer {
-                self.resident_field_alias(&arg.value)
-            } else {
-                None
+            let is_buffer_field = |f: &KernelFieldDecl| {
+                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
+                    && is_gpu_buffer_ty(&f.ty)
             };
-            if let Some((src_kvar, src_field)) = resident_alias {
-                // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that helper's
-                // doc for why a bare `Arc::clone` here used to silently alias
-                // the same `wgpu::Buffer` between both kernel structs instead
-                // of copying it (a real device-to-device GPU copy).
-                self.line(&format!("{var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), &{src_kvar}.{src_field}_buf);"));
-                self.line(&format!("{var_name}.rebuild_bind_group();"));
-                // No Rust value exists for `param_name` to record in `param_to_arg` --
-                // record only the one thing a sibling output field's fill expression
-                // might still need from it (its element count), computed straight from
-                // the buffer's byte size divided by this field's own device element
-                // width (the aliased buffer is reused as-is, so the width matches).
-                let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
-                param_to_len.insert(param_name, format!(
-                    "({src_kvar}.{src_field}_buf.size() as usize / std::mem::size_of::<{inner}>())"
-                ));
-                continue;
+            // At most one field a single param feeds is ever a real GPU buffer (the
+            // `field = param` match that's this field's own `.reshape()`/plain-assign
+            // source) -- every other match sharing the same param name is a scalar
+            // shadow-axis field (`__field_axisN = param`), never a buffer itself. See
+            // `kernel_param_to_field_map`'s doc for why one param can feed more than
+            // one field at all.
+            let buffer_field = fields.iter().find(|f| is_buffer_field(f)).copied();
+            let scalar_fields: Vec<&KernelFieldDecl> = fields.iter().copied().filter(|f| !is_buffer_field(f)).collect();
+
+            let mut arg_rust: Option<String> = None;
+
+            if let Some(field) = buffer_field {
+                let field_name = &field.name;
+                // A resident source for this argument — either a same-scope alias
+                // (`let fc = k1.y` — `gpu_resident_vars`, no Rust binding of its own) or a
+                // bare kernel-field read used *inline*, with no `let` at all
+                // (`Kernel2(k1.y, ...)`, e.g. `attention_heads_gpu`'s
+                // `SoftmaxRowsKernel(k_scores.c, ...)`) — see `resident_field_alias`'s doc
+                // for why both need the same check. Either way the source kernel's buffer
+                // is cloned straight across, no upload, no `with` required
+                // (docs/scoped-access-blocks.md's "no new syntax at all" rule). Must be
+                // checked before `self.emit_expr(&arg.value)` below — an alias has no Rust
+                // identifier to emit at all, and an inline field read would otherwise go
+                // through `try_emit_kernel_field_read`'s unconditional download.
+                let resident_alias = self.resident_field_alias(&arg.value);
+                if let Some((src_kvar, src_field)) = resident_alias {
+                    // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that helper's
+                    // doc for why a bare `Arc::clone` here used to silently alias
+                    // the same `wgpu::Buffer` between both kernel structs instead
+                    // of copying it (a real device-to-device GPU copy).
+                    self.line(&format!("{var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), &{src_kvar}.{src_field}_buf);"));
+                    self.line(&format!("{var_name}.rebuild_bind_group();"));
+                    // No Rust value exists for `param_name` to record in `param_to_arg` --
+                    // record only the one thing a sibling output field's fill expression
+                    // might still need from it (its element count), computed straight from
+                    // the buffer's byte size divided by this field's own device element
+                    // width (the aliased buffer is reused as-is, so the width matches).
+                    let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
+                    param_to_len.insert(param_name, format!(
+                        "({src_kvar}.{src_field}_buf.size() as usize / std::mem::size_of::<{inner}>())"
+                    ));
+                } else {
+                    let a = self.emit_expr(&arg.value);
+                    param_to_arg.insert(param_name, a.clone());
+                    let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
+                    // If this constructor argument is literally one of the *current*
+                    // function's own parameters, and that parameter is typed
+                    // `BoringGpuArg<T>` (`current_fn_gpu_arg_param_names` —
+                    // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found it
+                    // used *only* this way), or a same-function local bound directly to a
+                    // `fn_returns_resident` call (`resident_call_vars` —
+                    // `try_emit_gpu_resident_call_let`, also a genuine `BoringGpuArg<T>`-typed
+                    // Rust binding), branch on the enum instead of always uploading: a
+                    // resident argument hands its buffer over directly (an `Arc::clone`, no
+                    // data copy), a host argument uploads exactly as before. See
+                    // docs/scoped-access-blocks.md's "Kernel Constructor Interaction".
+                    let is_gpu_arg_param = matches!(&arg.value.kind, ExprKind::Var(pname)
+                        if self.current_fn_gpu_arg_param_names.contains(pname.as_str())
+                            || self.resident_call_vars.contains_key(pname.as_str()));
+                    if is_gpu_arg_param {
+                        self.line(&format!("match &{a} {{"));
+                        self.line("    BoringGpuArg::Resident(buf, _len) => {");
+                        // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that
+                        // helper's doc; `buf` here is `&Arc<wgpu::Buffer>` (matched
+                        // through a `&BoringGpuArg<T>`), which Rust's deref
+                        // coercion turns into `&wgpu::Buffer` at this call site.
+                        self.line(&format!("        {var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"));
+                        self.line(&format!("        {var_name}.rebuild_bind_group();"));
+                        self.line("    }");
+                        self.line("    BoringGpuArg::Host(v) => {");
+                        self.line(&format!(
+                            "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                        ));
+                        self.line("    }");
+                        self.line("}");
+                    } else {
+                        self.line(&format!(
+                            "{var_name}.copy_{field_name}_to_device(&{a}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                        ));
+                    }
+                    arg_rust = Some(a);
+                }
             }
 
-            let arg_rust = self.emit_expr(&arg.value);
-            param_to_arg.insert(param_name, arg_rust.clone());
-            if is_buffer {
-                let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
-                // If this constructor argument is literally one of the *current*
-                // function's own parameters, and that parameter is typed
-                // `BoringGpuArg<T>` (`current_fn_gpu_arg_param_names` —
-                // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found it
-                // used *only* this way), or a same-function local bound directly to a
-                // `fn_returns_resident` call (`resident_call_vars` —
-                // `try_emit_gpu_resident_call_let`, also a genuine `BoringGpuArg<T>`-typed
-                // Rust binding), branch on the enum instead of always uploading: a
-                // resident argument hands its buffer over directly (an `Arc::clone`, no
-                // data copy), a host argument uploads exactly as before. See
-                // docs/scoped-access-blocks.md's "Kernel Constructor Interaction".
-                let is_gpu_arg_param = matches!(&arg.value.kind, ExprKind::Var(pname)
-                    if self.current_fn_gpu_arg_param_names.contains(pname.as_str())
-                        || self.resident_call_vars.contains_key(pname.as_str()));
-                if is_gpu_arg_param {
-                    self.line(&format!("match &{arg_rust} {{"));
-                    self.line("    BoringGpuArg::Resident(buf, _len) => {");
-                    // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that
-                    // helper's doc; `buf` here is `&Arc<wgpu::Buffer>` (matched
-                    // through a `&BoringGpuArg<T>`), which Rust's deref
-                    // coercion turns into `&wgpu::Buffer` at this call site.
-                    self.line(&format!("        {var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"));
-                    self.line(&format!("        {var_name}.rebuild_bind_group();"));
-                    self.line("    }");
-                    self.line("    BoringGpuArg::Host(v) => {");
-                    self.line(&format!(
-                        "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
-                    ));
-                    self.line("    }");
-                    self.line("}");
-                } else {
-                    self.line(&format!(
-                        "{var_name}.copy_{field_name}_to_device(&{arg_rust}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
-                    ));
+            if scalar_fields.is_empty() { continue; }
+
+            // Every field left is a scalar shadow-axis field (see `is_buffer_field`
+            // above) -- always needs the argument's own Rust value, computed once
+            // and shared across every such field fed by this same param.
+            let a = match arg_rust {
+                Some(a) => a,
+                None => {
+                    let a = self.emit_expr(&arg.value);
+                    param_to_arg.insert(param_name, a.clone());
+                    a
                 }
-            } else if let Type::ArrayN(inner, _) = &field.ty {
-                // A `'const`-qualified fixed-size array field (`[float, W*H]'const
-                // weights`) isn't a device buffer at all -- wgpu packs it straight into
-                // the kernel's `#[repr(C)] Params` struct as `[T; N]` (see wgpu::host's
-                // own `GpuQual::Const` struct-field arm), using the same narrowed width
-                // as an actual device buffer (`wgpu::host::host_scalar_type`, e.g. `float`/
-                // `float64` -> `f32` -- WGSL has no 64-bit float, see that function's own
-                // doc) -- so `kernel_host_scalar_type` (this file's mirror of that same
-                // mapping) is the right width here too, not `kernel_host_element_type`
-                // (host-native width, used for a value already round-tripped off a GPU
-                // buffer -- wrong type here, `weights` never leaves the Params struct).
-                // The blanket `_ => "i64"` fallback `kernel_host_scalar_type` used to hit
-                // for any type it didn't otherwise recognize (including this one)
-                // previously emitted a nonsensical whole-array-to-scalar cast
-                // (`blur.weights = (w) as i64;`) instead of the needed per-element cast +
-                // `Vec<T>` -> `[T; N]` conversion. The target array's length is inferred
-                // from the field's own declared `[T; N]` type at the assignment site, no
-                // need to spell `N` again.
-                let elem = kernel_host_scalar_type(inner);
-                self.line(&format!(
-                    "{var_name}.{field_name} = {arg_rust}.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>().try_into().unwrap();"
-                ));
-            } else {
-                let cast = kernel_host_scalar_type(&field.ty);
-                self.line(&format!("{var_name}.{field_name} = ({arg_rust}) as {cast};"));
+            };
+            for field in scalar_fields {
+                let field_name = &field.name;
+                if let Type::ArrayN(inner, _) = &field.ty {
+                    // A `'const`-qualified fixed-size array field (`[float, W*H]'const
+                    // weights`) isn't a device buffer at all -- wgpu packs it straight into
+                    // the kernel's `#[repr(C)] Params` struct as `[T; N]` (see wgpu::host's
+                    // own `GpuQual::Const` struct-field arm), using the same narrowed width
+                    // as an actual device buffer (`wgpu::host::host_scalar_type`, e.g. `float`/
+                    // `float64` -> `f32` -- WGSL has no 64-bit float, see that function's own
+                    // doc) -- so `kernel_host_scalar_type` (this file's mirror of that same
+                    // mapping) is the right width here too, not `kernel_host_element_type`
+                    // (host-native width, used for a value already round-tripped off a GPU
+                    // buffer -- wrong type here, `weights` never leaves the Params struct).
+                    // The blanket `_ => "i64"` fallback `kernel_host_scalar_type` used to hit
+                    // for any type it didn't otherwise recognize (including this one)
+                    // previously emitted a nonsensical whole-array-to-scalar cast
+                    // (`blur.weights = (w) as i64;`) instead of the needed per-element cast +
+                    // `Vec<T>` -> `[T; N]` conversion. The target array's length is inferred
+                    // from the field's own declared `[T; N]` type at the assignment site, no
+                    // need to spell `N` again.
+                    let elem = kernel_host_scalar_type(inner);
+                    self.line(&format!(
+                        "{var_name}.{field_name} = {a}.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>().try_into().unwrap();"
+                    ));
+                } else {
+                    let cast = kernel_host_scalar_type(&field.ty);
+                    self.line(&format!("{var_name}.{field_name} = ({a}) as {cast};"));
+                }
             }
         }
 
@@ -508,7 +543,7 @@ impl Transpiler {
         // already uses for inputs, which resizes the buffer to match and rebuilds the
         // bind group (see wgpu::host).
         for (field_name, init) in Self::kernel_output_fill_map(decl) {
-            if param_to_field.values().any(|f| f == &field_name) { continue; }
+            if param_to_field.values().any(|fields| fields.contains(&field_name)) { continue; }
             let Some(field) = decl.fields.iter().find(|f| f.name == field_name) else { continue };
             let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
             match init {
@@ -685,12 +720,24 @@ impl Transpiler {
     }
 
     /// Scan a kernel's (first) `init` body for `field = param` assignments,
-    /// returning a `param name -> field name` map. Every kernel in this
-    /// codebase's convention assigns each init param straight to a field (with
-    /// any remaining fields, e.g. `'unified` outputs, zero-initialized
-    /// separately) — richer init bodies aren't recognized here.
-    fn kernel_param_to_field_map(decl: &KernelDecl) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
+    /// returning a `param name -> field names` map — a single init param can
+    /// legitimately feed more than one field's assignment, so every match is
+    /// kept, not just the last one seen. This happens whenever a dynamic-shape
+    /// field's shadow-axis assignment (`__field_axisN = param`, synthesized by
+    /// `desugar_labeled_array` from either this field's own `.reshape(...)` or
+    /// another field's dynamic-shape comprehension fill) reuses a dimension
+    /// parameter that some other field's own `.reshape(...)` already used for
+    /// one of *its* axes — e.g. a transpose kernel's `dst = [.. for col = rows,
+    /// row = cols]` reusing the exact same `rows`/`cols` params that `src`'s
+    /// own `src = s.reshape(col = cols, row = rows)` already mapped to
+    /// `src`'s shadow-axis fields. A plain `param name -> field name` map (the
+    /// previous shape here) would let the second match silently overwrite the
+    /// first, permanently losing the earlier field's assignment — every kernel
+    /// in this codebase's convention assigns each init param straight to a
+    /// field (with any remaining fields, e.g. `'unified` outputs, zero-
+    /// initialized separately) — richer init bodies aren't recognized here.
+    fn kernel_param_to_field_map(decl: &KernelDecl) -> std::collections::HashMap<String, Vec<String>> {
+        let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         if let Some(init) = decl.inits.first() {
             for stmt in &init.body {
                 if let Stmt::Expr(e) = stmt {
@@ -713,7 +760,10 @@ impl Transpiler {
                                 _ => None,
                             };
                             if let Some(param) = param {
-                                map.insert(param.clone(), field.clone());
+                                let fields = map.entry(param.clone()).or_default();
+                                if !fields.contains(field) {
+                                    fields.push(field.clone());
+                                }
                             }
                         }
                     }
