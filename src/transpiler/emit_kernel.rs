@@ -529,6 +529,26 @@ impl Transpiler {
             }
         }
 
+        // Scalar fields the loop above never touched because their `init()`-body
+        // assignment is a *computed* expression over other init params, not a
+        // bare `field = param` passthrough (`kernel_param_to_field_map` only
+        // recognizes that exact shape) — e.g. `half_dim = dh / 2`. `Kernel::new()`
+        // (see wgpu::host::emit_kernel_new) leaves any such field at its Rust
+        // default (0/0.0) forever, silently, with no error anywhere: the field is
+        // declared and used correctly inside the kernel body, so nothing else
+        // catches the gap. Translate the init-body expression into Rust here,
+        // substituting each init param for the Rust expression the constructor
+        // call actually passed (`param_to_arg`, already populated by the loop
+        // above), the same way `kernel_output_fill_map`'s array-fill expressions
+        // are substituted below.
+        for (field_name, expr) in Self::kernel_derived_scalar_field_map(decl) {
+            let Some(field) = decl.fields.iter().find(|f| f.name == field_name) else { continue };
+            if is_gpu_buffer_ty(&field.ty) { continue; }
+            let cast = kernel_host_scalar_type(&field.ty);
+            let rust_expr = self.substitute_and_emit(&expr, &param_to_arg, &param_to_len);
+            self.line(&format!("{var_name}.{field_name} = ({rust_expr}) as {cast};"));
+        }
+
         // `'unified`/`'global` array fields the loop above never touched are outputs
         // allocated in `init()` via `field = [value for ..<count]` (e.g. `mel = [0.0 for
         // ..<n_mels * n_frames]`) or a plain bracketed literal (e.g. `out = [0.0, 0.0,
@@ -764,6 +784,37 @@ impl Transpiler {
                                 if !fields.contains(field) {
                                     fields.push(field.clone());
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Scan a kernel's (first) `init` body for `field = expr` assignments where
+    /// `expr` is a *computed* expression over other init params, rather than a
+    /// bare passthrough (`kernel_param_to_field_map` already handles `field =
+    /// param` / `field = param as T`) or one of the array-output shapes
+    /// `kernel_output_fill_map` already handles (`field = [value for ..<count]`,
+    /// a comprehension, or a bracketed literal). Example: `half_dim = dh / 2`.
+    /// Returns `field name -> that init-body RHS expression`, for
+    /// `emit_kernel_construction` to translate with `substitute_and_emit` the
+    /// same way an array-fill expression already is.
+    fn kernel_derived_scalar_field_map(decl: &KernelDecl) -> std::collections::HashMap<String, Expr> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(init) = decl.inits.first() {
+            for stmt in &init.body {
+                if let Stmt::Expr(e) = stmt {
+                    if let ExprKind::Assign(lhs, rhs) = &e.kind {
+                        if let ExprKind::Var(field) = &lhs.kind {
+                            let is_passthrough = matches!(&rhs.kind, ExprKind::Var(_))
+                                || matches!(&rhs.kind, ExprKind::Cast(inner, _) if matches!(inner.kind, ExprKind::Var(_)));
+                            let is_array_init = matches!(&rhs.kind,
+                                ExprKind::ArrayFill { .. } | ExprKind::Array(_) | ExprKind::ArrayComp { .. });
+                            if !is_passthrough && !is_array_init {
+                                map.insert(field.clone(), (**rhs).clone());
                             }
                         }
                     }

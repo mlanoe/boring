@@ -2340,21 +2340,36 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
 fn collect_block_sizes(program: &Program) -> std::collections::HashMap<String, (u32, u32, u32)> {
     let mut var_to_type: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut map = std::collections::HashMap::new();
-    // A `k(block = N)` dispatch site commonly references a top-level scalar
-    // `let` (e.g. `let N = 16`) rather than an int literal — WGSL's
+    // A `k(block = N)` dispatch site commonly references a scalar `let`
+    // (e.g. `let N = 16`, either top-level or local to the enclosing
+    // function/method) rather than an int literal — WGSL's
     // `@workgroup_size` must still be a compile-time constant, so that
-    // reference needs resolving here before the shader is emitted. Collected
-    // up front (top-level only — a dispatch-site block size referencing a
-    // local/function-scoped variable isn't statically resolvable this way and
-    // falls back to the same conservative default as any other unresolvable
-    // expression).
+    // reference needs resolving here before the shader is emitted.
+    // Top-level int `let`s are collected up front and seed every function's
+    // own local scope (cloned per item below); a local `let NAME = <int
+    // literal>` is then folded in as `scan_call_block_size` walks that
+    // function's body, so a dispatch site can reference either. Anything
+    // that isn't a literal int at its binding site (a computed expression,
+    // a function parameter, ...) still falls back to the same conservative
+    // default as before.
     let const_ints = collect_top_level_int_consts(program);
     for item in &program.items {
         match item {
             Item::Let(s) => resolve_let_kernel_type(s, &mut var_to_type),
-            Item::Stmt(s) => scan_call_block_size(s, &mut map, &mut var_to_type, &const_ints),
-            Item::Fn(f) => { for s in &f.body { scan_call_block_size(s, &mut map, &mut var_to_type, &const_ints); } }
-            Item::Struct(s) => { for m in &s.methods { for st in &m.body { scan_call_block_size(st, &mut map, &mut var_to_type, &const_ints); } } }
+            Item::Stmt(s) => {
+                let mut local_ints = const_ints.clone();
+                scan_call_block_size(s, &mut map, &mut var_to_type, &mut local_ints);
+            }
+            Item::Fn(f) => {
+                let mut local_ints = const_ints.clone();
+                for s in &f.body { scan_call_block_size(s, &mut map, &mut var_to_type, &mut local_ints); }
+            }
+            Item::Struct(s) => {
+                for m in &s.methods {
+                    let mut local_ints = const_ints.clone();
+                    for st in &m.body { scan_call_block_size(st, &mut map, &mut var_to_type, &mut local_ints); }
+                }
+            }
             _ => {}
         }
     }
@@ -2421,10 +2436,20 @@ fn scan_call_block_size(
     s: &Stmt,
     map: &mut std::collections::HashMap<String, (u32, u32, u32)>,
     var_to_type: &mut std::collections::HashMap<String, String>,
-    const_ints: &std::collections::HashMap<String, i64>,
+    const_ints: &mut std::collections::HashMap<String, i64>,
 ) {
     match s {
-        Stmt::Let(ls) => resolve_let_kernel_type(ls, var_to_type),
+        Stmt::Let(ls) => {
+            resolve_let_kernel_type(ls, var_to_type);
+            // Fold a local `let NAME = <int literal>` into the same
+            // resolvable-constant set a top-level `let` already gets — see
+            // `collect_block_sizes`'s doc comment.
+            if let Some(val) = &ls.value {
+                if let ExprKind::Int(n) = &val.kind {
+                    const_ints.insert(ls.name.clone(), *n);
+                }
+            }
+        }
         Stmt::Loop(ls) => { for inner in &ls.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         Stmt::While(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
         Stmt::WhileLet(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type, const_ints); } }
@@ -2461,14 +2486,15 @@ fn scan_call_block_size(
                         let parse_u32 = |e: &Expr| -> u32 {
                             match &e.kind {
                                 ExprKind::Int(n) => *n as u32,
-                                // A top-level scalar `let` referenced by name (e.g.
-                                // `let N = 16` then `k(block = N)`) — WGSL's
+                                // A scalar `let` referenced by name (e.g. `let N
+                                // = 16` then `k(block = N)`), top-level or local
+                                // to the enclosing function — WGSL's
                                 // `@workgroup_size` has to be a compile-time
-                                // constant, so this is the one variable shape
-                                // that's actually resolvable here. Anything else
-                                // (a local/function-scoped variable, or a
-                                // computed expression) still falls back to the
-                                // same conservative default as before.
+                                // constant, so this is the variable shape that's
+                                // actually resolvable here. Anything else (a
+                                // function parameter, or a computed expression)
+                                // still falls back to the same conservative
+                                // default as before.
                                 ExprKind::Var(name) => const_ints.get(name.as_str())
                                     .map(|n| *n as u32)
                                     .unwrap_or(1),

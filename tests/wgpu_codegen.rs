@@ -126,6 +126,56 @@ kernel VecAdd:
 }
 
 #[test]
+fn test_dispatch_block_size_resolves_local_let_int_const_not_silently_one() {
+    // Regression test: a `k(block = (a, b))` dispatch where `b` is a
+    // function-local `let`-bound int (not a literal, not a top-level
+    // const) used to silently emit `@workgroup_size(a, 1, 1)` instead of
+    // resolving `b`'s value -- WGSL requires `@workgroup_size` to be a
+    // compile-time constant, and `collect_block_sizes`/`scan_call_block_size`
+    // only ever resolved a *top-level* scalar `let` referenced by name,
+    // falling back to `1` for anything function-local (including a
+    // trivially constant-foldable one like this). No error was raised
+    // either -- the shader compiled and ran with only workgroup y=0 ever
+    // dispatching, silently dropping every other row of work. Confirmed
+    // against a real GPU: before this fix, a warp-shuffle reduction kernel
+    // dispatched this way (`boring-llm`'s `linear_warp_gpu`) produced
+    // `3 0 0 0` instead of the correct `3 3 7 7`.
+    let src = r#"
+kernel WarpLike:
+    let [float]'global x
+    mut [float]'unified y
+    let int warps_per_block
+
+    init([float]'global xi, int wpb):
+        x = xi
+        warps_per_block = wpb
+        y = [0.0 for ..<4]
+
+    def ():
+        let warp_in_block = gpu.thread.y
+        if warp_in_block < warps_per_block:
+            y[warp_in_block] = x[warp_in_block]
+
+pub req [float]'gpu'unified warp_call([float]'global x) throws:
+    let int warps_per_block = 8
+    mut k = WarpLike(x, warps_per_block)
+    kernel:
+        k(block = (32, warps_per_block), grid = (1, 1))
+    k.y
+"#;
+    let (wgsl, _rs) = wgpu_codegen("dispatch_block_size_local_let", src);
+    assert!(
+        wgsl.contains("@workgroup_size(32, 8, 1)"),
+        "expected the local `let warps_per_block = 8` to resolve into \
+         @workgroup_size's y dimension, not silently fall back to 1;\ngot:\n{wgsl}"
+    );
+    assert!(
+        !wgsl.contains("@workgroup_size(32, 1, 1)"),
+        "must not silently drop the non-literal block-size dimension to 1;\ngot:\n{wgsl}"
+    );
+}
+
+#[test]
 fn test_kernel_dispatch_surfaces_validation_errors_instead_of_silent_failure() {
     // Before this fix, `dispatch()` returned `()` and no error scope existed
     // anywhere in the generated code -- a validation failure (e.g. a rejected
@@ -3651,4 +3701,104 @@ print "{k.out[0]}"
     );
     assert!(stdout.trim() == "inf", "expected the Inf branch's real IEEE-754 value \
         printed back, got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+}
+
+/// Regression test: a kernel field that `init()` assigns a *computed*
+/// expression (`half_n = nn / 2`), not a bare `field = param` passthrough,
+/// used to be silently left at its Rust default (`0`) by the generated
+/// constructor call -- `kernel_param_to_field_map` (the scan feeding
+/// `emit_kernel_construction`'s `k.field = ...` assignments) only recognizes
+/// a bare passthrough, so a derived field was never assigned anything at all.
+/// The field is declared and used correctly inside the kernel body, so
+/// nothing else catches the gap: `cargo build` on the generated Rust succeeds
+/// cleanly, and the shader dispatches with no validation error -- it just
+/// silently computes nothing, because the kernel body's own guard
+/// (`i < half_n`) never holds once `half_n` stayed 0.  Metal/CUDA/ROCm never
+/// had this bug -- those backends fully replay `init()`'s body inside their
+/// own host-side `new()`, computing a derived field for free. Confirmed
+/// against a real GPU adapter (same rationale as
+/// `host_reshape_axis_fields_not_dropped_when_two_fields_share_dimension_params`'s
+/// doc comment: this bug class is invisible to `cargo build`).
+#[test]
+fn host_init_derived_scalar_field_not_dropped_real_gpu_dispatch() {
+    let src = r#"
+let N = 16
+var [float32]'unified x = [0.0 for ..<N]
+for i in 0..<N:
+    x[i] = float32(i) + 1.0
+
+kernel Derived:
+    let [float32]'unified x
+    mut [float32]'unified out
+    let int n
+    let int half_n
+
+    init([float32]'unified xs, int nn):
+        x = xs
+        n = nn
+        half_n = nn / 2
+        out = [0.0 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < half_n:
+            out[i] = x[i]
+
+mut k = Derived(x, N)
+kernel:
+    k(block = N, grid = 1)
+
+for i, v in k.out:
+    print "out[{i}] = {v}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("init_derived_scalar_field", src);
+
+    // Codegen-level assertion: the derived field must get its own computed
+    // assignment in the generated constructor call, not just a declaration
+    // and a `0` default (which the broken code still produces, so a check
+    // for the field's mere presence would pass either way).
+    assert!(
+        rs.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with("k.half_n") && l.contains(" = ") && l.contains("N / 2")
+        }),
+        "expected a computed assignment for 'half_n' (derived from `nn / 2`) in the \
+         generated constructor call -- it must not be silently dropped just because its \
+         init-body expression isn't a bare `field = param` passthrough;\ngot:\n{rs}"
+    );
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("init_derived_scalar_field");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    // `half_n` = N / 2 = 8 -- if it silently stayed 0, `i < half_n` would never hold
+    // and every `out[i]` would stay at its zero-filled default instead of `x[i]`.
+    for i in 0..8 {
+        let expected = format!("out[{i}] = {}", i as f32 + 1.0);
+        assert!(
+            stdout.contains(&expected),
+            "expected '{expected}' (half_n must resolve to 8, copying the first half of x), \
+             got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        );
+    }
+    for i in 8..16 {
+        let expected = format!("out[{i}] = 0");
+        assert!(
+            stdout.contains(&expected),
+            "expected '{expected}' (second half of out untouched, still zero-filled), \
+             got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        );
+    }
 }
