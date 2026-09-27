@@ -1,0 +1,38 @@
+# Regression fixture for an open-ended range whose start is a compound
+# (non-bare-variable/literal) expression — `s[i+1..]`/`arr[i+1..]` — see
+# tests/open_ended_range_compound_start.rs for the full writeup.
+#
+# Two shapes, on purpose:
+#   - string_slice: `s[i+1..]` — a char-safe string slice.
+#   - array_slice:  `arr[i+1..]` — a plain `Vec<T>` slice.
+#
+# Each also has a parenthesized twin (`s[(i+1)..]`/`arr[(i+1)..]`) so the test
+# can assert the two produce identical results — the parenthesized form was
+# the only workaround before this bug was fixed.
+
+def string string_slice():
+    var s = "hello"
+    let i = 0
+    s[i+1..]
+
+def string string_slice_parenthesized():
+    var s = "hello"
+    let i = 0
+    s[(i+1)..]
+
+def [int] array_slice():
+    let [int] arr = [10, 20, 30, 40]
+    let i = 0
+    arr[i+1..]
+
+def [int] array_slice_parenthesized():
+    let [int] arr = [10, 20, 30, 40]
+    let i = 0
+    arr[(i+1)..]
+
+def main():
+    print "{string_slice()}"
+    print "{string_slice() == string_slice_parenthesized()}"
+    for x in array_slice():
+        print "{x}"
+    print "{array_slice() == array_slice_parenthesized()}"

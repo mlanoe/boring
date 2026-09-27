@@ -1,0 +1,16 @@
+# Regression fixture: a char-safe string range-slice (`s[..<i]`, `s[(i+1)..]`)
+# used as one leaf of a `+` string-concatenation chain. `collect_string_parts`
+# (emit_stmt.rs) flattens the whole chain into a single `format!(...)` call's
+# argument list, which is exactly the context where `Arc::from`/`Rc::from`
+# (missing the `::<str>` turbofish) leaves the `Arc<T, A>` allocator
+# parameter unconstrained and `cargo build` fails with E0283 — see
+# tests/string_slice_concat_turbofish.rs for the full writeup.
+#
+# `(i+1)` is parenthesized to route around a separate, already-filed parser
+# bug where `i+1..` without parens panics the compiler outright — unrelated
+# to the turbofish bug this fixture targets.
+def main():
+    var s = "hello"
+    let i = 2
+    s = s[..<i] + "H" + s[(i+1)..]
+    print "{s}"

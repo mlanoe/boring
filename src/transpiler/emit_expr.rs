@@ -1533,7 +1533,7 @@ impl Transpiler {
                     }
                     (None, None)        => format!("{obj_s}.chars().collect::<String>()"),
                 };
-                return format!("{str_ptr}::from({collected}.as_str())");
+                return format!("{str_ptr}::<str>::from({collected}.as_str())");
             }
             let start_s = start.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
             let end_s   = end.as_deref().map(|e| cast_idx(self.emit_expr(e), e));

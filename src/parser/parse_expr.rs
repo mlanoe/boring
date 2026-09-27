@@ -511,27 +511,92 @@ impl Parser {
     }
 
     pub(crate) fn parse_shift(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_add()?;
+        let mut lhs = self.parse_range()?;
         loop {
             // `<<`: two consecutive Lt tokens
             if self.check(&TokenKind::Lt) && self.check2(&TokenKind::Lt) {
                 let line = self.line();
                 let col = self.col();
                 self.advance(); self.advance();
-                let rhs = self.parse_add()?;
+                let rhs = self.parse_range()?;
                 lhs = Expr { kind: ExprKind::BinOp(BinOp::Shl, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
             // `>>`: two consecutive Gt tokens
             } else if self.check(&TokenKind::Gt) && self.check2(&TokenKind::Gt) {
                 let line = self.line();
                 let col = self.col();
                 self.advance(); self.advance();
-                let rhs = self.parse_add()?;
+                let rhs = self.parse_range()?;
                 lhs = Expr { kind: ExprKind::BinOp(BinOp::Shr, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
             } else {
                 break;
             }
         }
         Ok(lhs)
+    }
+
+    /// Range operators (`..`, `..<`, `..=`) sit one level above additive/
+    /// multiplicative precedence (below shift/bitwise/comparison/logical) —
+    /// matching `spec/grammar.bnf`'s `range_expr ::= expr ".." expr` and
+    /// `slice_range ::= expr ".." ...`, where the start/end are full
+    /// expressions, not single unary terms.
+    ///
+    /// Both start and end are parsed via `parse_add` (which itself resolves
+    /// the full unary/mul/add chain before returning), so a compound start
+    /// like `i+1` binds into ONE operand before `..`/`..<`/`..=` is even
+    /// considered — `i+1..` parses as `(i+1)..`, not `i + (1..)`.
+    ///
+    /// This used to live inline inside `parse_unary`, checked right after a
+    /// single unary term — i.e. one layer *below* `parse_mul`, not above
+    /// `parse_add`. That meant a compound start combined via `+`/`-`/`*`/`/`/`%`
+    /// never got the chance to fully combine before the range operator grabbed
+    /// its last-parsed unary operand: `i+1..` parsed as `i + (1..)`, a bare
+    /// `SliceRange` reachable directly as a `BinOp::Add` operand, which crashed
+    /// the transpiler outright (`emit_expr`'s "SliceRange cannot appear outside
+    /// an index expression" panic — see CHANGELOG.md) for any read of an
+    /// open-ended range with a non-trivial start (`s[i+1..]`, `arr[i+1..]`).
+    /// Parenthesizing (`s[(i+1)..]`) used to be the only workaround.
+    pub(crate) fn parse_range(&mut self) -> Result<Expr, ParseError> {
+        let line = self.line();
+        let col = self.col();
+        let start = self.parse_add()?;
+        match self.peek() {
+            TokenKind::DotDotLt | TokenKind::DotDotEq => {
+                let inclusive = self.peek() == &TokenKind::DotDotEq;
+                self.advance();
+                // `M..=` inside `[M..=]` — open-ended inclusive slice (next token is `]`).
+                // (`M..<` has no open-ended form — `..<` always requires an explicit end.)
+                if inclusive && self.check(&TokenKind::RBracket) {
+                    Ok(Expr {
+                        kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive },
+                        line, col, len: self.span_len(line, col),
+                    })
+                } else {
+                    let end = self.parse_add()?;
+                    Ok(Expr {
+                        kind: ExprKind::Range { start: Box::new(start), end: Box::new(end), inclusive },
+                        line, col, len: self.span_len(line, col),
+                    })
+                }
+            }
+            // Bare `..` is only still legal as the open-ended slice `M..]` — the
+            // exclusive-with-endpoint form was renamed to `..<` (no alias kept for
+            // the old spelling, matching the ownership-qualifier rename precedent).
+            TokenKind::DotDot => {
+                self.advance();
+                if self.check(&TokenKind::RBracket) {
+                    Ok(Expr {
+                        kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive: false },
+                        line, col, len: self.span_len(line, col),
+                    })
+                } else {
+                    Err(ParseError::Generic {
+                        line, col, len: self.span_len(line, col),
+                        msg: "exclusive range is now `x..<y`, not `x..y` — use `..<` instead of bare `..`".to_string(),
+                    })
+                }
+            }
+            _ => Ok(start),
+        }
     }
 
     pub(crate) fn parse_add(&mut self) -> Result<Expr, ParseError> {
@@ -569,62 +634,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// Unary (`-`/`!`/`~`) binds tighter than range (`..`/`..=`), matching Rust:
-    /// `-1..2` is `(-1)..2`, not `-(1..2)`. So parse the full unary chain first
-    /// via `parse_unary_no_range`, then attach a trailing range at this level —
-    /// one layer above unary, below `parse_mul`.
-    ///
-    /// The range's end is parsed via `parse_mul` (not `parse_unary_no_range`), so
-    /// a bare product/quotient binds into the end without needing parens —
-    /// `0..W * H` is `0..(W * H)`, matching Rust's range precedence (looser than
-    /// `*`/`/`/`%`) and this same function's own doc above. `for k in 0..<W * H:`
-    /// (a real kernel body, see `linguist/samples/gpu.br`) used to mis-parse as
-    /// `(0..W) * H` — a `Range * Int` type error — before this fix.
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        let line = self.line();
-        let col = self.col();
-        let start = self.parse_unary_no_range()?;
-        match self.peek() {
-            TokenKind::DotDotLt | TokenKind::DotDotEq => {
-                let inclusive = self.peek() == &TokenKind::DotDotEq;
-                self.advance();
-                // `M..=` inside `[M..=]` — open-ended inclusive slice (next token is `]`).
-                // (`M..<` has no open-ended form — `..<` always requires an explicit end.)
-                if inclusive && self.check(&TokenKind::RBracket) {
-                    Ok(Expr {
-                        kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive },
-                        line, col, len: self.span_len(line, col),
-                    })
-                } else {
-                    let end = self.parse_mul()?;
-                    Ok(Expr {
-                        kind: ExprKind::Range { start: Box::new(start), end: Box::new(end), inclusive },
-                        line, col, len: self.span_len(line, col),
-                    })
-                }
-            }
-            // Bare `..` is only still legal as the open-ended slice `M..]` — the
-            // exclusive-with-endpoint form was renamed to `..<` (no alias kept for
-            // the old spelling, matching the ownership-qualifier rename precedent).
-            TokenKind::DotDot => {
-                self.advance();
-                if self.check(&TokenKind::RBracket) {
-                    Ok(Expr {
-                        kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive: false },
-                        line, col, len: self.span_len(line, col),
-                    })
-                } else {
-                    Err(ParseError::Generic {
-                        line, col, len: self.span_len(line, col),
-                        msg: "exclusive range is now `x..<y`, not `x..y` — use `..<` instead of bare `..`".to_string(),
-                    })
-                }
-            }
-            _ => Ok(start),
-        }
-    }
-
-    fn parse_unary_no_range(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
         let col = self.col();
         match self.peek().clone() {
@@ -645,7 +655,7 @@ impl Parser {
                         msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
                     });
                 }
-                let expr = self.parse_unary_no_range();
+                let expr = self.parse_unary();
                 self.depth -= 1;
                 Ok(Expr { kind: ExprKind::UnaryOp(op, Box::new(expr?)), line, col, len: self.span_len(line, col)})
             }
