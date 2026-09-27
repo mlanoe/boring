@@ -94,13 +94,31 @@ fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program)
 /// same way every other pipeline stage here does — mirrors
 /// `desugar_array_block_or_exit` immediately above, for the identical reason.
 fn desugar_inject_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
-    match desugar_inject::desugar_inject(program) {
+    match desugar_inject::desugar_inject(program, current_env_flag().as_deref()) {
         Ok(p) => p,
         Err(e) => {
             report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     }
+}
+
+/// `@provide(env = "...")` (docs/design-notes/boring-di-draft.md §6): reads the
+/// current build's environment once, from a `--env <value>` flag anywhere in
+/// `argv` — a self-contained Boring-CLI concern read directly from
+/// `std::env::args()` rather than threaded through every subcommand's own
+/// bespoke argument parser (`parse_build_command`/`parse_run_command`/the GPU
+/// targets' own parsing), since it needs to reach every one of them
+/// identically and none of them otherwise share a common options struct.
+/// `None` when no `--env` flag was given at all — every provider's `env` is
+/// then unconditionally unmatched, so resolution always falls back to a
+/// plain (`env`-less) provider, exactly as if this build had no notion of
+/// environments at all.
+fn current_env_flag() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().position(|a| a == "--env")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn report_warning(path: &Path, source: &str, line: usize, col: usize, len: usize, message: &str) {
@@ -1476,6 +1494,18 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
             // parameter through every intermediate function between here and there.
             "--locked" => { std::env::set_var("BORING_LOCKED", "1"); }
             "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
+            // `@provide(env = "...")` (docs/design-notes/boring-di-draft.md §6) — just
+            // recognized here so it isn't rejected as an unknown flag; the actual value is
+            // read back independently by `current_env_flag()` (`main.rs`), the same
+            // "set/read via a well-known name, not threaded as a parameter" shape as
+            // `--locked`/`--offline` just above.
+            "--env" => {
+                i += 1;
+                if args.get(i).is_none() {
+                    eprintln!("error: --env requires a value");
+                    process::exit(1);
+                }
+            }
             "--" => {
                 // Everything after `--` is passed to the script via args() — stop parsing here.
                 break;
@@ -1840,6 +1870,16 @@ fn parse_build_command(build_args: &[String]) {
             // parameter — read back via DepPolicy::from_env() (src/git_deps.rs).
             "--locked"  => { std::env::set_var("BORING_LOCKED", "1"); }
             "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
+            // `@provide(env = "...")` (docs/design-notes/boring-di-draft.md §6) — see
+            // `parse_run_flags`'s matching arm for why this is just recognized (not stored)
+            // here; the value is read back independently by `current_env_flag()`.
+            "--env" => {
+                i += 1;
+                if build_args.get(i).is_none() {
+                    eprintln!("error: --env requires a value");
+                    process::exit(1);
+                }
+            }
             "--rust-options" => {
                 i += 1;
                 match build_args.get(i) {
@@ -2569,7 +2609,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
             process::exit(1);
         }
     };
-    match desugar_inject::desugar_inject(program) {
+    match desugar_inject::desugar_inject(program, current_env_flag().as_deref()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());

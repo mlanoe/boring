@@ -1,8 +1,8 @@
 # Draft — a general-purpose dependency-injection / inversion-of-control mechanism for Boring
 
 Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
-`@provide`'s `pub` requirement (§3), and a first slice of `@inject` (§1-§2 — same-`Program`
-providers only, no `id`/`env`, explicit field qualifier required, no bare-field inference, a struct
+`@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), and a first slice of `@inject` (§1-§2 —
+same-`Program` providers only, explicit field qualifier required, no bare-field inference, a struct
 can't combine `@inject` with its own `init` yet) are real and tested on both backends
 (`src/desugar_inject.rs`, `src/checker/mod.rs`'s `check_di_provider_attrs`,
 `src/interpreter/call.rs`'s `singleton_cache`, `tests/dependency_injection.rs`,
@@ -10,7 +10,7 @@ can't combine `@inject` with its own `init` yet) are real and tested on both bac
 (`boring/interpreter/*.br`) remains v3, deliberately deferred — see "`boring run` parity" under Open
 Questions for why the interpreter/transpiler split turned out cheaper than originally planned. Still
 design-only: `'static` under `@provide`/`@inject` (§2, blocked on a `docs/book.md` §21 amendment),
-`id`/`env` (§5-§6), cross-project (`[deps]`) resolution, and cycle detection (§7). This is a
+cross-project (`[deps]`) resolution, and cycle detection (§7). This is a
 standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
 
 ## Goal
@@ -776,14 +776,15 @@ built (§2), never re-evaluated at runtime. Concretely:
   single test wanting a *different* double than its neighbors in the same environment still reaches
   for the labeled-argument override (§ above) on whatever it constructs directly.
 
-**How the compiler actually learns the current `env`** is genuinely open (a `--env <value>` flag on
-`boring build`/`boring run`, most likely, resolved before any `@provide`/`@inject` matching begins)
-— but resolving *that* question is now purely a Boring-CLI concern, with no dependency on Rust/Cargo
-test-target machinery at all: because `@provide`/`@inject` resolve entirely inside the Boring
-compiler, before any Rust is emitted (§2), `env` never needs to know whether Cargo's own `#[cfg(test)]`
-exists or applies — it's a self-contained flag Boring's own pipeline reads once, up front. This also
-answers the previously-open question of whether a distinct "test build" target needs to exist
-upstream: it doesn't — `env = "test"` needs nothing from Cargo, only from `boring`'s own CLI.
+**How the compiler actually learns the current `env` — resolved and shipped.** A `--env <value>`
+flag, exactly as anticipated above, on both `boring build` and `boring run` (`main.rs`'s
+`current_env_flag`) — read once, directly from `std::env::args()` rather than threaded through each
+subcommand's own bespoke argument parser (`parse_build_command`/`parse_run_flags`/the GPU targets'
+own parsing all just need to *recognize* `--env <value>` so it isn't rejected as an unknown flag;
+none of them need to store or forward it themselves). Confirms the reasoning below: no dependency on
+Rust/Cargo test-target machinery at all — `@provide`/`@inject` resolve entirely inside
+`src/desugar_inject.rs`, before any Rust is emitted, so `env` never needs Cargo's own `#[cfg(test)]`
+to exist or apply. `env = "test"` needs nothing from Cargo, only from `boring`'s own CLI.
 
 ### 7. Transitive resolution falls out for free
 
@@ -1098,16 +1099,17 @@ the `@EnvironmentObject` row's actual shape, not an approximation of it.
   matching real DI frameworks' own default posture (Guice/Dagger also default to unscoped/transient)
   rather than inverting it as an earlier version of this draft did. Kept here, struck through, as a
   record that this was genuinely unresolved for a while, not silently always fine.
-- ~~Deeply-nested test substitution?~~ **Resolved (§6): `@provide(env = "...")`**, a compile-time
-  registry swap keyed by a free-form environment string, never a runtime ambient scope — landing on
-  the "something more static" option this bullet used to leave open rather than the
+- ~~Deeply-nested test substitution?~~ **Resolved and shipped (§6): `@provide(env = "...")`**, a
+  compile-time registry swap keyed by a free-form environment string, never a runtime ambient scope —
+  landing on the "something more static" option this bullet used to leave open rather than the
   ambient-dynamic-scope one, and generalizing past testing specifically (`env = "test"` is just one
   conventional value) to cover build/target-specific providers too (`env = "preprod-redhat"`). The
   "does a distinct test-build target exist upstream" question this used to raise is now moot: `env`
-  is read once by Boring's own CLI, entirely independent of Cargo/Rust build profiles, so it needs no
-  `#[cfg(test)]`-equivalent hook from anything downstream. The one piece still genuinely open: the
-  exact CLI shape for supplying `env` (a `--env <value>` flag on `boring build`/`boring run` is the
-  leading candidate, not yet settled).
+  is read once by Boring's own CLI (`--env <value>` on both `boring build` and `boring run`,
+  `main.rs`'s `current_env_flag`), entirely independent of Cargo/Rust build profiles, so it needs no
+  `#[cfg(test)]`-equivalent hook from anything downstream. Implemented in `src/desugar_inject.rs`
+  (`resolve_provider`: an env-matching candidate outranks a plain one for the same `(base type, id)`
+  key; falls back to the plain one when nothing matches), tested in `tests/dependency_injection.rs`.
 - ~~Ambiguity UX?~~ **Mostly resolved.** First, a distinction worth making explicit since "lazy" now
   means two unrelated things in this document: `@singleton`'s laziness (§4) is a **runtime** property
   of the *generated code* (when a provider's body actually executes, once the compiled program is
@@ -1333,18 +1335,20 @@ rough priority order.
   `desugar_inject.rs` already builds the same-project `(base type) -> provider` registry this would
   need, so widening it to also support the bare case is additive, not a redesign.
 - **Ambiguity and unresolved-provider diagnostics** — **basic version shipped**:
-  `desugar_inject.rs`'s `collect_providers` scans the whole `Program` once, erroring at the second
-  colliding declaration for a given base type (no `id`/`env` yet, so any two `@provide` functions for
-  the same type collide unconditionally) and naming the type/no-provider case clearly when nothing
-  matches at all. What's genuinely still missing, per § "Ambiguity UX"'s fuller design: a `note:`
-  pointing back at the *first* declaration as a separate structured diagnostic (folded into one
-  message for now, since this pass reuses `ParseError`, which has no note/multi-span shape), the
-  distance-based priority ranking (§ "Resolution is keyed by..." — no cross-project `[deps]`
-  resolution exists yet for it to rank against), and `env`-filtering ahead of the collision check.
-- **`@provide(env = "...")`'s CLI shape (§6)** — decide how `env` actually reaches the compiler (a
-  `--env <value>` flag on `boring build`/`boring run` is the leading candidate). No dependency on
-  Cargo/Rust build profiles either way — `env` is read once by Boring's own CLI, before any
-  `@provide`/`@inject` resolution begins.
+  `desugar_inject.rs`'s `collect_providers` scans the whole `Program` once, keyed by `(base type,
+  id)` (§5) with `env`-filtering (§6) applied at resolution time (`resolve_provider`) rather than at
+  collection time — erroring at the second declaration sharing both key *and* `env` value (an
+  unconditional collision, independent of which `env` a given build ends up using), and naming the
+  type/id/env clearly when nothing matches at resolution. What's genuinely still missing, per §
+  "Ambiguity UX"'s fuller design: a `note:` pointing back at the *first* declaration as a separate
+  structured diagnostic (folded into one message for now, since this pass reuses `ParseError`, which
+  has no note/multi-span shape), and the distance-based priority ranking (§ "Resolution is keyed
+  by..." — no cross-project `[deps]` resolution exists yet for it to rank against).
+- ~~`@provide(env = "...")`'s CLI shape (§6)~~ **Resolved and shipped**: a `--env <value>` flag on
+  both `boring build` and `boring run` (`main.rs`'s `current_env_flag`, read directly from
+  `std::env::args()` rather than threaded through each subcommand's own argument parser). No
+  dependency on Cargo/Rust build profiles either way — `env` is read once by Boring's own CLI, before
+  any `@provide`/`@inject` resolution begins.
 
 **Deliberately deferrable — document as "not in v1," don't design now:**
 

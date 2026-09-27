@@ -18,9 +18,9 @@
 //! ## What this pass actually is
 //!
 //! Same shape as `desugar_array_block`: this is simultaneously the
-//! "resolution" step (building the `(base type) -> provider` registry this
-//! design calls for, and matching each `@inject` field against it) and the
-//! "desugar" step (rewriting the match away into an ordinary, `init`-based
+//! "resolution" step (building the `(base type, id) -> provider` registry
+//! this design calls for, and matching each `@inject` field against it) and
+//! the "desugar" step (rewriting the match away into an ordinary, `init`-based
 //! defaulted constructor argument — "the same omit-and-fall-back call-site
 //! mechanic Boring already implements for default parameters", per the design
 //! doc's §1). A struct with an `@inject` field is never passed through to the
@@ -35,16 +35,17 @@
 //! accessors and `main.rs`'s existing `report_error` plumbing, exactly like
 //! `desugar_array_block` already does for its own resolution errors).
 //!
-//! ## Scope of this first implementation (see the design doc's Open
-//! Questions/"Before implementation begins" for what's deliberately deferred)
+//! ## Scope of this implementation (see the design doc's Open Questions/
+//! "Before implementation begins" for what's deliberately still deferred)
 //!
 //! - **Same-project (in practice: same parsed `Program`) only** — no `[deps]`
 //!   cross-project resolution yet. A provider is visible here exactly when
 //!   it's a top-level (or one-level-nested-in-`mod`) `@provide` function in
 //!   this same `Program`.
-//! - **No `id`/`env`** — the registry key is the base type name alone; two
-//!   `@provide` functions for the same type are always ambiguous, with no way
-//!   to disambiguate yet.
+//! - **`id`/`env` (§5-§6) are implemented** — see `attr_kv`/`resolve_provider`
+//!   below. `env` is read once, up front, from a `--env <value>` CLI flag
+//!   (`main.rs`'s `current_env_flag`) — a self-contained Boring-CLI concern,
+//!   no dependency on Cargo/Rust build profiles.
 //! - **`@inject` fields must write an explicit qualifier** — bare-field
 //!   qualifier inference (copying a `@singleton` provider's qualifier
 //!   verbatim, or running chapter 30's usual inference against a transient
@@ -54,11 +55,16 @@
 //!   yet — keeps this first cut to the common case (no hand-written
 //!   constructor at all) rather than also merging synthesized and
 //!   user-written parameter lists.
+//! - **`'static` is not yet in the accepted set** — blocked on the
+//!   `docs/book.md` §21 amendment the design doc's §2 calls for (a fourth
+//!   legal `'static`-construction site, inside a `@provide`-attributed
+//!   function body); not attempted yet.
+//! - **No `[deps]` cross-project resolution, no cycle detection.**
 //!
-//! None of this is `@inject`-site-vs-`@provide`-site cross-project or `id`/
-//! `env` machinery the checker itself would need to know about later —
-//! widening any of the above only ever changes *this* pass's resolution
-//! logic, not what a resolved `@inject` field desugars into.
+//! None of this is `@inject`-site-vs-`@provide`-site cross-project machinery
+//! the checker itself would need to know about later — widening any of the
+//! above only ever changes *this* pass's resolution logic, not what a
+//! resolved `@inject` field desugars into.
 
 use crate::ast::*;
 use crate::parser::ParseError;
@@ -78,13 +84,45 @@ struct Provider {
     /// provider is `@singleton` (§2: the field must match exactly, since
     /// there's only one physical representation in play).
     return_ty: Type,
+    /// `@provide(env = "...")` (§6) — `None` for a plain, unconditional
+    /// provider. Filtered against the current build's `--env` value at
+    /// resolution time; an env-matching provider outranks a plain one for the
+    /// same `(base type, id)` key.
+    env: Option<String>,
     line: usize,
 }
 
-type Registry = HashMap<String, Provider>;
+/// Keyed by `(base type, id)` — `id` is `None` for a bare, unnamed binding
+/// (§5). Each bucket holds every `@provide` candidate for that key, at most
+/// one per distinct `env` value (including at most one with `env: None`) —
+/// `collect_providers` rejects two providers sharing both key *and* `env` as
+/// unconditionally ambiguous; `resolve_provider` picks among the rest by the
+/// current build's `env`.
+type Registry = HashMap<(String, Option<String>), Vec<Provider>>;
 
 fn err(line: usize, col: usize, msg: String) -> ParseError {
     ParseError::Generic { line, col, len: 1, msg }
+}
+
+/// Parses one named argument's value out of an attribute's raw arg list
+/// (`Attr::args`, e.g. `@provide(id = "primary", env = "test")` parses to
+/// `["id=\"primary\"", "env=\"test\""]` — one already-comma-split string per
+/// argument, `key=value` with no surrounding whitespace, confirmed against
+/// the actual parser output rather than assumed). Strips the value's
+/// surrounding string-literal quotes, if any — `id`/`env` are always written
+/// as string literals (§5's "guardrail, non-negotiable: must be a
+/// compile-time string literal on both sides" — trivially true here, since
+/// `Attr::args` only ever holds literal source text in the first place, never
+/// a re-evaluatable expression).
+fn attr_kv<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+    for arg in args {
+        if let Some((k, v)) = arg.split_once('=') {
+            if k == key {
+                return Some(v.trim().trim_matches('"'));
+            }
+        }
+    }
+    None
 }
 
 /// Strips `Type::Mut` and any number of `Type::Qualified` layers down to the
@@ -113,9 +151,10 @@ fn outer_qualifier(ty: &Type) -> Option<&OwnerQual> {
 }
 
 /// §2's accepted-qualifier gate for the `@inject`-site's own field type:
-/// `'shared`/`'actor`/`'guard`/`'observed`(-suffixed)/`'static` always legal;
-/// `'owned` only when the matched provider isn't `@singleton`; anything else
-/// (bare/scalar, `'inline`, `'weak`-suffixed) is a hard error.
+/// `'shared`/`'actor`/`'guard`/`'observed`(-suffixed) always legal; `'owned`
+/// only when the matched provider isn't `@singleton`; anything else
+/// (bare/scalar, `'inline`, `'weak`-suffixed) is a hard error. `'static` is
+/// not yet accepted — see this file's module doc.
 fn check_field_qualifier_accepted(
     field: &FieldDecl,
     provider: &Provider,
@@ -124,15 +163,20 @@ fn check_field_qualifier_accepted(
     let Some(q) = outer_qualifier(ty) else {
         return Err(err(field.line, field.col, format!(
             "`@inject` field `{}` has no qualifier — `@inject` needs one of `'shared`/`'actor`/\
-             `'guard`/`'observed`/`'static`, or `'owned` for a non-`@singleton` provider \
+             `'guard`/`'observed`, or `'owned` for a non-`@singleton` provider \
              (docs/design-notes/boring-di-draft.md §2); a bare scalar or plain struct type has \
              nothing for dependency injection to abstract",
             field.name,
         )));
     };
     match q {
-        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Static
-        | OwnerQual::Observed => Ok(()),
+        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Observed => Ok(()),
+        OwnerQual::Static => Err(err(field.line, field.col, format!(
+            "`@inject` field `{}` cannot be `'static` yet — this needs a `docs/book.md` §21 \
+             amendment (a fourth legal `'static`-construction site, inside a `@provide`-attributed \
+             function body) not implemented yet (docs/design-notes/boring-di-draft.md §2)",
+            field.name,
+        ))),
         OwnerQual::Owned => {
             if provider.is_singleton {
                 Err(err(field.line, field.col, format!(
@@ -160,8 +204,8 @@ fn check_field_qualifier_accepted(
         ))),
         _ => Err(err(field.line, field.col, format!(
             "`@inject` field `{}`'s qualifier is not legal here (docs/design-notes/\
-             boring-di-draft.md §2) — use `'shared`/`'actor`/`'guard`/`'observed`/`'static`, or \
-             `'owned` for a non-`@singleton` provider",
+             boring-di-draft.md §2) — use `'shared`/`'actor`/`'guard`/`'observed`, or `'owned` \
+             for a non-`@singleton` provider",
             field.name,
         ))),
     }
@@ -193,28 +237,71 @@ fn collect_providers(items: &[Item], reg: &mut Registry) -> Result<(), ParseErro
             Item::Fn(f) if f.attrs.iter().any(|a| a.name == "provide") => {
                 let Some(ret_ty) = &f.return_ty else { continue };
                 let Some(base) = base_type_name(ret_ty) else { continue };
+                let provide_attr = f.attrs.iter().find(|a| a.name == "provide")
+                    .expect("guarded by this match arm's own guard");
                 let is_singleton = f.attrs.iter().any(|a| a.name == "singleton");
+                let id = attr_kv(&provide_attr.args, "id").map(str::to_string);
+                let env = attr_kv(&provide_attr.args, "env").map(str::to_string);
                 let entry = Provider {
                     fn_name: f.name.clone(),
                     is_singleton,
                     return_ty: ret_ty.without_mut().clone(),
+                    env: env.clone(),
                     line: f.line,
                 };
-                if let Some(existing) = reg.get(base) {
+                let key = (base.to_string(), id.clone());
+                let bucket = reg.entry(key).or_default();
+                if let Some(existing) = bucket.iter().find(|p| p.env == env) {
+                    let id_desc = id.as_deref().map(|i| format!(" id = \"{}\",", i)).unwrap_or_default();
+                    let env_desc = env.as_deref().map(|e| format!(" env = \"{}\"", e)).unwrap_or_else(|| "no env".to_string());
                     return Err(err(f.line, f.col, format!(
-                        "ambiguous provider for `{}` — `@provide` functions `{}` (line {}) and \
-                         `{}` (line {}) both provide this type, with no `id`/`env` to \
-                         disambiguate (docs/design-notes/boring-di-draft.md, \"Ambiguity UX\")",
-                        base, existing.fn_name, existing.line, f.name, f.line,
+                        "ambiguous provider for `{}` ({}{}) — `@provide` functions `{}` (line {}) \
+                         and `{}` (line {}) both provide this exact binding, with no further `id`/\
+                         `env` to disambiguate (docs/design-notes/boring-di-draft.md, \"Ambiguity UX\")",
+                        base, id_desc, env_desc, existing.fn_name, existing.line, f.name, f.line,
                     )));
                 }
-                reg.insert(base.to_string(), entry);
+                bucket.push(entry);
             }
             Item::Mod(m) => collect_providers(&m.items, reg)?,
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Resolves `(base, id)` against the registry for the current build's `env`
+/// (§6): an env-matching candidate outranks a plain (`env: None`) one for the
+/// same key; a plain candidate is the fallback when nothing matches the
+/// current `env` (or no `--env` was given at all). Two same-rank candidates
+/// can never both survive to this point — `collect_providers` already
+/// rejects two providers sharing both key and `env` value as unconditionally
+/// ambiguous — so this only ever picks among *different* `env` values.
+fn resolve_provider<'a>(
+    reg: &'a Registry,
+    base: &str,
+    id: Option<&str>,
+    current_env: Option<&str>,
+    field: &FieldDecl,
+) -> Result<&'a Provider, ParseError> {
+    let key = (base.to_string(), id.map(str::to_string));
+    let candidates = reg.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+    if let Some(env) = current_env {
+        if let Some(p) = candidates.iter().find(|p| p.env.as_deref() == Some(env)) {
+            return Ok(p);
+        }
+    }
+    if let Some(p) = candidates.iter().find(|p| p.env.is_none()) {
+        return Ok(p);
+    }
+    let id_desc = id.map(|i| format!(" (id = \"{}\")", i)).unwrap_or_default();
+    let env_desc = current_env.map(|e| format!(" for env \"{}\"", e)).unwrap_or_default();
+    Err(err(field.line, field.col, format!(
+        "no `@provide` found for type `{}`{}{} (needed by `@inject` field `{}`) — declare a \
+         `pub @provide` function returning `{}` somewhere in this project \
+         (docs/design-notes/boring-di-draft.md §3)",
+        base, id_desc, env_desc, field.name, base,
+    )))
 }
 
 /// Builds the `init` this struct needs so its `@inject` field(s) become
@@ -224,26 +311,20 @@ fn collect_providers(items: &[Item], reg: &mut Registry) -> Result<(), ParseErro
 /// example uses), so this reuses `emit_init`'s already-correct body-init
 /// codegen and `emit_expr.rs`'s `try_emit_labeled_init_call` call-site
 /// defaulting verbatim — no new transpiler machinery.
-fn synthesize_init(s: &StructDecl, reg: &Registry) -> Result<InitDecl, ParseError> {
+fn synthesize_init(s: &StructDecl, reg: &Registry, current_env: Option<&str>) -> Result<InitDecl, ParseError> {
     let mut params = Vec::with_capacity(s.fields.len());
     let mut body = Vec::with_capacity(s.fields.len());
     for f in &s.fields {
-        let is_inject = f.attrs.iter().any(|a| a.name == "inject");
-        let default = if is_inject {
+        let inject_attr = f.attrs.iter().find(|a| a.name == "inject");
+        let default = if let Some(inject_attr) = inject_attr {
             let Some(base) = base_type_name(&f.ty) else {
                 return Err(err(f.line, f.col, format!(
                     "`@inject` field `{}` has no recognizable base type to resolve a provider \
                      against", f.name,
                 )));
             };
-            let Some(provider) = reg.get(base) else {
-                return Err(err(f.line, f.col, format!(
-                    "no `@provide` found for type `{}` (needed by `@inject` field `{}`) — declare \
-                     a `pub @provide` function returning `{}` somewhere in this project \
-                     (docs/design-notes/boring-di-draft.md §3)",
-                    base, f.name, base,
-                )));
-            };
+            let id = attr_kv(&inject_attr.args, "id");
+            let provider = resolve_provider(reg, base, id, current_env, f)?;
             check_field_qualifier_accepted(f, provider)?;
             check_singleton_qualifier_match(f, provider)?;
             Some(Expr {
@@ -284,7 +365,7 @@ fn synthesize_init(s: &StructDecl, reg: &Registry) -> Result<InitDecl, ParseErro
     Ok(InitDecl { params, body, line: s.line, col: s.col })
 }
 
-fn desugar_struct(mut s: StructDecl, reg: &Registry) -> Result<StructDecl, ParseError> {
+fn desugar_struct(mut s: StructDecl, reg: &Registry, current_env: Option<&str>) -> Result<StructDecl, ParseError> {
     let has_inject = s.fields.iter().any(|f| f.attrs.iter().any(|a| a.name == "inject"));
     if !has_inject {
         return Ok(s);
@@ -297,26 +378,26 @@ fn desugar_struct(mut s: StructDecl, reg: &Registry) -> Result<StructDecl, Parse
             s.name,
         )));
     }
-    let init = synthesize_init(&s, reg)?;
+    let init = synthesize_init(&s, reg, current_env)?;
     s.inits.push(init);
     Ok(s)
 }
 
-fn desugar_items(items: Vec<Item>, reg: &Registry) -> Result<Vec<Item>, ParseError> {
+fn desugar_items(items: Vec<Item>, reg: &Registry, current_env: Option<&str>) -> Result<Vec<Item>, ParseError> {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(match item {
-            Item::Struct(s) => Item::Struct(desugar_struct(s, reg)?),
-            Item::Mod(mut m) => { m.items = desugar_items(m.items, reg)?; Item::Mod(m) }
+            Item::Struct(s) => Item::Struct(desugar_struct(s, reg, current_env)?),
+            Item::Mod(mut m) => { m.items = desugar_items(m.items, reg, current_env)?; Item::Mod(m) }
             other => other,
         });
     }
     Ok(out)
 }
 
-pub fn desugar_inject(mut program: Program) -> Result<Program, ParseError> {
+pub fn desugar_inject(mut program: Program, current_env: Option<&str>) -> Result<Program, ParseError> {
     let mut reg = Registry::new();
     collect_providers(&program.items, &mut reg)?;
-    program.items = desugar_items(program.items, &reg)?;
+    program.items = desugar_items(program.items, &reg, current_env)?;
     Ok(program)
 }

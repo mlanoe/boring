@@ -33,6 +33,22 @@ fn emit_rust(src: &str) -> std::process::Output {
         .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
 }
 
+fn emit_rust_with_env(src: &str, env: &str) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let dir = tempfile_dir();
+    let br_file = dir.join("main.br");
+    std::fs::write(&br_file, src).expect("failed to write fixture .br file");
+
+    Command::new(bin)
+        .arg("build")
+        .arg(&br_file)
+        .arg("--env")
+        .arg(env)
+        .arg("--emit-rust")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
+}
+
 fn emit_rust_single_threaded(src: &str) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_boring");
     let dir = tempfile_dir();
@@ -561,6 +577,216 @@ def main():
     assert!(
         stderr.contains("already declares its own `init`"),
         "expected the existing-init-conflict error, got:\n{}", stderr
+    );
+}
+
+// ── `id` (§5) — multiple named bindings of the same type ───────────────────────
+
+#[test]
+fn inject_id_disambiguates_multiple_bindings() {
+    let src = "\
+trait Database:
+    req string query()
+
+struct PostgresDatabase as Database:
+    string host
+    req string query(): \"{self.host}\"
+
+@provide(id = \"primary\")
+@singleton
+pub Database'shared primaryDb():
+    PostgresDatabase(host = \"primary.internal\")
+
+@provide(id = \"replica\")
+@singleton
+pub Database'shared replicaDb():
+    PostgresDatabase(host = \"replica.internal\")
+
+struct ReportGenerator:
+    @inject(id = \"replica\")
+    Database'shared db
+
+def main():
+    let r = ReportGenerator()
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected id-disambiguated providers to compile, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ReportGenerator::new(replicaDb())"),
+        "expected @inject(id = \"replica\") to resolve to replicaDb specifically, got:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_id_with_no_matching_provider_is_rejected() {
+    let src = "\
+trait Database:
+    req string query()
+
+struct PostgresDatabase as Database:
+    req string query(): \"data\"
+
+@provide(id = \"primary\")
+pub Database'shared primaryDb():
+    PostgresDatabase()
+
+struct ReportGenerator:
+    @inject(id = \"replica\")
+    Database'shared db
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected an id with no matching provider to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no `@provide` found for type `Database`"),
+        "expected the no-provider-found error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_bare_and_id_bindings_never_collide() {
+    // A bare `@inject`/`@provide` (no `id`) and an `id`-tagged one for the same base
+    // type are two distinct registry keys — never ambiguous with each other.
+    let src = "\
+trait Database:
+    req string query()
+
+struct PostgresDatabase as Database:
+    string host
+    req string query(): \"{self.host}\"
+
+@provide
+pub Database'shared defaultDb():
+    PostgresDatabase(host = \"default.internal\")
+
+@provide(id = \"replica\")
+pub Database'shared replicaDb():
+    PostgresDatabase(host = \"replica.internal\")
+
+struct ServiceA:
+    @inject
+    Database'shared db
+
+struct ServiceB:
+    @inject(id = \"replica\")
+    Database'shared db
+
+def main():
+    let a = ServiceA()
+    let b = ServiceB()
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected a bare and an id-tagged provider for the same type to coexist, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("ServiceA::new(defaultDb())"), "got:\n{}", stdout);
+    assert!(stdout.contains("ServiceB::new(replicaDb())"), "got:\n{}", stdout);
+}
+
+// ── `env` (§6) — build-specific provider override ───────────────────────────────
+
+#[test]
+fn inject_env_overrides_plain_provider_when_matching() {
+    let src = "\
+trait AuditLogger:
+    req string label()
+
+struct FileAuditLogger as AuditLogger:
+    req string label(): \"file\"
+
+struct MockAuditLogger as AuditLogger:
+    req string label(): \"mock\"
+
+@provide
+@singleton
+pub AuditLogger'shared auditLogger():
+    FileAuditLogger()
+
+@provide(env = \"test\")
+pub AuditLogger'shared testAuditLogger():
+    MockAuditLogger()
+
+struct ReportGenerator:
+    @inject
+    AuditLogger'shared logger
+
+def main():
+    let r = ReportGenerator()
+    print \"ok\"
+";
+    // No --env: falls back to the plain provider.
+    let out = emit_rust(src);
+    assert!(out.status.success(), "got:\n{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ReportGenerator::new(auditLogger())"),
+        "expected the plain provider with no --env, got:\n{}", stdout
+    );
+
+    // --env test: the env-tagged provider outranks the plain one.
+    let out = emit_rust_with_env(src, "test");
+    assert!(out.status.success(), "got:\n{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ReportGenerator::new(testAuditLogger())"),
+        "expected --env test to resolve to testAuditLogger, got:\n{}", stdout
+    );
+
+    // --env prod: doesn't match "test", falls back to the plain provider.
+    let out = emit_rust_with_env(src, "prod");
+    assert!(out.status.success(), "got:\n{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ReportGenerator::new(auditLogger())"),
+        "expected --env prod (no match) to fall back to the plain provider, got:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_ambiguous_same_env_is_rejected() {
+    let src = "\
+trait Logger:
+    req string label()
+
+struct A as Logger:
+    req string label(): \"a\"
+struct B as Logger:
+    req string label(): \"b\"
+
+@provide(env = \"test\")
+pub Logger'shared providerA():
+    A()
+
+@provide(env = \"test\")
+pub Logger'shared providerB():
+    B()
+
+struct Service:
+    @inject
+    Logger'shared logger
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected two providers for the same env to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous provider for `Logger`"),
+        "expected the ambiguity error, got:\n{}", stderr
     );
 }
 
