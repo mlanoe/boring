@@ -3527,7 +3527,27 @@ impl Transpiler {
                         let materialized = format!(
                             "match &{vname} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }}"
                         );
-                        result.push(format!("&({})", materialized));
+                        // Only wrap in an extra `&(...)` when the callee's declared
+                        // parameter at this position is actually `T&` (Borrow/BorrowMut-
+                        // qualified) — the general by-ref coercion further below does the
+                        // same check (see its own `param_ty` match against
+                        // `OwnerQual::Borrow | OwnerQual::BorrowMut`) but is skipped
+                        // entirely by this branch's `continue`. A plain by-value array
+                        // parameter (the common case: `add_one_gpu([float32] x, ...)`)
+                        // must receive the materialized `Vec<T>` itself, not `&Vec<T>` —
+                        // confirmed via a real E0308 (`expected Vec<f32>, found &Vec<f32>`)
+                        // when chaining one GPU host function's result directly into
+                        // another's argument through a single `let` binding.
+                        let param_ty_here = sig.get(i);
+                        let needs_ref = matches!(
+                            param_ty_here,
+                            Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
+                        );
+                        result.push(if needs_ref {
+                            format!("&({})", materialized)
+                        } else {
+                            materialized
+                        });
                         i += 1;
                         continue;
                     }

@@ -544,6 +544,61 @@ pub req [float32]'gpu'unified add_gpu([float32] a, int n) throws:
         "the [float32] param must never be declared as a Vec<f64>;\ngot:\n{rs}");
 }
 
+#[test]
+fn host_fn_chained_resident_call_arg_no_stray_ref() {
+    // Regression test: chaining the result of one `pub req [T]'gpu'unified`
+    // host function directly into another such function's non-first `[T]`
+    // argument, via a single intermediate `let` binding (`let stage1 =
+    // add_one_gpu(a, 4); let stage2 = add_one_gpu(stage1, 4)`), used to emit
+    // an extraneous leading `&` around the whole `BoringGpuArg<T>` ->
+    // `Vec<T>` materializing match-expression at the second call site --
+    // `emit_args_coerced`'s `resident_call_vars` branch always hardcoded
+    // `&(match &stage1 { ... })` without ever checking whether the callee's
+    // declared parameter at that position was actually `T&` (Borrow-
+    // qualified). A plain by-value `[float32]'global` param (as here) must
+    // receive the materialized `Vec<f32>` itself, not `&Vec<f32>` -- this was
+    // a genuine E0308 (`expected Vec<f32>, found &Vec<f32>`) on a real
+    // `cargo build`, confirmed fixed by a real Metal run producing the
+    // correct output (`3 4 5 6` for inputs `1 2 3 4` through two chained
+    // +1.0 kernel dispatches) after this fix.
+    let (_, rs) = metal_codegen("host_fn_chained_resident_call_arg", r#"
+kernel AddOneKernel:
+    let [float32]'global x
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global xi, int ni):
+        x = xi
+        n = ni
+        out = [0.0 for i in 0..<ni]
+
+    def ():
+        let cell = gpu.thread.x
+        if cell < n:
+            out[cell] = x[cell] + 1.0
+
+pub req [float32]'gpu'unified add_one_gpu([float32]'global x, int n) throws:
+    mut k = AddOneKernel(x, n)
+    kernel:
+        k(block = 256, grid = 1)
+    k.out
+
+[float32] passthrough([float32] x):
+    x
+
+def main() throws:
+    let a = [1.0, 2.0, 3.0, 4.0]
+    let stage1 = add_one_gpu(a, 4)
+    let stage2 = add_one_gpu(stage1, 4)
+    let result = passthrough(stage2)
+    print "{result[0]}"
+"#);
+    assert!(rs.contains("add_one_gpu(match &stage1 {"),
+        "expected the chained argument's materializing match-expression with no wrapping parens;\ngot:\n{rs}");
+    assert!(!rs.contains("add_one_gpu(&(match &stage1 {"),
+        "the materialized Vec<f32> must not be wrapped in an extra & -- this is exactly the E0308 regression;\ngot:\n{rs}");
+}
+
 // ─── host — __boring_launch ───────────────────────────────────────────────────
 
 #[test]
