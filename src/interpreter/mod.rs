@@ -2332,6 +2332,14 @@ pub struct Interpreter {
     /// clean runtime error; this bounds it the same way the parser already
     /// bounds expression/statement nesting depth.
     pub(crate) call_depth: usize,
+    /// `@singleton` (docs/design-notes/boring-di-draft.md §4) memoization cache —
+    /// keyed by function name (an `@singleton` function is always zero-arg and
+    /// there's exactly one declaration per name, so the name alone is an
+    /// unambiguous cache key). Mirrors the transpiler's own `LazyLock` semantics:
+    /// first call, from anywhere (a direct call or an `@inject` site resolving
+    /// against it), computes and caches; every later call, from anywhere, gets
+    /// the cached `Value` back, cloned. See `call_fn`'s own check.
+    pub(crate) singleton_cache: HashMap<String, Value>,
 }
 
 /// Maximum user-function call nesting depth before `call_fn`/`call_closure`/
@@ -2445,6 +2453,7 @@ impl Interpreter {
             warp_barrier: None,
             warp_scratch: None,
             call_depth: 0,
+            singleton_cache: HashMap::new(),
         }
     }
 
@@ -2488,6 +2497,7 @@ impl Interpreter {
             warp_barrier: None,
             warp_scratch: None,
             call_depth: 0,
+            singleton_cache: HashMap::new(),
         }
     }
 

@@ -471,6 +471,38 @@ def main():
 }
 
 #[test]
+fn inject_owned_accepted_with_transient_provider() {
+    let src = "\
+trait Greeter:
+    req string greet()
+
+struct EnglishGreeter as Greeter:
+    req string greet(): \"hello\"
+
+struct Greeting:
+    @inject
+    Greeter'owned greeter
+
+    req string say():
+        self.greeter.greet()
+
+@provide
+pub Greeter greeterProvider():
+    EnglishGreeter()
+
+def main():
+    let g = Greeting()
+    print g.say()
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected 'owned with a transient (non-@singleton) provider to compile, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn inject_owned_rejected_when_provider_is_singleton() {
     let src = "\
 trait NetworkClient:

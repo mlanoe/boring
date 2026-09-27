@@ -1,14 +1,17 @@
 # Draft — a general-purpose dependency-injection / inversion-of-control mechanism for Boring
 
-Status: **partially implemented**. `@singleton` (§4), `@provide`'s `pub` requirement (§3), and a
-first slice of `@inject` (§1-§2 — same-`Program` providers only, no `id`/`env`, explicit field
-qualifier required, no bare-field inference, a struct can't combine `@inject` with its own `init`
-yet) are real and tested (`src/desugar_inject.rs`, `src/checker/mod.rs`'s
-`check_di_provider_attrs`, `tests/dependency_injection.rs`, `tests/cases/{singleton,inject}_di.br`).
-Still design-only: `'static` under `@provide`/`@inject` (§2, blocked on a `docs/book.md` §21
-amendment), `id`/`env` (§5-§6), cross-project (`[deps]`) resolution, cycle detection (§7), and
-`boring run`/the self-hosted interpreter (deferred to v2/v3 by design). This is a standalone design
-topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
+Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
+`@provide`'s `pub` requirement (§3), and a first slice of `@inject` (§1-§2 — same-`Program`
+providers only, no `id`/`env`, explicit field qualifier required, no bare-field inference, a struct
+can't combine `@inject` with its own `init` yet) are real and tested on both backends
+(`src/desugar_inject.rs`, `src/checker/mod.rs`'s `check_di_provider_attrs`,
+`src/interpreter/call.rs`'s `singleton_cache`, `tests/dependency_injection.rs`,
+`tests/cases/{singleton,inject}_di.br`). The self-hosted-in-Boring interpreter
+(`boring/interpreter/*.br`) remains v3, deliberately deferred — see "`boring run` parity" under Open
+Questions for why the interpreter/transpiler split turned out cheaper than originally planned. Still
+design-only: `'static` under `@provide`/`@inject` (§2, blocked on a `docs/book.md` §21 amendment),
+`id`/`env` (§5-§6), cross-project (`[deps]`) resolution, and cycle detection (§7). This is a
+standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
 
 ## Goal
 
@@ -1034,8 +1037,24 @@ the `@EnvironmentObject` row's actual shape, not an approximation of it.
 
 ## Open questions
 
-- ~~`boring run` parity for `@inject`/`@provide`?~~ **Resolved: phased rollout — `boring build` in
-  v1, `boring run` in v2.** `boring build` needs the collection pass described in §2 to complete —
+- ~~`boring run` parity for `@inject`/`@provide`?~~ **Resolved, and shipped ahead of the original
+  phased-rollout plan.** The original plan below (`boring build` in v1, `boring run` in v2) assumed
+  `@inject` would need its own, separate interpreter-side resolution logic. It didn't: the actual v1
+  implementation (`src/desugar_inject.rs`) resolves `@inject` entirely as an AST-level desugaring
+  pass, synthesizing an ordinary `init` before *either* backend ever runs — so `boring run`'s
+  tree-walking interpreter already gets `@inject`/`@provide` for free, with zero interpreter-specific
+  code, simply by being wired into the same pipeline stage (`main.rs`'s `run_file`, right after
+  `desugar_array_block`). The one piece that genuinely needed separate interpreter work was
+  `@singleton`'s own memoization — the transpiler's `LazyLock`-based codegen has no interpreter
+  equivalent, so a first `boring run` of a `@singleton` function silently re-ran its body on every
+  call. Fixed with a small name-keyed cache on `Interpreter` (`singleton_cache`, checked/populated in
+  `call_fn`) — sound because the checker already guarantees an `@singleton` function is zero-parameter
+  with exactly one declaration per name. Confirmed via the same `inject_di.br` scenario running
+  correctly under both `boring build` and `boring run`.
+
+  <details><summary>Original phased-rollout reasoning (superseded above, kept for the record)</summary>
+
+  `boring build` needs the collection pass described in §2 to complete —
   now bounded to the current project's own files, not the whole `[deps]` graph — before it can fix a
   bare `@inject` field's Rust layout. `boring run`'s tree-walking interpreter has no equivalent
   pre-pass requirement at all: it can resolve a bare (or explicit) `@inject` site lazily, at the
@@ -1047,6 +1066,8 @@ the `@EnvironmentObject` row's actual shape, not an approximation of it.
   pass or backend implements it, is what should govern whether it's uniform. *How* each backend
   arrives at the answer (upfront collection for `build`, lazy on-construction lookup for `run`) is
   exactly the kind of backend-specific implementation detail that's fine to differ.
+
+  </details>
 - ~~Self-hosted-in-Boring interpreter support?~~ **Resolved: v3, well after both of the above.** The
   interpreter written in Boring itself (`boring/interpreter/*.br` — `CLAUDE.md`) is not a variant of
   `boring run` — it's a Boring *program* (`lexer.br`/`parser_core.br`/`ast.br`/`exec.br`/`eval.br`/
@@ -1285,11 +1306,12 @@ rough priority order.
 3. ~~Cross-project visibility default for `@provide`?~~ **Resolved and shipped (§3)**: `@provide`
    requires `pub`, unconditionally — the checker rejects a non-`pub` `@provide`
    (`check_di_provider_attrs`), tested in `tests/dependency_injection.rs`.
-4. ~~`boring run` vs. `boring build` parity?~~ **Resolved: `boring build` in v1, `boring run` in v2,
-   the self-hosted-in-Boring interpreter (`boring/interpreter/*.br`) not before v3.** `@inject`'s
-   actual v1 implementation (`desugar_inject.rs`) runs entirely as an AST-level desugaring pass
-   before the checker/transpiler — `boring run`'s tree-walking interpreter never sees `@inject`/
-   `@provide` at all yet (v2 scope, unchanged).
+4. ~~`boring run` vs. `boring build` parity?~~ **Resolved and shipped, both backends, ahead of the
+   original phased plan** — see the fuller writeup under Open Questions. `@inject`/`@provide` need no
+   interpreter-specific code at all (`desugar_inject.rs` resolves them at the AST level before either
+   backend runs); `@singleton` needed one small addition, a name-keyed memoization cache on
+   `Interpreter` (`singleton_cache`, `src/interpreter/call.rs`'s `call_fn`), now shipped too. The
+   self-hosted-in-Boring interpreter (`boring/interpreter/*.br`) remains v3, unaffected by this.
 5. ~~Eager vs. lazy construction for `@singleton`?~~ **Resolved and shipped (§4): lazy** —
    `emit_singleton_fn` (`src/transpiler/emit_top.rs`) compiles to a `std::sync::LazyLock`, each
    `@singleton` its own independent static. Non-`@singleton` providers don't need this decision at

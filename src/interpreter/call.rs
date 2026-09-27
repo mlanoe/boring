@@ -4,6 +4,19 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, in_throws_context: bool) -> Eval {
+        // `@singleton` (docs/design-notes/boring-di-draft.md §4): the checker
+        // (`check_di_provider_attrs`) already guarantees a zero-parameter,
+        // non-`throws`/`task`/`stream` function, so a name-keyed cache is sound —
+        // there's exactly one declaration per name and no arguments to vary on.
+        // Mirrors the transpiler's own `LazyLock`: first call from anywhere
+        // computes and caches, every later call (direct or via an `@inject` site)
+        // gets the same cached value back, cloned.
+        let is_singleton = decl.attrs.iter().any(|a| a.name == "singleton");
+        if is_singleton {
+            if let Some(cached) = self.singleton_cache.get(&decl.name) {
+                return Ok(cached.clone());
+            }
+        }
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
@@ -14,6 +27,11 @@ impl Interpreter {
         }
         let result = self.call_fn_inner(decl, captured, args, line, in_throws_context);
         self.call_depth -= 1;
+        if is_singleton {
+            if let Ok(val) = &result {
+                self.singleton_cache.insert(decl.name.clone(), val.clone());
+            }
+        }
         result
     }
 
