@@ -428,7 +428,7 @@ impl HostEmitter {
         }
         self.blank();
 
-        if self.screen_var.is_some() || top_level_kernel_touching || !kernel_names.is_empty() || program.items.iter().any(|i| matches!(i, Item::Stmt(_) | Item::Let(_))) {
+        if self.screen_var.is_some() || top_level_kernel_touching || !kernel_names.is_empty() || has_boring_main || program.items.iter().any(|i| matches!(i, Item::Stmt(_) | Item::Let(_))) {
             self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
             self.indent += 1;
             if self.screen_var.is_some() || top_level_kernel_touching {

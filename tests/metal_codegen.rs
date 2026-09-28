@@ -1743,3 +1743,64 @@ def main() throws:
          output (\"1\");\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
 }
+
+// ─── host — kernel-less program still gets a real `fn main()` ────────────────
+
+// `rename_top_level_main` always renames the user's `fn main()` to
+// `boring_main` before this backend's own host emitter runs (see
+// `metal::mod`'s `transpile_metal`) so the general pipeline's kernel-aware
+// codegen never collides with a function literally named `main`. Every other
+// target (wgpu, cuda) then unconditionally emits a real `fn main()` wrapper
+// that calls `boring_main()` -- but this backend's own `emit_program` used to
+// gate the entire `fn main()` block behind `self.screen_var.is_some() ||
+// top_level_kernel_touching || !kernel_names.is_empty() || program.items...
+// Stmt/Let`, with no `has_boring_main` case at all. A program with no
+// `Screen`, no `kernel` declarations, and no bare top-level statement/let --
+// i.e. a plain `def main():` and nothing else -- satisfied none of those, so
+// `fn main()` (and the call to `boring_main()`) was silently omitted
+// entirely, leaving `boring_main` defined but never called and the crate
+// missing an entry point (`error[E0601]: main function not found`). Confirmed
+// this test fails to compile with exactly that error against the pre-fix
+// code.
+#[test]
+fn real_metal_target_kernel_less_program_gets_main_and_runs() {
+    let test_name = "kernel_less_program_gets_main";
+    let (_msl, rs, _toml) = run_metal(test_name, r#"
+def main() throws:
+    print "hi"
+"#);
+
+    assert!(
+        rs.contains("fn main("),
+        "expected a real `fn main()` wrapper to be emitted even though this \
+         program has no Screen, no kernel declarations, and no bare \
+         top-level statement/let;\ngot:\n{rs}"
+    );
+    assert!(
+        rs.contains("boring_main()"),
+        "expected the generated `fn main()` to actually call `boring_main()`;\ngot:\n{rs}"
+    );
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated Metal project for a kernel-less program to \
+         compile AND run to completion (no real GPU touched -- this program \
+         never constructs or dispatches a kernel), but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert_eq!(
+        stdout.trim_end(), "hi",
+        "expected `boring_main()` to actually run;\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+}
