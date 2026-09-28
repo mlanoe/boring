@@ -2333,3 +2333,19 @@ mod tests_gpu;
 mod tests_labeled_array;
 mod tests_bytearray;
 mod tests_for_lazy_iterables;
+
+#[test]
+fn integer_pow_preserves_width_and_reports_invalid_inputs() {
+    let mut interp = Interpreter::new();
+    macro_rules! check_width {
+        ($($variant:ident),+) => { $(
+            let result = interp.call_method(Value::$variant(3), "pow", vec![Value::Int(3)], 1, &mut None).unwrap();
+            assert!(matches!(result, Value::$variant(27)));
+        )+ };
+    }
+    check_width!(Int, Uint, Uint8, Int8, Int16, Int32, Int64, Int128, Uint16, Uint32, Uint64, Uint128);
+    assert!(interp.call_method(Value::Int8(3), "pow", vec![Value::Int(5)], 1, &mut None).is_err());
+    for args in [vec![], vec![Value::Float64(2.0)], vec![Value::Int(2), Value::Int(3)]] {
+        assert!(interp.call_method(Value::Int(3), "pow", args, 1, &mut None).is_err());
+    }
+}

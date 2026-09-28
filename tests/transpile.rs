@@ -693,6 +693,12 @@ transpile_test!(builtin_name_user_members);
 transpile_test!(implicit_self_length_nontail);
 transpile_test!(throws_method_name_collision);
 transpile_test!(narrowing_cast_if_let);
+// A `string`-typed STRUCT FIELD (not a bare local/parameter) cast to a fixed-width
+// integer inside `guard let`/`if let` used to be misclassified as a numeric narrowing
+// cast (wrongly emitting `isize::try_from(t.field.clone())`, which doesn't compile --
+// `TryFrom<Arc<str>>`/`Rc<str>` isn't implemented for `isize`) instead of the correct
+// string-parse codegen. See the file's own doc comment for the full writeup.
+transpile_test!(guard_let_cast_struct_field);
 transpile_test!(try_else_nil_if_let);
 // `try`/`try?` used to only be recognized as a prefix inside `parse_else_expr`,
 // one precedence level above where `guard let x = EXPR`/`if let x = EXPR`
@@ -1266,3 +1272,9 @@ transpile_test!(shared_return_callsite_no_double_wrap);
 // wrong runtime value — see tests/cases/inline_if_else_next_line_postfix.br's
 // own doc comment and `parse_postfix_inner` in src/parser/parse_expr.rs.
 transpile_test!(inline_if_else_next_line_postfix);
+
+transpile_test!(numeric_method_parity);
+
+transpile_test!(conditional_cast_boundaries);
+
+transpile_test!(collection_named_methods);

@@ -95,3 +95,86 @@ if let Some(n) = countdown:
     print "countdown stopped at {n}"
 else:
     print "countdown stopped at nil"
+
+# Regression: `while let name:` self-referencing shorthand loop whose bound
+# variable is a non-Copy value (string) reused 2+ times in the loop body,
+# including once inside an `if`/`else` expression — e.g. pushed into a
+# history array, then read again to encode. Found wiring boring-llm's
+# KV-cache chat loop (`user_msgs.push(line); let t = if first_turn:
+# tok.encode_chat(...) else: tok.encode_chat_turn(line)` inside a `while let
+# line:` loop reading `readLine()`). `emit_while_let` never registered the
+# loop-bound name's type at all (unlike an `if let`/`elif let` binding), so
+# NEITHER later use site got `.clone()` inserted at `boring build` —
+# `error[E0382]: use of moved value` at `cargo build`, even though the exact
+# same reuse shape for an ordinary `let`-bound local already worked. Also
+# covers the underlying gap that made the bug invisible outside `readLine()`
+# itself: an unannotated `var x = someOptFn()` only tracked `x` in
+# `optional_vars`, never in `var_types` — so nothing later unwrapping `x`
+# (this loop included) could resolve its inner type either.
+pub struct Tok:
+    req string encode(string text):
+        "<{text}>"
+
+string? nextTok(int n):
+    if n <= 0: return nil
+    return "tok{n}"
+
+let tok = Tok()
+var [string] tokHistory = []
+var n2 = 3
+var word = nextTok(n2)
+while let word:
+    tokHistory.push(word)
+    let tag = if tokHistory.len() == 1:
+        tok.encode(word)
+    else:
+        tok.encode(word)
+    print tag
+    n2 = n2 - 1
+    word = nextTok(n2)
+print "history size: {tokHistory.len()}"
+
+# Regression: `let x = <optional-expr> else <default>` binding — e.g.
+# `readLine() else "default"` or `dict[key] else "fallback"` — reused 2+
+# times, including once inside an `if`/`else` expression. Same underlying
+# `string_vars` clone-tracking gap as the `while let`/`as string` bugs above
+# and in tests/string_cast_let_reuse.rs, but a genuinely different trigger:
+# `else` unconditionally unwraps the optional, so the binding's Rust type is
+# the *default*'s type (never `Option<_>`), yet `track_let_metadata` never
+# registered it in `string_vars` at all when the initializer was an
+# `ExprKind::Else` — NEITHER `history.push(line)` nor either branch of the
+# `if`/`else` got `.clone()` inserted, `error[E0382]: use of moved value` at
+# `cargo build`, invisible from the Boring source itself. Found wiring
+# boring-llm's KV-cache chat loop (`let line = readLine() else "default"`,
+# reused via `history.push(line)` + `tok.encode_a/b(line)`). Covers both the
+# `<T?-returning-call> else default` shape and the `dict[key] else default`
+# shape (same `ExprKind::Else` AST node, same fix).
+string? maybeGreeting(int n):
+    if n <= 0: return nil
+    return "hi{n}"
+
+var [string] greetHistory = []
+let greet1 = maybeGreeting(2) else "default"
+greetHistory.push(greet1)
+let encoded1 = if greetHistory.len() == 1:
+    tok.encode(greet1)
+else:
+    tok.encode(greet1)
+print encoded1
+
+let greet2 = maybeGreeting(0) else "default"
+greetHistory.push(greet2)
+print greetHistory.len()
+
+let {string=string} greetTable = {"a" = "yo"}
+let greet3 = greetTable["a"] else "fallback"
+greetHistory.push(greet3)
+let encoded3 = if greetHistory.len() == 3:
+    tok.encode(greet3)
+else:
+    tok.encode(greet3)
+print encoded3
+
+let greet4 = greetTable["missing"] else "fallback"
+greetHistory.push(greet4)
+print greetHistory.len()

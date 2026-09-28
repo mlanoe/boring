@@ -1,5 +1,8 @@
 # Plan: porting the Rust interpreter to Boring
 
+> Historical porting report. For the current three-engine comparison and remaining
+> implementation work, see [Interpreter parity audit (2026-09-29)](interpreter-parity.md).
+
 **Date:** 2026-06-10  
 **Updated:** 2026-09-07 — `Dict`/`Set` O(n) limitation documented, §8.3 (real `use` module-import support, §8.2, landed 2026-08-25)  
 **Status:** Complete — 83/83 tests passing, single-thread and multi-thread modes  

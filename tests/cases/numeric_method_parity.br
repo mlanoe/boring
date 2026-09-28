@@ -1,0 +1,45 @@
+# Shared behavioral contract for both interpreters and generated Rust.
+let int n_int = 3
+print n_int.pow(3)
+let uint n_uint = 3
+print n_uint.pow(3)
+let uint8 n_uint8 = 3
+print n_uint8.pow(3)
+let int8 n_int8 = 3
+print n_int8.pow(3)
+let int16 n_int16 = 3
+print n_int16.pow(3)
+let int32 n_int32 = 3
+print n_int32.pow(3)
+let int64 n_int64 = 3
+print n_int64.pow(3)
+let int128 n_int128 = 3
+print n_int128.pow(3)
+let uint16 n_uint16 = 3
+print n_uint16.pow(3)
+let uint32 n_uint32 = 3
+print n_uint32.pow(3)
+let uint64 n_uint64 = 3
+print n_uint64.pow(3)
+let uint128 n_uint128 = 3
+print n_uint128.pow(3)
+let int exact = 9007199254740993
+print exact.pow(1)
+let int negative = -3
+print negative.pow(3)
+print negative.pow(0)
+let uint32 exponent = 4
+print negative.pow(exponent)
+let float32 f32 = 2.0
+let float64 f64 = 2.0
+print f32.powf(3.0)
+print f64.powf(3.0)
+struct Custom:
+    req int pow(int exponent):
+        exponent + 1
+let custom = Custom()
+print custom.pow(2)
+print ord("éclair")
+print chr(233)
+print ord("😀")
+print chr(128512)

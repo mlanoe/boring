@@ -522,6 +522,14 @@ impl DeviceEmitter {
 
     // ── Expressions ───────────────────────────────────────────────────────────
 
+    /// Value of an if/elif/else branch body: the trailing expression statement,
+    /// or `"0"` if the branch has none.
+    fn if_branch_value(&mut self, body: &[Stmt]) -> String {
+        body.last().and_then(|s| {
+            if let Stmt::Expr(e) = s { Some(self.expr(e)) } else { None }
+        }).unwrap_or_else(|| "0".into())
+    }
+
     fn expr(&mut self, e: &Expr) -> String {
         match &e.kind {
             ExprKind::Int(n)   => n.to_string(),
@@ -630,19 +638,20 @@ impl DeviceEmitter {
                 format!("(({})({})) ", c_type(ty), self.expr(inner))
             }
             ExprKind::If(i) => {
-                // Ternary: only first branch used.
-                if let Some((cond, then_body)) = i.branches.first() {
+                let tail = match &i.else_body {
+                    Some(b) => self.if_branch_value(b),
+                    None => "0".into(),
+                };
+                // Nest every branch (not just the first) so an elif chain lowers to
+                // `c0 ? t0 : (c1 ? t1 : (c2 ? t2 : else))` instead of collapsing to
+                // just the first condition with the else value as fallback.
+                let mut acc = tail;
+                for (cond, then_body) in i.branches.iter().rev() {
                     let c = self.expr(cond);
-                    let t = then_body.last().and_then(|s| {
-                        if let Stmt::Expr(e) = s { Some(self.expr(e)) } else { None }
-                    }).unwrap_or_else(|| "0".into());
-                    let e = i.else_body.as_ref().and_then(|b| b.last()).and_then(|s| {
-                        if let Stmt::Expr(e) = s { Some(self.expr(e)) } else { None }
-                    }).unwrap_or_else(|| "0".into());
-                    format!("({} ? {} : {})", c, t, e)
-                } else {
-                    "0".into()
+                    let t = self.if_branch_value(then_body);
+                    acc = format!("({} ? {} : {})", c, t, acc);
                 }
+                acc
             }
             ExprKind::Range { start, end, inclusive: _ } => {
                 format!("/* range {}..{} */", self.expr(start), self.expr(end))

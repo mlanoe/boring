@@ -1,0 +1,39 @@
+# Regression test.
+#
+# `(t.field as int)` used as the scrutinee of `guard let`/`if let` -- where
+# `field` is a `string`-typed STRUCT FIELD, not a bare local/parameter --
+# used to transpile to the wrong codegen. `cast_source_is_stringy_or_bool`
+# (used by `try_emit_checked_int_cast_as_option` to decide whether the cast
+# already has its own correct Option-producing codegen) only recognized a
+# bare `ExprKind::Var`, so a field access fell through to `_ => false` and
+# got wrongly treated as a *numeric* narrowing cast, emitting
+# `isize::try_from(t.field.clone()).ok()` -- which fails to compile since
+# `TryFrom<Arc<str>>`/`TryFrom<Rc<str>>` isn't implemented for `isize`.
+# It should instead emit the ordinary string-parse codegen
+# (`t.field.clone().trim().parse::<isize>().ok()`), exactly as it already
+# did for a bare local/parameter of the same declared type.
+
+struct Tok:
+    string text
+
+int parse_field(Tok t) throws:
+    guard let n = (t.text as int) else throw "bad: {t.text}"
+    n
+
+int parse_field_if_let(Tok t):
+    if let n = (t.text as int):
+        n
+    else:
+        (0 as int) - (1 as int)
+
+def run() throws:
+    let good = Tok("42")
+    let bad = Tok("not a number")
+
+    # Parses cleanly -- guard let does NOT take the early throw.
+    print "{parse_field(good)}"
+    # Fails to parse -- if let takes the "else" branch, not a numeric TryFrom crash.
+    print "{parse_field_if_let(bad)}"
+
+def main() throws:
+    run()

@@ -4,6 +4,48 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
+        // Integer powers retain their width and never round through a float.
+        // The transpiler converts the exponent to Rust's u32 as well.
+        if method == "pow" && matches!(&obj,
+            Value::Int(_) | Value::Uint(_) | Value::Uint8(_) | Value::Int8(_)
+            | Value::Int16(_) | Value::Int32(_) | Value::Int64(_) | Value::Int128(_)
+            | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_))
+        {
+            if args.len() != 1 {
+                return Err(err("pow: expected one integer exponent", line));
+            }
+            let exponent = match &args[0] {
+                Value::Int(n) => *n as u32,
+                Value::Uint(n) => *n as u32,
+                Value::Uint8(n) => *n as u32,
+                Value::Int8(n) => *n as u32,
+                Value::Int16(n) => *n as u32,
+                Value::Int32(n) => *n as u32,
+                Value::Int64(n) => *n as u32,
+                Value::Int128(n) => *n as u32,
+                Value::Uint16(n) => *n as u32,
+                Value::Uint32(n) => *n as u32,
+                Value::Uint64(n) => *n as u32,
+                Value::Uint128(n) => *n as u32,
+                _ => return Err(err("pow: expected one integer exponent", line)),
+            };
+            let result = match obj {
+                Value::Int(n) => n.checked_pow(exponent).map(Value::Int),
+                Value::Uint(n) => n.checked_pow(exponent).map(Value::Uint),
+                Value::Uint8(n) => n.checked_pow(exponent).map(Value::Uint8),
+                Value::Int8(n) => n.checked_pow(exponent).map(Value::Int8),
+                Value::Int16(n) => n.checked_pow(exponent).map(Value::Int16),
+                Value::Int32(n) => n.checked_pow(exponent).map(Value::Int32),
+                Value::Int64(n) => n.checked_pow(exponent).map(Value::Int64),
+                Value::Int128(n) => n.checked_pow(exponent).map(Value::Int128),
+                Value::Uint16(n) => n.checked_pow(exponent).map(Value::Uint16),
+                Value::Uint32(n) => n.checked_pow(exponent).map(Value::Uint32),
+                Value::Uint64(n) => n.checked_pow(exponent).map(Value::Uint64),
+                Value::Uint128(n) => n.checked_pow(exponent).map(Value::Uint128),
+                _ => unreachable!(),
+            };
+            return result.ok_or_else(|| err("pow: integer overflow", line));
+        }
         // `ByteArray` method dispatch — the hot paths (len/first/last/push/slice/
         // getAt/index-API/contains) stay packed; anything else inflates to a
         // real `Array` and re-dispatches through the normal path below. See

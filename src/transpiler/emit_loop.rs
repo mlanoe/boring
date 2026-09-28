@@ -13,7 +13,68 @@ use super::*;
 use super::Transpiler;
 use super::helpers::*;
 
+/// Snapshot of every piece of clone-tracking/type state
+/// `Transpiler::register_optional_binding_type`/`unregister_optional_binding_type`
+/// (emit_match.rs) can touch for one variable name. Used only by `emit_while_let`'s
+/// self-referencing shorthand branch below: unlike every other `if let`/`while let`
+/// binding form, whose bound name is a fresh loop/branch-scoped local that can just
+/// be registered on entry and blindly unregistered on exit, the shorthand's bound
+/// name IS the outer `var` binding (`while let v:` ≡ `while let v = v:`) — so
+/// "unregister" must restore whatever tracking the outer binding already carried
+/// before the loop shadowed it with the unwrapped inner type, not wipe it to
+/// nothing.
+struct OptionalBindingSnapshot {
+    known_local_vars: bool,
+    mut_checked_local_vars: bool,
+    content_mutable_local_vars: bool,
+    var_types: Option<Type>,
+    var_struct_types: Option<String>,
+    string_vars: bool,
+    optional_vars: bool,
+    var_mutex_types: bool,
+    managed_refcell_vars: bool,
+    managed_mutex_vars: bool,
+}
+
+fn set_membership(set: &mut std::collections::HashSet<String>, name: &str, present: bool) {
+    if present { set.insert(name.to_string()); } else { set.remove(name); }
+}
+
 impl Transpiler {
+    fn snapshot_optional_binding(&self, name: &str) -> OptionalBindingSnapshot {
+        OptionalBindingSnapshot {
+            known_local_vars: self.known_local_vars.contains(name),
+            mut_checked_local_vars: self.mut_checked_local_vars.contains(name),
+            content_mutable_local_vars: self.content_mutable_local_vars.contains(name),
+            var_types: self.var_types.get(name).cloned(),
+            var_struct_types: self.var_struct_types.get(name).cloned(),
+            string_vars: self.string_vars.contains(name),
+            optional_vars: self.optional_vars.contains(name),
+            var_mutex_types: self.var_mutex_types.contains(name),
+            managed_refcell_vars: self.managed_refcell_vars.contains(name),
+            managed_mutex_vars: self.managed_mutex_vars.contains(name),
+        }
+    }
+
+    fn restore_optional_binding(&mut self, name: &str, snap: OptionalBindingSnapshot) {
+        set_membership(&mut self.known_local_vars, name, snap.known_local_vars);
+        set_membership(&mut self.mut_checked_local_vars, name, snap.mut_checked_local_vars);
+        set_membership(&mut self.content_mutable_local_vars, name, snap.content_mutable_local_vars);
+        match snap.var_types {
+            Some(t) => { self.var_types.insert(name.to_string(), t); }
+            None => { self.var_types.remove(name); }
+        }
+        match snap.var_struct_types {
+            Some(t) => { self.var_struct_types.insert(name.to_string(), t); }
+            None => { self.var_struct_types.remove(name); }
+        }
+        set_membership(&mut self.string_vars, name, snap.string_vars);
+        set_membership(&mut self.optional_vars, name, snap.optional_vars);
+        set_membership(&mut self.var_mutex_types, name, snap.var_mutex_types);
+        set_membership(&mut self.managed_refcell_vars, name, snap.managed_refcell_vars);
+        set_membership(&mut self.managed_mutex_vars, name, snap.managed_mutex_vars);
+    }
+
     /// Best-effort resolution of an expression's static Boring type, for the
     /// two shapes relevant to for-loop auto-enumerate detection: a plain
     /// local variable/parameter, and a struct field access. Returns `None`
@@ -153,7 +214,17 @@ impl Transpiler {
             self.line("{");
             self.indent += 1;
             self.line(&format!("let mut {} = {};", outer, val));
-            self.known_local_vars.insert(s.name.clone());
+            // The loop-bound name IS the outer binding, so — unlike every other
+            // while-let/if-let form below, whose bound name is a fresh loop/
+            // branch-scoped local — registering it here shadows whatever
+            // clone-tracking the outer binding already carried (e.g. `var line =
+            // readLine()`'s own `Optional(string)` entry) with the unwrapped
+            // inner type for the loop body's duration. Snapshot it first so it
+            // can be restored verbatim once the loop exits, instead of either
+            // leaking the shadowed inner-type tracking past the loop or wiping
+            // out the outer binding's own pre-loop tracking entirely.
+            let snapshot = self.snapshot_optional_binding(&s.name);
+            self.register_optional_binding_type(&s.name, &s.value);
             self.line(&format!("while let Some({}) = {} {{", s.name, outer));
             self.indent += 1;
             let prev = self.while_let_redirect.insert(s.name.clone(), outer.clone());
@@ -171,6 +242,7 @@ impl Transpiler {
                 Some(p) => { self.while_let_redirect.insert(s.name.clone(), p); }
                 None => { self.while_let_redirect.remove(&s.name); }
             }
+            self.restore_optional_binding(&s.name, snapshot);
             self.indent -= 1;
             self.line("}");
             // Write the final (`None`) state back to the outer binding, so code
@@ -187,13 +259,39 @@ impl Transpiler {
             Self::collect_pattern_binds(pat, &mut self.known_local_vars);
             let pat_s = self.emit_pattern(pat);
             self.line(&format!("while let {} = {} {{", pat_s, val));
-        } else {
-            // `while let name = expr:` — implicit Some unwrap
-            self.known_local_vars.insert(s.name.clone());
-            self.line(&format!("while let Some({}) = {} {{", s.name, val));
+            self.indent += 1;
+            // The common `Some(name)` shape gets the same inner-type propagation
+            // as the implicit-unwrap form just below (a nested/tuple pattern's
+            // binds stay known-locals-only via `collect_pattern_binds` above,
+            // same as before this fix — mirrors if-let's own `CondClause::LetPat`
+            // arm, which doesn't attempt type propagation for those either).
+            let simple_bind = match pat {
+                Pattern::Some(inner) => match inner.as_ref() {
+                    Pattern::Bind(name) => Some(name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = &simple_bind {
+                self.register_optional_binding_type(name, &s.value);
+            }
+            self.emit_loop_body(&s.body);
+            if let Some(name) = &simple_bind {
+                self.unregister_optional_binding_type(name);
+            }
+            self.indent -= 1;
+            self.line("}");
+            return;
         }
+        // `while let name = expr:` — implicit Some unwrap. `name` is a fresh
+        // loop-scoped local (not the self-referencing shorthand above), so —
+        // like an if-let binding — it can be registered on entry and
+        // unconditionally unregistered on exit rather than snapshot/restored.
+        self.register_optional_binding_type(&s.name, &s.value);
+        self.line(&format!("while let Some({}) = {} {{", s.name, val));
         self.indent += 1;
         self.emit_loop_body(&s.body);
+        self.unregister_optional_binding_type(&s.name);
         self.indent -= 1;
         self.line("}");
     }

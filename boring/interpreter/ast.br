@@ -174,6 +174,7 @@ struct EnumDecl:
     [string] type_params
     [string] protocols
     [EnumVariant] variants
+    [TypeMethod] type_methods
     [FnDecl] methods
     [SetDecl] setters
     [AsDecl] conversions

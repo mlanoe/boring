@@ -702,3 +702,13 @@ interp_test!(struct_field_scalar_coercion_no_init);
 interp_test!(struct_field_array_coercion_explicit_init);
 interp_test!(struct_field_scalar_coercion_init_shortcut);
 interp_test!(struct_field_scalar_coercion_method_assign);
+
+// Interpreter parity with the transpiler numerical fixtures.
+interp_test!(pow_method_int_unaffected);
+interp_test!(pow_method_int_exponent_var);
+
+interp_test!(numeric_method_parity);
+
+interp_test!(conditional_cast_boundaries);
+
+interp_test!(collection_named_methods);

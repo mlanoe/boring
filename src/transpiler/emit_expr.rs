@@ -1408,6 +1408,20 @@ impl Transpiler {
                     || matches!(self.var_types.get(v.as_str()), Some(Type::Str))
                     || matches!(self.var_types.get(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
             }
+            // A struct field / array / dict element access whose declared type is
+            // `string` (e.g. the `t.text` in `guard let n = (t.text as int) else ...`)
+            // — same string-ness check as the `Var` arm above, just resolved through
+            // `resolve_field_or_index_type` instead of `var_types` since a bare
+            // `ExprKind::Field`/`Index`/`LabeledIndex` was previously falling through
+            // to `_ => false` here and getting wrongly routed through the numeric
+            // `TryFrom` path below instead of the correct `.parse().ok()` codegen.
+            ExprKind::Field(_, _) | ExprKind::Index(_, _) | ExprKind::LabeledIndex(_, _) => {
+                match self.resolve_field_or_index_type(inner).as_ref().map(Type::without_mut) {
+                    Some(Type::Str) => true,
+                    Some(Type::Named(n)) => n == "string" || n == "str",
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }

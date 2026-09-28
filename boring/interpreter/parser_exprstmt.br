@@ -494,6 +494,14 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_optional_method_call(expr, field, args, line)
             else:
                 expr = make_optional_field(expr, field, line)
+        elif parser_check(p, "Lt") and parser_peek_generic_args_at(p, 0):
+            parser_advance(p)
+            var type_args = [parse_type(p)]
+            while parser_eat(p, "Comma"):
+                type_args.push(parse_type(p))
+            parser_expect(p, "Gt")
+            let args = parse_call_args(p)
+            expr = make_generic_call(expr, type_args, args, line)
         elif parser_check(p, "LBracket"):
             parser_advance(p)
             if parser_peek_is_labeled_start(p):

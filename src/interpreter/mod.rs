@@ -1030,10 +1030,18 @@ impl Env {
 
     /// Mark a variable as moved: keep the name in scope so reads produce a "use of moved value"
     /// error instead of the less informative "undefined variable" error.
+    ///
+    /// Deliberately does NOT touch `mutable` (rebind permission) — moved just
+    /// means the old value is gone, not that the binding itself became
+    /// permanently immutable. A `var` binding must stay reassignable via a
+    /// plain `name = <expr>` even after being moved-from (this mirrors real
+    /// Rust: writing a fresh value into an already-moved `mut` binding is
+    /// legal). Only `content_mutable` is cleared, since `def` calls / field
+    /// writes / structural mutation on the now-gone old value make no sense
+    /// until a fresh value is assigned back in.
     pub fn set_moved(&mut self, name: &str) {
         if self.vars.contains_key(name) {
             self.vars.insert(name.to_string(), Value::Moved(name.to_string()));
-            self.mutable.remove(name);
             self.content_mutable.remove(name);
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().set_moved(name);

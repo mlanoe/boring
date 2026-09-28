@@ -1,0 +1,41 @@
+# Conditional casts reject range/sign loss and evaluate the source only once.
+struct Probe:
+    var int calls = 0
+
+    def int sample():
+        calls += 1
+        300
+
+def main():
+    mut probe = Probe()
+    if let n = (probe.sample() as uint8):
+        print "unexpected {n}"
+    else:
+        print "overflow"
+    print probe.calls
+
+    let int negative = -1
+    if let n = (negative as uint8):
+        print "unexpected {n}"
+    else:
+        print "negative"
+
+    let uint16 high = 255
+    if let n = (high as int8):
+        print "unexpected {n}"
+    else:
+        print "signed overflow"
+
+    let uint128 huge = (1 as uint128) << 127
+    if let n = (huge as int128):
+        print "unexpected {n}"
+    else:
+        print "wide overflow"
+
+    let value = 9
+    if let value = (1 as uint8):
+        print value
+    print value
+
+    if let first = ("2" as int), let second = (first as uint8):
+        print second

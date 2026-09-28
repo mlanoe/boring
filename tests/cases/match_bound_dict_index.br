@@ -1,0 +1,57 @@
+# Regression fixture: a dict-typed enum variant field, once bound by a
+# `match` pattern, was transpiled as if a later `fields[key]` were ARRAY
+# indexing — casting the string key to `usize` and calling `.get()` as if on
+# a `Vec` — instead of a real `HashMap` lookup. See
+# tests/match_bound_dict_index.rs for the full writeup.
+#
+# Root cause: `emit_match_arm` (src/transpiler/emit_match.rs) registers a
+# match-arm bound name's type into `var_types`/`string_vars`/`var_struct_types`
+# etc., but never into `dict_vars` — the set `expr_is_dict` (used throughout
+# emit_expr.rs to decide dict-style `.get(&key)` vs array-style
+# `.get(idx as usize)` codegen) checks for a bare `Var`. `let`/`var` locals and
+# function params already get added to `dict_vars` (emit_let.rs / emit_top.rs)
+# — a match-bound name never did, so a variant field declared `{K=V}` was
+# silently mistreated as an array once bound by `match`.
+#
+# Four shapes, on purpose, so a future change to this tracking can't silently
+# regress any one of them while fixing another:
+#   - get_direct: the actual reported bug — a match-bound dict indexed
+#     directly in the arm body (`Dict(fields): fields[key] else -1`).
+#   - get_via_field: dict reached via an ordinary struct field — must keep
+#     working (was never broken; proves the bug is specific to the
+#     match-binding, not dicts-by-string in general).
+#   - get_via_param: dict reached via a plain function parameter — same
+#     control purpose as get_via_field.
+#   - get_via_fn: the documented workaround (route the match-bound dict
+#     through a dedicated function call, then index the return value) — must
+#     keep working once the direct case is also fixed.
+
+enum Wrapper:
+    Dict({string=int} fields)
+
+int get_direct(Wrapper w, string key):
+    match w:
+        Dict(fields): fields[key] else -1
+
+pub struct Holder:
+    {string=int} fields
+
+int get_via_field(Holder h, string key):
+    h.fields[key] else -1
+
+int get_via_param({string=int} fields, string key):
+    fields[key] else -1
+
+{string=int} unwrap(Wrapper w):
+    match w:
+        Dict(fields): fields
+
+int get_via_fn(Wrapper w, string key):
+    unwrap(w)[key] else -1
+
+def main() throws:
+    var {string=int} m = {=}
+    m["a"] = 1
+    let w = Wrapper.Dict(m)
+    let h = Holder(m)
+    print "direct={get_direct(w, "a")} field={get_via_field(h, "a")} param={get_via_param(m, "a")} fn={get_via_fn(w, "a")}"

@@ -18,8 +18,7 @@
 # Covers a `float32` function PARAMETER (the exact shape that surfaced this bug), an
 # explicitly `float64`-typed local, and a `float32` struct field. An `int` receiver
 # (confirming this fix doesn't touch it) is covered separately in
-# `pow_method_int_unaffected.br` — `boring run` has no int `.pow()` case at all (errors
-# `no method 'pow' on Int`), so it can't share this file's `interp_test!` registration.
+# `pow_method_int_unaffected.br`. Both interpreters now also exercise those integer fixtures.
 
 struct Velocity:
     float32 x

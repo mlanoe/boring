@@ -1,0 +1,11 @@
+pub struct Tok:
+    int eos
+
+    req [int] encode(string text):
+        [1, 2, 3]
+
+def main() throws:
+    let tok = Tok(0)
+    let msg = "hello" as string
+    let a = tok.encode(msg)
+    let b = tok.encode(msg)

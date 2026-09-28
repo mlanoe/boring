@@ -196,11 +196,18 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             call_value(interp, callee, arg_vals)
 
         ExprKind.GenericCall(callee_expr2, _type_args, gen_args):
-            # Ignore type args — evaluate as a regular call
-            let gen_callee = eval_expr(interp, callee_expr2)
-            let gen_hints = call_hint_types(interp, gen_callee, gen_args.length)
-            let gen_arg_vals = eval_args_with_hints(interp, gen_args, gen_hints)
-            call_value(interp, gen_callee, gen_arg_vals)
+            # Runtime type erasure must preserve method-call dispatch. Evaluating
+            # obj.method as a field would invoke it prematurely with no arguments.
+            match callee_expr2.kind:
+                ExprKind.Field(receiver, method):
+                    eval_expr(interp, Expr(kind= ExprKind.MethodCall(receiver, method, gen_args), line= expr.line))
+                ExprKind.OptionalField(receiver, method):
+                    eval_expr(interp, Expr(kind= ExprKind.OptionalMethodCall(receiver, method, gen_args), line= expr.line))
+                _:
+                    let gen_callee = eval_expr(interp, callee_expr2)
+                    let gen_hints = call_hint_types(interp, gen_callee, gen_args.length)
+                    let gen_arg_vals = eval_args_with_hints(interp, gen_args, gen_hints)
+                    call_value(interp, gen_callee, gen_arg_vals)
 
         # Pipe: `lhs |> name(args)` — free function if one exists, else method call.
         ExprKind.Pipe(left, method, args):
@@ -256,21 +263,28 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     Value.Set(_):
                         assign_target(interp, recv_expr, result)
                     _: nil
-            elif method == "push" or method == "append":
-                match result:
-                    Value.Array(_): assign_target(interp, recv_expr, result)
-                    _: nil
-            elif method == "insert":
-                match result:
-                    Value.Array(_): assign_target(interp, recv_expr, result)
+            elif method == "push" or method == "append" or method == "insert":
+                # Collection write-back belongs to the receiver, not to every
+                # user method with the same name and a collection return value.
+                match recv:
+                    Value.Array(_):
+                        match result:
+                            Value.Array(_): assign_target(interp, recv_expr, result)
+                            _: nil
                     _: nil
             elif method == "set" or method == "put":
-                match result:
-                    Value.Dict(_): assign_target(interp, recv_expr, result)
+                match recv:
+                    Value.Dict(_):
+                        match result:
+                            Value.Dict(_): assign_target(interp, recv_expr, result)
+                            _: nil
                     _: nil
             elif method == "add":
-                match result:
-                    Value.Set(_): assign_target(interp, recv_expr, result)
+                match recv:
+                    Value.Set(_):
+                        match result:
+                            Value.Set(_): assign_target(interp, recv_expr, result)
+                            _: nil
                     _: nil
             result
 
@@ -590,10 +604,41 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     Value.Nil
 
         ExprKind.Else(inner, default_expr):
-            let v = eval_expr(interp, inner)
-            match v:
-                Value.Nil: eval_expr(interp, default_expr)
-                _: v
+            match inner.kind:
+                # `dict[key] else default` must fall back on a missing key
+                # while retaining a present value without evaluating the default.
+                ExprKind.Index(obj_expr, idx_expr):
+                    match idx_expr.kind:
+                        ExprKind.SliceRange(_, _, _):
+                            let v = eval_expr(interp, inner)
+                            match v:
+                                Value.Nil: eval_expr(interp, default_expr)
+                                _: v
+                        _:
+                            let obj = eval_expr(interp, obj_expr)
+                            let idx = eval_expr(interp, idx_expr)
+                            match obj:
+                                Value.Dict(entries):
+                                    var found = Value.Nil
+                                    var has = false
+                                    for entry in entries:
+                                        if entry.0 == idx:
+                                            found = entry.1
+                                            has = true
+                                    if has:
+                                        found
+                                    else:
+                                        eval_expr(interp, default_expr)
+                                _:
+                                    let v = get_index(interp, obj, idx)
+                                    match v:
+                                        Value.Nil: eval_expr(interp, default_expr)
+                                        _: v
+                _:
+                    let v = eval_expr(interp, inner)
+                    match v:
+                        Value.Nil: eval_expr(interp, default_expr)
+                        _: v
 
         ExprKind.TryElse(inner, default_expr):
             let v = eval_expr(interp, inner)
@@ -879,7 +924,10 @@ def [Type?] merged_overload_hint_types(mut Interpreter interp, [FnDecl] candidat
 # "first match", so an overloaded method gets the same merged-consensus hint a free
 # OverloadedFn call does.
 def [Type?] method_hint_types(mut Interpreter interp, Value recv, string method_name, int arg_count):
-    let type_name = recv.type_name()
+    let type_name = match recv:
+        Value.StructDef(name): "__type__." + name
+        Value.EnumDef(name): "__type__." + name
+        _: recv.type_name()
     let methods_opt = interp.struct_methods.get(type_name)
     if let methods = methods_opt:
         var candidates = [FnDecl]{}
@@ -1770,7 +1818,7 @@ def Value get_index(mut Interpreter interp, Value obj, Value idx):
             for entry in entries:
                 if entry.0 == idx:
                     return entry.1
-            throw "key not found in dict"
+            Value.Nil
         Value.Str(s):
             match idx:
                 Value.Int(i):
@@ -1816,6 +1864,41 @@ def Value? try_call_conversion_method(mut Interpreter interp, Value val, string 
                     mi = mi + 1
             nil
         _: nil
+
+# Apply numeric annotations at value boundaries without attempting casts to
+# erased generic parameters or user-defined types.
+def Value coerce_declared_value(mut Interpreter interp, Value val, Type ty):
+    match val:
+        Value.Nil: return val
+        Value.Uninitialized: return val
+        _: nil
+    match ty:
+        Type.Qualified(inner, _): coerce_declared_value(interp, val, inner)
+        Type.Optional(inner): coerce_declared_value(interp, val, inner)
+        Type.Array(inner): coerce_array_elements(interp, val, inner)
+        Type.ArrayN(inner, _): coerce_array_elements(interp, val, inner)
+        Type.Float32 | Type.Float64:
+            cast_value(interp, val, ty)
+        _:
+            if let kind = type_to_num_kind(ty):
+                if let source_kind = num_kind_of(val):
+                    if source_kind != kind:
+                        return cast_value(interp, val, ty)
+                else:
+                    match val:
+                        Value.Float32(_) | Value.Float64(_): return cast_value(interp, val, ty)
+                        _: nil
+            val
+
+def Value coerce_array_elements(mut Interpreter interp, Value val, Type elem):
+    match val:
+        Value.Array(items):
+            var [Value] coerced = []
+            for item in items:
+                coerced.push(coerce_declared_value(interp, item, elem))
+            Value.Array(coerced)
+        _: val
+
 
 # Type cast
 def Value cast_value(mut Interpreter interp, Value val, Type ty):
@@ -2284,9 +2367,9 @@ req string display_value(Interpreter interp, Value val):
                 obj.type_name.clone()
         Value.EnumVariant(type_name, variant, fields):
             if fields.length == 0:
-                "{type_name}.{variant}"
+                variant
             else:
-                var result = "{type_name}.{variant}("
+                var result = "{variant}("
                 var i = 0
                 while i < fields.length:
                     if i > 0:
@@ -2736,9 +2819,9 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
     var pos_idx = 0
     for field in decl.fields:
         if labeled.has(field.name):
-            fields.push((field.name, labeled[field.name]))
+            fields.push((field.name, coerce_declared_value(interp, labeled[field.name], field.ty)))
         elif pos_idx < positional.length:
-            fields.push((field.name, positional[pos_idx]))
+            fields.push((field.name, coerce_declared_value(interp, positional[pos_idx], field.ty)))
             pos_idx = pos_idx + 1
         else:
             var fval = Value.Nil
@@ -2746,7 +2829,7 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
                 fval = eval_expr(interp, default_expr)
             elif default_rest:
                 fval = default_value_for_type(field.ty)
-            fields.push((field.name, fval))
+            fields.push((field.name, coerce_declared_value(interp, fval, field.ty)))
     # Handle init declarations: pub params become fields
     if decl.inits.length > 0:
         let init_decl = decl.inits[0]

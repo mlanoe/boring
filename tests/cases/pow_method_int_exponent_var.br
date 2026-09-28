@@ -1,22 +1,5 @@
-# Regression test: `.pow()` on an `int` receiver with a non-literal (variable/parameter)
-# `int`-typed EXPONENT. Boring's `int` maps to Rust `isize`, but `isize::pow`'s real Rust
-# signature is `pow(self, exp: u32) -> isize` — the exponent type doesn't match `isize`.
-# Before this fix, the transpiler emitted the exponent expression unchanged with no
-# `as u32` conversion, so `cargo build` on the generated project failed with
-# `E0308: expected u32, found isize` — even though `boring build` itself succeeded and
-# `boring run` (the interpreter) has no int `.pow()` case at all (`no method 'pow' on
-# Int`), so this is only caught by a real `cargo build`/`cargo run` of the `--emit-rust`
-# output (see tests/transpile.rs), not by `boring run`.
-#
-# A bare integer literal exponent (`base.pow(2)`, covered separately by
-# `pow_method_int_unaffected.br`) happens to compile without any fix at all, because
-# Rust's untyped-integer-literal inference resolves `2` to `u32` from context — this file
-# exists specifically to cover the case that literal doesn't: an exponent that is itself a
-# typed `int` variable/parameter, which has no such inference to fall back on and needs an
-# explicit `as u32` cast in the generated Rust.
-#
-# Covers both an `int` function PARAMETER exponent (the exact shape from the bug report)
-# and a `let`-bound local `int` variable exponent.
+# Integer .pow() accepts both parameter and local-variable exponents.
+# The exponent follows the transpiler convention: conversion to uint32.
 
 int g(int base, int exponent):
     return base.pow(exponent)

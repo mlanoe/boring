@@ -1804,3 +1804,122 @@ def main() throws:
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
 }
+
+// ─── device — multi-branch if-expression inside a kernel body ────────────────
+
+// A kernel `def()` body's `if`/`elif`/.../`else` *expression* (assigned to a
+// local, unlike an `if` used as a statement) used to lower to a single
+// ternary that only ever checked the FIRST condition, unconditionally using
+// the `else` branch's value otherwise -- every `elif` branch's condition
+// AND value were silently dropped from the generated MSL entirely, not
+// merely miscompiled. Two elif branches is the minimum that actually proves
+// nesting: one elif could (in principle, though it wasn't the case here)
+// still be papered over by a checker or interpreter path; three branches
+// beyond the first `if` leaves no doubt every one of them is independently
+// reachable in the emitted ternary chain.
+#[test]
+fn device_multi_branch_if_expression_emits_full_chain_not_first_condition_only() {
+    let (msl, _rs) = metal_codegen("multi_branch_if_expr", r#"
+kernel FourWay:
+    let [int]'global inp
+    mut [int]'unified out
+    let int n
+
+    init([int]'global i, int nn):
+        inp = i
+        n = nn
+
+    def ():
+        let idx = gpu.thread.x
+        if idx < n:
+            let v = inp[idx]
+            let r = if v == 0:
+                100
+            elif v == 1:
+                200
+            elif v == 2:
+                300
+            else:
+                400
+            out[idx] = r
+"#);
+    assert!(
+        msl.contains("((v == 0) ? 100 : ((v == 1) ? 200 : ((v == 2) ? 300 : 400)))"),
+        "expected all four branches (if + 2 elif + else) to be nested in the \
+         generated ternary chain, not collapsed to just the first condition \
+         with the else value as an unconditional fallback (e.g. \
+         `((v == 0) ? 100 : 400)`, silently dropping both elif branches);\n\
+         got:\n{msl}"
+    );
+}
+
+// Real end-to-end verification of the above fix: `boring build --target
+// metal` + `cargo build` + actually running the resulting binary, which
+// dispatches a kernel whose body evaluates a 4-way if/elif/elif/else
+// expression per-thread and writes the result back to a GPU buffer. This is
+// the only way to catch this bug class for certain -- the buggy generated
+// MSL compiles and runs successfully, it just silently computes the wrong
+// value for every thread that should have taken an elif branch (confirmed:
+// pre-fix this printed "100 400 400 400" instead of "100 200 300 400").
+#[test]
+fn real_gpu_multi_branch_if_expression_computes_every_branch_correctly() {
+    let test_name = "multi_branch_if_expr_dispatch";
+    let (_msl, _rs, _toml) = run_metal(test_name, r#"
+kernel FourWay:
+    let [int]'global inp
+    mut [int]'unified out
+    let int n
+
+    init([int]'global i, int nn):
+        inp = i
+        n = nn
+        out = [0 for ..<nn]
+
+    def ():
+        let idx = gpu.thread.x
+        if idx < n:
+            let v = inp[idx]
+            let r = if v == 0:
+                100
+            elif v == 1:
+                200
+            elif v == 2:
+                300
+            else:
+                400
+            out[idx] = r
+
+def main() throws:
+    let inp = [0, 1, 2, 3]
+    mut k = FourWay(inp, 4)
+    kernel:
+        k(block = 4, grid = 1)
+    print "{k.out[0]} {k.out[1]} {k.out[2]} {k.out[3]}"
+"#);
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated Metal project (a per-thread 4-way \
+         if/elif/elif/else kernel body) to build AND run to completion \
+         against a real Metal GPU, but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    let expected = "100 200 300 400";
+    assert_eq!(
+        stdout.trim_end(), expected,
+        "expected every branch (if + both elif + else) to compute its own \
+         value for the matching thread, not fall through to the else value \
+         for any elif-matching thread;\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+}

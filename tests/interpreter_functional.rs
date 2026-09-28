@@ -12,9 +12,47 @@
 // Run with:
 //   cargo test --test interpreter_functional
 
-use std::io::Write as IoWrite;
+use std::io::{Read, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+// Fail with a diagnostic instead of hanging the test runner on an actor deadlock.
+fn wait_for_interpreter(mut child: std::process::Child) -> std::process::Output {
+    // Drain both pipes while polling so a verbose guest cannot fill a pipe and
+    // turn an otherwise successful execution into an artificial timeout.
+    let mut stdout = child.stdout.take().expect("missing stdout pipe");
+    let mut stderr = child.stderr.take().expect("missing stderr pipe");
+    let out_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).expect("cannot read stdout");
+        bytes
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("cannot read stderr");
+        bytes
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("cannot poll interpreter") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().expect("cannot reap interpreter");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let output = std::process::Output {
+        status,
+        stdout: out_reader.join().expect("stdout reader panicked"),
+        stderr: err_reader.join().expect("stderr reader panicked"),
+    };
+    assert!(!timed_out, "interpreter exceeded 60s; stderr: {}", String::from_utf8_lossy(&output.stderr));
+    output
+}
 
 const MODES: &[(&str, &str, &str)] = &[
     ("strict",  "multi",  "main_rust"),
@@ -61,8 +99,7 @@ fn run_case_with_bin(name: &str, bin: &Path, label: &str) {
 
     child.stdin.take().unwrap().write_all(&source).unwrap();
 
-    let out = child.wait_with_output()
-        .unwrap_or_else(|e| panic!("[{}@{}] wait failed: {}", name, label, e));
+    let out = wait_for_interpreter(child);
 
     assert!(
         out.status.success(),
@@ -207,13 +244,14 @@ fn run_file_case_with_bin(dir: &str, entry: &str, bin: &Path, label: &str) -> st
         dir, label, bin.display()
     );
     let entry_path = Path::new("tests/cases").join(dir).join(entry);
-    Command::new(bin)
+    let child = Command::new(bin)
         .arg(&entry_path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .unwrap_or_else(|e| panic!("[{}@{}] failed to spawn: {}", dir, label, e))
+        .spawn()
+        .unwrap_or_else(|e| panic!("[{}@{}] failed to spawn: {}", dir, label, e));
+    wait_for_interpreter(child)
 }
 
 /// Runs `dir/entry` against all 4 interpreter binaries and checks stdout
@@ -335,13 +373,14 @@ fn deeply_nested_blocks_produce_a_clean_error_not_a_crash() {
             label, bin.display()
         );
 
-        let out = Command::new(&bin)
+        let child = Command::new(&bin)
             .arg(&tmp)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .unwrap_or_else(|e| panic!("[deep_nested_blocks@{}] failed to spawn: {}", label, e));
+        let out = wait_for_interpreter(child);
 
         // The exact failure mode we're guarding against is a native crash
         // (SIGABRT from a stack overflow) rather than a normal nonzero exit —
@@ -369,3 +408,47 @@ fn deeply_nested_blocks_produce_a_clean_error_not_a_crash() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+// Interpreter parity with the transpiler numerical fixtures.
+itest!(pow_method_int_unaffected);
+itest!(pow_method_int_exponent_var);
+itest!(pow_method_float_width);
+itest!(ord_chr);
+
+itest!(numeric_method_parity);
+
+// Optional dictionary lookup and associated-function parity.
+itest!(dict_index_optional_return);
+itest!(if_let_dict_index_no_else);
+itest!(trait_type_level_methods);
+itest!(type_def_typed_throws);
+itest!(type_method_throws_untyped);
+itest!(enum_type_def);
+itest!(enum_type_def_throws);
+itest!(implicit_self_length_nontail);
+
+#[test]
+fn malformed_field_type_reports_an_error_without_deadlocking() {
+    run_file_case_err("error_type_diagnostic", "main.br", "expected type, got Plus at line 2");
+}
+
+itest!(monomorphize_method);
+itest!(monomorphize_method_on_generic_struct);
+itest!(monomorphize_optional_method);
+itest!(monomorphize_ext_method);
+itest!(monomorphize_enum_method);
+
+itest!(builtin_error_enum);
+itest!(typed_catch_match_error);
+itest!(float32_struct_method_math);
+itest!(if_else_cast_numeric);
+
+itest!(narrowing_cast_if_let);
+itest!(guard_let_cast_struct_field);
+
+itest!(conditional_cast_boundaries);
+
+itest!(option_owned_methods);
+itest!(pub_top_level_const);
+
+itest!(collection_named_methods);

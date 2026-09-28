@@ -204,6 +204,73 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
     if method_name == "clone" and args.length == 0:
         return recv
     let recv_type = recv.type_name()
+    if method_name == "pow" and (is_fixed_width_int_name(recv_type) or recv_type == "int" or recv_type == "uint" or recv_type == "uint8"):
+        if args.length != 1:
+            throw "pow: expected one integer exponent"
+        let exponent = match args[0]:
+            Value.Int(n): n as uint32
+            Value.Uint(n): n as uint32
+            Value.Uint8(n): n as uint32
+            Value.Int8(n): n as uint32
+            Value.Int16(n): n as uint32
+            Value.Int32(n): n as uint32
+            Value.Int64(n): n as uint32
+            Value.Int128(n): n as uint32
+            Value.Uint16(n): n as uint32
+            Value.Uint32(n): n as uint32
+            Value.Uint64(n): n as uint32
+            Value.Uint128(n): n as uint32
+            _: throw "pow: expected one integer exponent"
+        match recv:
+            Value.Int(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Int(result)
+                throw "pow: integer overflow"
+            Value.Uint(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Uint(result)
+                throw "pow: integer overflow"
+            Value.Uint8(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Uint8(result)
+                throw "pow: integer overflow"
+            Value.Int8(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Int8(result)
+                throw "pow: integer overflow"
+            Value.Int16(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Int16(result)
+                throw "pow: integer overflow"
+            Value.Int32(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Int32(result)
+                throw "pow: integer overflow"
+            Value.Int64(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Int64(result)
+                throw "pow: integer overflow"
+            Value.Int128(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Int128(result)
+                throw "pow: integer overflow"
+            Value.Uint16(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Uint16(result)
+                throw "pow: integer overflow"
+            Value.Uint32(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Uint32(result)
+                throw "pow: integer overflow"
+            Value.Uint64(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Uint64(result)
+                throw "pow: integer overflow"
+            Value.Uint128(n):
+                if let result = n.checked_pow(exponent):
+                    return Value.Uint128(result)
+                throw "pow: integer overflow"
+            _: nil
     match recv:
         Value.Str(s):
             match method_name:
@@ -1244,6 +1311,15 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
 
         Value.Float64(f):
             match method_name:
+                "pow" | "powf":
+                    if args.length != 1:
+                        throw "pow: expected one numeric exponent"
+                    let exponent = match args[0]:
+                        Value.Float64(e): e as float64
+                        Value.Float32(e): e as float64
+                        Value.Int(e): e as float64
+                        _: throw "pow: argument must be a number"
+                    Value.Float64(f.powf(exponent))
                 "abs":
                     if f < 0.0:
                         Value.Float64(0.0 - f)
@@ -1272,6 +1348,15 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         # f32 precision throughout.
         Value.Float32(f):
             match method_name:
+                "pow" | "powf":
+                    if args.length != 1:
+                        throw "pow: expected one numeric exponent"
+                    let exponent = match args[0]:
+                        Value.Float64(e): e as float32
+                        Value.Float32(e): e as float32
+                        Value.Int(e): e as float32
+                        _: throw "pow: argument must be a number"
+                    Value.Float32(f.powf(exponent))
                 "abs":
                     if f < 0.0:
                         Value.Float32(0.0 - f)
@@ -1390,8 +1475,9 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     let param = method_decl.params[i]
                     env_define(interp, param.name, args[i], param.mutable)
                     i += 1
-                let result = eval_block(interp, method_decl.body)
-                if method_decl.mutating:
+                let mutating = method_decl.mutating
+                let result = exec_method_body(interp, method_decl)
+                if mutating:
                     for field in inner.fields:
                         let updated = interp.current_env.get(field.0)
                         if let v = updated:
@@ -1404,7 +1490,16 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     return Value.Object(inner)
                 throw "unknown method {method_name} on {type_name}"
 
+        Value.StructDef(type_name):
+            let method_opt = interp.find_best_method("__type__." + type_name, method_name, args)
+            if let decl = method_opt:
+                return call_fn(interp, decl, args, nil)
+            throw "no type method '{method_name}' on struct '{type_name}'"
+
         Value.EnumDef(type_name):
+            let method_opt = interp.find_best_method("__type__." + type_name, method_name, args)
+            if let decl = method_opt:
+                return call_fn(interp, decl, args, nil)
             # EnumDef.Variant(args) → construct enum variant
             Value.EnumVariant(type_name, method_name, args)
 
@@ -1420,7 +1515,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     let param = method_decl.params[i]
                     env_define(interp, param.name, args[i], param.mutable)
                     i += 1
-                let result = eval_block(interp, method_decl.body)
+                let result = exec_method_body(interp, method_decl)
                 pop_scope(interp)
                 result
             else:

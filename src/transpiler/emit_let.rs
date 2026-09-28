@@ -495,12 +495,57 @@ impl Transpiler {
             self.collection_vars.remove(s.name.as_str());
         }
         // Also track immutable string literal vars so string methods (parseInt, indexOf, slice…)
-        // can dispatch correctly even without an explicit type annotation.
+        // can dispatch correctly even without an explicit type annotation. An explicit
+        // `as string` cast (e.g. `let msg = "hello" as string`) produces the same Rc<str>/
+        // Arc<str> value as a bare literal but wraps it in `ExprKind::Cast`, which the bare
+        // `Str`/`StringInterp` match above doesn't see — without this arm the binding is never
+        // added to `string_vars`, so a later reuse across 2+ call sites gets no `.clone()`
+        // inserted at all (unlike the bare-literal form, which already clones correctly).
         let is_immutable_string_lit = !s.binding.is_mutable() && s.ty.is_none()
-            && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
-        // readLine() returns Option<Arc<str>> — don't track as plain string var (it's optional).
-        let is_readline_call = false;
-        if is_immutable_string_lit || is_readline_call {
+            && (matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
+                || matches!(&s_value.kind, ExprKind::Cast(_, dst_ty) if Self::is_string_type(dst_ty)));
+        if is_immutable_string_lit {
+            self.string_vars.insert(s.name.clone());
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
+        }
+        // `let/var x = readLine()` — the builtin returns `Option<Arc<str>>` (or
+        // `Option<Rc<str>>` single-threaded), not a bare string, so it must NOT join
+        // `string_vars` above: that set drives *unconditional* `.clone()` insertion for
+        // a directly-held string, which is wrong for `x` here (it needs unwrapping
+        // first — `x.clone()` on an `Option<Rc<str>>` would silently clone the wrong
+        // layer wherever a bare-string use site was assumed). Track it as
+        // `Optional(string)` in `var_types`/`optional_vars` instead, the same shape a
+        // `T?`-returning user function's result gets a few lines below (the
+        // `ExprKind::Call` + `fn_return_types` handling) — without this, neither this
+        // var itself nor any `if let`/`while let` binding that later unwraps it
+        // (`register_optional_binding_type`, emit_match.rs) can resolve its inner
+        // type, so a value read out of it never gets `.clone()`-inserted on 2+ reuse
+        // (`E0382 use of moved value` at `cargo build`, invisible from the Boring
+        // source itself).
+        let is_readline_call = s.ty.is_none()
+            && matches!(&s_value.kind, ExprKind::Call(callee, args)
+                if args.is_empty() && matches!(&callee.kind, ExprKind::Var(n) if n == "readLine"));
+        if is_readline_call {
+            self.var_types.insert(s.name.clone(), Type::Optional(Box::new(Type::Named("string".to_string()))));
+            self.optional_vars.insert(s.name.clone());
+        }
+        // `let x = <optional-expr> else <default>` — e.g. `readLine() else "default"` or
+        // `dict[key] else "fallback"`. Unlike the bare `readLine()` case just above, `else`
+        // unconditionally unwraps the optional: the whole expression's Rust type is the
+        // *default*'s type (Boring requires them to match), never `Option<_>`. When that
+        // default is itself string-typed, `x` holds a plain `Rc<str>`/`Arc<str>` — the exact
+        // same shape as a bare-literal `let x = "..."` — and must join `string_vars` the same
+        // way. Without this, `emit_expr_owned`'s `ExprKind::Var` arm (the thing that actually
+        // inserts `.clone()` at every non-last reuse of a `string_vars` member) never fires
+        // for it, silently emitting a bare move on the 2nd+ use and producing a
+        // use-after-move E0382 that's invisible from the Boring source itself.
+        let is_else_default_string = s.ty.is_none()
+            && matches!(&s_value.kind, ExprKind::Else(_, default)
+                if matches!(&default.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
+                    || matches!(&default.kind, ExprKind::Cast(_, ty) if Self::is_string_type(ty))
+                    || self.resolve_expr_declared_type(default).is_some_and(|t| Self::is_string_type(&t)));
+        if is_else_default_string {
             self.string_vars.insert(s.name.clone());
             self.vec_vars.remove(s.name.as_str());
             self.collection_vars.remove(s.name.as_str());
@@ -525,6 +570,20 @@ impl Transpiler {
             ExprKind::MethodCall(_, m, _) if m == "split" || m == "chars");
         if is_str_array_ty || is_split_or_chars {
             self.str_vec_vars.insert(s.name.clone());
+        }
+        // A bare (un-annotated) `let x = recv.split(...)`/`let x = recv.chars()` needs its
+        // `[string]` type recorded in `var_types` too, not just `str_vec_vars`/`vec_vars` —
+        // mirrors the identical "Track all Named return types (including enums), plus
+        // Array/Dict/Set, in var_types so auto-clone can detect non-Copy variables at call
+        // sites" reasoning already applied to `ExprKind::Call`/`MethodCall` returns just
+        // above. Without this, `emit_expr_owned`'s `Var` arm (which only consults
+        // `var_types`, not `str_vec_vars`) never inserts `.clone()` when such a variable is
+        // passed as an argument to a user-struct method call inside a loop — the array
+        // param is generated as an owned `Vec<T>` (not a borrow) by `emit_method_call_fallback`,
+        // so the second iteration hits `E0382 use of moved value` at `cargo build`, invisible
+        // from the Boring source itself.
+        if is_split_or_chars && s.ty.is_none() {
+            self.var_types.insert(s.name.clone(), Type::Array(Box::new(Type::Named("string".to_string()))));
         }
         // Track HashSet variables for `remove(&v)` and `add`→`insert` dispatch.
         if matches!(&s.ty, Some(Type::Set(_)))
@@ -727,7 +786,23 @@ impl Transpiler {
                 if s.ty.is_none() {
                     if let Some(ret_ty) = self.fn_return_types.get(type_name.as_str()).cloned() {
                         match &ret_ty {
-                            Type::Optional(_) => { self.optional_vars.insert(s.name.clone()); }
+                            Type::Optional(_) => {
+                                self.optional_vars.insert(s.name.clone());
+                                // Also track the full `Optional(T)` shape in `var_types` (not
+                                // just `optional_vars`) so a caller that resolves a variable's
+                                // declared type purely from `var_types` — e.g. a `while let
+                                // name:` self-referencing shorthand loop unwrapping this same
+                                // binding, via `register_optional_binding_type` in
+                                // emit_match.rs — can see it too. Previously only
+                                // `optional_vars` was set here, so `var x = someOptFn(); while
+                                // let x: ...` never propagated `x`'s inner type into the loop
+                                // body at all: no `.clone()` was ever inserted for a value
+                                // reused there (`E0382` at `cargo build`), even though the
+                                // otherwise-identical `readLine()`-sourced shape (a hardcoded
+                                // builtin, tracked separately just above in this function)
+                                // already worked.
+                                self.var_types.insert(s.name.clone(), ret_ty.clone());
+                            }
                             // Track function calls returning a named struct/enum type so field
                             // access Optional detection works (prevents double-wrapping in
                             // struct literals) and method dispatch recognizes the enum case too.

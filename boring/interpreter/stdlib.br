@@ -531,6 +531,9 @@ def void register_stdlib(mut Interpreter interp):
     let log2_fn = Value.NativeFn("log2", Value.Nil)
     env_define(env, "log2", log2_fn, false)
 
+    let atan2_fn = Value.NativeFn("atan2", Value.Nil)
+    env_define(env, "atan2", atan2_fn, false)
+
     let exp_fn = Value.NativeFn("exp", Value.Nil)
     env_define(env, "exp", exp_fn, false)
 
@@ -658,6 +661,11 @@ def Interpreter'actor new_interpreter():
         loaded_modules = []
     )
     register_stdlib(interp)
+    var [EnumVariant] error_variants = []
+    for name in ["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"]:
+        error_variants.push(EnumVariant(name= name, fields= [], attrs= [], line= 0))
+    let error_decl = EnumDecl(name= "Error", is_pub= true, is_native= false, type_params= [], protocols= [], variants= error_variants, methods= [], type_methods= [], setters= [], conversions= [], attrs= [], line= 0)
+    exec_item(interp, Item.Enum(error_decl))
     interp
 
 # ─── register_free_fn ──────────────────────────────────────────────────────────
@@ -856,6 +864,14 @@ def void exec_use(mut Interpreter interp, UseDecl decl):
                 error "'{wanted}' is not exported by module '{module_name}'"
                 exit(1)
 
+# Separate namespace: associated functions have no self, even when an instance
+# method has the same name. Reuse overload selection and ordinary call frames.
+def void register_type_methods(mut Interpreter interp, string owner, [TypeMethod] methods):
+    var [FnDecl] functions = []
+    for m in methods:
+        functions.push(FnDecl(name= m.name, qualifier= nil, params= m.params, return_ty= m.return_ty, body= m.body, is_pub= m.is_pub, can_throw= m.can_throw, is_task= m.is_task, is_stream= false, stream_capacity= nil, mutating= false, is_native= false, throws_ty= nil, type_params= [], where_clause= [], attrs= [], line= m.line))
+    interp.set_method_decls("__type__." + owner, functions)
+
 def void exec_item(mut Interpreter interp, Item item):
     match item:
         Item.Fn(decl):
@@ -869,6 +885,7 @@ def void exec_item(mut Interpreter interp, Item item):
         Item.Struct(decl):
             let sname = decl.name
             interp.set_struct_decl(sname, decl)
+            register_type_methods(interp, sname, decl.type_methods)
             # Collect own methods into final list; build a comma-separated name index
             var all_struct_methods = [FnDecl]{}
             var own_names_str = ","
@@ -888,6 +905,7 @@ def void exec_item(mut Interpreter interp, Item item):
         Item.Enum(decl):
             let ename = decl.name
             interp.set_enum_decl(ename, decl)
+            register_type_methods(interp, ename, decl.type_methods)
             interp.set_method_decls(ename, decl.methods)
             env_define(interp.global_env, ename, Value.EnumDef(ename), false)
         Item.Trait(decl):

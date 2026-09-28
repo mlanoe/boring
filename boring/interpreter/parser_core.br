@@ -302,20 +302,28 @@ def bool parser_peek_is_macro_call(mut Parser p):
     # Detect `name!` — current token is Ident, next is Bang
     parser_token_at_offset_is(p, 1, "Bang")
 
+# Look ahead without consuming tokens. Only a balanced type argument list
+# immediately followed by '(' is a call; ordinary '<' comparisons stay intact.
+def bool parser_peek_generic_args_at(mut Parser p, int offset):
+    if token_kind_name(parser_peek_token_at(p, offset).kind) != "Lt":
+        return false
+    var i = offset + 1
+    var depth = 1
+    if token_kind_name(parser_peek_token_at(p, i).kind) == "Gt":
+        return false
+    while depth > 0:
+        let kind = token_kind_name(parser_peek_token_at(p, i).kind)
+        if kind == "Lt":
+            depth += 1
+        elif kind == "Gt":
+            depth -= 1
+        elif kind != "Ident" and kind != "Void" and kind != "Comma" and kind != "Question" and kind != "LBracket" and kind != "RBracket" and kind != "LBrace" and kind != "RBrace" and kind != "Eq" and kind != "Int" and kind != "Tick" and kind != "Ampersand" and kind != "Mut" and kind != "Dot":
+            return false
+        i += 1
+    token_kind_name(parser_peek_token_at(p, i).kind) == "LParen"
+
 def bool parser_peek_is_generic_call(mut Parser p):
-    # Detect `Name<Type>(` — e.g. channel<int>(4)
-    # p is positioned on the Ident; check offsets 1..4
-    if token_kind_name(parser_peek_token_at(p, 1).kind) != "Lt":
-        return false
-    # offset 2: a type-like token (Ident for primitive or named type)
-    let k2 = token_kind_name(parser_peek_token_at(p, 2).kind)
-    if k2 != "Ident" and k2 != "Void":
-        return false
-    # offset 3: closing Gt
-    if token_kind_name(parser_peek_token_at(p, 3).kind) != "Gt":
-        return false
-    # offset 4: LParen to confirm it's a call
-    token_kind_name(parser_peek_token_at(p, 4).kind) == "LParen"
+    parser_peek_generic_args_at(p, 1)
 
 def bool parser_peek_is_trailing_closure(mut Parser p):
     # Detects `(params): body` — only fires when params look like simple identifiers
@@ -489,23 +497,30 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
     # We need to distinguish `int add(int a, int b):` from `print foo(42)`
     # Key: after `(`, params should start with a type-ident followed by another ident,
     # or the parens should be empty AND followed by colon.
-    # Pattern: Ident Ident LParen ...
-    if parser_token_at_offset_is(p, 0, "Ident") and parser_token_at_offset_is(p, 1, "Ident") and parser_token_at_offset_is(p, 2, "LParen"):
-        # Check inside parens: empty parens → might be decl if followed by colon
-        if parser_token_at_offset_is(p, 3, "RParen"):
-            return parser_token_at_offset_is(p, 4, "Colon") or parser_token_at_offset_is(p, 4, "Throws")
-        # Non-empty: first token after ( must be type (Ident, [, or {) followed by Ident
-        let p0 = token_kind_name(parser_peek_token_at(p, 3).kind)
-        let p1 = token_kind_name(parser_peek_token_at(p, 4).kind)
-        if p0 == "Ident" and p1 == "Ident": return true
-        # [type] param — p1 must be Ident (type name), not a literal
-        if p0 == "LBracket" and p1 == "Ident": return true
-        if p0 == "LBrace" and p1 == "Ident": return true
-        # `mut`/`var` param prefix — an expression call's arguments can never start
-        # with either token, so this alone proves it's a typed parameter list.
-        if p0 == "Var" or p0 == "Mut": return true
-        return false
-    # Pattern: [ ... ] Ident LParen → array return type
+    # Pattern: Ident [Question] Ident LParen ... — the optional `Question` handles
+    # an optional-type return (`string? name(...)`) shorthand, same shape as the
+    # `def string? name(...)` form already handled in parse_fn_decl.
+    if parser_token_at_offset_is(p, 0, "Ident"):
+        let has_q = parser_token_at_offset_is(p, 1, "Question")
+        let name_off = if has_q: 2 else: 1
+        let lparen_off = name_off + 1
+        if parser_token_at_offset_is(p, name_off, "Ident") and parser_token_at_offset_is(p, lparen_off, "LParen"):
+            let params_off = lparen_off + 1
+            # Check inside parens: empty parens → might be decl if followed by colon
+            if parser_token_at_offset_is(p, params_off, "RParen"):
+                return parser_token_at_offset_is(p, params_off + 1, "Colon") or parser_token_at_offset_is(p, params_off + 1, "Throws")
+            # Non-empty: first token after ( must be type (Ident, [, or {) followed by Ident
+            let p0 = token_kind_name(parser_peek_token_at(p, params_off).kind)
+            let p1 = token_kind_name(parser_peek_token_at(p, params_off + 1).kind)
+            if p0 == "Ident" and p1 == "Ident": return true
+            # [type] param — p1 must be Ident (type name), not a literal
+            if p0 == "LBracket" and p1 == "Ident": return true
+            if p0 == "LBrace" and p1 == "Ident": return true
+            # `mut`/`var` param prefix — an expression call's arguments can never start
+            # with either token, so this alone proves it's a typed parameter list.
+            if p0 == "Var" or p0 == "Mut": return true
+            return false
+    # Pattern: [ ... ] [Question] Ident LParen → array return type
     if parser_token_at_offset_is(p, 0, "LBracket"):
         var depth = 0
         var i = 0
@@ -517,8 +532,11 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
                 depth = depth - 1
                 if depth == 0:
                     found = true
-                    if parser_token_at_offset_is(p, i + 1, "Ident") and parser_token_at_offset_is(p, i + 2, "LParen"):
-                        let after_lparen = i + 3
+                    let has_q = parser_token_at_offset_is(p, i + 1, "Question")
+                    let name_off = if has_q: i + 2 else: i + 1
+                    let lparen_off = name_off + 1
+                    if parser_token_at_offset_is(p, name_off, "Ident") and parser_token_at_offset_is(p, lparen_off, "LParen"):
+                        let after_lparen = lparen_off + 1
                         if parser_token_at_offset_is(p, after_lparen, "RParen"):
                             return parser_token_at_offset_is(p, after_lparen + 1, "Colon")
                         # Params can start with Ident or [ (array type) or { (dict type)
@@ -681,7 +699,10 @@ def Type parse_type_base(mut Parser p) throws:
             p.expect(TokenKind.RParen)
             Type.Tuple(types)
         _:
-            throw "expected type, got {token_kind_name(p.peek())} at line {p.current_line()}"
+            # Release the actor lock between reads, including on diagnostic paths.
+            let unexpected = token_kind_name(p.peek())
+            let error_line = p.current_line()
+            throw "expected type, got {unexpected} at line {error_line}"
 
 # ── Fn / struct / enum / program parsing ─────────────────────────────────────
 
@@ -881,6 +902,13 @@ def Param parse_param(mut Parser p) throws:
         default = parse_expr(p)
     Param(name= name_tok.text(), ty= ty, mutable= mutable, owned= false, variadic= variadic, default= default, line= line)
 
+def TypeMethod parse_type_method(mut Parser p, bool is_pub) throws:
+    p.expect(TokenKind.Type)
+    let is_def = parser_check(p, "Def")
+    let fn_decl = parse_fn_decl(p, is_pub, is_def)
+    let kind = if is_def: TypeMethodKind.Def else: TypeMethodKind.Req
+    TypeMethod(kind= kind, name= fn_decl.name, params= fn_decl.params, return_ty= fn_decl.return_ty, body= fn_decl.body, is_pub= is_pub, can_throw= fn_decl.can_throw, is_task= fn_decl.is_task, line= fn_decl.line)
+
 def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
     let line = p.current_line()
     p.expect(TokenKind.Struct)
@@ -908,14 +936,15 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
     p.expect(TokenKind.Indent)
     var fields = [FieldDecl]{}
     var methods = [FnDecl]{}
+    var type_methods = [TypeMethod]{}
     var inits = [InitDecl]{}
     var setters = [SetDecl]{}
     var conversions = [AsDecl]{}
     while p.peek() != TokenKind.Dedent:
         if p.peek() == TokenKind.Eof:
             break
-        while p.eat(TokenKind.Newline):
-            nil
+        while parser_check(p, "Newline") or parser_check(p, "Comment"):
+            p.advance()
         if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
             break
         match p.peek():
@@ -931,6 +960,10 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                     methods.push(parse_fn_decl(p, true, true))
                 elif parser_check(p, "Req"):
                     methods.push(parse_fn_decl(p, true, false))
+                elif parser_check(p, "Type"):
+                    type_methods.push(parse_type_method(p, true))
+                elif parser_is_fn_shorthand(p):
+                    methods.push(parse_fn_decl_shorthand(p))
                 else:
                     # pub let / pub var field
                     let f = parse_field_decl(p)
@@ -953,10 +986,13 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                 let conv_body = parse_fn_body(p)
                 conversions.push(AsDecl(is_pub= false, ty= conv_ty, can_throw= can_throw, is_task= false, body= conv_body, line= as_line))
             TokenKind.Type:
-                # Associated type declaration: `type Output = int` — skip
-                while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
-                    p.advance()
-                p.eat(TokenKind.Newline)
+                if parser_token_at_offset_is(p, 1, "Def") or parser_token_at_offset_is(p, 1, "Req"):
+                    type_methods.push(parse_type_method(p, false))
+                else:
+                    # Associated type declaration: `type Output = int`.
+                    while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+                        p.advance()
+                    p.eat(TokenKind.Newline)
             TokenKind.Pass:
                 # no-op placeholder, allows `struct Foo:\n    pass` for an empty body
                 p.advance()
@@ -977,9 +1013,12 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                     let task_shorthand_decl = parse_fn_decl_shorthand(p)
                     methods.push(FnDecl(name= task_shorthand_decl.name, qualifier= task_shorthand_decl.qualifier, params= task_shorthand_decl.params, return_ty= task_shorthand_decl.return_ty, body= task_shorthand_decl.body, is_pub= task_shorthand_decl.is_pub, can_throw= task_shorthand_decl.can_throw, is_task= true, is_stream= task_shorthand_decl.is_stream, stream_capacity= task_shorthand_decl.stream_capacity, mutating= task_shorthand_decl.mutating, is_native= task_shorthand_decl.is_native, throws_ty= task_shorthand_decl.throws_ty, type_params= task_shorthand_decl.type_params, where_clause= task_shorthand_decl.where_clause, attrs= task_shorthand_decl.attrs, line= task_shorthand_decl.line))
             _:
-                fields.push(parse_field_decl(p))
+                if parser_is_fn_shorthand(p):
+                    methods.push(parse_fn_decl_shorthand(p))
+                else:
+                    fields.push(parse_field_decl(p))
     p.eat(TokenKind.Dedent)
-    StructDecl(name= name, fields= fields, methods= methods, inits= inits, line= line, is_pub= is_pub, is_native= false, protocols= struct_protocols, conversions= conversions, type_params= [], where_clause= [], setters= setters, type_methods= [], type_vars= [], assoc_type_defs= [], attrs= [])
+    StructDecl(name= name, fields= fields, methods= methods, inits= inits, line= line, is_pub= is_pub, is_native= false, protocols= struct_protocols, conversions= conversions, type_params= [], where_clause= [], setters= setters, type_methods= type_methods, type_vars= [], assoc_type_defs= [], attrs= [])
 
 def FieldDecl parse_field_decl(mut Parser p) throws:
     let line = p.current_line()
@@ -1048,17 +1087,18 @@ def EnumDecl parse_enum_decl(mut Parser p, bool is_pub) throws:
     # Allow `enum Foo: pass` for empty enum body
     if p.eat(TokenKind.Pass):
         p.eat(TokenKind.Newline)
-        return EnumDecl(name= name, variants= [], methods= [], is_pub= is_pub, conversions= [], type_params= [], line= line, is_native= false, protocols= [], setters= [], attrs= [])
+        return EnumDecl(name= name, variants= [], methods= [], type_methods= [], is_pub= is_pub, conversions= [], type_params= [], line= line, is_native= false, protocols= [], setters= [], attrs= [])
     p.expect(TokenKind.Newline)
     p.expect(TokenKind.Indent)
     var variants = [EnumVariant]{}
     var methods = [FnDecl]{}
     var enum_conversions = [AsDecl]{}
+    var type_methods = [TypeMethod]{}
     while p.peek() != TokenKind.Dedent:
         if p.peek() == TokenKind.Eof:
             break
-        while p.eat(TokenKind.Newline):
-            nil
+        while parser_check(p, "Newline") or parser_check(p, "Comment"):
+            p.advance()
         if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
             break
         match p.peek():
@@ -1072,8 +1112,12 @@ def EnumDecl parse_enum_decl(mut Parser p, bool is_pub) throws:
                     methods.push(parse_fn_decl(p, true, true))
                 elif parser_check(p, "Req"):
                     methods.push(parse_fn_decl(p, true, false))
+                elif parser_check(p, "Type"):
+                    type_methods.push(parse_type_method(p, true))
                 else:
                     variants.push(parse_enum_variant(p))
+            TokenKind.Type:
+                type_methods.push(parse_type_method(p, false))
             TokenKind.As:
                 # as TypeName: body — parse conversion block
                 let eas_line = p.current_line()
@@ -1086,7 +1130,7 @@ def EnumDecl parse_enum_decl(mut Parser p, bool is_pub) throws:
             _:
                 variants.push(parse_enum_variant(p))
     p.eat(TokenKind.Dedent)
-    EnumDecl(name= name, variants= variants, methods= methods, line= line, is_pub= is_pub, is_native= false, type_params= [], protocols= [], setters= [], conversions= enum_conversions, attrs= [])
+    EnumDecl(name= name, variants= variants, methods= methods, type_methods= type_methods, line= line, is_pub= is_pub, is_native= false, type_params= [], protocols= [], setters= [], conversions= enum_conversions, attrs= [])
 
 def EnumVariant parse_enum_variant(mut Parser p) throws:
     let line = p.current_line()
@@ -1414,6 +1458,9 @@ def Item parse_item(mut Parser p) throws:
                 Item.Fn(parse_fn_decl_auto(p, true, true))
             elif parser_check(p, "Req"):
                 Item.Fn(parse_fn_decl_auto(p, true, false))
+            elif parser_is_fn_shorthand(p):
+                let decl = parse_fn_shorthand(p)
+                Item.Fn(FnDecl(name= decl.name, qualifier= decl.qualifier, params= decl.params, return_ty= decl.return_ty, body= decl.body, is_pub= true, can_throw= decl.can_throw, is_task= decl.is_task, is_stream= decl.is_stream, stream_capacity= decl.stream_capacity, mutating= decl.mutating, is_native= decl.is_native, throws_ty= decl.throws_ty, type_params= decl.type_params, where_clause= decl.where_clause, attrs= decl.attrs, line= decl.line))
             else:
                 Item.Stmt(parse_stmt(p))
         TokenKind.Lt:
@@ -2578,6 +2625,21 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Str(s): return Value.Int(s.length)
             Value.Dict(pairs): return Value.Int(pairs.length)
             _: throw "len: unsupported type"
+    if name == "ord":
+        match args[0] else Value.Nil:
+            Value.Str(s):
+                if s.length == 0:
+                    throw "ord: empty string"
+                return Value.Int(ord(s))
+            _: throw "ord: expected a string argument"
+    if name == "chr":
+        match args[0] else Value.Nil:
+            Value.Int(n):
+                let code = n as uint32
+                if code > 1114111 or (code >= 55296 and code <= 57343):
+                    throw "chr: invalid codepoint {n}"
+                return Value.Str(chr(n))
+            _: throw "chr: expected an int argument"
     if name == "int":
         let v = args[0] else Value.Nil
         match v:
@@ -2649,6 +2711,21 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
     if name == "bool":
         let v = args[0] else Value.Nil
         return Value.Bool(val_to_bool(v))
+    if name == "atan2":
+        if args.length != 2:
+            throw "atan2: expected two numbers"
+        match args[0]:
+            Value.Float32(y):
+                let x = match args[1]:
+                    Value.Float32(v): v
+                    Value.Float64(v): v as float32
+                    Value.Int(v): v as float32
+                    _: throw "atan2: expected two numbers"
+                return Value.Float32(y.atan2(x))
+            _:
+                guard let y = value_as_float64_widened(args[0]) else: throw "atan2: expected two numbers"
+                guard let x = value_as_float64_widened(args[1]) else: throw "atan2: expected two numbers"
+                return Value.Float64(y.atan2(x))
     if name == "sqrt":
         let v = args[0] else Value.Nil
         match v:

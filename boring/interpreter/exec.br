@@ -110,6 +110,8 @@ def Signal? exec_block_fn(mut Interpreter interp, [Stmt] stmts):
                             final_sig = exec_if_as_expr(interp, s)
                         Stmt.Match(s):
                             final_sig = exec_match_as_expr(interp, s)
+                        Stmt.IfLet(s):
+                            final_sig = exec_if_let_as_expr(interp, s)
                         _:
                             let sig = exec_stmt(interp, stmt)
                             if sig != nil:
@@ -127,6 +129,51 @@ def Signal? exec_block_fn(mut Interpreter interp, [Stmt] stmts):
             exec_block(interp, defers[di])
             di = di - 1
     final_sig
+
+# An if-let in tail position returns its selected branch's value.
+def Signal? exec_if_let_as_expr(mut Interpreter interp, IfLetStmt s):
+    let parent = interp.current_env
+    let matched = exec_if_let_match(interp, s.clauses)
+    var Signal? result = nil
+    if matched:
+        result = exec_block_fn(interp, s.then_body)
+    else:
+        if let body = s.else_body:
+            mut child = new_env(parent.clone())
+            interp.current_env = child
+            result = exec_block_fn(interp, body)
+    interp.current_env = parent
+    if result != nil:
+        return result
+    ReturnSignal(Value.Nil)
+
+# Conditional numeric casts are checked; ordinary `as` still truncates.
+# Cast once, then check signs and round-trip to detect loss of integer range.
+def Value eval_cond_binding(mut Interpreter interp, Expr expr):
+    match expr.kind:
+        ExprKind.Cast(inner, ty):
+            let original = eval_expr(interp, inner)
+            let converted = cast_value(interp, original, ty)
+            if let source_kind = num_kind_of(original):
+                if let target_kind = type_to_num_kind(ty):
+                    let original_int = value_as_i128(original) else (0 as int128)
+                    let converted_int = value_as_i128(converted) else (0 as int128)
+                    if num_kind_signed(source_kind) and not num_kind_signed(target_kind) and original_int < 0:
+                        return Value.Nil
+                    if not num_kind_signed(source_kind) and num_kind_signed(target_kind) and converted_int < 0:
+                        return Value.Nil
+                    let restored = i128_to_kind(source_kind, converted_int)
+                    if not values_equal(original, restored):
+                        return Value.Nil
+            converted
+        _: eval_expr(interp, expr)
+
+def Value eval_cond_in_env(mut Interpreter interp, Env'actor env, Expr expr):
+    let parent = interp.current_env
+    interp.current_env = env
+    let value = eval_cond_binding(interp, expr)
+    interp.current_env = parent
+    value
 
 # ─── exec_stmt ────────────────────────────────────────────────────────────────
 
@@ -301,7 +348,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                                 if not val_to_bool(eval_expr(interp, e)):
                                     all_true = false
                             CondClause.Let(name, e):
-                                let v = eval_expr(interp, e)
+                                let v = eval_cond_binding(interp, e)
                                 match v:
                                     Value.Nil: all_true = false
                                     _: interp.current_env.define(name, v)
@@ -401,11 +448,11 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
 # ─── exec_if_let ──────────────────────────────────────────────────────────────
 
 def Signal? exec_if_let(mut Interpreter interp, IfLetStmt s):
+    let parent = interp.current_env
     let all_matched = exec_if_let_match(interp, s.clauses)
     if all_matched:
-        let child = interp.current_env
         let sig = exec_block(interp, s.then_body)
-        interp.current_env = child
+        interp.current_env = parent
         return sig
     if let else_stmts = s.else_body:
         return exec_block(interp, else_stmts)
@@ -428,12 +475,12 @@ def bool exec_if_let_match(mut Interpreter interp, [CondClause] clauses):
         ci = ci + 1
         match clause:
             CondClause.Let(name, expr):
-                let v = eval_expr(interp, expr)
+                let v = eval_cond_in_env(interp, child, expr)
                 match v:
                     Value.Nil: all_matched = false
                     _: child.define(name, v)
             CondClause.LetPat(pat, expr):
-                let v = eval_expr(interp, expr)
+                let v = eval_cond_in_env(interp, child, expr)
                 if not match_pattern(v, pat, child, interp):
                     all_matched = false
             CondClause.Expr(expr):
@@ -988,6 +1035,16 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
                 fn_env.define_mut(param.name, val)
             else:
                 fn_env.define(param.name, val)
+    for param in decl.params:
+        if let ty = param.ty:
+            let param_name = param.name
+            let current = fn_env.get(param_name.clone())
+            if let val = current:
+                let coerced = if param.variadic:
+                    coerce_array_elements(interp, val, ty)
+                else:
+                    coerce_declared_value(interp, val, ty)
+                fn_env.force_set(param_name, coerced)
     let prev_env = interp.current_env
     interp.current_env = fn_env
     # Push this call's declared return type so `return .Left` (exec_stmt's Return case)
@@ -1011,6 +1068,18 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
             interp.set_pending_throw(v)
             Nil
         _: Nil
+
+# Instance methods already have their self/field/parameter scope installed.
+def Value exec_method_body(mut Interpreter interp, FnDecl decl):
+    push_return_ty(interp, decl.return_ty)
+    let sig = exec_block_fn(interp, decl.body)
+    pop_return_ty(interp)
+    match sig:
+        ReturnSignal(v): v
+        ThrowSignal(v):
+            interp.set_pending_throw(v)
+            Value.Nil
+        _: Value.Nil
 
 # ─── call_closure ─────────────────────────────────────────────────────────────
 

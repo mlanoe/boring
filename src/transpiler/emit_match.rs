@@ -122,121 +122,7 @@ impl Transpiler {
             match clause {
                 CondClause::Let(name, expr) => {
                     bound_names.push(name.clone());
-                    self.known_local_vars.insert(name.clone());
-                    // If the expression is an optional actor field, track the binding as managed.
-                    let is_actor = self.expr_yields_actor(expr);
-                    if is_actor {
-                        match self.config.threading {
-                            crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.clone()); }
-                            crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.clone()); }
-                        }
-                        // Also track the inner struct type so method return types can be inferred.
-                        // e.g. `if let p = self.parent:` where parent: Env'actor? → var_struct_types["p"] = "Env"
-                        let struct_ty = match &expr.kind {
-                            crate::ast::ExprKind::Field(obj, field_name) => {
-                                let sn = match &obj.kind {
-                                    crate::ast::ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
-                                    crate::ast::ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
-                                    _ => None,
-                                };
-                                sn.and_then(|sn| self.struct_fields.get(sn.as_str()))
-                                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
-                                    .and_then(|(_, ty)| match ty {
-                                        crate::ast::Type::Optional(inner) => match inner.as_ref() {
-                                            crate::ast::Type::Qualified(inner2, _) => match inner2.as_ref() {
-                                                crate::ast::Type::Named(n) => Some(n.clone()),
-                                                _ => None,
-                                            },
-                                            crate::ast::Type::Named(n) => Some(n.clone()),
-                                            _ => None,
-                                        },
-                                        crate::ast::Type::Qualified(inner, _) => match inner.as_ref() {
-                                            crate::ast::Type::Named(n) => Some(n.clone()),
-                                            _ => None,
-                                        },
-                                        _ => None,
-                                    })
-                            }
-                            _ => None,
-                        };
-                        if let Some(sty) = struct_ty {
-                            self.var_struct_types.insert(name.clone(), sty);
-                        }
-                    } else if matches!(&expr.kind, crate::ast::ExprKind::Var(_) | crate::ast::ExprKind::Field(..)) {
-                        // `if let b = someOptionalVar:` / `if let b = self.field:` / `if let
-                        // b = bareImplicitSelfField:` — propagate the inner type (mirrors
-                        // `emit_flow.rs`'s `emit_guard`, `CondClause::Let` arm) so a field
-                        // write or `def` call through `b` below can resolve its struct type
-                        // and get checked. `resolve_expr_declared_type` covers a known local
-                        // var, an implicit bare-field self-reference, AND an explicit field
-                        // chain alike — a bare implicit self-field source (`if let m =
-                        // mutation:` where `mutation` means `self.mutation`) used to fall
-                        // through this branch entirely untracked, since only `var_types` was
-                        // consulted (implicit fields are never registered there). Without
-                        // this, `m`'s own field reads inside the branch body couldn't resolve
-                        // their declared type, so the Some(...)-wrap guards in
-                        // `expr_is_declared_optional` couldn't recognize them as already
-                        // Optional either — see docs/option-return-double-some-wrap-bug.md.
-                        if let Some(crate::ast::Type::Optional(inner)) = self.resolve_expr_declared_type(expr) {
-                            self.var_types.insert(name.clone(), *inner.clone());
-                            if Self::is_string_type(&inner) {
-                                self.string_vars.insert(name.clone());
-                            }
-                            if matches!(*inner, crate::ast::Type::Optional(_)) {
-                                self.optional_vars.insert(name.clone());
-                            }
-                            if let crate::ast::Type::Named(n) = inner.as_ref() {
-                                if self.is_known_user_type(n.as_str()) {
-                                    self.var_struct_types.insert(name.clone(), n.clone());
-                                }
-                            }
-                        }
-                    } else if let crate::ast::ExprKind::Call(callee, _) = &expr.kind {
-                        // `if let b = make():` where `make()` returns `T?` — mirror the
-                        // `Var`/`Field` branch above using the callee's declared return type
-                        // instead of a variable's tracked type.
-                        if let crate::ast::ExprKind::Var(fn_name) = &callee.kind {
-                            if let Some(crate::ast::Type::Optional(inner)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
-                                self.var_types.insert(name.clone(), *inner.clone());
-                                if Self::is_string_type(&inner) {
-                                    self.string_vars.insert(name.clone());
-                                }
-                                if let crate::ast::Type::Named(n) = inner.as_ref() {
-                                    if self.is_known_user_type(n.as_str()) {
-                                        self.var_struct_types.insert(name.clone(), n.clone());
-                                    }
-                                }
-                            }
-                        }
-                    } else if let crate::ast::ExprKind::MethodCall(recv, method, args) = &expr.kind {
-                        // `if let b = dict.get(k):` — a builtin dict lookup, not a
-                        // user-declared method, so there's no `struct_method_return_types`
-                        // entry to consult; propagate from the dict's own declared value
-                        // type instead (`{K=V}` → `V`). Scoped to the one-arg `.get()` form,
-                        // the only dict/array method whose return type is a clean `Option<V>`
-                        // determined purely by the receiver's own declared type (see
-                        // `is_option_expr`'s `ALWAYS_OPTION`/`get`-arity comment for the wider
-                        // "which builtin methods are unconditionally Option-shaped" context).
-                        if method == "get" && args.len() == 1 {
-                            if let Some(crate::ast::Type::Dict(_, v)) = self.resolve_expr_declared_type(recv) {
-                                if let crate::ast::Type::Named(n) = v.as_ref() {
-                                    if self.is_known_user_type(n.as_str()) {
-                                        self.var_struct_types.insert(name.clone(), n.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // An `if let`/`elif let` binding has no `mut`/`var mut` spelling —
-                    // exactly like `guard let` (see `emit_flow.rs`'s `emit_guard`) — so it
-                    // is never content-mutable. Register it as *checked* so `emit_expr.rs`'s
-                    // field-write diagnostic and `emit_methods.rs`'s `def`-call diagnostics
-                    // actually fire for it, instead of silently no-op'ing and letting invalid
-                    // Rust reach rustc (E0594) further down the pipeline. Mirrors
-                    // `emit_let.rs`'s unconditional `mut_checked_local_vars.insert` for a
-                    // plain `let`.
-                    self.content_mutable_local_vars.remove(name);
-                    self.mut_checked_local_vars.insert(name.clone());
+                    self.register_optional_binding_type(name, expr);
                 }
                 CondClause::LetPat(pat, _) => { Self::collect_pattern_binds(pat, &mut self.known_local_vars); }
                 CondClause::Expr(_) => {}
@@ -245,23 +131,178 @@ impl Transpiler {
         bound_names
     }
 
+    /// Registers clone-tracking / type metadata for `name`, bound to the unwrapped
+    /// inner value of an `Option<T>`-producing `expr` — the shared body of an `if
+    /// let`/`elif let` clause's `CondClause::Let(name, expr)` case (see
+    /// `register_if_let_clause_bindings` above) and of a `while let name[ = expr]:`
+    /// loop's own bound name (`emit_loop.rs`'s `emit_while_let`), so a while-let
+    /// binding gets exactly the same "propagate the inner type so later reuse gets
+    /// `.clone()`-inserted" treatment an if-let binding already gets, instead of
+    /// falling through emission entirely untyped/untracked (see
+    /// docs/while-let-clone-tracking-gap.md for the bug this closed: neither
+    /// `while let`'s implicit-unwrap nor self-referencing-shorthand form registered
+    /// its bound name's type at all, so a loop-body value reused 2+ times — e.g.
+    /// pushed into a history array, then read again inside an `if`/`else` — never
+    /// got `.clone()` inserted at any use site, an `E0382 use of moved value` at
+    /// `cargo build` the Boring source itself gives no hint of).
+    pub(crate) fn register_optional_binding_type(&mut self, name: &str, expr: &Expr) {
+        self.known_local_vars.insert(name.to_string());
+        // If the expression is an optional actor field, track the binding as managed.
+        let is_actor = self.expr_yields_actor(expr);
+        if is_actor {
+            match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.to_string()); }
+                crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.to_string()); }
+            }
+            // Also track the inner struct type so method return types can be inferred.
+            // e.g. `if let p = self.parent:` where parent: Env'actor? → var_struct_types["p"] = "Env"
+            let struct_ty = match &expr.kind {
+                crate::ast::ExprKind::Field(obj, field_name) => {
+                    let sn = match &obj.kind {
+                        crate::ast::ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
+                        crate::ast::ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+                        _ => None,
+                    };
+                    sn.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                        .and_then(|(_, ty)| match ty {
+                            crate::ast::Type::Optional(inner) => match inner.as_ref() {
+                                crate::ast::Type::Qualified(inner2, _) => match inner2.as_ref() {
+                                    crate::ast::Type::Named(n) => Some(n.clone()),
+                                    _ => None,
+                                },
+                                crate::ast::Type::Named(n) => Some(n.clone()),
+                                _ => None,
+                            },
+                            crate::ast::Type::Qualified(inner, _) => match inner.as_ref() {
+                                crate::ast::Type::Named(n) => Some(n.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                }
+                _ => None,
+            };
+            if let Some(sty) = struct_ty {
+                self.var_struct_types.insert(name.to_string(), sty);
+            }
+        } else if matches!(&expr.kind, crate::ast::ExprKind::Var(_) | crate::ast::ExprKind::Field(..)) {
+            // `if let b = someOptionalVar:` / `if let b = self.field:` / `if let
+            // b = bareImplicitSelfField:` — propagate the inner type (mirrors
+            // `emit_flow.rs`'s `emit_guard`, `CondClause::Let` arm) so a field
+            // write or `def` call through `b` below can resolve its struct type
+            // and get checked. `resolve_expr_declared_type` covers a known local
+            // var, an implicit bare-field self-reference, AND an explicit field
+            // chain alike — a bare implicit self-field source (`if let m =
+            // mutation:` where `mutation` means `self.mutation`) used to fall
+            // through this branch entirely untracked, since only `var_types` was
+            // consulted (implicit fields are never registered there). Without
+            // this, `m`'s own field reads inside the branch body couldn't resolve
+            // their declared type, so the Some(...)-wrap guards in
+            // `expr_is_declared_optional` couldn't recognize them as already
+            // Optional either — see docs/option-return-double-some-wrap-bug.md.
+            if let Some(crate::ast::Type::Optional(inner)) = self.resolve_expr_declared_type(expr) {
+                self.var_types.insert(name.to_string(), *inner.clone());
+                // Set (not just insert) both memberships explicitly — `name` can be the
+                // very same outer binding this is unwrapping (the `while let name:`
+                // self-referencing shorthand, emit_loop.rs), which may already carry a
+                // *stale* `string_vars`/`optional_vars` membership from its own
+                // (Optional-shaped) pre-loop tracking; leaving a stale positive after
+                // narrowing to the inner type here would wrongly keep treating the
+                // now-unwrapped loop-bound value as still-Optional inside the loop body
+                // (e.g. printing it via the Optional-formatting path instead of a plain
+                // string one).
+                if Self::is_string_type(&inner) {
+                    self.string_vars.insert(name.to_string());
+                } else {
+                    self.string_vars.remove(name);
+                }
+                if matches!(*inner, crate::ast::Type::Optional(_)) {
+                    self.optional_vars.insert(name.to_string());
+                } else {
+                    self.optional_vars.remove(name);
+                }
+                if let crate::ast::Type::Named(n) = inner.as_ref() {
+                    if self.is_known_user_type(n.as_str()) {
+                        self.var_struct_types.insert(name.to_string(), n.clone());
+                    }
+                }
+            }
+        } else if let crate::ast::ExprKind::Call(callee, _) = &expr.kind {
+            // `if let b = make():` where `make()` returns `T?` — mirror the
+            // `Var`/`Field` branch above using the callee's declared return type
+            // instead of a variable's tracked type.
+            if let crate::ast::ExprKind::Var(fn_name) = &callee.kind {
+                if let Some(crate::ast::Type::Optional(inner)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
+                    self.var_types.insert(name.to_string(), *inner.clone());
+                    if Self::is_string_type(&inner) {
+                        self.string_vars.insert(name.to_string());
+                    }
+                    if let crate::ast::Type::Named(n) = inner.as_ref() {
+                        if self.is_known_user_type(n.as_str()) {
+                            self.var_struct_types.insert(name.to_string(), n.clone());
+                        }
+                    }
+                }
+            }
+        } else if let crate::ast::ExprKind::MethodCall(recv, method, args) = &expr.kind {
+            // `if let b = dict.get(k):` — a builtin dict lookup, not a
+            // user-declared method, so there's no `struct_method_return_types`
+            // entry to consult; propagate from the dict's own declared value
+            // type instead (`{K=V}` → `V`). Scoped to the one-arg `.get()` form,
+            // the only dict/array method whose return type is a clean `Option<V>`
+            // determined purely by the receiver's own declared type (see
+            // `is_option_expr`'s `ALWAYS_OPTION`/`get`-arity comment for the wider
+            // "which builtin methods are unconditionally Option-shaped" context).
+            if method == "get" && args.len() == 1 {
+                if let Some(crate::ast::Type::Dict(_, v)) = self.resolve_expr_declared_type(recv) {
+                    if let crate::ast::Type::Named(n) = v.as_ref() {
+                        if self.is_known_user_type(n.as_str()) {
+                            self.var_struct_types.insert(name.to_string(), n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // An `if let`/`elif let`/`while let` binding has no `mut`/`var mut`
+        // spelling — exactly like `guard let` (see `emit_flow.rs`'s `emit_guard`)
+        // — so it is never content-mutable. Register it as *checked* so
+        // `emit_expr.rs`'s field-write diagnostic and `emit_methods.rs`'s
+        // `def`-call diagnostics actually fire for it, instead of silently
+        // no-op'ing and letting invalid Rust reach rustc (E0594) further down
+        // the pipeline. Mirrors `emit_let.rs`'s unconditional
+        // `mut_checked_local_vars.insert` for a plain `let`.
+        self.content_mutable_local_vars.remove(name);
+        self.mut_checked_local_vars.insert(name.to_string());
+    }
+
     /// Undo `register_if_let_clause_bindings` once the block it guards has been fully
     /// emitted, so tracking doesn't leak onto a same-named local declared later in the
     /// function (or in a sibling `elif`/`else` branch) — the same cleanup
     /// `emit_match_arm` already does for match-arm pattern bindings after each arm.
     fn unregister_if_let_clause_bindings(&mut self, names: &[String]) {
         for name in names {
-            self.known_local_vars.remove(name.as_str());
-            self.mut_checked_local_vars.remove(name.as_str());
-            self.content_mutable_local_vars.remove(name.as_str());
-            self.var_types.remove(name.as_str());
-            self.var_struct_types.remove(name.as_str());
-            self.string_vars.remove(name.as_str());
-            self.optional_vars.remove(name.as_str());
-            self.var_mutex_types.remove(name.as_str());
-            self.managed_refcell_vars.remove(name.as_str());
-            self.managed_mutex_vars.remove(name.as_str());
+            self.unregister_optional_binding_type(name);
         }
+    }
+
+    /// Undo `register_optional_binding_type` for one name — shared by
+    /// `unregister_if_let_clause_bindings` above and by `emit_while_let`
+    /// (`emit_loop.rs`) for its implicit-unwrap and explicit-`Some(name)`-pattern
+    /// forms, whose bound name is scoped to the loop body only (unlike the
+    /// self-referencing shorthand's, which IS the outer binding and instead
+    /// saves/restores around this call — see `emit_while_let`'s own doc comment).
+    pub(crate) fn unregister_optional_binding_type(&mut self, name: &str) {
+        self.known_local_vars.remove(name);
+        self.mut_checked_local_vars.remove(name);
+        self.content_mutable_local_vars.remove(name);
+        self.var_types.remove(name);
+        self.var_struct_types.remove(name);
+        self.string_vars.remove(name);
+        self.optional_vars.remove(name);
+        self.var_mutex_types.remove(name);
+        self.managed_refcell_vars.remove(name);
+        self.managed_mutex_vars.remove(name);
     }
 
     pub(crate) fn emit_cond_clauses(&self, clauses: &[CondClause]) -> String {
@@ -1193,10 +1234,22 @@ impl Transpiler {
         // (`mut Type`, docs/book.md). Both scoped to this arm body and removed
         // afterward, like `bound_structs`.
         let mut bound_mut_checked: Vec<String> = Vec::new();
+        let mut bound_dicts: Vec<String> = Vec::new();
         for (name, ty) in &bound_types {
             self.var_types.insert(name.clone(), ty.clone());
             if Self::is_string_type(ty) {
                 self.string_vars.insert(name.clone());
+            }
+            // Register Dict-typed pattern vars so `expr_is_dict` recognizes a match-bound
+            // dict (e.g. `Dict(fields): fields[key]`) and emits HashMap `.get(&key)` codegen
+            // instead of falling through to the generic numeric-index codegen (`(key) as
+            // usize` + `.get(idx)`), which doesn't even compile for a non-numeric key.
+            // `let`/`var` locals and function params already do this (`dict_vars.insert` in
+            // emit_let.rs / emit_top.rs) — match-arm bindings never did, so a variant field
+            // declared `{K=V}` was silently mistreated as an array once bound by `match`.
+            if matches!(ty.without_mut(), Type::Dict(..)) {
+                self.dict_vars.insert(name.clone());
+                bound_dicts.push(name.clone());
             }
             // Register Optional-typed pattern vars so they aren't double-wrapped in Some().
             if matches!(ty, Type::Optional(_)) {
@@ -1368,6 +1421,9 @@ impl Transpiler {
         for (name, _) in &bound_types {
             self.var_types.remove(name.as_str());
             self.string_vars.remove(name.as_str());
+        }
+        for name in &bound_dicts {
+            self.dict_vars.remove(name.as_str());
         }
         for name in &bound_structs {
             self.var_struct_types.remove(name.as_str());

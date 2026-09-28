@@ -1,0 +1,32 @@
+# A user method returning a collection must not replace its receiver.
+struct Builder:
+    var int calls = 0
+
+    def [int] push(int n):
+        calls += 1
+        [n]
+
+    def [int] insert(uint n):
+        calls += 1
+        [n as int]
+
+    def {string=int} put(int n):
+        calls += 1
+        {"value" = n}
+
+    def {int} add(int n):
+        calls += 1
+        {n}
+
+def main():
+    mut builder = Builder()
+    let pushed = builder.push(7)
+    print pushed[0]
+    let inserted = builder.insert(8)
+    print inserted[0]
+    let {string=int} mapped = builder.put(9)
+    let mapped_value = mapped["value"] else 0
+    print mapped_value
+    let added = builder.add(10)
+    print added.contains(10)
+    print builder.calls
