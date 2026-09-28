@@ -4389,6 +4389,11 @@ impl Transpiler {
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
             while_let_redirect: self.while_let_redirect.clone(),
+            // A nested fn/closure body is its own Rust item — a bare `break` inside
+            // it can never target an enclosing Boring loop (Rust itself rejects
+            // that), so there is no outer while-let-shorthand loop for a `break`
+            // emitted in here to sync back into. Always start clear, never inherited.
+            while_let_break_sync: None,
             fn_returns_void: self.fn_returns_void,
             fn_declared_void: self.fn_declared_void,
             suppress_ok_wrap: false,

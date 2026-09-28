@@ -786,7 +786,22 @@ impl Transpiler {
                             Type::Named(n) if self.is_known_user_type(n.as_str()) => {
                                 self.var_struct_types.insert(s.name.clone(), n.clone());
                             }
-                            Type::Array(_) | Type::Dict(..) | Type::Set(_) => {
+                            // `string`-returning methods (e.g. `let reply = tok.decode(...)`)
+                            // need the same `string_vars` tracking a `let string reply = ...`
+                            // annotation or a free-function call's return already gets — without
+                            // it, `emit_expr_owned`'s `Var` arm never matches this binding and a
+                            // later reuse (`arr.push(reply)` then `print reply`) emits a bare move
+                            // with no `.clone()`, moving `reply`'s `Rc<str>`/`Arc<str>` out from
+                            // under the later use (E0382 at `cargo build`).
+                            _ if Self::is_string_type(&ret_ty) => {
+                                self.string_vars.insert(s.name.clone());
+                            }
+                            // Track all Named return types (including enums), plus Array/Dict/Set,
+                            // in var_types so auto-clone can detect non-Copy variables at call
+                            // sites — mirrors the identical `ExprKind::Call` (free-function)
+                            // fallback just above, which is why a free function's string return
+                            // was already clone-safe while a struct method's wasn't.
+                            Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) => {
                                 self.var_types.insert(s.name.clone(), ret_ty.clone());
                             }
                             _ => {}

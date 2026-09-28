@@ -483,9 +483,42 @@ def Signal? exec_while_let_simple(mut Interpreter interp, string name, Expr valu
                     _: nil
     nil
 
+# Self-referencing shorthand: `while let v:` ≡ `while let v = v:` (book.md).
+# The condition and the loop body's `v` are the SAME outer binding — unlike
+# exec_while_let_simple above, don't shadow it in a per-iteration child scope,
+# or a body reassignment (the documented idiom for advancing to the next
+# value) would write to a shadow discarded at the end of the iteration instead
+# of the binding the next condition check reads, hanging the loop forever.
+# Mirrors the main tree-walk interpreter's exec_while_let (src/interpreter/exec.rs).
+def Signal? exec_while_let_self_shorthand(mut Interpreter interp, string name, Expr value_expr, [Stmt] body):
+    while true:
+        let v = eval_expr(interp, value_expr)
+        match v:
+            Value.Nil: break
+            _:
+                interp.current_env.set(name, v)
+                mut child = new_env(interp.current_env)
+                let prev = interp.current_env
+                interp.current_env = child
+                let sig = exec_block(interp, body)
+                interp.current_env = prev
+                match sig:
+                    BreakSignal(_): return nil
+                    ReturnSignal(rv): return ReturnSignal(rv)
+                    ThrowSignal(tv): return ThrowSignal(tv)
+                    _: nil
+    nil
+
+def bool is_self_shorthand_value(Expr value_expr, string name):
+    match value_expr.kind:
+        ExprKind.Var(vname): vname == name
+        _: false
+
 def Signal? exec_while_let(mut Interpreter interp, WhileLetStmt s):
     if let pattern = s.pattern:
         exec_while_let_pattern(interp, pattern, s.value, s.body)
+    elif is_self_shorthand_value(s.value, s.name):
+        exec_while_let_self_shorthand(interp, s.name, s.value, s.body)
     else:
         exec_while_let_simple(interp, s.name, s.value, s.body)
 

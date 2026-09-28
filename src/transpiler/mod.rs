@@ -693,6 +693,20 @@ struct Transpiler {
     /// would shadow-collide the two in Rust and either fail to type-check or
     /// silently only rebind the discarded per-iteration shadow.
     pub(crate) while_let_redirect: std::collections::HashMap<String, String>,
+    /// Set only for the duration of emitting a self-referencing `while let v:`
+    /// shorthand loop's own body (the `(loop-bound name, outer mangled name)`
+    /// pair, e.g. `("line", "__wl_line")`) — cleared to `None` whenever
+    /// `emit_stmt` descends into any *other* loop-producing statement (`for`,
+    /// `while`, `do-while`, `loop`, or another `while let`), so a `break`
+    /// belonging to a nested loop never mistakes itself for exiting this one.
+    /// `emit_stmt`'s `Stmt::Break` arm reads this: when set, an early exit
+    /// (`break` reached before the loop body's own tail reassignment) must
+    /// first move the loop-local unwrapped value back into the outer
+    /// `Option`-typed storage (`{outer} = Some({name});`), or that storage is
+    /// left in whatever partially-moved state the `while let Some(name) =
+    /// outer` match left it in — read by the post-loop `{name} = {outer};`
+    /// sync in `emit_while_let`.
+    pub(crate) while_let_break_sync: Option<(String, String)>,
     /// True when the current function's declared return type is `()` (void).
     /// Prevents expression-return without semicolon for void functions.
     pub(crate) fn_returns_void: bool,
@@ -1384,6 +1398,7 @@ impl Transpiler {
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
             while_let_redirect: std::collections::HashMap::new(),
+            while_let_break_sync: None,
             fn_returns_void: false,
             fn_declared_void: false,
             suppress_ok_wrap: false,

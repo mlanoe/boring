@@ -24,6 +24,19 @@ impl Transpiler {
             Stmt::Return(s)         => self.emit_return(s),
             Stmt::Throw(s)          => self.emit_throw(s),
             Stmt::Break(_, val) => {
+                // A self-referencing `while let v:` shorthand loop (see
+                // `emit_while_let`) leaves its outer `Option`-typed storage
+                // partially moved-from for the duration of each iteration's
+                // unwrapped binding — reaching `break` skips the loop body's
+                // own tail reassignment that would otherwise refill it, so
+                // move the unwrapped value back in first. A no-op (`None`)
+                // whenever this `break` belongs to some other loop, including
+                // one nested inside such a loop's body — `while_let_break_sync`
+                // is cleared for the duration of every other loop-producing
+                // statement below precisely so this doesn't misfire there.
+                if let Some((name, outer)) = self.while_let_break_sync.clone() {
+                    self.line(&format!("{} = Some({});", outer, name));
+                }
                 match val {
                     Some(e) => self.line(&format!("break {};", self.emit_expr(e))),
                     None    => self.line("break;"),
@@ -33,10 +46,26 @@ impl Transpiler {
             Stmt::If(s)             => self.emit_if(s, is_last),
             Stmt::IfLet(s)          => self.emit_if_let(s, is_last),
             Stmt::Match(s)          => self.emit_match(s, is_last),
-            Stmt::While(s)          => self.emit_while(s),
-            Stmt::WhileLet(s)       => self.emit_while_let(s),
-            Stmt::DoWhile(s)        => self.emit_do_while(s),
-            Stmt::Loop(s)           => self.emit_loop(s),
+            Stmt::While(s)          => {
+                let prev = self.while_let_break_sync.take();
+                self.emit_while(s);
+                self.while_let_break_sync = prev;
+            }
+            Stmt::WhileLet(s)       => {
+                let prev = self.while_let_break_sync.take();
+                self.emit_while_let(s);
+                self.while_let_break_sync = prev;
+            }
+            Stmt::DoWhile(s)        => {
+                let prev = self.while_let_break_sync.take();
+                self.emit_do_while(s);
+                self.while_let_break_sync = prev;
+            }
+            Stmt::Loop(s)           => {
+                let prev = self.while_let_break_sync.take();
+                self.emit_loop(s);
+                self.while_let_break_sync = prev;
+            }
             Stmt::Wait(dur, _)      => {
                 // Resolve leading-dot syntax: `.fromSecs(1)` → `Duration::from_secs(1)`
                 // Also detect Instant vs Duration for sleep_until vs sleep dispatch.
@@ -67,6 +96,10 @@ impl Transpiler {
                     ExprKind::MethodCall(obj, method, _)
                         if method == "all" && matches!(&obj.kind, ExprKind::Var(v) if v == "GPU")
                 );
+                // A `break` inside this `for` loop's body must never be
+                // mistaken for exiting an enclosing while-let-shorthand loop —
+                // see the `Stmt::Break` arm above.
+                let prev_break_sync = self.while_let_break_sync.take();
                 if is_gpu_all {
                     let saved_gpu_device_vars = self.gpu_device_vars.clone();
                     self.gpu_device_vars.insert(s.vars[0].clone());
@@ -75,6 +108,7 @@ impl Transpiler {
                 } else {
                     self.emit_for(s);
                 }
+                self.while_let_break_sync = prev_break_sync;
             }
             Stmt::Guard(s)          => self.emit_guard(s),
             Stmt::Try(s)            => self.emit_try(s),

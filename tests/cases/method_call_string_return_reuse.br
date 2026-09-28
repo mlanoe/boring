@@ -1,0 +1,31 @@
+pub struct Tok:
+    int eos
+
+    req string decode([int] ids):
+        var string s = ""
+        for id in ids:
+            s = "{s}{id}"
+        s
+
+string decode_free([int] ids):
+    var string s = ""
+    for id in ids:
+        s = "{s}{id}"
+    s
+
+def demo_method_call() throws:
+    let tok = Tok(0)
+    var [string] arr = []
+    let reply = tok.decode([1, 2, 3])
+    arr.push(reply)
+    print reply
+
+def demo_free_function() throws:
+    var [string] arr = []
+    let reply = decode_free([1, 2, 3])
+    arr.push(reply)
+    print reply
+
+def main() throws:
+    demo_method_call()
+    demo_free_function()

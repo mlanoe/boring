@@ -74,3 +74,24 @@ while let tick:
     print "self tick {tick}"
     tick = prevTick(tick)
 print "self done"
+
+# Regression: same self-shorthand LOOP form as above, but with a `break` in
+# the body (not just a plain fall-through reassignment) — book.md's stdin
+# "type empty line to quit" REPL idiom needs exactly this shape. This used to
+# compile fine under `boring run` and even under `boring build` WITHOUT a
+# `break`, but adding one produced Rust E0382 ("use of partially moved
+# value") on the post-loop sync: the loop head's `while let Some(name) =
+# outer` match moves `outer`'s contents into `name` every iteration, and the
+# tail reassignment that normally refills `outer` never runs on the
+# iteration that hits `break` — so `outer` was still in that iteration's
+# moved-from state when the post-loop sync tried to read it back out.
+var countdown = prevTick(5)
+while let countdown:
+    if countdown == 2:
+        break
+    print "counting {countdown}"
+    countdown = prevTick(countdown)
+if let Some(n) = countdown:
+    print "countdown stopped at {n}"
+else:
+    print "countdown stopped at nil"

@@ -2429,16 +2429,36 @@ def WhileLetStmt parse_while_let_stmt(mut Parser p) throws:
     parser_expect(p, "While")
     parser_expect(p, "Let")
     let pat = parse_pattern(p)
-    parser_expect(p, "Eq")
-    let saved = parser_get_allow_noparen_closure(p)
-    parser_set_allow_noparen_closure(p, false)
-    parser_set_allow_trailing_closure(p, false)
-    let expr = parse_or(p)
-    parser_set_allow_noparen_closure(p, saved)
-    parser_set_allow_trailing_closure(p, true)
-    parser_expect(p, "Colon")
-    let body = parse_block(p)
-    WhileLetStmt(name= "_", pattern= pat, value= expr, body= body, line= line)
+    # Shorthand: `while let v:` expands to `while let v = v:` — only available
+    # for a bare bind pattern, matching the main Rust parser's own restriction
+    # (a constructor pattern like `Some(x)` always requires an explicit `=`).
+    match pat:
+        Pattern.Bind(name):
+            var Expr value
+            if parser_check(p, "Colon") or parser_check(p, "Newline"):
+                value = make_var_expr(name, p.current_line())
+            else:
+                parser_expect(p, "Eq")
+                let saved = parser_get_allow_noparen_closure(p)
+                parser_set_allow_noparen_closure(p, false)
+                parser_set_allow_trailing_closure(p, false)
+                value = parse_or(p)
+                parser_set_allow_noparen_closure(p, saved)
+                parser_set_allow_trailing_closure(p, true)
+            parser_expect(p, "Colon")
+            let body = parse_block(p)
+            WhileLetStmt(name= name, pattern= nil, value= value, body= body, line= line)
+        _:
+            parser_expect(p, "Eq")
+            let saved = parser_get_allow_noparen_closure(p)
+            parser_set_allow_noparen_closure(p, false)
+            parser_set_allow_trailing_closure(p, false)
+            let value = parse_or(p)
+            parser_set_allow_noparen_closure(p, saved)
+            parser_set_allow_trailing_closure(p, true)
+            parser_expect(p, "Colon")
+            let body = parse_block(p)
+            WhileLetStmt(name= "_", pattern= pat, value= value, body= body, line= line)
 
 def [Expr] parse_macro_args(mut Parser p) throws:
     # Consume opening delimiter: `(` or `[`

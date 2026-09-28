@@ -110,6 +110,17 @@ impl KernelTranspiler {
             }
 
             ExprKind::Assign(lhs, rhs) => {
+                // Inside a self-referencing `while let v:` loop body (see
+                // `emit_stmt.rs`'s `Stmt::WhileLet` arm), a plain reassignment of
+                // the loop-bound name is the documented way to advance to the next
+                // value — route it to the outer binding's mangled Rust identifier
+                // instead of the loop-pattern's own (shadowed) unwrapped binding.
+                if let ExprKind::Var(name) = &lhs.kind {
+                    if let Some(outer) = self.while_let_redirect.get(name.as_str()) {
+                        let rs = self.emit_expr(rhs);
+                        return format!("{} = {}", outer, rs);
+                    }
+                }
                 let ls = self.emit_expr(lhs);
                 let rs = self.emit_expr(rhs);
                 format!("{} = {}", ls, rs)

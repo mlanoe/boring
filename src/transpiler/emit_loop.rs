@@ -157,7 +157,16 @@ impl Transpiler {
             self.line(&format!("while let Some({}) = {} {{", s.name, outer));
             self.indent += 1;
             let prev = self.while_let_redirect.insert(s.name.clone(), outer.clone());
+            // See `while_let_break_sync`'s doc comment: `emit_stmt`'s `Stmt::Break`
+            // arm reads this to refill `outer` before an early exit, since the
+            // loop head's `while let Some(name) = outer` match leaves `outer`
+            // moved-from for the rest of the iteration otherwise. Always `None`
+            // here already (the caller in `emit_stmt` clears it for every
+            // loop-producing statement, this one included) — save/restore
+            // anyway rather than assuming that invariant holds at every caller.
+            let prev_break_sync = self.while_let_break_sync.replace((s.name.clone(), outer.clone()));
             self.emit_loop_body(&s.body);
+            self.while_let_break_sync = prev_break_sync;
             match prev {
                 Some(p) => { self.while_let_redirect.insert(s.name.clone(), p); }
                 None => { self.while_let_redirect.remove(&s.name); }

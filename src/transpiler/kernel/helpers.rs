@@ -41,6 +41,25 @@ pub(super) struct KernelTranspiler {
     pub(super) broadcast_senders: std::collections::HashSet<String>,
     /// Variables bound as `broadcast` receivers — `rx.recv()` → blocking read from own slot.
     pub(super) broadcast_receivers: std::collections::HashSet<String>,
+    /// Maps a self-referencing `while let v:` shorthand loop's bound name (`v`) to
+    /// the mangled Rust name (`__wl_v`) holding the outer `Option`-typed binding —
+    /// see `emit_stmt.rs`'s `Stmt::WhileLet` arm. Naively emitting
+    /// `while let Some(v) = v { ...; v = next; }` would shadow-collide the two in
+    /// Rust and either fail to type-check or silently only rebind the discarded
+    /// per-iteration shadow.
+    pub(super) while_let_redirect: std::collections::HashMap<String, String>,
+    /// Set only for the duration of emitting a self-referencing `while let v:`
+    /// shorthand loop's own body (the `(loop-bound name, outer mangled name)`
+    /// pair, e.g. `("line", "__wl_line")`) — cleared to `None` whenever `emit_stmt`
+    /// descends into any *other* loop-producing statement (`for`, `while`,
+    /// `do-while`, `loop`, or another `while let`), so a `break` belonging to a
+    /// nested loop never mistakes itself for exiting this one. The `Stmt::Break`
+    /// arm reads this: when set, an early exit must first move the loop-local
+    /// unwrapped value back into the outer `Option`-typed storage
+    /// (`{outer} = Some({name});`), or that storage is left in whatever
+    /// partially-moved state the `while let Some(name) = outer` match left it in —
+    /// read by the post-loop `{name} = {outer};` sync in the `WhileLet` arm.
+    pub(super) while_let_break_sync: Option<(String, String)>,
 }
 
 impl KernelTranspiler {
@@ -59,6 +78,8 @@ impl KernelTranspiler {
             watch_receivers: std::collections::HashSet::new(),
             broadcast_senders: std::collections::HashSet::new(),
             broadcast_receivers: std::collections::HashSet::new(),
+            while_let_redirect: std::collections::HashMap::new(),
+            while_let_break_sync: None,
         }
     }
 
