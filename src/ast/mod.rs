@@ -1570,8 +1570,7 @@ impl Type {
     /// hash/equality behavior and silently corrupt the set's internal bucket
     /// placement — a universal invariant of hash-based sets, not a fact about
     /// Rust's `HashSet<T>` specifically (which happens to be how today's Rust
-    /// backend realizes it: no `iter_mut()`/`get_mut()` at all — see
-    /// docs/design-notes/checker-portability-draft.md). Unlike
+    /// backend realizes it: no `iter_mut()`/`get_mut()` at all). Unlike
     /// `nested_slot_grants_mut` (which tracks which slot needs a Rust-level
     /// `let mut` for an otherwise-legal `mut` placement), this is a pure
     /// well-formedness scan — `{mut T}` has no legal transpiler target at all,

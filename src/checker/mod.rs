@@ -17,8 +17,17 @@
 // reasoning is instead an artifact of Rust's ownership/borrow model, or of the
 // current Rust-only GPU codegen pipeline, live in `rust_checks.rs` (same
 // `Checker` struct, same scope/binding-tracking state, split purely to keep the
-// universal/Rust-specific line visible at the file level). See
-// `docs/design-notes/checker-portability-draft.md` for the full inventory.
+// universal/Rust-specific line visible at the file level).
+//
+// The universal family (immutability/`mut` rules, dead code, missing return,
+// call arity, match exhaustiveness incl. full enum-variant coverage) is where
+// to keep investing: every check added here counts for Rust today and for any
+// future backend at no extra cost. The Rust-specific family in `rust_checks.rs`
+// is almost entirely a variation on "what operation does this particular Rust
+// memory qualifier (`'owned`/`'shared`/`'actor`/`'guard`/`'static`/`'atomic`)
+// unlock" — when a second backend actually lands, that qualifier system is what
+// will need redesigning to be parameterized per backend, not these individual
+// checks rewritten one by one.
 
 mod rust_checks;
 
@@ -710,9 +719,8 @@ impl Checker {
     // today's Rust backend realizes it: no `iter_mut()`/`get_mut()` at all).
     // (docs/book.md's "Sets — `{T}`" section documents the resulting rule —
     // this was, for a long time, the one item in this whole area that was
-    // documented as rejected but never actually wired up). See
-    // docs/design-notes/checker-portability-draft.md for why this distinction
-    // matters. Unlike `check_tuple_mut_constraint`/`check_scalar_mut_constraint`,
+    // documented as rejected but never actually wired up). Unlike
+    // `check_tuple_mut_constraint`/`check_scalar_mut_constraint`,
     // this does NOT gate on whether the *outer* binding itself requests `mut`
     // (`Self::requests_mut`) — `let {mut Point} pts = {}` is illegal even though
     // `pts` is a plain `let`, because the illegality lives on the Set's element
@@ -1430,16 +1438,14 @@ impl Checker {
     // through and returns `Ok(())`) or silently evaluates to `Nil` as an
     // expression (`interpreter::eval_expr::eval_match_expr`) in `boring run`,
     // and raises rustc E0004 in `boring build` — a real behavioral divergence
-    // between the two backends for the same bug (see
-    // docs/design-notes/checker-portability-draft.md's match-exhaustiveness
-    // section). Scoped to the two subject shapes this checker can verify
-    // without real type inference — a subject statically known to be `bool`
-    // (a boolean literal, a comparison/logical/identity expression, or a
-    // `Var` whose declared type is `bool`) or an optional (`T?`, a `Var` whose
-    // declared type is `Type::Optional`). Full user-declared enum
-    // exhaustiveness needs a variant-list registry this checker doesn't have
-    // yet — deliberately not attempted here, see the same design-notes
-    // section for why.
+    // between the two backends for the same bug. Scoped to the subject shapes
+    // this checker can verify without real type inference — a subject
+    // statically known to be `bool` (a boolean literal, a comparison/logical/
+    // identity expression, or a `Var` whose declared type is `bool`), an
+    // optional (`T?`, a `Var` whose declared type is `Type::Optional`), or a
+    // user-declared enum (a `Var` whose declared type resolves to a name in
+    // the `enums` registry — see `check_enum_match_exhaustiveness` further
+    // down for full variant-coverage tracking).
     //
     // An arm with a `guard` clause never counts toward covering its
     // pattern(s) — the guard may reject it at runtime, exactly like real
@@ -1479,9 +1485,9 @@ impl Checker {
     /// Full variant-coverage exhaustiveness for a user-declared enum, the
     /// generalization `check_bool_match_exhaustiveness`/
     /// `check_optional_match_exhaustiveness` were deliberately scoped short of
-    /// (see docs/design-notes/checker-portability-draft.md's "still open"
-    /// item) — now backed by the `enums` registry collected up front. Same
-    /// guard-arm semantics as the other two: a guarded arm never counts toward
+    /// until the `enums` registry (name -> variant names, collected up front
+    /// like `kernel_decls`) existed to back it. Same guard-arm semantics as
+    /// the other two: a guarded arm never counts toward
     /// coverage on its own. A qualified pattern (`Error.Expired`, stored as
     /// `Pattern::Variant("Error::Expired", _)` — see the parser) is matched by
     /// its trailing segment only; a qualifier naming a different enum than the
@@ -2042,9 +2048,10 @@ fn stmt_always_exits(stmt: &Stmt) -> bool {
 ///
 /// Deliberately does NOT require a `match`'s arms/guards, or an `if`/`if let`
 /// chain, to be *provably* exhaustive beyond "there is an `else`" — proving
-/// real exhaustiveness needs type information this checker doesn't reliably
-/// have (see docs/design-notes/checker-portability-draft.md's match-
-/// exhaustiveness section) and isn't either of these checks' job. Assuming the
+/// real exhaustiveness for an arbitrary condition needs type information this
+/// checker doesn't reliably have (`check_match_exhaustiveness` handles the
+/// bool/optional/enum subjects it *can* verify separately) and isn't either of
+/// these checks' job. Assuming the
 /// arms/branches as written already cover every real case is the deliberately
 /// optimistic default: for `check_dead_code` it only costs a missed detection
 /// (a false negative — fine); for `check_missing_return` it's what keeps that

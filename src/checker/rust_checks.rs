@@ -14,10 +14,9 @@
 //! Split out of `checker/mod.rs` so the line between "universal Boring semantics"
 //! (stays in `mod.rs`) and "artifacts of Rust's ownership/borrow model, or of the
 //! current Rust-only GPU codegen pipeline" (this file) is visible at the file
-//! level, not just by reading each check's own reasoning. See
-//! `docs/design-notes/checker-portability-draft.md` for the full inventory and
-//! rationale behind this split — done in anticipation of future non-Rust
-//! backends (Swift/Kotlin), where none of the checks below apply as-is:
+//! level, not just by reading each check's own reasoning — done in
+//! anticipation of future non-Rust backends (Swift/Kotlin), where none of the
+//! checks below apply as-is:
 //! `Box`/`Rc`/`Arc` move-and-borrow semantics, `std::sync::atomic`'s exact type
 //! support, GPU-kernel dispatch unwrapping `Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock`,
 //! and the GPU-residency/`with`-block memory-mapping model built around them.
