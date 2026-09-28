@@ -3,8 +3,10 @@
 Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
 `@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), `'static` (§2, checker/registry-level —
 see caveat below), and a first slice of `@inject` (§1-§2 — same-`Program` providers only,
-bare-field inference against a `@singleton` provider only (not yet against a transient one — a real
-`boring build`-specific gap, not a design limitation), a struct can't combine `@inject` with its own
+bare-field inference against a `@singleton` provider (always) or a transient one (only when the base
+type is a trait and the provider returns it bare too — a real `boring build`-specific gap for every
+other transient shape, not a design limitation, see "Before implementation begins"), a struct can't
+combine `@inject` with its own
 `init` yet) are real and tested on both backends (`src/desugar_inject.rs`, `src/checker/mod.rs`'s
 `check_di_provider_attrs`, `src/interpreter/call.rs`'s `singleton_cache`,
 `tests/dependency_injection.rs`, `tests/cases/{singleton,inject}_di.br`). The self-hosted-in-Boring
