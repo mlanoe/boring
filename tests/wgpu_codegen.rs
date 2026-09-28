@@ -3106,24 +3106,19 @@ kernel S:
 }
 
 /// `wgsl_scalar`'s `wgsl_unsupported_width` fallback (device.rs) narrows a genuinely
-/// unrepresentable-width element type (`uint8`/`int8`/`int16`/`uint16`/`int64`/`uint64`/
-/// `int128`/`uint128`) down to a 4-byte `i32`/`u32` with only an inline WGSL comment -- fine
-/// for a *scalar* kernel param (just a narrowed value, still 4 bytes on both host and
-/// device), but silently wrong for a storage-*buffer* field: the host side
+/// unrepresentable-width element type down to a 4-byte `i32`/`u32` with only an inline WGSL
+/// comment -- fine for a *scalar* kernel param (just a narrowed value, still 4 bytes on both
+/// host and device), but silently wrong for a storage-*buffer* field: the host side
 /// (`host_scalar_type` in host.rs) keeps that field's *real*, narrower-or-wider byte width
 /// (`u8`, `i16`, `u64`, ...) for its `Vec`/upload, while the device side's `array<u32>` still
 /// indexes by 4-byte word -- every element past the first is read from the wrong byte
-/// offset. Unlike the dynamic-'sync case above this was never caught anywhere: no error was
-/// pushed for buffer fields at all, just the inert WGSL comment, so the mismatched build
-/// compiled and ran with silently corrupted data. `emit_kernel_decl`'s new validation loop
-/// (device.rs) now rejects it outright, for every affected width, not just `uint8`.
+/// offset. `int64`/`uint64`/`int128`/`uint128` have no packing story on this target (unlike
+/// `uint8`/`int8`/`uint16`/`int16` -- see the `wgpu_packed_byte_buffer_field_*` tests below,
+/// which cover the now-supported case this test used to also reject) and stay hard-rejected
+/// by `emit_kernel_decl`'s validation loop (device.rs) instead of silently corrupting data.
 #[test]
 fn wgpu_narrow_width_buffer_field_is_rejected_not_silently_corrupted() {
     for (decl, name) in [
-        ("mut [uint8]'unified w_packed", "uint8"),
-        ("mut [int8]'unified w_packed", "int8"),
-        ("mut [int16]'unified w_packed", "int16"),
-        ("mut [uint16]'unified w_packed", "uint16"),
         ("mut [int64]'unified w_packed", "int64"),
         ("mut [uint64]'unified w_packed", "uint64"),
     ] {
@@ -3144,6 +3139,140 @@ kernel Q:
              diagnostic instead of silently corrupting data, got:\n{stderr}"
         );
     }
+}
+
+/// An atomic (`'actor'global`/`'actor'unified`) buffer field needs a real 32-bit element for
+/// WGSL's `atomicAdd`/`atomicMin`/... intrinsics -- there's no sub-word atomic op, so a
+/// packed-byte-kind element type is rejected there even though it's supported on an ordinary
+/// (non-atomic) buffer field (see `packed_byte_kind_of_ty`'s doc comment and the
+/// `wgpu_packed_byte_buffer_field_*` tests below).
+#[test]
+fn wgpu_atomic_packed_byte_buffer_field_is_rejected_not_silently_corrupted() {
+    let src = r#"
+kernel Q:
+    mut [float32]'unified out
+    mut [uint8]'actor'global counters
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = counters[tid] as float32
+"#;
+    let stderr = run_wgpu_expect_failure("atomic_packed_byte_buffer_field_rejected", src);
+    assert!(
+        stderr.contains("atomic buffer field 'counters'") && stderr.contains("no atomic form"),
+        "expected the atomic packed-byte buffer field to be rejected with a clear diagnostic \
+         instead of silently corrupting data, got:\n{stderr}"
+    );
+}
+
+/// The wgpu-backend regression test for the packed-byte-kind buffer field feature: a
+/// `uint8`/`int8`-element `'global` field is transparently packed into `array<u32>` storage
+/// words (see `PackedByteKind`'s doc comment in device.rs) instead of being rejected. Modeled
+/// on the real motivating case (`boring-llm`'s `Q8LinearKernel`, which reads GGUF's Q8_0
+/// quantization format -- pairs of a little-endian 16-bit scale followed by packed int8
+/// values, all inside one raw byte buffer): this kernel reads a `[uint8]'global` buffer
+/// holding two 5-byte records (a little-endian 16-bit header followed by three 1-byte
+/// fields), plus a separate `[int8]'global` buffer to check sign-extension, and copies every
+/// individual element straight through to a `'unified` output -- verifying every logical
+/// index is read from the correct bit offset, not just the first one per 4-byte word
+/// (`bytes`/`sbytes` are 10/6 elements long, deliberately NOT a multiple of the 4-per-word
+/// packing, exercising the buffer-size-rounding and host-upload-padding path too, see
+/// `round_up_to_word_bytes` in host.rs).
+#[test]
+fn wgpu_packed_byte_buffer_field_real_gpu_dispatch() {
+    let test_name = "packed_byte_buffer_field_real_dispatch";
+    let src = r#"
+kernel PackedRecords:
+    let [uint8]'global bytes
+    let [int8]'global sbytes
+    mut [float32]'unified out_bytes
+    mut [float32]'unified out_sbytes
+    mut [float32]'unified out_header
+
+    init([uint8] b, [int8] sb, [float32] ob, [float32] osb, [float32] oh):
+        bytes = b
+        sbytes = sb
+        out_bytes = ob
+        out_sbytes = osb
+        out_header = oh
+
+    def ():
+        let tid = gpu.thread.x
+        out_bytes[tid] = bytes[tid] as float32
+        out_sbytes[tid] = sbytes[tid] as float32
+        if tid < 2:
+            let lo = bytes[tid * 5]
+            let hi = bytes[tid * 5 + 1]
+            out_header[tid] = (lo as float32) + (hi as float32) * 256.0
+
+let bytes = [10, 200, 3, 250, 5, 20, 100, 3, 250, 5]
+let sbytes = [-1, -128, 127, 0, -50, 100]
+mut out_bytes = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+mut out_sbytes = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+mut out_header = [0.0, 0.0]
+
+mut k = PackedRecords(bytes, sbytes, out_bytes, out_sbytes, out_header)
+kernel:
+    k(block = 10)
+
+for i in 0..<10:
+    print "out_bytes[{i}] = {k.out_bytes[i]}"
+for i in 0..<6:
+    print "out_sbytes[{i}] = {k.out_sbytes[i]}"
+for i in 0..<2:
+    print "out_header[{i}] = {k.out_header[i]}"
+"#;
+    let (wgsl, _emulated, _rs, _toml) = run_wgpu(test_name, src);
+
+    // Codegen shape: both packed fields back onto `array<u32>`, not a per-width WGSL type
+    // that doesn't exist (`array<i8>` isn't valid WGSL and would fail naga parsing).
+    assert!(
+        wgsl.contains("array<u32>"),
+        "expected the packed-byte buffer fields' storage to be declared as `array<u32>`, got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("extractBits"),
+        "expected packed-byte element reads to use WGSL's `extractBits` builtin, got:\n{wgsl}"
+    );
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join(test_name);
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a real \
+         GPU (dispatching a kernel reading packed `uint8`/`int8` buffer fields), but it \
+         failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+
+    // Every uint8 element, at every word offset (0..=3), across all 3 backing u32 words
+    // (10 elements: word0 = indices 0-3, word1 = 4-7, word2 = 8-9 partial).
+    let expected_bytes: [i64; 10] = [10, 200, 3, 250, 5, 20, 100, 3, 250, 5];
+    for (i, v) in expected_bytes.iter().enumerate() {
+        let line = format!("out_bytes[{i}] = {v}");
+        assert!(stdout.contains(&line), "expected `{line}` in:\n{stdout}");
+    }
+    // Every int8 element, including negative values and the min/max of the type, across
+    // both backing u32 words (6 elements: word0 = indices 0-3, word1 = 4-5 partial) --
+    // confirms sign-extension via `extractBits(bitcast<i32>(word), ...)` is correct at every
+    // offset, not just offset 0.
+    let expected_sbytes: [i64; 6] = [-1, -128, 127, 0, -50, 100];
+    for (i, v) in expected_sbytes.iter().enumerate() {
+        let line = format!("out_sbytes[{i}] = {v}");
+        assert!(stdout.contains(&line), "expected `{line}` in:\n{stdout}");
+    }
+    // The two little-endian 16-bit headers, each decoded from a separate pair of uint8
+    // elements straddling a word boundary at record 0 (bytes[0..2], inside word0) and mid-word
+    // at record 1 (bytes[5..7], spanning word1) -- matching GGUF's per-block scale field shape.
+    assert!(stdout.contains("out_header[0] = 51210"), "expected out_header[0] = 10 + 200*256 = 51210, got:\n{stdout}");
+    assert!(stdout.contains("out_header[1] = 25620"), "expected out_header[1] = 20 + 100*256 = 25620, got:\n{stdout}");
 }
 
 /// Same silently-dropped-errors bug, different diagnostic source: `build_gpu_array_subst`

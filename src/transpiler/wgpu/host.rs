@@ -383,6 +383,14 @@ impl<'a> HostEmitter<'a> {
                         // producing kernel instance itself needing to stay alive — see
                         // docs/scoped-access-blocks.md's interprocedural residency case.
                         self.line(&format!("    {}_buf: std::sync::Arc<wgpu::Buffer>,", f.name));
+                        // A packed-byte-kind field's buffer is padded up to a whole number
+                        // of 4-byte words (`round_up_to_word_bytes`), so its wgpu buffer size
+                        // no longer determines the real element count -- track it separately
+                        // so `copy_{field}_to_host` can truncate the padding back off. See
+                        // `emit_kernel_copy_accessors`.
+                        if is_packed_byte_field(&array_inner(&f.ty)) {
+                            self.line(&format!("    {}_len: usize,", f.name));
+                        }
                         // Keep Vec mirror for host-visible fields ('unified/'actor'unified).
                         if matches!(f.qual, GpuQual::Unified | GpuQual::Surface | GpuQual::ActorUnified) {
                             let inner_ty = array_inner(&f.ty);
@@ -476,14 +484,21 @@ impl<'a> HostEmitter<'a> {
         let params_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
             .filter(|f| is_params_field(f)).collect();
 
-        // Create GPU buffers.
+        // Create GPU buffers. `packed_len_exprs` records each packed-byte-kind field's
+        // real (unpadded) initial element count, in the same match arms below, so the
+        // "Return struct" section further down can initialize that field's `_len`
+        // without recomputing which arm applied.
+        let mut packed_len_exprs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for f in &buf_fields {
             let usages = buffer_usages(f);
             let inner_ty = array_inner(&f.ty);
             let host_ty = host_scalar_type(&inner_ty);
+            let packed = is_packed_byte_field(&inner_ty);
             let (size_expr, init_data) = match &f.ty {
                 Type::ArrayN(_, n) => {
-                    (format!("({} * std::mem::size_of::<{}>()) as u64", n, host_ty),
+                    let bytes = format!("{} * std::mem::size_of::<{}>()", n, host_ty);
+                    if packed { packed_len_exprs.insert(f.name.clone(), n.to_string()); }
+                    (if packed { round_up_to_word_bytes(&bytes) } else { format!("({}) as u64", bytes) },
                      format!("vec![{}::default(); {}]", host_ty, n))
                 }
                 // A fixed-shape labeled multi-dim array (every axis a literal
@@ -497,12 +512,16 @@ impl<'a> HostEmitter<'a> {
                 // and fail wgpu's binding-size validation on first dispatch.
                 ty if ty.labeled_array_len().is_some() => {
                     let n = ty.labeled_array_len().unwrap();
-                    (format!("({} * std::mem::size_of::<{}>()) as u64", n, host_ty),
+                    let bytes = format!("{} * std::mem::size_of::<{}>()", n, host_ty);
+                    if packed { packed_len_exprs.insert(f.name.clone(), n.to_string()); }
+                    (if packed { round_up_to_word_bytes(&bytes) } else { format!("({}) as u64", bytes) },
                      format!("vec![{}::default(); {}]", host_ty, n))
                 }
                 _ if has_dim_field => {
                     // Dynamic size derived from Dimension (width * height * sizeof<T>).
-                    (format!("((width * height) as usize * std::mem::size_of::<{}>()) as u64", host_ty),
+                    let bytes = format!("(width * height) as usize * std::mem::size_of::<{}>()", host_ty);
+                    if packed { packed_len_exprs.insert(f.name.clone(), "(width * height) as usize".to_string()); }
+                    (if packed { round_up_to_word_bytes(&bytes) } else { format!("({}) as u64", bytes) },
                      format!("vec![{}::default(); (width * height) as usize]", host_ty))
                 }
                 _ => {
@@ -514,6 +533,7 @@ impl<'a> HostEmitter<'a> {
                     // from whatever buffer exists right now, and wgpu rejects a storage/
                     // uniform binding under 4 bytes (one scalar element) at bind-group
                     // creation time, before the resize logic ever runs.
+                    if packed { packed_len_exprs.insert(f.name.clone(), "0".to_string()); }
                     ("4u64".into(), format!("Vec::<{}>::new()", host_ty))
                 }
             };
@@ -631,6 +651,9 @@ impl<'a> HostEmitter<'a> {
         self.line("            bind_group,");
         for f in &buf_fields {
             self.line(&format!("            {}_buf,", f.name));
+            if let Some(len_expr) = packed_len_exprs.get(&f.name) {
+                self.line(&format!("            {}_len: {},", f.name, len_expr));
+            }
             if matches!(f.qual, GpuQual::Unified | GpuQual::Surface | GpuQual::ActorUnified) {
                 let inner_ty = array_inner(&f.ty);
                 let n = match &f.ty {
@@ -788,9 +811,20 @@ impl<'a> HostEmitter<'a> {
             if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified) && is_buffer_array_ty(&f.ty) {
                 let inner_ty = array_inner(&f.ty);
                 let host_ty = host_scalar_type(&inner_ty);
+                let packed = is_packed_byte_field(&inner_ty);
                 // D2H.
                 self.line(&format!("    fn copy_{}_to_host(&self) -> Vec<{}> {{", f.name, host_ty));
-                self.line(&format!("        __boring_gpu_copy_d2h::<{}>(&self.device, &self.queue, &self.{}_buf)", host_ty, f.name));
+                if packed {
+                    // The buffer itself is padded up to a whole 4-byte word
+                    // (`copy_{field}_to_device` below, `round_up_to_word_bytes`), so
+                    // `__boring_gpu_copy_d2h` reads back up to 3 extra trailing zero
+                    // elements — truncate to the real length tracked in `{field}_len`.
+                    self.line(&format!("        let mut __v = __boring_gpu_copy_d2h::<{}>(&self.device, &self.queue, &self.{}_buf);", host_ty, f.name));
+                    self.line(&format!("        __v.truncate(self.{}_len);", f.name));
+                    self.line("        __v");
+                } else {
+                    self.line(&format!("        __boring_gpu_copy_d2h::<{}>(&self.device, &self.queue, &self.{}_buf)", host_ty, f.name));
+                }
                 self.line("    }");
                 // H2D. `new()` creates every buffer field at size 0 (it has no host-side
                 // notion of the real data size until a caller actually supplies some —
@@ -801,7 +835,11 @@ impl<'a> HostEmitter<'a> {
                 // being replaced — hence the rebuild_bind_group() call whenever the size
                 // actually changes.
                 self.line(&format!("    fn copy_{}_to_device(&mut self, data: &[{}]) {{", f.name, host_ty));
-                self.line(&format!("        let needed = (data.len() * std::mem::size_of::<{}>()) as u64;", host_ty));
+                if packed {
+                    self.line(&format!("        let needed = {};", round_up_to_word_bytes(&format!("data.len() * std::mem::size_of::<{}>()", host_ty))));
+                } else {
+                    self.line(&format!("        let needed = (data.len() * std::mem::size_of::<{}>()) as u64;", host_ty));
+                }
                 self.line(&format!("        if self.{}_buf.size() != needed {{", f.name));
                 self.line(&format!("            self.{}_buf = std::sync::Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {{", f.name));
                 self.line("                label: None,");
@@ -811,7 +849,25 @@ impl<'a> HostEmitter<'a> {
                 self.line("            }));");
                 self.line("            self.rebuild_bind_group();");
                 self.line("        }");
-                self.line(&format!("        __boring_gpu_copy_h2d(&self.device, &self.queue, bytemuck::cast_slice(data), &self.{}_buf);", f.name));
+                if packed {
+                    // `__boring_gpu_copy_h2d`'s internal `copy_buffer_to_buffer` size is
+                    // `src.len()`, which wgpu requires to be a multiple of
+                    // `COPY_BUFFER_ALIGNMENT` (4 bytes) — pad the raw byte view up to
+                    // `needed` (zero-filled tail) whenever `data`'s own byte length isn't
+                    // already word-aligned, instead of passing the unpadded slice through.
+                    self.line("        let __bytes: &[u8] = bytemuck::cast_slice(data);");
+                    self.line("        let __padded: std::borrow::Cow<[u8]> = if (__bytes.len() as u64) == needed {");
+                    self.line("            std::borrow::Cow::Borrowed(__bytes)");
+                    self.line("        } else {");
+                    self.line("            let mut __v = __bytes.to_vec();");
+                    self.line("            __v.resize(needed as usize, 0);");
+                    self.line("            std::borrow::Cow::Owned(__v)");
+                    self.line("        };");
+                    self.line(&format!("        __boring_gpu_copy_h2d(&self.device, &self.queue, &__padded, &self.{}_buf);", f.name));
+                    self.line(&format!("        self.{}_len = data.len();", f.name));
+                } else {
+                    self.line(&format!("        __boring_gpu_copy_h2d(&self.device, &self.queue, bytemuck::cast_slice(data), &self.{}_buf);", f.name));
+                }
                 self.line("    }");
                 self.blank();
             }
@@ -1870,6 +1926,30 @@ fn array_inner(ty: &Type) -> Type {
         ty if ty.as_labeled_array().is_some() => ty.as_labeled_array().unwrap().0.clone(),
         other => other.clone(),
     }
+}
+
+/// True for a buffer field element type this backend represents on the device side as
+/// a packed `array<u32>` (`uint8`/`int8`/`uint16`/`int16` — see
+/// `super::device::PackedByteKind`'s doc comment). The host-facing `Vec<u8>`/`Vec<i8>`/
+/// `Vec<u16>`/`Vec<i16>` type (`host_scalar_type`) is unaffected — only the wgpu
+/// buffer's *allocated byte size* needs to be a whole number of 4-byte words to match
+/// the device-side `array<u32>` declaration, which is what every call site of this
+/// function rounds via `round_up_to_word_bytes`.
+fn is_packed_byte_field(inner_ty: &Type) -> bool {
+    super::device::packed_byte_kind_of_ty(inner_ty).is_some()
+}
+
+/// Rounds a byte-length Rust expression (a `usize`-typed source string) up to the next
+/// multiple of 4 and casts to `u64` — the buffer-size unit `wgpu::BufferDescriptor`
+/// wants. Needed only for packed-byte-kind fields (`is_packed_byte_field`): every other
+/// element type is already 4 bytes wide (`i32`/`u32`/`f32`), so `n * size_of::<T>()` is
+/// automatically a multiple of 4 and this rounding is a no-op there — this helper is
+/// simply never called for those. Without it, a buffer sized to e.g. 34 raw bytes
+/// (GGUF's Q8_0 block size) would violate `wgpu::COPY_BUFFER_ALIGNMENT` (4 bytes) the
+/// first time it's used as a `copy_buffer_to_buffer` destination/source, and also
+/// wouldn't hold a whole number of the `array<u32>` words the device side indexes by.
+fn round_up_to_word_bytes(byte_len_expr: &str) -> String {
+    format!("(((({}) + 3) / 4) * 4) as u64", byte_len_expr)
 }
 
 fn host_scalar_type(ty: &Type) -> &'static str {

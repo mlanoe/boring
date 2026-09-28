@@ -800,6 +800,23 @@ impl DeviceEmitter {
                             decl.name, f.name, name,
                             if name.starts_with('u') { "u32" } else { "i32" }, name
                         ), f.line, f.col));
+                    } else if packed_byte_kind_of_ty(inner).is_some()
+                        && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
+                        // `uint8`/`int8`/`uint16`/`int16` are otherwise supported on a buffer
+                        // field (packed into `array<u32>` words, see `PackedByteKind`), but an
+                        // atomic field needs a real whole-word element for WGSL's
+                        // `atomicAdd`/`atomicMin`/... intrinsics to operate on — there's no
+                        // sub-word atomic op to extend `packed_byte_read`/
+                        // `try_packed_byte_assign`'s plain-index codegen to. Reject explicitly
+                        // instead of silently falling through to `wgsl_scalar`'s
+                        // `/* ERROR */`-commented fallback (which doesn't fail the naga build).
+                        self.errors.push(TranspileError::at(format!(
+                            "kernel {}: atomic buffer field '{}' has element type `uint8`/`int8`/\
+                             `uint16`/`int16`, which has no atomic form on --target wgpu — WGSL's \
+                             atomic intrinsics need a whole 32-bit element, not a packed sub-word \
+                             one. Use `int32`/`uint32` instead",
+                            decl.name, f.name
+                        ), f.line, f.col));
                     }
                 }
             }
@@ -1203,6 +1220,8 @@ impl DeviceEmitter {
                         };
                         if let Some(line) = self.try_atomic_assign(lhs, rhs) {
                             self.line(&line);
+                        } else if let Some(line) = self.try_packed_byte_assign(lhs, rhs) {
+                            self.line(&line);
                         } else if plain_handled {
                             // Already emitted by `try_emit_plain_index_method_stmt`
                             // above: `{lhs} = {target}; {target} = ...;` in place
@@ -1381,6 +1400,82 @@ impl DeviceEmitter {
             _ => return None,
         };
         Some(format!("{};", call))
+    }
+
+    /// Looks up `name` among the current kernel's fields and returns its
+    /// `PackedByteKind` when it's a buffer field with a `uint8`/`int8`/`uint16`/`int16`
+    /// element type (see that type's doc comment) — `None` for every other field
+    /// (including a packed-kind field that isn't itself a storage buffer, which can't
+    /// happen today since those widths are only ever accepted on buffer fields, but
+    /// there's no ordinary-index-expression path that would reach a non-buffer one
+    /// anyway).
+    fn packed_field_kind(&self, name: &str) -> Option<PackedByteKind> {
+        let field = self.current_fields.iter().find(|f| f.name == *name)?;
+        if !is_buffer_field(field) { return None; }
+        buffer_field_elem_ty(field).and_then(packed_byte_kind_of_ty)
+    }
+
+    /// Read a single logical element out of a `PackedByteKind`-packed `array<u32>`
+    /// storage buffer at `idx_s` (already-stringified WGSL, evaluated once by the
+    /// caller). Uses WGSL's `extractBits` builtin (`extractBits(e, offset, count)`,
+    /// valid on `i32`/`u32`) rather than hand-rolled shift/mask arithmetic — it's the
+    /// one WGSL builtin that already does the right thing for *both* the unsigned
+    /// case (zero-extends) and the signed one (sign-extends, once the packed word is
+    /// reinterpreted as `i32` via `bitcast`) in a single call. Returns a `u32`
+    /// expression for `U8`/`U16`, an `i32` one for `I8`/`I16` — matching the type this
+    /// backend's own `wgsl_scalar` narrows the corresponding *scalar* field to
+    /// elsewhere in this file, so arithmetic mixing a packed-buffer read with an
+    /// ordinary scalar of the same declared Boring type stays well-typed in WGSL.
+    fn packed_byte_read(arr_name: &str, idx_s: &str, kind: PackedByteKind) -> String {
+        let per_word = kind.elems_per_word();
+        let bits = kind.bits();
+        let word = format!("{}[u32({}) / {}u]", arr_name, idx_s, per_word);
+        let offset = format!("((u32({}) % {}u) * {}u)", idx_s, per_word, bits);
+        if kind.signed() {
+            format!("extractBits(bitcast<i32>({}), {}, {}u)", word, offset, bits)
+        } else {
+            format!("extractBits({}, {}, {}u)", word, offset, bits)
+        }
+    }
+
+    /// Store a single logical element into a `PackedByteKind`-packed `array<u32>`
+    /// storage buffer — the write-side counterpart of `packed_byte_read`. WGSL has no
+    /// masked-store builtin (unlike the `extractBits` read side), so this emits a
+    /// single assignment statement whose RHS reads the current word, clears the
+    /// target element's bits, and ORs in the new value's bits at the right offset —
+    /// `buf[w] = (buf[w] & ~(mask << off)) | ((u32(v) & mask) << off);`. `u32(v)` is a
+    /// bit-preserving reinterpretation per the WGSL spec (not a saturating/wrapping
+    /// numeric conversion), so a negative `i32` input (the `I8`/`I16` case) still
+    /// masks down to the correct unsigned bit pattern.
+    fn packed_byte_store_stmt(arr_name: &str, idx_s: &str, val_s: &str, kind: PackedByteKind) -> String {
+        let per_word = kind.elems_per_word();
+        let bits = kind.bits();
+        let mask: u32 = if bits == 8 { 0xFF } else { 0xFFFF };
+        let word_ref = format!("{}[u32({}) / {}u]", arr_name, idx_s, per_word);
+        let offset = format!("((u32({}) % {}u) * {}u)", idx_s, per_word, bits);
+        format!(
+            "{word} = (({word} & ~({mask:#x}u << {offset})) | ((u32({val}) & {mask:#x}u) << {offset}));",
+            word = word_ref, offset = offset, val = val_s, mask = mask
+        )
+    }
+
+    /// `arr[i] = v` (or the RHS of a desugared `arr[i] OP= v`, which reaches here as an
+    /// ordinary `Assign` whose RHS happens to re-read `arr[i]` — that read goes through
+    /// the `packed_byte_read` path installed in `expr()`'s `Index` arm, so compound
+    /// assignment "just works" through composition with no extra codegen needed here)
+    /// where `arr` is a packed-byte-kind buffer field. Checked before the generic
+    /// `Assign` fallback in `emit_stmt`'s `Stmt::Expr` case, the same way
+    /// `try_atomic_assign` is — mutually exclusive with it, since a packed-byte field
+    /// is never `'actor'global`/`'actor'unified` (atomic ops need a real 32-bit
+    /// element).
+    fn try_packed_byte_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<String> {
+        let ExprKind::Index(arr, idx) = &lhs.kind else { return None; };
+        let ExprKind::Var(name) = &arr.kind else { return None; };
+        let kind = self.packed_field_kind(name)?;
+        let idx_s = self.expr(idx);
+        let val_s = self.expr(rhs);
+        let arr_name = self.current_buffer_renames.get(name).cloned().unwrap_or_else(|| name.clone());
+        Some(Self::packed_byte_store_stmt(&arr_name, &idx_s, &val_s, kind))
     }
 
     /// Detect `arr[i].min/max/swap/cas(...)` where `arr` is an
@@ -1634,6 +1729,19 @@ impl DeviceEmitter {
                             return format!("{}.{}[u32({})]", pvar, wgsl_safe_ident(name), idx_s);
                         }
                     }
+                    // A `uint8`/`int8`/`uint16`/`int16` buffer field — its backing
+                    // storage is a plain `array<u32>` (`wgsl_buffer_type`), so a bare
+                    // `{}[u32(...)]` index here would read/write a whole 4-byte word
+                    // instead of one logical byte/half-word. Route through the
+                    // `extractBits`-based bit-extraction read instead — see
+                    // `packed_byte_read`'s doc comment (the write side is
+                    // `try_packed_byte_assign`, checked separately at the statement
+                    // level since WGSL has no masked-store expression).
+                    if let Some(kind) = self.packed_field_kind(name) {
+                        let arr_name = self.current_buffer_renames.get(name).cloned().unwrap_or_else(|| name.clone());
+                        let idx_s = self.expr(idx);
+                        return Self::packed_byte_read(&arr_name, &idx_s, kind);
+                    }
                 }
                 format!("{}[u32({})]", self.expr(arr), self.expr(idx))
             }
@@ -1748,6 +1856,24 @@ impl DeviceEmitter {
                                 // that ever emits `arrayLength`, rather than at every call
                                 // site that happens to compare/combine a `.len()` against an
                                 // index.
+                                //
+                                // A packed-byte field's `array<u32>` backing buffer holds
+                                // `elems_per_word` logical elements per word, so its own
+                                // `.len()` must be the *word* count times that factor, not
+                                // the raw word count — otherwise a packed `uint8`/`int8`/
+                                // `uint16`/`int16` field's `.len()` would silently under-report
+                                // by up to 4x. This is still only exact when the field's real
+                                // element count is itself a whole number of words (the common
+                                // case, and always true for a field grown through
+                                // `copy_{field}_to_device`, which rounds up to a whole word
+                                // and tracks the real length separately on the host side — see
+                                // `host::round_up_to_word_bytes`) — a field whose *device-side*
+                                // `.len()` needs to be exact for a non-word-aligned length
+                                // would need that length threaded through as an extra param
+                                // instead, which no caller of this backend has needed yet.
+                                if let Some(kind) = self.packed_field_kind(name) {
+                                    return format!("(i32(arrayLength(&{})) * {})", obj_s, kind.elems_per_word());
+                                }
                                 return format!("i32(arrayLength(&{}))", obj_s);
                             }
                             if let Type::ArrayN(_, n) = &field.ty {
@@ -1881,28 +2007,70 @@ fn buffer_field_elem_ty(f: &KernelFieldDecl) -> Option<&Type> {
 /// generated Rust) uploads/sizes the buffer at the type's real, different byte width. Any
 /// element read/written beyond the first ends up at the wrong offset — not a narrowing,
 /// an outright stride mismatch. Returns `None` for types WGSL represents natively
-/// (`int32`/`uint32`/`float32`) or narrows self-consistently (`int`/`uint`/`float64`,
-/// handled by `wgsl_narrowed_width`/`wgsl_unsupported_f64` instead).
+/// (`int32`/`uint32`/`float32`), narrows self-consistently (`int`/`uint`/`float64`,
+/// handled by `wgsl_narrowed_width`/`wgsl_unsupported_f64` instead), or is transparently
+/// packed into `array<u32>` words (`uint8`/`int8`/`uint16`/`int16`, see
+/// `packed_byte_kind_of_ty` and `wgsl_buffer_type`) — still genuinely unrepresentable:
+/// `int64`/`uint64`/`int128`/`uint128` (64/128-bit ints have no packing story here).
 fn buffer_elem_unsupported_width_name(ty: &Type) -> Option<&'static str> {
     match ty {
-        Type::Uint8 => Some("uint8"),
-        Type::Int8 => Some("int8"),
-        Type::Int16 => Some("int16"),
-        Type::Uint16 => Some("uint16"),
         Type::Int64 => Some("int64"),
         Type::Uint64 => Some("uint64"),
         Type::Int128 => Some("int128"),
         Type::Uint128 => Some("uint128"),
         Type::Named(n) => match n.as_str() {
-            "uint8" => Some("uint8"),
-            "int8" => Some("int8"),
-            "int16" => Some("int16"),
-            "uint16" => Some("uint16"),
             "int64" | "i64" | "int128" | "i128" => Some("int64/int128"),
             "uint64" | "u64" | "uint128" | "u128" => Some("uint64/uint128"),
             _ => None,
         },
         Type::Qualified(inner, _) => buffer_elem_unsupported_width_name(inner),
+        _ => None,
+    }
+}
+
+/// A storage-buffer element type WGSL can't represent natively (no 8/16-bit integer
+/// scalars) but that this backend supports anyway by transparently packing several
+/// logical elements into one 4-byte `u32` storage word — the standard technique for
+/// byte-level data on WGSL-only GPU APIs. `U8`/`I8` pack 4 elements/word (8 bits each),
+/// `U16`/`I16` pack 2 elements/word (16 bits each). See `wgsl_buffer_type` (declares the
+/// backing `array<u32>`), `DeviceEmitter::packed_byte_read`/`packed_byte_store_stmt`
+/// (the per-element bit-extraction/masked-store codegen), and `host::host_scalar_type`'s
+/// counterpart on the Rust side (the host-facing `Vec<u8>`/`Vec<i8>`/... type is
+/// unchanged — only the wgpu buffer's own byte layout is affected, and that layout is
+/// bit-for-bit identical to the plain byte array on every little-endian host, so no
+/// host-side repacking arithmetic is needed, only buffer-size rounding — see
+/// `host::round_up_to_word_bytes`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum PackedByteKind { U8, I8, U16, I16 }
+
+impl PackedByteKind {
+    pub(super) fn elems_per_word(self) -> u32 {
+        match self { PackedByteKind::U8 | PackedByteKind::I8 => 4, PackedByteKind::U16 | PackedByteKind::I16 => 2 }
+    }
+    fn bits(self) -> u32 {
+        match self { PackedByteKind::U8 | PackedByteKind::I8 => 8, PackedByteKind::U16 | PackedByteKind::I16 => 16 }
+    }
+    fn signed(self) -> bool {
+        matches!(self, PackedByteKind::I8 | PackedByteKind::I16)
+    }
+}
+
+/// Does `ty` need the `array<u32>`-packed representation on `--target wgpu`? See
+/// `PackedByteKind`'s doc comment.
+pub(super) fn packed_byte_kind_of_ty(ty: &Type) -> Option<PackedByteKind> {
+    match ty {
+        Type::Uint8 => Some(PackedByteKind::U8),
+        Type::Int8 => Some(PackedByteKind::I8),
+        Type::Uint16 => Some(PackedByteKind::U16),
+        Type::Int16 => Some(PackedByteKind::I16),
+        Type::Named(n) => match n.as_str() {
+            "uint8" => Some(PackedByteKind::U8),
+            "int8" => Some(PackedByteKind::I8),
+            "uint16" => Some(PackedByteKind::U16),
+            "int16" => Some(PackedByteKind::I16),
+            _ => None,
+        },
+        Type::Qualified(inner, _) => packed_byte_kind_of_ty(inner),
         _ => None,
     }
 }
@@ -1925,6 +2093,14 @@ fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
                     Type::Named(n) if matches!(n.as_str(), "uint" | "u32" | "u64") => "atomic<u32>".into(),
                     other => wgsl_scalar(other),
                 }
+            } else if packed_byte_kind_of_ty(inner).is_some() {
+                // Backing storage is `array<u32>` regardless of the logical element
+                // width (8 or 16 bits) — see `PackedByteKind`'s doc comment. Every
+                // read/write of an individual element goes through
+                // `packed_byte_read`/`try_packed_byte_assign` instead of a plain
+                // WGSL index, so the declared type here never needs to (and cannot)
+                // reflect the narrower logical width.
+                "u32".to_string()
             } else {
                 wgsl_scalar(inner)
             }
