@@ -94,7 +94,7 @@ fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program)
 /// same way every other pipeline stage here does — mirrors
 /// `desugar_array_block_or_exit` immediately above, for the identical reason.
 fn desugar_inject_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
-    match desugar_inject::desugar_inject(program, current_env_flag().as_deref()) {
+    match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent()) {
         Ok(p) => p,
         Err(e) => {
             report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
@@ -2609,7 +2609,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
             process::exit(1);
         }
     };
-    match desugar_inject::desugar_inject(program, current_env_flag().as_deref()) {
+    match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());

@@ -8,9 +8,15 @@
 // synthesized `init` by `src/desugar_inject.rs`, reusing Boring's existing
 // labeled-argument-with-defaults call-site machinery rather than any new
 // transpiler codegen. Current `@inject` scope (see that file's own doc
-// comment for the full list): same-`Program` providers only (no `[deps]`
-// cross-project resolution yet), no `id`/`env`, a struct with an `@inject`
-// field can't also declare its own `init`, and a bare (unqualified) field
+// comment for the full list): same-project only (no `[deps]` cross-project
+// resolution yet) — a provider is visible from the entry file itself *or*
+// any same-project sibling file reached via a bare `use <name>`
+// (`emit_rust_multi_file` below covers this; the reverse direction — a
+// struct with its own `@inject` field declared *only* in a sibling file — is
+// not covered, see `desugar_inject.rs`'s module doc for why), `id`/`env`
+// (§5-§6) and cycle detection (§7) are both implemented (see their own
+// sections further down), a struct with an `@inject` field can't also
+// declare its own `init`, and a bare (unqualified) field
 // against a non-`@singleton` ("transient") provider is only resolved without
 // an explicit qualifier when the field's base type is a trait AND the
 // provider itself returns that trait bare too (a trait object's bare
@@ -84,6 +90,25 @@ fn emit_rust_kernel(src: &str) -> std::process::Output {
         .arg("--target")
         .arg("kernel")
         .arg(&br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
+}
+
+/// Same-project multi-file scenario (`desugar_inject.rs`'s `walk_same_project_uses`):
+/// `main_src` is the entry file (`main.br`), `sibling_src` is written alongside it
+/// under `sibling_name.br` and reached from `main_src` via a bare `use <sibling_name>`.
+fn emit_rust_multi_file(main_src: &str, sibling_name: &str, sibling_src: &str) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let dir = tempfile_dir();
+    let br_file = dir.join("main.br");
+    std::fs::write(&br_file, main_src).expect("failed to write fixture main.br");
+    std::fs::write(dir.join(format!("{sibling_name}.br")), sibling_src)
+        .expect("failed to write fixture sibling .br file");
+
+    Command::new(bin)
+        .arg("build")
+        .arg(&br_file)
+        .arg("--emit-rust")
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
 }
@@ -1134,6 +1159,114 @@ def main():
     assert!(
         stderr.contains("cycle detected among `@provide` providers"),
         "expected the cycle-detection error, got:\n{}", stderr
+    );
+}
+
+// ── Same-project multi-file resolution ──────────────────────────────────────────
+
+#[test]
+fn inject_resolves_provider_declared_in_sibling_file() {
+    let main_src = "\
+use providers
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+def main():
+    let repo = UserRepository()
+    print \"ok\"
+";
+    let sibling_src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+@provide
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+";
+    let out = emit_rust_multi_file(main_src, "providers", sibling_src);
+    assert!(
+        out.status.success(),
+        "expected a provider in a same-project sibling file to resolve, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("UserRepository::new(networkClient())"),
+        "expected the sibling-file provider to be wired in, got:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_ambiguous_provider_across_entry_and_sibling_file_is_rejected() {
+    // The ambiguity check (`collect_providers`) must see both files' providers as
+    // one registry, not two independent ones.
+    let main_src = "\
+use providers
+
+trait Logger:
+    req void log(string msg)
+
+struct ConsoleLogger as Logger:
+    def void log(string msg): print msg
+
+@provide
+pub Logger'shared consoleLoggerProvider():
+    ConsoleLogger()
+
+struct Service:
+    @inject
+    Logger'shared logger
+
+def main():
+    print \"ok\"
+";
+    let sibling_src = "\
+struct FileLogger as Logger:
+    def void log(string msg): print msg
+
+@provide
+pub Logger'shared fileLoggerProvider():
+    FileLogger()
+";
+    let out = emit_rust_multi_file(main_src, "providers", sibling_src);
+    assert!(!out.status.success(), "expected providers in two different files to still be caught as ambiguous");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous provider for `Logger`"),
+        "expected the ambiguity error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_no_provider_found_still_fires_across_files() {
+    // A sibling file exists and is reachable, but declares no matching provider at
+    // all — must still fail with the ordinary no-provider-found error, not silently
+    // succeed just because *some* sibling file was scanned.
+    let main_src = "\
+use helpers
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+def main():
+    print \"ok\"
+";
+    let sibling_src = "\
+trait NetworkClient:
+    req string fetch()
+";
+    let out = emit_rust_multi_file(main_src, "helpers", sibling_src);
+    assert!(!out.status.success(), "expected no-provider-found to still fire when the sibling file has no matching @provide");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no `@provide` found for type `NetworkClient`"),
+        "expected the no-provider-found error, got:\n{}", stderr
     );
 }
 

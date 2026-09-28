@@ -38,10 +38,23 @@
 //! ## Scope of this implementation (see the design doc's Open Questions/
 //! "Before implementation begins" for what's deliberately still deferred)
 //!
-//! - **Same-project (in practice: same parsed `Program`) only** — no `[deps]`
-//!   cross-project resolution yet. A provider is visible here exactly when
-//!   it's a top-level (or one-level-nested-in-`mod`) `@provide` function in
-//!   this same `Program`.
+//! - **Same-project only** — no `[deps]` cross-project resolution yet. A
+//!   provider is visible here when it's a top-level (or
+//!   one-level-nested-in-`mod`) `@provide` function in the entry `Program`
+//!   itself, *or* in any same-project sibling file transitively reachable
+//!   from it via a bare `use <name>` (`walk_same_project_uses`) — this only
+//!   widens the *provider registry* (and trait-name set, for bare-field
+//!   detection), read-only: the sibling file's own content is parsed purely to
+//!   look for `@provide`/`trait` declarations, never rewritten or merged back.
+//!   **A struct declared only in a sibling file, with its own `@inject`
+//!   field, is not covered** — that field never gets desugared at all,
+//!   because neither backend's own `use`-loading (`inline_boring_use` in the
+//!   transpiler, `exec_use` in the interpreter) invokes this pass on a file it
+//!   loads; only the file actually handed to `desugar_inject` up front (the
+//!   entry file) ever has its own structs desugared. Closing that gap means
+//!   hooking this pass into both of those call sites directly — a
+//!   substantially bigger architectural change than the read-only registry
+//!   widening implemented here, deliberately not attempted in this slice.
 //! - **`id`/`env` (§5-§6) are implemented** — see `attr_kv`/`resolve_provider`
 //!   below. `env` is read once, up front, from a `--env <value>` CLI flag
 //!   (`main.rs`'s `current_env_flag`) — a self-contained Boring-CLI concern,
@@ -350,6 +363,67 @@ fn collect_trait_names(items: &[Item], names: &mut HashSet<String>) {
             _ => {}
         }
     }
+}
+
+/// Widens `collect_providers`/`collect_trait_names` to also see a **same-project
+/// sibling file**, reached the same way a bare `use <name>` already does at
+/// every other point in the pipeline (`source_dir`-relative — mirrors
+/// `emit_top.rs`'s `emit_use`, minus the `[deps]`/`boring.<module>` special
+/// cases, which this simply never matches: a `[deps]` name or a stdlib module
+/// resolves to a path that doesn't exist under `source_dir`, so the `exists()`-
+/// equivalent check below naturally — not by any explicit exclusion — limits
+/// this to same-project files only, exactly this pass's intended scope for now
+/// (see this file's module doc: no `[deps]` cross-project resolution yet).
+///
+/// Read-only and best-effort: a sibling file that fails to read/lex/parse is
+/// silently skipped here rather than reported — any *real* syntax error in it
+/// still surfaces moments later, with a proper diagnostic, when the checker/
+/// transpiler/interpreter independently (and always) re-parses it themselves.
+/// This pass only ever *adds* candidates a bare `use` already makes reachable;
+/// it never changes what's a compile error elsewhere.
+///
+/// **What this does not do** (a real, accepted limitation — see this file's
+/// module doc): a *struct* declared only in a sibling file, with its own
+/// `@inject` field, never gets that field desugared at all by visiting it this
+/// way — this function only ever reads a sibling file to grow the provider/
+/// trait-name registry, it never rewrites or returns the sibling `Program`
+/// itself. Making that direction work would mean hooking this whole pass into
+/// `inline_boring_use` (`transpiler/emit_top.rs`) and `exec_use`
+/// (`interpreter/mod.rs`) — the actual places each backend independently loads
+/// a `use`d file from disk — a materially bigger change than widening a
+/// read-only registry scan, deliberately not attempted in this first slice.
+fn walk_same_project_uses(
+    items: &[Item],
+    source_dir: &std::path::Path,
+    reg: &mut Registry,
+    trait_names: &mut HashSet<String>,
+    visited: &mut HashSet<std::path::PathBuf>,
+) -> Result<(), ParseError> {
+    for item in items {
+        match item {
+            Item::Use(u) if !u.path.is_empty() => {
+                let rel: std::path::PathBuf = u.path.iter().collect();
+                let candidate = source_dir.join(rel).with_extension("br");
+                let Ok(candidate) = candidate.canonicalize() else { continue };
+                if !visited.insert(candidate.clone()) { continue; }
+                let Ok(source) = std::fs::read_to_string(&candidate) else { continue };
+                let Ok(tokens) = crate::lexer::lex_all(&source) else { continue };
+                let Ok(sibling) = crate::parser::parse(tokens) else { continue };
+                // Errors from a sibling file (ambiguous providers within *it*) are real
+                // and worth surfacing — unlike read/lex/parse failure, an ambiguity here
+                // is this pass's own, well-defined diagnostic, not something the
+                // checker/transpiler would otherwise catch on their own independent
+                // re-parse (they don't run `desugar_inject` on a `use`d file at all, per
+                // this function's own doc above).
+                collect_providers(&sibling.items, reg)?;
+                collect_trait_names(&sibling.items, trait_names);
+                walk_same_project_uses(&sibling.items, source_dir, reg, trait_names, visited)?;
+            }
+            Item::Mod(m) => walk_same_project_uses(&m.items, source_dir, reg, trait_names, visited)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Resolves `(base, id)` against the registry for the current build's `env`
@@ -726,14 +800,30 @@ fn detect_cycles(
     Ok(())
 }
 
-pub fn desugar_inject(mut program: Program, current_env: Option<&str>) -> Result<Program, ParseError> {
+/// `source_dir`: the entry file's own directory (`main.rs`'s callers all have
+/// this — the file they just parsed `program` from) — lets `collect_providers`/
+/// `collect_trait_names` widen to same-project sibling files reached via a
+/// bare `use <name>` (`walk_same_project_uses`, this file's own doc there for
+/// the full scope/limitation). `None` (e.g. no real file on disk — a REPL-style
+/// caller, if one ever exists) simply skips that widening; every other pass
+/// still runs, scoped to `program` alone, exactly as before this parameter
+/// existed.
+pub fn desugar_inject(
+    mut program: Program,
+    current_env: Option<&str>,
+    source_dir: Option<&std::path::Path>,
+) -> Result<Program, ParseError> {
     let mut reg = Registry::new();
     collect_providers(&program.items, &mut reg)?;
+    let mut trait_names = HashSet::new();
+    collect_trait_names(&program.items, &mut trait_names);
+    if let Some(source_dir) = source_dir {
+        let mut visited = HashSet::new();
+        walk_same_project_uses(&program.items, source_dir, &mut reg, &mut trait_names, &mut visited)?;
+    }
     let mut struct_deps = HashMap::new();
     collect_struct_inject_deps(&program.items, &mut struct_deps);
     detect_cycles(&reg, &struct_deps)?;
-    let mut trait_names = HashSet::new();
-    collect_trait_names(&program.items, &mut trait_names);
     program.items = desugar_items(program.items, &reg, current_env, &trait_names)?;
     Ok(program)
 }

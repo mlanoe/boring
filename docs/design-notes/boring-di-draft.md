@@ -3,7 +3,8 @@
 Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
 `@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), `'static` (§2, checker/registry-level —
 see caveat below), cycle detection (§7, best-effort — see caveat below), and a first slice of
-`@inject` (§1-§2 — same-`Program` providers only,
+`@inject` (§1-§2 — the entry file's own providers, plus any same-project sibling file reached via a
+bare `use <name>` (read-only registry widening — see the caveat below for what this doesn't cover),
 bare-field inference against a `@singleton` provider (always) or a transient one (only when the base
 type is a trait and the provider returns it bare too — a real `boring build`-specific gap for every
 other transient shape, not a design limitation, see "Before implementation begins"), a struct can't
@@ -21,8 +22,15 @@ same bug class already fixed for `'actor`/`'guard`/`'shared` but not yet for `'s
 representation; a further, not-yet-fully-diagnosed issue for a `'static` reference to a *trait* type
 specifically). **Cycle-detection caveat**: sound-by-omission, not sound-by-construction — an edge in
 the dependency graph only exists where a provider's body is a bare constructor-call tail expression
-(`provider_target_struct`); a cycle hidden behind a more elaborate provider body isn't caught. Still
-design-only: cross-project (`[deps]`) resolution. This
+(`provider_target_struct`); a cycle hidden behind a more elaborate provider body isn't caught.
+**Same-project multi-file caveat**: only widens the *provider registry* — a struct declared only in
+a sibling file, with its own `@inject` field, doesn't get that field desugared at all (neither
+backend's own `use`-loading — `inline_boring_use`/`exec_use` — invokes this pass on a file it loads);
+closing that direction needs a materially bigger change (`src/desugar_inject.rs`'s module doc has the
+full writeup). Still design-only: cross-project (`[deps]`) resolution — investigated this session and
+found to require the same, bigger architectural change (hooking this pass into both backends' file-
+loading directly) rather than a registry extension; deliberately deferred rather than attempted
+partially. This
 is a standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
 
 ## Goal
@@ -1388,6 +1396,25 @@ rough priority order.
   `std::env::args()` rather than threaded through each subcommand's own argument parser). No
   dependency on Cargo/Rust build profiles either way — `env` is read once by Boring's own CLI, before
   any `@provide`/`@inject` resolution begins.
+- **Cross-project (`[deps]`) resolution — investigated this session, real architectural finding
+  recorded for whoever picks this up next.** Every `.br` file (a same-project sibling *or* a `[deps]`
+  dependency) is always re-parsed as its own separate `ast::Program` in this codebase — there is no
+  merged whole-program AST anywhere, in either backend. `desugar_inject` runs exactly once, on the
+  entry file's `Program`, before either backend even starts loading further files. Widening the
+  *provider registry* to also see a same-project sibling file (shipped this session,
+  `walk_same_project_uses`) was a contained, read-only extension — parse the sibling file, scan it for
+  `@provide`/`trait` declarations, discard the parsed tree. Reaching an actual **struct's own
+  `@inject` field** declared in a file loaded only via `use` (same-project sibling *or* `[deps]`) is a
+  different, bigger problem: that file's `Program` is never handed to `desugar_inject` at all —
+  `inline_boring_use` (`src/transpiler/emit_top.rs`) and `exec_use`/`exec_named_dep_use`
+  (`src/interpreter/mod.rs`) each independently load and process it, in each backend's own separate
+  file-loading pipeline, well after `desugar_inject` has already finished. Making that direction work
+  — which cross-project resolution absolutely needs (`app-lib`'s own `SettingsView`, in the worked
+  example, is exactly this shape) — means invoking `desugar_inject`'s struct-desugaring logic from
+  *inside* those four call sites directly, in both backends, rather than as a single upfront pass.
+  That's a materially bigger, riskier change than everything shipped this session combined — explicitly
+  deferred rather than attempted partially. See `src/desugar_inject.rs`'s own module doc for the same
+  writeup, closer to the code.
 
 **Deliberately deferrable — document as "not in v1," don't design now:**
 
