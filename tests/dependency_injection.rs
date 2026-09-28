@@ -9,9 +9,17 @@
 // labeled-argument-with-defaults call-site machinery rather than any new
 // transpiler codegen. Current `@inject` scope (see that file's own doc
 // comment for the full list): same-`Program` providers only (no `[deps]`
-// cross-project resolution yet), no `id`/`env`, explicit field qualifier
-// required (no bare-field inference yet), and a struct with an `@inject`
-// field can't also declare its own `init`.
+// cross-project resolution yet), no `id`/`env`, a struct with an `@inject`
+// field can't also declare its own `init`, and a bare (unqualified) field
+// against a non-`@singleton` ("transient") provider is only resolved without
+// an explicit qualifier when the field's base type is a trait AND the
+// provider itself returns that trait bare too (a trait object's bare
+// representation is a fixed `Box<dyn Trait>` rule, not something chapter
+// 30's per-function usage-based inference decides — see
+// `synthesize_init`'s doc comment) — every other bare-field-vs-transient-
+// provider combination (a plain struct/generic base type, or a trait base
+// type whose only visible provider returns it `'shared`/`'actor`/`'guard`/
+// `'owned`/`'new`) still needs an explicit qualifier.
 //
 // Run with:
 //   cargo test --test dependency_injection
@@ -428,13 +436,64 @@ def main():
 }
 
 #[test]
+fn inject_bare_trait_field_with_bare_transient_provider_compiles_and_runs() {
+    // The one bare-field-vs-transient-provider combination that IS resolved without
+    // an explicit qualifier: the field's base type is a trait (`NetworkClient`) and
+    // the only visible provider returns that trait bare too (no qualifier of its
+    // own). A bare trait-typed field's Rust representation is a fixed rule —
+    // `Box<dyn Trait>`, unconditionally, since a trait object is unsized — not
+    // something chapter 30's per-function usage-based inference decides the way an
+    // ordinary bare struct field's representation is, so there's no ordering gap for
+    // this specific shape: `struct_init_defaults` (`src/transpiler/mod.rs`) now
+    // renders this default through the qualifier-aware `emit_let_value`, which
+    // already knows to `Box::new(...)`-wrap a bare trait-typed value.
+    let src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+struct UserRepository:
+    @inject
+    NetworkClient client
+
+    req string load():
+        self.client.fetch()
+
+@provide
+pub NetworkClient networkClient():
+    RealNetworkClient()
+
+def main():
+    let repo = UserRepository()
+    print repo.load()
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected a bare @inject trait field with a bare-returning transient provider to compile, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Box::new(networkClient())"),
+        "expected the omitted @inject argument to be boxed to match the bare trait field's \
+         `Box<dyn NetworkClient>` representation, got:\n{}", stdout
+    );
+}
+
+#[test]
 fn inject_bare_field_with_transient_provider_is_rejected() {
-    // Bare-field inference against a transient provider isn't supported yet (a real
-    // `boring build`-specific gap: the default expression substituted at the omitting
-    // call site is rendered before chapter 30 inference has decided the field's actual
-    // representation, so it never gets the `Box::new(...)`/`Arc::new(...)` wrap
-    // inference later requires) — confirmed via a real `cargo build` failure before
-    // this rejection was added. Only the `@singleton` case (below) is unaffected.
+    // Bare-field inference against a transient provider whose own return type is
+    // qualified (`'shared` here) isn't supported: unlike the bare-provider case
+    // above, there's no single wrap that turns an `Arc<dyn NetworkClient>`-returning
+    // call into the `Box<dyn NetworkClient>` a bare field always is — this is a real
+    // representation mismatch (a plain `boring build`-specific gap when the base type
+    // isn't even a trait — see the non-trait test below — but a permanent one here),
+    // confirmed via a real `cargo build` failure before this rejection was added.
+    // Only the `@singleton` case (below) and the bare-trait/bare-provider case above
+    // are unaffected.
     let src = "\
 trait NetworkClient:
     req string fetch()
@@ -455,6 +514,41 @@ def main():
 ";
     let out = emit_rust(src);
     assert!(!out.status.success(), "expected a bare @inject field with a transient provider to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("needs an explicit qualifier for now"),
+        "expected the bare-transient rejection, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_bare_non_trait_field_with_transient_provider_is_rejected() {
+    // Same rejection as above, but for a base type that isn't a trait at all (a
+    // plain struct) — the general case the bare-trait exception above deliberately
+    // does NOT cover. Here chapter 30's ordinary per-function usage-based inference
+    // genuinely is what decides this field's eventual representation ('inline vs
+    // 'owned vs 'shared/'actor/'guard), and that decision isn't made yet at the
+    // point `struct_init_defaults` (`src/transpiler/mod.rs`) renders the omitted
+    // default expression — a real, still-open `boring build` ordering gap, unlike
+    // the trait case (where the representation is a fixed rule, not an inference
+    // outcome, so there's nothing to wait on).
+    let src = "\
+struct Config:
+    int value
+
+struct App:
+    @inject
+    Config config
+
+@provide
+pub Config configProvider():
+    Config(value = 42)
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a bare @inject field with a non-trait base type and a transient provider to be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("needs an explicit qualifier for now"),
@@ -554,6 +648,73 @@ def main():
     assert!(
         stderr.contains("must be matched exactly"),
         "expected the singleton-qualifier-mismatch error, got:\n{}", stderr
+    );
+}
+
+// ── `'static` (§2) ───────────────────────────────────────────────────────────────
+//
+// Checker/registry-level acceptance only, not a full end-to-end compile+run: a
+// bare constructor-call return value isn't wrapped in the `&` reference a
+// `'static` return type requires (task_ce5a4ff9, filed this session, a real gap
+// unrelated to `@inject` — confirmed via a plain, hand-written function with no DI
+// attributes involved at all). Add a full `tests/cases/static_di.br` behavioral
+// test (matching `inject_di.br`) once that's fixed.
+
+#[test]
+fn inject_static_field_is_accepted() {
+    let src = "\
+struct RealConfig:
+    string apiKey
+
+struct Service:
+    @inject
+    RealConfig'static config
+
+@provide
+pub RealConfig'static loadConfig():
+    RealConfig(apiKey = \"secret\")
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected an explicit 'static @inject field to be accepted, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Service::new(loadConfig())") || stdout.contains("Service { config: "),
+        "expected the resolved provider to be wired in, got:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_static_bare_field_requires_explicit_qualifier() {
+    // §2: `'static` is the one deliberate exception to "bare field copies a
+    // @singleton provider's qualifier verbatim" — never silently inherited.
+    let src = "\
+struct RealConfig:
+    string apiKey
+
+struct Service:
+    @inject
+    RealConfig config
+
+@provide
+pub RealConfig'static loadConfig():
+    RealConfig(apiKey = \"secret\")
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a bare field copying 'static to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must write `'static` explicitly"),
+        "expected the must-write-static-explicitly error, got:\n{}", stderr
     );
 }
 

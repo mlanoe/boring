@@ -1,18 +1,23 @@
 # Draft — a general-purpose dependency-injection / inversion-of-control mechanism for Boring
 
 Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
-`@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), and a first slice of `@inject` (§1-§2 —
-same-`Program` providers only, bare-field inference against a `@singleton` provider only (not yet
-against a transient one — a real `boring build`-specific gap, not a design limitation), a struct
-can't combine `@inject` with its own `init` yet) are real and tested on both backends
-(`src/desugar_inject.rs`, `src/checker/mod.rs`'s `check_di_provider_attrs`,
-`src/interpreter/call.rs`'s `singleton_cache`, `tests/dependency_injection.rs`,
-`tests/cases/{singleton,inject}_di.br`). The self-hosted-in-Boring interpreter
-(`boring/interpreter/*.br`) remains v3, deliberately deferred — see "`boring run` parity" under Open
-Questions for why the interpreter/transpiler split turned out cheaper than originally planned. Still
-design-only: `'static` under `@provide`/`@inject` (§2, blocked on a `docs/book.md` §21 amendment),
-cross-project (`[deps]`) resolution, and cycle detection (§7). This is a
-standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
+`@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), `'static` (§2, checker/registry-level —
+see caveat below), and a first slice of `@inject` (§1-§2 — same-`Program` providers only,
+bare-field inference against a `@singleton` provider only (not yet against a transient one — a real
+`boring build`-specific gap, not a design limitation), a struct can't combine `@inject` with its own
+`init` yet) are real and tested on both backends (`src/desugar_inject.rs`, `src/checker/mod.rs`'s
+`check_di_provider_attrs`, `src/interpreter/call.rs`'s `singleton_cache`,
+`tests/dependency_injection.rs`, `tests/cases/{singleton,inject}_di.br`). The self-hosted-in-Boring
+interpreter (`boring/interpreter/*.br`) remains v3, deliberately deferred — see "`boring run`
+parity" under Open Questions for why the interpreter/transpiler split turned out cheaper than
+originally planned. **`'static` caveat**: `@inject`/`@provide` themselves accept and resolve it
+correctly, but a full end-to-end `'static` example is currently blocked by two separate,
+pre-existing, unrelated transpiler gaps found and filed while testing this (task_ce5a4ff9 — a bare
+constructor-call return value isn't wrapped in the `&` reference a `'static` return type needs, the
+same bug class already fixed for `'actor`/`'guard`/`'shared` but not yet for `'static`'s own
+representation; a further, not-yet-fully-diagnosed issue for a `'static` reference to a *trait* type
+specifically). Still design-only: cross-project (`[deps]`) resolution and cycle detection (§7). This
+is a standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
 
 ## Goal
 
@@ -1300,12 +1305,18 @@ rough priority order.
    opts into memoizing — `'owned` + `@singleton` is enforced as a compile error
    (`check_di_provider_attrs`, `src/checker/mod.rs`; `check_singleton_owned_return`,
    `src/checker/rust_checks.rs`), tested in `tests/dependency_injection.rs`.
-2. **`'static` under `@provide` needs a fourth legal construction site added to `docs/book.md` §21
-   itself** (currently three: top level, `main`, `type let` field) — a small amendment to the *core*
-   qualifier system, not just this feature, and a prerequisite for `'static` being usable under
-   `@inject`/`@provide` at all. **Still not done** — `'static` is not yet in `@inject`'s/`@provide`'s
-   accepted set in the actual implementation (`desugar_inject.rs`/`check_di_provider_attrs` both
-   currently accept `'shared`/`'actor`/`'guard`/`'observed`/`'owned` only).
+2. ~~`'static` under `@provide` needs a fourth legal construction site added to `docs/book.md` §21
+   itself~~ **Turned out to be unnecessary — resolved and shipped without it.** The anticipated
+   amendment assumed an existing site-authorization list that would need extending; investigating the
+   actual checker while implementing found no such list actually gates a function's own return-type
+   provenance or a defaulted-parameter's default-value provenance today
+   (`check_static_provenance`/`check_static_arg_provenance` only cover a `let` statement's initializer
+   and a call argument, respectively) — so there was nothing to extend for either a `@provide`
+   function's tail expression or `desugar_inject`'s own synthesized default. `'static` is now in
+   `@inject`'s/`@provide`'s accepted set (`desugar_inject.rs`/`check_field_qualifier_accepted`),
+   including the "must be written explicitly, never bare-copied" carve-out (§2). **Caveat**: a full
+   end-to-end example is still blocked by two separate, pre-existing, unrelated transpiler gaps found
+   and filed while testing this (task_ce5a4ff9) — see the Status line at the top of this document.
 3. ~~Cross-project visibility default for `@provide`?~~ **Resolved and shipped (§3)**: `@provide`
    requires `pub`, unconditionally — the checker rejects a non-`pub` `@provide`
    (`check_di_provider_attrs`), tested in `tests/dependency_injection.rs`.
@@ -1338,8 +1349,15 @@ rough priority order.
   worried about) — see §2's own updated text and `synthesize_init`'s doc comment: a real `boring
   build`-specific gap in how a defaulted `init` parameter's call-site value gets wrapped when its
   representation is decided later, by chapter 30 inference, than when the default is rendered.
-  Rejected explicitly for now, `boring run`-vs-`boring build` parity kept intact rather than shipping
-  a combination that only works on one backend.
+  **Partially resolved**: fixed for the one sub-case where there's actually nothing for chapter 30 to
+  decide — a bare field whose base type is a *trait*, matched against a provider that returns that
+  trait bare too, since a trait object's representation is a fixed `Box<dyn Trait>` rule (unsized,
+  no other option), not an inference outcome (`struct_init_defaults`, `src/transpiler/mod.rs`, now
+  renders that default through the qualifier-aware `emit_let_value` the same way an explicit
+  `'owned`/`'new` param's default always did). The general case — a plain struct/generic base type, or
+  a trait base type whose only visible provider returns it already qualified (`'shared`/`'owned`/etc.)
+  — is unchanged and still rejected explicitly: `boring run`-vs-`boring build` parity kept intact
+  rather than shipping a combination that only works on one backend.
 - **Ambiguity and unresolved-provider diagnostics** — **basic version shipped**:
   `desugar_inject.rs`'s `collect_providers` scans the whole `Program` once, keyed by `(base type,
   id)` (§5) with `env`-filtering (§6) applied at resolution time (`resolve_provider`) rather than at

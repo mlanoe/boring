@@ -1,0 +1,41 @@
+# Regression fixture: an explicit `init` (body form) with a BARE (unqualified)
+# trait-typed parameter that defaults to a call returning a bare trait type.
+# Sibling to `init_owned_trait_param.br`, but with no `'owned` qualifier
+# written at all — exactly the shape `desugar_inject.rs` needs for a bare
+# `@inject` field matched against a non-`@singleton` ("transient") provider
+# (see `tests/dependency_injection.rs`'s header comment).
+#
+# Was a bug in `struct_init_defaults` (`src/transpiler/mod.rs`): a bare
+# trait-typed field is *always* `Box<dyn Trait>` (a trait object is unsized,
+# so there's no other representation for it — unlike a genuine struct-typed
+# bare field, this isn't decided by chapter-30's per-function usage-based
+# inference at all). But `struct_init_defaults` only routed an EXPLICITLY
+# `'owned`/`'new`-qualified param's default through the qualifier-aware
+# `emit_let_value` (which already knows to `Box::new(...)`-wrap a bare
+# trait-typed value) — a bare-qualified param fell through to the
+# qualifier-blind `emit_expr`, so `greeterProvider()` (returning bare `impl
+# Greeter`) was never boxed to match the field/param's own `Box<dyn Greeter>`
+# type, and the generated Rust failed to compile (E0308: expected
+# `Box<dyn Greeter>`, found opaque type).
+
+trait Greeter:
+    req string greet()
+
+struct EnglishGreeter as Greeter:
+    req string greet(): "hello"
+
+Greeter greeterProvider():
+    EnglishGreeter()
+
+struct Greeting:
+    Greeter greeter
+
+    init(Greeter greeter = greeterProvider()):
+        self.greeter = greeter
+
+    req string say():
+        self.greeter.greet()
+
+def main():
+    let g = Greeting()
+    print g.say()

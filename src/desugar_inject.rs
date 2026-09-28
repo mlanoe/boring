@@ -68,10 +68,24 @@
 //!   yet — keeps this first cut to the common case (no hand-written
 //!   constructor at all) rather than also merging synthesized and
 //!   user-written parameter lists.
-//! - **`'static` is not yet in the accepted set** — blocked on the
-//!   `docs/book.md` §21 amendment the design doc's §2 calls for (a fourth
-//!   legal `'static`-construction site, inside a `@provide`-attributed
-//!   function body); not attempted yet.
+//! - **`'static` is accepted** (§2) — an explicit `@inject` field only; never
+//!   copied verbatim onto a bare one, even from a `@singleton` provider (§2's
+//!   own carve-out — see the dedicated check in `synthesize_init`). The
+//!   `docs/book.md` §21 "fourth legal construction site" amendment §2
+//!   originally called for turned out to be unnecessary in practice: no
+//!   existing checker rule actually gates a function's own return-type
+//!   provenance or a defaulted-parameter's default-value provenance today
+//!   (`check_static_provenance`/`check_static_arg_provenance` only cover a
+//!   `let` statement's initializer and a call argument, respectively) — so
+//!   there was no site-authorization list to extend at all for either a
+//!   `@provide` function's tail expression or `desugar_inject`'s own
+//!   synthesized default. Also fixed a real, unrelated parser bug found while
+//!   testing this: the bare (no `def`/`req`) return-type-first function
+//!   shorthand (`Config'static loadConfig(): ...`) failed to parse at all,
+//!   for any of `'static`/`'guard`/`'task`/`'req` specifically — `is_fn_decl_shorthand`'s
+//!   scanner only knew how to skip a qualifier name written as a generic
+//!   `Ident`, not one of these four reserved-keyword-tokenized qualifiers
+//!   (`parser/mod.rs`).
 //! - **No `[deps]` cross-project resolution, no cycle detection.**
 //!
 //! None of this is `@inject`-site-vs-`@provide`-site cross-project machinery
@@ -81,7 +95,7 @@
 
 use crate::ast::*;
 use crate::parser::ParseError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What `@inject` needs to know about one `@provide` function.
 struct Provider {
@@ -164,10 +178,12 @@ fn outer_qualifier(ty: &Type) -> Option<&OwnerQual> {
 }
 
 /// §2's accepted-qualifier gate for the `@inject`-site's own field type:
-/// `'shared`/`'actor`/`'guard`/`'observed`(-suffixed) always legal; `'owned`
-/// only when the matched provider isn't `@singleton`; anything else
-/// (bare/scalar, `'inline`, `'weak`-suffixed) is a hard error. `'static` is
-/// not yet accepted — see this file's module doc.
+/// `'shared`/`'actor`/`'guard`/`'observed`(-suffixed)/`'static` always legal;
+/// `'owned` only when the matched provider isn't `@singleton`; anything else
+/// (bare/scalar, `'inline`, `'weak`-suffixed) is a hard error. `'static`'s
+/// extra "must be written explicitly, never bare-copied" rule is checked
+/// separately, by `synthesize_init`, before this function ever runs on an
+/// (already-explicit-by-then) field.
 fn check_field_qualifier_accepted(
     field: &FieldDecl,
     provider: &Provider,
@@ -183,13 +199,8 @@ fn check_field_qualifier_accepted(
         )));
     };
     match q {
-        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Observed => Ok(()),
-        OwnerQual::Static => Err(err(field.line, field.col, format!(
-            "`@inject` field `{}` cannot be `'static` yet — this needs a `docs/book.md` §21 \
-             amendment (a fourth legal `'static`-construction site, inside a `@provide`-attributed \
-             function body) not implemented yet (docs/design-notes/boring-di-draft.md §2)",
-            field.name,
-        ))),
+        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Observed
+        | OwnerQual::Static => Ok(()),
         OwnerQual::Owned => {
             if provider.is_singleton {
                 Err(err(field.line, field.col, format!(
@@ -283,6 +294,26 @@ fn collect_providers(items: &[Item], reg: &mut Registry) -> Result<(), ParseErro
     Ok(())
 }
 
+/// Every trait name declared in this `Program` (recursing into `mod`, same
+/// scope as `collect_providers` above) — lets `synthesize_init` tell a bare
+/// `@inject` field's base type apart from an ordinary struct/generic type
+/// without needing any transpiler state (this pass runs well before the
+/// transpiler ever sees the program). See `synthesize_init`'s "Bare field,
+/// transient provider" arm for why the distinction matters: a trait is the
+/// one case where a bare field's Rust representation is a fixed, unconditional
+/// rule (`Box<dyn Trait>` — a trait object is unsized, so there's no other
+/// option) rather than something chapter 30's per-function usage-based
+/// inference decides later.
+fn collect_trait_names(items: &[Item], names: &mut HashSet<String>) {
+    for item in items {
+        match item {
+            Item::Trait(t) => { names.insert(t.name.clone()); }
+            Item::Mod(m) => collect_trait_names(&m.items, names),
+            _ => {}
+        }
+    }
+}
+
 /// Resolves `(base, id)` against the registry for the current build's `env`
 /// (§6): an env-matching candidate outranks a plain (`env: None`) one for the
 /// same key; a plain candidate is the fallback when nothing matches the
@@ -334,11 +365,23 @@ fn resolve_provider<'a>(
 /// §2 worried a bare field would need — already satisfied for free here,
 /// since `collect_providers` always finishes before this function is ever
 /// called (`desugar_inject`'s two-pass structure). A bare field matched
-/// against a *transient* provider is left untouched — no fixed
-/// representation to copy, so it runs chapter 30's ordinary usage-based
-/// inference exactly like any other unqualified struct field, same as if
-/// `@inject` had never been written at all.
-fn synthesize_init(s: &mut StructDecl, reg: &Registry, current_env: Option<&str>) -> Result<InitDecl, ParseError> {
+/// against a *transient* provider is, in the general case, left untouched —
+/// no fixed representation to copy, so it runs chapter 30's ordinary
+/// usage-based inference exactly like any other unqualified struct field,
+/// same as if `@inject` had never been written at all. That general case is
+/// still rejected outright (see the "Bare field, transient provider" arm
+/// below) — a real `boring build` gap, not a design limitation. A bare field
+/// whose base type is a *trait* (`trait_names`) is the one exception: a trait
+/// object is unsized, so its bare representation is always `Box<dyn Trait>`
+/// regardless of usage, a fixed rule rather than something chapter 30 decides
+/// — so that combination is accepted and left bare, same as the general case
+/// says it should be, just without needing to wait on inference at all.
+fn synthesize_init(
+    s: &mut StructDecl,
+    reg: &Registry,
+    current_env: Option<&str>,
+    trait_names: &HashSet<String>,
+) -> Result<InitDecl, ParseError> {
     let mut params = Vec::with_capacity(s.fields.len());
     let mut body = Vec::with_capacity(s.fields.len());
     for f in &mut s.fields {
@@ -356,6 +399,25 @@ fn synthesize_init(s: &mut StructDecl, reg: &Registry, current_env: Option<&str>
                 base.to_string()
             };
             let provider = resolve_provider(reg, &base, id.as_deref(), current_env, f)?;
+            if is_bare && outer_qualifier(&provider.return_ty) == Some(&OwnerQual::Static) {
+                // §2: `'static` is the one deliberate exception to "just copy the
+                // provider" — not because of the general "'static is never inferred"
+                // rule (nothing is *constructed* at an `@inject` site, ever, so that
+                // risk doesn't apply here), but because `'static` uniquely carries two
+                // sharp, easy-to-miss consequences (the §6 test-override escape hatch
+                // breaks; a fourth legal construction site is needed) that deserve to be
+                // visible at the `@inject` site itself, especially given the provider
+                // can live in a different project entirely. Bare `NetworkClient client`
+                // silently inheriting `'static`-ness from a distant provider would hide
+                // that cost from a reader standing at the field declaration.
+                return Err(err(f.line, f.col, format!(
+                    "`@inject` field `{}` must write `'static` explicitly — the only visible \
+                     provider (`{}`) returns `{}'static`, and unlike every other accepted \
+                     qualifier, `'static` is never copied onto a bare field silently \
+                     (docs/design-notes/boring-di-draft.md §2)",
+                    f.name, provider.fn_name, base,
+                )));
+            }
             if is_bare && provider.is_singleton {
                 // §2: bare field, `@singleton` provider — copy verbatim, skip chapter 30
                 // inference entirely (not just narrow it). Runs the same acceptance/
@@ -370,25 +432,55 @@ fn synthesize_init(s: &mut StructDecl, reg: &Registry, current_env: Option<&str>
             } else if !is_bare {
                 check_field_qualifier_accepted(f, provider)?;
                 check_singleton_qualifier_match(f, provider)?;
+            } else if trait_names.contains(&base) && outer_qualifier(&provider.return_ty).is_none() {
+                // Bare field, transient provider, TRAIT base type, and — critically —
+                // the provider itself returns that trait BARE too (no `'shared`/`'owned`/
+                // etc. of its own). This is the one case where the general ordering gap
+                // below doesn't apply. A trait object is unsized, so a bare trait-typed
+                // field's Rust representation is always `Box<dyn Trait>`, unconditionally
+                // (`emit_field_type`'s "Priority 4 (dyn Trait) still applies" arm) — not
+                // something chapter 30's per-function usage-based inference decides, so
+                // there's nothing for the up-front `struct_init_defaults` rendering
+                // (`src/transpiler/mod.rs`) to race against; it now recognizes a bare
+                // trait-typed param as needing the qualifier-aware `emit_let_value`
+                // (which already `Box::new(...)`-wraps a bare trait-typed default) the
+                // same way an explicit `'owned`/`'new` param always did — confirmed via a
+                // real `cargo build` + `cargo run` round trip.
+                //
+                // The `provider.return_ty` guard matters independently of that ordering
+                // fix: a bare field is *always* `Box<dyn Trait>`, so the provider call
+                // must produce something a single `Box::new(...)` can turn into that —
+                // true only when the provider itself returns the trait bare (a concrete,
+                // by-value/static-dispatch return). A `'shared`/`'actor`/`'guard`
+                // provider already returns `Arc<dyn Trait>`/`Arc<Mutex<dyn Trait>>`/etc.,
+                // which `Box::new(...)` can't turn into `Box<dyn Trait>` (E0308, not an
+                // ordering bug) — and an `'owned`/`'new` provider already returns
+                // `Box<dyn Trait>` itself, which `box_if_trait_typed` doesn't recognize
+                // from a bare `Call(fn_name, ..)` the way it does a variable of the exact
+                // trait type, so it would double-box. Both stay on the rejection path
+                // below, same as before this fix — write an explicit qualifier there.
             } else {
-                // Bare field, transient provider — §2 says this should run chapter 30's
-                // ordinary usage-based inference chain unmodified. In principle, yes; in
-                // this implementation, no, not yet: chapter 30 inference runs later, at
-                // transpile time, per function — but the default expression substituted at
-                // an omitting call site is rendered once, up front, when this struct's
-                // `init` is first registered (`struct_init_defaults`,
-                // `src/transpiler/mod.rs`), before inference has decided anything. By the
-                // time inference picks (say) `'owned` for this bare field, the plain
-                // `providerFn()` default text is already fixed with no `Box::new(...)`
-                // wrap — confirmed via a real `cargo build` failure (E0308: expected
-                // `Box<dyn Trait>`, found the provider's own bare return type). `boring run`
-                // has no such ordering problem at all (the interpreter evaluates the
-                // default expression fresh, at construction time, with no static wrapping
-                // step to get out of sync) — so this is a `boring build`-only gap, and
-                // rejecting it here keeps both backends honest rather than shipping a
-                // combination that silently works on one and not the other. Write an
-                // explicit qualifier for now; only the `@singleton` case above is affected
-                // by the ordering concern the design doc's §2 originally worried about.
+                // Bare field, transient provider, non-trait (plain struct/generic) base
+                // type — §2 says this should run chapter 30's ordinary usage-based
+                // inference chain unmodified. In principle, yes; in this implementation,
+                // no, not yet: chapter 30 inference runs later, at transpile time, per
+                // function — but the default expression substituted at an omitting call
+                // site is rendered once, up front, when this struct's `init` is first
+                // registered (`struct_init_defaults`, `src/transpiler/mod.rs`), before
+                // inference has decided anything. By the time inference picks (say)
+                // `'owned` for this bare field, the plain `providerFn()` default text is
+                // already fixed with no `Box::new(...)` wrap — confirmed via a real
+                // `cargo build` failure (E0308: expected `Box<dyn Trait>`, found the
+                // provider's own bare return type). `boring run` has no such ordering
+                // problem at all (the interpreter evaluates the default expression
+                // fresh, at construction time, with no static wrapping step to get out
+                // of sync) — so this is a `boring build`-only gap, and rejecting it here
+                // keeps both backends honest rather than shipping a combination that
+                // silently works on one and not the other. Unlike the trait case above,
+                // there's no fixed rule to fall back on here — the field's eventual
+                // representation genuinely isn't knowable this early. Write an explicit
+                // qualifier for now; only the `@singleton` case above is affected by the
+                // ordering concern the design doc's §2 originally worried about.
                 return Err(err(f.line, f.col, format!(
                     "`@inject` field `{}` needs an explicit qualifier for now when its provider \
                      (`{}`) isn't `@singleton` — bare-field inference against a transient \
@@ -435,7 +527,12 @@ fn synthesize_init(s: &mut StructDecl, reg: &Registry, current_env: Option<&str>
     Ok(InitDecl { params, body, line: s.line, col: s.col })
 }
 
-fn desugar_struct(mut s: StructDecl, reg: &Registry, current_env: Option<&str>) -> Result<StructDecl, ParseError> {
+fn desugar_struct(
+    mut s: StructDecl,
+    reg: &Registry,
+    current_env: Option<&str>,
+    trait_names: &HashSet<String>,
+) -> Result<StructDecl, ParseError> {
     let has_inject = s.fields.iter().any(|f| f.attrs.iter().any(|a| a.name == "inject"));
     if !has_inject {
         return Ok(s);
@@ -448,17 +545,22 @@ fn desugar_struct(mut s: StructDecl, reg: &Registry, current_env: Option<&str>) 
             s.name,
         )));
     }
-    let init = synthesize_init(&mut s, reg, current_env)?;
+    let init = synthesize_init(&mut s, reg, current_env, trait_names)?;
     s.inits.push(init);
     Ok(s)
 }
 
-fn desugar_items(items: Vec<Item>, reg: &Registry, current_env: Option<&str>) -> Result<Vec<Item>, ParseError> {
+fn desugar_items(
+    items: Vec<Item>,
+    reg: &Registry,
+    current_env: Option<&str>,
+    trait_names: &HashSet<String>,
+) -> Result<Vec<Item>, ParseError> {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(match item {
-            Item::Struct(s) => Item::Struct(desugar_struct(s, reg, current_env)?),
-            Item::Mod(mut m) => { m.items = desugar_items(m.items, reg, current_env)?; Item::Mod(m) }
+            Item::Struct(s) => Item::Struct(desugar_struct(s, reg, current_env, trait_names)?),
+            Item::Mod(mut m) => { m.items = desugar_items(m.items, reg, current_env, trait_names)?; Item::Mod(m) }
             other => other,
         });
     }
@@ -468,6 +570,8 @@ fn desugar_items(items: Vec<Item>, reg: &Registry, current_env: Option<&str>) ->
 pub fn desugar_inject(mut program: Program, current_env: Option<&str>) -> Result<Program, ParseError> {
     let mut reg = Registry::new();
     collect_providers(&program.items, &mut reg)?;
-    program.items = desugar_items(program.items, &reg, current_env)?;
+    let mut trait_names = HashSet::new();
+    collect_trait_names(&program.items, &mut trait_names);
+    program.items = desugar_items(program.items, &reg, current_env, &trait_names)?;
     Ok(program)
 }

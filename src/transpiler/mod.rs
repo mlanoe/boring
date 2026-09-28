@@ -3300,11 +3300,31 @@ impl Transpiler {
             // passing the already-`Arc<dyn Greeter>` call through as-is (regressed
             // `tests/dependency_injection.rs`'s
             // `inject_resolves_transient_provider_at_zero_arg_call_site`).
+            //
+            // A BARE (unqualified) trait-typed param — `Greeter greeter = greeterProvider()`,
+            // no qualifier written at all — needs the same qualifier-aware rendering, but for
+            // a different reason than the `'owned`/`'new` case above: it isn't chapter-30's
+            // per-function usage-based inference that decides this field's representation
+            // (that pipeline is for genuine struct-typed fields). A bare trait-typed field is
+            // *always* `Box<dyn Trait>`, unconditionally — see `emit_field_type`'s "Priority 4
+            // (dyn Trait) still applies" arm — because a trait object is unsized and can't be
+            // stored inline. That's already known as soon as `self.trait_method_names` has
+            // this trait registered (true here: `Item::Trait` registration runs in this same
+            // pre-scan pass, over `program.items` in file order, so it's populated for any
+            // trait declared earlier in the file — same forward-reference caveat as the
+            // `'owned`/`'new` case has always had). `emit_let_value` already has the exact
+            // "bare trait-typed slot → box unless already trait-boxed" logic this needs (see
+            // its `Some(Type::Named(n)) if self.trait_method_names.contains_key(n)` arm) —
+            // reuse it instead of duplicating it here.
             let defaults: Vec<Option<String>> = init.params.iter()
                 .map(|p| p.default.as_ref().map(|d| {
-                    let owned_or_new = p.ty.as_ref()
-                        .is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, q) if q.is_owned_or_new()));
-                    if owned_or_new {
+                    let needs_qualified_render = p.ty.as_ref()
+                        .is_some_and(|t| match t.without_mut() {
+                            Type::Qualified(_, q) => q.is_owned_or_new(),
+                            Type::Named(n) => self.trait_method_names.contains_key(n.as_str()),
+                            _ => false,
+                        });
+                    if needs_qualified_render {
                         self.emit_let_value(p.ty.as_ref(), d)
                     } else {
                         self.emit_expr(d)

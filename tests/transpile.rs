@@ -1101,6 +1101,20 @@ transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);
 // `owned_call_arg_no_double_box`'s doc above (constructor call sites aren't
 // updated to emit `Arc::new(Mutex::new(...))` for a trait-typed default).
 transpile_test!(init_owned_trait_param, ignore_managed);
+// `init_bare_trait_param`: sibling to `init_owned_trait_param` above, but for
+// a BARE (unqualified) trait-typed init param — `Greeter greeter =
+// greeterProvider()`, no `'owned` written at all. Same underlying
+// `struct_init_defaults` bug (qualifier-blind `emit_expr` instead of the
+// qualifier-aware `emit_let_value`), but reached through a different gate:
+// there's no explicit qualifier for the old check to key off, so the fix
+// also recognizes a bare param whose type is a known trait name (a trait
+// object is unsized, so a bare trait-typed field is *always* `Box<dyn
+// Trait>` — not decided by chapter-30's per-function usage-based inference
+// the way an ordinary bare struct-typed field is). See
+// `tests/init_bare_trait_param.rs` for the codegen-shape half. No known
+// managed-mode gap here (unlike `init_owned_trait_param`'s `ignore_managed`)
+// since there's no `'owned` call-site wrapping involved.
+transpile_test!(init_bare_trait_param);
 
 // ── Strict-mode size-based return-type auto-boxing (docs/transpilation-modes.md
 //    "Size-based auto-boxing") ────────────────────────────────────────────────
