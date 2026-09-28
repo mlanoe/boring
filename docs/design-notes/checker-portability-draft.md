@@ -72,6 +72,34 @@ fire via synthetic positive cases (both bool and optional), and confirmed silent
 exhaustive/wildcard/unresolvable-subject negative cases. 7 new unit tests
 (`match_exhaustiveness_tests`). All four candidates from the original inventory are now implemented.
 
+**Update 5**: the "still open" item — full exhaustiveness over user-declared enum variants — is
+now implemented too. `Checker` gained an `enums: HashMap<String, Vec<String>>` registry (enum name
+-> its variant names in declaration order), collected up front in `collect_item_signatures`/
+`collect_stmt_signatures` alongside the existing `kernel_decls`/`fn_arity` collection, covering both
+top-level and nested (`mod`/local) enum declarations. `check_match_exhaustiveness` now tries a third
+resolution after bool/optional: `static_enum_subject` (same `Var`-only, best-effort limitation as
+`static_bool_or_optional_subject` — a statically-typed local/param/field binding, not a general
+type-checker) resolves the subject's base type (after peeling `mut`/ownership-qualifier wrappers,
+reusing `strip_qualifiers`) against the `enums` registry; `check_enum_match_exhaustiveness` then
+diffs the arms' covered variant set against the full registered variant list, same guard-arm
+semantics as bool/optional (a guarded arm never counts toward coverage on its own), and names every
+missing variant in the warning rather than just flagging non-exhaustiveness generically. A qualified
+pattern (`Error.Expired`, parsed as `Pattern::Variant("Error::Expired", _)`) is matched by its
+trailing segment. A `native` enum (`enum Name: native` — body provided by the runtime, not parsed
+variants) registers with an empty variant list, which naturally disables the check for it (nothing
+can ever be "missing" against an empty set) with no separate skip condition needed. Validated
+empirically against the full corpus (346 local `.br` files under `examples/`,
+`boring/interpreter/`, `stdlib/`, `linguist/`, `tests/`, plus the 46-file sibling-project corpus
+under `perso/`): **zero hits, bool/optional/enum alike** — every real match in this codebase is
+already exhaustive or wildcard-covered. Confirmed to actually fire via synthetic positive cases
+(single missing variant, multiple missing variants — correctly pluralizes "variant"/"variants" and
+lists all missing names), confirmed silent on exhaustive/wildcard/native/non-`Var`-subject negative
+cases. 8 new unit tests (`enum_match_*`, `native_enum_is_never_flagged`, plus the pre-existing
+`unresolvable_subject_type_is_never_flagged` rewritten to use a call-expression subject now that a
+typed-`Var`-over-an-enum subject is no longer unresolvable). This closes the last item from
+recommendation #2 below — every candidate originally inventoried, plus this follow-on, is now
+shipped.
+
 Goal of the rest of this document (still valid): map out what already exists in `src/checker/`
 and `src/validator/`, and distinguish what is a rule **universal to Boring** (portable as-is to a
 future Swift/Kotlin backend) from what is an **artifact of the current Rust model** (ownership/
@@ -196,10 +224,9 @@ presumably not to complicate `checker/mod.rs`, but to create `validator/swift.rs
    original inventory are now shipped. `check_missing_return`'s optimistic "assume the arms as
    written are exhaustive" stance is now backed by a real (if narrower-than-full-enum) check for two
    of the most common non-exhaustive-match shapes.
-   **Still open**: real exhaustiveness over user-declared enum variants (needs the variant-list
-   registry mentioned above — a bigger lift than any of the four shipped checks, requiring new
-   checker-side state none of them needed) — see the open questions section for the concrete next
-   step if this gets picked up.
+   ~~Still open: real exhaustiveness over user-declared enum variants~~ **Done** — see Update 5
+   above (`check_enum_match_exhaustiveness`, backed by the new `enums` registry). Every candidate
+   from the original inventory, including this follow-on, is now shipped.
 
 3. **The qualifier system remains the real underlying project.** Almost every Rust-specific check
    in both files is really a variation on "what operation does this particular Rust memory

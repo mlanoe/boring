@@ -182,6 +182,14 @@ struct Checker {
     /// Mirrors `struct_ctor_owned`'s identical "more than one `init` -> skip"
     /// precedent for the same kind of ambiguity.
     fn_overloaded: std::collections::HashSet<String>,
+    /// Enum name -> its variant names in declaration order, collected once up
+    /// front (mirrors `kernel_decls`) for `check_enum_match_exhaustiveness`. A
+    /// `native` enum (body is `native`, see `EnumDecl::is_native`) parses with
+    /// an empty `variants` list — its true variant set isn't visible to this
+    /// checker, so it registers empty here too, which naturally disables the
+    /// check for it (an empty variant list can never have a "missing" one)
+    /// rather than needing a separate skip condition.
+    enums: HashMap<String, Vec<String>>,
     /// Struct name -> ordered `(param name, is-committed-'owned)` pairs for that
     /// struct's constructor, used by the use-after-move check
     /// (`check_move_read`/`owned_target_for_arg`) — see that section's header
@@ -251,6 +259,7 @@ impl Checker {
             fn_var_params: HashMap::new(),
             method_mutating: HashMap::new(),
             kernel_decls: HashMap::new(),
+            enums: HashMap::new(),
             fn_returns_resident: HashMap::new(),
             fn_gpu_arg_params: HashMap::new(),
             fn_returns_resident_tuple: HashMap::new(),
@@ -387,6 +396,7 @@ impl Checker {
             Item::Fn(f)     => self.collect_fn_signature(f),
             Item::Struct(s) => self.collect_struct_signature(s),
             Item::Kernel(k) => { self.kernel_decls.insert(k.name.clone(), k.clone()); }
+            Item::Enum(e)   => { self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
             Item::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
             Item::Stmt(s)   => self.collect_stmt_signatures(s),
             _ => {}
@@ -399,6 +409,7 @@ impl Checker {
         match stmt {
             Stmt::Fn(f)     => self.collect_fn_signature(f),
             Stmt::Struct(s) => self.collect_struct_signature(s),
+            Stmt::Enum(e)   => { self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
             Stmt::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
             Stmt::If(s)     => { for (_, b) in &s.branches { for st in b { self.collect_stmt_signatures(st); } } if let Some(b) = &s.else_body { for st in b { self.collect_stmt_signatures(st); } } }
             Stmt::While(s)  => { for st in &s.body { self.collect_stmt_signatures(st); } }
@@ -1441,10 +1452,70 @@ impl Checker {
     fn check_match_exhaustiveness(&mut self, m: &MatchStmt) {
         if self.kernel_dispatch_only { return; }
         match self.static_bool_or_optional_subject(&m.subject) {
-            Some(true) => self.check_bool_match_exhaustiveness(m),
-            Some(false) => self.check_optional_match_exhaustiveness(m),
+            Some(true) => { self.check_bool_match_exhaustiveness(m); return; }
+            Some(false) => { self.check_optional_match_exhaustiveness(m); return; }
             None => {}
         }
+        if let Some(enum_name) = self.static_enum_subject(&m.subject) {
+            self.check_enum_match_exhaustiveness(m, &enum_name);
+        }
+    }
+
+    /// The user-declared enum name a subject is statically known to be an
+    /// instance of, when this checker can tell — same `Var`-only, best-effort
+    /// limitation as `static_bool_or_optional_subject` (not a type-checker).
+    /// Peels `mut`/ownership-qualifier wrappers first (`Color'actor c` still
+    /// resolves to `Color`) via the same helpers `check_label_compat` uses.
+    fn static_enum_subject(&self, expr: &Expr) -> Option<String> {
+        let ExprKind::Var(name) = &expr.kind else { return None; };
+        let ty = self.lookup(name)?.ty.as_ref()?;
+        match Self::strip_qualifiers(ty.without_mut()) {
+            Type::Named(n) if self.enums.contains_key(n) => Some(n.clone()),
+            Type::Generic(n, _) if self.enums.contains_key(n) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// Full variant-coverage exhaustiveness for a user-declared enum, the
+    /// generalization `check_bool_match_exhaustiveness`/
+    /// `check_optional_match_exhaustiveness` were deliberately scoped short of
+    /// (see docs/design-notes/checker-portability-draft.md's "still open"
+    /// item) — now backed by the `enums` registry collected up front. Same
+    /// guard-arm semantics as the other two: a guarded arm never counts toward
+    /// coverage on its own. A qualified pattern (`Error.Expired`, stored as
+    /// `Pattern::Variant("Error::Expired", _)` — see the parser) is matched by
+    /// its trailing segment only; a qualifier naming a different enum than the
+    /// subject's is not cross-checked here; at worst this under-reports rather
+    /// than false-positives, same conservative direction as every other check
+    /// in this family.
+    fn check_enum_match_exhaustiveness(&mut self, m: &MatchStmt, enum_name: &str) {
+        let Some(variants) = self.enums.get(enum_name) else { return; };
+        if variants.is_empty() { return; }
+        let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut has_wild = false;
+        for arm in &m.arms {
+            if arm.guard.is_some() { continue; }
+            for pat in &arm.patterns {
+                match pat {
+                    Pattern::Variant(name, _) => {
+                        covered.insert(name.rsplit("::").next().unwrap_or(name));
+                    }
+                    Pattern::Wildcard | Pattern::Bind(_) => has_wild = true,
+                    _ => {}
+                }
+            }
+        }
+        if has_wild { return; }
+        let missing: Vec<&str> = variants.iter()
+            .map(|v| v.as_str())
+            .filter(|v| !covered.contains(v))
+            .collect();
+        if missing.is_empty() { return; }
+        let noun = if missing.len() > 1 { "variants" } else { "variant" };
+        self.warning(
+            format!("non-exhaustive match over `{enum_name}`: missing {noun} `{}`", missing.join("`, `")),
+            m.line, m.col,
+        );
     }
 
     /// `Some(true)` for a subject statically known to be `bool`, `Some(false)`
@@ -2969,9 +3040,65 @@ mod match_exhaustiveness_tests {
 
     #[test]
     fn unresolvable_subject_type_is_never_flagged() {
-        // No static-annotation signal at all — this checker doesn't guess.
+        // A call expression, not a `Var` — this checker only resolves a
+        // statically-typed binding, same limitation as bool/optional above.
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef Shape make():\n    Shape.Circle(1.0)\ndef string f():\n    match make():\n        Circle(r): \"{r}\"\ndef main():\n    print f()\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning on an unresolvable (non-`Var`) subject, got {warns:?}");
+    }
+
+    #[test]
+    fn enum_match_missing_variant_is_flagged() {
         let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef string f(Shape s):\n    match s:\n        Circle(r): \"{r}\"\ndef main():\n    print f(Shape.Circle(1.0))\n";
         let warns = warnings_for(src);
-        assert!(!has_exhaustiveness_warning(&warns), "expected no warning on an unresolvable (non-bool/non-optional) subject, got {warns:?}");
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+        assert!(warns.iter().any(|w| w.contains("Rect")), "expected the missing variant `Rect` to be named, got {warns:?}");
+    }
+
+    #[test]
+    fn enum_match_covering_all_variants_is_not_flagged() {
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef string f(Shape s):\n    match s:\n        Circle(r): \"{r}\"\n        Rect(w, h): \"{w}x{h}\"\ndef main():\n    print f(Shape.Circle(1.0))\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn enum_match_with_wildcard_is_not_flagged() {
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef string f(Shape s):\n    match s:\n        Circle(r): \"{r}\"\n        _: \"other\"\ndef main():\n    print f(Shape.Circle(1.0))\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn enum_match_no_payload_variants_all_covered_is_not_flagged() {
+        let src = "enum Color:\n    Red\n    Green\n    Blue\ndef string f(Color c):\n    match c:\n        Red: \"r\"\n        Green: \"g\"\n        Blue: \"b\"\ndef main():\n    print f(Color.Red)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn enum_match_qualified_variant_pattern_counts_toward_coverage() {
+        // `Error.Expired` parses as `Pattern::Variant("Error::Expired", _)` —
+        // must still be recognized as covering the `Expired` variant.
+        let src = "enum Error:\n    Expired\n    NotFound\ndef string f(Error e):\n    match e:\n        Error.Expired: \"expired\"\n        NotFound: \"missing\"\ndef main():\n    print f(Error.Expired)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn enum_guarded_arm_does_not_count_toward_coverage() {
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef string f(Shape s):\n    match s:\n        Circle(r) if r > 0.0: \"{r}\"\n        Rect(w, h): \"{w}x{h}\"\ndef main():\n    print f(Shape.Circle(1.0))\n";
+        let warns = warnings_for(src);
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+        assert!(warns.iter().any(|w| w.contains("Circle")), "expected the missing variant `Circle` to be named, got {warns:?}");
+    }
+
+    #[test]
+    fn native_enum_is_never_flagged() {
+        // `native` body parses with an empty `variants` list — nothing to be
+        // "missing" against, so the check naturally never fires for it.
+        let src = "enum Weekday: native\ndef string f(Weekday d):\n    match d:\n        Monday: \"mon\"\ndef main():\n    print f(Weekday.Monday)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning on a native enum, got {warns:?}");
     }
 }
