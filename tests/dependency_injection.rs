@@ -1022,6 +1022,121 @@ def main():
     );
 }
 
+// ── Cycle detection (§7) ─────────────────────────────────────────────────────────
+
+#[test]
+fn inject_cycle_between_two_providers_is_rejected() {
+    let src = "\
+trait TraitA:
+    req int value()
+trait TraitB:
+    req int value()
+
+struct ConcreteA as TraitA:
+    @inject
+    TraitB'shared b
+
+    req int value(): 1
+
+struct ConcreteB as TraitB:
+    @inject
+    TraitA'shared a
+
+    req int value(): 2
+
+@provide
+pub TraitA'shared provideA():
+    ConcreteA()
+
+@provide
+pub TraitB'shared provideB():
+    ConcreteB()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a cycle between two providers to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cycle detected among `@provide` providers"),
+        "expected the cycle-detection error, got:\n{}", stderr
+    );
+    // The chain should name both providers, in either traversal order.
+    assert!(
+        stderr.contains("provideA") && stderr.contains("provideB"),
+        "expected the full chain naming both providers, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_transitive_non_cyclic_dependency_is_accepted() {
+    // §7: "Transitive resolution falls out for free" — a real dependency chain
+    // (A needs B, B needs nothing further) is not a cycle and must compile fine.
+    let src = "\
+struct Logger:
+    def log(): print \"log\"
+
+struct RealNetworkClient:
+    @inject
+    Logger'shared logger
+
+    def fetch(): self.logger.log()
+
+@provide
+pub Logger'shared loggerProvider():
+    Logger()
+
+@provide
+pub RealNetworkClient'shared networkClient():
+    RealNetworkClient()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(
+        out.status.success(),
+        "expected a non-cyclic transitive dependency to compile, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("RealNetworkClient::new(loggerProvider())"),
+        "expected transitive resolution to fall out for free, got:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_self_cycle_is_rejected() {
+    // A struct whose own provider (transitively, through itself) needs another
+    // instance of the exact same base type — the degenerate one-node cycle.
+    let src = "\
+trait Node:
+    req int value()
+
+struct LinkedNode as Node:
+    @inject
+    Node'shared next
+
+    req int value(): 1
+
+@provide
+pub Node'shared nodeProvider():
+    LinkedNode()
+
+def main():
+    print \"ok\"
+";
+    let out = emit_rust(src);
+    assert!(!out.status.success(), "expected a self-cycle to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cycle detected among `@provide` providers"),
+        "expected the cycle-detection error, got:\n{}", stderr
+    );
+}
+
 // ── `--target kernel` rejection ──────────────────────────────────────────────────
 
 #[test]

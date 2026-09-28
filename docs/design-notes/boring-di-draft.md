@@ -2,7 +2,8 @@
 
 Status: **partially implemented, both `boring build` and `boring run`**. `@singleton` (§4),
 `@provide`'s `pub` requirement (§3), `id`/`env` (§5-§6), `'static` (§2, checker/registry-level —
-see caveat below), and a first slice of `@inject` (§1-§2 — same-`Program` providers only,
+see caveat below), cycle detection (§7, best-effort — see caveat below), and a first slice of
+`@inject` (§1-§2 — same-`Program` providers only,
 bare-field inference against a `@singleton` provider (always) or a transient one (only when the base
 type is a trait and the provider returns it bare too — a real `boring build`-specific gap for every
 other transient shape, not a design limitation, see "Before implementation begins"), a struct can't
@@ -18,7 +19,10 @@ pre-existing, unrelated transpiler gaps found and filed while testing this (task
 constructor-call return value isn't wrapped in the `&` reference a `'static` return type needs, the
 same bug class already fixed for `'actor`/`'guard`/`'shared` but not yet for `'static`'s own
 representation; a further, not-yet-fully-diagnosed issue for a `'static` reference to a *trait* type
-specifically). Still design-only: cross-project (`[deps]`) resolution and cycle detection (§7). This
+specifically). **Cycle-detection caveat**: sound-by-omission, not sound-by-construction — an edge in
+the dependency graph only exists where a provider's body is a bare constructor-call tail expression
+(`provider_target_struct`); a cycle hidden behind a more elaborate provider body isn't caught. Still
+design-only: cross-project (`[deps]`) resolution. This
 is a standalone design topic, not scoped to `boring-ui` — see "Where this came from" at the bottom.
 
 ## Goal
@@ -1337,10 +1341,19 @@ rough priority order.
 
 **Real new implementation work to scope, not just "reuse existing infrastructure":**
 
-- **Cycle detection over the `@provide`/`@inject` graph** (§7) is a genuinely new static-analysis
-  pass (build the dependency graph, detect cycles, report the full chain) — "the same class of
-  technique as the recursion-depth guard" (as this document puts it) is a design analogy, not
-  existing code to call into.
+- ~~Cycle detection over the `@provide`/`@inject` graph~~ **Resolved and shipped (§7)**:
+  `desugar_inject.rs`'s `detect_cycles`, a DFS with an explicit path stack over a graph of provider
+  *functions* (an edge `P -> Q` means "the struct `P` constructs has an `@inject` field that resolves
+  to `Q`"), reporting the first back-edge found as the full chain (`provideA -> provideB ->
+  provideA`), not just "cycle detected". **One real, accepted limitation**: an edge only exists where
+  a provider's body is simple enough for `provider_target_struct` to see through — a bare tail
+  expression or `return` that's itself a direct constructor call (every worked example in this
+  document is exactly this shape). A genuine cycle hidden behind a provider whose body does anything
+  more elaborate (an `if`/`match`, an intermediate variable, a call to another function that itself
+  constructs the struct) silently isn't caught — sound-by-omission, never a false positive, same
+  posture as this pass's other best-effort checks. Tested in `tests/dependency_injection.rs`
+  (a two-provider cycle, a one-provider self-cycle, and a non-cyclic transitive chain that must still
+  compile — §7's "falls out for free" claim, re-verified alongside the cycle checks).
 - **The whole-program (now same-project-only, §2) collection pass** that must complete before a
   struct with a bare `@inject` field can have its Rust layout finalized — **resolved and shipped for
   the `@singleton` case**: `desugar_inject.rs`'s two-pass structure (`collect_providers` builds the

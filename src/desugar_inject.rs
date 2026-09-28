@@ -86,7 +86,9 @@
 //!   scanner only knew how to skip a qualifier name written as a generic
 //!   `Ident`, not one of these four reserved-keyword-tokenized qualifiers
 //!   (`parser/mod.rs`).
-//! - **No `[deps]` cross-project resolution, no cycle detection.**
+//! - **Cycle detection is implemented** (§7) — `detect_cycles`, best-effort (see
+//!   `Provider::target_struct`'s doc for the one accepted limitation).
+//! - **No `[deps]` cross-project resolution.**
 //!
 //! None of this is `@inject`-site-vs-`@provide`-site cross-project machinery
 //! the checker itself would need to know about later — widening any of the
@@ -117,6 +119,41 @@ struct Provider {
     /// same `(base type, id)` key.
     env: Option<String>,
     line: usize,
+    /// The concrete struct this provider's body directly constructs, when its
+    /// body is the simple, common shape every worked example in the design
+    /// doc actually uses — a bare tail-expression or explicit `return` that's
+    /// itself a constructor call (`RealNetworkClient()`, `PostgresDatabase(host
+    /// = ...)`) — used only for cycle detection (§7): if that struct itself has
+    /// `@inject` fields, their own resolved providers become this provider's
+    /// graph edges. `None` for anything else (an arbitrary expression, a
+    /// multi-statement body ending some other way) — cycle detection simply
+    /// can't see through the edge in that case and treats it as a dead end,
+    /// same as a provider that constructs nothing `@inject`-relevant at all.
+    /// This is a deliberate, accepted limitation (see this file's module doc)
+    /// — a real static analysis that's sound-by-omission (never a false
+    /// "cycle detected"), not a sound-by-construction whole-program dataflow
+    /// pass.
+    target_struct: Option<String>,
+}
+
+/// Best-effort: does this function's body end in a bare constructor call
+/// (`Type(args...)` or `Type(args...) as`-free equivalent), either as the tail
+/// expression or an explicit `return`? See `Provider::target_struct`'s doc for
+/// why this doesn't need to be exhaustive.
+fn provider_target_struct(f: &FnDecl) -> Option<String> {
+    let tail = f.body.last()?;
+    let expr = match tail {
+        Stmt::Expr(e) => Some(e),
+        Stmt::Return(r) => r.value.as_ref(),
+        _ => None,
+    }?;
+    match &expr.kind {
+        ExprKind::Call(callee, _) => match &callee.kind {
+            ExprKind::Var(name) => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Keyed by `(base type, id)` — `id` is `None` for a bare, unnamed binding
@@ -272,6 +309,7 @@ fn collect_providers(items: &[Item], reg: &mut Registry) -> Result<(), ParseErro
                     return_ty: ret_ty.without_mut().clone(),
                     env: env.clone(),
                     line: f.line,
+                    target_struct: provider_target_struct(f),
                 };
                 let key = (base.to_string(), id.clone());
                 let bucket = reg.entry(key).or_default();
@@ -567,9 +605,133 @@ fn desugar_items(
     Ok(out)
 }
 
+/// One struct's own `@inject` dependencies — `(base type, id, field line/col)`
+/// per field, recursed into `mod` the same as `collect_providers`/
+/// `collect_trait_names`. Bare fields are included too (keyed on their own
+/// base type, `id`) — cycle detection doesn't care whether a field ends up
+/// bare or explicit, only what type it ultimately needs a provider for.
+fn collect_struct_inject_deps(
+    items: &[Item],
+    out: &mut HashMap<String, Vec<(String, Option<String>, usize, usize)>>,
+) {
+    for item in items {
+        match item {
+            Item::Struct(s) => {
+                let deps: Vec<_> = s.fields.iter().filter_map(|f| {
+                    let inject_attr = f.attrs.iter().find(|a| a.name == "inject")?;
+                    let base = base_type_name(&f.ty)?.to_string();
+                    let id = attr_kv(&inject_attr.args, "id").map(str::to_string);
+                    Some((base, id, f.line, f.col))
+                }).collect();
+                if !deps.is_empty() {
+                    out.insert(s.name.clone(), deps);
+                }
+            }
+            Item::Mod(m) => collect_struct_inject_deps(&m.items, out),
+            _ => {}
+        }
+    }
+}
+
+/// §7: "A cycle... is a compile error, reported as the full chain, not just
+/// 'cycle detected'." Builds a directed graph over provider *functions*
+/// (nodes = `fn_name`) — an edge `P -> Q` means "resolving `P` (i.e. calling
+/// the struct it constructs) transitively needs `Q` too" — and runs a
+/// straightforward DFS with an explicit path stack, reporting the first back-
+/// edge found as the full chain from where it re-enters itself. See
+/// `Provider::target_struct`'s doc for the real, accepted limitation this
+/// inherits: an edge only exists where a provider's body is simple enough
+/// (§ above) for this pass to see through it at all — a genuine cycle hidden
+/// behind a provider whose body does anything more elaborate than a bare
+/// constructor call silently isn't caught. Never a false positive, only a
+/// possible false negative — same "sound-by-omission" posture as the rest of
+/// this file's best-effort static checks.
+fn detect_cycles(
+    reg: &Registry,
+    struct_deps: &HashMap<String, Vec<(String, Option<String>, usize, usize)>>,
+) -> Result<(), ParseError> {
+    // Flatten the registry into one lookup by provider name (fn_name is
+    // globally unique — `collect_providers` already rejects two providers
+    // sharing a full key, and distinct keys always have distinct fn_names in
+    // any program that doesn't itself have a duplicate top-level fn name,
+    // already a separate compile error elsewhere).
+    let by_name: HashMap<&str, &Provider> = reg.values()
+        .flat_map(|bucket| bucket.iter())
+        .map(|p| (p.fn_name.as_str(), p))
+        .collect();
+
+    // Edges: provider name -> every provider it transitively needs. Resolved
+    // ignoring `env`/`current_env` entirely and fanning out over *every*
+    // candidate for a given `(base, id)` key — deliberately conservative, the
+    // same "same-project exhaustive" spirit `collect_providers`'s own
+    // ambiguity check already uses: a cycle that only manifests for one
+    // particular `--env` value is still a real cycle worth catching, not
+    // something to silently defer to whichever build happens to hit it.
+    let edges = |p: &Provider| -> Vec<String> {
+        let Some(target) = &p.target_struct else { return Vec::new() };
+        let Some(deps) = struct_deps.get(target) else { return Vec::new() };
+        deps.iter()
+            .filter_map(|(base, id, _, _)| reg.get(&(base.clone(), id.clone())))
+            .flat_map(|bucket| bucket.iter().map(|q| q.fn_name.clone()))
+            .collect()
+    };
+
+    let mut state: HashMap<&str, u8> = HashMap::new(); // 0=unvisited, 1=on stack, 2=done
+    let mut path: Vec<&str> = Vec::new();
+
+    fn visit<'a>(
+        name: &'a str,
+        by_name: &HashMap<&'a str, &'a Provider>,
+        edges: &dyn Fn(&Provider) -> Vec<String>,
+        state: &mut HashMap<&'a str, u8>,
+        path: &mut Vec<&'a str>,
+    ) -> Result<(), ParseError> {
+        match state.get(name).copied().unwrap_or(0) {
+            2 => return Ok(()),
+            1 => {
+                // Back-edge found — `name` is already on the current path. Report
+                // the full chain from its first occurrence back to itself.
+                let start = path.iter().position(|n| *n == name).unwrap_or(0);
+                let chain: Vec<&str> = path[start..].iter().copied().chain(std::iter::once(name)).collect();
+                let provider = by_name.get(name).expect("cycle node must be a known provider");
+                return Err(err(provider.line, 0, format!(
+                    "cycle detected among `@provide` providers: {} — each one transitively needs \
+                     the next, with no way to ever finish constructing any of them \
+                     (docs/design-notes/boring-di-draft.md §7)",
+                    chain.join(" -> "),
+                )));
+            }
+            _ => {}
+        }
+        let Some(provider) = by_name.get(name) else { return Ok(()) };
+        state.insert(name, 1);
+        path.push(name);
+        for next in edges(provider) {
+            // Leak the owned String into the same lifetime as everything else in
+            // `by_name`'s keys would require unsafe or an arena; simplest correct
+            // fix is to look the callee up by value each time instead of trying
+            // to thread a borrowed `&str` through — re-borrow via `by_name`.
+            if let Some(next_key) = by_name.keys().find(|k| **k == next.as_str()) {
+                visit(next_key, by_name, edges, state, path)?;
+            }
+        }
+        path.pop();
+        state.insert(name, 2);
+        Ok(())
+    }
+
+    for name in by_name.keys().copied().collect::<Vec<_>>() {
+        visit(name, &by_name, &edges, &mut state, &mut path)?;
+    }
+    Ok(())
+}
+
 pub fn desugar_inject(mut program: Program, current_env: Option<&str>) -> Result<Program, ParseError> {
     let mut reg = Registry::new();
     collect_providers(&program.items, &mut reg)?;
+    let mut struct_deps = HashMap::new();
+    collect_struct_inject_deps(&program.items, &mut struct_deps);
+    detect_cycles(&reg, &struct_deps)?;
     let mut trait_names = HashSet::new();
     collect_trait_names(&program.items, &mut trait_names);
     program.items = desugar_items(program.items, &reg, current_env, &trait_names)?;
