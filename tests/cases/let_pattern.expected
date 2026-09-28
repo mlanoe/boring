@@ -9,3 +9,8 @@ p = 99
 no q
 hello Alice
 anonymous
+self tick 3
+self tick 2
+self tick 1
+self tick 0
+self done

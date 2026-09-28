@@ -4388,6 +4388,7 @@ impl Transpiler {
             with_open_names: self.with_open_names.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
+            while_let_redirect: self.while_let_redirect.clone(),
             fn_returns_void: self.fn_returns_void,
             fn_declared_void: self.fn_declared_void,
             suppress_ok_wrap: false,

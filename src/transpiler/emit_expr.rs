@@ -2516,6 +2516,15 @@ impl Transpiler {
     fn emit_expr_assign(&self, target: &Expr, value: &Expr) -> String {
         // Global mutable var assignment: `logX = val` → `*LOGX.lock().unwrap() = val`.
         if let ExprKind::Var(var_name) = &target.kind {
+            // Inside a self-referencing `while let v:` loop body (see
+            // `emit_loop.rs`'s `emit_while_let`), a plain reassignment of the
+            // loop-bound name is the documented way to advance to the next
+            // value — route it to the outer binding's mangled Rust identifier
+            // instead of the loop-pattern's own (shadowed) unwrapped binding.
+            if let Some(outer) = self.while_let_redirect.get(var_name.as_str()) {
+                let val_s = self.emit_expr_owned(value);
+                return format!("{} = {}", outer, val_s);
+            }
             if self.global_vars_used_in_fns.contains(var_name.as_str()) {
                 let static_name = var_name.to_uppercase();
                 let val_s = self.emit_expr_owned(value);

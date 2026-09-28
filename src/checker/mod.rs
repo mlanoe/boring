@@ -1267,8 +1267,22 @@ impl Checker {
             }
             Stmt::WhileLet(s)  => {
                 self.check_expr(&s.value);
+                // Self-referencing shorthand: `while let v:` ≡ `while let v = v:`
+                // (book.md) — the loop-bound name IS the outer binding (unwrapped),
+                // so it inherits the outer binding's actual mutability instead of
+                // the fixed `Let` every other while-let form gets. Otherwise a body
+                // reassignment (the documented idiom for advancing to the next
+                // value, e.g. a stdin read loop) is wrongly rejected as an assignment
+                // to an immutable binding even when the outer variable was `var`.
+                let self_shorthand = s.pattern.is_none()
+                    && matches!(&s.value.kind, ExprKind::Var(n) if n == &s.name);
+                let outer_kind = if self_shorthand {
+                    self.lookup(&s.name).map(|b| b.kind.clone())
+                } else {
+                    None
+                };
                 self.push_scope();
-                self.define(&s.name, BindingKind::Let);
+                self.define(&s.name, outer_kind.unwrap_or(BindingKind::Let));
                 self.check_block_in_current_scope(&s.body);
                 self.pop_scope();
             }

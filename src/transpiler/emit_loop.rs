@@ -137,6 +137,41 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_while_let(&mut self, s: &WhileLetStmt) {
+        // Self-referencing shorthand: `while let v:` ≡ `while let v = v:` (book.md).
+        // The condition and the loop-bound name are the SAME outer `var` — naively
+        // emitting `while let Some(v) = v { ...; v = next; }` shadows the outer
+        // `Option`-typed `v` with the loop-pattern's own unwrapped `v`, so a body
+        // reassignment (the documented idiom for advancing to the next value)
+        // writes to the wrong Rust binding and either fails to type-check or is a
+        // silent no-op that hangs the loop. Give the outer binding a distinct
+        // internal Rust name for the duration of this loop instead.
+        let self_shorthand = s.pattern.is_none()
+            && matches!(&s.value.kind, ExprKind::Var(n) if n == &s.name);
+        if self_shorthand {
+            let outer = format!("__wl_{}", s.name);
+            let val = self.emit_expr(&s.value);
+            self.line("{");
+            self.indent += 1;
+            self.line(&format!("let mut {} = {};", outer, val));
+            self.known_local_vars.insert(s.name.clone());
+            self.line(&format!("while let Some({}) = {} {{", s.name, outer));
+            self.indent += 1;
+            let prev = self.while_let_redirect.insert(s.name.clone(), outer.clone());
+            self.emit_loop_body(&s.body);
+            match prev {
+                Some(p) => { self.while_let_redirect.insert(s.name.clone(), p); }
+                None => { self.while_let_redirect.remove(&s.name); }
+            }
+            self.indent -= 1;
+            self.line("}");
+            // Write the final (`None`) state back to the outer binding, so code
+            // after the loop sees the same value a real `while let` head would
+            // leave it in.
+            self.line(&format!("{} = {};", val, outer));
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         let val = self.emit_expr(&s.value);
         if let Some(pat) = &s.pattern {
             // `while let Some(x) = expr:` — explicit pattern form

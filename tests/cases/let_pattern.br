@@ -56,3 +56,21 @@ def void greet(string? name):
 
 greet("Alice")
 greet(nil)
+
+# Swift-style shorthand LOOP form: `while let v:` ≡ `while let v = v:`, with the
+# body reassigning `v` to advance to the next value — this is book.md's own
+# documented stdin-read-loop idiom, generalized here with a pure function
+# instead of readLine() so the test stays deterministic. Regression test: this
+# used to be rejected by the checker ("cannot assign to `tick`: declared as
+# `let`") and, once that was worked around, failed to compile under
+# `boring build` (Rust E0308 from the loop-bound `tick` shadowing the outer
+# `Option`-typed `tick`).
+def int? prevTick(int n):
+    if n <= 0: return nil
+    return n - 1
+
+var tick = prevTick(4)
+while let tick:
+    print "self tick {tick}"
+    tick = prevTick(tick)
+print "self done"

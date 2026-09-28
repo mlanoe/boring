@@ -572,6 +572,30 @@ impl Interpreter {
     }
 
     pub(crate) fn exec_while_let(&mut self, s: &WhileLetStmt, env: EnvRef) -> Result<(), Signal> {
+        // Self-referencing shorthand: `while let v:` ≡ `while let v = v:` (book.md).
+        // The condition and the loop body's `v` are the SAME outer binding — unlike
+        // the pattern/explicit-expr forms below, don't shadow it in a per-iteration
+        // child scope, or a body reassignment (the documented idiom for advancing to
+        // the next value) would write to a shadow discarded at the end of the
+        // iteration instead of the binding the next condition check reads, hanging
+        // the loop forever.
+        let self_shorthand = s.pattern.is_none()
+            && matches!(&s.value.kind, ExprKind::Var(n) if n == &s.name);
+        if self_shorthand {
+            loop {
+                let val = self.eval_expr(&s.value, Rc::clone(&env))?;
+                if matches!(val, Value::Nil) { break; }
+                let _ = env.borrow_mut().set(&s.name, val);
+                let child = Env::child(Rc::clone(&env));
+                match self.exec_block(&s.body, child) {
+                    Ok(()) => {}
+                    Err(Signal::Break(_)) => break,
+                    Err(Signal::Continue) => continue,
+                    Err(other) => return Err(other),
+                }
+            }
+            return Ok(());
+        }
         loop {
             let val = self.eval_expr(&s.value, Rc::clone(&env))?;
             let child = Env::child(Rc::clone(&env));

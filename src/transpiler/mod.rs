@@ -683,6 +683,16 @@ struct Transpiler {
     /// All local variable names in the current function scope.
     /// Used to distinguish module/type paths (use `::`) from instance variable access (use `.`).
     pub(crate) known_local_vars: std::collections::HashSet<String>,
+    /// Active only while emitting the body of a self-referencing `while let v:`
+    /// shorthand loop (`≡ while let v = v:`, docs/book.md). Maps the loop-bound
+    /// name to the mangled Rust identifier `emit_while_let` introduced for the
+    /// *outer* `Option`-typed binding, so `emit_expr_assign`'s bare-`Var`-target
+    /// case can route a body reassignment (the documented idiom for advancing
+    /// to the next value) to that outer storage instead of the loop-pattern's
+    /// own unwrapped binding — naively emitting `while let Some(v) = v { v = next; }`
+    /// would shadow-collide the two in Rust and either fail to type-check or
+    /// silently only rebind the discarded per-iteration shadow.
+    pub(crate) while_let_redirect: std::collections::HashMap<String, String>,
     /// True when the current function's declared return type is `()` (void).
     /// Prevents expression-return without semicolon for void functions.
     pub(crate) fn_returns_void: bool,
@@ -1373,6 +1383,7 @@ impl Transpiler {
             with_open_names: std::collections::HashSet::new(),
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
+            while_let_redirect: std::collections::HashMap::new(),
             fn_returns_void: false,
             fn_declared_void: false,
             suppress_ok_wrap: false,
