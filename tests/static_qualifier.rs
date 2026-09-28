@@ -301,3 +301,76 @@ fn generic_struct_static_field_depending_on_type_param_is_rejected() {
         "cannot depend on Wrapper's own generic type parameter",
     );
 }
+
+// ── Positive: trait-typed 'static field — type emission + method casing ────
+
+#[test]
+fn trait_typed_static_field_emits_dyn_borrow_and_preserves_method_casing() {
+    // Regression, two bugs in a `Configurable'static config` struct field:
+    //
+    // Bug 1: `emit_type`'s `OwnerQual::Static` arm used to always wrap with
+    // `format!("&'static {}", self.emit_type(inner))` — but for a trait-named
+    // `inner`, `self.emit_type(inner)` already self-boxes to `Box<dyn Trait>`
+    // (`emit_named_type`'s "Priority 4" trait handling), so the result was
+    // double-wrapped to `&'static Box<dyn Configurable>` instead of the correct
+    // `&'static dyn Configurable`. Same double-boxing bug class already fixed
+    // for `OwnerQual::Owned` (see the arm just above in emit_top.rs).
+    //
+    // Bug 2: `resolve_expr_struct_type`'s `ExprKind::Field` arm only matched a
+    // bare `Type::Named` field type, so a `self.config.apiKey()` call — where
+    // `config`'s declared type is `Type::Qualified(Named("Configurable"),
+    // OwnerQual::Static)`, not a bare `Named` — failed to resolve `config`'s
+    // struct/trait type at all. That made `expr_receiver_is_known_user_type`
+    // return false, so the call fell through to the generic
+    // camelCase→snake_case fallback and emitted `self.config.api_key()`
+    // instead of preserving the trait method's own declared `apiKey` casing.
+    // Fixed by routing through `qualified_named_type_name`, which already
+    // strips every qualifier layer (used elsewhere for `'actor`/`'guard`/
+    // `'observed` fields) — so this fix covers `'shared`/`'owned`/`'observed`
+    // trait-typed fields the same way, not just `'static`.
+    //
+    // This case also has a separate, more structural gap — constructing
+    // `App { config: c }` from a `RealConfig'static` local doesn't compile
+    // yet (`expected &dyn Configurable, found LazyLock<RealConfig>`; there's
+    // no coercion path from a concrete `T'static` into a `Trait'static` field
+    // at all) — so this test only checks the emitted Rust text, not a full
+    // compile+run.
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let case_br = Path::new("tests/cases").join("static_trait_field.br");
+    let emit = Command::new(bin)
+        .arg("build")
+        .arg(&case_br)
+        .arg("--emit-rust")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e));
+    assert!(
+        emit.status.success(),
+        "expected `boring build --emit-rust` on static_trait_field.br to succeed, but it failed:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+    let generated = String::from_utf8_lossy(&emit.stdout);
+
+    assert!(
+        generated.contains("pub config: &'static dyn Configurable"),
+        "expected the trait-typed 'static field to emit `&'static dyn Configurable` \
+         (not double-boxed as `&'static Box<dyn Configurable>`) — got:\n{}",
+        generated
+    );
+    assert!(
+        !generated.contains("&'static Box<dyn Configurable>"),
+        "trait-typed 'static field should not be double-boxed — got:\n{}",
+        generated
+    );
+
+    assert!(
+        generated.contains("self.config.apiKey()"),
+        "expected the trait method call through a 'static field to preserve its \
+         declared `apiKey` casing (not fall back to `api_key`) — got:\n{}",
+        generated
+    );
+    assert!(
+        !generated.contains("self.config.api_key()"),
+        "trait method call through a 'static field should not be snake_cased — got:\n{}",
+        generated
+    );
+}

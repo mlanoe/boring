@@ -95,10 +95,7 @@ impl Transpiler {
                 self.struct_fields.get(inner_ty.as_str())?
                     .iter()
                     .find(|(fname, _)| fname == field)
-                    .and_then(|(_, fty)| match fty {
-                        Type::Named(n) => Some(n.clone()),
-                        _ => None,
-                    })
+                    .and_then(|(_, fty)| qualified_named_type_name(fty))
             }
             // `arr[i]` — resolve the array's declared element type (not `arr`'s own
             // type): `self.blocks[i]` needs `self.blocks`'s field type to be

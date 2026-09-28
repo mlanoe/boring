@@ -3512,7 +3512,20 @@ impl Transpiler {
                     let is_str_slice = matches!(**inner, Type::Str)
                         || matches!(**inner, Type::Named(ref n) if n == "str");
                     if is_str_slice { "&'static str".to_string() }
-                    else { format!("&'static {}", self.emit_type(inner)) }
+                    else if let Type::Named(n) = inner.as_ref() {
+                        if self.trait_method_names.contains_key(n.as_str()) {
+                            // A trait name inner already renders as `Box<dyn Trait>` on its
+                            // own (Priority 4 in `emit_named_type`) — wrapping that in
+                            // `&'static {}` would double up to `&'static Box<dyn Trait>`.
+                            // Same double-boxing class of bug already fixed for
+                            // `OwnerQual::Owned` above; emit the plain trait-object borrow.
+                            format!("&'static dyn {}", normalize_type_name(n, self.use_rc_str()))
+                        } else {
+                            format!("&'static {}", self.emit_type(inner))
+                        }
+                    } else {
+                        format!("&'static {}", self.emit_type(inner))
+                    }
                 }
                 // 'new pseudo-qualifier (Union([Owned, Shared, Actor, Guard]) — replaces the
                 // old dedicated OwnerQual::New variant): a struct field's resolved qualifier

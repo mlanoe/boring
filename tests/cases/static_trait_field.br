@@ -1,0 +1,19 @@
+trait Configurable:
+    req string apiKey()
+
+struct RealConfig as Configurable:
+    string apiKey
+
+    req string apiKey():
+        apiKey
+
+struct App:
+    Configurable'static config
+
+    req show():
+        print "{self.config.apiKey()}"
+
+def main():
+    let RealConfig'static c = RealConfig(apiKey = "secret")
+    let app = App(config = c)
+    app.show()
