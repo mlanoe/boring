@@ -708,6 +708,25 @@ impl Transpiler {
                 self.emit_guard_new(&raw)
             });
         }
+        // `T'static` → `&'static T`. A bare `&raw` was tried first and does NOT compile
+        // (E0515, "cannot return reference to temporary value") — unlike the module-level
+        // `static`/`LazyLock<T>` a top-level/`main`-scope `T'static let` promotes to
+        // (`emit_top.rs`'s `emit_static_qualified_let_item`), a plain function's stack
+        // frame doesn't outlive the call, so its bare constructor value has nothing durable
+        // to reference. `Box::leak(Box::new(raw))` gives the value real `'static` storage
+        // (leaked once per call — accepted here the same way `emit_struct.rs`'s own
+        // `Box::leak`-based introspection codegen already leaks per-call); the resulting
+        // `&'static mut T` coerces to `&'static T` at this tail-expression/return position
+        // (a plain Rust pointer-weakening coercion, confirmed to compile and run). Same
+        // `is_fresh_struct_ctor` gate as `'actor`/`'guard` — there's no "is this value
+        // already `&'static`-shaped?" detector the way `'shared`'s arm above has, so an
+        // already-qualified value (a bare `'static`-typed variable, per the provenance gate
+        // in `check_static_provenance`) must not be re-wrapped here; it already reaches the
+        // caller's default `emit_expr_owned` fallback correctly.
+        if let Type::Qualified(inner, OwnerQual::Static) = ty {
+            let raw = self.emit_let_value(Some(inner), e);
+            return Some(format!("Box::leak(Box::new({}))", raw));
+        }
         // Deliberately no `OwnerQual::Observed` arm here: unlike 'actor/'guard/'shared,
         // a bare-constructor `'observed` return value is already wrapped correctly by
         // `emit_expr.rs`'s `emit_constructor` (its own `OwnerQual::Observed` arm, gated

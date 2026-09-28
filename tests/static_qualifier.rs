@@ -179,6 +179,49 @@ fn req_group_accepts_static_argument_build_and_run() {
     assert_build_and_run("static_req_group.br", &[], "default", "value: 7");
 }
 
+// ── Positive: function return-type qualifier (bare constructor tail) ──────
+
+#[test]
+fn fn_return_type_wraps_bare_constructor_in_static_storage() {
+    // Regression: a function's own declared `'static` return-type qualifier was never
+    // applied to a bare constructor-call return value (neither a bare tail expression nor
+    // an explicit `return`) — unlike the `'actor`/`'guard`/`'shared` version of this exact
+    // bug class (see `actor_guard_shared_return_qualifier` in tests/transpile.rs), which
+    // already wraps in `Arc::new(...)`/`Mutex::new(...)`. A bare `&raw` was tried first
+    // and does NOT compile here (E0515, "cannot return reference to temporary value") —
+    // unlike those qualifiers, `'static` needs the value to actually live for the whole
+    // program, which a function's own stack frame cannot provide on its own. See
+    // `src/transpiler/emit_stmt.rs`'s `wrap_return_for_qualifier` `'static` arm for the fix
+    // (`Box::leak(Box::new(raw))`, which coerces to `&'static T` at the return site).
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let case_br = Path::new("tests/cases").join("static_fn_return_bare_ctor.br");
+    let emit = Command::new(bin)
+        .arg("build")
+        .arg(&case_br)
+        .arg("--emit-rust")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e));
+    assert!(
+        emit.status.success(),
+        "expected `boring build --emit-rust` on static_fn_return_bare_ctor.br to succeed, but it failed:\n{}",
+        String::from_utf8_lossy(&emit.stderr)
+    );
+    let generated = String::from_utf8_lossy(&emit.stdout);
+    assert!(
+        generated.contains("Box::leak(Box::new(RealConfig {"),
+        "expected the bare constructor return to be wrapped in `Box::leak(Box::new(...))` \
+         to give it real 'static storage — got:\n{}",
+        generated
+    );
+
+    assert_build_and_run(
+        "static_fn_return_bare_ctor.br",
+        &[],
+        "fn_return",
+        "secret",
+    );
+}
+
 // ── Negative: provenance gate ───────────────────────────────────────────────
 
 #[test]

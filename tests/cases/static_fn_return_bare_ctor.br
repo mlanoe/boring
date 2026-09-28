@@ -1,0 +1,9 @@
+struct RealConfig:
+    string apiKey
+
+RealConfig'static loadConfig():
+    RealConfig(apiKey = "secret")
+
+def main():
+    let c = loadConfig()
+    print "{c.apiKey}"
