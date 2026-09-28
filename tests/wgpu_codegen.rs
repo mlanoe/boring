@@ -3275,6 +3275,89 @@ for i in 0..<2:
     assert!(stdout.contains("out_header[1] = 25620"), "expected out_header[1] = 20 + 100*256 = 25620, got:\n{stdout}");
 }
 
+/// `request_device` used to hardcode `required_limits: wgpu::Limits::default()`
+/// (via `..Default::default()`, no `required_limits` field at all) -- wgpu's
+/// conservative, portable-across-everything default, capping every buffer at
+/// `max_storage_buffer_binding_size` = 128 MiB regardless of what the real
+/// adapter actually supports. A single kernel field's buffer larger than that
+/// (e.g. a large ML weight matrix) failed at `create_bind_group` time with a
+/// validation error, on hardware that could easily have bound it. Fixed by
+/// requesting `adapter.limits()` instead, at both `request_device` call sites
+/// (the plain headless `async_main` path and the windowed/Screen path).
+#[test]
+fn wgpu_large_buffer_binding_uses_adapter_limits_not_default_cap() {
+    let test_name = "large_buffer_binding_adapter_limits";
+    let src = r#"
+kernel LargeBuffer:
+    mut [float32]'unified out
+
+    init([float32] o):
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        if tid < 4:
+            out[tid] = (tid as float32) + 1.0
+
+mut out = [0.0 for ..=35999999]
+
+mut k = LargeBuffer(out)
+kernel:
+    k(block = 4)
+
+print "out[0] = {k.out[0]}"
+print "out[1] = {k.out[1]}"
+print "out[2] = {k.out[2]}"
+print "out[3] = {k.out[3]}"
+print "len = {k.out.len()}"
+"#;
+    let (_wgsl, _emulated, rs, _toml) = run_wgpu(test_name, src);
+
+    // Codegen shape: both `request_device` call sites now request the adapter's own
+    // reported limits instead of the conservative portable default.
+    assert!(
+        rs.contains("required_limits: adapter.limits()"),
+        "expected `request_device` to request `adapter.limits()` instead of the \
+         conservative `wgpu::Limits::default()` (128 MiB storage-buffer binding cap), got:\n{rs}"
+    );
+    assert!(
+        !rs.contains("DeviceDescriptor::default()"),
+        "expected no bare `DeviceDescriptor::default()` request left (it carries the \
+         128 MiB cap with no way to raise it), got:\n{rs}"
+    );
+
+    // Real GPU dispatch: a single kernel field backed by a ~137 MiB buffer (36,000,000
+    // float32 elements) -- comfortably larger than the old artificial 128 MiB
+    // (134,217,728 byte) `max_storage_buffer_binding_size` default, but well within any
+    // real desktop/discrete GPU's actual capacity. Before the fix, this failed at
+    // `Device::create_bind_group` with a validation error regardless of the real
+    // adapter's capability; after the fix it binds and dispatches successfully.
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join(test_name);
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU (binding a >128 MiB single-buffer kernel field), but it failed -- this \
+         is the exact `max_storage_buffer_binding_size` validation error the adapter-limits \
+         fix is meant to prevent:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(!stderr.contains("exceeds"), "expected no buffer-size validation error, got:\n{stderr}");
+    assert!(stdout.contains("out[0] = 1"), "expected out[0] = 1, got:\n{stdout}");
+    assert!(stdout.contains("out[1] = 2"), "expected out[1] = 2, got:\n{stdout}");
+    assert!(stdout.contains("out[2] = 3"), "expected out[2] = 3, got:\n{stdout}");
+    assert!(stdout.contains("out[3] = 4"), "expected out[3] = 4, got:\n{stdout}");
+    assert!(stdout.contains("len = 36000000"), "expected len = 36000000, got:\n{stdout}");
+}
+
 /// Same silently-dropped-errors bug, different diagnostic source: `build_gpu_array_subst`
 /// resolves a GPU-array-qualified free-function parameter (`w_packed` here) to the single
 /// kernel buffer field it's always called with across the whole program (see

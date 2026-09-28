@@ -1110,10 +1110,21 @@ impl<'a> HostEmitter<'a> {
                 self.line("    let __boring_use_subgroups = adapter.features().contains(wgpu::Features::SUBGROUP);");
                 self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {");
                 self.line("        required_features: if __boring_use_subgroups { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },");
+                // `wgpu::Limits::default()` is the conservative,
+                // portable-across-everything default (128 MiB storage-buffer
+                // binding, 256 MiB buffer size) — far below what a real
+                // desktop/discrete GPU actually supports. Requesting the
+                // adapter's own reported limits instead lets buffers larger
+                // than that artificial cap (e.g. large ML model weights) bind
+                // successfully on hardware that supports it.
+                self.line("        required_limits: adapter.limits(),");
                 self.line("        ..Default::default()");
                 self.line("    }, None).await.expect(\"Failed to create device\");");
             } else {
-                self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await.expect(\"Failed to create device\");");
+                self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {");
+                self.line("        required_limits: adapter.limits(),");
+                self.line("        ..Default::default()");
+                self.line("    }, None).await.expect(\"Failed to create device\");");
             }
             // Defensive: make sure the device is fully settled before any real
             // dispatch work begins. There's nothing queued yet, so this returns
@@ -1363,11 +1374,19 @@ impl<'a> HostEmitter<'a> {
         if self.has_emulated_shader {
             self.line("            .request_device(&wgpu::DeviceDescriptor {");
             self.line("                required_features: if adapter.features().contains(wgpu::Features::SUBGROUP) { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },");
+            // See the non-Screen async_main path's identical call for why:
+            // adapter.limits() instead of the conservative Limits::default(),
+            // so buffers larger than the 128 MiB portable-default cap can
+            // bind successfully on hardware that actually supports it.
+            self.line("                required_limits: adapter.limits(),");
             self.line("                ..Default::default()");
             self.line("            }, None)");
             self.line("            .await.expect(\"Failed to create device\");");
         } else {
-            self.line("            .request_device(&wgpu::DeviceDescriptor::default(), None)");
+            self.line("            .request_device(&wgpu::DeviceDescriptor {");
+            self.line("                required_limits: adapter.limits(),");
+            self.line("                ..Default::default()");
+            self.line("            }, None)");
             self.line("            .await.expect(\"Failed to create device\");");
         }
         self.line("        (instance, adapter, device, queue)");
