@@ -161,8 +161,8 @@ impl Transpiler {
             // immediately above the field, same generic pass-through as struct-level attrs
             // above. See `FieldDecl::attrs`'s doc comment for why this exists: a struct-wide
             // `@serde(rename_all = "...")` can't cover a field whose JSON key doesn't
-            // correspond to any single Boring spelling of its name. `@inject` (docs/design-
-            // notes/boring-di-draft.md) is excluded — it's fully resolved and desugared away
+            // correspond to any single Boring spelling of its name. `@inject` (docs/book.md
+            // §33) is excluded — it's fully resolved and desugared away
             // by `desugar_inject.rs` before the transpiler ever runs (into a synthesized
             // `init`, `s.inits`), but the attribute itself is left on the field's own AST
             // node — it carries no Rust-side meaning at all, unlike `@serde`/`@derive`.

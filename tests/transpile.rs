@@ -1080,7 +1080,7 @@ transpile_test!(new_owned_no_double_or_missing_box, ignore_managed);
 // trait impls being generated for the wrapper type directly).
 transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);
 // `init_owned_trait_param`: an explicit body-`init`'s `Trait'owned` parameter
-// (the `@inject`-relevant shape — docs/design-notes/boring-di-draft.md's
+// (the `@inject`-relevant shape — docs/book.md §33's
 // `'owned` transient-dependency case, `desugar_inject.rs`'s synthesized init)
 // — two compounding bugs, both pre-existing and unrelated to `@inject`
 // itself: (1) the param's own type got boxed twice (`Box<Box<dyn Greeter>>`)
@@ -1207,7 +1207,7 @@ transpile_test!(actor_field_method_outer_var);
 // qualifier-inference resolution (representation-inspection tests, no full build).
 transpile_test!(observed_qualifier);
 
-// `@singleton` (docs/design-notes/boring-di-draft.md §4): first-call-wins memoization
+// `@singleton` (docs/book.md §33): first-call-wins memoization
 // behind a compiler-synthesized LazyLock, proven end-to-end — the constructor's side
 // effect (`print`) runs exactly once despite two calls, and both call sites end up
 // holding the *same* shared `'actor` cell (a mutation through either handle is visible
@@ -1223,7 +1223,7 @@ transpile_test!(observed_qualifier);
 // compile-error-message assertion this case exists to complement.
 transpile_test!(singleton_di, ignore_single);
 
-// `@inject` (docs/design-notes/boring-di-draft.md §1): two independent structs,
+// `@inject` (docs/book.md §33): two independent structs,
 // each with an `@inject` field of the same type, resolved against one
 // `@provide` + `@singleton` provider — both end up sharing the same underlying
 // instance with no parameter threaded through by hand. `ignore_single`: same
@@ -1231,11 +1231,16 @@ transpile_test!(singleton_di, ignore_single);
 // (the provider here is also `@singleton`).
 transpile_test!(inject_di, ignore_single);
 
+// `@inject`/`@provide` with `'static` (docs/book.md §33) —
+// full end-to-end proof, unblocked once task_ce5a4ff9 (the missing `&'static` wrap
+// on a bare constructor-call return) was fixed on `main`.
+transpile_test!(static_di);
+
 // Regression test: a function's own declared `'actor`/`'guard`/`'shared` return-type
 // qualifier was never applied to a bare constructor-call return value — neither a bare
 // tail expression nor an explicit `return` — so the generated Rust failed to compile
 // (E0308: expected e.g. `Arc<Mutex<Counter>>`, found the bare `Counter` struct literal).
-// Found while implementing `@singleton` (docs/design-notes/boring-di-draft.md), which
+// Found while implementing `@singleton` (docs/book.md §33), which
 // uses exactly this bare-constructor-return shape for every `@provide` worked example.
 // See `src/transpiler/emit_stmt.rs`'s `wrap_return_for_qualifier` doc for the fix.
 transpile_test!(actor_guard_shared_return_qualifier);

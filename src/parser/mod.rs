@@ -290,7 +290,7 @@ impl Parser {
                     // (`NetworkClient'shared networkClient(): ...`) — previously fell through
                     // to the discard branch below, silently dropping any attribute written
                     // above it (found via `@singleton`/`@provide`, which the DI design
-                    // (docs/design-notes/boring-di-draft.md) writes almost exclusively in
+                    // (docs/book.md §33) writes almost exclusively in
                     // this shorthand form — a `@provide`/`@singleton`/`@derive`/etc. above
                     // such a function compiled with zero errors and zero effect).
                     _ if self.is_fn_decl_shorthand() => {

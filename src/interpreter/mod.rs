@@ -2332,7 +2332,7 @@ pub struct Interpreter {
     /// clean runtime error; this bounds it the same way the parser already
     /// bounds expression/statement nesting depth.
     pub(crate) call_depth: usize,
-    /// `@singleton` (docs/design-notes/boring-di-draft.md §4) memoization cache —
+    /// `@singleton` (docs/book.md §33) memoization cache —
     /// keyed by function name (an `@singleton` function is always zero-arg and
     /// there's exactly one declaration per name, so the name alone is an
     /// unambiguous cache key). Mirrors the transpiler's own `LazyLock` semantics:

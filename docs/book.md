@@ -40,6 +40,7 @@ Boring's own semantics — memory management, ownership, and the qualifiers in [
 30. [Qualifier Inference](#30-qualifier-inference)
 31. [Debugging & Profiling](#31-debugging--profiling)
 32. [GPU Computing](#32-gpu-computing)
+33. [Dependency Injection](#33-dependency-injection)
 
 ---
 
@@ -9407,6 +9408,195 @@ Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` obje
 
 **[Warp-level primitives](warp-level-primitives.html)**
 `gpu.warp.*` — warp/wavefront/SIMD-group/subgroup built-ins (`size`, `lane`, `sync()`, `shuffle_down/up/xor/shuffle`) for intra-warp reductions that skip the shared-memory round-trip and block barrier a full `sync` costs. Per-backend mapping, the wgpu real-subgroup/shared-memory-emulated fallback split, and the divergent-branch mask caveat.
+
+---
+
+## 33. Dependency Injection
+
+Two attributes, `@inject` and `@provide`, let one piece of code depend on *an abstraction* (a trait) and have some other, possibly distant code — a different file, a different `boring.toml` project, a test — supply the concrete implementation, without the dependent code naming the concrete type or every intermediate caller threading it through by hand. This is dependency injection / inversion of control in the conventional sense (Spring, Guice/Dagger, Swift's `Dependencies`), fitted to a language with no runtime reflection: resolution happens once, at compile time, by rewriting the same omit-and-default-fall-back mechanism [chapter 8](#8-structs) already uses for defaulted constructor parameters — no container, no runtime type registry, no annotation processor. A third, independent attribute, `@singleton`, provides general-purpose function-result memoization that dependency injection builds on but that has nothing to do with DI on its own.
+
+### 1. `@inject` — a field attribute
+
+```boring
+trait NetworkClient:
+    req [byte] fetch(string url) throws
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+    req [User] fetchUsers() throws:
+        client.fetch("/users")
+```
+
+`@inject` decorates a struct field whose type is written exactly as it would be without DI at all — an explicit `NetworkClient'shared`, or (in the cases below) a bare `NetworkClient`. It never introduces its own representation and never appears inside the `'`-tick qualifier chain — it sits outside the qualifier system entirely, the same way `@serde(rename = ...)` decorates a field without altering its type ([chapter 24](#24-attributes)).
+
+`@inject` marks the field's constructor argument as **resolved, not supplied**: it becomes optional, exactly like an ordinary defaulted parameter (`init(float radius = 1.0)`), except the default expression is a compiler-synthesized call to the one resolved provider rather than something you wrote. A struct with an `@inject` field cannot also declare its own hand-written `init` — the whole point is that this field doesn't need one.
+
+Whether the field's own qualifier must be written explicitly, or can be left bare and copied from the provider, depends on whether the matched provider is `@singleton` (§4):
+
+- **Explicit field, `@singleton` provider** — a real compatibility check: the provider's declared return-type qualifier must match the field's written one exactly, or it's a compile error naming both sides ("`client` is declared `NetworkClient'actor`, but the only visible provider (`networkClient`) returns `NetworkClient'shared`") — there's only one physical instance in play, so this is the only shape it can take.
+- **Explicit field, transient (non-`@singleton`) provider** — no check at all: the field's own qualifier just decides how the freshly-constructed value gets wrapped at that call site (`Box::new`, `Arc::new`, …), the same as any other constructor call assigned to a qualified binding.
+- **Bare field, `@singleton` provider** — the field's type is copied verbatim from the provider's own return type, skipping ordinary usage-based qualifier inference ([chapter 30](#30-qualifier-inference)) entirely — there's only one representation the shared value could ever have.
+- **Bare field, transient provider, trait base type, provider also returns that trait bare** — accepted: a bare trait field is always `Box<dyn Trait>` (a trait object is unsized, so there is no other representation), a fixed rule rather than an inference outcome.
+- **Bare field, transient provider, any other shape** (a plain struct/generic base type, or a trait whose only visible provider returns it already qualified) — currently rejected, requiring an explicit qualifier instead. This is a real transpiler gap, not a design restriction: a defaulted `init` parameter's call-site value is rendered before qualifier inference has decided the field's final representation, so there's nothing yet to wrap the default expression in.
+
+### 2. Accepted qualifiers: `'shared`/`'actor`/`'guard`/`'observed`/`'static` always, `'owned` only without `@singleton`
+
+An `@inject`-site's resolved type must be one of `'shared`, `'actor`, `'guard`, `'observed` (layered on `'actor`/`'guard`, per [chapter 21](#observed--a-composable-sharingnotification-suffix)), `'static`, or — only for a transient (non-`@singleton`) provider — `'owned`. `'weak` is never accepted (a dependency has to guarantee it stays alive). `'inline` and bare scalars are hard errors: `@inject` almost always keys on a trait, and `dyn Trait` is unsized (no `'inline`, no-indirection representation exists for it at all); a scalar has nothing for DI to abstract over (no varying implementation, nothing worth sharing) — an ordinary defaulted parameter already covers that case with none of this machinery.
+
+`'owned` is rejected specifically when the matched provider is `@singleton` — a `Box<T>` is exclusive by definition and cannot back more than one holder, exactly like `@singleton` + `'owned` is already rejected on any function ([chapter 24](#24-attributes)). Without `@singleton`, `'owned` is the natural qualifier for a genuinely transient dependency: a fresh, per-resolution instance, never shared.
+
+**`'static` must always be written explicitly, even against a `@singleton` provider that itself returns `'static`** — the one exception to "bare copies the provider verbatim." A provider can live in a different project than the `@inject` site consuming it, and `'static` carries two consequences a reader standing at a bare field would otherwise have no way to see: it needs its own construction site upstream (already covered — a `@provide`-attributed function body is a legal `'static`-construction site, no grammar change needed), and it breaks the test-substitution override below (`UserRepository(client = MockNetworkClient())` doesn't typecheck when `client` is `NetworkClient'static`, since a value passed into a `'static` parameter must itself already be `'static`-typed — the mock would have to be declared at a legal `'static` site first). Reach for `'static` under `@inject` only for a dependency that genuinely never needs substituting in a test (a parsed embedded resource, an immutable constant table); `'shared` remains the better default otherwise.
+
+### 3. `@provide` — a function attribute
+
+```boring
+struct RealNetworkClient as NetworkClient:
+    req [byte] fetch(string url) throws:
+        ...
+
+@provide
+@singleton
+NetworkClient'shared networkClient():
+    RealNetworkClient()
+```
+
+`@provide` decorates an ordinary, already-existing Boring function declaration (the return-type-first form, [chapter 5](#5-functions)) — no new declaration kind. It registers the function's return type (and `id`, if given — §5) as the one resolution source for that binding, visible program-wide, including across `[deps]` project boundaries, using the same visibility the compiler already resolves `use <name>.xxx` and trait impls against ([chapter 15](#15-modules)). Top-level only — nested inside another function's body would reintroduce a "conditionally registered at runtime" flavor this design avoids.
+
+**`@provide` requires `pub`.** A `@provide`-attributed function that isn't also `pub` is a compile error — a private, module-only provider has no legitimate use case, since `@provide`'s whole reason to exist is to be found by `@inject` sites that don't know its concrete declaration. A helper genuinely meant to stay internal simply shouldn't carry `@provide` at all; it can still be called *by* a `pub @provide` function.
+
+`@provide` takes one optional named argument, `id` (§5). Memoized/shared scope is a separate, stackable attribute, `@singleton` (§4) — not an argument of `@provide`, since it has meaning independent of DI.
+
+### 4. `@singleton` — general-purpose memoization, DI-independent
+
+By default, a `@provide`-attributed function's body runs exactly like any other function call — fresh, every time an `@inject` site resolves against it. This is genuinely transient scope, and it's why `'owned` (§2) is legal here: a fresh `Box<T>` on every call is exactly what `'owned` already means.
+
+`@singleton` opts into the opposite: it's legal on **any** function, `@provide`-attributed or not, and has nothing to do with DI specifically:
+
+```boring
+@singleton
+def string expensiveGreeting():
+    print "computing the greeting (only once, ever)"
+    "hello"
+```
+
+It memoizes the function's result behind a compiler-synthesized `LazyLock`: the body runs *at most once*, the first time the function is called from anywhere — an `@inject` site resolving it, or ordinary code calling it directly by name — and every subsequent call, from anywhere, gets a clone/reference to that same instance. Construction is lazy (first-use), never eager (at startup): this avoids constructing a provider a given run never actually touches, and it sidesteps provider-to-provider ordering entirely (a provider whose body needs another `@singleton` value just triggers that one's own on-demand construction, the same mechanism that already resolves ordinary function-call dependencies) rather than requiring a topological sort before startup. Genuine cycles are still caught at compile time (§7) regardless.
+
+`@singleton` requires its function's return type to be a qualifier that supports more than one reader — `'shared`/`'actor`/`'guard`/`'observed` (or, redundantly, `'static`) — never `'owned`, which is exclusive by definition. Rejected outright under `--target kernel` (too low-level for the dynamic dispatch this assumes) and under `--threading single` when the return type resolves to a non-`Sync` form.
+
+Transient dependencies (a per-request DTO, a fresh per-screen view model) are simply `@provide`-attributed functions without `@singleton`, using `'owned` (or a non-singleton `'shared`/`'actor`/`'guard`/`'observed`, for Arc-style cheap cloning without cross-consumer sharing) — no special casing needed.
+
+### 5. Multiple implementations of one interface — supertraits or `id`
+
+When two bindings are genuinely different concepts (an audit trail versus debug output are different *kinds* of logger, not two configurations of one), a marker sub-trait needs no new syntax:
+
+```boring
+trait Logger:
+    req void log(string msg)
+
+trait AuditLogger as Logger:      # supertrait — no new members, just a distinct identity
+trait DebugLogger as Logger:
+
+@provide
+@singleton
+AuditLogger'shared auditLogger(): FileAuditLogger()
+
+struct PaymentService:
+    @inject
+    AuditLogger'shared audit     # unambiguous — resolves against AuditLogger's own provider
+```
+
+When the bindings are the same concept, just multiple instances or configurations of it (three database shards, one client per environment), `@inject`/`@provide` also take an `id` argument:
+
+```boring
+trait Database:
+    req [Row] query(string sql) throws
+
+@provide(id = "primary")
+@singleton
+Database'shared primaryDb(): PostgresDatabase(host = "primary.internal")
+
+@provide(id = "replica")
+@singleton
+Database'shared replicaDb(): PostgresDatabase(host = "replica.internal")
+
+struct ReportGenerator:
+    @inject(id = "replica")
+    Database'shared db     # resolves against replicaDb() specifically
+```
+
+The resolution key becomes **(base type, `id`)** — an `@inject` with no `id` only ever matches a `@provide` with no `id`, and vice versa. `id` must be a compile-time string literal on both sides, never a computed expression — the same "no runtime name lookup" guardrail that keeps this whole mechanism free of Spring-style reflective resolution.
+
+### 6. Test/build substitution — a labeled constructor argument, or `@provide(env = "...")`
+
+Because an `@inject`-annotated field is exactly an omittable, defaulted constructor argument, overriding it for a specific test is already expressible with an ordinary named-argument call:
+
+```boring
+test "fetchUsers hits the network client":
+    let repo = UserRepository(client = MockNetworkClient(canned = [...]))
+    let users = repo.fetchUsers()
+    assert users.length == 1
+```
+
+No mock container, no test-only module class — the override is a plain, visible constructor argument at the exact call site the test controls. This only reaches a dependency of the exact object the test constructs directly (see §2's `'static` caveat for the one qualifier it doesn't work for as shown).
+
+For a dependency several constructions deep, resolved by code the test never calls directly, `@provide` takes one more optional argument, `env` — a free-form compile-time string naming the build it applies to (`"test"`, `"debug"`, `"preprod-redhat"`, or anything project-specific; Boring never parses or structures it, exactly like `id`). An `env`-tagged provider **replaces** the plain one for its `(type, id)` pair whenever the compiler is invoked for that exact environment:
+
+```boring
+# --- production code ---
+@provide
+@singleton
+AuditLogger'shared auditLogger(): FileAuditLogger()   # the default — every build not overridden below
+
+# --- test file ---
+@provide(env = "test")
+AuditLogger'shared testAuditLogger(): MockAuditLogger()
+```
+
+An `env`-matching provider outranks a plain, env-less one for the same `(type, id)`; two candidates at the same rank (two plain providers, or two matching the same `env` string) still hit the ordinary ambiguous-provider error. This is a compile-time swap of the registry for that build, not a runtime ambient override — no push/pop scope stack, nothing active only "during one test." The compiler learns the current environment from a `--env <value>` flag, accepted by both `boring build` and `boring run`, independent of Cargo/Rust build profiles or `#[cfg(test)]`.
+
+### 7. Transitive resolution and cycles
+
+A `@provide`-attributed function's body is ordinary code — if the concrete type it constructs itself has `@inject` fields, those resolve recursively at *that* construction:
+
+```boring
+struct RealNetworkClient as NetworkClient:
+    @inject
+    Logger'shared logger        # resolved when RealNetworkClient() runs, wherever that happens
+    string baseUrl
+
+@provide
+@singleton
+NetworkClient'shared networkClient():
+    RealNetworkClient(baseUrl = "https://api.example.com")
+    # `logger` is not passed here — it resolves on its own, recursively
+```
+
+A cycle (the provider for `A` needs a `B`-typed `@inject` field, the one for `B` needs an `A`-typed one back) is a compile error, reported as the full chain (`provideA -> provideB -> provideA`), not just "cycle detected." Detection is best-effort: an edge in the dependency graph only exists where a provider's body is a bare constructor-call tail expression — a cycle hidden behind a more elaborate provider body (an `if`/`match`, an intermediate variable) isn't caught. Sound-by-omission, never a false positive.
+
+### Scope: which files and projects `@inject`/`@provide` see each other across
+
+A provider is visible to an `@inject` site when it's declared in the entry file itself, in a same-project sibling file reached via a bare `use <name>` ([chapter 15](#15-modules)), or in a `boring.toml` `[deps]` project reached via a dep-qualified `use <name>.xxx`. Either way this only widens the *provider registry* — the other file's own content is scanned read-only for `@provide`/trait declarations, never rewritten. **A struct declared only in that other file or project, with its own `@inject` field, does not get that field resolved** — only a struct declared in the file actually being compiled (the entry file) has its `@inject` fields desugared. Write providers your entry file's own structs can reach; keep a struct that needs `@inject` in the same file (or inline it) rather than importing it from a sibling/dependency file expecting its `@inject` fields to already be wired up.
+
+### Illustrative Rust equivalent
+
+Following the `RealNetworkClient`/`UserRepository` example above, assuming `networkClient()` is `@provide` + `@singleton`:
+
+```rust
+static NETWORK_CLIENT: std::sync::LazyLock<Arc<dyn NetworkClient>> =
+    std::sync::LazyLock::new(|| Arc::new(RealNetworkClient::new(/* logger resolved here */)) as Arc<dyn NetworkClient>);
+
+fn network_client() -> Arc<dyn NetworkClient> { NETWORK_CLIENT.clone() }
+
+struct UserRepository { client: Arc<dyn NetworkClient> }
+impl UserRepository {
+    pub fn new() -> Self { UserRepository { client: network_client() } }
+    pub fn new_with(client: Arc<dyn NetworkClient>) -> Self { UserRepository { client } }
+}
+```
+
+Two constructors fall out exactly the way an ordinary defaulted parameter already generates one call-site path for "omitted" and one for "supplied" — `@inject` is the same mechanism with a synthesized default, not a special case of the codegen. A plain `NetworkClient client` field with **no** `@inject` above it never becomes DI-resolved just because a matching `@provide` function happens to exist somewhere in the program — the attribute must always be written for resolution to happen at all.
 
 ---
 

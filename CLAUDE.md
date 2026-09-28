@@ -247,6 +247,34 @@ desugars to `Column([Text(...), ...])` (no `if`/`for`) or an imperative `Vec` bu
 
 This shares its exact `Ident ":"` token shape with the pre-existing no-paren closure shorthand (`n: n * 2`) and, in its parenthesized form, with the pre-existing zero-arg trailing-body sugar (`timeout(...): body`) — disambiguated **by resolving the callee** against this file's own declarations, not by casing: last param `[dyn Trait]` → this sugar (a concrete `[T]` last param is a compile error, never silently misapplied); last param `Fn(...)`, or not a known callable at all *with* an explicit `(...)` argument list → the ordinary trailing-closure sugar (tail semantics); not a known callable and *no* parentheses at all → the closure-literal shorthand, unchanged. See [book.md](docs/book.md#trailing-array-block-sugar) for the full decision table.
 
+## Dependency injection
+
+```boring
+trait NetworkClient:
+    req [byte] fetch(string url) throws
+
+struct RealNetworkClient as NetworkClient:
+    req [byte] fetch(string url) throws: ...
+
+@provide
+@singleton
+NetworkClient'shared networkClient():
+    RealNetworkClient()
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client   # omittable, defaulted to networkClient() at every call site
+```
+
+- `@inject` — struct field only, decorates a field whose type is written exactly as it would be without DI (`'shared`/`'actor`/`'guard`/`'observed`/`'static` always accepted, `'owned` only when the matched provider isn't `@singleton`; bare/scalar/`'inline`/`'weak` rejected). A bare (unqualified) field is only accepted against a `@singleton` provider (copies its type verbatim) or a transient provider whose base type is a trait it returns bare too — every other bare combination needs an explicit qualifier (a real transpiler gap, not a design limit).
+- `@provide` — function attribute (ordinary return-type-first function, no new declaration), requires `pub`. Registers the function's return type as the resolution source for `@inject` sites matching it. Optional `id`/`env` args (compile-time string literals only) for multiple bindings and test/build-specific overrides.
+- `@singleton` — separate, general-purpose attribute (works on any function, not DI-specific): memoizes behind a `LazyLock`, body runs once, ever, from anywhere.
+- Provider visibility: entry file itself, any same-project sibling file reached via bare `use <name>`, or a `boring.toml` `[deps]` project reached via `use <name>.xxx` — all read-only registry widening. A struct declared *only* in that other file/project doesn't get its own `@inject` fields resolved — only the struct actually declared in the file being compiled does.
+- Test/mock override: an ordinary labeled constructor argument (`UserRepository(client = MockNetworkClient())`) — no container needed.
+- Cycle detection is best-effort (only sees through a provider whose body is a bare constructor-call tail expression).
+
+See [book.md §33](docs/book.md#33-dependency-injection) for the full reference.
+
 ## Project structure
 
 ```sh

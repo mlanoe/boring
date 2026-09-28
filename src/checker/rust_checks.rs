@@ -235,7 +235,7 @@ impl Checker {
 
     // ── `@singleton` / `'owned` incompatibility ─────────────────────────────────
     //
-    // docs/design-notes/boring-di-draft.md §2: `@singleton` promises one shared,
+    // docs/book.md §33: `@singleton` promises one shared,
     // referenceable instance; `'owned` (`Box<T>`) is exclusive by construction and
     // can never be referenced by more than one holder, `@provide` or not.
     pub(super) fn check_singleton_owned_return(&mut self, f: &FnDecl) {
@@ -247,7 +247,7 @@ impl Checker {
                 "`@singleton`'s return type cannot be `'owned`: `Box<T>` is exclusive by \
                  definition and cannot be referenced by more than one caller — drop \
                  `@singleton` for a fresh instance per call, or change the return qualifier to \
-                 `'shared`/`'actor`/`'guard`/`'observed` (docs/design-notes/boring-di-draft.md §2)",
+                 `'shared`/`'actor`/`'guard`/`'observed` (docs/book.md §33)",
                 attr.line, attr.col,
             );
         }

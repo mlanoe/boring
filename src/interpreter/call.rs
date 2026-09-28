@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, in_throws_context: bool) -> Eval {
-        // `@singleton` (docs/design-notes/boring-di-draft.md §4): the checker
+        // `@singleton` (docs/book.md §33): the checker
         // (`check_di_provider_attrs`) already guarantees a zero-parameter,
         // non-`throws`/`task`/`stream` function, so a name-keyed cache is sound —
         // there's exactly one declaration per name and no arguments to vary on.

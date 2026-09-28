@@ -8,8 +8,8 @@
 //
 // Pins the exact generated Rust shape for an explicit body-`init`'s
 // `Trait'owned` parameter — the shape `desugar_inject.rs` synthesizes for
-// `@inject`'s own `'owned` transient-dependency case (docs/design-notes/
-// boring-di-draft.md §2, §4) — so a future change can't silently regress
+// `@inject`'s own `'owned` transient-dependency case (docs/book.md
+// §33) — so a future change can't silently regress
 // either half of the original bug:
 //   1. The field/param type itself must be `Box<dyn Greeter>`, not
 //      doubly-boxed as `Box<Box<dyn Greeter>>` (`emit_type`'s

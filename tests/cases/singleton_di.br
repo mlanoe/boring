@@ -3,7 +3,7 @@ struct Counter:
     def inc():
         value += 1
 
-# `@singleton` (docs/design-notes/boring-di-draft.md §4): memoizes the function's
+# `@singleton` (docs/book.md §33): memoizes the function's
 # result behind a compiler-synthesized LazyLock — the body runs at most once, and
 # every call thereafter clones out the same shared instance. Bare constructor-call
 # tail expression, matching the design doc's own @provide examples verbatim (this

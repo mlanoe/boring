@@ -1,4 +1,4 @@
-# `@inject` (docs/design-notes/boring-di-draft.md §1) end-to-end: two independent
+# `@inject` (docs/book.md §33) end-to-end: two independent
 # structs each declare an `@inject`-annotated field of the same type, resolved
 # against the same `@provide` + `@singleton` provider (§4). Neither struct
 # constructs or names the provider — `AccountMenu()`/`ProfileBadge()` are both

@@ -1,0 +1,23 @@
+# `@inject`/`@provide` with `'static` (docs/book.md §33):
+# an explicit `'static` field, resolved against a provider whose own bare
+# constructor-call tail expression is now correctly wrapped in a `&'static`
+# reference (task_ce5a4ff9, fixed on `main` after this feature's first `'static`
+# slice landed).
+
+struct RealConfig:
+    string apiKey
+
+struct Service:
+    @inject
+    RealConfig'static config
+
+    req string useKey():
+        "{self.config.apiKey}"
+
+@provide
+pub RealConfig'static loadConfig():
+    RealConfig(apiKey = "secret")
+
+def main():
+    let s = Service()
+    print s.useKey()

@@ -865,7 +865,7 @@ impl Checker {
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
             self.check_atomic_compatibility(&Some(f.ty.clone()), f.line, f.col);
             self.check_observed_compatibility(&Some(f.ty.clone()), f.line, f.col);
-            // `@inject` itself (docs/design-notes/boring-di-draft.md §1) is fully resolved
+            // `@inject` itself (docs/book.md §33) is fully resolved
             // and desugared away before the checker ever runs — see `desugar_inject.rs`,
             // which either synthesizes a real `init` for this struct or exits with a clear
             // resolution error. Nothing left for the checker to reject here.
@@ -965,17 +965,17 @@ impl Checker {
 
     // ── Dependency injection (`@inject`/`@provide`/`@singleton`) ────────────────
     //
-    // docs/design-notes/boring-di-draft.md. First implementation slice: `@singleton`
-    // (a general, DI-independent memoization attribute, §4) and `@provide`'s `pub`
-    // requirement (§3) are enforced here, on **top-level** `Item::Fn` declarations
-    // only (called from `check_item`, not from `check_fn` itself, precisely so it
-    // never fires on a struct method or trait default method — `@provide`/
-    // `@singleton` are restricted to top-level functions for now, the same
-    // restriction `'static` construction already has, docs/design-notes/
-    // boring-di-draft.md §3). `@inject` itself has no resolution/registry pass
-    // implemented yet, so it is rejected explicitly (`check_struct`'s field loop)
-    // rather than silently compiling into a *required* constructor argument —
-    // the opposite of its entire point, which is to make that argument optional.
+    // docs/book.md §33. `@singleton` (a general, DI-independent memoization
+    // attribute) and `@provide`'s `pub` requirement are enforced here, on
+    // **top-level** `Item::Fn` declarations only (called from `check_item`, not
+    // from `check_fn` itself, precisely so it never fires on a struct method or
+    // trait default method — `@provide`/`@singleton` are restricted to top-level
+    // functions for now, the same restriction `'static` construction already
+    // has). `@inject` itself is resolved and desugared away entirely by
+    // `desugar_inject.rs`, before this checker ever runs — by the time a struct
+    // reaches here, an `@inject` field has already become an ordinary,
+    // omittable, defaulted `init` parameter, with nothing left for the checker
+    // to specially reject.
     fn check_di_provider_attrs(&mut self, f: &FnDecl) {
         if self.kernel_dispatch_only { return; }
         if let Some(attr) = f.attrs.iter().find(|a| a.name == "singleton") {
@@ -1021,7 +1021,7 @@ impl Checker {
                 self.error(
                     "`@provide` requires `pub` — a private provider could never be found by an \
                      `@inject` site outside its own module, which is `@provide`'s entire reason \
-                     to exist (docs/design-notes/boring-di-draft.md §3)",
+                     to exist (docs/book.md §33)",
                     attr.line, attr.col,
                 );
             }

@@ -89,12 +89,17 @@ fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program)
     }
 }
 
-/// Runs `desugar_inject` (docs/design-notes/boring-di-draft.md's `@inject`
+/// Runs `desugar_inject` (docs/book.md §33's `@inject`
 /// resolution/desugaring pass) and reports+exits on a resolution error the
 /// same way every other pipeline stage here does — mirrors
 /// `desugar_array_block_or_exit` immediately above, for the identical reason.
-fn desugar_inject_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
-    match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent()) {
+fn desugar_inject_or_exit(
+    path: &Path,
+    source: &str,
+    program: ast::Program,
+    deps: &std::collections::HashMap<String, PathBuf>,
+) -> ast::Program {
+    match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), deps) {
         Ok(p) => p,
         Err(e) => {
             report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
@@ -103,7 +108,7 @@ fn desugar_inject_or_exit(path: &Path, source: &str, program: ast::Program) -> a
     }
 }
 
-/// `@provide(env = "...")` (docs/design-notes/boring-di-draft.md §6): reads the
+/// `@provide(env = "...")` (docs/book.md §33): reads the
 /// current build's environment once, from a `--env <value>` flag anywhere in
 /// `argv` — a self-contained Boring-CLI concern read directly from
 /// `std::env::args()` rather than threaded through every subcommand's own
@@ -1494,7 +1499,7 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
             // parameter through every intermediate function between here and there.
             "--locked" => { std::env::set_var("BORING_LOCKED", "1"); }
             "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
-            // `@provide(env = "...")` (docs/design-notes/boring-di-draft.md §6) — just
+            // `@provide(env = "...")` (docs/book.md §33) — just
             // recognized here so it isn't rejected as an unknown flag; the actual value is
             // read back independently by `current_env_flag()` (`main.rs`), the same
             // "set/read via a well-known name, not threaded as a parameter" shape as
@@ -1870,7 +1875,7 @@ fn parse_build_command(build_args: &[String]) {
             // parameter — read back via DepPolicy::from_env() (src/git_deps.rs).
             "--locked"  => { std::env::set_var("BORING_LOCKED", "1"); }
             "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
-            // `@provide(env = "...")` (docs/design-notes/boring-di-draft.md §6) — see
+            // `@provide(env = "...")` (docs/book.md §33) — see
             // `parse_run_flags`'s matching arm for why this is just recognized (not stored)
             // here; the value is read back independently by `current_env_flag()`.
             "--env" => {
@@ -2142,7 +2147,28 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
-    let program = desugar_inject_or_exit(&path, &source, program);
+
+    // Resolve this project's `[deps]` (if any) up front, before `desugar_inject` runs —
+    // both its own same-project-multi-file registry widening (extended to also follow a
+    // dep-qualified `use <name>.xxx`) and the interpreter's own `use` dispatch
+    // (`exec_named_dep_use`, via `interp.set_deps` below) need the same resolved
+    // `name -> path` map. Errors here (a reserved name, an unsupported `git = ...`
+    // entry, ...) are fatal — same fail-fast convention as `load_project_toml`'s own
+    // [external_types]/[derives] include resolution.
+    let mut deps = std::collections::HashMap::new();
+    if let Some(root) = find_project_root(&path) {
+        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
+            match BoringToml::parse(&toml_src).resolve_deps(&root) {
+                Ok(resolved) => deps = resolved,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+    }
+
+    let program = desugar_inject_or_exit(&path, &source, program, &deps);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -2184,21 +2210,9 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
         if src_dir.is_dir() {
             interp.add_search_path(src_dir);
         }
-        // If that project's boring.toml declares [deps] (named dependencies on other
-        // Boring projects — see docs/cross-project-code-sharing-gap.md), resolve them
-        // now so `use <name>.xxx` works. Errors here (a reserved name, an unsupported
-        // `git = ...` entry, ...) are fatal — same fail-fast convention as
-        // `load_project_toml`'s own [external_types]/[derives] include resolution.
-        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
-            match BoringToml::parse(&toml_src).resolve_deps(&root) {
-                Ok(deps) => interp.set_deps(deps),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    process::exit(1);
-                }
-            }
-        }
     }
+    // Already resolved above (needed earlier, for desugar_inject_or_exit).
+    interp.set_deps(deps);
 
     // Add BORING_PATH entries (uses OS path-list separator: `:` on Unix, `;` on Windows)
     if let Ok(env_path) = std::env::var("BORING_PATH") {
@@ -2268,10 +2282,10 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
-    let program = desugar_inject_or_exit(&path, &source, program);
-    if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
     // Same [deps] resolution as emit_rust_to_dir, so `--emit-rust` (project mode or a
-    // standalone file) resolves `use <name>.xxx` identically to a real `boring build`.
+    // standalone file) resolves `use <name>.xxx` identically to a real `boring build` —
+    // resolved up front now, before desugar_inject_or_exit, so its own registry widening
+    // can also follow a dep-qualified `use <name>.xxx`, not just a bare same-project one.
     let mut deps = config.deps.clone();
     if let Some(root) = find_project_root(&path) {
         if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
@@ -2284,6 +2298,8 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
             }
         }
     }
+    let program = desugar_inject_or_exit(&path, &source, program, &deps);
+    if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
     // Same `source_dir` derivation as `emit_rust_to_dir` — without it, a local
     // `use <file>` resolves relative to the *process* cwd instead of the source
     // file's own directory, so `--emit-rust` run from anywhere other than the
@@ -2360,18 +2376,14 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
-    let program = desugar_inject_or_exit(&path, &source, program);
 
-    if report_check_result(&path, &source, checker::check(&program)) {
-        process::exit(1);
-    }
-
-    let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
     // Resolve boring.toml's [deps] the same way run_file does for `boring run` — via
     // find_project_root, so this works uniformly for both project mode (`boring build`,
     // no file arg) and a standalone file (`boring build path/to/file.br`), covering both
     // without needing separate handling in build_project_with_config/the --emit-rust
-    // branch. See docs/cross-project-code-sharing-gap.md.
+    // branch. See docs/cross-project-code-sharing-gap.md. Resolved up front, before
+    // desugar_inject_or_exit, so its own registry widening can also follow a
+    // dep-qualified `use <name>.xxx`, not just a bare same-project one.
     let mut deps = config.deps.clone();
     if let Some(root) = find_project_root(&path) {
         if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
@@ -2384,6 +2396,13 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
             }
         }
     }
+    let program = desugar_inject_or_exit(&path, &source, program, &deps);
+
+    if report_check_result(&path, &source, checker::check(&program)) {
+        process::exit(1);
+    }
+
+    let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
     let config_with_dir = transpiler::TranspileConfig { source_dir, deps, ..config.clone() };
     let transpile_out = transpiler::transpile_with_config(&program, config_with_dir);
     report_transpile_warnings(&path, &source, &transpile_out.warnings);
@@ -2609,7 +2628,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
             process::exit(1);
         }
     };
-    match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent()) {
+    match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), &deps) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
@@ -3105,7 +3124,10 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
-    let program = desugar_inject_or_exit(&path, &source, program);
+    // No [deps] resolution for the kernel target (no_std, no Cargo dependency
+    // management) — an empty map simply means a dep-qualified `use <name>.xxx` never
+    // matches here, same as before this parameter existed.
+    let program = desugar_inject_or_exit(&path, &source, program, &std::collections::HashMap::new());
 
     // Validate for kernel-mode compatibility.
     let diags = validator::validate_kernel(&program);

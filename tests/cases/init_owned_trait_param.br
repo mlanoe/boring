@@ -1,6 +1,6 @@
 # Regression fixture: an explicit `init` (body form) with a `Trait'owned`
-# parameter that defaults to a call returning a bare trait type. Mirrors the
-# `@inject` design doc's (docs/design-notes/boring-di-draft.md §2, §4)
+# parameter that defaults to a call returning a bare trait type. Mirrors
+# `@inject`'s own (docs/book.md §33)
 # `'owned` transient-dependency case — `@inject`'s own desugar_inject.rs
 # synthesizes exactly this shape (an init with an `'owned`-typed param), so
 # a bug in emitting it blocks `@inject` even though the bug has nothing to

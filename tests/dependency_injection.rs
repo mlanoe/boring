@@ -2,18 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Checker and codegen tests for the dependency-injection design
-// (docs/design-notes/boring-di-draft.md): `@singleton` (a general,
+// (docs/book.md §33): `@singleton` (a general,
 // DI-independent memoization mechanism, §4), `@provide`'s `pub` requirement
 // (§3), and `@inject` itself (§1-§2) — resolved and desugared into a
 // synthesized `init` by `src/desugar_inject.rs`, reusing Boring's existing
 // labeled-argument-with-defaults call-site machinery rather than any new
 // transpiler codegen. Current `@inject` scope (see that file's own doc
-// comment for the full list): same-project only (no `[deps]` cross-project
-// resolution yet) — a provider is visible from the entry file itself *or*
-// any same-project sibling file reached via a bare `use <name>`
-// (`emit_rust_multi_file` below covers this; the reverse direction — a
-// struct with its own `@inject` field declared *only* in a sibling file — is
-// not covered, see `desugar_inject.rs`'s module doc for why), `id`/`env`
+// comment for the full list): a provider is visible from the entry file
+// itself, any same-project sibling file reached via a bare `use <name>`
+// (`emit_rust_multi_file` below covers this), or a `[deps]` cross-project
+// dependency reached via a dep-qualified `use <name>.xxx`
+// (`emit_rust_cross_project_dep`/`run_cross_project_dep` below cover this) —
+// either way registry-only: a struct with its own `@inject` field declared
+// *only* in that other file/project is not covered, see `desugar_inject.rs`'s
+// module doc for why. `id`/`env`
 // (§5-§6) and cycle detection (§7) are both implemented (see their own
 // sections further down), a struct with an `@inject` field can't also
 // declare its own `init`, and a bare (unqualified) field
@@ -109,6 +111,77 @@ fn emit_rust_multi_file(main_src: &str, sibling_name: &str, sibling_src: &str) -
         .arg("build")
         .arg(&br_file)
         .arg("--emit-rust")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
+}
+
+/// Writes a two-project layout for a cross-project `[deps]` scenario:
+/// `<scratch>/main_project` (its own `boring.toml` declaring
+/// `[deps] <dep_name> = "../dep_project"`, `main_src` at `src/main.br`) and
+/// `<scratch>/dep_project/src/<dep_file_name>.br` (`dep_src`, no `boring.toml`
+/// of its own needed — `BoringToml::resolve_deps` only requires `<path>/src` to
+/// exist). Returns the scratch dir (kept alive by the caller) and the main
+/// project's entry file path.
+fn setup_cross_project_dep_dirs(
+    main_src: &str,
+    dep_name: &str,
+    dep_file_name: &str,
+    dep_src: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile_dir();
+    let main_src_dir = dir.join("main_project").join("src");
+    std::fs::create_dir_all(&main_src_dir).expect("failed to create main project src dir");
+    std::fs::write(
+        dir.join("main_project").join("boring.toml"),
+        format!(
+            "[project]\nname = \"main_project\"\nversion = \"0.1.0\"\nmain = \"src/main.br\"\n\n\
+             [deps]\n{dep_name} = \"../dep_project\"\n"
+        ),
+    ).expect("failed to write main_project/boring.toml");
+    std::fs::write(main_src_dir.join("main.br"), main_src).expect("failed to write main.br");
+
+    let dep_src_dir = dir.join("dep_project").join("src");
+    std::fs::create_dir_all(&dep_src_dir).expect("failed to create dep project src dir");
+    std::fs::write(dep_src_dir.join(format!("{dep_file_name}.br")), dep_src)
+        .expect("failed to write dep .br file");
+
+    let main_file = main_src_dir.join("main.br");
+    (dir, main_file)
+}
+
+/// Cross-project `[deps]` scenario (`desugar_inject.rs`'s `walk_same_project_uses`,
+/// extended to also follow a dep-qualified `use <name>.xxx` — see this file's own
+/// "Cross-project `[deps]` resolution" section below), via `boring build --emit-rust`.
+fn emit_rust_cross_project_dep(
+    main_src: &str,
+    dep_name: &str,
+    dep_file_name: &str,
+    dep_src: &str,
+) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let (_dir, main_file) = setup_cross_project_dep_dirs(main_src, dep_name, dep_file_name, dep_src);
+    Command::new(bin)
+        .arg("build")
+        .arg(&main_file)
+        .arg("--emit-rust")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
+}
+
+/// Same layout as `emit_rust_cross_project_dep`, but via `boring run` — proves the
+/// interpreter backend resolves the same dep-qualified `use` identically (this
+/// feature must work the same way on both backends, not just the transpiler).
+fn run_cross_project_dep(
+    main_src: &str,
+    dep_name: &str,
+    dep_file_name: &str,
+    dep_src: &str,
+) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let (_dir, main_file) = setup_cross_project_dep_dirs(main_src, dep_name, dep_file_name, dep_src);
+    Command::new(bin)
+        .arg("run")
+        .arg(&main_file)
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
 }
@@ -678,12 +751,12 @@ def main():
 
 // ── `'static` (§2) ───────────────────────────────────────────────────────────────
 //
-// Checker/registry-level acceptance only, not a full end-to-end compile+run: a
-// bare constructor-call return value isn't wrapped in the `&` reference a
-// `'static` return type requires (task_ce5a4ff9, filed this session, a real gap
-// unrelated to `@inject` — confirmed via a plain, hand-written function with no DI
-// attributes involved at all). Add a full `tests/cases/static_di.br` behavioral
-// test (matching `inject_di.br`) once that's fixed.
+// These are the checker/registry-level acceptance/rejection tests (fast,
+// `--emit-rust` only). The full end-to-end proof (real compile+run) lives in
+// `tests/cases/static_di.br` (`transpile_test!(static_di, ...)` in
+// `tests/transpile.rs`) — was blocked on task_ce5a4ff9 (a bare constructor-call
+// return value not wrapped in the `&` reference a `'static` return type
+// requires), now fixed on `main`.
 
 #[test]
 fn inject_static_field_is_accepted() {
@@ -1267,6 +1340,158 @@ trait NetworkClient:
     assert!(
         stderr.contains("no `@provide` found for type `NetworkClient`"),
         "expected the no-provider-found error, got:\n{}", stderr
+    );
+}
+
+// ── Cross-project `[deps]` resolution ────────────────────────────────────────────
+//
+// Extends the same-project-multi-file registry widening above to also follow a
+// dep-qualified `use <name>.xxx` (`boring.toml`'s `[deps]`, resolved the same way
+// both backends' own dispatch already does — `exec_named_dep_use`/`emit_use`'s dep
+// branch). Same limitation as same-project multi-file: registry-only — a struct
+// declared in the dependency project, with its own `@inject` field, still isn't
+// covered (see `desugar_inject.rs`'s module doc).
+
+#[test]
+fn inject_resolves_provider_declared_in_dep_project_emit_rust() {
+    let main_src = "\
+use netlib.client.*
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+def main():
+    let repo = UserRepository()
+    print \"ok\"
+";
+    let dep_src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+@provide
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+";
+    let out = emit_rust_cross_project_dep(main_src, "netlib", "client", dep_src);
+    assert!(
+        out.status.success(),
+        "expected a provider in a [deps] project to resolve, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("UserRepository::new(networkClient())"),
+        "expected the dep-project provider to be wired in, got:\n{}", stdout
+    );
+}
+
+#[test]
+fn inject_resolves_provider_declared_in_dep_project_boring_run() {
+    // Same scenario as the `--emit-rust` test above, run through the interpreter
+    // instead — this feature must behave identically on both backends.
+    let main_src = "\
+use netlib.client.*
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+def main():
+    let repo = UserRepository()
+    print repo.client.fetch()
+";
+    let dep_src = "\
+trait NetworkClient:
+    req string fetch()
+
+struct RealNetworkClient as NetworkClient:
+    req string fetch(): \"data\"
+
+@provide
+pub NetworkClient'shared networkClient():
+    RealNetworkClient()
+";
+    let out = run_cross_project_dep(main_src, "netlib", "client", dep_src);
+    assert!(
+        out.status.success(),
+        "expected `boring run` to resolve a provider in a [deps] project, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("data"), "expected the resolved provider's value, got:\n{}", stdout);
+}
+
+#[test]
+fn inject_no_provider_found_still_fires_across_dep_project() {
+    // The dep project is reachable, but declares no matching provider at all — must
+    // still fail with the ordinary no-provider-found error, not silently succeed
+    // just because *some* dep file was scanned.
+    let main_src = "\
+use netlib.client.*
+
+struct UserRepository:
+    @inject
+    NetworkClient'shared client
+
+def main():
+    print \"ok\"
+";
+    let dep_src = "\
+trait NetworkClient:
+    req string fetch()
+";
+    let out = emit_rust_cross_project_dep(main_src, "netlib", "client", dep_src);
+    assert!(!out.status.success(), "expected no-provider-found to still fire when the dep project has no matching @provide");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no `@provide` found for type `NetworkClient`"),
+        "expected the no-provider-found error, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn inject_ambiguous_provider_across_entry_and_dep_project_is_rejected() {
+    // Same ambiguity check as the same-project-multi-file case, but across a
+    // [deps] project boundary — must still see both files' providers as one
+    // registry, not two independent ones.
+    let main_src = "\
+use netlib.client.*
+
+trait Logger:
+    req void log(string msg)
+
+struct ConsoleLogger as Logger:
+    def void log(string msg): print msg
+
+@provide
+pub Logger'shared consoleLoggerProvider():
+    ConsoleLogger()
+
+struct Service:
+    @inject
+    Logger'shared logger
+
+def main():
+    print \"ok\"
+";
+    let dep_src = "\
+struct FileLogger as Logger:
+    def void log(string msg): print msg
+
+@provide
+pub Logger'shared fileLoggerProvider():
+    FileLogger()
+";
+    let out = emit_rust_cross_project_dep(main_src, "netlib", "client", dep_src);
+    assert!(!out.status.success(), "expected providers in the entry file and a [deps] project to still be caught as ambiguous");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous provider for `Logger`"),
+        "expected the ambiguity error, got:\n{}", stderr
     );
 }
 

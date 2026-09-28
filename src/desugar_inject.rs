@@ -9,7 +9,7 @@
 //
 // See the LICENSE file at the project root for the full text.
 
-//! Resolves `@inject` (docs/design-notes/boring-di-draft.md §1) against the
+//! Resolves `@inject` (docs/book.md §33) against the
 //! `@provide` registry and desugars it away — runs once, on the whole
 //! `Program`, right after `desugar_array_block` (same pipeline slot, for the
 //! same reason: every consumer downstream — checker, transpiler — only ever
@@ -35,25 +35,29 @@
 //! accessors and `main.rs`'s existing `report_error` plumbing, exactly like
 //! `desugar_array_block` already does for its own resolution errors).
 //!
-//! ## Scope of this implementation (see the design doc's Open Questions/
-//! "Before implementation begins" for what's deliberately still deferred)
+//! ## Scope of this implementation (see docs/book.md §33 for what's shipped;
+//! deliberately deferred pieces are noted inline below)
 //!
-//! - **Same-project only** — no `[deps]` cross-project resolution yet. A
-//!   provider is visible here when it's a top-level (or
-//!   one-level-nested-in-`mod`) `@provide` function in the entry `Program`
-//!   itself, *or* in any same-project sibling file transitively reachable
-//!   from it via a bare `use <name>` (`walk_same_project_uses`) — this only
+//! - **Same-project sibling files AND `[deps]` cross-project files are both
+//!   registry-widening sources — never full desugaring sources.** A provider
+//!   is visible here when it's a top-level (or one-level-nested-in-`mod`)
+//!   `@provide` function in the entry `Program` itself, *or* in any file
+//!   transitively reachable from it via a `use <name>` — bare (same-project
+//!   sibling, `source_dir`-relative) or dep-qualified (`use <name>.xxx`
+//!   against `boring.toml`'s `[deps]`, resolved the same way both backends'
+//!   own dispatch does) — via `walk_same_project_uses`. Either way this only
 //!   widens the *provider registry* (and trait-name set, for bare-field
-//!   detection), read-only: the sibling file's own content is parsed purely to
+//!   detection), read-only: the other file's own content is parsed purely to
 //!   look for `@provide`/`trait` declarations, never rewritten or merged back.
-//!   **A struct declared only in a sibling file, with its own `@inject`
-//!   field, is not covered** — that field never gets desugared at all,
-//!   because neither backend's own `use`-loading (`inline_boring_use` in the
-//!   transpiler, `exec_use` in the interpreter) invokes this pass on a file it
-//!   loads; only the file actually handed to `desugar_inject` up front (the
-//!   entry file) ever has its own structs desugared. Closing that gap means
-//!   hooking this pass into both of those call sites directly — a
-//!   substantially bigger architectural change than the read-only registry
+//!   **A struct declared only in another file — same-project sibling or a
+//!   `[deps]` dependency — with its own `@inject` field, is not covered** —
+//!   that field never gets desugared at all, because neither backend's own
+//!   `use`-loading (`inline_boring_use`/the dep branch in the transpiler,
+//!   `exec_use`/`exec_named_dep_use` in the interpreter) invokes this pass on
+//!   a file it loads; only the file actually handed to `desugar_inject` up
+//!   front (the entry file) ever has its own structs desugared. Closing that
+//!   gap means hooking this pass into all four of those call sites directly —
+//!   a substantially bigger architectural change than the read-only registry
 //!   widening implemented here, deliberately not attempted in this slice.
 //! - **`id`/`env` (§5-§6) are implemented** — see `attr_kv`/`resolve_provider`
 //!   below. `env` is read once, up front, from a `--env <value>` CLI flag
@@ -101,7 +105,10 @@
 //!   (`parser/mod.rs`).
 //! - **Cycle detection is implemented** (§7) — `detect_cycles`, best-effort (see
 //!   `Provider::target_struct`'s doc for the one accepted limitation).
-//! - **No `[deps]` cross-project resolution.**
+//! - **`[deps]` cross-project resolution is implemented for the *registry*
+//!   only** (see above) — a `@provide` in a `use <name>.xxx`-reached
+//!   dependency is visible; a struct declared in that dependency, with its own
+//!   `@inject` field, is not.
 //!
 //! None of this is `@inject`-site-vs-`@provide`-site cross-project machinery
 //! the checker itself would need to know about later — widening any of the
@@ -115,8 +122,8 @@ use std::collections::{HashMap, HashSet};
 /// What `@inject` needs to know about one `@provide` function.
 struct Provider {
     /// The provider function's own name — called with no arguments at every
-    /// `@inject` site that resolves against it (docs/design-notes/
-    /// boring-di-draft.md §1: providers are always zero-arg by construction,
+    /// `@inject` site that resolves against it (docs/book.md
+    /// §33: providers are always zero-arg by construction,
     /// since none of their own parameters could ever be supplied at an
     /// `@inject` call site).
     fn_name: String,
@@ -217,8 +224,7 @@ fn base_type_name(ty: &Type) -> Option<&str> {
 /// `mut` wrapper, if present) — `None` for a bare/scalar type. For a
 /// composed suffix like `T'actor'observed`, this is `Observed` (the outer
 /// layer), matching how `boring-ui-draft.md` treats the suffix as what
-/// actually decides `@inject`/`@provide` acceptance (docs/design-notes/
-/// boring-di-draft.md §2).
+/// actually decides `@inject`/`@provide` acceptance (docs/book.md §33).
 fn outer_qualifier(ty: &Type) -> Option<&OwnerQual> {
     match ty {
         Type::Qualified(_, q) => Some(q),
@@ -243,7 +249,7 @@ fn check_field_qualifier_accepted(
         return Err(err(field.line, field.col, format!(
             "`@inject` field `{}` has no qualifier — `@inject` needs one of `'shared`/`'actor`/\
              `'guard`/`'observed`, or `'owned` for a non-`@singleton` provider \
-             (docs/design-notes/boring-di-draft.md §2); a bare scalar or plain struct type has \
+             (docs/book.md §33); a bare scalar or plain struct type has \
              nothing for dependency injection to abstract",
             field.name,
         )));
@@ -256,7 +262,7 @@ fn check_field_qualifier_accepted(
                 Err(err(field.line, field.col, format!(
                     "`@inject` field `{}` cannot be `'owned` — the matched provider (`{}`) is \
                      `@singleton`, and `'owned` (`Box<T>`) is exclusive by definition and cannot \
-                     be referenced by more than one consumer (docs/design-notes/boring-di-draft.md §2)",
+                     be referenced by more than one consumer (docs/book.md §33)",
                     field.name, provider.fn_name,
                 )))
             } else {
@@ -267,18 +273,18 @@ fn check_field_qualifier_accepted(
             "`@inject` field `{}` cannot be `'inline` — `@inject` almost always keys on a trait, \
              and a bare trait type is unsized (`dyn Trait` has no `'inline`/no-indirection \
              representation); use `'shared`/`'actor`/`'guard`/`'owned` instead \
-             (docs/design-notes/boring-di-draft.md §2)",
+             (docs/book.md §33)",
             field.name,
         ))),
         OwnerQual::Weak => Err(err(field.line, field.col, format!(
             "`@inject` field `{}` cannot be a `'weak` reference — a weak reference can vanish, \
              and an injected dependency needs to guarantee it stays alive \
-             (docs/design-notes/boring-di-draft.md §2)",
+             (docs/book.md §33)",
             field.name,
         ))),
         _ => Err(err(field.line, field.col, format!(
-            "`@inject` field `{}`'s qualifier is not legal here (docs/design-notes/\
-             boring-di-draft.md §2) — use `'shared`/`'actor`/`'guard`/`'observed`, or `'owned` \
+            "`@inject` field `{}`'s qualifier is not legal here (docs/book.md \
+             §33) — use `'shared`/`'actor`/`'guard`/`'observed`, or `'owned` \
              for a non-`@singleton` provider",
             field.name,
         ))),
@@ -298,7 +304,7 @@ fn check_singleton_qualifier_match(field: &FieldDecl, provider: &Provider) -> Re
             "`{}` is declared `{:?}`, but the only visible provider (`{}`) is `@singleton` and \
              returns `{:?}` — a `@singleton` provider's return type must be matched exactly, \
              since there's only one physical instance in play \
-             (docs/design-notes/boring-di-draft.md §2)",
+             (docs/book.md §33)",
             field.name, field_ty, provider.fn_name, provider.return_ty,
         )));
     }
@@ -332,7 +338,7 @@ fn collect_providers(items: &[Item], reg: &mut Registry) -> Result<(), ParseErro
                     return Err(err(f.line, f.col, format!(
                         "ambiguous provider for `{}` ({}{}) — `@provide` functions `{}` (line {}) \
                          and `{}` (line {}) both provide this exact binding, with no further `id`/\
-                         `env` to disambiguate (docs/design-notes/boring-di-draft.md, \"Ambiguity UX\")",
+                         `env` to disambiguate (docs/book.md §33)",
                         base, id_desc, env_desc, existing.fn_name, existing.line, f.name, f.line,
                     )));
                 }
@@ -398,9 +404,32 @@ fn walk_same_project_uses(
     reg: &mut Registry,
     trait_names: &mut HashSet<String>,
     visited: &mut HashSet<std::path::PathBuf>,
+    deps: &HashMap<String, std::path::PathBuf>,
 ) -> Result<(), ParseError> {
     for item in items {
         match item {
+            // Dep-qualified `use <name>.xxx` (`boring.toml`'s `[deps]`, resolved by the
+            // caller into `name -> <dep>/src` the same way both backends' own dispatch
+            // does — `exec_named_dep_use`/`emit_use`'s dep branch, `path[0]` against the
+            // resolved map, `path[1..]` joined onto the dep's root). `deps` already holds
+            // every *transitive* dep too (`BoringToml::resolve_deps` flattens the whole
+            // graph up front), so recursing with the same `deps` map lets a dep's own
+            // dep-qualified `use` resolve exactly as it would in that dep's own build —
+            // only the `source_dir` for a *bare* nested `use` changes, to that dep's own
+            // root, matching how a bare `use` inside the dep file itself would resolve.
+            Item::Use(u) if u.path.len() >= 2 && deps.contains_key(&u.path[0]) => {
+                let dep_root = &deps[&u.path[0]];
+                let rel: std::path::PathBuf = u.path[1..].iter().collect();
+                let candidate = dep_root.join(rel).with_extension("br");
+                let Ok(candidate) = candidate.canonicalize() else { continue };
+                if !visited.insert(candidate.clone()) { continue; }
+                let Ok(source) = std::fs::read_to_string(&candidate) else { continue };
+                let Ok(tokens) = crate::lexer::lex_all(&source) else { continue };
+                let Ok(dep_file) = crate::parser::parse(tokens) else { continue };
+                collect_providers(&dep_file.items, reg)?;
+                collect_trait_names(&dep_file.items, trait_names);
+                walk_same_project_uses(&dep_file.items, dep_root, reg, trait_names, visited, deps)?;
+            }
             Item::Use(u) if !u.path.is_empty() => {
                 let rel: std::path::PathBuf = u.path.iter().collect();
                 let candidate = source_dir.join(rel).with_extension("br");
@@ -417,9 +446,9 @@ fn walk_same_project_uses(
                 // this function's own doc above).
                 collect_providers(&sibling.items, reg)?;
                 collect_trait_names(&sibling.items, trait_names);
-                walk_same_project_uses(&sibling.items, source_dir, reg, trait_names, visited)?;
+                walk_same_project_uses(&sibling.items, source_dir, reg, trait_names, visited, deps)?;
             }
-            Item::Mod(m) => walk_same_project_uses(&m.items, source_dir, reg, trait_names, visited)?,
+            Item::Mod(m) => walk_same_project_uses(&m.items, source_dir, reg, trait_names, visited, deps)?,
             _ => {}
         }
     }
@@ -455,7 +484,7 @@ fn resolve_provider<'a>(
     Err(err(field.line, field.col, format!(
         "no `@provide` found for type `{}`{}{} (needed by `@inject` field `{}`) — declare a \
          `pub @provide` function returning `{}` somewhere in this project \
-         (docs/design-notes/boring-di-draft.md §3)",
+         (docs/book.md §33)",
         base, id_desc, env_desc, field.name, base,
     )))
 }
@@ -526,7 +555,7 @@ fn synthesize_init(
                     "`@inject` field `{}` must write `'static` explicitly — the only visible \
                      provider (`{}`) returns `{}'static`, and unlike every other accepted \
                      qualifier, `'static` is never copied onto a bare field silently \
-                     (docs/design-notes/boring-di-draft.md §2)",
+                     (docs/book.md §33)",
                     f.name, provider.fn_name, base,
                 )));
             }
@@ -771,7 +800,7 @@ fn detect_cycles(
                 return Err(err(provider.line, 0, format!(
                     "cycle detected among `@provide` providers: {} — each one transitively needs \
                      the next, with no way to ever finish constructing any of them \
-                     (docs/design-notes/boring-di-draft.md §7)",
+                     (docs/book.md §33)",
                     chain.join(" -> "),
                 )));
             }
@@ -808,10 +837,23 @@ fn detect_cycles(
 /// caller, if one ever exists) simply skips that widening; every other pass
 /// still runs, scoped to `program` alone, exactly as before this parameter
 /// existed.
+///
+/// `deps`: this project's resolved `boring.toml` `[deps]` map (`name -> that
+/// dep's src/ dir`, already flattened over the whole transitive dep graph by
+/// `BoringToml::resolve_deps` — see `main.rs`), the same map both backends
+/// hand to `set_deps`/`TranspileConfig.deps`. Lets `walk_same_project_uses`
+/// widen the registry through a dep-qualified `use <name>.xxx` too, not just a
+/// bare same-project `use` — still read-only/registry-only, same limitation as
+/// the same-project case (see this file's module doc: a struct declared only
+/// in a dep file still never gets its own `@inject` field desugared). An empty
+/// map (no `boring.toml`, or a caller that hasn't resolved deps at all — see
+/// `emit_kernel_with_version` in `main.rs`) simply means no dep-qualified `use`
+/// ever matches, identical to today's behavior before this parameter existed.
 pub fn desugar_inject(
     mut program: Program,
     current_env: Option<&str>,
     source_dir: Option<&std::path::Path>,
+    deps: &HashMap<String, std::path::PathBuf>,
 ) -> Result<Program, ParseError> {
     let mut reg = Registry::new();
     collect_providers(&program.items, &mut reg)?;
@@ -819,7 +861,7 @@ pub fn desugar_inject(
     collect_trait_names(&program.items, &mut trait_names);
     if let Some(source_dir) = source_dir {
         let mut visited = HashSet::new();
-        walk_same_project_uses(&program.items, source_dir, &mut reg, &mut trait_names, &mut visited)?;
+        walk_same_project_uses(&program.items, source_dir, &mut reg, &mut trait_names, &mut visited, deps)?;
     }
     let mut struct_deps = HashMap::new();
     collect_struct_inject_deps(&program.items, &mut struct_deps);

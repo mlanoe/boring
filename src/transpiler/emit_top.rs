@@ -7,7 +7,7 @@ impl Transpiler {
         match item {
             Item::Use(u)    => self.emit_use(u),
             Item::Fn(f) if f.attrs.iter().any(|a| a.name == "singleton") => {
-                // `@singleton` (docs/design-notes/boring-di-draft.md §4) — the checker
+                // `@singleton` (docs/book.md §33) — the checker
                 // (`check_di_provider_attrs`) already guarantees, by this point, that `f` is
                 // a free top-level function (`f.qualifier.is_none()`, never `main`), takes no
                 // parameters, doesn't `throw`/`task`/`stream`, and its return type isn't
@@ -862,7 +862,7 @@ impl Transpiler {
         }
     }
 
-    /// `@singleton` (docs/design-notes/boring-di-draft.md §4) — memoizes a function's
+    /// `@singleton` (docs/book.md §33) — memoizes a function's
     /// result behind a compiler-synthesized `LazyLock`, first-call-wins from anywhere
     /// (an `@inject` site once that exists, or an ordinary direct call, identically).
     ///
@@ -1460,13 +1460,13 @@ impl Transpiler {
             return;
         }
 
-        // Attributes → #[...]. `singleton`/`provide`/`inject` (docs/design-notes/
-        // boring-di-draft.md) carry compiler-synthesized meaning, not pass-through Rust
-        // attribute syntax — `singleton` is handled entirely by `emit_singleton_fn`
-        // (which renames the function before delegating to `emit_fn`, so this loop never
-        // even sees it under its original name in practice); `provide` never needs any
-        // Rust-side marker at all (`@inject` — not yet implemented — is the only thing
-        // that will ever consult it, purely at the Boring-compiler level).
+        // Attributes → #[...]. `singleton`/`provide`/`inject` (docs/book.md §33) carry
+        // compiler-synthesized meaning, not pass-through Rust attribute syntax —
+        // `singleton` is handled entirely by `emit_singleton_fn` (which renames the
+        // function before delegating to `emit_fn`, so this loop never even sees it under
+        // its original name in practice); `provide` never needs any Rust-side marker at
+        // all; `inject` is fully resolved and desugared away by `desugar_inject.rs`
+        // before the transpiler ever runs (see `emit_struct.rs`'s own note on this).
         for attr in &f.attrs {
             if matches!(attr.name.as_str(), "singleton" | "provide" | "inject") { continue; }
             let args_s = if attr.args.is_empty() {
@@ -3374,8 +3374,8 @@ impl Transpiler {
                         // that exact same representation, not an extra layer of boxing, so
                         // return it directly instead of falling into the `Box<{}>` wrap below
                         // (which would otherwise produce `Box<Box<dyn Trait>>`, confirmed via
-                        // a real `cargo build` on `Trait'owned` — see docs/design-notes/
-                        // boring-di-draft.md's `'owned` transient-dependency case).
+                        // a real `cargo build` on `Trait'owned` — see docs/book.md §33's
+                        // `'owned` transient-dependency case).
                         if let Type::Named(n) = inner.as_ref() {
                             if self.trait_method_names.contains_key(n.as_str()) {
                                 return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
