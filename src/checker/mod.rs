@@ -1545,10 +1545,9 @@ impl Checker {
     fn static_bool_or_optional_subject(&self, expr: &Expr) -> Option<bool> {
         match &expr.kind {
             ExprKind::Bool(_) => Some(true),
-            ExprKind::BinOp(op, _, _) if matches!(op,
-                BinOp::Eq | BinOp::NotEq | BinOp::RefEq | BinOp::Lt | BinOp::Gt
+            ExprKind::BinOp(BinOp::Eq | BinOp::NotEq | BinOp::RefEq | BinOp::Lt | BinOp::Gt
                 | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or
-                | BinOp::Is | BinOp::IsNot) => Some(true),
+                | BinOp::Is | BinOp::IsNot, _, _) => Some(true),
             ExprKind::UnaryOp(UnaryOp::Not, _) => Some(true),
             ExprKind::Var(name) => {
                 let ty = self.lookup(name)?.ty.as_ref()?.without_mut();

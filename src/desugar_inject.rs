@@ -184,6 +184,10 @@ fn provider_target_struct(f: &FnDecl) -> Option<String> {
 /// current build's `env`.
 type Registry = HashMap<(String, Option<String>), Vec<Provider>>;
 
+/// One struct's `@inject` dependencies, keyed by struct name — see
+/// `collect_struct_inject_deps`'s doc comment for what each tuple entry means.
+type StructInjectDeps = HashMap<String, Vec<(String, Option<String>, usize, usize)>>;
+
 fn err(line: usize, col: usize, msg: String) -> ParseError {
     ParseError::Generic { line, col, len: 1, msg }
 }
@@ -715,7 +719,7 @@ fn desugar_items(
 /// bare or explicit, only what type it ultimately needs a provider for.
 fn collect_struct_inject_deps(
     items: &[Item],
-    out: &mut HashMap<String, Vec<(String, Option<String>, usize, usize)>>,
+    out: &mut StructInjectDeps,
 ) {
     for item in items {
         match item {
@@ -751,7 +755,7 @@ fn collect_struct_inject_deps(
 /// this file's best-effort static checks.
 fn detect_cycles(
     reg: &Registry,
-    struct_deps: &HashMap<String, Vec<(String, Option<String>, usize, usize)>>,
+    struct_deps: &StructInjectDeps,
 ) -> Result<(), ParseError> {
     // Flatten the registry into one lookup by provider name (fn_name is
     // globally unique — `collect_providers` already rejects two providers

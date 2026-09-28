@@ -562,6 +562,7 @@ fn desugar_expr(e: Expr, sigs: &Signatures) -> Result<Expr, ParseError> {
 
 /// Resolves one `TrailingArrayBlock` node per the module doc comment's
 /// decision table, and rewrites it away accordingly.
+#[allow(clippy::too_many_arguments)]
 fn desugar_trailing_array_block(
     callee: Expr,
     args: Vec<Arg>,

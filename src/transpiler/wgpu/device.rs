@@ -2215,7 +2215,7 @@ fn wgsl_zero(ty: &Type) -> &'static str {
 /// Inf/NaN sentinel (`1.0 / 0.0`, `-1.0 / 0.0`, `0.0 / 0.0`), not general constant folding.
 fn const_float_value(expr: &Expr) -> Option<f64> {
     match &expr.kind {
-        ExprKind::Float(f) => Some(*f as f64),
+        ExprKind::Float(f) => Some(*f),
         ExprKind::Int(n) => Some(*n as f64),
         ExprKind::UnaryOp(UnaryOp::Neg, inner) => const_float_value(inner).map(|v| -v),
         _ => None,

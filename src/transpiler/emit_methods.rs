@@ -815,8 +815,8 @@ impl Transpiler {
     /// not a clone: `'actor'observed`/`'guard'observed` could cheaply clone an
     /// Arc-based handle, but `'inline'observed`/`'owned'observed` have no shareable
     /// handle at all (`value` is a bare `T`/`Box<T>`, no `Clone` guaranteed) — a
-    /// borrow is the only representation that works uniformly across all four legal
-    /// base compositions.
+    ///   borrow is the only representation that works uniformly across all four legal
+    ///   base compositions.
     ///
     /// The callback must itself be `'static` (it's stored in `BoringObservedSubs`,
     /// which outlives this statement), but Boring's ordinary closure-literal
@@ -1069,6 +1069,7 @@ impl Transpiler {
     /// `Box<T>` auto-derefs same as `T`). Returns `(call_expr, is_req)` — callers
     /// decide whether/how to notify. `via_value` only changes the mut-gating error
     /// message's wording (`"through .value"` vs plain).
+    #[allow(clippy::too_many_arguments)]
     fn observed_call_expr(
         &self, obj: &Expr, v: &str, escaped_v: &str, struct_name: &str, base: &OwnerQual,
         method: &str, args: &[Arg], via_value: bool,

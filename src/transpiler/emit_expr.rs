@@ -1025,9 +1025,8 @@ impl Transpiler {
             // just a bare literal or variable. Deliberately excludes comparison
             // (`Eq`/`Lt`/...) and logical (`And`/`Or`) ops, which produce `bool`,
             // not a number.
-            ExprKind::BinOp(op, l, r) if matches!(op,
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-                | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) =>
+            ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr, l, r) =>
                 self.is_definitely_numeric_expr(l) && self.is_definitely_numeric_expr(r),
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .map(is_known_numeric_scalar_type).unwrap_or(false),
