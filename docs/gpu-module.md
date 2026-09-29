@@ -357,6 +357,12 @@ See [warp-level primitives](warp-level-primitives.html) for the full design
 (per-backend mapping, the wgpu real-subgroup/emulated-fallback split, and the
 divergent-branch caveat).
 
+Matrix/tensor-core acceleration (`gpu.tensor.*`) is a **proposed, not yet
+implemented** extension of this same nested-namespace pattern — see
+[tensor-core primitives](tensor-core-primitives.html) for the full design,
+per-backend feasibility (including a definitive finding that RDNA1/RDNA2 AMD
+GPUs have no matrix-core hardware at all), and phased implementation plan.
+
 ---
 
 ## `GPU` type

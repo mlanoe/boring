@@ -155,6 +155,7 @@ This is deliberately **not** `Buffer::clone()`: in the real `metal` crate, `Clon
 | Warp intrinsics | full support | SIMD-group operations (different API) |
 | `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
 | Windows / Linux | yes | macOS only |
+| Tensor-core (`gpu.tensor.*`) | not yet implemented on either backend | not yet implemented — see [tensor-core primitives](tensor-core-primitives.html) for a proposed design (`simdgroup_matrix`, 8×8 fp16/fp32 only, Apple7+/A14+) |
 
 ---
 

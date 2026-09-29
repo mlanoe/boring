@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — `gpu.tensor.*` — matrix/tensor-core acceleration primitives</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="gputensor--matrixtensor-core-acceleration-primitives"><code>gpu.tensor.*</code> — matrix/tensor-core acceleration primitives</h1>
+<blockquote><strong>Status: Proposed design. Not implemented — no parser, checker, or codegen changes have been made.</strong> This document is a research + feasibility study, produced the same way <a href="warp-level-primitives.html">`warp-level-primitives.md`</a> was before <code>gpu.warp.*</code> shipped: real vendor documentation, a concrete per-backend lowering table, a worked example, and an honest limitations section — but with no code behind it yet. Implementation is sequenced into discrete phases at the end of this document, each phase intended to become its own follow-up task.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p><code>boring-llm</code> (a real GPU-accelerated LLM inference engine written in Boring) was compared against llama.cpp for performance ceiling. Direct source inspection of <code>boring</code>&#x27;s CUDA backend (<code>src/transpiler/cuda/</code>) confirms <strong>zero tensor-core support today</strong> — no <code>wmma</code>, no <code>mma.sync</code>, nothing, anywhere in the transpiler or <code>docs/</code>. The most sophisticated CUDA-specific primitive Boring currently exposes is warp-level shuffle (<code>gpu.warp.shuffle_*</code>, mapped straight to <code>__shfl_*_sync</code> — see <a href="warp-level-primitives.html">warp-level primitives</a>) plus block-level shared memory via bare <code>&#x27;actor</code>. This is very likely the single biggest reason Boring-transpiled GEMM/attention kernels can&#x27;t approach llama.cpp&#x27;s real-world throughput on NVIDIA hardware — llama.cpp&#x27;s CUDA backend (via cuBLAS or its own kernels) uses tensor cores for the bulk of its GEMM work on any reasonably modern NVIDIA GPU, and Boring has no equivalent path at all.</p>
+<p><strong>Real motivating pattern, checked directly</strong>: <code>boring-llm/src/math_gpu.br</code>&#x27;s <code>LinearKernel</code> and <code>Q8LinearKernel</code> (16×16 shared-memory-tiled GEMM, fp32 accumulate; <code>Q8LinearKernel</code> additionally fuses Q8_0 dequantization into the tile-load step) are exactly the kind of kernel a tensor-core path exists to accelerate. The same file&#x27;s <code>LinearWarpKernel</code> — a <code>gpu.warp.*</code>-based alternative added as a Phase 4 stretch item — is a useful, humbling precedent: its own doc comment reports it measured <strong>slower</strong> than the tiled kernel on real hardware (~1.5×–2.4× slower depending on shape), because removing barriers didn&#x27;t address the actual bottleneck (data reuse via shared memory). That result is echoed explicitly in this document&#x27;s own feasibility section below: <strong>a tensor-core rewrite must be benchmarked against <code>linear_gpu</code>/ <code>q8_linear_gpu</code>, not assumed to win, before it replaces anything.</strong></p>
+<p><code>gpu.warp.*</code> is the direct design precedent for how Boring unifies a GPU-vendor-specific hardware primitive under one language-level surface. Its own README is instructive about the <em>limits</em> of unification, not just the form: <code>gpu.warp.size</code> is a single API but an backend/hardware-dependent <em>value</em> (32 on NVIDIA, 32-or-64 on AMD, a fixed constant 32 on wgpu&#x27;s emulated fallback) — the primitive&#x27;s shape is uniform, its concrete parameters are not. Tensor-core fragments turn out to need the same honesty, taken further: <strong>the tile shapes themselves don&#x27;t unify across vendors at all</strong> (see &quot;Known gaps&quot; below) — this document proposes unifying the <em>operation surface</em> (declare a fragment, load it, multiply-accumulate it, store it) while being explicit that the legal <code>(M, N, K, T)</code> tuples are backend-specific and do not have a common intersection across CUDA and Metal today.</p>
+<hr>
+<h2 id="vendor-research-summary">Vendor research summary</h2>
+<p>Full findings (with source URLs) are condensed here; see the per-backend lowering section for how each maps onto <code>gpu.tensor.*</code>.</p>
+<h3 id="cuda--nvcudawmma-warp-level-and-raw-mmasyncwgmma-ptx">CUDA — <code>nvcuda::wmma</code> (warp-level) and raw <code>mma.sync</code>/<code>wgmma</code> (PTX)</h3>
+<p>Source: CUDA C++ Programming Guide §7.24 &quot;Warp Matrix Functions&quot;; PTX ISA §9.7.16.5.14 &quot;mma&quot;, §9.7.17 &quot;wgmma&quot;.</p>
+<ul><li><strong>API</strong> (<code>&lt;mma.h&gt;</code>, namespace <code>nvcuda::wmma</code>): `fragment&lt;Use, M, N, K, T,</li></ul>
+<p>  Layout&gt;<code>, </code>fill_fragment<code>, </code>load_matrix_sync<code>, </code>mma_sync<code>,   </code>store_matrix_sync<code>. </code>Use<code> ∈ </code>{matrix_a, matrix_b, accumulator}`.</p>
+<ul><li><strong>Legal shapes are hard, compiler-enforced template constants</strong> — not a</li></ul>
+<p>  runtime check:   - fp16/int8/bf16 (<code>__half</code>/<code>char</code>/<code>unsigned char</code>/<code>__nv_bfloat16</code>) → fp32 or     fp16/int32 accumulate: <strong>16×16×16, 32×8×16, 8×32×16</strong> (sm_70+ for fp16,     sm_75+ for int8, sm_80+ for bf16)   - tf32 (<code>precision::tf32</code>, explicit <code>__float_to_tf32</code> conversion required):     <strong>16×16×8 only</strong> (sm_80+)   - fp64: <strong>8×8×4 only</strong> (sm_80+)   - sub-byte int4/b1: <code>experimental</code> namespace, 8×8×32 / 8×8×128 (sm_75+,     flagged for removal in future architectures except AND-mode b1)</p>
+<ul><li><em></em>fp8 (e4m3/e5m2, sm_89+/Ada) and everything Hopper&#x27;s <code>wgmma</code> warpgroup-async</li></ul>
+<p>  family covers (sm_90a+) are not exposed via the <code>wmma</code> C++ header at all<em></em> —   only reachable via raw <code>mma.sync</code>/<code>wgmma.mma_async</code> PTX (inline asm or a   library like CUTLASS). This is a hard ceiling on <code>mma.h</code>, not an omission in   the guide.</p>
+<ul><li><strong>Warp-cooperative, opaque fragment layout</strong>: every <code>load_matrix_sync</code>/</li></ul>
+<p>  <code>mma_sync</code>/<code>store_matrix_sync</code> call &quot;must be called by all threads in the   warp, or the result is undefined&quot;; fragment element-to-lane mapping is   &quot;unspecified and subject to change in future architectures&quot; — no portable   manual indexing (the one exception: uniform elementwise ops via   <code>fragment::x[]</code>, e.g. scaling every element by a scalar).</p>
+<ul><li><strong>Alignment</strong>: <code>mptr</code> must be 256-bit (32-byte) aligned; <code>ldm</code> must be a</li></ul>
+<p>  multiple of 8 elements (<code>__half</code>) or 4 elements (<code>float</code>) — i.e. a multiple   of 16 bytes either way. All template/call arguments must be identical   across every thread in the warp.</p>
+<ul><li><strong>Realistic GEMM loop</strong>: one <code>accumulator</code> fragment per output tile,</li></ul>
+<p>  zero-filled once, then for each <code>K</code>-tile: load fresh <code>matrix_a</code>/<code>matrix_b</code>   fragments, <code>mma_sync(acc, a, b, acc)</code> (true in-place <code>C = A·B + C</code>). Store   once, after the loop.</p>
+<h4 id="what-llamacpp-actually-does--checked-directly-against-ggml-cuda-source">What llama.cpp actually does — checked directly against <code>ggml-cuda</code> source</h4>
+<p>Since this whole proposal is motivated by a <code>boring-llm</code> vs. llama.cpp comparison, it&#x27;s worth checking llama.cpp&#x27;s own real usage rather than assuming <code>wmma.h</code> is &quot;the&quot; way developers use tensor cores in practice. It isn&#x27;t, entirely:</p>
+<ul><li><strong><code>wmma::</code> C++ is not llama.cpp&#x27;s primary path today.</strong> Its FlashAttention</li></ul>
+<p>  CUDA kernel originally used <code>nvcuda::wmma</code>, but   <a href="https://github.com/ggml-org/llama.cpp/pull/11583">PR #11583</a> replaced it   with hand-rolled PTX <code>mma.sync</code> instructions (via the project&#x27;s own thin   <code>mma.cuh</code> wrapper) for every architecture <strong>except Volta</strong> — the author&#x27;s   stated reason: <code>wmma::fragment</code>&#x27;s C++ abstraction imposes a fixed data   layout that &quot;allows for better optimization&quot; once bypassed, i.e. the fixed   fragment layout was a real ceiling on tuned performance, not just   boilerplate. <code>wmma::</code> C++ is kept <strong>only</strong> as the legacy path for the   oldest tensor-core generation (V100/Volta, sm_70) — not deleted, but not   where new optimization work happens either.</p>
+<ul><li><strong>The single most structurally relevant kernel to this project is MMQ</strong></li></ul>
+<p>  (<code>ggml/src/ggml-cuda/mmq.cuh</code>) — fused dequantize + int8 matrix multiply,   int32 accumulate, <strong>the same shape as <code>boring-llm</code>&#x27;s own <code>Q8LinearKernel</code></strong>   (raw quantized bytes in, no separate dequant-to-float pass). MMQ picks its   compute path by architecture: Turing+ (NVIDIA) or CDNA/RDNA3+-with-MFMA/WMMA   (AMD) → an MMA/MFMA tensor-core int8 path; Pascal or older/no tensor cores   → <strong><code>dp4a</code></strong>, a plain 4-wide int8 dot-product ALU instruction — real   hardware acceleration, but not a tensor core. This is the same shape of   fallback this document already recommends for AMD RDNA1/RDNA2 (see ROCm   research above, <code>v_dot2_f32_f16</code>/<code>v_dot4_i32_i8</code> etc.) — llama.cpp reaches   for an ALU dot-product fallback on hardware without tensor cores rather   than a naive scalar loop, independently confirming that&#x27;s the right   instinct on both vendors&#x27; hardware, not just AMD&#x27;s.</p>
+<ul><li><em></em>A real, humbling performance data point, directly on point for this</li></ul>
+<p>  project&#x27;s actual usage pattern<strong>: PR #11583&#x27;s own measured numbers show the   new PTX-<code>mma.sync</code> FlashAttention kernel is </strong>0.87×–0.99× at batch sizes   8–32 (i.e. sometimes <em>slower</em>)<strong>, with real gains (1.02×–1.50×) only   appearing at batch sizes </strong>≥128<em></em>. <code>boring-llm</code> runs single-user inference   (<code>seq≈26</code>, effectively batch=1) — exactly the regime where even the most   experienced team working on this exact problem measured a slowdown. See   &quot;Composing with existing kernels&quot; below for how this sharpens the benchmark   discipline already recommended there.</p>
+<h3 id="metal--simdgroup_matrixt-cols-rows-msl-23">Metal — <code>simdgroup_matrix&lt;T, Cols, Rows&gt;</code> (MSL 2.3+)</h3>
+<p>Source: Metal Shading Language Specification (v4.1); Apple Tech Talk &quot;Discover Metal enhancements for A14 Bionic&quot;; WWDC 2026 session 330 (&quot;Optimize custom machine learning operations with Metal tensors&quot;).</p>
+<ul><li><strong>Type</strong>: <code>simdgroup_half8x8</code> / <code>simdgroup_float8x8</code> only — <em></em>8×8 is the</li></ul>
+<p>  only legal shape<em></em>, <code>T ∈ {half, float}</code> only (no bf16, no int8, no tf32 in   this API). One unconfirmed secondary-source claim of a <code>simdgroup_float4x4</code>   could not be corroborated against the spec text and is likely confusion   with the unrelated plain-SIMD <code>simd_float4x4</code> vertex-math type — treat   8×8-only as the reliable fact.</p>
+<ul><li><strong>Operations</strong>: <code>simdgroup_load</code>, <code>simdgroup_store</code>, <code>simdgroup_multiply</code>,</li></ul>
+<p>  <code>simdgroup_multiply_accumulate</code> — all four introduced together in MSL 2.3.   No separate init function; construction is via the type&#x27;s own   scalar-fill constructor (<code>simdgroup_float8x8 acc(0.0f)</code>).</p>
+<ul><li><strong>Hardware gate</strong>: requires <code>MTLGPUFamily.apple7</code> (A14/M1 and everything</li></ul>
+<p>  since — every Mac this backend already targets that isn&#x27;t an Intel Mac or   pre-A14 device). No software emulation path pre-Apple7 — hard unavailable,   same as CUDA pre-Volta.</p>
+<ul><li><strong>Warp/simdgroup-cooperative</strong>, same shape as CUDA: &quot;all operations must be</li></ul>
+<p>  executed only under uniform control-flow within the SIMD-group or the   behavior is undefined.&quot; Composes normally with <code>simdgroup_barrier</code> around a   threadgroup-memory staging step; orthogonal to (not built from)   <code>simd_shuffle_*</code>.</p>
+<ul><li><strong>Not dedicated tensor-core silicon on M1–M4.</strong> Direct quote (metal-benchmarks</li></ul>
+<p>  project): Apple&#x27;s <code>simdgroup_matrix</code> &quot;decreases register pressure and   improves ALU utilization in existing FP32 pipelines&quot; — it runs on the same   general FMA/ALU datapath as scalar code, not a separate functional unit.   Independent measurement (an M4 Max reverse-engineering writeup) found fp16   <code>matmul2d</code> throughput peaking at ~46% of the scalar-ALU roofline — never   above it — and fp8 running <em>slower</em> than fp16 despite half the data,   confirming software emulation, not hardware fp8 support. Apple&#x27;s own A14   numbers frame the win as ~37% average / 22–36% on real conv/Inception   workloads — a scheduling/occupancy-efficiency gain, not a CUDA-tensor-core-class   4–16× throughput multiplier.   - <strong>M5 changes this</strong>: a newer, separate &quot;Neural Accelerator&quot; (one per GPU     core, genuinely decoupled matrix-multiply hardware) is reachable only     through Apple&#x27;s <em>newer</em> <code>#include &lt;metal_tensor&gt;</code> / <code>matmul2d</code> /     &quot;TensorOps&quot; API introduced at WWDC 2026 — not through classic     <code>simdgroup_matrix</code>, which still just runs on the ALU path even on M5.     This is a materially different, newer API surface and is explicitly     <strong>out of scope</strong> for this proposal (see &quot;Known gaps&quot; and &quot;Sequencing&quot;).</p>
+<ul><li><strong>Composing with Boring&#x27;s existing 16×16 tile convention</strong>: a real tiled</li></ul>
+<p>  Metal GEMM holds a small 2D array of <code>simdgroup_float8x8</code> accumulators per   simdgroup (e.g. <code>acc[2][2]</code> for a 16×16 logical tile = four 8×8 sub-tile   accumulators), looping <code>simdgroup_multiply_accumulate</code> over the sub-tile   grid each K-step, then storing all sub-tiles once. This is the natural   mapping for <code>LinearKernel</code>&#x27;s existing 16×16 <code>&#x27;actor</code> tiles (see &quot;Composing   with existing kernels&quot; below).</p>
+<h3 id="rocmhip--mfma-cdna-only-vs-rdnas-wmma--the-rx-6600-has-neither">ROCm/HIP — MFMA (CDNA only) vs. RDNA&#x27;s WMMA — <strong>the RX 6600 has neither</strong></h3>
+<p>Source: AMD GPUOpen &quot;Matrix Cores&quot; lab notes; <code>ROCm/amd_matrix_instruction_calculator</code> README; <code>ROCm/rocWMMA</code> README; GPUOpen&#x27;s RDNA3-WMMA and RDNA4-matrix-core articles; LLVM&#x27;s GFX10 ISA reference.</p>
+<ul><li><strong>MFMA (<code>__builtin_amdgcn_mfma_*</code>, ISA <code>v_mfma_*</code>) is exclusive to CDNA</strong></li></ul>
+<p>  (MI100/MI200/MI300-class datacenter cards, gfx908/gfx90a/gfx940-942/gfx950).   AMD&#x27;s own <code>amd_matrix_instruction_calculator</code> README states it plainly:   MFMA is &quot;the ISA-level interface to the Matrix Cores within the AMD   Instinct MI100, MI200, and MI300 series processors,&quot; while a <em>distinct</em>   family, WMMA/SWMMAC, is &quot;the ISA-level interface to the AI Accelerators   within the AMD Radeon RDNA 3 and RDNA 4 processors.&quot; <strong>RDNA1 and RDNA2   appear in neither list.</strong></p>
+<ul><li><strong>This is the confident, load-bearing finding for this project</strong>: the</li></ul>
+<p>  user&#x27;s real test hardware, an AMD Radeon RX 6600 (gfx1032, RDNA2), <strong>has no   dedicated matrix/tensor-acceleration hardware of any kind.</strong> GPUOpen&#x27;s own   RDNA2-vs-RDNA3 comparison table lists BF16 throughput as flatly &quot;N/A&quot; for   RDNA2 hardware; the FP16/INT8 numbers RDNA2 does report come from ordinary   wave32 vector-ALU <strong>dot-product instructions</strong> (<code>v_dot2_f32_f16</code>,   <code>v_dot4_i32_i8</code>, <code>v_dot2_i32_i16</code>, <code>v_dot8_i32_i4</code> — real ISA instructions,   confirmed present since RDNA1/RDNA2 per LLVM&#x27;s GFX10 reference), not a   separate MMA unit. <code>rocWMMA</code>&#x27;s own supported-architecture list (its   GitHub README) confirms this <strong>by omission</strong>: it lists gfx9xx (CDNA) and   gfx11xx/gfx12xx (RDNA3/RDNA4) — gfx1030/gfx1032/gfx1031/etc. (RDNA2) and any   RDNA1 target are simply absent, because there is no hardware underneath for   the library to lower onto. Sources agree on this with no ambiguity.</p>
+<ul><li><strong>rocWMMA</strong>&#x27;s C++ API is a deliberate 1:1 mirror of CUDA&#x27;s <code>nvcuda::wmma</code> —</li></ul>
+<p>  <code>rocwmma::fragment</code>, <code>load_matrix_sync</code>, <code>mma_sync</code>, <code>store_matrix_sync</code> —   per ROCm&#x27;s own docs, easing a shared Boring-side abstraction.</p>
+<ul><li><strong>MFMA is directly callable from ordinary HIP device code</strong> (no inline</li></ul>
+<p>  asm required for basic use) — confirmed via AMD&#x27;s own worked example   calling <code>__builtin_amdgcn_mfma_f32_16x16x4f32(...)</code> inline in a <code>__global__</code>   kernel. It requires compiling with a CDNA <code>--offload-arch</code> (e.g. <code>gfx90a</code>);   no RDNA <code>--offload-arch</code> exposes <code>__builtin_amdgcn_mfma_*</code> at all — RDNA3+   instead exposes the distinct <code>__builtin_amdgcn_wmma_*</code> family.</p>
+<ul><li><strong>Fixed CDNA2 tile shapes</strong> (from AMD&#x27;s own table): FP32 accumulate —</li></ul>
+<p>  32×32×2, 32×32×1, 16×16×4, 16×16×1, 4×4×1; FP16/INT8/BF16 input — 32×32×8,   32×32×4, 16×16×16, 16×16×4, 4×4×4; FP64 — 16×16×4, 4×4×4. Exact shape sets   shift generation to generation (CDNA1/2/3 each add/change combinations).</p>
+<ul><li><strong>Boring-specific complication</strong>: <code>boring build --target rocm</code> (the</li></ul>
+<p>  transpiler) does not know the real target GPU architecture — that&#x27;s   chosen later, at <code>cargo build</code> time, via <code>BORING_ROCM_ARCH</code> consumed by   <code>build.rs</code>&#x27;s <code>hipcc --genco</code> invocation (see <code>rocm-backend.md</code>). This means   the transpiler cannot simply &quot;check the arch and pick MFMA or fallback&quot; the   way it might for CUDA/Metal — the arch isn&#x27;t known until a build step the   transpiler doesn&#x27;t control. See &quot;Per-backend lowering&quot; below for the   proposed fix (emit both code paths, let the C preprocessor pick).</p>
+<h3 id="wgpuwgsl--a-real-gap-today-but-actively-closing-upstream-not-permanent">wgpu/WGSL — a real gap today, but <strong>actively closing upstream</strong>, not permanent</h3>
+<p>Source: W3C WGSL/WebGPU spec (Candidate Recommendation Draft); gpuweb issues</p>
+<p>#4195 (&quot;Subgroup matrix&quot;), #4137, #3950; <code>gpuweb/gpuweb</code>&#x27;s <code>proposals/subgroup-matrix.md</code> explainer; <code>gfx-rs/wgpu</code> PRs #8251, #9490,</p>
+<p>#10414; <code>wgpu-types</code> <code>Features</code> docs.</p>
+<ul><li><em></em>No cooperative-matrix/tensor primitive exists in the ratified WGSL spec</li></ul>
+<p>  today<em></em>, and none exists in the wgpu version this project pins (~v22,   mid-2024).</p>
+<ul><li><strong>This is not a dead or purely-hypothetical gap, though.</strong> gpuweb has an</li></ul>
+<p>  active &quot;subgroup-matrix&quot; proposal (<code>subgroup_matrix_left&lt;T,K,M&gt;</code>/   <code>_right&lt;T,N,K&gt;</code>/<code>_result&lt;T,N,M&gt;</code> WGSL types; component types f32/f16/   u32/i32/u8/i8; Vulkan/Metal backend mappings drafted, a D3D12 mapping added   as recently as 2026-09-22) — status &quot;Draft,&quot; not yet spec-merged, with live   design churn as of meeting notes from 2026-01 and 2026-03.</p>
+<ul><li><strong>wgpu/naga already has real, merged, non-standard support</strong> ahead of the</li></ul>
+<p>  standard settling: <code>Features::EXPERIMENTAL_COOPERATIVE_MATRIX</code> (merged   2025-12-22, PR #8251) adds a <code>coop_mat</code> WGSL type plus <code>coopLoad</code>/   <code>coopStore</code>/<code>coopMatMulAdd</code>, targeting Vulkan (<code>VK_KHR_cooperative_matrix</code>)   and Metal (<code>simdgroup_matrix</code> under the hood) — <strong>initially limited to 8×8   f32 only</strong>, with follow-on work (non-square tiles, PR #10414 open as of   2026-09-21; integer types, PR #9490 closed as a draft needing rework) still   landing. None of this reaches the DX12 backend yet. None of it is in any   shipped browser (Chrome/Dawn carries only an internal experimental flag).   <strong>Crucially, all of this postdates wgpu v22 by 1.5+ years and 6+ major   versions</strong> — nothing here is usable at Boring&#x27;s current wgpu pin.</p>
+<ul><li><strong>Honest framing for this design</strong>: the wgpu backend needs a real</li></ul>
+<p>  software-fallback story <em>today and for the near-to-mid term</em> — but the   right posture is &quot;track <code>Features::EXPERIMENTAL_COOPERATIVE_MATRIX</code> as the   likely native path once Boring&#x27;s wgpu pin is bumped past ~v28,&quot; not &quot;assume   permanent absence.&quot; This mirrors the exact wording already used for other   wgpu gaps in <code>wgpu-backend.md</code>&#x27;s &quot;Will these gaps close?&quot; section — some   gaps there are &quot;Boring-side integration gaps&quot; (closable unilaterally),   others are &quot;genuine spec-level gaps&quot; (outside wgpu&#x27;s control, slow). This   one is closer to the first bucket once the pin moves, and to the second   bucket (an actual upstream spec dependency) until then.</p>
+<hr>
+<h2 id="proposed-design">Proposed design</h2>
+<h3 id="why-a-namespace--new-builtin-types-not-a-qualifier">Why a namespace + new builtin types, not a qualifier</h3>
+<p><code>gpu.warp.*</code> is a namespace of built-in <em>values and functions</em> — it needed no new type, because a warp shuffle just moves an existing scalar between registers of the same shape it already had. A tensor-core fragment is different in kind, not degree: it is an opaque, hardware-defined, multi-lane-cooperative aggregate whose logical shape (<code>M</code>, <code>N</code>, <code>K</code>) and role (<code>A</code>/<code>B</code>/accumulator) <em>is</em> part of its type — exactly why every vendor models it as a distinct type rather than a qualifier on an existing scalar/array (<code>wmma::fragment&lt;Use, M, N, K, T, Layout&gt;</code>, <code>simdgroup_matrix&lt;T, Cols, Rows&gt;</code>, <code>rocwmma::fragment&lt;...&gt;</code>). Boring&#x27;s existing qualifiers (<code>&#x27;actor</code>, <code>&#x27;global</code>, <code>&#x27;unified</code>, …) all describe the <em>memory/ownership</em> semantics of a binding whose element type is otherwise ordinary — they compose with <code>[T]</code>/<code>[T, N]</code>, they don&#x27;t replace the type. Inventing a <code>&#x27;frag</code> qualifier would force an awkward question (&quot;qualifier on what base type?&quot;) that every vendor&#x27;s own API answers by making the fragment a type of its own. So: <strong>new builtin generic types under a <code>gpu.tensor</code> namespace, with methods on them</strong> — following the vendor precedent more faithfully than a qualifier would, while still nesting under the existing <code>gpu</code> built-in the same way <code>gpu.warp</code> does.</p>
+<h3 id="types">Types</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>gpu.tensor.MatrixA&lt;<span class="kt">int</span> M, <span class="kt">int</span> K, dtype T, Layout = gpu.tensor.RowMajor&gt;
+gpu.tensor.MatrixB&lt;<span class="kt">int</span> K, <span class="kt">int</span> N, dtype T, Layout = gpu.tensor.RowMajor&gt;
+gpu.tensor.Accumulator&lt;<span class="kt">int</span> M, <span class="kt">int</span> N, dtype T&gt;</code></pre></div>
+<p><code>Layout</code> is one of two builtin tag types, <code>gpu.tensor.RowMajor</code> / <code>gpu.tensor.ColMajor</code> — mirroring <code>wmma::row_major</code>/<code>col_major</code> and <code>rocwmma</code>&#x27;s identical convention. An <code>Accumulator</code> fragment carries no <code>Layout</code> type parameter (matching CUDA/HIP: accumulator layout is passed to the load/store call itself, not baked into the type — the accumulator is logically layout-agnostic in-register, it only has a layout once written to memory).</p>
+<p><code>M</code>, <code>N</code>, <code>K</code>, <code>T</code> (and the CUDA-only <code>precision::tf32</code>-style narrowed dtypes) are <strong>checked against the current <code>--target</code>&#x27;s own legal shape/type table at compile time</strong> — an illegal combination (e.g. <code>gpu.tensor.MatrixA&lt;16, 16, float32&gt;</code> on <code>--target metal</code>, where only <code>8×8</code> <code>half</code>/<code>float32</code> is legal) is a hard compile error naming the offending backend and its actual legal set, the same style CUDA/Metal/ROCm/wgpu already use elsewhere in this project for target-specific hard errors (e.g. wgpu&#x27;s <code>float64</code> rejection).</p>
+<h3 id="methods">Methods</h3>
+<p>All only callable inside a kernel <code>def()</code> body (device-side), like <code>gpu.warp.*</code>, and inherit the identical divergent-branch caveat: every lane in the warp/simdgroup/wavefront must execute the same call at the same program point, or behavior is undefined — Boring doesn&#x27;t detect or warn about this today, matching <code>gpu.warp.*</code>&#x27;s own documented, unsolved caveat.</p>
+<table><thead><tr><th>Method</th><th>Meaning</th><th>Valid on</th></tr></thead><tbody><tr><td><code>frag.load(src, ld)</code></td><td>cooperative load from an array/shared-memory tile, <code>ld</code> = leading dimension (stride)</td><td><code>MatrixA</code>, <code>MatrixB</code>, <code>Accumulator</code></td></tr><tr><td><code>frag.fill(v)</code></td><td>fill every element with scalar <code>v</code></td><td><code>Accumulator</code> only</td></tr><tr><td><code>acc.mma(a, b)</code></td><td><code>acc = a·b + acc</code>, in place, warp-cooperative</td><td><code>Accumulator</code> only (takes a <code>MatrixA</code> + <code>MatrixB</code>)</td></tr><tr><td><code>frag.store(dst, ld)</code></td><td>cooperative store back to memory</td><td><code>Accumulator</code> only</td></tr></tbody></table>
+<p><code>MatrixA</code>/<code>MatrixB</code> are load-only — matching every vendor API, which never writes a <code>matrix_a</code>/<code>matrix_b</code> fragment back to memory (there&#x27;s no real operation that would mean).</p>
+<h3 id="gputensoravailable--the-compile-time-capability-query"><code>gpu.tensor.available</code> — the compile-time capability query</h3>
+<p>A single builtin <code>bool</code> constant, resolved per <code>--target</code> (and, for CUDA, per the same architecture-targeting knob proposed as prerequisite work below):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">if</span> gpu.tensor.available:
+    <span class="co"># use gpu.tensor.* fragments</span>
+<span class="kw">else</span>:
+    <span class="co"># existing plain tiled shared-memory loop</span></code></pre></div>
+<p>This is deliberately an ordinary Boring <code>if</code>, not new conditional-compilation syntax — kernel authors already know how to write one. Per-backend behavior:</p>
+<ul><li><strong>CUDA</strong>: <code>true</code> once a minimum-SM knob (proposed prerequisite, see</li></ul>
+<p>  &quot;Sequencing&quot;) is set to sm_70+; <code>false</code> (with a checker warning, not a hard   error, if <code>gpu.tensor.*</code> is used inside the <code>true</code> branch anyway) otherwise.</p>
+<ul><li><strong>Metal</strong>: resolved <strong>at runtime</strong>, not transpile time — Metal already</li></ul>
+<p>  compiles MSL at app-startup via <code>newLibraryWithSource</code> (see   <code>metal-backend.md</code>), so, exactly like wgpu&#x27;s existing <code>Features::SUBGROUP</code>   dual-shader-module pattern, the Metal backend emits <strong>two</strong> <code>.metal</code>   variants (one using <code>simdgroup_matrix</code>, one the existing plain tiled loop)   and picks between them via <code>device.supportsFamily(.apple7)</code> before first   dispatch. This reuses a pattern this project has already shipped once.</p>
+<ul><li><strong>ROCm</strong>: resolved <strong>at HIP-compile time</strong> via C preprocessor branching on</li></ul>
+<p>  a target-architecture macro that <code>hipcc</code>/clang predefines for whatever   <code>--offload-arch</code> <code>BORING_ROCM_ARCH</code> resolves to (the exact macro form needs   verification against a real <code>hipcc</code> invocation before implementation — this   is called out as a Phase 3 prerequisite, not asserted as already-verified   fact). The transpiler emits <strong>both</strong> branches unconditionally into the   generated <code>.hip</code> source (mirroring wgpu&#x27;s dual-module strategy, but via   <code>#if</code>/<code>#else</code> instead of a runtime feature query, because ROCm&#x27;s target   architecture is a compile-time fact the transpiler itself doesn&#x27;t have   early enough to choose between two Rust-level source files the way Metal/   wgpu can). RDNA1/RDNA2 (including <code>gfx1032</code>, the RX 6600) always take the   <code>#else</code> (fallback) branch — there is no hardware to gate <code>#if</code> toward.</p>
+<ul><li><strong>wgpu</strong>: <code>false</code>, unconditionally, at the pinned wgpu version — no</li></ul>
+<p>  runtime query needed since the feature doesn&#x27;t exist there at all yet (see   vendor research above). Revisit once the wgpu pin moves past the version   that ships <code>Features::EXPERIMENTAL_COOPERATIVE_MATRIX</code>.</p>
+<ul><li><strong><code>boring run</code> (interpreter)</strong>: <code>true</code>, unconditionally — <code>gpu.tensor.*</code> is</li></ul>
+<p>  fully simulable on the CPU as a plain dense matrix multiply over the   fragment&#x27;s declared shape (no real hardware behavior to emulate, unlike   <code>gpu.warp.*</code>&#x27;s per-warp barrier/shuffle simulation — a tensor-core MMA has   no cross-lane synchronization semantics visible to a correctness-only   simulation, only a throughput characteristic that&#x27;s meaningless on the   CPU). Lets kernel authors validate correctness with no GPU at all, same   workflow as every other kernel primitive today.</p>
+<p><strong>Important limitation, stated plainly</strong>: <code>gpu.tensor.available</code> answers &quot;does this hardware have <em>any</em> tensor acceleration,&quot; not &quot;is <em>this specific</em> <code>(M,N,K,T)</code> combination legal here.&quot; A fragment declaration with an illegal shape for the current target is still a hard compile error inside the <code>true</code> branch — <code>gpu.tensor.available</code> does not paper over the fact that CUDA&#x27;s smallest wmma tile family (16×16×16 fp16/int8/bf16, or 16×16×8 tf32) and Metal&#x27;s only legal shape (8×8×8, <code>half</code>/<code>float</code> only) <strong>share no common tuple at all</strong>. A kernel wanting a tensor-core path on both CUDA and Metal needs two distinct fragment declarations (and, in practice, two distinct kernel structs or a <code>--target</code>-selected variant) — this document does not propose an auto-decomposing &quot;one declaration, N backends&quot; abstraction (see &quot;Known gaps,&quot; item 1, for why that&#x27;s explicitly out of scope for now).</p>
+<hr>
+<h2 id="per-backend-lowering">Per-backend lowering</h2>
+<table><thead><tr><th>Boring</th><th>CUDA</th><th>Metal</th><th>ROCm/HIP</th><th>wgpu</th></tr></thead><tbody><tr><td><code>gpu.tensor.MatrixA&lt;M,K,T,Layout&gt;</code></td><td><code>wmma::fragment&lt;matrix_a, M, K, T, Layout&gt;</code></td><td><code>simdgroup_half8x8</code>/<code>simdgroup_float8x8</code> (M=K=8 enforced)</td><td><code>rocwmma::fragment&lt;matrix_a, M, K, T, Layout&gt;</code> (CDNA) or raw <code>__builtin_amdgcn_mfma_*</code> operand prep (see below)</td><td>n/a — always the <code>#else</code>/fallback branch at the pinned wgpu version</td></tr><tr><td><code>gpu.tensor.MatrixB&lt;K,N,T,Layout&gt;</code></td><td><code>wmma::fragment&lt;matrix_b, ...&gt;</code></td><td>same 8×8 type</td><td><code>rocwmma::fragment&lt;matrix_b, ...&gt;</code></td><td>n/a</td></tr><tr><td><code>gpu.tensor.Accumulator&lt;M,N,T&gt;</code></td><td><code>wmma::fragment&lt;accumulator, M, N, T&gt;</code></td><td>same 8×8 type</td><td><code>rocwmma::fragment&lt;accumulator, ...&gt;</code></td><td>n/a</td></tr><tr><td><code>frag.load(src, ld)</code></td><td><code>wmma::load_matrix_sync(frag, src, ld)</code></td><td><code>simdgroup_load(frag, src, ld)</code></td><td><code>rocwmma::load_matrix_sync(frag, src, ld)</code></td><td>n/a</td></tr><tr><td><code>acc.fill(v)</code></td><td><code>wmma::fill_fragment(acc, v)</code></td><td><code>simdgroup_float8x8 acc(v)</code> (constructor)</td><td><code>rocwmma::fill_fragment(acc, v)</code></td><td>n/a</td></tr><tr><td><code>acc.mma(a, b)</code></td><td><code>wmma::mma_sync(acc, a, b, acc)</code></td><td><code>simdgroup_multiply_accumulate(acc, a, b, acc)</code></td><td><code>rocwmma::mma_sync(acc, a, b, acc)</code> (rocWMMA path) or direct <code>__builtin_amdgcn_mfma_*</code> call (raw-intrinsic path — see below)</td><td>n/a</td></tr><tr><td><code>frag.store(dst, ld)</code></td><td><code>wmma::store_matrix_sync(dst, acc, ld, layout)</code></td><td><code>simdgroup_store(acc, dst, ld)</code></td><td><code>rocwmma::store_matrix_sync(dst, acc, ld, layout)</code></td><td>n/a</td></tr><tr><td><code>gpu.tensor.available</code></td><td>compile-time <code>bool</code>, gated on a proposed min-SM knob (sm_70+)</td><td>runtime <code>bool</code>, <code>device.supportsFamily(.apple7)</code> — selects between two generated <code>.metal</code> modules</td><td>preprocessor branch on the real <code>--offload-arch</code>, resolved at <code>hipcc</code> time, not transpile time</td><td>compile-time <code>false</code> (pinned wgpu version has no primitive)</td></tr></tbody></table>
+<h3 id="cuda--recommended-shapetype-coverage-for-phase-1">CUDA — recommended shape/type coverage for Phase 1</h3>
+<ul><li><strong>fp16 in → fp32 accumulate</strong>, 16×16×16 (and 32×8×16/8×32×16 for</li></ul>
+<p>  non-square tiles) — the standard, best-supported combination, sm_70+.</p>
+<ul><li><strong>int8 in → int32 accumulate</strong>, same shapes, sm_75+ — this is the</li></ul>
+<p>  <strong>highest-value target for this project specifically</strong>: <code>Q8LinearKernel</code>   already stores Q8_0 weights as raw signed int8 values with a per-block   fp16 scale (see <code>boring-llm/src/math_gpu.br</code>). A tensor-core path here   could load the raw quantized int8 bytes directly into a <code>MatrixB</code>   fragment (skipping the current per-thread dequantize-to-float32 step   entirely inside the hot loop) and apply the block scale once, after   <code>mma_sync</code>, to the int32 accumulator. This isn&#x27;t a hypothetical   optimization — it&#x27;s structurally <strong>the same kernel llama.cpp&#x27;s own MMQ   path already is</strong> (see &quot;What llama.cpp actually does&quot; above): fused   dequant + int8 tensor-core dot product, int32 accumulate. Real,   independently-arrived-at precedent for exactly this design, not just a   theoretical fit.</p>
+<ul><li><strong>tf32</strong> (16×16×8 only, sm_80+, needs the source to call</li></ul>
+<p>  <code>__float_to_tf32</code> before <code>.load()</code> — modeled as a <code>frag.load_tf32(src, ld)</code>   variant, or an implicit conversion the checker inserts when <code>T</code> is   declared <code>gpu.tensor.TF32</code>): a reasonable stretch item, not required for   Phase 1.</p>
+<ul><li><em></em><code>wmma.h</code> C++ is proposed as the Phase 1 <em>starting point</em>, not the</li></ul>
+<p>  end state.<strong> It&#x27;s the simplest, most conservative surface to validate the   new parser/checker machinery against (matches this project&#x27;s existing   &quot;verify via codegen-snapshot tests first&quot; style for untestable-locally CUDA   features). But llama.cpp&#x27;s own migration away from <code>wmma::</code> for anything   newer than Volta (above) is real signal that a </strong>Phase 1.5<em></em> revisiting the   hot kernels (<code>Q8LinearTensorCoreKernel</code> in particular) with raw PTX   <code>mma.sync</code> — once the <code>wmma.h</code>-based primitive is shipped and validated —   is a reasonable, evidence-backed follow-on, not a speculative one. This is   a materially different, lower-level codegen surface (hand-written   register-level PTX asm rather than a C++ template call) and should be its   own follow-up task, not conflated with Phase 1&#x27;s simpler goal of proving   the primitive works at all.</p>
+<ul><li><em></em>Explicitly out of scope for both the <code>wmma.h</code>-based Phase 1 and the raw</li></ul>
+<p>  <code>mma.sync</code> Phase 1.5<em></em>: fp8 (Ada+) and Hopper&#x27;s <code>wgmma</code> warpgroup-async   family need a genuinely different instruction family and target hardware   generation this project has no way to test against locally. Flagged as a   distinct, later follow-up if the project ever specifically needs   Hopper-class hardware, not bundled into this proposal.</p>
+<h3 id="metal--recommended-coverage-for-phase-2">Metal — recommended coverage for Phase 2</h3>
+<ul><li><strong>fp16 in → fp32 accumulate</strong>, 8×8×8, the only legal shape — full stop.</li><li>Dual-module runtime dispatch (<code>device.supportsFamily(.apple7)</code>), as</li></ul>
+<p>  described above — keeps Metal builds running correctly (via the existing   plain-tiled fallback) on Intel Macs and pre-A14 Apple Silicon.</p>
+<ul><li><em></em>Expectation-setting, stated plainly in the doc a kernel author would</li></ul>
+<p>  read<strong>: because classic <code>simdgroup_matrix</code> runs on the same ALU pipeline as   scalar FMA on every currently-common Mac (M1–M4), the realistic payoff here   is Apple&#x27;s own documented ~30–40%-class occupancy/register-pressure win —   not a CUDA-tensor-core-class multiple. The newer M5 Neural Accelerator path   (<code>matmul2d</code>/TensorOps) is real dedicated hardware but is </strong>a different,   newer API<em></em>, explicitly out of scope for this proposal (see &quot;Known gaps&quot;).</p>
+<h3 id="rocm--recommended-gating-and-coverage-for-phase-3">ROCm — recommended gating and coverage for Phase 3</h3>
+<ul><li><strong>CDNA targets</strong> (<code>gfx908</code>, <code>gfx90a</code>, <code>gfx940</code>–<code>gfx942</code>, <code>gfx950</code>): real</li></ul>
+<p>  MFMA hardware. Prefer <code>rocWMMA</code>&#x27;s CUDA-mirroring C++ API   (<code>rocwmma::fragment</code>/<code>load_matrix_sync</code>/<code>mma_sync</code>/<code>store_matrix_sync</code>) over   hand-emitting raw <code>__builtin_amdgcn_mfma_*</code> calls where possible — it&#x27;s a   vendor-maintained, tested library sitting on top of the same intrinsics,   and its API shape requires near-zero change to the CUDA-backend codegen   logic already written for <code>wmma</code>.</p>
+<ul><li><strong>RDNA3/RDNA4 targets</strong> (<code>gfx11xx</code>, <code>gfx12xx</code>): real WMMA &quot;AI accelerator&quot;</li></ul>
+<p>  hardware, a <em>different</em> instruction family from CDNA&#x27;s MFMA   (<code>__builtin_amdgcn_wmma_*</code>) — <code>rocWMMA</code>&#x27;s own supported-architecture list   covers these too, so the same library-first strategy applies, but the   underlying codegen path is genuinely distinct from the CDNA one and needs   its own validation (this project has no RDNA3/4 hardware to test against   today, only the RDNA2 RX 6600 — flagged as an untestable-locally gap, the   same honest caveat this project&#x27;s docs already carry for CUDA).</p>
+<ul><li><strong>RDNA1/RDNA2 targets</strong> (<code>gfx101x</code>, <code>gfx103x</code> — including <code>gfx1032</code>, the</li></ul>
+<p>  RX 6600): <strong>always the fallback branch, unconditionally.</strong> No <code>#if</code> probes   a real capability here because there&#x27;s nothing to detect — the finding is   unambiguous (see vendor research above). The fallback itself is proposed   in two tiers: <strong>Phase 3a</strong> (safe, simple) reuses the exact plain   shared-memory-tiled loop <code>LinearKernel</code>/<code>Q8LinearKernel</code> already use — i.e.   <code>gpu.tensor.available == false</code> on this hardware simply means &quot;nothing   changes, write the loop you&#x27;d write today.&quot; <strong>Phase 3b</strong> (real, but a later   stretch) would target RDNA2&#x27;s actual <code>v_dot2_f32_f16</code>/<code>v_dot4_i32_i8</code>-style   ALU dot-product instructions via their own Clang/LLVM builtins — genuine,   real hardware acceleration, just not &quot;tensor cores,&quot; and a distinct,   separate design exercise from this one (closer in spirit to a   <code>gpu.warp.*</code>-style addition than to <code>gpu.tensor.*</code>).</p>
+<h3 id="wgpu--phase-4-software-fallback-only-with-an-explicit-upstream-trigger-to-revisit">wgpu — Phase 4, software fallback only, with an explicit upstream trigger to revisit</h3>
+<ul><li><code>gpu.tensor.available</code> is <code>false</code>. The <code>else</code> branch — Boring&#x27;s existing</li></ul>
+<p>  tiled shared-memory GEMM pattern (<code>var&lt;workgroup&gt;</code> tiles, <code>workgroupBarrier()</code>)   — is the permanent, documented codegen for this backend <strong>at the current   wgpu pin</strong>.</p>
+<ul><li><strong>Concrete revisit trigger, not vague &quot;someday&quot;</strong>: once Boring&#x27;s wgpu</li></ul>
+<p>  dependency is bumped to a version shipping   <code>Features::EXPERIMENTAL_COOPERATIVE_MATRIX</code> (merged at wgpu ~28.x,   Vulkan+Metal only, 8×8 f32 initially), re-run this feasibility exercise —   the runtime-feature-query + dual-shader-module pattern this project already   ships for <code>gpu.warp.*</code>&#x27;s subgroup fallback applies here verbatim.</p>
+<hr>
+<h2 id="composing-with-existing-kernels--what-actually-has-to-restructure">Composing with existing kernels — what actually has to restructure</h2>
+<p>The task here isn&#x27;t abstract: <code>boring-llm</code>&#x27;s <code>LinearKernel</code>/<code>Q8LinearKernel</code> (<code>src/math_gpu.br</code>) are real, already-shipping 16×16-tiled GEMM kernels using 256 threads (a 16×16 block) to compute one 16×16 output tile, one scalar accumulator per thread. Adopting <code>gpu.tensor.*</code> is <strong>not a drop-in swap of the inner reduction loop</strong> — it changes the fundamental thread-to-output mapping:</p>
+<ul><li><strong>Today</strong>: 256 threads, each owning one scalar accumulator (<code>acc</code>), each</li></ul>
+<p>  independently walking the 16-wide <code>for kk in 0..&lt;16: acc += tile_x[...] *   tile_w[...]</code> reduction after a shared-memory tile load <code>sync</code> barrier.</p>
+<ul><li><strong>With <code>gpu.tensor.*</code> (CUDA, 16×16×16 fp16 fragments)</strong>: <em></em>one warp (32</li></ul>
+<p>  threads) computes the entire 16×16=256-element output tile<strong> via a single   <code>acc.mma(a, b)</code> call per K-step — the block&#x27;s thread count doesn&#x27;t need to   drop to 32 (multiple warps can each own a different output tile within the   same block, keeping occupancy up), but the <em>loop structure</em> changes from   &quot;256 threads, 1 output element each&quot; to &quot;N warps, 1 whole 16×16 tile each.&quot;   Shared-memory tile loading also changes shape: cooperative fragment loads   read directly from the <code>&#x27;actor</code> tile (32 threads loading a 16×16=256-element   tile means each thread loads/stages 8 elements instead of today&#x27;s 1:1   mapping), and <code>Q8LinearKernel</code>&#x27;s inline dequantization must move </strong>earlier<em></em>   — either dequantize into the shared-memory tile <em>before</em> the fragment load   (since <code>.load()</code> reads raw memory of the fragment&#x27;s own element type, not   an arbitrary expression), or — the higher-value option specifically because   the weights are already int8 — skip dequantization inside the hot loop   entirely and load the raw quantized bytes straight into an int8 <code>MatrixB</code>   fragment, applying the per-block fp16 scale once to the int32 accumulator   after <code>mma_sync</code> (see &quot;CUDA — recommended shape/type coverage&quot; above).</p>
+<ul><li><strong>With <code>gpu.tensor.*</code> (Metal, 8×8×8 fp16/fp32)</strong>: the existing 16×16 tile</li></ul>
+<p>  maps cleanly onto a 2×2 grid of <code>simdgroup_float8x8</code> accumulators per   simdgroup — a smaller restructuring than CUDA&#x27;s, since the tile size   Boring already picked (16×16) happens to be an exact small multiple of   Metal&#x27;s fixed 8×8 unit.</p>
+<p><strong>This must be benchmarked, not assumed to win</strong> — exactly the lesson <code>LinearWarpKernel</code>&#x27;s own doc comment in <code>math_gpu.br</code> already learned the hard way (a <code>gpu.warp.*</code>-based rewrite that removed barriers but lost shared- memory data reuse came out <em>slower</em>, not faster, on real hardware). Reducing per-tile thread count from 256 to 32 (one warp) trades scalar ALU parallelism for tensor-core throughput-per-instruction — whether that nets a win depends on real GPU occupancy characteristics for this project&#x27;s actual shapes (<code>d_in</code>/<code>d_out</code>/<code>seq</code> at Qwen2.5-0.5B&#x27;s scale), not on FLOP-counting alone.</p>
+<p><strong>This isn&#x27;t just an internal, single-data-point caution — llama.cpp&#x27;s own real measurements say the same thing, more starkly.</strong> PR #11583 (see &quot;What llama.cpp actually does&quot; above) reports its PTX-<code>mma.sync</code> FlashAttention kernel at <strong>0.87×–0.99× (slower) at batch sizes 8–32</strong>, with real wins (1.02×–1.50×) only past batch ≥128. <code>boring-llm</code> is single-user inference — <code>seq≈26</code>, effectively batch=1 — squarely inside the regime where the most experienced team working on this exact class of kernel measured a regression, not a win. This doesn&#x27;t mean a tensor-core rewrite is pointless for <code>boring-llm</code> — GEMM (this project&#x27;s <code>LinearKernel</code>/<code>Q8LinearKernel</code>) and FlashAttention have different arithmetic intensity profiles, and MMQ-style kernels (structurally closer to <code>Q8LinearKernel</code>) aren&#x27;t the same kernel PR #11583 measured — but it is a concrete reason to treat &quot;small-batch tensor cores may not help, and might hurt&quot; as the null hypothesis to disprove, not background noise to note in passing.</p>
+<p>Any Phase 1 CUDA kernel built from this proposal should ship as a new, independently-verified variant alongside <code>linear_gpu</code>/<code>q8_linear_gpu</code> — the same pattern <code>linear_warp_gpu</code> already established — and only replace the existing kernels if it&#x27;s measured to actually win at this project&#x27;s real sizes.</p>
+<hr>
+<h2 id="worked-example-illustrative--not-compiler-output-the-transpiler-does-not-implement-this-yet">Worked example (illustrative — not compiler output; the transpiler does not implement this yet)</h2>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> LinearTensorCoreKernel:
+    <span class="kw">let</span> [float16]<span class="lf">&#x27;global</span>  x         <span class="co"># (seq × d_in), pre-converted to fp16</span>
+    <span class="kw">let</span> [float16]<span class="lf">&#x27;global</span>  w         <span class="co"># (d_out × d_in), pre-converted to fp16</span>
+    <span class="kw">let</span> [float32]<span class="lf">&#x27;global</span>  bv        <span class="co"># (d_out,)</span>
+    <span class="kw">mut</span> [float32]<span class="lf">&#x27;unified</span> y         <span class="co"># output: seq × d_out</span>
+    <span class="kw">let</span> <span class="kt">int</span>               seq
+    <span class="kw">let</span> <span class="kt">int</span>               d_in
+    <span class="kw">let</span> <span class="kt">int</span>               d_out
+    <span class="kw">mut</span> [float16, width = <span class="nb">16</span>, height = <span class="nb">16</span>]<span class="lf">&#x27;actor</span> tile_x
+    <span class="kw">mut</span> [float16, width = <span class="nb">16</span>, height = <span class="nb">16</span>]<span class="lf">&#x27;actor</span> tile_w
+
+    <span class="kw">init</span>([float16]<span class="lf">&#x27;global</span> xi, [float16]<span class="lf">&#x27;global</span> wi, [float32]<span class="lf">&#x27;global</span> bi,
+         <span class="kt">int</span> s, <span class="kt">int</span> din, <span class="kt">int</span> dout):
+        x = xi; w = wi; bv = bi; seq = s; d_in = din; d_out = dout
+        y = [<span class="nb">0.0</span> <span class="kw">for</span> ..&lt;s * dout]
+
+    <span class="kw">def</span> ():
+        <span class="kw">if</span> gpu.tensor.available:
+            <span class="kw">let</span> ty = gpu.thread.y            <span class="co"># one warp per output tile</span>
+            <span class="kw">let</span> row_tile = gpu.block.y
+            <span class="kw">let</span> col_tile = gpu.block.x
+            <span class="kw">var</span> gpu.tensor.Accumulator&lt;<span class="nb">16</span>, <span class="nb">16</span>, float32&gt; acc
+            acc.<span class="fn">fill</span>(<span class="nb">0.0</span>)
+            <span class="kw">let</span> num_tiles = (d_in + <span class="nb">15</span>) / <span class="nb">16</span>
+            <span class="kw">for</span> t <span class="kw">in</span> <span class="nb">0..</span>&lt;num_tiles:
+                <span class="co"># cooperative tile load into shared memory (elided: same</span>
+                <span class="co"># 32-threads-load-256-elements staging step described above)</span>
+                <span class="kw">sync</span>
+                <span class="kw">var</span> gpu.tensor.MatrixA&lt;<span class="nb">16</span>, <span class="nb">16</span>, float16&gt; a_frag
+                <span class="kw">var</span> gpu.tensor.MatrixB&lt;<span class="nb">16</span>, <span class="nb">16</span>, float16&gt; b_frag
+                a_frag.<span class="fn">load</span>(tile_x, <span class="nb">16</span>)
+                b_frag.<span class="fn">load</span>(tile_w, <span class="nb">16</span>)
+                acc.<span class="fn">mma</span>(a_frag, b_frag)
+                <span class="kw">sync</span>
+            <span class="co"># store + bias-add: elided, same shape as LinearKernel&#x27;s tail</span>
+        <span class="kw">else</span>:
+            <span class="co"># existing scalar-accumulator tiled loop — LinearKernel, unchanged</span>
+            ...</code></pre></div>
+<p>Expected CUDA C emission for the <code>gpu.tensor.available</code> branch (hand-written here to show the target shape — not produced by a real transpiler run, since <code>gpu.tensor.*</code> codegen does not exist yet):</p>
+<div class="code-block" data-lang="cuda"><span class="lang-label">cuda</span><pre><code>#include &lt;mma.h&gt;
+using namespace nvcuda;
+
+wmma::fragment&lt;wmma::accumulator, 16, 16, 16, float&gt; acc;
+wmma::fill_fragment(acc, 0.0f);
+for (int t = 0; t &lt; num_tiles; t++) {
+    // ... cooperative shared-memory tile load, __syncthreads() ...
+    wmma::fragment&lt;wmma::matrix_a, 16, 16, 16, half, wmma::row_major&gt; a_frag;
+    wmma::fragment&lt;wmma::matrix_b, 16, 16, 16, half, wmma::row_major&gt; b_frag;
+    wmma::load_matrix_sync(a_frag, tile_x, 16);
+    wmma::load_matrix_sync(b_frag, tile_w, 16);
+    wmma::mma_sync(acc, a_frag, b_frag, acc);
+    __syncthreads();
+}</code></pre></div>
+<hr>
+<h2 id="known-gaps-and-limitations">Known gaps and limitations</h2>
+<ol><li><strong>No cross-backend tile-shape portability.</strong> CUDA&#x27;s smallest <code>wmma</code></li></ol>
+<p>   family (16×16×16, or 16×16×8 for tf32) and Metal&#x27;s only legal shape    (8×8×8) share <strong>zero</strong> common <code>(M, N, K)</code> tuples. <code>gpu.tensor.*</code> unifies    the <em>operation surface</em>, not the <em>tile geometry</em> — a kernel targeting    tensor-core acceleration on both CUDA and Metal needs two distinct    fragment declarations today. An auto-decomposing higher-level type (e.g.    a <code>gpu.tensor.Tile&lt;M,N,K,T&gt;</code> that transparently tiles itself into however    many hardware-native sub-fragments a given backend needs) is a real,    plausible future design — deliberately <strong>not proposed here</strong>, because it&#x27;s    a materially larger and riskier transpiler undertaking (generated nested    loops managing multiple backing fragment variables) that this document&#x27;s    own instructions call out as exactly the kind of complexity not to take on    in one sitting without first validating the simpler primitive-level design. 2. <strong>Divergent-branch safety is inherited, unsolved, same as <code>gpu.warp.*</code>.</strong>    Every <code>gpu.tensor.*</code> method call needs uniform control flow across the    warp/simdgroup/wavefront; Boring doesn&#x27;t detect or warn about a call    inside non-uniform control flow today. 3. <strong>CUDA needs a new architecture-targeting knob it doesn&#x27;t have today.</strong>    Unlike ROCm&#x27;s <code>BORING_ROCM_ARCH</code>, <code>docs/cuda-module.md</code> shows no existing    mechanism for choosing a minimum compute capability / <code>-gencode</code> flag for    <code>nvcc</code>. <code>gpu.tensor.*</code> needs sm_70+ at minimum — this is a real    prerequisite gap, not just a nice-to-have, since without it there&#x27;s no    principled way to set <code>gpu.tensor.available</code> for CUDA at all. Proposed as    Phase 0 prerequisite work. 4. <strong>ROCm&#x27;s RDNA1/RDNA2 exclusion is permanent, not a &quot;not yet.&quot;</strong> Confirmed    directly against AMD&#x27;s own hardware/library support lists — there is no    future ROCm release that will make MFMA or WMMA exist on <code>gfx1032</code>    silicon. The fallback path is the only sound target for this project&#x27;s    real RDNA2 test hardware, indefinitely. 5. <strong>wgpu&#x27;s gap is real today but explicitly not structural</strong> — see vendor    research above. Re-evaluate once Boring&#x27;s wgpu pin moves past the version    shipping <code>Features::EXPERIMENTAL_COOPERATIVE_MATRIX</code>. 6. <strong>fp8 and Hopper&#x27;s <code>wgmma</code> family are out of scope</strong> — a distinct, later    follow-up if the project ever needs Hopper-class hardware specifically.    Raw PTX <code>mma.sync</code> itself (as opposed to <code>wgmma</code>/fp8) is <strong>not</strong> in this    bucket, though — llama.cpp&#x27;s own migration away from <code>wmma::</code> C++ (see    &quot;What llama.cpp actually does&quot;) is real evidence it&#x27;s a worthwhile    Phase 1.5 follow-on, just a distinct, riskier codegen surface from Phase    1&#x27;s <code>wmma.h</code>-based starting point, not bundled into it. 7. <strong>Metal&#x27;s classic <code>simdgroup_matrix</code> is not dedicated hardware on M1–M4</strong> —    set expectations accordingly (a ~30–40%-class occupancy win, not a    multiple). The M5 Neural Accelerator&#x27;s real dedicated hardware is reachable    only through a newer, different API (<code>matmul2d</code>/TensorOps, WWDC 2026) —    explicitly a separate design exercise, not folded into this proposal, to    avoid conflating two materially different Metal features under one name. 8. <strong>No kernel in this project has been rewritten or benchmarked yet.</strong>    Every performance claim above is vendor-documented theoretical throughput,    not a measurement against <code>boring-llm</code>&#x27;s real shapes — see &quot;Composing with    existing kernels&quot; for why this specifically must be verified, not assumed.</p>
+<hr>
+<h2 id="feasibility-and-sequencing">Feasibility and sequencing</h2>
+<p>Each phase below is sized to become its own discrete follow-up task, the same granularity this project already tracks GPU-kernel bug fixes at.</p>
+<ul><li><strong>Phase 0 — prerequisites</strong> (blocks every other phase):</li></ul>
+<p>  - Add an explicit CUDA architecture-targeting knob (mirroring     <code>BORING_ROCM_ARCH</code>) so <code>gpu.tensor.available</code> has something principled to     gate on.   - Parser/checker support for <code>gpu.tensor.MatrixA/MatrixB/Accumulator&lt;...&gt;</code>     as local-variable types inside a kernel <code>def()</code> body — new surface area     (today&#x27;s const generics, e.g. <code>Blur&lt;int N&gt;</code>, only appear on <em>struct/kernel     declarations</em>, never as an ad hoc local variable&#x27;s own type) and the     riskiest new parser work this proposal implies. Validate this in     isolation before attempting any backend codegen.   - <code>gpu.tensor.available</code> as a builtin compile-time/runtime bool, per the     per-backend resolution rules above.</p>
+<ul><li><strong>Phase 1 — CUDA (<code>wmma.h</code>), highest value, most standardized backend.</strong></li></ul>
+<p>  fp16→fp32 and int8→int32, 16×16×16-family shapes. Ship a new   <code>LinearTensorCoreKernel</code>/<code>Q8LinearTensorCoreKernel</code> alongside (not   replacing) <code>linear_gpu</code>/<code>q8_linear_gpu</code>, and benchmark at this project&#x27;s   actual batch=1/<code>seq≈26</code> scale before considering a swap — llama.cpp&#x27;s own   PR #11583 numbers (slower at batch 8–32, wins only past batch≥128; see   &quot;What llama.cpp actually does&quot;) make this the default expectation to   disprove, not a formality. Unverified against real NVIDIA hardware in this   dev environment, same standing caveat every other CUDA feature in this   project already carries.</p>
+<ul><li><strong>Phase 1.5 — CUDA, raw PTX <code>mma.sync</code></strong> (follow-on to Phase 1, only after</li></ul>
+<p>  it&#x27;s validated): revisit <code>Q8LinearTensorCoreKernel</code> with hand-generated PTX   instead of <code>wmma.h</code>, following llama.cpp&#x27;s own precedent of moving off   <code>wmma::</code> C++ for exactly this reason (fixed fragment layout capping   performance). A materially riskier codegen surface (register-level PTX   asm generation, not a C++ template call) — scoped as its own task, not   bundled into Phase 1.</p>
+<ul><li><strong>Phase 2 — Metal (<code>simdgroup_matrix</code>).</strong> 8×8 fp16/fp32 only, dual-module</li></ul>
+<p>  runtime dispatch on <code>MTLGPUFamily.apple7</code>. Real hardware to verify against   (this project&#x27;s Metal backend is actively verified locally). Expect a   modest win, not a multiple — set that expectation up front in the PR/task   description so a &quot;only 1.3×&quot; result isn&#x27;t read as a failure.</p>
+<ul><li><strong>Phase 3 — ROCm.</strong> 3a: preprocessor-gated dual-path codegen, CDNA→rocWMMA,</li></ul>
+<p>  RDNA3/4→rocWMMA (its RDNA coverage), RDNA1/RDNA2→existing fallback   unconditionally. Verify the real HIP/clang arch-macro mechanism against a   real <code>hipcc</code> invocation before implementing the <code>#if</code> gating (flagged   above as unverified). Real, hardware-verifiable fallback-path testing on   the project&#x27;s existing RX 6600 (confirms the <code>#else</code> branch is taken and   produces identical output to today&#x27;s plain kernel — no MFMA/WMMA path   testable locally without CDNA/RDNA3+ hardware, matching this project&#x27;s   existing &quot;verified as far as hardware allows&quot; caveats elsewhere). 3b   (stretch, separate task): RDNA2 <code>v_dot*</code> ALU-instruction acceleration —   real hardware acceleration, not tensor cores, a distinct design exercise.</p>
+<ul><li><strong>Phase 4 — wgpu.</strong> Software-fallback-only, <code>gpu.tensor.available = false</code></li></ul>
+<p>  permanently at the current pin. No implementation work beyond making sure   the <code>else</code> branch of any <code>gpu.tensor.*</code>-using kernel compiles correctly on   this backend. Revisit as its own future task once the wgpu dependency is   bumped past the version shipping <code>Features::EXPERIMENTAL_COOPERATIVE_MATRIX</code>.</p>
+<p>No prototype code accompanies this document. The parser/type-system change in Phase 0 (a new kind of generic local-variable type) is real, non-trivial surface area that this research pass did not attempt to validate against the real parser — attempting a &quot;minimal&quot; CUDA-only prototype without first landing and validating that prerequisite would risk shipping a syntax shape that doesn&#x27;t actually fit Boring&#x27;s grammar, which is worse than proposing a well-reasoned design and sequencing it properly.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

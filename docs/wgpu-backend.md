@@ -477,6 +477,7 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 | `computeCapability()` | CUDA SM version | always `[0, 0]` — not applicable |
 | Multi-device (`GPU(1)`, `new(g1) K`) | full support — distinct `CudaContext` per index | `GPU(n)`/`.name()`/`.maxThreads()`/etc. resolve to real, distinct physical adapters when more than one is present (see "`GPU` type on wgpu" above) — introspection only. `new(g1) K` (actually placing a kernel's *dispatch* on a specific device) is still not implemented; every kernel dispatches on the single global `device`/`queue` regardless of which `GPU(n)` it was constructed with |
 | Windows / Linux / macOS | Windows + Linux | yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu) |
+| Tensor-core (`gpu.tensor.*`) | not yet implemented | not yet implemented — WGSL has no cooperative-matrix primitive at this project's pinned wgpu version (~v22); real upstream work exists (`Features::EXPERIMENTAL_COOPERATIVE_MATRIX`, merged wgpu ~28.x) but postdates the pin. See [tensor-core primitives](tensor-core-primitives.html) for the proposed design and revisit trigger. |
 
 ### Will these gaps close?
 
