@@ -71,16 +71,20 @@ impl Transpiler {
                 // doesn't, the `else` branch below silently emits an invalid local `pub
                 // let` (or drops the item) instead of a module-level item.
                 if s.is_static || self.let_type_is_static(s) || self.is_gpu_target || s.is_pub || self.global_lets_used_elsewhere.contains(&s.name) {
-                    // Non-GPU only: a call into an external/opaque type (`Color.srgb(...)`,
-                    // `Vec2.new(...)`) or a plain string literal (`top_level_let_is_string_literal`)
-                    // that isn't itself scalar-safe -- `top_level_let_is_const_safe` still declines
-                    // both, so `top_level_let_is_promotable`'s only other ways to reach here are
+                    // A call into an external/opaque type (`Color.srgb(...)`, `Vec2.new(...)`)
+                    // or a plain string literal (`top_level_let_is_string_literal`) that isn't
+                    // itself scalar-safe -- `top_level_let_is_const_safe` still declines both,
+                    // so `top_level_let_is_promotable`'s only other ways to reach here are
                     // `top_level_let_external_call` and `top_level_let_is_string_literal`.
-                    // GPU/kernel targets never take this branch: `no_std` kernel code has neither
-                    // `std::sync::LazyLock` nor `Rc`/`Arc` to fall back to, and both
-                    // `top_level_let_is_string_literal` and `emit_program_items`'s GPU branch
-                    // (`top_level_let_is_const_safe`-gated) already keep every non-scalar `let`
-                    // away from this arm under `is_gpu_target`.
+                    // `external_call` is forced `None` under `is_gpu_target` just below (the
+                    // external-call detection is host-code-only, unrelated to string literals),
+                    // so GPU targets (metal/cuda/wgpu/rocm) never take the external-call branch
+                    // -- but DO take the string-literal branch just like any other target: their
+                    // *host* Rust is ordinary `std`, same `std::sync::LazyLock`/`Arc` available
+                    // as anywhere else. Only the wholly separate `no_std` kernel-module backend
+                    // (`transpiler::kernel`, Rust-for-Linux) truly lacks both, and it never
+                    // reaches this file's `emit_item` at all (its own `Item::Let` handling
+                    // lives in `transpiler/kernel/mod.rs`).
                     // `pub let` at module scope → `pub const`/`pub static`, mirroring `pub
                     // struct`/`pub def`/`pub enum` elsewhere. A bare `let` (no `pub`) keeps
                     // emitting a private item, matching prior behavior for code that never

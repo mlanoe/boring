@@ -3980,6 +3980,29 @@ impl Transpiler {
 
     // ── String interpolation ──────────────────────────────────────────────────
 
+    /// Emit `e` for use as a `format!`/`println!` argument (a Display-formatting
+    /// position, `{}`/`{:spec}`) rather than as an ordinary value. A promoted
+    /// top-level string constant (`global_string_const_names` — see
+    /// `top_level_let_is_string_literal`'s emission in emit_top.rs) is declared as
+    /// `static NAME: std::sync::LazyLock<Arc<str>> = ...` — `LazyLock<T>` never
+    /// implements `Display` even when `T` does (unlike a method call, which Rust
+    /// resolves through `Deref` automatically, `{}` formatting needs the concrete
+    /// argument type itself to implement `Display`), so a bare `self.emit_expr(e)`
+    /// here would hand `format!` a `LazyLock<Arc<str>>` argument and fail to compile
+    /// with `E0277`. One explicit `*` reaches the inner `Arc<str>`, which does
+    /// implement `Display`. Every other read of such a constant (a method call, a
+    /// `&`-coerced call argument) already works through ordinary `Deref` and needs no
+    /// special case — this is scoped to Display-formatting call sites only
+    /// (`build_format_string`/`build_macro_format_string`/`build_positional_format`).
+    fn emit_display_arg(&self, e: &Expr) -> String {
+        if let ExprKind::Var(n) = &e.kind {
+            if self.global_string_const_names.contains(n.as_str()) {
+                return format!("*{}", n);
+            }
+        }
+        self.emit_expr(e)
+    }
+
     pub(crate) fn emit_interp(&self, segs: &[StringSegment]) -> String {
         let (fmt, args) = self.build_format_string(segs);
         let str_ty = match self.config.threading {
@@ -4016,7 +4039,7 @@ impl Transpiler {
                     }
                 }
                 StringSegment::Expr(e) => {
-                    let expr_s = self.emit_expr(e);
+                    let expr_s = self.emit_display_arg(e);
                     // Vec collections: wrap in BoringFmt for Display without debug quotes.
                     // HashMap/HashSet: keep {:?} (no Display impl).
                     let is_vec_var = matches!(&e.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()))
@@ -4032,7 +4055,7 @@ impl Transpiler {
                 StringSegment::FormattedExpr(e, spec) => {
                     let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                     fmt.push_str(&format!("{{:{}}}", rust_spec));
-                    args.push(self.emit_expr(e));
+                    args.push(self.emit_display_arg(e));
                 }
             }
         }
@@ -4063,12 +4086,12 @@ impl Transpiler {
                 StringSegment::Expr(e) => {
                     // Boring interpolation inside a macro format string → keep as {}
                     fmt.push_str("{}");
-                    args.push(self.emit_expr(e));
+                    args.push(self.emit_display_arg(e));
                 }
                 StringSegment::FormattedExpr(e, spec) => {
                     let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                     fmt.push_str(&format!("{{:{}}}", rust_spec));
-                    args.push(self.emit_expr(e));
+                    args.push(self.emit_display_arg(e));
                 }
             }
         }
@@ -4113,7 +4136,7 @@ impl Transpiler {
                     }
                 }
                 StringSegment::Expr(e) => {
-                    let expr_s = self.emit_expr(e);
+                    let expr_s = self.emit_display_arg(e);
                     let is_vec_var = matches!(&e.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()))
                         || self.expr_field_is_array(e);
                     let is_col = looks_like_collection(&expr_s)
@@ -4127,7 +4150,7 @@ impl Transpiler {
                 StringSegment::FormattedExpr(e, spec) => {
                     let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                     fmt.push_str(&format!("{{:{}}}", rust_spec));
-                    combined.push(self.emit_expr(e));
+                    combined.push(self.emit_display_arg(e));
                 }
             }
         }
