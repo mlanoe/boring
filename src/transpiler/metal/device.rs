@@ -112,6 +112,13 @@ struct DeviceEmitter {
     auto_sync: bool,
     // Top-level scalar lets inlined into MSL (not in scope in kernel functions).
     top_level_scalars: std::collections::HashMap<String, String>,
+    /// Declared Boring types of the current function/method body's local `let`/`var`/`mut`
+    /// bindings, populated by `Stmt::Let` and cleared at the start of each device
+    /// function/method/entry-point body. Best-effort only -- just accurate enough for
+    /// `infer_shuffle_operand_type` to tell whether a `gpu.warp.shuffle_*` operand is
+    /// Boring's default `int`/`uint` (MSL `int64_t`/`uint64_t`), which needs the
+    /// int32-round-trip cast `gpu_warp_shuffle_msl` applies (see its doc comment).
+    locals: std::collections::HashMap<String, Type>,
     /// True while emitting the body of a `void`-returning device function/method --
     /// the tail statement of such a body must stay a bare expression statement
     /// (nothing to return), unlike a non-void function's tail expression.
@@ -127,6 +134,7 @@ impl DeviceEmitter {
             current_kernel: String::new(),
             auto_sync: false,
             top_level_scalars: std::collections::HashMap::new(),
+            locals: std::collections::HashMap::new(),
             current_fn_is_void: true,
         }
     }
@@ -208,6 +216,10 @@ impl DeviceEmitter {
         self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
+        self.locals.clear();
+        for p in &decl.params {
+            if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
+        }
         let last_idx = decl.body.len().saturating_sub(1);
         for (i, stmt) in decl.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
@@ -249,6 +261,10 @@ impl DeviceEmitter {
         self.line(&format!("static {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
+        self.locals.clear();
+        for p in &method.params {
+            if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
+        }
         let last_idx = method.body.len().saturating_sub(1);
         for (i, stmt) in method.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
@@ -258,6 +274,7 @@ impl DeviceEmitter {
     fn emit_entry_point(&mut self, decl: &KernelDecl, entry: &FnDecl) {
         // The entry point is always `void` (a GPU kernel entry has no return value).
         self.current_fn_is_void = true;
+        self.locals.clear();
         let fn_name = format!("{}_kernel", decl.name);
 
         // Build parameter list with [[buffer(N)]] and [[threadgroup(N)]] indices.
@@ -450,6 +467,16 @@ impl DeviceEmitter {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
                 let ty = s.ty.as_ref().map(msl_type).unwrap_or_else(|| "auto".into());
                 let kw = if mutable { "" } else { "const " };
+                // Track this binding's Boring type (explicit, or a best-effort guess from
+                // its initializer) so `infer_shuffle_operand_type` can later tell whether a
+                // `gpu.warp.shuffle_*` call on it needs the int32-round-trip cast.
+                let inferred_ty = s.ty.clone().or_else(|| match s.value.as_ref().map(|v| &v.kind) {
+                    Some(ExprKind::Int(_)) => Some(Type::Int),
+                    Some(ExprKind::Float(_)) => Some(Type::Float64),
+                    Some(ExprKind::Cast(_, ty)) => Some(ty.clone()),
+                    _ => None,
+                });
+                if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
                     self.line(&format!("{}{} {} = {};", kw, ty, msl_safe_ident(&s.name), rhs));
@@ -732,6 +759,33 @@ impl DeviceEmitter {
 
     // ── Expressions ───────────────────────────────────────────────────────────
 
+    /// Declared Boring type of a local binding or (via `self.field`) kernel field
+    /// named `name`, if tracked -- see `locals`'s doc comment.
+    fn local_or_field_type(&self, name: &str) -> Option<Type> {
+        self.locals.get(name).cloned()
+            .or_else(|| self.current_fields.iter().find(|f| f.name == name).map(|f| f.ty.clone()))
+    }
+
+    /// Best-effort Boring type of `expr`, just accurate enough for
+    /// `gpu_warp_method_call` to decide whether a `gpu.warp.shuffle_*` operand needs
+    /// the int32-round-trip cast Metal's `simd_shuffle*` requires for a 64-bit int
+    /// (see that function's doc comment). Resolves a local/`self.field` variable via
+    /// `local_or_field_type`, an explicit cast's target type, or a literal; anything
+    /// else (a binary op, an arbitrary call, ...) returns `None`, and the caller
+    /// leaves the value un-cast -- unchanged from before this inference existed.
+    fn infer_shuffle_operand_type(&self, expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Var(name) => self.local_or_field_type(name),
+            ExprKind::Field(obj, name) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
+                self.local_or_field_type(name)
+            }
+            ExprKind::Cast(_, ty) => Some(ty.clone()),
+            ExprKind::Int(_) => Some(Type::Int),
+            ExprKind::Float(_) => Some(Type::Float64),
+            _ => None,
+        }
+    }
+
     /// Value of an if/elif/else branch body: the trailing expression statement,
     /// or `"0"` if the branch has none.
     fn if_branch_value(&mut self, body: &[Stmt]) -> String {
@@ -818,7 +872,8 @@ impl DeviceEmitter {
             ExprKind::MethodCall(obj, method, args) => {
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
                 if is_gpu_warp_receiver(obj) {
-                    if let Some(msl) = gpu_warp_method_call(method, &args_s) {
+                    let operand_ty = args.first().and_then(|a| self.infer_shuffle_operand_type(&a.value));
+                    if let Some(msl) = gpu_warp_method_call(method, &args_s, operand_ty.as_ref()) {
                         return msl;
                     }
                 }
@@ -1108,15 +1163,38 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
 /// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — MSL
 /// SIMD-group intrinsics need no capability/mask handling (unlike CUDA's
 /// `_sync` mask), so these map straight across.
-fn gpu_warp_method_call(method: &str, args: &[String]) -> Option<String> {
-    match method {
-        "sync"         => Some("simdgroup_barrier(mem_flags::mem_none)".into()),
-        "shuffle_down" | "shuffleDown" => Some(format!("simd_shuffle_down({}, {})", args[0], args[1])),
-        "shuffle_up" | "shuffleUp"     => Some(format!("simd_shuffle_up({}, {})", args[0], args[1])),
-        "shuffle_xor" | "shuffleXor"   => Some(format!("simd_shuffle_xor({}, {})", args[0], args[1])),
-        "shuffle"      => Some(format!("simd_shuffle({}, {})", args[0], args[1])),
-        _ => None,
-    }
+///
+/// One real gap: Metal's `simd_shuffle*` template family is constrained by
+/// `__is_valid_simdgroup_type<T>`, which excludes 64-bit integers — only
+/// 32-bit-or-narrower scalar types (plus `float`/`bool`) are valid. Boring's
+/// default `int`/`uint` map to `int64_t`/`uint64_t` on this backend (see
+/// `msl_type`), so `simd_shuffle(v, lane)` on a plain `int` value compiles fine
+/// through `boring build` but is rejected by Metal's own compiler at first
+/// dispatch (`newLibraryWithSource`) with "no matching function for call to
+/// 'simd_shuffle'" — invisible until the kernel actually runs. When
+/// `operand_ty` resolves to `int64_t`/`uint64_t`, shuffle the value through a
+/// narrower `int32_t`/`uint32_t` view instead and cast back — safe for any
+/// value that actually fits in 32 bits, true of every real GPU-side integer
+/// use case in this domain. `operand_ty` is `None` when the operand's type
+/// couldn't be resolved (see `infer_shuffle_operand_type`); the call is then
+/// left unmodified, the same as before this cast existed.
+fn gpu_warp_method_call(method: &str, args: &[String], operand_ty: Option<&Type>) -> Option<String> {
+    let intrinsic = match method {
+        "sync" => return Some("simdgroup_barrier(mem_flags::mem_none)".into()),
+        "shuffle_down" | "shuffleDown" => "simd_shuffle_down",
+        "shuffle_up" | "shuffleUp"     => "simd_shuffle_up",
+        "shuffle_xor" | "shuffleXor"   => "simd_shuffle_xor",
+        "shuffle"                     => "simd_shuffle",
+        _ => return None,
+    };
+    let wide_ty = operand_ty.map(msl_type).filter(|t| t == "int64_t" || t == "uint64_t");
+    Some(match wide_ty {
+        Some(wide) => {
+            let narrow = if wide == "int64_t" { "int32_t" } else { "uint32_t" };
+            format!("({wide})({intrinsic}(({narrow})({}), {}))", args[0], args[1])
+        }
+        None => format!("{intrinsic}({}, {})", args[0], args[1]),
+    })
 }
 
 #[test]

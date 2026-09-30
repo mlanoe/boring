@@ -235,6 +235,41 @@ kernel W:
     assert!(msl.contains("simd_shuffle_up("), "expected simd_shuffle_up;\ngot:\n{msl}");
     assert!(msl.contains("simd_shuffle_xor("), "expected simd_shuffle_xor;\ngot:\n{msl}");
     assert!(msl.contains("simd_shuffle("), "expected simd_shuffle;\ngot:\n{msl}");
+    // `buf`'s element type is `float` (MSL `float`, simdgroup-valid) — none of the
+    // four shuffle calls above need the int32 round-trip cast added below.
+    assert!(!msl.contains("int32_t"), "float shuffle should stay uncast;\ngot:\n{msl}");
+}
+
+/// Regression test for a real bug found via `perso/boring-llm`: Metal's
+/// `simd_shuffle*` template family rejects 64-bit integers
+/// (`__is_valid_simdgroup_type<long>` is false), but Boring's default `int`
+/// maps to MSL `int64_t` — so `gpu.warp.shuffle` on an `int` local compiled
+/// fine through `boring build` but panicked at first kernel dispatch with
+/// "no matching function for call to 'simd_shuffle'" (confirmed on real
+/// Apple Silicon hardware). Fixed by shuffling through a narrower
+/// `int32_t` view and casting back.
+#[test]
+fn device_gpu_warp_shuffle_int_operand_gets_int32_roundtrip() {
+    let (msl, _) = metal_codegen("gpu_warp_shuffle_int", r#"
+kernel W:
+    mut [float]'unified out
+    def ():
+        let tid = gpu.thread.x
+        var int v = 0
+        v = gpu.warp.shuffle(v, 0)
+        var int w = 0
+        w = gpu.warp.shuffle_down(w, 1)
+        out[tid] = v as float32 + w as float32
+"#);
+    assert!(
+        msl.contains("(int64_t)(simd_shuffle((int32_t)(v_), 0))")
+            || msl.contains("(int64_t)(simd_shuffle((int32_t)(v), 0))"),
+        "expected int32-round-tripped simd_shuffle for `int` operand;\ngot:\n{msl}"
+    );
+    assert!(
+        msl.contains("(int64_t)(simd_shuffle_down((int32_t)(w")
+        , "expected int32-round-tripped simd_shuffle_down for `int` operand;\ngot:\n{msl}"
+    );
 }
 
 #[test]
@@ -792,6 +827,41 @@ print "{k1.buf[0]}"
         "expected the copy helper to actually copy buffer contents;\ngot:\n{rs}");
     assert!(rs.contains("Scale::new(boring_metal_device(), __boring_metal_buffer_copy(&boring_metal_device(), &k1.buf)?)"),
         "expected the k2 constructor call to use the real copy helper, not a bare Buffer::clone() retain;\ngot:\n{rs}");
+}
+
+#[test]
+fn read_only_kernel_input_reuses_explicitly_resident_local_buffer() {
+    let (_, rs) = metal_codegen("resident_read_only_input", r#"
+kernel Produce:
+    mut [float]'unified out
+    init([float]'unified initial):
+        out = initial
+    def ():
+        out[gpu.thread.x] = 1.0
+
+kernel Consume:
+    let [float]'global input
+    mut [float]'unified out
+    init([float]'global value, [float]'unified result):
+        input = value
+        out = result
+    def ():
+        out[gpu.thread.x] = input[gpu.thread.x]
+
+req [float]'gpu'unified produce() throws:
+    mut p = Produce([0.0, 0.0])
+    kernel:
+        p(block = 2)
+    p.out
+
+def main() throws:
+    let [float]'gpu'unified value = produce()
+    mut c = Consume(value, [0.0, 0.0])
+    kernel:
+        c(block = 2)
+"#);
+    assert!(rs.contains("BoringGpuArg::Resident(buf, _) => buf.clone()"),
+        "read-only Metal input should retain the resident Buffer without copying its contents:\n{rs}");
 }
 
 // ─── host — struct `count`/`length` field & method shadowing ─────────────────
