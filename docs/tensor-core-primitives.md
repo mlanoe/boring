@@ -1,10 +1,38 @@
 # `gpu.tensor.*` — portable matrix operations on labeled arrays
 
-> **Status: proposed design, not implemented.** The examples reuse Boring's
-> existing arrays, qualifiers, kernel declarations, and dispatch syntax.
-> `gpu.tensor.matmul` and `gpu.tensor.mma`, their collective semantics, and
-> their backend implementations are new work. This document replaces the
-> earlier proposal for public hardware-fragment types.
+> **Status: device tile fallback, host CPU/interpreter fallback, and automatic
+> fixed-shape host GPU dispatch are implemented; native matrix acceleration is
+> not implemented.**
+> CamelCase GPU names and compatibility
+> aliases are implemented. Validated `gpu.tensor.matmulTile` and `mmaTile`
+> calls run in the interpreter and lower to scalar code on CUDA, Metal, ROCm,
+> and wgpu. Top-level host `gpu.tensor.matmul`/`mma` calls synthesize private
+> multi-block kernels on all four GPU targets.
+
+## Accepted API direction (2026-09-30)
+
+The decisions in this section supersede the earlier single-block milestone
+and the open multi-block question in the feasibility review below.
+
+- Keep `gpu.` explicit in host and kernel code. No leading-dot shorthand or
+  implicit `tensor`/`warp`/`block` aliases are proposed.
+- Use camelCase: `blockDim`, `gridDim`, `shuffleDown`, `shuffleUp`,
+  `shuffleXor`, `matmulTile`, and `mmaTile`. Existing snake_case GPU names
+  remain compatibility aliases during migration.
+- Host `gpu.tensor.matmul(a, b, c)` and `gpu.tensor.mma(a, b, c)` own
+  dispatch. Inputs and the preallocated mutable output use existing
+  `'gpu'global` or `'gpu'unified` qualifiers. No new qualifier is introduced.
+- Device `gpu.tensor.matmulTile` and `gpu.tensor.mmaTile` are block
+  collectives. Explicit `row`, `col`, `rows`, and `cols` select the output
+  region; initially tile extents are compile-time constants. Each block
+  reduces over all K and owns a disjoint output tile. Handle output edges
+  without out-of-bounds accesses. No split-K or grid-wide barrier is implied.
+- Host dispatch partitions M/N into output tiles. Dependent whole-matrix
+  operations use ordered kernel launches, not block barriers. The developer
+  owns disjointness for explicit device calls; the host API guarantees it.
+Transpose flags, optional bias, runtime shape validation, and host scheduling
+still need their detailed contracts finalized. The existing compiler review
+remains relevant to each tile's checking and memory visibility.
 
 ## Objective
 
@@ -20,10 +48,9 @@ PyTorch implementation, autograd, a graph compiler, or a dynamically ranked
 universal Tensor class. Boring already has typed, labeled multidimensional
 arrays, including axes whose extents are known only at runtime.
 
-The initial API is device-side and block-collective. Unlike a host-side
-PyTorch call, it executes inside a user-written kernel. A future host API
-could arrange an entire multi-block multiplication automatically; that is a
-separate execution contract.
+The device API is block-collective and executes inside a user-written kernel.
+The host API arranges the same tiled multi-block multiplication automatically;
+it has a separate execution contract because it owns dispatch.
 
 ## Design decisions
 
@@ -67,21 +94,56 @@ Matching label names alone neither proves equal extents nor requests an
 implicit transpose. Arbitrary axis contraction, strided/transposed views,
 and broadcasting are later extensions requiring their own contracts.
 
-The checker verifies fixed extents. Dynamic extents require validation before
-dispatch: A.K = B.K, C.N = B.N, and C.M = A.M. The initial implementation
-should start with fixed extents; runtime shapes must not be advertised until
-validation, allocation, and codegen are implemented together.
+The checker verifies fixed extents. The runtime `linear` overload takes explicit
+`m`, `n`, and `k` arguments because flat GPU buffers do not carry axis extents in
+their type. The interpreter, ordinary CPU fallback, and synthesized GPU host
+code reject non-positive dimensions and validate all three buffer lengths before
+dispatch.
 
 ## API
 
 ```boring
-gpu.tensor.matmul(a, b, c)   # c = a × b
-gpu.tensor.mma(a, b, c)      # c = a × b + c
+gpu.tensor.matmulTile(a, b, c, row = row, col = col, rows = 16, cols = 16)
+gpu.tensor.mmaTile(a, b, c, row = row, col = col, rows = 16, cols = 16)
+gpu.tensor.linearTile(x, weight, y, row = row, col = col, rows = 16, cols = 16)
 ```
 
-Both functions operate on all elements of the supplied rank-two arrays.
-`matmul` does not read the previous destination values. `mma` requires an
-initialized destination. Neither operation allocates the public output.
+Both functions reduce over the complete K dimension and operate on the
+selected `rows` by `cols` output tile, clipped at the M/N boundaries.
+`matmulTile` does not read previous destination values. `mmaTile` requires an
+initialized destination and adds the product to it. Neither operation
+allocates the public output. `rows` and `cols` are positive compile-time
+integer literals in the initial implementation; `row` and `col` are uniform,
+non-negative integer expressions shared by every thread in the block.
+
+`linearTile` has the overwrite behavior of `matmulTile`, but accepts the right
+operand in the row-major weight layout used by PyTorch linear layers and GGUF:
+A is `[K,M]`, weight is `[K,N]`, and C is `[N,M]`. It computes
+`A * weight transpose` without materializing a transposed weight buffer. The
+whole-operation spelling is `gpu.tensor.linear(x, weight, y)`. Bias remains a
+separate operation in this milestone.
+
+For runtime dimensions, the implemented host spelling is:
+
+```boring
+req [float32]'gpu'unified linear(
+    [float32]'gpu'global x,
+    [float32]'gpu'global weight,
+    int seq,
+    int dOut,
+    int dIn,
+) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<seq * dOut]
+    gpu.tensor.linear(x, weight, y, m = seq, n = dOut, k = dIn)
+    y
+```
+
+This overload accepts flat float32 arrays in either `'gpu'global` or
+`'gpu'unified` storage. It assigns one output element to each GPU thread and
+derives a one-dimensional multi-block launch from `m * n`. Calls must be direct
+function-body statements for GPU builds, and the containing function must
+declare `throws`. Returning the destination immediately returns the generated
+kernel's resident output and avoids a host readback.
 
 The initial numeric profile is float32 inputs, float32 accumulation, and
 float32 output. It must have a loop implementation on CUDA, Metal, ROCm, and
@@ -129,12 +191,13 @@ in shared memory, or use scalar loops. Thread counts and resource limits
 can prevent a native path; select the fallback in that case. The initial
 contract must not require a fixed hardware subgroup size.
 
-The first version supports a single block for a whole-array invocation.
-Enforce an explicit one-block launch for kernels using this restricted form;
-do not infer a conventional per-element grid from the output shape. Multiple
-blocks calling the operation on the same arrays would race. Scalable
-multi-block execution requires disjoint tile views or a separate host-level
-API, neither of which is silently supplied by this proposal.
+Multiple blocks may call the operation on the same arrays when their output
+tiles are disjoint. The normal mapping is `row = gpu.block.y * rows` and
+`col = gpu.block.x * cols`, with grid dimensions `ceil(N / cols)` by
+`ceil(M / rows)`. The compiler checks that origins are block-uniform, but the
+explicit device API leaves disjointness to the developer. Overlapping output
+tiles are a data race. The host API computes the normal mapping and guarantees
+disjoint ownership.
 
 ## Memory qualifiers remain the developer's choice
 
@@ -172,29 +235,32 @@ uses float32 to avoid making half-precision support a prerequisite.
 
 ```boring
 kernel MatrixMul:
-    let [float32, k = 32, m = 32]'global a
-    let [float32, n = 32, k = 32]'global b
-    mut [float32, n = 32, m = 32]'unified c
+    let [float32, k = 35, m = 33]'global a
+    let [float32, n = 67, k = 35]'global b
+    mut [float32, n = 67, m = 33]'unified c
 
-    init([float32, k = 32, m = 32]'global input_a,
-         [float32, n = 32, k = 32]'global input_b):
+    init([float32, k = 35, m = 33]'global input_a,
+         [float32, n = 67, k = 35]'global input_b):
         a = input_a
         b = input_b
         # Fixed-size c is automatically zero-initialized.
 
     def ():
-        gpu.tensor.matmul(a, b, c)
+        let row = gpu.block.y * 16
+        let col = gpu.block.x * 16
+        gpu.tensor.matmulTile(a, b, c, row = row, col = col,
+                             rows = 16, cols = 16)
 
-var [float32] host_a = [float32(i % 7) for i in 0..<32 * 32]
-var [float32] host_b = [float32(i % 5) for i in 0..<32 * 32]
+var [float32] host_a = [float32(i % 7) for i in 0..<35 * 33]
+var [float32] host_b = [float32(i % 5) for i in 0..<67 * 35]
 
 var multiplication = MatrixMul(
-    host_a.reshape(k = 32, m = 32),
-    host_b.reshape(n = 32, k = 32)
+    host_a.reshape(k = 35, m = 33),
+    host_b.reshape(n = 67, k = 35)
 )
 
 kernel:
-    multiplication(block = (32, 1), grid = (1, 1))
+    multiplication(block = (32, 1), grid = ((67 + 15) / 16, (33 + 15) / 16))
 
 let result = multiplication.c.flatten()
 with result:
@@ -202,9 +268,10 @@ with result:
     print "C[0, 1] = {result[1]}"
 ```
 
-The one-dimensional block is an example launch configuration, not an API
-restriction. A portable lowering linearizes x/y/z thread indices when the
-block is multidimensional.
+The final blocks in both dimensions are partial tiles. The implementation
+clips them without out-of-bounds accesses. The one-dimensional block is an
+example launch configuration, not an API restriction. A portable lowering
+linearizes x/y/z thread indices when the block is multidimensional.
 
 ## Reference fallback
 
@@ -325,23 +392,87 @@ Q8 weights alone are not sufficient for an int8 multiplication path.
 Quantized matmul deserves a separate API contract rather than hidden behavior
 inside ordinary `matmul`. This document does not choose that API yet.
 
+## `boring-llm` migration gap review (2026-09-30)
+
+The current tensor milestone cannot yet replace `boring-llm`'s production
+matrix kernels. That project exposes the concrete requirements more precisely
+than a generic tensor example:
+
+- Model dimensions and sequence lengths come from GGUF metadata and the KV
+  cache at runtime. The six-argument `linear` overload now accepts runtime
+  `seq`, `d_in`, and `d_out` values for flat float32 buffers and validates them
+  before dispatch.
+- Linear operations are called inside reusable `req` functions and loops. The
+  GPU host rewrite now accepts direct statements in function bodies as well as
+  at top level; calls nested in control flow still need scheduling support.
+- GGUF stores each weight output row contiguously as `(d_out, d_in)`. The
+  implemented `linear` and `linearTile` operations read that layout directly
+  and compute `x * W transpose` without a transposed weight copy.
+- Q/K/V projections add a one-dimensional bias. A separate device-resident
+  broadcast-add operation is sufficient for correctness, while a matmul
+  epilogue may later avoid another dispatch and memory pass.
+- Intermediate values are chained through many GPU operations. An immediately
+  returned tensor result remains device-resident and is read back only at a
+  host-access boundary. Generated constructors still copy resident inputs into
+  each kernel-owned buffer, so zero-copy buffer reuse and dependent launch
+  scheduling remain necessary for production migration.
+- The production path keeps weights packed as `uint8` and performs fused
+  dequantization for Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q6_K, and IQ4_NL.
+  Ordinary float32 `matmul` can replace only the unquantized development path.
+- Single-token decode (`seq == 1`) is a matrix-vector workload. Existing
+  `boring-llm` measurements select warp-broadcast kernels for the 32-element
+  Q4_0/Q5_0/Q8_0/IQ4_NL formats and tiled kernels for prefill. A generic
+  tensor implementation must retain shape-aware selection or demonstrate an
+  equal or better measured path before replacing those kernels.
+- Attention needs runtime rank-three batched products, a mapping from query
+  heads to shared KV heads for GQA, a transposed K operand, and separate causal
+  mask and softmax stages. Rank-two matmul can migrate linear layers first but
+  cannot replace the attention kernels by itself.
+
+The minimum compiler work for a useful float32 migration is therefore:
+
+1. Extend the implemented direct-function-body scheduling to structured
+   control flow.
+2. Reuse resident buffers without device-to-device copies across dependent calls.
+3. Extend the implemented GGUF-oriented float32 `linear` path to the required
+   packed quantized formats.
+4. Provide output allocation or a concise way to create a correctly shaped
+   mutable destination from runtime extents.
+5. Provide a device-resident bias broadcast/add operation, whether as a tensor
+   epilogue or an independently fusible elementwise operation.
+
+After that baseline, migrate and benchmark the unquantized `linear_gpu` path.
+The next independent milestone is a quantized matrix operation whose format
+contract describes packed bytes, block geometry, scales/minima/codebooks, and
+the float32 accumulation policy. It should reuse the existing verified
+`boring-llm` decoding formulas initially; treating quantization as a hidden
+conversion inside ordinary `matmul` would make type, storage, and precision
+behavior too implicit.
+
+Attention should follow only after runtime rank-two scheduling is stable. Its
+first extension should be a statically ranked, dynamically sized batched
+matmul with explicit batch/head mapping and transpose semantics. Masking and
+softmax remain separate operations unless profiling demonstrates that a fused
+attention contract is necessary.
+
 ## Implementation sequence and acceptance criteria
 
 ### Phase 0 — finalize the operation contract
 
 Specify rank-two axis ordering, accepted qualifiers, fixed-shape checking,
-non-aliasing, collective participation, one-block dispatch validation, and
+non-aliasing, collective participation, disjoint tile ownership, and
 float32 numerical behavior. Reuse the existing parser and array types;
 add builtin resolution/checking rather than new generic fragment syntax.
 
 ### Phase 1 — portable correctness baseline
 
-Implement `matmul` and `mma` for fixed-size float32 global/unified arrays in
-the interpreter and all four GPU backends. Use distributed scalar loops.
-Verify rectangular matrices, tails, `mma` initialization, more/fewer outputs
-than threads, multidimensional blocks, and permitted zero extents. Reject
+Implement `matmulTile` and `mmaTile` for fixed-size float32 global/unified
+arrays in the interpreter and all four GPU backends. Use distributed scalar
+loops. Verify rectangular matrices, tails, `mmaTile` initialization,
+more/fewer outputs than threads, multidimensional blocks, and multi-block
+tiling. Reject
 incompatible shapes, immutable outputs, invalid types, and provable aliasing
-or divergent participation. Reject multi-block launches for the initial API.
+or divergent participation. Fixed extents and tile sizes must be positive.
 
 Check generated sources with real backend compilers where available.
 Snapshots alone cannot establish shader validity or numerical correctness.
@@ -355,13 +486,12 @@ Keep a way for tests/benchmarks to force the fallback. Compare both paths for
 correctness and end-to-end time, including staging and synchronization.
 Measure multiple shapes; selecting native instructions is not itself a win.
 
-### Phase 3 — dynamic shapes and scalable execution
+### Phase 3 — host dispatch and dynamic shapes
 
-Add runtime shape validation and output allocation integration. Design either
-explicit disjoint tile operands for multi-block kernels or a host-side matmul
-that owns dispatch. Validate address spaces before admitting shared `'actor`
-operands. Add equal-shaped batch axes before considering broadcasting or
-arbitrary contractions.
+The fixed-shape host-side `matmul`/`mma` operation owns multi-block dispatch.
+Next, add runtime shape validation and output allocation integration. Validate
+address spaces before admitting shared `'actor` operands. Add equal-shaped
+batch axes before considering broadcasting or arbitrary contractions.
 
 ### Phase 4 — quantized and specialized workloads
 
@@ -372,14 +502,14 @@ use case cannot be expressed through the array operation contract.
 
 ## Implementation feasibility review (2026-09-29)
 
-This is a source review of the current compiler, not a compiled tensor
-prototype or a device validation. The operation is feasible without changing
-surface grammar, but collective checking and memory visibility are substantial
-prerequisites. The following findings refine the phases above.
+This review predates the implementation described at the end of this file.
+It established that the operation was feasible without changing surface
+grammar and identified the compiler work required by collective checking and
+memory visibility. The progress section records which items are now complete.
 
 | Area | Evidence in the current source | Consequence |
 |---|---|---|
-| Syntax | `src/parser/parse_expr.rs`, `parse_postfix_inner`, already builds `MethodCall` for dotted calls; labeled types already exist | No parser production is needed for `gpu.tensor.matmul(a,b,c)` |
+| Syntax | `src/parser/parse_expr.rs`, `parse_postfix_inner`, already builds `MethodCall` for dotted calls; labeled types already exist | No parser production is needed for `gpu.tensor.matmulTile(a, b, c, row = ..., col = ..., rows = ..., cols = ...)` |
 | Kernel checking | `src/checker/rust_checks.rs`, `check_kernel_decl`, checks field shapes and axis count only; the generic method-call visitor in `src/checker/mod.rs` just visits receiver/arguments | Add a kernel-body validation pass with field types, mutation effects, device context, arity, shapes, and collective restrictions |
 | Dynamic shapes | `src/main.rs` runs `desugar_labeled_array` before the checker; `desugar_kernel_decl` in `src/desugar_labeled_array.rs` replaces dynamic labeled fields with flat arrays and extent fields | Preserve shape metadata or resolve tensor operations before this information is erased; fixed-size fields avoid this issue initially |
 | Qualifiers | CUDA/ROCm device emitters group Global/Unified into buffer arguments; Metal emits device pointers for both; wgpu also treats them as storage-backed fields | Existing device storage can be reused; no tensor qualifier is needed. Host residency behavior must remain unchanged |
@@ -402,9 +532,10 @@ These are review recommendations, not already implemented guarantees:
   global or unified, with a mutable output. Resolve shape by axis position,
   not by special label names. Shared fields, views, aliases, dynamic extents,
   and zero-size buffers follow after explicit support and tests.
-- Require an explicit one-block launch. Validate constant launch dimensions
-  statically and runtime launch values on the host; every dispatch route,
-  including the interpreter, must enforce the same restriction.
+- Require explicit tile origins and extents. Accept multi-block launches when
+  the caller maps blocks to disjoint output tiles. The checker proves block
+  uniformity of accepted origin expressions; output disjointness remains a
+  caller obligation for the explicit device API.
 - Reject a destination that names either input. Distinct field names do not
   prove distinct allocations: validate underlying buffer identity/ranges
   before dispatch where aliasing is possible. Do not advertise complete
@@ -433,21 +564,17 @@ single host read after dispatch would miss.
 
 Rejected examples should cover wrong arity, incompatible extents, immutable
 outputs, output/input aliasing, calls outside a kernel, conditional calls,
-unsupported types, and multi-block launches. Include distinct fields backed
-by an overlapping allocation when the host representation permits it.
+unsupported types, and lane-dependent tile origins. Include distinct fields
+backed by an overlapping allocation when the host representation permits it.
 
-### Remaining architectural decision
+### Multi-block decision
 
-The one-block API is a valid correctness milestone, not a scalable GEMM
-solution. Before optimizing it, choose how whole-array operations scale:
-explicit disjoint tile views inside kernels, or a separate host operation
-that owns dispatch. Keep the block scope stable; silently turning the same
-call into a grid-wide collective would change its synchronization semantics.
-
-Recommendation: implement the restricted collective baseline first, including
-its checker and coherent interpreter model. Decide the multi-block extension
-before investing in native fragment codegen. No hardware-specific research
-is needed to discover these compiler prerequisites.
+Whole-array operations scale over M and N. Each device call remains a
+block-scoped collective and receives an explicit output origin and literal
+tile extents. The caller maps blocks to disjoint tiles; no grid-wide barrier
+or split-K reduction is implied. A host operation will own this mapping and
+dispatch a private kernel. This keeps device synchronization local while
+providing a PyTorch-like whole-operation entry point.
 
 ## References and research boundaries
 
@@ -467,3 +594,125 @@ Exact native shape/type tables, architecture gates, and dependency versions
 must be verified when implementing each accelerated path. This revision does
 not carry forward the old proposal's unverified generation-specific claims
 or extrapolate vendor benchmark numbers into expected Boring speedups.
+
+## Implementation progress (2026-09-30)
+
+`src/checker/tensor.rs` now resolves direct field operands into a common tile
+operation description: operation kind, operand identities, M/N/K, origin
+expressions, and literal tile extents. Direct kernel call statements pass
+through this check in both interpreter and GPU-build checker modes.
+
+Current checks cover positional operands, named tile arguments, float32
+rank-two positive literal shapes, global/unified storage, mutable output,
+obvious same-field aliasing, dimensional compatibility, and size overflow.
+Axis labels are descriptive; operand position determines the contraction.
+
+The collective context check now scans nested expressions and control flow.
+It rejects calls in constructors/helper methods, nested calls, operand or GPU
+namespace shadowing, and calls following an unverified control-flow or
+side-effecting prefix. The initial accepted prefix consists of comments and
+immutable integer coordinate bindings. Origins may use non-negative literals,
+previously validated bindings, block indices/dimensions, and addition or
+multiplication. Lane values, memory reads, casts, and arbitrary calls are not
+accepted as origins. This deliberately conservative analysis can be extended
+without weakening collective participation requirements.
+
+Runtime buffer aliasing and proof of disjoint output ownership remain caller
+obligations for explicit device tile calls. Origin addition uses saturating
+bounds in the interpreter and pre-addition range guards in generated code.
+Top-level host calls are lowered before target emission. Calls nested in
+functions or control flow are rejected until their scheduling semantics are
+defined.
+
+Unit tests exercise rectangular shapes, tail tiles, accumulation, and invalid
+contracts. CLI tests verify diagnostics for `boring run` and all four GPU
+build targets without relying on vendor toolchains.
+
+## Scalar backend lowering (2026-09-30)
+
+A common scalar fallback now exists in `src/transpiler/tensor.rs` and is
+connected to the CUDA, ROCm, Metal and wgpu device emitters. It consumes the
+resolved operation, preserves backend-specific buffer names, linearizes all
+three thread dimensions, and assigns each output element to one lane.
+
+The implementation supports rectangular matrices, partial edge tiles, tiles
+wholly outside the output, overwrite (`matmulTile`) and accumulation
+(`mmaTile`). Origin bounds are checked before adding offsets. Temporary
+identifiers are scoped and avoid hiding rendered buffer/origin names.
+Entry and exit synchronization uses CUDA/HIP block barriers, Metal device
+and threadgroup memory flags, and WGSL storage/workgroup barriers.
+
+Device tile calls are now active. Explicit kernels own their launch geometry
+and must map blocks to disjoint output regions. The host API owns this mapping
+for fixed-shape calls.
+
+The generated CUDA/HIP-style scalar body is compiled as ordinary C++ in a
+CPU harness and compared against matrix multiplication for a 3×5 times 5×7
+case, multiple block shapes, multiple output tiles, overwrite followed by
+accumulation, and guarded output sentinels. The harness replaces barriers
+with no-ops and invokes lanes sequentially: it validates arithmetic and
+indexing, **not GPU memory ordering**. Separate emitter tests cover all four
+backends and WGSL buffer renaming.
+
+Real frontend compilation was also verified on 2026-09-30 for a rectangular,
+multi-block kernel containing consecutive `matmulTile` and `mmaTile` calls:
+
+- Apple Metal Toolchain 27A266a compiled MSL to AIR and linked a metallib;
+- Naga CLI 30.0.1 parsed and validated the generated WGSL;
+- CUDA 12.6 `nvcc` and `ptxas` compiled the generated CUDA for `sm_70`,
+  `sm_75`, `sm_80`, `sm_86`, `sm_89`, and `sm_90`;
+- ROCm HIP 6.2 compiled the generated HIP code for `gfx1030`, `gfx1100`,
+  `gfx1101`, `gfx90a`, and `gfx942`.
+
+These checks establish source validity across the architectures currently
+listed by the repository validation scripts. Real GPU numerical execution and
+memory-ordering validation remain outstanding.
+
+The interpreter executes each block collective once, on that block's linear
+lane zero, after all lanes have evaluated the arguments. Its existing merge
+combines disjoint block writes. This produces the same mathematical result for
+validated calls and supports consecutive `matmulTile`/`mmaTile` calls in the
+same block. It does not model instruction-level scheduling or barrier timing;
+the conservative checker continues to reject divergent or nested calls.
+
+## Host operation progress (2026-09-30)
+
+The common checker now accepts `gpu.tensor.matmul(a, b, c)` and
+`gpu.tensor.mma(a, b, c)` for three direct, explicitly typed host variables.
+All operands must be fixed-size rank-two float32 labeled arrays with
+`'gpu'global` or `'gpu'unified` residency, and the destination binding must be
+mutable and distinct from both inputs. Shape ordering and compatibility are
+identical to the device API.
+
+`boring run` executes the whole operation and the ordinary Rust backend lowers
+it to portable nested loops. Both paths support overwrite followed by
+accumulation and validate backing-array lengths.
+
+CUDA, Metal, ROCm, and wgpu builds rewrite each top-level host call into a
+private fixed-shape kernel. The generated host code uploads or binds A, B, and
+the initial C value, dispatches a 16-by-16 logical output tiling (smaller for
+small matrices), then assigns the downloaded result back to C. `matmul`
+overwrites C in the device operation; `mma` uses its uploaded value as the
+accumulator. Consecutive calls are therefore ordered correctly, although the
+current implementation may transfer an intermediate C back to the host and
+upload it again rather than retaining it on the device.
+
+Automatic dispatch accepts direct top-level calls and direct statements in
+function bodies, including `req` functions. Operands must be named variables
+with types visible at the call site. GPU-target functions declare `throws`
+because kernel construction and dispatch can fail. When the destination is
+returned immediately, the lowering returns the synthesized kernel field
+directly; wgpu consequently preserves it as a resident buffer without an
+intermediate device-to-host copy. Calls nested in control flow, dynamic
+extents, output allocation, batching, bias, and device-residency reuse remain
+future work. `linear`/`linearTile` support the transposed row-major weight
+orientation without a copy. Native matrix instructions remain a backend
+optimization after the portable behavior is validated on real hardware.
+
+Generated host projects were checked offline with Rust for Metal and wgpu. The
+synthesized Metal shaders compile to AIR and metallib with Apple Metal
+Toolchain 27A266a, and Naga 30.0.1 validates the synthesized WGSL. CUDA and
+ROCm device-source validation uses the same scalar tile lowering already
+compiled for the explicit device API. This environment exposes neither a Metal
+device nor a wgpu adapter to the test process, so numerical execution of the
+automatically dispatched kernels on real GPU hardware remains outstanding.

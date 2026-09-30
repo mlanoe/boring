@@ -619,6 +619,11 @@ impl Interpreter {
     /// property mocks, the immutable-`let`-binding mutating-method diagnostic, and an
     /// ordinary struct method call with its modified-`self`/owned-param write-back.
     fn eval_expr_method_call(&mut self, obj_expr: &Expr, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        if let ExprKind::Field(inner, ns) = &obj_expr.kind {
+            if ns == "tensor" && matches!(&inner.kind, ExprKind::Var(g) if g == "gpu") {
+                return self.eval_gpu_tensor_method(method, args, env, line);
+            }
+        }
         // `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — matched
         // purely on the receiver's AST shape (`gpu.warp` is never evaluated as a
         // real value; only `.size`/`.lane` field access goes through the `GpuWarp`

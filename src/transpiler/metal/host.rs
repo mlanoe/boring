@@ -3306,6 +3306,7 @@ fn rust_type(ty: &Type) -> String {
             other           => return other.to_string(),
         }.into(),
         Type::TypeParam(p)     => p.clone(),
+        Type::Mut(inner)       => rust_type(inner),
         Type::Qualified(inner, _) => rust_type(inner),
         Type::Generic(n, args) => {
             let s: Vec<String> = args.iter().map(rust_type).collect();

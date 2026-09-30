@@ -95,6 +95,8 @@ pub struct RocmOutput {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutput {
+    let tensor_host = crate::transpiler::tensor_host::lower(program);
+    let program = &tensor_host.program;
     // Collect all kernel names.
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }
@@ -187,6 +189,7 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
 
     let mut errors = general_out.errors;
     errors.extend(struct_errors);
+    errors.extend(tensor_host.errors);
     RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors }
 }
 

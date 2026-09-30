@@ -315,6 +315,7 @@ impl Checker {
     // isn't this check's job.
 
     pub(super) fn check_kernel_decl(&mut self, k: &KernelDecl) {
+        self.check_direct_tensor_calls(k);
         for field in &k.fields {
             if let Some(msg) = field.ty.labeled_array_shape_error() {
                 self.error(msg, field.line, field.col);

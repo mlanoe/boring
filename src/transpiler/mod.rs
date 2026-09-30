@@ -5624,6 +5624,25 @@ mod tests {
     }
 
     #[test]
+    fn host_tensor_calls_lower_to_portable_rust_loops() {
+        let src = "let [float32, k = 5, m = 3]'gpu'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'gpu'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified c = [float32(0) for ..<21]\ngpu.tensor.matmul(a, b, c)\ngpu.tensor.mma(a, b, c)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert_eq!(code.matches("for __boring_tensor_row in 0usize..3usize").count(), 2);
+        assert!(code.contains("for __boring_tensor_col in 0usize..7usize"));
+        assert!(code.contains("for __boring_tensor_k in 0usize..5usize"));
+        assert!(code.contains("let mut __boring_tensor_sum: f32 = 0.0f32"));
+        assert!(code.contains("let mut __boring_tensor_sum: f32 = c["));
+        assert!(!code.contains("gpu::tensor"));
+    }
+
+    #[test]
+    fn host_tensor_linear_uses_row_major_weights() {
+        let src = "let [float32, k = 5, m = 3]'gpu'global x = [float32(i) for i in 0..<15]\nlet [float32, k = 5, n = 7]'gpu'global w = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified y = [float32(0) for ..<21]\ngpu.tensor.linear(x, w, y)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("w[__boring_tensor_col * 5 + __boring_tensor_k]"), "{code}");
+    }
+
+    #[test]
     fn test_managed_multi_wraps_owned() {
         // T'owned → Arc<Mutex<T>> in managed+multi; plain Named is NOT wrapped.
         let src = "struct Counter:\n    init(pub int n)\ndef Counter'owned make(): Counter(n = 5)\n";
@@ -6726,3 +6745,6 @@ stream int streamFn():\n    yield 1\n";
             "Method's struct definition must carry the new `isCallable` field, got:\n{}", code);
     }
 }
+
+mod tensor;
+mod tensor_host;

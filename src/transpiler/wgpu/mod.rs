@@ -52,6 +52,8 @@ pub struct WgpuOutput {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutput {
+    let tensor_host = crate::transpiler::tensor_host::lower(program);
+    let program = &tensor_host.program;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }
     }).collect();
@@ -113,6 +115,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     let mut errors = general_out.errors;
     errors.extend(device_errors);
     errors.extend(host_errors);
+    errors.extend(tensor_host.errors);
     WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors }
 }
 

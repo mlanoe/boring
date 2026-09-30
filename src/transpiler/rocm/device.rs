@@ -276,6 +276,15 @@ impl DeviceEmitter {
                 }
             }
             Stmt::Expr(e) => {
+                if crate::checker::tensor::is_tensor_call(e) {
+                    let fields = self.current_fields.clone();
+                    let source = crate::transpiler::tensor::emit(
+                        e, &fields, crate::transpiler::tensor::Dialect::Rocm,
+                        |expr| self.expr(expr),
+                    );
+                    for line in source.lines() { self.line(line); }
+                    return;
+                }
                 match &e.kind {
                     // `print "..."` → printf(...) in device code.
                     ExprKind::Call(callee, args)
@@ -826,8 +835,8 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     match (obj, field) {
         ("gpu", "thread")    => "threadIdx".into(),
         ("gpu", "block")     => "blockIdx".into(),
-        ("gpu", "block_dim") => "blockDim".into(),
-        ("gpu", "grid_dim")  => "gridDim".into(),
+        ("gpu", "block_dim" | "blockDim") => "blockDim".into(),
+        ("gpu", "grid_dim" | "gridDim")  => "gridDim".into(),
         ("threadIdx", "x")   => "threadIdx.x".into(),
         ("threadIdx", "y")   => "threadIdx.y".into(),
         ("threadIdx", "z")   => "threadIdx.z".into(),
@@ -855,12 +864,21 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
 fn gpu_warp_method_call(method: &str, args: &[String]) -> Option<String> {
     match method {
         "sync"         => Some("__syncwarp(0xffffffff)".into()),
-        "shuffle_down" => Some(format!("__shfl_down_sync(0xffffffff, {}, {})", args[0], args[1])),
-        "shuffle_up"   => Some(format!("__shfl_up_sync(0xffffffff, {}, {})", args[0], args[1])),
-        "shuffle_xor"  => Some(format!("__shfl_xor_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle_down" | "shuffleDown" => Some(format!("__shfl_down_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle_up" | "shuffleUp"     => Some(format!("__shfl_up_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle_xor" | "shuffleXor"   => Some(format!("__shfl_xor_sync(0xffffffff, {}, {})", args[0], args[1])),
         "shuffle"      => Some(format!("__shfl_sync(0xffffffff, {}, {})", args[0], args[1])),
         _ => None,
     }
+}
+
+#[test]
+fn tensor_scalar_fallback_is_emitted() {
+    let program = crate::transpiler::tensor::test_program();
+    let source = emit_device_hip(&program);
+    assert!(source.contains("bp_tensor_sum += a["), "{source}");
+    assert!(source.contains("c["), "{source}");
+    assert!(!source.contains("matmulTile("), "{source}");
 }
 
 fn is_gpu_warp_receiver(obj: &Expr) -> bool {
@@ -966,4 +984,3 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
         _ => false,
     }
 }
-

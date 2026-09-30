@@ -418,6 +418,121 @@ let _result = k.out
     assert_eq!(val, Value::Array(expected.into()));
 }
 
+#[test]
+fn test_gpu_camel_case_names() {
+    let src = r#"
+kernel Names:
+    mut [int, 4] out
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.blockDim.x
+        out[i] = gpu.gridDim.x + gpu.warp.shuffleXor(gpu.warp.lane, 1)
+mut k = Names()
+kernel:
+    k(block = 2, grid = 2)
+let actual = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Array(actual) = get_var(&interp, "actual") else { panic!("expected array") };
+    assert_eq!(actual.as_ref(), &[Value::Int(3), Value::Int(2), Value::Int(3), Value::Int(2)]);
+}
+
+#[test]
+fn test_tensor_tiles_rectangular_multiblock_and_mma() {
+    let src = r#"
+kernel TensorTiles:
+    let [float32, k = 5, m = 3]'global a
+    let [float32, n = 7, k = 5]'global b
+    mut [float32, n = 7, m = 3]'unified c
+    init([float32, k = 5, m = 3]'global input_a,
+         [float32, n = 7, k = 5]'global input_b):
+        a = input_a
+        b = input_b
+    def ():
+        let row = gpu.block.y * 2
+        let col = gpu.block.x * 4
+        gpu.tensor.matmulTile(a, b, c, row = row, col = col, rows = 2, cols = 4)
+        gpu.tensor.mmaTile(a, b, c, row = row, col = col, rows = 2, cols = 4)
+let a = [float32(i % 7 - 3) for i in 0..<15]
+let b = [float32(i % 5 - 2) for i in 0..<35]
+mut kernel_value = TensorTiles(a, b)
+kernel:
+    kernel_value(block = (3, 2), grid = (2, 2))
+let actual = kernel_value.c
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Array(actual) = get_var(&interp, "actual") else { panic!("expected array") };
+    let expected: Vec<Value> = (0..3).flat_map(|row| (0..7).map(move |col| {
+        let sum: f32 = (0..5).map(|k| {
+            (((row * 5 + k) % 7) as f32 - 3.0) * (((k * 7 + col) % 5) as f32 - 2.0)
+        }).sum();
+        Value::Float32(sum * 2.0)
+    })).collect();
+    assert_eq!(actual.as_ref(), expected.as_slice());
+}
+
+#[test]
+fn test_host_tensor_matmul_and_mma() {
+    let src = r#"
+let [float32, k = 5, m = 3]'gpu'global a = [float32(i % 7 - 3) for i in 0..<15]
+let [float32, n = 7, k = 5]'gpu'unified b = [float32(i % 5 - 2) for i in 0..<35]
+mut [float32, n = 7, m = 3]'gpu'unified c = [float32(0) for ..<21]
+gpu.tensor.matmul(a, b, c)
+gpu.tensor.mma(a, b, c)
+let actual = c
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Array(actual) = get_var(&interp, "actual") else { panic!("expected array") };
+    let expected: Vec<Value> = (0..3).flat_map(|row| (0..7).map(move |col| {
+        let sum: f32 = (0..5).map(|k| {
+            (((row * 5 + k) % 7) as f32 - 3.0) * (((k * 7 + col) % 5) as f32 - 2.0)
+        }).sum();
+        Value::Float32(sum * 2.0)
+    })).collect();
+    assert_eq!(actual.as_ref(), expected.as_slice());
+}
+
+#[test]
+fn test_tensor_linear_uses_row_major_weights() {
+    let src = r#"
+let [float32, k = 3, m = 2]'gpu'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
+let [float32, k = 3, n = 2]'gpu'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+mut [float32, n = 2, m = 2]'gpu'unified y = [0.0 as float32 for ..<4]
+gpu.tensor.linear(x, w, y)
+let actual = y
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Array(actual) = get_var(&interp, "actual") else { panic!("expected array") };
+    assert_eq!(actual.as_ref(), &[
+        Value::Float32(-2.0), Value::Float32(20.0),
+        Value::Float32(-2.0), Value::Float32(47.0),
+    ]);
+}
+
+#[test]
+fn test_dynamic_tensor_linear_uses_runtime_dimensions() {
+    let src = r#"
+let m = 2
+let n = 2
+let k = 3
+let [float32]'gpu'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
+let [float32]'gpu'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+gpu.tensor.linear(x, w, y, m = m, n = n, k = k)
+let actual = y
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let Value::Array(actual) = get_var(&interp, "actual") else { panic!("expected array") };
+    assert_eq!(actual.as_ref(), &[
+        Value::Float32(-2.0), Value::Float32(20.0),
+        Value::Float32(-2.0), Value::Float32(47.0),
+    ]);
+}
+
 // ─── kernel field access after launch ────────────────────────────────────────
 
 #[test]

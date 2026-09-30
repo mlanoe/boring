@@ -1649,3 +1649,30 @@ def main() throws:
          compile against `str`/`String`;\ngot:\n{rs}"
     );
 }
+
+#[test]
+fn device_gpu_warp_builtins_map_correctly_camel_case() {
+    let (cu, _) = cuda_codegen("gpu_warp_builtins_camel_case", r#"
+kernel W:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffleDown(buf[tid], 1)
+        let b = gpu.warp.shuffleUp(buf[tid], 1)
+        let c = gpu.warp.shuffleXor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + lane + size
+"#);
+    assert!(cu.contains("warpSize"), "expected warpSize;\ngot:\n{cu}");
+    assert!(cu.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{cu}");
+    assert!(cu.contains("__syncwarp(0xffffffff)"), "expected __syncwarp;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_down_sync(0xffffffff,"), "expected __shfl_down_sync;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_up_sync(0xffffffff,"), "expected __shfl_up_sync;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_xor_sync(0xffffffff,"), "expected __shfl_xor_sync;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_sync(0xffffffff,"), "expected __shfl_sync;\ngot:\n{cu}");
+}
+
+// ─── host — struct and constructor ───────────────────────────────────────────

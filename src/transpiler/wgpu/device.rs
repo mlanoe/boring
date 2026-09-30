@@ -1082,9 +1082,9 @@ impl DeviceEmitter {
         self.line(&format!("{}[bp_lidx] = {};", scratch, v));
         self.line("workgroupBarrier();");
         let target_expr = match method {
-            "shuffle_down" => format!("i32(bp_lane) + i32({})", operand),
-            "shuffle_up"   => format!("i32(bp_lane) - i32({})", operand),
-            "shuffle_xor"  => format!("i32(bp_lane) ^ i32({})", operand),
+            "shuffle_down" | "shuffleDown" => format!("i32(bp_lane) + i32({})", operand),
+            "shuffle_up" | "shuffleUp"     => format!("i32(bp_lane) - i32({})", operand),
+            "shuffle_xor" | "shuffleXor"   => format!("i32(bp_lane) ^ i32({})", operand),
             "shuffle"      => format!("i32({})", operand),
             _ => unreachable!("is_gpu_warp_shuffle already restricts `method`"),
         };
@@ -1182,6 +1182,15 @@ impl DeviceEmitter {
                 }
             }
             Stmt::Expr(e) => {
+                if crate::checker::tensor::is_tensor_call(e) {
+                    let fields = self.current_fields.clone();
+                    let source = crate::transpiler::tensor::emit(
+                        e, &fields, crate::transpiler::tensor::Dialect::Wgsl,
+                        |expr| self.expr(expr),
+                    );
+                    for line in source.lines() { self.line(line); }
+                    return;
+                }
                 match &e.kind {
                     // `print` → silent no-op (no device-side print in WGSL).
                     ExprKind::Call(callee, _)
@@ -2258,8 +2267,8 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     match (obj, field) {
         ("gpu", "thread")    => "bp_tid".into(),
         ("gpu", "block")     => "bp_bid".into(),
-        ("gpu", "block_dim") => "bp_bdim".into(),
-        ("gpu", "grid_dim")  => "bp_gdim".into(),
+        ("gpu", "block_dim" | "blockDim") => "bp_bdim".into(),
+        ("gpu", "grid_dim" | "gridDim")  => "bp_gdim".into(),
         // Dimension accessors — cast to i32 for arithmetic (matches Boring int → i32).
         ("bp_tid",  "x") => "i32(bp_tid.x)".into(),
         ("bp_tid",  "y") => "i32(bp_tid.y)".into(),
@@ -2291,9 +2300,9 @@ fn gpu_warp_method_call(method: &str, args: &[String], mode: WarpMode) -> Option
     match (method, mode) {
         ("sync", WarpMode::Real)     => Some("subgroupBarrier()".into()),
         ("sync", WarpMode::Emulated) => Some("workgroupBarrier()".into()),
-        ("shuffle_down", WarpMode::Real) => Some(format!("subgroupShuffleDown({}, {})", args[0], args[1])),
-        ("shuffle_up", WarpMode::Real)   => Some(format!("subgroupShuffleUp({}, {})", args[0], args[1])),
-        ("shuffle_xor", WarpMode::Real)  => Some(format!("subgroupShuffleXor({}, {})", args[0], args[1])),
+        ("shuffle_down" | "shuffleDown", WarpMode::Real) => Some(format!("subgroupShuffleDown({}, {})", args[0], args[1])),
+        ("shuffle_up" | "shuffleUp", WarpMode::Real)     => Some(format!("subgroupShuffleUp({}, {})", args[0], args[1])),
+        ("shuffle_xor" | "shuffleXor", WarpMode::Real)   => Some(format!("subgroupShuffleXor({}, {})", args[0], args[1])),
         ("shuffle", WarpMode::Real)      => Some(format!("subgroupShuffle({}, {})", args[0], args[1])),
         _ => None,
     }
@@ -2305,7 +2314,7 @@ fn is_gpu_warp_receiver(obj: &Expr) -> bool {
 }
 
 fn is_gpu_warp_shuffle(method: &str) -> bool {
-    matches!(method, "shuffle_down" | "shuffle_up" | "shuffle_xor" | "shuffle")
+    matches!(method, "shuffle_down" | "shuffleDown" | "shuffle_up" | "shuffleUp" | "shuffle_xor" | "shuffleXor" | "shuffle")
 }
 
 /// Kernel-prefixed (lowercased kernel name, matching `wgsl_workgroup_array_ident`'s
@@ -2515,6 +2524,20 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
                                    || args.iter().any(|a| expr_references_any(&a.value, names)),
         _ => false,
     }
+}
+
+#[test]
+fn tensor_scalar_fallback_preserves_wgsl_buffer_names() {
+    let program = crate::transpiler::tensor::test_program();
+    let kernels: Vec<_> = program.items.iter().filter_map(|item| {
+        if let Item::Kernel(kernel) = item { Some(kernel.clone()) } else { None }
+    }).collect();
+    let (source, _, errors) = emit_device_wgsl(&program, &kernels, &Default::default());
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(source.contains("storageBarrier();"), "{source}");
+    assert!(source.contains("bp_tensor_sum += matrix_a["), "{source}");
+    assert!(source.contains("matrix_c["), "{source}");
+    assert!(!source.contains("matmulTile("), "{source}");
 }
 
 /// Scan `kernel:` blocks for `kname(block = ...)` calls and return per-kernel block sizes.

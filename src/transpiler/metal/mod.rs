@@ -57,6 +57,8 @@ pub struct MetalOutput {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_metal(program: &Program, stem: &str, version: &str) -> MetalOutput {
+    let tensor_host = crate::transpiler::tensor_host::lower(program);
+    let program = &tensor_host.program;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }
     }).collect();
@@ -141,6 +143,7 @@ pub fn transpile_metal(program: &Program, stem: &str, version: &str) -> MetalOut
 
     let mut errors = general_out.errors;
     errors.extend(struct_errors);
+    errors.extend(tensor_host.errors);
     MetalOutput { host_rs, device_msl, kernel_names, cargo_toml, errors }
 }
 

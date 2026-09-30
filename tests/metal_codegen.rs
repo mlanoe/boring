@@ -1923,3 +1923,50 @@ def main() throws:
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
 }
+
+#[test]
+fn device_gpu_warp_builtins_map_correctly_camel_case() {
+    let (msl, _) = metal_codegen("gpu_warp_builtins_camel_case", r#"
+kernel W:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffleDown(buf[tid], 1)
+        let b = gpu.warp.shuffleUp(buf[tid], 1)
+        let c = gpu.warp.shuffleXor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + lane + size
+"#);
+    assert!(msl.contains("[[thread_index_in_simdgroup]]"),
+        "expected [[thread_index_in_simdgroup]];\ngot:\n{msl}");
+    assert!(msl.contains("[[threads_per_simdgroup]]"),
+        "expected [[threads_per_simdgroup]];\ngot:\n{msl}");
+    assert!(msl.contains("__simd_lane_id"), "expected __simd_lane_id;\ngot:\n{msl}");
+    assert!(msl.contains("__simd_size"), "expected __simd_size;\ngot:\n{msl}");
+    assert!(msl.contains("simdgroup_barrier(mem_flags::mem_none)"),
+        "expected simdgroup_barrier;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle_down("), "expected simd_shuffle_down;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle_up("), "expected simd_shuffle_up;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle_xor("), "expected simd_shuffle_xor;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle("), "expected simd_shuffle;\ngot:\n{msl}");
+}
+
+#[test]
+fn device_gpu_block_dim_maps_correctly_camel_case() {
+    let (msl, _) = metal_codegen("gpu_block_dim_camel_case", r#"
+kernel B:
+    mut [float]'unified buf
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.blockDim.x
+        buf[i] = buf[i] * 2.0
+"#);
+    assert!(msl.contains("__block_pos.x"),
+        "expected __block_pos.x for gpu.block.x;\ngot:\n{msl}");
+    assert!(msl.contains("__block_dim.x"),
+        "expected __block_dim.x for gpu.blockDim.x;\ngot:\n{msl}");
+}
+
+// ─── device — 'actor'global atomics ──────────────────────────────────────────

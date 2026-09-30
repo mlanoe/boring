@@ -1717,6 +1717,10 @@ impl Checker {
     // ── Expressions ───────────────────────────────────────────────────────────
 
     fn check_expr(&mut self, expr: &Expr) {
+        if tensor::is_tensor_call(expr) {
+            self.check_host_tensor_call(expr);
+            return;
+        }
         match &expr.kind {
             // ── Assignment — the core immutability check ──────────────────
             ExprKind::Assign(lhs, rhs) => {
@@ -3122,3 +3126,5 @@ mod match_exhaustiveness_tests {
         assert!(!has_exhaustiveness_warning(&warns), "expected no warning on a native enum, got {warns:?}");
     }
 }
+
+pub(crate) mod tensor;

@@ -458,6 +458,15 @@ impl DeviceEmitter {
                 }
             }
             Stmt::Expr(e) => {
+                if crate::checker::tensor::is_tensor_call(e) {
+                    let fields = self.current_fields.clone();
+                    let source = crate::transpiler::tensor::emit(
+                        e, &fields, crate::transpiler::tensor::Dialect::Metal,
+                        |expr| self.expr(expr),
+                    );
+                    for line in source.lines() { self.line(line); }
+                    return;
+                }
                 match &e.kind {
                     // `print` → silent no-op in Metal kernels (no device-side printf in MSL).
                     ExprKind::Call(callee, _)
@@ -1074,8 +1083,8 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     match (obj, field) {
         ("gpu", "thread")    => "__thread_pos".into(),
         ("gpu", "block")     => "__block_pos".into(),
-        ("gpu", "block_dim") => "__block_dim".into(),
-        ("gpu", "grid_dim")  => "__grid_dim".into(),
+        ("gpu", "block_dim" | "blockDim") => "__block_dim".into(),
+        ("gpu", "grid_dim" | "gridDim")  => "__grid_dim".into(),
         // Dimension accessors — cast to int64_t for arithmetic.
         ("__thread_pos", "x") => "(int64_t)__thread_pos.x".into(),
         ("__thread_pos", "y") => "(int64_t)__thread_pos.y".into(),
@@ -1102,12 +1111,21 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
 fn gpu_warp_method_call(method: &str, args: &[String]) -> Option<String> {
     match method {
         "sync"         => Some("simdgroup_barrier(mem_flags::mem_none)".into()),
-        "shuffle_down" => Some(format!("simd_shuffle_down({}, {})", args[0], args[1])),
-        "shuffle_up"   => Some(format!("simd_shuffle_up({}, {})", args[0], args[1])),
-        "shuffle_xor"  => Some(format!("simd_shuffle_xor({}, {})", args[0], args[1])),
+        "shuffle_down" | "shuffleDown" => Some(format!("simd_shuffle_down({}, {})", args[0], args[1])),
+        "shuffle_up" | "shuffleUp"     => Some(format!("simd_shuffle_up({}, {})", args[0], args[1])),
+        "shuffle_xor" | "shuffleXor"   => Some(format!("simd_shuffle_xor({}, {})", args[0], args[1])),
         "shuffle"      => Some(format!("simd_shuffle({}, {})", args[0], args[1])),
         _ => None,
     }
+}
+
+#[test]
+fn tensor_scalar_fallback_is_emitted() {
+    let program = crate::transpiler::tensor::test_program();
+    let source = emit_device_msl(&program);
+    assert!(source.contains("bp_tensor_sum += a["), "{source}");
+    assert!(source.contains("c["), "{source}");
+    assert!(!source.contains("matmulTile("), "{source}");
 }
 
 fn is_gpu_warp_receiver(obj: &Expr) -> bool {
@@ -1243,4 +1261,3 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
         _ => false,
     }
 }
-

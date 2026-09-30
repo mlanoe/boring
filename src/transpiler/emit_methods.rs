@@ -2789,6 +2789,7 @@ impl Transpiler {
         } else {
             obj
         };
+        if let Some(r) = self.try_emit_host_tensor_cpu(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_introspect_handle_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_clone_and_task_method(obj, method, args) { return r; }
@@ -2816,6 +2817,80 @@ impl Transpiler {
         if let Some(r) = self.try_emit_float_math_method(obj, method, args) { return r; }
 
         self.emit_method_call_fallback(obj, method, args)
+    }
+
+    /// Portable host fallback for the ordinary Rust target. GPU backends reject
+    /// host tensor calls until their automatic kernel-dispatch synthesis is wired.
+    fn try_emit_host_tensor_cpu(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ExprKind::Field(gpu, namespace) = &obj.kind else { return None };
+        if namespace != "tensor" || !matches!(&gpu.kind, ExprKind::Var(name) if name == "gpu") {
+            return None;
+        }
+        if method == "linear" && args.len() == 6 {
+            let names: Option<Vec<&str>> = args[..3].iter().map(|arg| match &arg.value.kind {
+                ExprKind::Var(name) if arg.label.is_none() => Some(name.as_str()),
+                _ => None,
+            }).collect();
+            let names = names?;
+            let dimension = |label: &str| args[3..].iter()
+                .find(|arg| arg.label.as_deref() == Some(label))
+                .map(|arg| self.emit_expr(&arg.value));
+            let (m, n, k) = (dimension("m")?, dimension("n")?, dimension("k")?);
+            return Some(format!(
+                "{{\nlet (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * __boring_tensor_k, \"tensor weight length mismatch\");\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nfor __boring_tensor_row in 0usize..__boring_tensor_m {{\n    for __boring_tensor_col in 0usize..__boring_tensor_n {{\n        let mut __boring_tensor_sum = 0.0f32;\n        for __boring_tensor_inner in 0usize..__boring_tensor_k {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * __boring_tensor_k + __boring_tensor_inner].mul_add({b}[__boring_tensor_col * __boring_tensor_k + __boring_tensor_inner], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
+                a = names[0], b = names[1], c = names[2],
+            ));
+        }
+        if !matches!(method, "matmul" | "mma" | "linear") || args.len() != 3 {
+            return None;
+        }
+        let names: Option<Vec<&str>> = args.iter().map(|arg| match &arg.value.kind {
+            ExprKind::Var(name) => Some(name.as_str()),
+            _ => None,
+        }).collect();
+        let names = names?;
+        let type_of = |name: &str| {
+            self.var_types.get(name)
+                .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))
+        };
+        let shape = |name: &str| -> Option<[usize; 2]> {
+            let mut ty = type_of(name)?;
+            loop {
+                match ty {
+                    Type::Qualified(inner, _) | Type::Mut(inner) => ty = inner,
+                    _ => break,
+                }
+            }
+            let Type::LabeledArray(_, axes) = ty else { return None };
+            if axes.len() != 2 { return None; }
+            let extent = |i: usize| match &axes[i].size.as_ref()?.0.kind {
+                ExprKind::Int(value) => usize::try_from(*value).ok(),
+                _ => None,
+            };
+            Some([extent(0)?, extent(1)?])
+        };
+        let a_shape = shape(names[0])?;
+        let b_shape = shape(names[1])?;
+        let c_shape = shape(names[2])?;
+        let (k, m) = (a_shape[0], a_shape[1]);
+        let transpose_b = method == "linear";
+        let n = if transpose_b { b_shape[1] } else { b_shape[0] };
+        let right_k = if transpose_b { b_shape[0] } else { b_shape[1] };
+        if right_k != k || c_shape != [n, m] { return None; }
+        let initial = if method == "mma" {
+            format!("{}[__boring_tensor_row * {n} + __boring_tensor_col]", names[2])
+        } else {
+            "0.0f32".to_string()
+        };
+        let right_index = if transpose_b {
+            format!("__boring_tensor_col * {k} + __boring_tensor_k")
+        } else {
+            format!("__boring_tensor_k * {n} + __boring_tensor_col")
+        };
+        Some(format!(
+            "{{\nfor __boring_tensor_row in 0usize..{m}usize {{\n    for __boring_tensor_col in 0usize..{n}usize {{\n        let mut __boring_tensor_sum: f32 = {initial};\n        for __boring_tensor_k in 0usize..{k}usize {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * {k} + __boring_tensor_k].mul_add({b}[{right_index}], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * {n} + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
+            a = names[0], b = names[1], c = names[2],
+        ))
     }
 
     /// Resolves the struct name for a parameter whose Rust binding is a *direct* value —

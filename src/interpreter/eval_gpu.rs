@@ -708,6 +708,7 @@ fn run_kernel_parallel(
             aliases.clone(),
             gpu_profile.clone(),
         );
+        ti.current_kernel_fields = decl_fields.to_vec();
         if let Some((sync_fields, barrier)) = sync_ctx {
             ti.sync_fields = sync_fields.clone();
             ti.kernel_barrier = Some(Arc::clone(barrier));
@@ -717,6 +718,7 @@ fn run_kernel_parallel(
         // `gpu.warp.*` (see `WARP_SIZE`'s doc comment for the linearization
         // formula, matching the one CUDA/ROCm codegen emits device-side).
         let flat_thread_for_lane = thread_in_x + thread_in_y * block_x + thread_in_z * block_x * block_y;
+        ti.kernel_thread_flat = flat_thread_for_lane;
         ti.warp_lane = flat_thread_for_lane % WARP_SIZE;
         if let Some((active_lanes, barrier, scratch)) = warp_ctx {
             ti.warp_active_lanes = active_lanes;
@@ -822,8 +824,10 @@ fn run_kernel_parallel(
         thread_env.borrow_mut().define("gpu", make_object("Gpu".into(), vec![
             ("thread".into(),    gpu_thread),
             ("block".into(),     gpu_block),
-            ("block_dim".into(), gpu_block_dim),
-            ("grid_dim".into(),  gpu_grid_dim),
+            ("blockDim".into(),   gpu_block_dim.clone()),
+            ("block_dim".into(),  gpu_block_dim),
+            ("gridDim".into(),    gpu_grid_dim.clone()),
+            ("grid_dim".into(),   gpu_grid_dim),
             ("warp".into(),      gpu_warp),
         ]));
 
@@ -1111,6 +1115,208 @@ fn run_kernel_parallel(
 // ─── Interpreter impl ─────────────────────────────────────────────────────────
 
 impl Interpreter {
+    pub(crate) fn eval_gpu_tensor_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        if self.current_kernel_fields.is_empty() {
+            return self.eval_gpu_tensor_host_method(method, args, env, line);
+        }
+        let call = Expr {
+            kind: ExprKind::MethodCall(
+                Box::new(Expr {
+                    kind: ExprKind::Field(
+                        Box::new(Expr { kind: ExprKind::Var("gpu".into()), line, col: 0, len: 3 }),
+                        "tensor".into(),
+                    ),
+                    line, col: 0, len: 10,
+                }),
+                method.into(), args.to_vec(),
+            ),
+            line, col: 0, len: 1,
+        };
+        let operation = crate::checker::tensor::resolve_fields(&call, &self.current_kernel_fields)
+            .map_err(|e| err(e.message, line))?;
+        let values = self.eval_args(args, Rc::clone(&env))?;
+        if self.kernel_thread_flat != 0 { return Ok(Value::Void); }
+        let array = |index: usize| match &values[index] {
+            Value::Array(values) => Ok(values.clone()),
+            other => Err(err(format!("tensor operand must be an array, got {}", other.type_name()), line)),
+        };
+        let a = array(0)?;
+        let b = array(1)?;
+        let mut c = Value::rc_vec_into_owned(array(2)?);
+        let named_int = |label: &str| -> Result<usize, Signal> {
+            let index = args.iter().position(|arg| arg.label.as_deref() == Some(label))
+                .ok_or_else(|| err(format!("missing tensor argument `{label}`"), line))?;
+            let value = match &values[index] {
+                Value::Labeled { value, .. } => value.as_ref(),
+                value => value,
+            };
+            match value {
+                Value::Int(value) if *value >= 0 => Ok(*value as usize),
+                Value::Uint(value) => usize::try_from(*value).map_err(|_| err("tensor origin is too large", line)),
+                _ => Err(err(format!("tensor argument `{label}` must be a non-negative integer"), line)),
+            }
+        };
+        let row_origin = named_int("row")?;
+        let col_origin = named_int("col")?;
+        for row in row_origin..row_origin.saturating_add(operation.rows).min(operation.m) {
+            for col in col_origin..col_origin.saturating_add(operation.cols).min(operation.n) {
+                let mut sum = if operation.accumulate {
+                    match c.get(row * operation.n + col) {
+                        Some(Value::Float32(value)) => *value,
+                        _ => return Err(err("tensor destination contains a non-float32 value", line)),
+                    }
+                } else { 0.0 };
+                for k in 0..operation.k {
+                    let left = match a.get(row * operation.k + k) {
+                        Some(Value::Float32(value)) => *value,
+                        _ => return Err(err("tensor left operand contains a non-float32 value", line)),
+                    };
+                    let right_index = if operation.transpose_b {
+                        col * operation.k + k
+                    } else {
+                        k * operation.n + col
+                    };
+                    let right = match b.get(right_index) {
+                        Some(Value::Float32(value)) => *value,
+                        _ => return Err(err("tensor right operand contains a non-float32 value", line)),
+                    };
+                    sum = left.mul_add(right, sum);
+                }
+                c[row * operation.n + col] = Value::Float32(sum);
+            }
+        }
+        env.borrow_mut().force_set(&operation.operands[2], Value::Array(c.into()));
+        Ok(Value::Void)
+    }
+
+    fn eval_gpu_tensor_host_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        if method == "linear" && args.len() == 6 {
+            let values = self.eval_args(args, Rc::clone(&env))?;
+            let array = |index: usize| match &values[index] {
+                Value::Array(values) => Ok(values.clone()),
+                other => Err(err(format!("tensor operand must be an array, got {}", other.type_name()), line)),
+            };
+            let dimension = |label: &str| -> Result<usize, Signal> {
+                let index = args.iter().position(|arg| arg.label.as_deref() == Some(label))
+                    .ok_or_else(|| err(format!("missing tensor argument `{label}`"), line))?;
+                let value = match &values[index] {
+                    Value::Labeled { value, .. } => value.as_ref(),
+                    value => value,
+                };
+                match value {
+                    Value::Int(value) if *value > 0 => usize::try_from(*value)
+                        .map_err(|_| err(format!("tensor dimension `{label}` is too large"), line)),
+                    Value::Uint(value) if *value > 0 => usize::try_from(*value)
+                        .map_err(|_| err(format!("tensor dimension `{label}` is too large"), line)),
+                    _ => Err(err(format!("tensor dimension `{label}` must be a positive integer"), line)),
+                }
+            };
+            let (m, n, k) = (dimension("m")?, dimension("n")?, dimension("k")?);
+            let left_len = m.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
+            let weight_len = n.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
+            let output_len = m.checked_mul(n).ok_or_else(|| err("tensor dimensions overflow", line))?;
+            let a = array(0)?;
+            let b = array(1)?;
+            let mut c = Value::rc_vec_into_owned(array(2)?);
+            if a.len() != left_len || b.len() != weight_len || c.len() != output_len {
+                return Err(err("tensor operand storage length does not match m, n, and k", line));
+            }
+            for row in 0..m {
+                for col in 0..n {
+                    let mut sum = 0.0f32;
+                    for inner in 0..k {
+                        let Value::Float32(left) = &a[row * k + inner] else {
+                            return Err(err("tensor left operand contains a non-float32 value", line));
+                        };
+                        let Value::Float32(right) = &b[col * k + inner] else {
+                            return Err(err("tensor weight contains a non-float32 value", line));
+                        };
+                        sum = left.mul_add(*right, sum);
+                    }
+                    c[row * n + col] = Value::Float32(sum);
+                }
+            }
+            let ExprKind::Var(output) = &args[2].value.kind else {
+                return Err(err("tensor destination must be a direct variable", line));
+            };
+            env.borrow_mut().force_set(output, Value::Array(c.into()));
+            return Ok(Value::Void);
+        }
+        if args.len() != 3 {
+            return Err(err("gpu.tensor.matmul, mma, and linear expect three operands", line));
+        }
+        let mut names = Vec::with_capacity(3);
+        let mut types = Vec::with_capacity(3);
+        for arg in args {
+            let ExprKind::Var(name) = &arg.value.kind else {
+                return Err(err("host tensor operands must be direct variables", line));
+            };
+            let ty = env.borrow().get_declared_type(name)
+                .ok_or_else(|| err("host tensor operands require explicit labeled-array types", line))?;
+            names.push(name.clone());
+            types.push(ty);
+        }
+        let call = Expr {
+            kind: ExprKind::MethodCall(
+                Box::new(Expr {
+                    kind: ExprKind::Field(
+                        Box::new(Expr { kind: ExprKind::Var("gpu".into()), line, col: 0, len: 3 }),
+                        "tensor".into(),
+                    ),
+                    line, col: 0, len: 10,
+                }),
+                method.into(), args.to_vec(),
+            ),
+            line, col: 0, len: 1,
+        };
+        let refs = std::array::from_fn(|i| (names[i].as_str(), &types[i], i == 2));
+        let operation = crate::checker::tensor::resolve_host_types(method, refs, &call)
+            .map_err(|e| err(e.message, line))?;
+        let values = self.eval_args(args, Rc::clone(&env))?;
+        let array = |index: usize| match &values[index] {
+            Value::Array(values) => Ok(values.clone()),
+            other => Err(err(format!("tensor operand must be an array, got {}", other.type_name()), line)),
+        };
+        let a = array(0)?;
+        let b = array(1)?;
+        let mut c = Value::rc_vec_into_owned(array(2)?);
+        if a.len() != operation.m * operation.k
+            || b.len() != operation.k * operation.n
+            || c.len() != operation.m * operation.n
+        {
+            return Err(err("tensor operand storage length does not match its declared shape", line));
+        }
+        for row in 0..operation.m {
+            for col in 0..operation.n {
+                let mut sum = if operation.accumulate {
+                    match &c[row * operation.n + col] {
+                        Value::Float32(value) => *value,
+                        _ => return Err(err("tensor destination contains a non-float32 value", line)),
+                    }
+                } else { 0.0 };
+                for k in 0..operation.k {
+                    let left = match &a[row * operation.k + k] {
+                        Value::Float32(value) => *value,
+                        _ => return Err(err("tensor left operand contains a non-float32 value", line)),
+                    };
+                    let right_index = if operation.transpose_b {
+                        col * operation.k + k
+                    } else {
+                        k * operation.n + col
+                    };
+                    let right = match &b[right_index] {
+                        Value::Float32(value) => *value,
+                        _ => return Err(err("tensor right operand contains a non-float32 value", line)),
+                    };
+                    sum = left.mul_add(right, sum);
+                }
+                c[row * operation.n + col] = Value::Float32(sum);
+            }
+        }
+        env.borrow_mut().force_set(&operation.operands[2], Value::Array(c.into()));
+        Ok(Value::Void)
+    }
+
     /// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — intercepted
     /// syntactically in `eval_expr_method_call` before generic method dispatch (the
     /// receiver `gpu.warp` is never a real bound value, only `gpu.warp.size`/`.lane`
@@ -1123,7 +1329,7 @@ impl Interpreter {
                 }
                 Ok(Value::Void)
             }
-            "shuffle_down" | "shuffle_up" | "shuffle_xor" | "shuffle" => {
+            "shuffle_down" | "shuffleDown" | "shuffle_up" | "shuffleUp" | "shuffle_xor" | "shuffleXor" | "shuffle" => {
                 if args.len() != 2 {
                     return Err(err(format!("gpu.warp.{} expects 2 arguments", method), line));
                 }
@@ -1138,9 +1344,9 @@ impl Interpreter {
                 };
                 let lane = self.warp_lane as i64;
                 let target_lane: i64 = match method {
-                    "shuffle_down" => lane + operand,
-                    "shuffle_up"   => lane - operand,
-                    "shuffle_xor"  => lane ^ operand,
+                    "shuffle_down" | "shuffleDown" => lane + operand,
+                    "shuffle_up" | "shuffleUp"     => lane - operand,
+                    "shuffle_xor" | "shuffleXor"   => lane ^ operand,
                     "shuffle"      => operand,
                     _ => unreachable!(),
                 };

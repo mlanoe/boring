@@ -4014,3 +4014,60 @@ for i, v in k.out:
         );
     }
 }
+
+#[test]
+fn test_gpu_warp_builtins_real_subgroup_path_camel_case() {
+    let src = r#"
+kernel WarpBuiltins:
+    mut [float]'unified buf
+
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffleDown(buf[tid], 1)
+        let b = gpu.warp.shuffleUp(buf[tid], 1)
+        let c = gpu.warp.shuffleXor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + f32(lane) + f32(size)
+"#;
+    let (wgsl, emulated, _rs, _toml) = run_wgpu("warp_builtins_real_camel_case", src);
+
+    assert!(wgsl.contains("enable subgroups;"), "expected enable subgroups;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("@builtin(subgroup_size)"), "expected @builtin(subgroup_size);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("@builtin(subgroup_invocation_id)"), "expected @builtin(subgroup_invocation_id);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupBarrier()"), "expected subgroupBarrier();\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffleDown("), "expected subgroupShuffleDown;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffleUp("), "expected subgroupShuffleUp;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffleXor("), "expected subgroupShuffleXor;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffle("), "expected subgroupShuffle;\ngot:\n{wgsl}");
+
+    // The emulated fallback module must exist alongside the real one whenever
+    // `gpu.warp.*` is used, and never uses the subgroup extension.
+    assert!(!emulated.is_empty(), "expected shaders/main_emulated.wgsl to be written");
+    assert!(!emulated.contains("enable subgroups;"), "emulated module must not enable subgroups;\ngot:\n{emulated}");
+}
+
+#[test]
+fn test_gpu_warp_shuffle_emulated_fallback_shape_camel_case() {
+    let src = r#"
+kernel WarpEmulated:
+    mut [float32]'unified buf
+
+    def ():
+        let tid = gpu.thread.x
+        gpu.warp.sync()
+        let shuffled = gpu.warp.shuffleDown(buf[tid], 1)
+        buf[tid] = shuffled
+"#;
+    let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated_camel_case", src);
+
+    assert!(emulated.contains("var<workgroup> bp_warp_scratch_warpemulated_f32"),
+        "expected a kernel-prefixed f32 workgroup scratch buffer;\ngot:\n{emulated}");
+    assert!(emulated.contains("workgroupBarrier()"), "expected workgroupBarrier();\ngot:\n{emulated}");
+    assert!(emulated.contains("@builtin(local_invocation_index)"),
+        "expected @builtin(local_invocation_index);\ngot:\n{emulated}");
+    assert!(emulated.contains("let bp_wsize: u32 = 32u;"), "expected fixed 32-lane fallback constant;\ngot:\n{emulated}");
+    assert!(emulated.contains("select("), "expected a select() for the warp-boundary clamp;\ngot:\n{emulated}");
+}

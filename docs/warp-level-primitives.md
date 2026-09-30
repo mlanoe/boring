@@ -164,3 +164,11 @@ in the tiled-reduction inner loop.
    an `if`/`while` that isn't provably warp-uniform?** A static analysis
    nicety, not required for a first version — flagged here so it isn't
    forgotten, not because it blocks shipping without it.
+
+## GPU naming compatibility
+
+The canonical spellings are `gpu.blockDim`, `gpu.gridDim`,
+`gpu.warp.shuffleDown`, `gpu.warp.shuffleUp`, and `gpu.warp.shuffleXor`.
+The interpreter and CUDA, Metal, ROCm, and wgpu emitters also accept the
+legacy snake_case spellings for compatibility. The `gpu.` prefix remains
+explicit; no leading-dot shorthand is introduced.

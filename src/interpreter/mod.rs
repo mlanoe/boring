@@ -2315,6 +2315,12 @@ pub struct Interpreter {
     /// calls `.wait()` on this when present instead of being a no-op — only
     /// set on kernels with `'sync` fields (see `sync_fields`).
     pub(crate) kernel_barrier: Option<std::sync::Arc<std::sync::Barrier>>,
+    /// Linear thread index within the current kernel block. Tensor block
+    /// collectives execute once on lane zero in the interpreter.
+    pub(crate) kernel_thread_flat: usize,
+    /// Fields of the kernel currently being simulated, used to resolve fixed
+    /// tensor shapes.
+    pub(crate) current_kernel_fields: Vec<KernelFieldDecl>,
     /// This thread's index within its warp (`gpu.warp.lane`) — always set to
     /// a real value inside a kernel thread (see `eval_gpu::run_one_kernel_thread`),
     /// `0` outside kernel execution.
@@ -2456,6 +2462,8 @@ impl Interpreter {
             last_var_params: HashMap::new(),
             sync_fields: HashMap::new(),
             kernel_barrier: None,
+            kernel_thread_flat: 0,
+            current_kernel_fields: Vec::new(),
             warp_lane: 0,
             warp_active_lanes: 0,
             warp_barrier: None,
@@ -2500,6 +2508,8 @@ impl Interpreter {
             last_var_params: HashMap::new(),
             sync_fields: HashMap::new(),
             kernel_barrier: None,
+            kernel_thread_flat: 0,
+            current_kernel_fields: Vec::new(),
             warp_lane: 0,
             warp_active_lanes: 0,
             warp_barrier: None,
