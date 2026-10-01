@@ -4,12 +4,25 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct TensorLinearConfig {
     pub decode_algorithm: Option<String>,
     pub prefill_algorithm: Option<String>,
     pub decode_formats: HashMap<String, String>,
     pub prefill_formats: HashMap<String, String>,
+    pub target_warp_width: usize,
+}
+
+impl Default for TensorLinearConfig {
+    fn default() -> Self {
+        Self {
+            decode_algorithm: None,
+            prefill_algorithm: None,
+            decode_formats: HashMap::new(),
+            prefill_formats: HashMap::new(),
+            target_warp_width: 32,
+        }
+    }
 }
 
 impl TensorLinearConfig {
@@ -555,13 +568,73 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     let warp_product = format!("        {}", product.replace("\n                ", "\n                        "));
     let nested_scalar_product = format!("    {}", product.replace("\n                ", "\n                    "));
     let q8_decode_algorithm = tensor_config.algorithm(Some("q8_0"), true);
+    let q5_decode_algorithm = tensor_config.algorithm(Some("q5_0"), true);
+    let q4_decode_algorithm = tensor_config.algorithm(Some("q4_0"), true);
+    let iq4_decode_algorithm = tensor_config.algorithm(Some("iq4_nl"), true);
     let q8_warp_decode = quantized_format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp" | "warp-broadcast");
-    let body = if quantized_format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp-broadcast") {
+    let q8_scale_lane = if tensor_config.target_warp_width == 32 {
+        "0"
+    } else {
+        "(lane / 32) * 32"
+    };
+    let q8_scale_inner_guard = if tensor_config.target_warp_width == 32 {
+        ""
+    } else {
+        " and inner < k"
+    };
+    let q8_value_position = if tensor_config.target_warp_width == 32 {
+        "lane"
+    } else {
+        "flat % 32"
+    };
+    let q8_value_decode = if tensor_config.target_warp_width == 32 {
+        format!("                    let raw = int(b[blockByte + 2 + {q8_value_position}])\n                    let quantized = if raw > 127: raw - 256 else: raw\n                    sum += a[row * k + inner] * ((quantized as float32) * scale)\n")
+    } else {
+        format!("                    if inner < k:\n                        let raw = int(b[blockByte + 2 + {q8_value_position}])\n                        let quantized = if raw > 127: raw - 256 else: raw\n                        sum += a[row * k + inner] * ((quantized as float32) * scale)\n")
+    };
+    let q5_value_decode = if tensor_config.target_warp_width == 32 {
+        "                    let position = lane\n                    let packed = int(b[blockByte + 6 + position % 16])\n                    let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                    let high = (qh >> (position as uint32)) & 1\n                    let quantized = (nibble | (high << 4)) - 16\n                    sum += a[row * k + inner] * ((quantized as float32) * scale)\n".to_string()
+    } else {
+        "                    if inner < k:\n                        let position = lane % 32\n                        let packed = int(b[blockByte + 6 + position % 16])\n                        let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                        let high = (qh >> (position as uint32)) & 1\n                        let quantized = (nibble | (high << 4)) - 16\n                        sum += a[row * k + inner] * ((quantized as float32) * scale)\n".to_string()
+    };
+    let q4_value_decode = if tensor_config.target_warp_width == 32 {
+        "                    let position = lane\n                    let packed = int(b[blockByte + 2 + position % 16])\n                    let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                    let quantized = nibble - 8\n                    sum += a[row * k + inner] * ((quantized as float32) * scale)\n".to_string()
+    } else {
+        "                    if inner < k:\n                        let position = lane % 32\n                        let packed = int(b[blockByte + 2 + position % 16])\n                        let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                        let quantized = nibble - 8\n                        sum += a[row * k + inner] * ((quantized as float32) * scale)\n".to_string()
+    };
+    let iq4_value_decode = if tensor_config.target_warp_width == 32 {
+        "                    let position = lane\n                    let packed = int(b[blockByte + 2 + position % 16])\n                    let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                    let quantized = if nibble == 0: -127 elif nibble == 1: -104 elif nibble == 2: -83 elif nibble == 3: -65 elif nibble == 4: -49 elif nibble == 5: -35 elif nibble == 6: -22 elif nibble == 7: -10 elif nibble == 8: 1 elif nibble == 9: 13 elif nibble == 10: 25 elif nibble == 11: 38 elif nibble == 12: 53 elif nibble == 13: 69 elif nibble == 14: 89 else: 113\n                    sum += a[row * k + inner] * ((quantized as float32) * scale)\n".to_string()
+    } else {
+        "                    if inner < k:\n                        let position = lane % 32\n                        let packed = int(b[blockByte + 2 + position % 16])\n                        let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                        let quantized = if nibble == 0: -127 elif nibble == 1: -104 elif nibble == 2: -83 elif nibble == 3: -65 elif nibble == 4: -49 elif nibble == 5: -35 elif nibble == 6: -22 elif nibble == 7: -10 elif nibble == 8: 1 elif nibble == 9: 13 elif nibble == 10: 25 elif nibble == 11: 38 elif nibble == 12: 53 elif nibble == 13: 69 elif nibble == 14: 89 else: 113\n                        sum += a[row * k + inner] * ((quantized as float32) * scale)\n".to_string()
+    };
+    let scale_broadcast = if quantized_format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp-broadcast") {
+        Some((34, &q8_value_decode))
+    } else if quantized_format == Some("q4_0") && matches!(q4_decode_algorithm, "auto" | "warp" | "warp-broadcast") {
+        Some((18, &q4_value_decode))
+    } else if quantized_format == Some("iq4_nl") && matches!(iq4_decode_algorithm, "auto" | "warp" | "warp-broadcast") {
+        Some((18, &iq4_value_decode))
+    } else {
+        None
+    };
+    let body = if let Some((broadcast_block_bytes, broadcast_value_decode)) = scale_broadcast {
         format!(
-            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpSize = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpSize\n            let warpsPerBlock = gpu.blockDim.x / warpSize\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            let row = 0\n            let col = cell\n            var float32 sum = 0.0\n            var int base = 0\n            while base < k:\n                let inner = base + lane\n                let scaleLane = (lane / 32) * 32\n                var float32 scale = 0.0\n                if cell < n and inner < k and lane == scaleLane:\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 34\n                    let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                    let sign = (scaleBits >> 15) & 1\n                    let exponent = (scaleBits >> 10) & 0x1F\n                    let fraction = scaleBits & 0x3FF\n                    if exponent == 0:\n                        scale = (fraction as float32) / 16777216.0\n                    elif exponent == 0x1F:\n                        scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                    else:\n                        scale = 1.0 + (fraction as float32) / 1024.0\n                        var int scaleExponent = exponent - 15\n                        while scaleExponent > 0:\n                            scale *= 2.0\n                            scaleExponent -= 1\n                        while scaleExponent < 0:\n                            scale /= 2.0\n                            scaleExponent += 1\n                    if sign == 1:\n                        scale = 0.0 - scale\n                scale = gpu.warp.shuffle(scale, scaleLane)\n                if cell < n and inner < k:\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 34\n                    let raw = int(b[blockByte + 2 + flat % 32])\n                    let quantized = if raw > 127: raw - 256 else: raw\n                    sum += a[row * k + inner] * ((quantized as float32) * scale)\n                base += warpSize\n            var int offset = warpSize / 2\n            while offset > 0:\n                sum += gpu.warp.shuffleXor(sum, offset)\n                offset /= 2\n            if cell < n:\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpSize = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpSize\n            let warpsPerBlock = gpu.blockDim.x / warpSize\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * {broadcast_block_bytes}\n                    var float32 scale = 0.0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                    scale = gpu.warp.shuffle(scale, scaleLane)\n{value_decode}                    base += warpSize\n                var int offset = warpSize / 2\n                while offset > 0:\n                    sum += gpu.warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
             initial = initial,
             product = nested_scalar_product,
+            scale_lane = q8_scale_lane,
+            scale_inner_guard = q8_scale_inner_guard,
+            value_decode = broadcast_value_decode,
+        )
+    } else if quantized_format == Some("q5_0") && matches!(q5_decode_algorithm, "auto" | "warp" | "warp-broadcast") {
+        format!(
+            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpSize = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpSize\n            let warpsPerBlock = gpu.blockDim.x / warpSize\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 22\n                    var float32 scale = 0.0\n                    var int qh = 0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                        qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                    scale = gpu.warp.shuffle(scale, scaleLane)\n                    qh = gpu.warp.shuffle(qh, scaleLane)\n{value_decode}                    base += warpSize\n                var int offset = warpSize / 2\n                while offset > 0:\n                    sum += gpu.warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            bias = if has_bias { "bias[col]" } else { "0.0" },
+            initial = initial,
+            product = nested_scalar_product,
+            scale_lane = q8_scale_lane,
+            scale_inner_guard = q8_scale_inner_guard,
+            value_decode = q5_value_decode,
         )
     } else if q8_warp_decode {
         format!(
@@ -578,7 +651,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
         )
     };
     let source = format!(
-        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, [float32]'{qc} input_c, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = input_c\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
+        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
         qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]),
     );
     let parsed = crate::parser::parse(
@@ -638,24 +711,25 @@ fn parse_dynamic_replacement_stmts(
     } else {
         format!("    guard {b}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n", b = call.operands[1], n = call.n, k = call.k)
     };
-    // A 256-thread block contains at least four warps on the supported
-    // 32- and 64-lane architectures. Dispatching in groups of four therefore
-    // covers every output column without baking a backend warp width into the
-    // host code; narrower warps simply execute additional guarded work.
-    let q8_decode_algorithm = tensor_config.algorithm(Some("q8_0"), true);
-    let q8_warp_decode = call.format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp" | "warp-broadcast");
-    let dispatch = if q8_warp_decode {
-        format!("    let {instance}_blocks = if {m} == 1: ({n} + 3) / 4 else: ({m} * {n} + 255) / 256\n", instance = instance, m = call.m, n = call.n)
+    let decode_algorithm = tensor_config.algorithm(call.format, true);
+    let warp_decode = match call.format {
+        Some("q8_0" | "q5_0" | "q4_0") => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
+        Some("iq4_nl") => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
+        _ => false,
+    };
+    let warps_per_block = 256 / tensor_config.target_warp_width.max(1);
+    let dispatch = if warp_decode {
+        format!("    let {instance}_blocks = if {m} == 1: ({n} + {tail}) / {warps_per_block} else: ({m} * {n} + 255) / 256\n", instance = instance, m = call.m, n = call.n, tail = warps_per_block - 1)
     } else {
         String::new()
     };
-    let grid = if q8_warp_decode {
+    let grid = if warp_decode {
         format!("{instance}_blocks")
     } else {
         format!("({m} * {n} + 255) / 256", m = call.m, n = call.n)
     };
     let source = format!(
-        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{c}, {m}, {n}, {k})\n{dispatch}    kernel:\n        {instance}(block = 256, grid = {grid})\n    {c} = {instance}.c\n",
+        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{dispatch}    kernel:\n        {instance}(block = 256, grid = {grid})\n    {c} = {instance}.c\n",
         a = call.operands[0], b = call.operands[1], c = call.operands[2],
         m = call.m, n = call.n, k = call.k,
     );

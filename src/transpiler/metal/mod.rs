@@ -61,7 +61,9 @@ pub fn transpile_metal(program: &Program, stem: &str, version: &str) -> MetalOut
 }
 
 pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> MetalOutput {
-    let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, tensor_config);
+    let mut tensor_config = tensor_config.clone();
+    tensor_config.target_warp_width = 32;
+    let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let program = &tensor_host.program;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }

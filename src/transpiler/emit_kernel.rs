@@ -56,6 +56,8 @@ fn is_gpu_buffer_ty(ty: &Type) -> bool {
 /// How a `'unified`/`'global` output field's initial device buffer contents are
 /// derived from its `init()`-body assignment — see `Transpiler::kernel_output_fill_map`.
 enum KernelOutputInit {
+    /// `field = [..<count]` — allocate storage without initializing/uploading it.
+    Alloc(Box<Expr>),
     /// `field = [value for ..<count]` — uniform fill.
     Fill(Expr, Box<Expr>),
     /// `field = [e0, e1, ...]` — literal elements, uploaded as-is.
@@ -610,6 +612,12 @@ impl Transpiler {
             let Some(field) = decl.fields.iter().find(|f| f.name == field_name) else { continue };
             let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
             match init {
+                KernelOutputInit::Alloc(count) => {
+                    let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
+                    self.line(&format!(
+                        "{var_name}.resize_{field_name}(({count_rust}) as usize);"
+                    ));
+                }
                 KernelOutputInit::Fill(value, count) => {
                     let value_rust = self.substitute_and_emit(&value, &param_to_arg, &param_to_len);
                     let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
@@ -645,7 +653,8 @@ impl Transpiler {
     }
 
     /// Scan a kernel's (first) `init` body for `field = [value for ..<count]`
-    /// (`ExprKind::ArrayFill`), `field = [value for i in ..<count]` (`ExprKind::
+    /// (`ExprKind::ArrayFill`), `field = [..<count]` (`ExprKind::ArrayAlloc`),
+    /// `field = [value for i in ..<count]` (`ExprKind::
     /// ArrayComp`), or plain `field = [e0, e1, ...]` (`ExprKind::Array`) assignments
     /// — the conventions this codebase's kernels use to size a `'unified` output
     /// buffer to its runtime size. Returns `field name -> KernelOutputInit`.
@@ -657,6 +666,9 @@ impl Transpiler {
                     if let ExprKind::Assign(lhs, rhs) = &e.kind {
                         if let ExprKind::Var(field) = &lhs.kind {
                             match &rhs.kind {
+                                ExprKind::ArrayAlloc { count } => {
+                                    map.insert(field.clone(), KernelOutputInit::Alloc(count.clone()));
+                                }
                                 ExprKind::ArrayFill { value, count } => {
                                     map.insert(field.clone(), KernelOutputInit::Fill((**value).clone(), count.clone()));
                                 }
@@ -855,7 +867,8 @@ impl Transpiler {
                             let is_passthrough = matches!(&rhs.kind, ExprKind::Var(_))
                                 || matches!(&rhs.kind, ExprKind::Cast(inner, _) if matches!(inner.kind, ExprKind::Var(_)));
                             let is_array_init = matches!(&rhs.kind,
-                                ExprKind::ArrayFill { .. } | ExprKind::Array(_) | ExprKind::ArrayComp { .. });
+                                ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. }
+                                    | ExprKind::Array(_) | ExprKind::ArrayComp { .. });
                             if !is_passthrough && !is_array_init {
                                 map.insert(field.clone(), (**rhs).clone());
                             }

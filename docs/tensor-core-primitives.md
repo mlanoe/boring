@@ -165,17 +165,20 @@ compiler itself:
 algorithm = "auto"
 
 [tensor.linear.decode]
-q8_0 = "warp"
+q8_0 = "warp-broadcast"
 
 [tensor.linear.prefill]
 algorithm = "scalar"
 ```
 
-`auto` is the default. The first implementation accepts `auto`, `scalar`, and
-`warp`; `warp` is currently available for Q8_0 single-row decode. Unsupported
-format/algorithm combinations fail during `boring build` instead of silently
-falling back. More algorithms and quantized formats can be added without
-changing source-level tensor calls.
+`auto` is the default. The first implementation accepts `auto`, `scalar`,
+`warp`, and `warp-broadcast`; the two warp schedules are currently available
+for Q8_0 single-row decode. `warp-broadcast` reads one scale per 32-element
+packed block and distributes it with `gpu.warp.shuffle`. Its launch geometry
+uses eight 32-lane warps per block on CUDA, Metal, and WGPU, and four 64-lane
+warps on ROCm. Unsupported format/algorithm combinations fail during
+`boring build` instead of silently falling back. More algorithms and quantized
+formats can be added without changing source-level tensor calls.
 
 `packedWeight` is a `[uint8]'gpu'global` or `[uint8]'gpu'unified` array in
 native GGUF block layout. Q8_0 uses a little-endian float16 scale followed by
@@ -494,11 +497,45 @@ the concrete requirements more precisely than a generic tensor example:
   dequantization. These cover every packed format currently implemented by
   `boring-llm`.
 - Single-token decode (`seq == 1`) is a matrix-vector workload. Dynamic Q8_0
-  linear now selects a warp-reduction path for `m == 1` and keeps the scalar
-  output-cell path for prefill. On Metal, 200 iterations at `m=1`, `k=896`,
-  `n=896` improved from 2.08 s to 1.26 s. The hand-written scale-broadcast
-  reference remains faster at 0.36 s, so scale broadcast and equivalent
-  scheduling for Q5_0, Q4_0, and IQ4_NL remain performance work.
+  linear selects a warp-reduction path for `m == 1`, optionally broadcasts
+  packed-block scales, and keeps the scalar output-cell path for prefill.
+  A destination declared with `[..<count]` is allocated directly on the device
+  on every GPU backend; WGPU resizes and rebinds the buffer without staging a
+  zero vector. In the current Metal microbenchmark, the tensor path improved
+  from about 2.08 seconds to 0.59-0.63 seconds for 200 iterations after direct
+  output allocation, 32-lane index specialization, and hoisting the uniform
+  output bound outside the decode loop. The hand-written Q8_0 reference took
+  about 0.64-0.69 seconds in the same alternating, warmed-up runs, putting the
+  generated tensor schedule at parity with the specialized kernel. This
+  Q5_0 now uses the same schedule and broadcasts both its scale and 32-bit
+  high-bit word. Its latest warmed-up Metal measurements are roughly 0.61-0.69
+  seconds versus 0.61-0.75 seconds for the hand-written reference, putting
+  both implementations at practical parity. Q4_0 now shares the scale-only
+  broadcast schedule with Q8_0; warmed-up Metal runs take roughly 0.56-0.75
+  seconds versus 0.51-0.84 seconds for the hand-written reference, again at
+  practical parity. IQ4_NL also supports the schedule and is correct on Metal
+  and WGPU. Warmed-up Metal runs took about 0.69-0.83 seconds versus 0.56-0.71
+  seconds for the specialized reference, but the scalar tensor schedule took
+  1.64-1.65 seconds. `auto` therefore selects warp-broadcast for IQ4_NL while
+  leaving its nonlinear codebook lowering as the remaining optimization gap.
+  A compact packed-word codebook representation was also benchmarked; it was
+  correct but did not improve the warmed-up Metal timings, so the clearer
+  direct 16-value selection remains. A position-varying IQ4_NL oracle now
+  covers all codebook entries across multiple rows, outputs, blocks, and
+  positive and negative scales. It matches the interpreter on a real Metal
+  device, and its generated kernels build for all four GPU targets.
+  Q4_0 has the same position-varying, multi-row and multi-block coverage,
+  including signed scales, and also matches the interpreter on real Metal.
+  Q8_0 is covered by the same oracle shape with positive and negative int8
+  values and scales, and likewise matches real Metal execution.
+  Q6_K now has a position-varying oracle covering its low nibbles, packed high
+  bits, signed per-group scales, both 128-value halves, multiple outputs, and
+  positive and negative block scales. It also matches real Metal execution.
+  Q4_K, Q3_K, and Q2_K now have equivalent position-varying oracles. Together
+  they exercise Q4_K's split six-bit scales and minima, Q3_K's sign masks and
+  split six-bit signed scales, and Q2_K's packed two-bit values with independent
+  four-bit scales and minima. Each oracle matches real Metal execution and
+  builds for CUDA, Metal, ROCm, and WGPU.
 - Attention needs runtime rank-three batched products, a mapping from query
   heads to shared KV heads for GQA, a transposed K operand, and separate causal
   mask and softmax stages. Rank-two matmul can migrate linear layers first but
@@ -508,10 +545,15 @@ The minimum compiler work for a useful float32 migration is therefore:
 
 1. Add an explicit safe in-place contract where profiling shows that the
    current loop-carried device copy is material.
-2. Validate every packed format against non-uniform, multi-block reference
-   vectors and real GGUF model tensors.
-3. Provide output allocation or a concise way to create a correctly shaped
-   mutable destination from runtime extents.
+2. Keep real-GGUF fixtures in the regression sweep. Q5_0, Q6_K, Q4_K, Q3_K,
+   IQ4_NL, Q8_0, and Q4_0 tensor paths match both CPU dequantization and the
+   specialized Metal kernels for every output of representative Qwen2.5
+   tensors. This includes the 151,936-output Q8_0 vocabulary projection.
+   Q2_K is covered by an extracted real superblock from Llama-2 7B, independently
+   checked against Python's GGUF decoder, so the regular GPU test does not need
+   to load the 2.6 GB model.
+3. Profile the remaining Q8_0 decode gap after direct device output allocation,
+   then apply the useful schedule pieces to other packed formats.
 4. Extend fused bias beyond the runtime float32 `linear` path when another
    tensor operation or packed format needs the same epilogue.
 
@@ -781,7 +823,7 @@ intermediate device-to-host copy. Runtime extents are implemented for the
 six-argument `linear` overload and its seven-argument bias form. Calls nested in ordinary loops and branches are
 also lowered, and loop-carried results remain resident without a host round
 trip. Mutable value semantics may still require a device copy between kernels;
-output allocation and batching remain future work.
+dynamic output allocation is implemented, while batching remains future work.
 `linear`/`linearTile` support the transposed row-major weight
 orientation without a copy. Native matrix instructions remain a backend
 optimization after the portable behavior is validated on real hardware.

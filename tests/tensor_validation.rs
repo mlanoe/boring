@@ -257,8 +257,21 @@ fn dynamic_tensor_linear_decodes_q8_0_weights_on_all_gpu_targets() {
     let shader = fs::read_to_string(metal_root.join("kernels/main.metal")).unwrap();
     assert!(shader.contains("simd_shuffle_xor"), "Q8_0 decode must synthesize a warp reduction");
     assert!(shader.contains("simd_shuffle(scale, scaleLane)"), "automatic Q8_0 decode must broadcast each packed-block scale");
+    assert!(shader.contains("const auto scaleLane = 0"), "32-lane targets must use a constant Q8_0 scale source lane");
+    assert!(shader.contains("(blockByte + 2) + lane"), "32-lane targets must avoid recomputing the Q8_0 position with a modulo");
+    assert_eq!(shader.matches("(cell < n)").count(), 1, "the uniform Q8_0 output bound must guard the whole warp schedule, not every decode iteration");
+    assert!(!shader.contains("(inner < k)"), "32-lane targets with Q8_0-aligned rows do not need an inner bound check");
     let host = fs::read_to_string(metal_root.join("src/main.rs")).unwrap();
-    assert!(host.contains("_blocks = if (1 == 1)"), "Q8_0 dispatch must select launch geometry from m");
+    assert!(host.contains("_blocks = if (1 == 1) { ((1 + 7) / 8)"), "Metal Q8_0 dispatch must use its eight 32-lane warps per block");
+    assert!(!host.contains("input_c"), "dynamic linear must allocate its overwritten destination directly on the GPU");
+    let rocm_host = fs::read_to_string(root.join("tensor_dynamic_q8_0_rocm/src/main.rs")).unwrap();
+    assert!(rocm_host.contains("_blocks = if (1 == 1) { ((1 + 3) / 4)"), "ROCm Q8_0 dispatch must use its four 64-lane warps per block");
+    let rocm_shader = fs::read_to_string(root.join("tensor_dynamic_q8_0_rocm/kernels/main.hip")).unwrap();
+    assert!(rocm_shader.contains("const auto scaleLane = ((lane / 32) * 32)"), "ROCm wave64 must select lane 0 or 32 for each Q8_0 packed block");
+    assert!(rocm_shader.contains("(inner < k)"), "ROCm wave64 must guard the optional second 32-lane half-wave");
+    let wgpu_host = fs::read_to_string(root.join("tensor_dynamic_q8_0_wgpu/src/main.rs")).unwrap();
+    assert!(wgpu_host.contains("__boring_tensor_host_0.resize_c(((1 * 1)) as usize)"), "WGPU must resize an uninitialized tensor destination without uploading it: {wgpu_host}");
+    assert!(!wgpu_host.contains("__boring_tensor_host_0.copy_c_to_device"), "WGPU must not upload an overwritten tensor destination");
 }
 
 #[test]
@@ -273,6 +286,62 @@ fn project_tensor_config_can_force_scalar_q8_decode() {
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
     let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
     assert!(!shader.contains("simd_shuffle_xor"), "scalar override must omit the warp reduction");
+}
+
+#[test]
+fn project_tensor_config_can_select_q5_warp_broadcast_decode() {
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_config_q5_warp_broadcast");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-config-q5\"\n\n[tensor.linear.decode]\nq5_0 = \"warp-broadcast\"\n").unwrap();
+    let path = root.join("main.br");
+    fs::write(&path, "req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32]\n    gpu.tensor.linear(x, weight, y, m = 1, n = 1, k = 32, format = \"q5_0\")\n    y\n").unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"]).arg(&path).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
+    assert!(shader.contains("simd_shuffle((int32_t)(qh), scaleLane)"), "explicit Q5_0 warp-broadcast config must select the Q5 schedule");
+}
+
+#[test]
+fn project_tensor_config_can_select_q4_warp_broadcast_decode() {
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_config_q4_warp_broadcast");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-config-q4\"\n\n[tensor.linear.decode]\nq4_0 = \"warp-broadcast\"\n").unwrap();
+    let path = root.join("main.br");
+    fs::write(&path, "req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32]\n    gpu.tensor.linear(x, weight, y, m = 1, n = 1, k = 32, format = \"q4_0\")\n    y\n").unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"]).arg(&path).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
+    assert!(shader.contains("const auto blockByte = ((flat / 32) * 18)"), "explicit Q4_0 warp-broadcast config must select the Q4 schedule");
+}
+
+#[test]
+fn project_tensor_config_can_select_iq4_warp_broadcast_decode() {
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_config_iq4_warp_broadcast");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-config-iq4\"\n\n[tensor.linear.decode]\niq4_nl = \"warp-broadcast\"\n").unwrap();
+    let path = root.join("main.br");
+    fs::write(&path, "req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32]\n    gpu.tensor.linear(x, weight, y, m = 1, n = 1, k = 32, format = \"iq4_nl\")\n    y\n").unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"]).arg(&path).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
+    assert!(shader.contains("nibble == 14"), "explicit IQ4_NL warp-broadcast config must select the nonlinear codebook schedule");
+}
+
+#[test]
+fn project_tensor_config_auto_selects_iq4_warp_broadcast_decode() {
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_config_iq4_auto");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-config-iq4-auto\"\n\n[tensor.linear]\nalgorithm = \"auto\"\n").unwrap();
+    let path = root.join("main.br");
+    fs::write(&path, "req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32]\n    gpu.tensor.linear(x, weight, y, m = 1, n = 1, k = 32, format = \"iq4_nl\")\n    y\n").unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"]).arg(&path).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
+    assert!(shader.contains("simd_shuffle(scale"), "auto must select IQ4_NL warp-broadcast because it substantially outperforms the scalar tensor schedule");
 }
 
 #[test]
@@ -291,6 +360,15 @@ fn dynamic_tensor_linear_decodes_q4_0_weights_on_all_gpu_targets() {
             .args(["build", "--target", target]).arg(&path).output().unwrap();
         assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
     }
+    let metal_root = root.join("tensor_dynamic_q4_0_metal");
+    let shader = fs::read_to_string(metal_root.join("kernels/main.metal")).unwrap();
+    assert!(shader.contains("simd_shuffle(scale, scaleLane)"), "Q4_0 decode must broadcast its packed-block scale");
+    assert!(shader.contains("const auto blockByte = ((flat / 32) * 18)"), "Q4_0 warp decode must use its 18-byte packed-block stride");
+    assert_eq!(shader.matches("(cell < n)").count(), 1, "the uniform Q4_0 output bound must guard the whole warp schedule");
+    let host = fs::read_to_string(metal_root.join("src/main.rs")).unwrap();
+    assert!(host.contains("_blocks = if (1 == 1) { ((1 + 7) / 8)"), "Metal Q4_0 dispatch must schedule one warp per output");
+    let rocm_shader = fs::read_to_string(root.join("tensor_dynamic_q4_0_rocm/kernels/main.hip")).unwrap();
+    assert!(rocm_shader.contains("const auto scaleLane = ((lane / 32) * 32)"), "ROCm Q4_0 wave64 must select a source lane for each packed block");
 }
 
 #[test]
@@ -309,6 +387,16 @@ fn dynamic_tensor_linear_decodes_q5_0_weights_on_all_gpu_targets() {
             .args(["build", "--target", target]).arg(&path).output().unwrap();
         assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
     }
+    let metal_root = root.join("tensor_dynamic_q5_0_metal");
+    let shader = fs::read_to_string(metal_root.join("kernels/main.metal")).unwrap();
+    assert!(shader.contains("simd_shuffle(scale, scaleLane)"), "Q5_0 decode must broadcast its packed-block scale");
+    assert!(shader.contains("simd_shuffle((int32_t)(qh), scaleLane)"), "Q5_0 decode must broadcast its high-bit word");
+    assert_eq!(shader.matches("(cell < n)").count(), 1, "the uniform Q5_0 output bound must guard the whole warp schedule");
+    let host = fs::read_to_string(metal_root.join("src/main.rs")).unwrap();
+    assert!(host.contains("_blocks = if (1 == 1) { ((1 + 7) / 8)"), "Metal Q5_0 dispatch must schedule one warp per output");
+    let rocm_shader = fs::read_to_string(root.join("tensor_dynamic_q5_0_rocm/kernels/main.hip")).unwrap();
+    assert!(rocm_shader.contains("const auto scaleLane = ((lane / 32) * 32)"), "ROCm Q5_0 wave64 must select a source lane for each packed block");
+    assert!(rocm_shader.contains("__shfl_sync(0xffffffff, qh, scaleLane)"), "ROCm Q5_0 must broadcast both high-bit words in a wave64");
 }
 
 #[test]
@@ -384,6 +472,584 @@ fn dynamic_tensor_linear_q5_0_matches_position_varying_reference() {
 }
 
 #[test]
+fn dynamic_tensor_linear_iq4_nl_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 64;
+    const CODEBOOK: [i32; 16] = [
+        -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+    ];
+    let scales = [1.0f32, 0.5, 2.0, -0.5];
+    let mut packed = Vec::with_capacity(N * K / 32 * 18);
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..4 {
+        let scale_bits: u16 = match block {
+            0 => 0x3c00,
+            1 => 0x3800,
+            2 => 0x4000,
+            _ => 0xb800,
+        };
+        packed.extend_from_slice(&scale_bits.to_le_bytes());
+        let mut nibbles = [0u8; 16];
+        for position in 0..32 {
+            let codebook_index = (position * 7 + block * 5) % CODEBOOK.len();
+            if position < 16 {
+                nibbles[position] |= codebook_index as u8;
+            } else {
+                nibbles[position - 16] |= (codebook_index as u8) << 4;
+            }
+            decoded[block * 32 + position] = CODEBOOK[codebook_index] as f32 * scales[block];
+        }
+        packed.extend_from_slice(&nibbles);
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x
+        .iter()
+        .map(|value| format!("{value} as float32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bytes = packed
+        .iter()
+        .map(|value| format!("uint8({value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("tensor_dynamic_iq4_nl_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_iq4_nl_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 64, format = \"iq4_nl\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .arg("run")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout)
+        .trim()
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{target}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+#[test]
+fn dynamic_tensor_linear_q4_0_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 64;
+    let scales = [1.0f32, 0.5, 2.0, -0.5];
+    let mut packed = Vec::with_capacity(N * K / 32 * 18);
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..4 {
+        let scale_bits: u16 = match block {
+            0 => 0x3c00,
+            1 => 0x3800,
+            2 => 0x4000,
+            _ => 0xb800,
+        };
+        packed.extend_from_slice(&scale_bits.to_le_bytes());
+        let mut nibbles = [0u8; 16];
+        for position in 0..32 {
+            let encoded = ((position * 7 + block * 5) % 16) as u8;
+            if position < 16 {
+                nibbles[position] |= encoded;
+            } else {
+                nibbles[position - 16] |= encoded << 4;
+            }
+            decoded[block * 32 + position] = (encoded as i32 - 8) as f32 * scales[block];
+        }
+        packed.extend_from_slice(&nibbles);
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x
+        .iter()
+        .map(|value| format!("{value} as float32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bytes = packed
+        .iter()
+        .map(|value| format!("uint8({value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("tensor_dynamic_q4_0_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_q4_0_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 64, format = \"q4_0\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .arg("run")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout)
+        .trim()
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{target}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+#[test]
+fn dynamic_tensor_linear_q8_0_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 64;
+    let scales = [1.0f32, 0.5, 2.0, -0.5];
+    let mut packed = Vec::with_capacity(N * K / 32 * 34);
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..4 {
+        let scale_bits: u16 = match block {
+            0 => 0x3c00,
+            1 => 0x3800,
+            2 => 0x4000,
+            _ => 0xb800,
+        };
+        packed.extend_from_slice(&scale_bits.to_le_bytes());
+        for position in 0..32 {
+            let quantized = ((position * 17 + block * 29) % 255) as i32 - 127;
+            packed.push((quantized & 0xff) as u8);
+            decoded[block * 32 + position] = quantized as f32 * scales[block];
+        }
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x
+        .iter()
+        .map(|value| format!("{value} as float32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bytes = packed
+        .iter()
+        .map(|value| format!("uint8({value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("tensor_dynamic_q8_0_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_q8_0_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 64, format = \"q8_0\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .arg("run")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout)
+        .trim()
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{target}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+#[test]
+fn dynamic_tensor_linear_q6_k_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 256;
+    const BLOCK_BYTES: usize = 210;
+    let block_scales = [1.0f32, -0.5];
+    let mut packed = vec![0u8; N * BLOCK_BYTES];
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..N {
+        let base = block * BLOCK_BYTES;
+        let scale_bits: u16 = if block == 0 { 0x3c00 } else { 0xb800 };
+        packed[base + 208..base + 210].copy_from_slice(&scale_bits.to_le_bytes());
+        let sub_scales: [i32; 16] = std::array::from_fn(|index| {
+            let magnitude = (index % 7 + 1) as i32;
+            if (index + block) % 2 == 0 { magnitude } else { -magnitude }
+        });
+        for (index, sub_scale) in sub_scales.iter().enumerate() {
+            packed[base + 192 + index] = (*sub_scale & 0xff) as u8;
+        }
+        for position in 0..K {
+            let iteration = position / 128;
+            let within = position % 128;
+            let group = within / 32;
+            let lane = within % 32;
+            let half = lane / 16;
+            let scale_index = iteration * 8 + half + group * 2;
+            let quantized = ((position * 13 + block * 17) % 64) as i32 - 32;
+            let encoded = (quantized + 32) as u8;
+            let low_offset = iteration * 64 + lane + if group % 2 == 0 { 0 } else { 32 };
+            if group < 2 {
+                packed[base + low_offset] |= encoded & 0x0f;
+            } else {
+                packed[base + low_offset] |= (encoded & 0x0f) << 4;
+            }
+            packed[base + 128 + iteration * 32 + lane] |=
+                ((encoded >> 4) & 0x03) << (group * 2);
+            decoded[block * K + position] =
+                quantized as f32 * sub_scales[scale_index] as f32 * block_scales[block];
+        }
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x
+        .iter()
+        .map(|value| format!("{value} as float32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let bytes = packed
+        .iter()
+        .map(|value| format!("uint8({value})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("tensor_dynamic_q6_k_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_q6_k_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 256, format = \"q6_k\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .arg("run")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout)
+        .trim()
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{target}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+#[test]
+fn dynamic_tensor_linear_q4_k_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 256;
+    const BLOCK_BYTES: usize = 144;
+    let block_scales = [0.5f32, -1.0];
+    let block_min_scales = [0.25f32, 0.5];
+    let sub_scales = [1u8, 5, 17, 31, 33, 47, 55, 63];
+    let sub_mins = [2u8, 7, 19, 29, 35, 45, 57, 62];
+    let mut packed = vec![0u8; N * BLOCK_BYTES];
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..N {
+        let base = block * BLOCK_BYTES;
+        let scale_bits: u16 = if block == 0 { 0x3800 } else { 0xbc00 };
+        let min_bits: u16 = if block == 0 { 0x3400 } else { 0x3800 };
+        packed[base..base + 2].copy_from_slice(&scale_bits.to_le_bytes());
+        packed[base + 2..base + 4].copy_from_slice(&min_bits.to_le_bytes());
+        for index in 0..4 {
+            packed[base + 4 + index] =
+                (sub_scales[index] & 0x3f) | ((sub_scales[index + 4] >> 4) << 6);
+            packed[base + 8 + index] =
+                (sub_mins[index] & 0x3f) | ((sub_mins[index + 4] >> 4) << 6);
+            packed[base + 12 + index] =
+                (sub_scales[index + 4] & 0x0f) | ((sub_mins[index + 4] & 0x0f) << 4);
+        }
+        for position in 0..K {
+            let chunk = position / 64;
+            let within = position % 64;
+            let half = within / 32;
+            let lane = within % 32;
+            let subblock = chunk * 2 + half;
+            let nibble = ((position * 7 + block * 5) % 16) as u8;
+            let quant_offset = base + 16 + chunk * 32 + lane;
+            if half == 0 {
+                packed[quant_offset] |= nibble;
+            } else {
+                packed[quant_offset] |= nibble << 4;
+            }
+            decoded[block * K + position] = block_scales[block]
+                * sub_scales[subblock] as f32
+                * nibble as f32
+                - block_min_scales[block] * sub_mins[subblock] as f32;
+        }
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x.iter().map(|value| format!("{value} as float32")).collect::<Vec<_>>().join(", ");
+    let bytes = packed.iter().map(|value| format!("uint8({value})")).collect::<Vec<_>>().join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_q4_k_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_q4_k_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 256, format = \"q4_k\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(&path).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout).trim().split(',')
+        .map(|value| value.parse().unwrap()).collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target]).arg(&path).output().unwrap();
+        assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
+    }
+}
+
+#[test]
+fn dynamic_tensor_linear_q3_k_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 256;
+    const BLOCK_BYTES: usize = 110;
+    let block_scales = [0.5f32, -1.0];
+    let sub_scales = [-31i32, -24, -17, -9, -1, 3, 8, 14, 19, 23, 27, 31, -28, -13, 6, 16];
+    let mut packed = vec![0u8; N * BLOCK_BYTES];
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..N {
+        let base = block * BLOCK_BYTES;
+        let scale_bits: u16 = if block == 0 { 0x3800 } else { 0xbc00 };
+        packed[base + 108..base + 110].copy_from_slice(&scale_bits.to_le_bytes());
+        for (index, sub_scale) in sub_scales.iter().enumerate() {
+            let encoded = (sub_scale + 32) as u8;
+            let word = index / 4;
+            let lane = index % 4;
+            let low_offset = base + 96 + (word % 2) * 4 + lane;
+            if word < 2 {
+                packed[low_offset] |= encoded & 0x0f;
+            } else {
+                packed[low_offset] |= (encoded & 0x0f) << 4;
+            }
+            packed[base + 104 + lane] |= ((encoded >> 4) & 0x03) << (word * 2);
+        }
+        for position in 0..K {
+            let outer = position / 128;
+            let remainder = position % 128;
+            let group = remainder / 32;
+            let within32 = remainder % 32;
+            let sub = within32 / 16;
+            let lane = within32 % 16;
+            let scale_index = outer * 8 + group * 2 + sub;
+            let quantized = ((position * 5 + block * 3) % 8) as i32 - 4;
+            packed[base + 32 + outer * 32 + sub * 16 + lane] |=
+                ((quantized & 0x03) as u8) << (group * 2);
+            if quantized >= 0 {
+                packed[base + sub * 16 + lane] |= 1 << (outer * 4 + group);
+            }
+            decoded[block * K + position] =
+                block_scales[block] * sub_scales[scale_index] as f32 * quantized as f32;
+        }
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x.iter().map(|value| format!("{value} as float32")).collect::<Vec<_>>().join(", ");
+    let bytes = packed.iter().map(|value| format!("uint8({value})")).collect::<Vec<_>>().join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_q3_k_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_q3_k_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 256, format = \"q3_k\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(&path).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout).trim().split(',')
+        .map(|value| value.parse().unwrap()).collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target]).arg(&path).output().unwrap();
+        assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
+    }
+}
+
+#[test]
+fn dynamic_tensor_linear_q2_k_matches_position_varying_reference() {
+    const M: usize = 2;
+    const N: usize = 2;
+    const K: usize = 256;
+    const BLOCK_BYTES: usize = 84;
+    let block_scales = [0.5f32, -1.0];
+    let block_min_scales = [0.25f32, 0.5];
+    let sub_scales = [1u8, 3, 5, 7, 9, 11, 13, 15, 2, 4, 6, 8, 10, 12, 14, 15];
+    let sub_mins = [15u8, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 1];
+    let mut packed = vec![0u8; N * BLOCK_BYTES];
+    let mut decoded = vec![0.0f32; N * K];
+    for block in 0..N {
+        let base = block * BLOCK_BYTES;
+        let scale_bits: u16 = if block == 0 { 0x3800 } else { 0xbc00 };
+        let min_bits: u16 = if block == 0 { 0x3400 } else { 0x3800 };
+        packed[base + 80..base + 82].copy_from_slice(&scale_bits.to_le_bytes());
+        packed[base + 82..base + 84].copy_from_slice(&min_bits.to_le_bytes());
+        for index in 0..16 {
+            packed[base + index] = sub_scales[index] | (sub_mins[index] << 4);
+        }
+        for position in 0..K {
+            let outer = position / 128;
+            let remainder = position % 128;
+            let group = remainder / 32;
+            let within32 = remainder % 32;
+            let sub = within32 / 16;
+            let lane = within32 % 16;
+            let scale_index = outer * 8 + group * 2 + sub;
+            let quantized = ((position * 3 + block) % 4) as u8;
+            packed[base + 16 + outer * 32 + sub * 16 + lane] |= quantized << (group * 2);
+            decoded[block * K + position] = block_scales[block]
+                * sub_scales[scale_index] as f32
+                * quantized as f32
+                - block_min_scales[block] * sub_mins[scale_index] as f32;
+        }
+    }
+    let x: Vec<f32> = (0..M * K)
+        .map(|index| ((index * 3) % 9) as f32 - 4.0)
+        .collect();
+    let bias = [1.0f32, -2.0];
+    let mut expected = Vec::with_capacity(M * N);
+    for row in 0..M {
+        for col in 0..N {
+            let mut sum = bias[col];
+            for inner in 0..K {
+                sum += x[row * K + inner] * decoded[col * K + inner];
+            }
+            expected.push(sum);
+        }
+    }
+    let floats = x.iter().map(|value| format!("{value} as float32")).collect::<Vec<_>>().join(", ");
+    let bytes = packed.iter().map(|value| format!("uint8({value})")).collect::<Vec<_>>().join(", ");
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_q2_k_reference");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("tensor_dynamic_q2_k_reference.br");
+    fs::write(&path, format!("req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<4]\n    gpu.tensor.linear(x, weight, bias, y, m = 2, n = 2, k = 256, format = \"q2_k\")\n    y\n\nlet [float32]'gpu'global x = [{floats}]\nlet [uint8]'gpu'global weight = [{bytes}]\nlet [float32]'gpu'global bias = [1.0 as float32, -2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print \"{{result[0]}},{{result[1]}},{{result[2]}},{{result[3]}}\"\n")).unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(&path).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let actual: Vec<f32> = String::from_utf8_lossy(&run.stdout).trim().split(',')
+        .map(|value| value.parse().unwrap()).collect();
+    assert_eq!(actual, expected);
+
+    for target in ["cuda", "metal", "rocm", "wgpu"] {
+        let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target]).arg(&path).output().unwrap();
+        assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
+    }
+}
+
+#[test]
 fn dynamic_tensor_linear_reports_supported_quantized_formats() {
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_bad_format");
     fs::create_dir_all(&root).unwrap();
@@ -443,6 +1109,7 @@ fn dynamic_tensor_linear_reports_specific_runtime_shape_errors() {
 fn dynamic_tensor_linear_decodes_iq4_nl_weights_on_all_gpu_targets() {
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_iq4_nl");
     fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-iq4-warp\"\n\n[tensor.linear.decode]\niq4_nl = \"warp-broadcast\"\n").unwrap();
     let path = root.join("tensor_dynamic_iq4_nl.br");
     fs::write(&path, "req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight, [float32]'gpu'global bias) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32]\n    gpu.tensor.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = \"iq4_nl\")\n    y\n\nlet [float32]'gpu'global x = [1.0 as float32 for ..<32]\nmut [uint8]'gpu'global weight = [uint8(136) for ..<18]\nweight[0] = uint8(0)\nweight[1] = uint8(60)\nlet [float32]'gpu'global bias = [2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print result[0]\n").unwrap();
 
@@ -455,6 +1122,15 @@ fn dynamic_tensor_linear_decodes_iq4_nl_weights_on_all_gpu_targets() {
             .args(["build", "--target", target]).arg(&path).output().unwrap();
         assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
     }
+    let metal_root = root.join("tensor_dynamic_iq4_nl_metal");
+    let shader = fs::read_to_string(metal_root.join("kernels/main.metal")).unwrap();
+    assert!(shader.contains("simd_shuffle(scale, scaleLane)"), "IQ4_NL decode must broadcast its packed-block scale");
+    assert!(shader.contains("nibble == 14"), "IQ4_NL warp decode must preserve the nonlinear 16-value codebook");
+    assert_eq!(shader.matches("(cell < n)").count(), 1, "the uniform IQ4_NL output bound must guard the whole warp schedule");
+    let host = fs::read_to_string(metal_root.join("src/main.rs")).unwrap();
+    assert!(host.contains("_blocks = if (1 == 1) { ((1 + 7) / 8)"), "Metal IQ4_NL dispatch must schedule one warp per output");
+    let rocm_shader = fs::read_to_string(root.join("tensor_dynamic_iq4_nl_rocm/kernels/main.hip")).unwrap();
+    assert!(rocm_shader.contains("const auto scaleLane = ((lane / 32) * 32)"), "ROCm IQ4_NL wave64 must select a source lane for each packed block");
 }
 
 #[test]

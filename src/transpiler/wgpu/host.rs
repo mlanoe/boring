@@ -826,6 +826,29 @@ impl<'a> HostEmitter<'a> {
                     self.line(&format!("        __boring_gpu_copy_d2h::<{}>(&self.device, &self.queue, &self.{}_buf)", host_ty, f.name));
                 }
                 self.line("    }");
+                // Allocate or resize a device output without staging and uploading a
+                // host-side zero vector. ArrayAlloc (`field = [..<count]`) promises
+                // that the kernel overwrites the storage before it is observed.
+                self.line(&format!("    fn resize_{}(&mut self, len: usize) {{", f.name));
+                if packed {
+                    self.line(&format!("        let needed = {};", round_up_to_word_bytes(&format!("len * std::mem::size_of::<{}>()", host_ty))));
+                } else {
+                    self.line(&format!("        let needed = (len * std::mem::size_of::<{}>()) as u64;", host_ty));
+                }
+                self.line("        let needed = needed.max(4);");
+                self.line(&format!("        if self.{}_buf.size() != needed {{", f.name));
+                self.line(&format!("            self.{}_buf = std::sync::Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {{", f.name));
+                self.line("                label: None,");
+                self.line("                size: needed,");
+                self.line(&format!("                usage: {},", buffer_usages(f)));
+                self.line("                mapped_at_creation: false,");
+                self.line("            }));");
+                self.line("            self.rebuild_bind_group();");
+                self.line("        }");
+                if packed {
+                    self.line(&format!("        self.{}_len = len;", f.name));
+                }
+                self.line("    }");
                 // H2D. `new()` creates every buffer field at size 0 (it has no host-side
                 // notion of the real data size until a caller actually supplies some —
                 // see wgpu::host::emit_kernel_new and emit_kernel::kernel_output_fill_map),
