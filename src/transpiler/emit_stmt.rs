@@ -183,6 +183,10 @@ impl Transpiler {
                         self.line(&format!("Ok({resident})"));
                         return;
                     }
+                    if self.current_fn_returns_resident.is_some() {
+                        self.line(&format!("Ok(BoringGpuArg::Host(({}).clone()))", self.emit_expr_owned(e)));
+                        return;
+                    }
                     // This function's own return type is NOT itself resident (the case
                     // above already handled that, via a raw pass-through that "just
                     // works" since both sides are `BoringGpuArg<T>`) — but the tail
@@ -213,6 +217,10 @@ impl Transpiler {
                     // tuple (`mha_step_gpu`-style) and the tail is a tuple literal.
                     if let Some(resident) = self.try_emit_gpu_resident_tuple_return(e) {
                         self.line(&resident);
+                        return;
+                    }
+                    if self.current_fn_returns_resident.is_some() {
+                        self.line(&format!("BoringGpuArg::Host(({}).clone())", self.emit_expr_owned(e)));
                         return;
                     }
                     // Same materializing fallback as the `throws` branch above, for a

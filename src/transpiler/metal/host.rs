@@ -115,6 +115,7 @@ struct HostEmitter {
     /// the three GPU targets, needs this (Metal's native buffer width is f32,
     /// but the general pass's host convention is fixed at f64).
     fn_float_array_params: std::collections::HashMap<String, Vec<bool>>,
+    fn_gpu_array_params: std::collections::HashMap<String, Vec<bool>>,
     /// Local variable names (current function only, reset per `emit_fn` call,
     /// mirrors `ref_params`' scoping) bound directly to a materializing call
     /// (`let k_t = transpose_gpu(...)`) -- these are `Vec<f64>` (the general
@@ -152,6 +153,11 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
         Type::Named(n) => struct_names.contains(n),
         _ => false,
     }
+}
+
+fn is_gpu_array_param(ty: &Type) -> bool {
+    matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+        if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
 }
 
 /// True for a bare `[float]`/`[float64]` array param -- this backend's own
@@ -212,6 +218,7 @@ impl HostEmitter {
             in_resident_return: None,
             fn_returns_resident: std::collections::HashMap::new(),
             fn_float_array_params: std::collections::HashMap::new(),
+            fn_gpu_array_params: std::collections::HashMap::new(),
             f64_array_locals: std::collections::HashSet::new(),
             resident_locals: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
@@ -350,6 +357,10 @@ impl HostEmitter {
                     .map(|p| p.ty.as_ref().is_some_and(is_float_array_param))
                     .collect();
                 self.fn_float_array_params.insert(f.name.clone(), float_array_flags);
+                self.fn_gpu_array_params.insert(
+                    f.name.clone(),
+                    f.params.iter().map(|p| p.ty.as_ref().is_some_and(is_gpu_array_param)).collect(),
+                );
                 if let Some(rt) = &f.return_ty {
                     if rt.gpu_resident_qual().is_some() {
                         self.fn_returns_resident.insert(f.name.clone(), rt.clone());
@@ -1165,6 +1176,14 @@ impl HostEmitter {
     /// `emit_kernel_field_value`'s doc for why a mirroring kernel-field RHS needs
     /// its own, non-materializing emission instead of the ordinary `self.expr()`.
     fn emit_assign_rhs(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        if matches!(&lhs.kind, ExprKind::Var(name) if self.resident_locals.contains(name.as_str())) {
+            if let Some(value) = self.try_resident_field_expr(rhs) { return value; }
+            if let ExprKind::Field(obj, field) = &rhs.kind {
+                if let ExprKind::Var(obj) = &obj.kind {
+                    return format!("BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<f32>())");
+                }
+            }
+        }
         if self.is_kernel_field_ref(lhs) && self.is_kernel_field_ref(rhs) {
             self.emit_kernel_field_value(rhs)
         } else {
@@ -1744,7 +1763,9 @@ impl HostEmitter {
                     // params -- see `cuda::host`'s identical fix for the full
                     // rationale (confirmed necessary for cross-calls between
                     // this emitter and the general-pipeline splice to type-check).
-                    let base = if is_float_array_param(ty) {
+                    let base = if is_gpu_array_param(ty) {
+                        format!("BoringGpuArg<{}>", general_host_elem_type(ty))
+                    } else if is_float_array_param(ty) {
                         "Vec<f64>".to_string()
                     } else {
                         rust_type(ty)
@@ -1803,6 +1824,10 @@ impl HostEmitter {
         let outer_resident_locals = std::mem::take(&mut self.resident_locals);
         for p in &f.params {
             if let Some(ty) = &p.ty {
+                if is_gpu_array_param(ty) {
+                    self.resident_locals.insert(p.name.clone());
+                    continue;
+                }
                 // A `[float]` param is declared `&Vec<f64>` (see the param-
                 // rendering fix above) but immediately shadow-rebound to an
                 // OWNED `Vec<f32>` local below -- it must NOT be tracked as a
@@ -1818,7 +1843,7 @@ impl HostEmitter {
         // `is_float_array_param`'s doc for the full rationale.
         for p in &f.params {
             if let Some(ty) = &p.ty {
-                if is_float_array_param(ty) {
+                if is_float_array_param(ty) && !is_gpu_array_param(ty) {
                     self.line(&format!(
                         "let {name} = {name}.iter().map(|&x| x as f32).collect::<Vec<f32>>();",
                         name = p.name
@@ -1838,7 +1863,7 @@ impl HostEmitter {
                         // `try_resident_field_expr` FIRST, before emitting the
                         // materializing read at all -- see its doc comment.
                         let wrapped = if self.in_resident_return.is_some() {
-                            if let Some(resident) = self.try_resident_field_expr(e) {
+                            if let Some(resident) = match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }.or_else(|| self.try_resident_field_expr(e)) {
                                 resident
                             } else {
                                 let s = self.expr(e);
@@ -1853,7 +1878,7 @@ impl HostEmitter {
                     }
                 } else if let Some(elem) = self.in_resident_return.clone() {
                     if let Stmt::Expr(e) = stmt {
-                        let wrapped = if let Some(resident) = self.try_resident_field_expr(e) {
+                        let wrapped = if let Some(resident) = match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }.or_else(|| self.try_resident_field_expr(e)) {
                             resident
                         } else {
                             let s = self.expr(e);
@@ -1939,11 +1964,12 @@ impl HostEmitter {
                 // see `resident_locals`'s doc. Keep it `BoringGpuArg<f64>`-
                 // typed and suppress the eager materializing wrap this
                 // specific call would otherwise get.
-                let is_resident_preserving = is_materializing_call
-                    && s.ty.as_ref().and_then(|t| t.gpu_resident_qual()).is_some();
+                let explicit_resident = s.ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some());
+                let is_resident_preserving = explicit_resident
+                    && (is_materializing_call || self.in_resident_return.is_some());
                 let ty_ann = if is_resident_preserving {
                     self.resident_locals.insert(s.name.clone());
-                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", general_host_elem_type(t))).unwrap_or_default()
+                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", general_host_elem_type(t.without_mut()))).unwrap_or_default()
                 } else if is_materializing_call {
                     self.f64_array_locals.insert(s.name.clone());
                     s.ty.as_ref().map(|t| format!(": Vec<{}>", general_host_elem_type(t))).unwrap_or_default()
@@ -1955,7 +1981,7 @@ impl HostEmitter {
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
-                    let rhs = self.expr(val);
+                    let rhs = if is_resident_preserving && !is_materializing_call { format!("BoringGpuArg::Host({})", self.expr(val)) } else { self.expr(val) };
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
@@ -2319,6 +2345,7 @@ impl HostEmitter {
             in_resident_return: self.in_resident_return.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
             fn_float_array_params: self.fn_float_array_params.clone(),
+            fn_gpu_array_params: self.fn_gpu_array_params.clone(),
             f64_array_locals: self.f64_array_locals.clone(),
             resident_locals: self.resident_locals.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
@@ -2590,7 +2617,17 @@ impl HostEmitter {
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
                 let float_flags = callee_name.and_then(|n| self.fn_float_array_params.get(n)).cloned();
+                let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
+                        if let ExprKind::Var(name) = &a.value.kind {
+                            if self.resident_locals.contains(name.as_str()) {
+                                return format!("{}.clone()", name);
+                            }
+                        }
+                        let value = self.expr(&a.value);
+                        return format!("BoringGpuArg::Host(({}).iter().map(|&x| x as f64).collect::<Vec<f64>>())", value);
+                    }
                     // A `[float]` position on the callee expects `&Vec<f64>` (see
                     // `is_float_array_param`'s doc), but every value flowing
                     // through this backend's own kernel-touching functions is
@@ -3044,6 +3081,22 @@ impl HostEmitter {
         Some(elem_rust_type(&field.ty))
     }
 
+    /// True when this constructor position initializes a read-only GPU buffer
+    /// field. Such a field can retain an already-resident Metal buffer directly:
+    /// `Buffer::clone()` is an Objective-C retain and performs no data copy.
+    fn kernel_ctor_buffer_is_read_only(&self, kernel_name: &str, idx: usize) -> bool {
+        let Some(decl) = self.kernel_decls.get(kernel_name) else { return false };
+        let Some(init) = decl.inits.first() else { return false };
+        let Some(param) = init.params.get(idx) else { return false };
+        init.body.iter().find_map(|stmt| {
+            let Stmt::Expr(expr) = stmt else { return None };
+            let ExprKind::Assign(lhs, rhs) = &expr.kind else { return None };
+            let (ExprKind::Var(field_name), ExprKind::Var(param_name)) = (&lhs.kind, &rhs.kind) else { return None };
+            if param_name != &param.name { return None; }
+            decl.fields.iter().find(|field| field.name == *field_name)
+        }).is_some_and(|field| field.binding == FieldBinding::Let)
+    }
+
     /// Renders `args` for a call to kernel `name`'s constructor targeting
     /// device `dev`, uploading each buffer-passthrough argument (see
     /// `kernel_ctor_buffer_flags`) via `new_buffer_with_data` -- or reusing
@@ -3058,6 +3111,7 @@ impl HostEmitter {
         let buffer_flags = self.kernel_ctor_buffer_flags(name);
         args.iter().enumerate().map(|(i, a)| {
             let is_buffer_pos = buffer_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+            let is_read_only_buffer = self.kernel_ctor_buffer_is_read_only(name, i);
             // The actual element type of the field this argument uploads into --
             // every upload path below used to hardcode `f32` unconditionally,
             // silently corrupting any non-float buffer (`[int]'global`, `int64_t`
@@ -3089,7 +3143,8 @@ impl HostEmitter {
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         return format!(
-                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => __boring_metal_buffer_copy(&{dev}, &buf)?, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            "(match &{v} {{ BoringGpuArg::Resident(buf, _) => {resident}, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            resident = if is_read_only_buffer { "buf.clone()".to_string() } else { format!("__boring_metal_buffer_copy(&{dev}, &buf)?") },
                             v = vname, dev = dev, elem = elem
                         );
                     }
@@ -3172,7 +3227,7 @@ impl HostEmitter {
         match kf.qual {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 match &kf.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => Some(format!(
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => Some(format!(
                         "BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<f32>())",
                         obj = obj_name, field = field
                     )),

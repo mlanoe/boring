@@ -26,17 +26,30 @@ impl super::Checker {
             );
             return;
         }
+        let operand_count = args.iter().position(|arg| arg.label.is_some()).unwrap_or(args.len());
+        let labeled = &args[operand_count..];
         let dynamic_linear = method == "linear"
-            && args.len() == 6
-            && args[..3].iter().all(|arg| arg.label.is_none())
-            && args[3..].iter().all(|arg| arg.label.as_deref().is_some_and(|label| matches!(label, "m" | "n" | "k")));
+            && matches!(operand_count, 3 | 4)
+            && args[..operand_count].iter().all(|arg| arg.label.is_none())
+            && matches!(labeled.len(), 3 | 4)
+            && labeled.iter().all(|arg| arg.label.as_deref().is_some_and(|label| matches!(label, "m" | "n" | "k" | "format")));
         if dynamic_linear {
             let mut labels = std::collections::HashSet::new();
-            if args[3..].iter().any(|arg| !labels.insert(arg.label.as_deref().unwrap())) {
-                self.error("dynamic gpu.tensor.linear requires distinct m, n, and k arguments", call.line, call.col);
+            if labeled.iter().any(|arg| !labels.insert(arg.label.as_deref().unwrap()))
+                || ["m", "n", "k"].iter().any(|label| !labels.contains(label)) {
+                self.error("dynamic gpu.tensor.linear requires distinct m, n, and k arguments (and at most one format)", call.line, call.col);
                 return;
             }
-            for arg in &args[..3] {
+            let format = labeled.iter().find(|arg| arg.label.as_deref() == Some("format"));
+            let quantized = match format.map(|arg| &arg.value.kind) {
+                None => false,
+                Some(ExprKind::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") => true,
+                Some(_) => {
+                    self.error("unsupported quantized tensor linear format", call.line, call.col);
+                    return;
+                }
+            };
+            for (index, arg) in args[..operand_count].iter().enumerate() {
                 let ExprKind::Var(name) = &arg.value.kind else {
                     self.error("host tensor operands must be direct variables", call.line, call.col);
                     return;
@@ -68,23 +81,31 @@ impl super::Checker {
                 };
                 let float32 = matches!(elem, Type::Float32)
                     || matches!(elem, Type::Named(name) if name == "float32" || name == "Float32" || name == "f32");
-                if !float32 {
-                    self.error("dynamic tensor operands require float32 arrays", call.line, call.col);
+                let uint8 = matches!(elem, Type::Uint8)
+                    || matches!(elem, Type::Named(name) if name == "uint8" || name == "Uint8" || name == "u8");
+                let expected = if quantized && index == 1 { uint8 } else { float32 };
+                if !expected {
+                    self.error(if quantized && index == 1 {
+                        "quantized tensor weights require a uint8 array"
+                    } else {
+                        "dynamic tensor operands require float32 arrays"
+                    }, call.line, call.col);
                     return;
                 }
             }
-            let ExprKind::Var(output) = &args[2].value.kind else { unreachable!() };
+            let output_index = operand_count - 1;
+            let ExprKind::Var(output) = &args[output_index].value.kind else { unreachable!() };
             if !self.lookup(output).is_some_and(|binding| binding.kind.is_mutable()) {
                 self.error("tensor destination must be mutable", call.line, call.col);
             }
-            if args[..2].iter().any(|arg| matches!(&arg.value.kind, ExprKind::Var(name) if name == output)) {
+            if args[..output_index].iter().any(|arg| matches!(&arg.value.kind, ExprKind::Var(name) if name == output)) {
                 self.error("tensor destination must not alias an input", call.line, call.col);
             }
             return;
         }
         if args.len() != 3 || args.iter().any(|arg| arg.label.is_some() || arg.spread || arg.default_rest) {
             self.error(
-                "gpu.tensor.matmul, mma, and linear require three positional operands",
+                "gpu.tensor.matmul and mma require three positional operands; linear accepts three positional operands, or three/four operands followed by m, n, and k",
                 call.line,
                 call.col,
             );
@@ -584,6 +605,14 @@ mod tests {
             &crate::parser::parse(crate::lexer::lex(&immutable).unwrap()).unwrap(),
         );
         assert!(result.errors.iter().any(|error| error.message.contains("destination must be mutable")));
+
+        let biased = source
+            .replace("int m", "[float32]'gpu'global bias, int m")
+            .replace("linear(x, w, y,", "linear(x, w, bias, y,");
+        let result = super::super::check(
+            &crate::parser::parse(crate::lexer::lex(&biased).unwrap()).unwrap(),
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
     }
 }
 

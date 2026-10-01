@@ -857,7 +857,7 @@ fn example_saxpy() {
     // Host struct
     assert!(rs.contains("struct Saxpy"),          "missing struct Saxpy;\ngot:\n{rs}");
     assert!(rs.contains("alpha: f32"),                "missing alpha field;\ngot:\n{rs}");
-    assert!(rs.contains("x: DeviceBuffer<f32>"),      "missing x field;\ngot:\n{rs}");
+    assert!(rs.contains("x: Arc<DeviceBuffer<f32>>"), "missing shared read-only x field;\ngot:\n{rs}");
     assert!(rs.contains("y: DeviceBuffer<f32>"),      "missing y field;\ngot:\n{rs}");
 
     // Host main: print, float cast, enumerate loop

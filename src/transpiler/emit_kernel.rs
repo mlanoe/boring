@@ -463,11 +463,17 @@ impl Transpiler {
                     if is_gpu_arg_param {
                         self.line(&format!("match &{a} {{"));
                         self.line("    BoringGpuArg::Resident(buf, _len) => {");
-                        // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that
-                        // helper's doc; `buf` here is `&Arc<wgpu::Buffer>` (matched
-                        // through a `&BoringGpuArg<T>`), which Rust's deref
-                        // coercion turns into `&wgpu::Buffer` at this call site.
-                        self.line(&format!("        {var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"));
+                        if field.binding == FieldBinding::Let {
+                            // Read-only kernel inputs can share the exact resident
+                            // allocation. Arc cloning only retains the handle; it does
+                            // not submit a device-to-device copy.
+                            self.line(&format!("        {var_name}.{field_name}_buf = std::sync::Arc::clone(buf);"));
+                        } else {
+                            // Mutable destinations retain value semantics: a second
+                            // kernel gets independent storage unless the source language
+                            // eventually grows an explicit in-place/borrow contract.
+                            self.line(&format!("        {var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"));
+                        }
                         self.line(&format!("        {var_name}.rebuild_bind_group();"));
                         self.line("    }");
                         self.line("    BoringGpuArg::Host(v) => {");
@@ -995,6 +1001,14 @@ impl Transpiler {
     /// expression emitter, when this returns `Some`.
     pub(crate) fn try_emit_gpu_resident_return(&self, expr: &Expr) -> Option<String> {
         self.current_fn_returns_resident.as_ref()?;
+        if let ExprKind::Var(name) = &expr.kind {
+            if self.gpu_resident_vars.contains_key(name.as_str())
+                || self.resident_call_vars.contains_key(name.as_str())
+                || self.current_fn_gpu_arg_param_names.contains(name.as_str())
+            {
+                return Some(format!("{name}.clone()"));
+            }
+        }
         let ExprKind::Field(obj, field) = &expr.kind else { return None };
         let ExprKind::Var(var_name) = &obj.kind else { return None };
         let kname = self.kernel_vars.get(var_name.as_str())?;

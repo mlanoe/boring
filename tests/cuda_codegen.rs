@@ -859,7 +859,7 @@ fn example_saxpy() {
     // confirmed via a `cargo check` against real cudarc 0.19.8 (the constructor
     // assigns it a bare `f64`, not a `CudaSlice`). See `host_field_type`'s fix.
     assert!(rs.contains("alpha: f32"),           "missing alpha field;\ngot:\n{rs}");
-    assert!(rs.contains("x: CudaSlice<f32>"),    "missing x field;\ngot:\n{rs}");
+    assert!(rs.contains("x: Arc<CudaSlice<f32>>"), "missing shared read-only x field;\ngot:\n{rs}");
     assert!(rs.contains("y: CudaSlice<f32>"),    "missing y field;\ngot:\n{rs}");
 
     // Host main: print, float cast, enumerate loop

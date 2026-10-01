@@ -3181,7 +3181,7 @@ impl Transpiler {
         let target_is_resident = matches!(&target.kind, ExprKind::Var(name)
             if self.resident_call_vars.contains_key(name.as_str()));
         let rhs_s = if target_is_resident {
-            None
+            self.try_emit_gpu_resident_return(value)
         } else {
             self.try_materialize_resident_call(value)
         }.unwrap_or_else(|| self.emit_expr_owned(value));

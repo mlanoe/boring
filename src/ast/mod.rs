@@ -2054,6 +2054,25 @@ fn scan_expr_var_arg(
                 for a in args { e!(&a.value); }
             }
         }
+        ExprKind::MethodCall(recv, method, args)
+            if matches!(method.as_str(), "matmul" | "mma" | "linear")
+                && matches!(&recv.kind, ExprKind::Field(gpu, namespace)
+                    if namespace == "tensor" && matches!(&gpu.kind, ExprKind::Var(root) if root == "gpu")) =>
+        {
+            // Whole-tensor host operations consume their two readable operands
+            // exactly like read-only kernel-constructor fields. Length queries
+            // elsewhere in the wrapper remain qualifying through the Field arm
+            // below. The mutable destination is deliberately scanned normally.
+            let positional = args.iter().position(|arg| arg.label.is_some()).unwrap_or(args.len());
+            let readable_operands = if method == "linear" && positional == 4 { 3 } else { 2 };
+            for (i, arg) in args.iter().enumerate() {
+                if i < readable_operands && matches!(&arg.value.kind, ExprKind::Var(v) if v == name) {
+                    *any = true;
+                } else {
+                    e!(&arg.value);
+                }
+            }
+        }
         ExprKind::MethodCall(recv, _, args) | ExprKind::OptionalMethodCall(recv, _, args) => {
             e!(recv);
             for a in args { e!(&a.value); }

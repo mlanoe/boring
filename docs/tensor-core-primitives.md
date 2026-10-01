@@ -120,8 +120,11 @@ non-negative integer expressions shared by every thread in the block.
 operand in the row-major weight layout used by PyTorch linear layers and GGUF:
 A is `[K,M]`, weight is `[K,N]`, and C is `[N,M]`. It computes
 `A * weight transpose` without materializing a transposed weight buffer. The
-whole-operation spelling is `gpu.tensor.linear(x, weight, y)`. Bias remains a
-separate operation in this milestone.
+whole-operation spelling is `gpu.tensor.linear(x, weight, y)`. The
+runtime-dimension overload also accepts an optional one-dimensional bias as
+`gpu.tensor.linear(x, weight, bias, y, m = m, n = n, k = k)`. The bias has
+exactly `n` float32 elements, is broadcast across the `m` rows, and is fused
+into the accumulation rather than dispatched as a separate operation.
 
 For runtime dimensions, the implemented host spelling is:
 
@@ -137,6 +140,42 @@ req [float32]'gpu'unified linear(
     gpu.tensor.linear(x, weight, y, m = seq, n = dOut, k = dIn)
     y
 ```
+
+With a bias, the call becomes:
+
+```boring
+gpu.tensor.linear(x, weight, bias, y, m = seq, n = dOut, k = dIn)
+```
+
+Q8_0-, Q5_0-, Q4_0-, IQ4_NL-, Q6_K-, Q4_K-, Q3_K-, and Q2_K-packed GGUF weights use the same operation with an explicit format:
+
+```boring
+gpu.tensor.linear(x, packedWeight, bias, y,
+                  m = seq, n = dOut, k = dIn, format = "q8_0")
+```
+
+`packedWeight` is a `[uint8]'gpu'global` or `[uint8]'gpu'unified` array in
+native GGUF block layout. Q8_0 uses a little-endian float16 scale followed by
+32 signed int8 values in each 34-byte block. Q5_0 uses the scale, a 32-bit
+high-bit field, and 16 low-nibble pairs in each 22-byte block. Q4_0 uses the
+scale followed by 16 packed nibble pairs in each 18-byte block; each nibble is
+offset by minus eight. `k` must be divisible by 32 and the buffer must contain exactly
+`(n * k / 32) * blockBytes` bytes. Dequantization is fused into the generated
+linear kernel; no float32 weight copy is allocated.
+
+IQ4_NL also uses 18-byte blocks but treats each nibble as an index into GGML's
+fixed 16-value non-linear codebook rather than as a linear four-bit integer.
+Q6_K uses 210-byte superblocks for 256 values: low four-bit data, high two-bit
+data, sixteen signed sub-block scales, and one float16 superblock scale. Its
+`k` extent must therefore be divisible by 256.
+Q4_K uses 144-byte superblocks for 256 values. It combines packed four-bit
+values with eight packed six-bit scales, eight packed six-bit minima, and two
+float16 superblock factors.
+Q3_K uses 110-byte superblocks for 256 values. It combines packed two-bit
+values, a separate high-bit mask, sixteen packed six-bit signed scales, and a
+float16 superblock scale.
+Q2_K uses 84-byte superblocks for 256 values, with sixteen packed scale/minimum
+pairs, 64 bytes of two-bit values, and two float16 superblock factors.
 
 This overload accepts flat float32 arrays in either `'gpu'global` or
 `'gpu'unified` storage. It assigns one output element to each GPU thread and
@@ -403,22 +442,31 @@ than a generic tensor example:
   `seq`, `d_in`, and `d_out` values for flat float32 buffers and validates them
   before dispatch.
 - Linear operations are called inside reusable `req` functions and loops. The
-  GPU host rewrite now accepts direct statements in function bodies as well as
-  at top level; calls nested in control flow still need scheduling support.
+  GPU host rewrite accepts top-level statements, direct function-body
+  statements, and calls nested in `if`, `if let`, `while`, `while let`, `for`,
+  `loop`, `do while`, block-form `match`, and `try`/`catch`.
+  A loop-carried mutable destination stays device-resident between iterations.
+  Mutable value semantics currently require a device-to-device copy when that
+  result becomes the next kernel's mutable destination.
 - GGUF stores each weight output row contiguously as `(d_out, d_in)`. The
   implemented `linear` and `linearTile` operations read that layout directly
   and compute `x * W transpose` without a transposed weight copy.
-- Q/K/V projections add a one-dimensional bias. A separate device-resident
-  broadcast-add operation is sufficient for correctness, while a matmul
-  epilogue may later avoid another dispatch and memory pass.
+- Q/K/V projections add a one-dimensional bias. The runtime float32 `linear`
+  overload now accepts that bias and fuses its row-wise broadcast into the
+  generated kernel, avoiding another dispatch and memory pass.
 - Intermediate values are chained through many GPU operations. An immediately
   returned tensor result remains device-resident and is read back only at a
-  host-access boundary. Generated constructors still copy resident inputs into
-  each kernel-owned buffer, so zero-copy buffer reuse and dependent launch
-  scheduling remain necessary for production migration.
-- The production path keeps weights packed as `uint8` and performs fused
-  dequantization for Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q6_K, and IQ4_NL.
-  Ordinary float32 `matmul` can replace only the unquantized development path.
+  host-access boundary. wgpu now shares the allocation when a resident value is
+  consumed by a read-only kernel field; Metal does the same across function
+  boundaries and for explicitly resident locals. Mutable fields retain
+  independent-value semantics and still receive a device copy. CUDA and ROCm
+  now use shared ownership for read-only resident buffers as well: cloning an
+  argument retains an `Arc<CudaSlice<T>>` or `Arc<DeviceBuffer<T>>` and does
+  not submit a device copy. Mutable destinations remain uniquely owned.
+- The production path keeps weights packed as `uint8`. Tensor `linear` now
+  performs fused Q8_0, Q5_0, Q4_0, IQ4_NL, Q6_K, Q4_K, and Q2_K
+  dequantization. Q3_K still needs an equivalent format contract before the tensor path can
+  replace all existing `boring-llm` kernels.
 - Single-token decode (`seq == 1`) is a matrix-vector workload. Existing
   `boring-llm` measurements select warp-broadcast kernels for the 32-element
   Q4_0/Q5_0/Q8_0/IQ4_NL formats and tiled kernels for prefill. A generic
@@ -431,15 +479,13 @@ than a generic tensor example:
 
 The minimum compiler work for a useful float32 migration is therefore:
 
-1. Extend the implemented direct-function-body scheduling to structured
-   control flow.
-2. Reuse resident buffers without device-to-device copies across dependent calls.
-3. Extend the implemented GGUF-oriented float32 `linear` path to the required
-   packed quantized formats.
-4. Provide output allocation or a concise way to create a correctly shaped
+1. Add an explicit safe in-place contract where profiling shows that the
+   current loop-carried device copy is material.
+2. Extend the implemented 32-element block formats to the remaining packed GGUF formats.
+3. Provide output allocation or a concise way to create a correctly shaped
    mutable destination from runtime extents.
-5. Provide a device-resident bias broadcast/add operation, whether as a tensor
-   epilogue or an independently fusible elementwise operation.
+4. Extend fused bias beyond the runtime float32 `linear` path when another
+   tensor operation or packed format needs the same epilogue.
 
 After that baseline, migrate and benchmark the unquantized `linear_gpu` path.
 The next independent milestone is a quantized matrix operation whose format
@@ -693,9 +739,11 @@ private fixed-shape kernel. The generated host code uploads or binds A, B, and
 the initial C value, dispatches a 16-by-16 logical output tiling (smaller for
 small matrices), then assigns the downloaded result back to C. `matmul`
 overwrites C in the device operation; `mma` uses its uploaded value as the
-accumulator. Consecutive calls are therefore ordered correctly, although the
-current implementation may transfer an intermediate C back to the host and
-upload it again rather than retaining it on the device.
+accumulator. Consecutive calls are ordered correctly. Results returned
+immediately from a GPU function stay resident; a later read-only tensor input
+shares the same allocation on CUDA, Metal, ROCm, and wgpu. A host access
+boundary still materializes the value, and mutable destinations keep
+independent storage.
 
 Automatic dispatch accepts direct top-level calls and direct statements in
 function bodies, including `req` functions. Operands must be named variables
@@ -703,14 +751,20 @@ with types visible at the call site. GPU-target functions declare `throws`
 because kernel construction and dispatch can fail. When the destination is
 returned immediately, the lowering returns the synthesized kernel field
 directly; wgpu consequently preserves it as a resident buffer without an
-intermediate device-to-host copy. Calls nested in control flow, dynamic
-extents, output allocation, batching, bias, and device-residency reuse remain
-future work. `linear`/`linearTile` support the transposed row-major weight
+intermediate device-to-host copy. Runtime extents are implemented for the
+six-argument `linear` overload and its seven-argument bias form. Calls nested in ordinary loops and branches are
+also lowered, and loop-carried results remain resident without a host round
+trip. Mutable value semantics may still require a device copy between kernels;
+output allocation and batching remain future work.
+`linear`/`linearTile` support the transposed row-major weight
 orientation without a copy. Native matrix instructions remain a backend
 optimization after the portable behavior is validated on real hardware.
 
-Generated host projects were checked offline with Rust for Metal and wgpu. The
-synthesized Metal shaders compile to AIR and metallib with Apple Metal
+Generated host projects were checked offline with Rust for CUDA, Metal, ROCm,
+and wgpu. CUDA was type-checked with a stubbed nvcc build step, and ROCm with a
+stubbed hipcc build step; this validates generated Rust ownership and launch
+argument types without claiming native device compilation. The synthesized
+Metal shaders compile to AIR and metallib with Apple Metal
 Toolchain 27A266a, and Naga 30.0.1 validates the synthesized WGSL. CUDA and
 ROCm device-source validation uses the same scalar tile lowering already
 compiled for the explicit device API. This environment exposes neither a Metal

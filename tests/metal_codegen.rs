@@ -628,10 +628,10 @@ def main() throws:
     let result = passthrough(stage2)
     print "{result[0]}"
 "#);
-    assert!(rs.contains("add_one_gpu(match &stage1 {"),
-        "expected the chained argument's materializing match-expression with no wrapping parens;\ngot:\n{rs}");
-    assert!(!rs.contains("add_one_gpu(&(match &stage1 {"),
-        "the materialized Vec<f32> must not be wrapped in an extra & -- this is exactly the E0308 regression;\ngot:\n{rs}");
+    assert!(rs.contains("add_one_gpu(stage1.clone(), 4)"),
+        "expected the resident GPU argument to remain resident across the chained call;\ngot:\n{rs}");
+    assert!(rs.contains("passthrough(&(match &stage2 {"),
+        "expected materialization only at the ordinary host-function boundary;\ngot:\n{rs}");
 }
 
 // ─── host — __boring_launch ───────────────────────────────────────────────────

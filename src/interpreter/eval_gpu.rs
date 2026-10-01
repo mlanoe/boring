@@ -1190,14 +1190,21 @@ impl Interpreter {
     }
 
     fn eval_gpu_tensor_host_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
-        if method == "linear" && args.len() == 6 {
+        let operand_count = args.iter().position(|arg| arg.label.is_some()).unwrap_or(args.len());
+        let dynamic_linear = method == "linear"
+            && matches!(operand_count, 3 | 4)
+            && ["m", "n", "k"].iter().all(|label| args[operand_count..].iter().any(|arg| arg.label.as_deref() == Some(*label)));
+        if dynamic_linear {
+            let output_index = operand_count - 1;
+            let bias_index = (operand_count == 4).then_some(2usize);
             let values = self.eval_args(args, Rc::clone(&env))?;
             let array = |index: usize| match &values[index] {
                 Value::Array(values) => Ok(values.clone()),
                 other => Err(err(format!("tensor operand must be an array, got {}", other.type_name()), line)),
             };
             let dimension = |label: &str| -> Result<usize, Signal> {
-                let index = args.iter().position(|arg| arg.label.as_deref() == Some(label))
+                let index = args[operand_count..].iter().position(|arg| arg.label.as_deref() == Some(label))
+                    .map(|index| index + operand_count)
                     .ok_or_else(|| err(format!("missing tensor argument `{label}`"), line))?;
                 let value = match &values[index] {
                     Value::Labeled { value, .. } => value.as_ref(),
@@ -1212,31 +1219,180 @@ impl Interpreter {
                 }
             };
             let (m, n, k) = (dimension("m")?, dimension("n")?, dimension("k")?);
+            let format = args[operand_count..].iter().position(|arg| arg.label.as_deref() == Some("format"))
+                .map(|index| match &values[index + operand_count] {
+                    Value::Labeled { value, .. } => value.as_ref(),
+                    value => value,
+                });
+            let quantized_format = match format {
+                None => None,
+                Some(Value::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") => Some(value.as_str()),
+                Some(_) => return Err(err("unsupported quantized tensor linear format", line)),
+            };
             let left_len = m.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
-            let weight_len = n.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
+            let weight_elements = n.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
+            let block_elements = if matches!(quantized_format, Some("q6_k" | "q4_k" | "q3_k" | "q2_k")) { 256 } else { 32 };
+            if quantized_format.is_some() && k % block_elements != 0 {
+                return Err(err(format!("quantized tensor dimension k must be a multiple of {block_elements}"), line));
+            }
+            let block_bytes = match quantized_format { Some("q8_0") => 34, Some("q5_0") => 22, Some("q4_0" | "iq4_nl") => 18, Some("q6_k") => 210, Some("q4_k") => 144, Some("q3_k") => 110, Some("q2_k") => 84, _ => 0 };
+            let weight_len = if quantized_format.is_some() { weight_elements / block_elements * block_bytes } else { weight_elements };
             let output_len = m.checked_mul(n).ok_or_else(|| err("tensor dimensions overflow", line))?;
             let a = array(0)?;
-            let b = array(1)?;
-            let mut c = Value::rc_vec_into_owned(array(2)?);
-            if a.len() != left_len || b.len() != weight_len || c.len() != output_len {
+            let b = if quantized_format.is_some() { None } else { Some(array(1)?) };
+            let packed = if quantized_format.is_some() {
+                match &values[1] {
+                    Value::ByteArray(bytes) => Some(bytes.clone()),
+                    _ => return Err(err("quantized tensor weights must be a uint8 array", line)),
+                }
+            } else { None };
+            let f16_to_f32 = |bits: u16| {
+                let sign = if bits & 0x8000 == 0 { 1.0f32 } else { -1.0f32 };
+                let exponent = ((bits >> 10) & 0x1f) as i32;
+                let fraction = (bits & 0x03ff) as u32;
+                let magnitude = match exponent {
+                    0 => (fraction as f32) * 2.0f32.powi(-24),
+                    31 if fraction == 0 => f32::INFINITY,
+                    31 => f32::NAN,
+                    _ => (1.0 + fraction as f32 / 1024.0) * 2.0f32.powi(exponent - 15),
+                };
+                sign * magnitude
+            };
+            let bias = bias_index.map(array).transpose()?;
+            let mut c = Value::rc_vec_into_owned(array(output_index)?);
+            let actual_weight_len = packed.as_ref().map_or_else(|| b.as_ref().unwrap().len(), |bytes| bytes.len());
+            if a.len() != left_len || actual_weight_len != weight_len || c.len() != output_len
+                || bias.as_ref().is_some_and(|bias| bias.len() != n) {
                 return Err(err("tensor operand storage length does not match m, n, and k", line));
             }
             for row in 0..m {
                 for col in 0..n {
-                    let mut sum = 0.0f32;
+                    let mut sum = match bias.as_ref().map(|bias| &bias[col]) {
+                        Some(Value::Float32(value)) => *value,
+                        Some(_) => return Err(err("tensor bias contains a non-float32 value", line)),
+                        None => 0.0f32,
+                    };
                     for inner in 0..k {
                         let Value::Float32(left) = &a[row * k + inner] else {
                             return Err(err("tensor left operand contains a non-float32 value", line));
                         };
-                        let Value::Float32(right) = &b[col * k + inner] else {
-                            return Err(err("tensor weight contains a non-float32 value", line));
+                        let right = if let Some(bytes) = packed.as_ref() {
+                            let flat = col * k + inner;
+                            let block = flat / block_elements;
+                            let offset = block * block_bytes;
+                            let scale_offset = match quantized_format { Some("q6_k") => offset + 208, Some("q3_k") => offset + 108, Some("q2_k") => offset + 80, _ => offset };
+                            let bits = u16::from_le_bytes([bytes[scale_offset], bytes[scale_offset + 1]]);
+                            let scale = f16_to_f32(bits);
+                            let mut minimum = 0.0f32;
+                            let quantized = if quantized_format == Some("q8_0") {
+                                (bytes[offset + 2 + flat % 32] as i8) as f32
+                            } else if quantized_format == Some("q5_0") {
+                                let position = flat % 32;
+                                let low = bytes[offset + 6 + position % 16];
+                                let nibble = if position < 16 { low & 0x0f } else { low >> 4 };
+                                let high_bits = u32::from_le_bytes([bytes[offset + 2], bytes[offset + 3], bytes[offset + 4], bytes[offset + 5]]);
+                                let high = (high_bits >> position) & 1;
+                                ((nibble as u32 | high << 4) as i32 - 16) as f32
+                            } else if quantized_format == Some("q4_0") {
+                                let position = flat % 32;
+                                let byte = bytes[offset + 2 + position % 16];
+                                let nibble = if position < 16 { byte & 0x0f } else { byte >> 4 };
+                                (nibble as i32 - 8) as f32
+                            } else if quantized_format == Some("iq4_nl") {
+                                const CODEBOOK: [i32; 16] = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
+                                let position = flat % 32;
+                                let byte = bytes[offset + 2 + position % 16];
+                                let nibble = if position < 16 { byte & 0x0f } else { byte >> 4 };
+                                CODEBOOK[nibble as usize] as f32
+                            } else if quantized_format == Some("q6_k") {
+                                let position = flat % 256;
+                                let iteration = position / 128;
+                                let within = position % 128;
+                                let group = within / 32;
+                                let lane = within % 32;
+                                let half = lane / 16;
+                                let ql_base = offset + iteration * 64;
+                                let qh_base = offset + 128 + iteration * 32;
+                                let scale_base = offset + 192 + iteration * 8;
+                                let low0 = bytes[ql_base + lane];
+                                let low32 = bytes[ql_base + lane + 32];
+                                let nibble = match group { 0 => low0 & 0x0f, 1 => low32 & 0x0f, 2 => low0 >> 4, _ => low32 >> 4 };
+                                let high_byte = bytes[qh_base + lane];
+                                let high = (high_byte >> (group * 2)) & 3;
+                                let scale_byte = bytes[scale_base + half + group * 2] as i8;
+                                let q = (nibble | high << 4) as i32 - 32;
+                                scale_byte as f32 * q as f32
+                            } else if quantized_format == Some("q3_k") {
+                                let position = flat % 256;
+                                let outer = position / 128;
+                                let remainder = position % 128;
+                                let group = remainder / 32;
+                                let within32 = remainder % 32;
+                                let sub = within32 / 16;
+                                let lane = within32 % 16;
+                                let scale_index = outer * 8 + group * 2 + sub;
+                                let scale_word = scale_index / 4;
+                                let scale_lane = scale_index % 4;
+                                let base = bytes[offset + 96 + (scale_word % 2) * 4 + scale_lane];
+                                let low = if scale_word < 2 { base & 15 } else { base >> 4 };
+                                let high = (bytes[offset + 104 + scale_lane] >> (scale_word * 2)) & 3;
+                                let sub_scale = (low | high << 4) as i32 - 32;
+                                let packed = bytes[offset + 32 + outer * 32 + sub * 16 + lane];
+                                let q = (packed >> (group * 2)) & 3;
+                                let high_mask = bytes[offset + sub * 16 + lane] & (1 << (outer * 4 + group));
+                                let high_offset = if high_mask == 0 { 4 } else { 0 };
+                                (sub_scale * (q as i32 - high_offset)) as f32
+                            } else if quantized_format == Some("q2_k") {
+                                let position = flat % 256;
+                                let outer = position / 128;
+                                let remainder = position % 128;
+                                let group = remainder / 32;
+                                let within32 = remainder % 32;
+                                let sub = within32 / 16;
+                                let lane = within32 % 16;
+                                let scale_byte = bytes[offset + outer * 8 + group * 2 + sub];
+                                let packed = bytes[offset + 16 + outer * 32 + sub * 16 + lane];
+                                let q = (packed >> (group * 2)) & 3;
+                                let min_bits = u16::from_le_bytes([bytes[offset + 82], bytes[offset + 83]]);
+                                minimum = f16_to_f32(min_bits) * (scale_byte >> 4) as f32;
+                                (scale_byte & 15) as f32 * q as f32
+                            } else {
+                                let position = flat % 256;
+                                let chunk = position / 64;
+                                let within = position % 64;
+                                let half = within / 32;
+                                let lane = within % 32;
+                                let subblock = chunk * 2 + half;
+                                let scales = offset + 4;
+                                let scale6 = if subblock < 4 {
+                                    bytes[scales + subblock] & 63
+                                } else {
+                                    (bytes[scales + subblock + 4] & 15) | ((bytes[scales + subblock - 4] >> 6) << 4)
+                                };
+                                let min6 = if subblock < 4 {
+                                    bytes[scales + subblock + 4] & 63
+                                } else {
+                                    (bytes[scales + subblock + 4] >> 4) | ((bytes[scales + subblock] >> 6) << 4)
+                                };
+                                let packed = bytes[offset + 16 + chunk * 32 + lane];
+                                let nibble = if half == 0 { packed & 15 } else { packed >> 4 };
+                                let min_bits = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+                                minimum = f16_to_f32(min_bits) * min6 as f32;
+                                scale6 as f32 * nibble as f32
+                            };
+                            quantized * scale - minimum
+                        } else {
+                            let Value::Float32(right) = &b.as_ref().unwrap()[col * k + inner] else {
+                                return Err(err("tensor weight contains a non-float32 value", line));
+                            };
+                            *right
                         };
-                        sum = left.mul_add(*right, sum);
+                        sum = left.mul_add(right, sum);
                     }
                     c[row * n + col] = Value::Float32(sum);
                 }
             }
-            let ExprKind::Var(output) = &args[2].value.kind else {
+            let ExprKind::Var(output) = &args[output_index].value.kind else {
                 return Err(err("tensor destination must be a direct variable", line));
             };
             env.borrow_mut().force_set(output, Value::Array(c.into()));

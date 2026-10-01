@@ -1031,7 +1031,7 @@ with fc2:
     // Kernel-construction consumes `xv` via the dual-mode branch, not an
     // unconditional upload.
     assert!(rs.contains("match &xv {"), "constructor argument for `xv` should branch on BoringGpuArg:\n{rs}");
-    assert!(rs.contains("k.x_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"), "resident branch should copy the buffer device-to-device, not alias it:\n{rs}");
+    assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "read-only resident input should reuse the same GPU allocation:\n{rs}");
     assert!(rs.contains("k.rebuild_bind_group();"), "resident branch should rebuild the bind group:\n{rs}");
 
     // Call sites: `ha` (a plain host array) is wrapped; `fc` (already resident) is
@@ -1133,7 +1133,7 @@ def main() throws:
     assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
         "x.length use should not disqualify x from the dual-typed param treatment:\n{rs}");
     assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
-    assert!(rs.contains("k.x_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"), "resident branch should copy the buffer device-to-device, not alias it:\n{rs}");
+    assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "read-only resident input should reuse the same GPU allocation:\n{rs}");
     assert!(rs.contains("(x.len()) as usize"), "x.length should compile via BoringGpuArg::len(), not a bare field access:\n{rs}");
     assert!(!rs.contains("x::length") && !rs.contains("x::count"), "x.length must not be emitted as a module path:\n{rs}");
 
@@ -1141,6 +1141,29 @@ def main() throws:
     assert!(rs.contains("scale_gpu(BoringGpuArg::Host(a.clone())"), "plain host argument should wrap as BoringGpuArg::Host:\n{rs}");
     assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
     assert!(!rs.contains("scale_gpu(&fc"), "the by-ref array-argument convention must not apply to a dual-typed param:\n{rs}");
+}
+
+#[test]
+fn test_resident_input_to_mutable_kernel_field_keeps_copy_semantics() {
+    let src = r#"
+kernel Mutate:
+    mut [float]'unified x
+    init([float]'unified input):
+        x = input
+    def ():
+        x[gpu.thread.x] += 1.0
+
+req [float]'gpu'unified mutate_gpu([float] x) throws:
+    mut k = Mutate(x)
+    kernel:
+        k(block = x.length)
+    k.x
+"#;
+    let (_wgsl, rs) = wgpu_codegen("resident_mutable_input_copy", src);
+    assert!(rs.contains("k.x_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"),
+        "mutable resident input must retain independent-value semantics:\n{rs}");
+    assert!(!rs.contains("k.x_buf = std::sync::Arc::clone(buf);"),
+        "mutable kernel fields must not alias the caller's allocation:\n{rs}");
 }
 
 #[test]

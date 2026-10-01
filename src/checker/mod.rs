@@ -519,7 +519,6 @@ impl Checker {
     /// all functions in the program are gathered up front, so a callee defined *after*
     /// its caller in source is visible to every pass just like one defined before.
     fn collect_gpu_arg_params(&mut self, program: &Program) {
-        if self.kernel_decls.is_empty() { return; }
         let mut all_fns: Vec<&FnDecl> = Vec::new();
         for item in &program.items { Self::gather_fns_item(item, &mut all_fns); }
 
@@ -538,6 +537,10 @@ impl Checker {
             for f in &all_fns {
                 let mut new_flags = vec![false; f.params.len()];
                 for (i, p) in f.params.iter().enumerate() {
+                    let explicitly_resident = p.ty.as_ref().is_some_and(|ty| {
+                        matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+                            if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+                    });
                     let kernel_decls = &self.kernel_decls;
                     let known = &flags_by_fn;
                     let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
@@ -552,7 +555,7 @@ impl Checker {
                         known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
                     };
                     let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify);
-                    new_flags[i] = only_qualifying;
+                    new_flags[i] = explicitly_resident || only_qualifying;
                 }
                 if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {
                     changed = true;

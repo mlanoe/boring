@@ -2826,19 +2826,23 @@ impl Transpiler {
         if namespace != "tensor" || !matches!(&gpu.kind, ExprKind::Var(name) if name == "gpu") {
             return None;
         }
-        if method == "linear" && args.len() == 6 {
-            let names: Option<Vec<&str>> = args[..3].iter().map(|arg| match &arg.value.kind {
+        if method == "linear" && matches!(args.len(), 6 | 7) {
+            let operand_count = args.len() - 3;
+            let names: Option<Vec<&str>> = args[..operand_count].iter().map(|arg| match &arg.value.kind {
                 ExprKind::Var(name) if arg.label.is_none() => Some(name.as_str()),
                 _ => None,
             }).collect();
             let names = names?;
-            let dimension = |label: &str| args[3..].iter()
+            let dimension = |label: &str| args[operand_count..].iter()
                 .find(|arg| arg.label.as_deref() == Some(label))
                 .map(|arg| self.emit_expr(&arg.value));
             let (m, n, k) = (dimension("m")?, dimension("n")?, dimension("k")?);
+            let (bias_check, initial, c) = if operand_count == 4 {
+                (format!("assert_eq!({}.len(), __boring_tensor_n, \"tensor bias length mismatch\");", names[2]), format!("{}[__boring_tensor_col]", names[2]), names[3])
+            } else { (String::new(), "0.0f32".into(), names[2]) };
             return Some(format!(
-                "{{\nlet (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * __boring_tensor_k, \"tensor weight length mismatch\");\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nfor __boring_tensor_row in 0usize..__boring_tensor_m {{\n    for __boring_tensor_col in 0usize..__boring_tensor_n {{\n        let mut __boring_tensor_sum = 0.0f32;\n        for __boring_tensor_inner in 0usize..__boring_tensor_k {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * __boring_tensor_k + __boring_tensor_inner].mul_add({b}[__boring_tensor_col * __boring_tensor_k + __boring_tensor_inner], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
-                a = names[0], b = names[1], c = names[2],
+                "{{\nlet (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * __boring_tensor_k, \"tensor weight length mismatch\");\n{bias_check}\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nfor __boring_tensor_row in 0usize..__boring_tensor_m {{\n    for __boring_tensor_col in 0usize..__boring_tensor_n {{\n        let mut __boring_tensor_sum = {initial};\n        for __boring_tensor_inner in 0usize..__boring_tensor_k {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * __boring_tensor_k + __boring_tensor_inner].mul_add({b}[__boring_tensor_col * __boring_tensor_k + __boring_tensor_inner], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
+                a = names[0], b = names[1],
             ));
         }
         if !matches!(method, "matmul" | "mma" | "linear") || args.len() != 3 {

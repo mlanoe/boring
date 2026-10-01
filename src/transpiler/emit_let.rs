@@ -1370,6 +1370,22 @@ impl Transpiler {
         if self.try_emit_gpu_resident_call_let(s) {
             return;
         }
+        // A GPU-qualified local inside a resident-returning GPU function is a
+        // loop-carried residency slot even when its initial value is ordinary
+        // host data. Start it in the Host variant so a later synthesized tensor
+        // dispatch can replace it with Resident without changing the Rust type.
+        if self.is_gpu_target
+            && self.current_fn_returns_resident.is_some()
+            && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
+            && s.value.is_some()
+        {
+            let value = self.emit_expr_owned(s.value.as_ref().unwrap());
+            let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+            self.line(&format!("{kw} {} = BoringGpuArg::Host({value});", escape_rust_keyword(&s.name)));
+            self.resident_call_vars.insert(s.name.clone(), s.ty.clone().unwrap());
+            self.known_local_vars.insert(s.name.clone());
+            return;
+        }
         if self.try_emit_gpu_device_let(s) {
             self.known_local_vars.insert(s.name.clone());
             return;

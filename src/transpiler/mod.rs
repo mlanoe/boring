@@ -3146,7 +3146,6 @@ impl Transpiler {
     /// (not just a raw kernel constructor) qualifies too, transitively, when that
     /// callee's own corresponding parameter already qualifies.
     fn compute_gpu_arg_params(&mut self, program: &Program) {
-        if self.kernel_decls.is_empty() { return; }
         let mut all_fns: Vec<&FnDecl> = Vec::new();
         for item in &program.items { Self::gather_gpu_arg_fns_item(item, &mut all_fns); }
 
@@ -3163,6 +3162,11 @@ impl Transpiler {
             for f in &all_fns {
                 let mut new_flags = vec![false; f.params.len()];
                 for (i, p) in f.params.iter().enumerate() {
+                    let resident_boundary = f.return_ty.as_ref().is_some_and(|ty| ty.gpu_resident_qual().is_some())
+                        && p.ty.as_ref().is_some_and(|ty| {
+                            matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+                                if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+                        });
                     let kernel_decls = &self.kernel_decls;
                     let known = &flags_by_fn;
                     let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
@@ -3177,7 +3181,7 @@ impl Transpiler {
                         known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
                     };
                     let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify);
-                    new_flags[i] = only_qualifying;
+                    new_flags[i] = resident_boundary || only_qualifying;
                 }
                 if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {
                     changed = true;

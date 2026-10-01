@@ -135,6 +135,13 @@ fn lower_function_body(
             index += 1;
             continue;
         }
+        if let Some(lowered) = lower_control_flow_stmt(
+            stmt, types, kernels, errors, ordinal, used_kernel_names, used_binding_names,
+        ) {
+            out.push(lowered);
+            index += 1;
+            continue;
+        }
         let Stmt::Expr(call) = stmt else {
             if stmt_uses_host_tensor(stmt) {
                 errors.push(super::TranspileError::at_line(
@@ -157,7 +164,7 @@ fn lower_function_body(
                 continue;
             };
             let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names);
-            match parse_dynamic_linear_kernel(&kernel_name, quals) {
+            match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format) {
                 Ok(kernel) => kernels.push(Item::Kernel(kernel)),
                 Err(message) => {
                     errors.push(super::TranspileError::at_line(message, call.line));
@@ -251,11 +258,113 @@ fn lower_function_body(
     out
 }
 
+fn lower_nested_body(
+    body: &[Stmt],
+    outer_types: &HashMap<String, Type>,
+    kernels: &mut Vec<Item>,
+    errors: &mut Vec<super::TranspileError>,
+    ordinal: &mut usize,
+    used_kernel_names: &mut HashSet<String>,
+    used_binding_names: &mut HashSet<String>,
+) -> Vec<Stmt> {
+    let mut nested_types = outer_types.clone();
+    lower_function_body(
+        body,
+        &mut nested_types,
+        kernels,
+        errors,
+        ordinal,
+        used_kernel_names,
+        used_binding_names,
+    )
+}
+
+fn lower_control_flow_stmt(
+    stmt: &Stmt,
+    types: &HashMap<String, Type>,
+    kernels: &mut Vec<Item>,
+    errors: &mut Vec<super::TranspileError>,
+    ordinal: &mut usize,
+    used_kernel_names: &mut HashSet<String>,
+    used_binding_names: &mut HashSet<String>,
+) -> Option<Stmt> {
+    let mut lower_body = |body: &[Stmt]| {
+        lower_nested_body(body, types, kernels, errors, ordinal, used_kernel_names, used_binding_names)
+    };
+    Some(match stmt {
+        Stmt::If(value) => {
+            let mut value = value.clone();
+            value.branches = value.branches.into_iter()
+                .map(|(condition, body)| (condition, lower_body(&body)))
+                .collect();
+            value.else_body = value.else_body.map(|body| lower_body(&body));
+            Stmt::If(value)
+        }
+        Stmt::While(value) => {
+            let mut value = value.clone();
+            value.body = lower_body(&value.body);
+            Stmt::While(value)
+        }
+        Stmt::For(value) => {
+            let mut value = value.clone();
+            value.body = lower_body(&value.body);
+            Stmt::For(value)
+        }
+        Stmt::Loop(value) => {
+            let mut value = value.clone();
+            value.body = lower_body(&value.body);
+            Stmt::Loop(value)
+        }
+        Stmt::DoWhile(value) => {
+            let mut value = value.clone();
+            value.body = lower_body(&value.body);
+            Stmt::DoWhile(value)
+        }
+        Stmt::IfLet(value) => {
+            let mut value = value.clone();
+            value.then_body = lower_body(&value.then_body);
+            value.elif_branches = value.elif_branches.into_iter().map(|mut branch| {
+                branch.body = lower_body(&branch.body);
+                branch
+            }).collect();
+            value.else_body = value.else_body.map(|body| lower_body(&body));
+            Stmt::IfLet(value)
+        }
+        Stmt::WhileLet(value) => {
+            let mut value = value.clone();
+            value.body = lower_body(&value.body);
+            Stmt::WhileLet(value)
+        }
+        Stmt::Match(value) => {
+            let mut value = value.clone();
+            value.arms = value.arms.into_iter().map(|mut arm| {
+                if let MatchBody::Block(body) = arm.body {
+                    arm.body = MatchBody::Block(lower_body(&body));
+                }
+                arm
+            }).collect();
+            Stmt::Match(value)
+        }
+        Stmt::Try(value) => {
+            let mut value = value.clone();
+            value.body = lower_body(&value.body);
+            value.catch_clauses = value.catch_clauses.into_iter().map(|mut clause| {
+                clause.body = lower_body(&clause.body);
+                clause
+            }).collect();
+            Stmt::Try(value)
+        }
+        _ => return None,
+    })
+}
+
 struct DynamicLinearCall<'a> {
     operands: [&'a str; 3],
+    bias: Option<&'a str>,
     m: String,
     n: String,
     k: String,
+    format: Option<&'a str>,
 }
 
 fn dimension_source(expr: &Expr) -> Option<String> {
@@ -268,16 +377,26 @@ fn dimension_source(expr: &Expr) -> Option<String> {
 
 fn dynamic_linear_call(expr: &Expr) -> Option<DynamicLinearCall<'_>> {
     let ExprKind::MethodCall(receiver, method, args) = &expr.kind else { return None };
-    if method != "linear" || args.len() != 6 { return None; }
+    if method != "linear" { return None; }
     if !matches!(&receiver.kind, ExprKind::Field(gpu, ns)
         if ns == "tensor" && matches!(&gpu.kind, ExprKind::Var(name) if name == "gpu")) { return None; }
-    let operands: Vec<&str> = args[..3].iter().map(|arg| match &arg.value.kind {
+    let operand_count = args.iter().position(|arg| arg.label.is_some())?;
+    if !matches!(operand_count, 3 | 4) { return None; }
+    let raw: Vec<&str> = args[..operand_count].iter().map(|arg| match &arg.value.kind {
         ExprKind::Var(name) if arg.label.is_none() => Some(name.as_str()),
         _ => None,
     }).collect::<Option<_>>()?;
-    let dim = |label: &str| args[3..].iter().find(|arg| arg.label.as_deref() == Some(label))
+    let dim = |label: &str| args[operand_count..].iter().find(|arg| arg.label.as_deref() == Some(label))
         .and_then(|arg| dimension_source(&arg.value));
-    Some(DynamicLinearCall { operands: operands.try_into().ok()?, m: dim("m")?, n: dim("n")?, k: dim("k")? })
+    let format = match args[operand_count..].iter().find(|arg| arg.label.as_deref() == Some("format")) {
+        None => None,
+        Some(arg) => match &arg.value.kind {
+            ExprKind::Str(value) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") => Some(value.as_str()),
+            _ => return None,
+        },
+    };
+    let (operands, bias) = if operand_count == 4 { ([raw[0], raw[1], raw[3]], Some(raw[2])) } else { ([raw[0], raw[1], raw[2]], None) };
+    Some(DynamicLinearCall { operands, bias, m: dim("m")?, n: dim("n")?, k: dim("k")?, format })
 }
 
 fn resolve_dynamic_quals(names: [&str; 3], types: &HashMap<String, Type>) -> Option<[GpuQual; 3]> {
@@ -382,9 +501,32 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str) -> Result<KernelDecl, Str
     }
 }
 
-fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3]) -> Result<KernelDecl, String> {
+fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>) -> Result<KernelDecl, String> {
+    let bias_field = if has_bias { "    let [float32]'global bias\n" } else { "" };
+    let bias_param = if has_bias { ", [float32]'global input_bias" } else { "" };
+    let bias_assign = if has_bias { "        bias = input_bias\n" } else { "" };
+    let initial = if has_bias { "bias[col]" } else { "0.0" };
+    let weight_type = if quantized_format.is_some() { "uint8" } else { "float32" };
+    let block_bytes = match quantized_format { Some("q8_0") => 34, Some("q5_0") => 22, Some("q6_k") => 210, Some("q4_k") => 144, Some("q3_k") => 110, Some("q2_k") => 84, _ => 18 };
+    let quantized_value = match quantized_format {
+        Some("q8_0") => "                let raw = int(b[blockByte + 2 + flat % 32])\n                let quantized = if raw > 127: raw - 256 else: raw\n",
+        Some("q5_0") => "                let position = flat % 32\n                let qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                let packed = int(b[blockByte + 6 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n                let quantized = (nibble | (high << 4)) - 16\n",
+        Some("q4_0") => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = nibble - 8\n",
+        Some("iq4_nl") => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = if nibble == 0: -127 elif nibble == 1: -104 elif nibble == 2: -83 elif nibble == 3: -65 elif nibble == 4: -49 elif nibble == 5: -35 elif nibble == 6: -22 elif nibble == 7: -10 elif nibble == 8: 1 elif nibble == 9: 13 elif nibble == 10: 25 elif nibble == 11: 38 elif nibble == 12: 53 elif nibble == 13: 69 elif nibble == 14: 89 else: 113\n",
+        Some("q6_k") => "                let position = flat % 256\n                let iteration = position / 128\n                let within = position % 128\n                let group = within / 32\n                let lane = within % 32\n                let half = lane / 16\n                let qlBase = blockByte + iteration * 64\n                let qhBase = blockByte + 128 + iteration * 32\n                let scaleBase = blockByte + 192 + iteration * 8\n                let low0 = int(b[qlBase + lane])\n                let low32 = int(b[qlBase + lane + 32])\n                let nibble = if group == 0: low0 & 0xF elif group == 1: low32 & 0xF elif group == 2: (low0 >> 4) & 0xF else: (low32 >> 4) & 0xF\n                let highByte = int(b[qhBase + lane])\n                let high = (highByte >> ((group * 2) as uint32)) & 3\n                let scaleRaw = int(b[scaleBase + half + group * 2])\n                let subScale = if scaleRaw > 127: scaleRaw - 256 else: scaleRaw\n                let quantized = subScale * ((nibble | (high << 4)) - 32)\n",
+        Some("q3_k") => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleIndex = outer * 8 + group * 2 + sub\n                let scaleWord = scaleIndex / 4\n                let scaleLane = scaleIndex % 4\n                let scaleByte = int(b[blockByte + 96 + (scaleWord % 2) * 4 + scaleLane])\n                let scaleLow = if scaleWord < 2: scaleByte & 0xF else: (scaleByte >> 4) & 0xF\n                let scaleHigh = (int(b[blockByte + 104 + scaleLane]) >> ((scaleWord * 2) as uint32)) & 3\n                let subScale = (scaleLow | (scaleHigh << 4)) - 32\n                let packed = int(b[blockByte + 32 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let highMask = int(b[blockByte + sub * 16 + lane]) & (1 << ((outer * 4 + group) as uint32))\n                let highOffset = if highMask == 0: 4 else: 0\n                let quantized = subScale * (q - highOffset)\n",
+        Some("q2_k") => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleByte = int(b[blockByte + outer * 8 + group * 2 + sub])\n                let packed = int(b[blockByte + 16 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let minBits = int(b[blockByte + 82]) | (int(b[blockByte + 83]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * ((scaleByte >> 4) as float32)\n                let quantized = (scaleByte & 0xF) * q\n",
+        _ => "                let position = flat % 256\n                let chunk = position / 64\n                let within = position % 64\n                let half = within / 32\n                let lane = within % 32\n                let subblock = chunk * 2 + half\n                let scalesBase = blockByte + 4\n                let subScale = if subblock < 4: int(b[scalesBase + subblock]) & 63 else: (int(b[scalesBase + subblock + 4]) & 0xF) | ((int(b[scalesBase + subblock - 4]) >> 6) << 4)\n                let subMin = if subblock < 4: int(b[scalesBase + subblock + 4]) & 63 else: (int(b[scalesBase + subblock + 4]) >> 4) | ((int(b[scalesBase + subblock]) >> 6) << 4)\n                let packed = int(b[blockByte + 16 + chunk * 32 + lane])\n                let nibble = if half == 0: packed & 0xF else: (packed >> 4) & 0xF\n                let minBits = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * (subMin as float32)\n                let quantized = subScale * nibble\n",
+    };
+    let block_elements = if matches!(quantized_format, Some("q6_k" | "q4_k" | "q3_k" | "q2_k")) { 256 } else { 32 };
+    let scale_offset = match quantized_format { Some("q6_k") => 208, Some("q3_k") => 108, Some("q2_k") => 80, _ => 0 };
+    let product = if quantized_format.is_some() {
+        format!("                let flat = col * k + inner\n                let blockByte = (flat / {block_elements}) * {block_bytes}\n                let scaleOffset = blockByte + {scale_offset}\n                let scaleBits = int(b[scaleOffset]) | (int(b[scaleOffset + 1]) << 8)\n                let sign = (scaleBits >> 15) & 1\n                let exponent = (scaleBits >> 10) & 0x1F\n                let fraction = scaleBits & 0x3FF\n                var float32 scale = 0.0\n                if exponent == 0:\n                    scale = (fraction as float32) / 16777216.0\n                elif exponent == 0x1F:\n                    scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (fraction as float32) / 1024.0\n                    var int scaleExponent = exponent - 15\n                    while scaleExponent > 0:\n                        scale *= 2.0\n                        scaleExponent -= 1\n                    while scaleExponent < 0:\n                        scale /= 2.0\n                        scaleExponent += 1\n                if sign == 1:\n                    scale = 0.0 - scale\n                var float32 minimum = 0.0\n{quantized_value}                sum += a[row * k + inner] * ((quantized as float32) * scale - minimum)\n")
+    } else {
+        "                sum += a[row * k + inner] * b[col * k + inner]\n".to_string()
+    };
     let source = format!(
-        "kernel {name}:\n    let [float32]'{qa} a\n    let [float32]'{qb} b\n    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [float32]'{qb} input_b, [float32]'{qc} input_c, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n        c = input_c\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n        let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n        let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n        if cell < m * n:\n            let row = cell / n\n            let col = cell % n\n            var float32 sum = 0.0\n            for inner in 0..<k:\n                sum += a[row * k + inner] * b[col * k + inner]\n            c[row * n + col] = sum\n",
+        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, [float32]'{qc} input_c, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = input_c\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n        let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n        let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n        if cell < m * n:\n            let row = cell / n\n            let col = cell % n\n            var float32 sum = {initial}\n            for inner in 0..<k:\n{product}            c[row * n + col] = sum\n",
         qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]),
     );
     let parsed = crate::parser::parse(
@@ -433,8 +575,17 @@ fn parse_dynamic_replacement_stmts(
     instance: &str,
     call: &DynamicLinearCall<'_>,
 ) -> Result<Vec<Stmt>, String> {
+    let bias_guard = call.bias.map(|bias| format!("    guard {bias}.length == {{n}} else throw \"tensor bias length mismatch\"\n")).unwrap_or_default().replace("{n}", &call.n);
+    let bias_arg = call.bias.map(|bias| format!("{bias}, ")).unwrap_or_default();
+    let weight_guard = if call.format.is_some() {
+        let block_bytes = match call.format { Some("q8_0") => 34, Some("q5_0") => 22, Some("q6_k") => 210, Some("q4_k") => 144, Some("q3_k") => 110, Some("q2_k") => 84, _ => 18 };
+        let block_elements = if matches!(call.format, Some("q6_k" | "q4_k" | "q3_k" | "q2_k")) { 256 } else { 32 };
+        format!("    guard {k} % {block_elements} == 0 else throw \"quantized tensor dimension k must be a multiple of {block_elements}\"\n    guard {b}.length == ({n} * {k} / {block_elements}) * {block_bytes} else throw \"quantized tensor weight length mismatch\"\n", k = call.k, b = call.operands[1], n = call.n)
+    } else {
+        format!("    guard {b}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n", b = call.operands[1], n = call.n, k = call.k)
+    };
     let source = format!(
-        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n    guard {b}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {c}, {m}, {n}, {k})\n    kernel:\n        {instance}(block = 256, grid = ({m} * {n} + 255) / 256)\n    {c} = {instance}.c\n",
+        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{c}, {m}, {n}, {k})\n    kernel:\n        {instance}(block = 256, grid = ({m} * {n} + 255) / 256)\n    {c} = {instance}.c\n",
         a = call.operands[0], b = call.operands[1], c = call.operands[2],
         m = call.m, n = call.n, k = call.k,
     );
@@ -476,6 +627,13 @@ fn stmt_uses_host_tensor(stmt: &Stmt) -> bool {
         Stmt::For(value) => value.body.iter().any(stmt_uses_host_tensor),
         Stmt::Loop(value) => value.body.iter().any(stmt_uses_host_tensor),
         Stmt::DoWhile(value) => value.body.iter().any(stmt_uses_host_tensor),
+        Stmt::IfLet(value) => value.then_body.iter().any(stmt_uses_host_tensor)
+            || value.elif_branches.iter().any(|branch| branch.body.iter().any(stmt_uses_host_tensor))
+            || value.else_body.as_ref().is_some_and(|body| body.iter().any(stmt_uses_host_tensor)),
+        Stmt::WhileLet(value) => value.body.iter().any(stmt_uses_host_tensor),
+        Stmt::Match(value) => value.arms.iter().any(|arm| matches!(&arm.body, MatchBody::Block(body) if body.iter().any(stmt_uses_host_tensor))),
+        Stmt::Try(value) => value.body.iter().any(stmt_uses_host_tensor)
+            || value.catch_clauses.iter().any(|clause| clause.body.iter().any(stmt_uses_host_tensor)),
         Stmt::KernelBlock(value) => value.body.iter().any(stmt_uses_host_tensor),
         _ => false,
     }
@@ -539,9 +697,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nested_host_scheduling() {
+    fn lowers_host_scheduling_inside_control_flow() {
         let lowered = lower(&parse("def work() throws:\n    let [float32, k = 2, m = 2]'gpu'global a = [0.0 for ..<4]\n    let [float32, n = 2, k = 2]'gpu'global b = [0.0 for ..<4]\n    mut [float32, n = 2, m = 2]'gpu'unified c = [0.0 for ..<4]\n    if true:\n        gpu.tensor.matmul(a, b, c)\n"));
-        assert!(lowered.errors.iter().any(|error| error.message.contains("outside control flow")));
+        assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
+        let function = lowered.program.items.iter().find_map(|item| match item {
+            Item::Fn(function) if function.name == "work" => Some(function),
+            _ => None,
+        }).unwrap();
+        let Stmt::If(branch) = &function.body[3] else { panic!("expected if") };
+        assert!(branch.branches[0].1.iter().any(|stmt| matches!(stmt, Stmt::KernelBlock(_))));
     }
 
     #[test]

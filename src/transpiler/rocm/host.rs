@@ -425,6 +425,12 @@ impl<T> Clone for DeviceBuffer<T> {
 /// still alive -- see that method's safety doc.
 trait BoringKernelArg { fn boring_kernel_ptr(self) -> *mut c_void; }
 
+impl<'a, T> BoringKernelArg for &'a DeviceBuffer<T> {
+    fn boring_kernel_ptr(self) -> *mut c_void {
+        &self.ptr as *const *mut c_void as *mut c_void
+    }
+}
+
 impl<'a, T> BoringKernelArg for &'a mut DeviceBuffer<T> {
     fn boring_kernel_ptr(self) -> *mut c_void {
         &mut self.ptr as *mut *mut c_void as *mut c_void
@@ -531,15 +537,13 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // See `cuda::host`'s identical `BoringGpuArg` doc comment -- this backend
-        // (like CUDA, unlike wgpu) has no cross-function GPU-buffer-residency
-        // optimization of its own; every kernel-touching function here always
-        // returns the `Host(...)` variant, but the type still needs to exist and
-        // type-check wherever the general-spliced code references it.
+        // See `cuda::host`'s identical `BoringGpuArg` contract. Returned kernel
+        // buffers remain resident across functions; read-only consumers retain
+        // the Arc while mutable consumers receive independent storage.
         self.line("#[allow(dead_code)]");
         self.line("enum BoringGpuArg<T> {");
         self.indent += 1;
-        self.line("Resident(DeviceBuffer<f64>, usize),");
+        self.line("Resident(Arc<DeviceBuffer<T>>, usize),");
         self.line("Host(Vec<T>),");
         self.indent -= 1;
         self.line("}");
@@ -574,7 +578,7 @@ impl HostEmitter {
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Arc<HipContext> { boring_gpu_ctx() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Arc<HipContext> { boring_gpu_ctx() }");
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_d2h<T>(device: &Arc<HipContext>, _queue: &Arc<HipContext>, buf: &DeviceBuffer<f64>) -> Vec<f64> {");
+        self.line("fn __boring_gpu_copy_d2h<T: Copy + Default>(device: &Arc<HipContext>, _queue: &Arc<HipContext>, buf: &DeviceBuffer<T>) -> Vec<T> {");
         self.indent += 1;
         self.line("let stream = boring_new_stream_with_priority(device, 0).expect(\"hip: failed to get shared stream for D2H copy\");");
         self.line("let v = stream.clone_dtoh(buf).expect(\"hip: D2H copy failed\");");
@@ -583,7 +587,7 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Arc<HipContext>, _queue: &Arc<HipContext>, _src: &[u8], _dst: &DeviceBuffer<f64>) {");
+        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Arc<HipContext>, _queue: &Arc<HipContext>, _src: &[u8], _dst: &DeviceBuffer<T>) {");
         self.indent += 1;
         self.line("unreachable!(\"rocm backend never constructs a host-to-device upload through this path -- kernel-constructor call sites upload directly\")");
         self.indent -= 1;
@@ -715,13 +719,14 @@ struct HostEmitter {
     /// this emitter has no cross-function residency-preservation optimization
     /// of its own, unlike the general pipeline's `resident_call_vars`.
     fn_returns_resident: std::collections::HashMap<String, Type>,
+    fn_gpu_array_params: std::collections::HashMap<String, Vec<bool>>,
     /// Local variable names (current function only, reset per `emit_fn` call)
     /// bound to a call into a `fn_returns_resident` function WHOSE OWN `let`
     /// type is itself `'gpu'unified` (`s.ty.gpu_resident_qual().is_some()`) --
     /// these stay `BoringGpuArg<f64>`-typed (never unwrapped to a plain
     /// `Vec`), so a later kernel-constructor call passing one of these as an
-    /// argument can MOVE the underlying `DeviceBuffer` straight through instead
-    /// of reading it back to host and re-uploading. See `Stmt::Let`'s own
+    /// argument can share the underlying `DeviceBuffer` through an `Arc`
+    /// instead of reading it back to host and re-uploading. See `Stmt::Let`'s own
     /// handling for where this is populated, and the kernel-constructor
     /// branch of `expr()`'s `Call` case for where it's consumed.
     resident_locals: std::collections::HashSet<String>,
@@ -777,6 +782,11 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
     }
 }
 
+fn is_gpu_array_param(ty: &Type) -> bool {
+    matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+        if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+}
+
 impl HostEmitter {
     fn new(kernel_names: &[String]) -> Self {
         Self {
@@ -801,6 +811,7 @@ impl HostEmitter {
             ref_params: std::collections::HashSet::new(),
             in_resident_return: false,
             fn_returns_resident: std::collections::HashMap::new(),
+            fn_gpu_array_params: std::collections::HashMap::new(),
             resident_locals: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
             top_level_scalars: std::collections::HashMap::new(),
@@ -1181,6 +1192,14 @@ impl HostEmitter {
 
     /// Mirrors `cuda::host`'s identical helper.
     fn emit_assign_rhs(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        if matches!(&lhs.kind, ExprKind::Var(name) if self.resident_locals.contains(name.as_str())) {
+            if let Some(value) = self.try_resident_field_expr(rhs) { return value; }
+            if let ExprKind::Field(obj, field) = &rhs.kind {
+                if let ExprKind::Var(obj) = &obj.kind {
+                    return format!("{{ let __n = {obj}.{field}.len(); BoringGpuArg::Resident(Arc::new({obj}.{field}), __n) }}");
+                }
+            }
+        }
         if self.is_kernel_field_ref(lhs) && self.is_kernel_field_ref(rhs) {
             self.emit_kernel_field_value(rhs)
         } else {
@@ -1336,6 +1355,10 @@ impl HostEmitter {
                     .map(|p| p.ty.as_ref().is_some_and(|ty| is_ref_worthy_type(ty, &self.struct_names)))
                     .collect();
                 self.fn_ref_params.insert(f.name.clone(), ref_flags);
+                self.fn_gpu_array_params.insert(
+                    f.name.clone(),
+                    f.params.iter().map(|p| p.ty.as_ref().is_some_and(is_gpu_array_param)).collect(),
+                );
                 if let Some(rt) = &f.return_ty {
                     if rt.gpu_resident_qual().is_some() {
                         self.fn_returns_resident.insert(f.name.clone(), rt.clone());
@@ -1562,8 +1585,8 @@ impl HostEmitter {
             // uploading a fresh one from host data via `clone_htod`, instead
             // of this constructor doing the upload itself (see
             // `emit_init_stmt`'s matching change).
-            let ty = if let Some(Some(elem)) = buffer_flags.get(i) {
-                format!("DeviceBuffer<{}>", elem)
+            let ty = if let Some(Some((elem, read_only))) = buffer_flags.get(i) {
+                if *read_only { format!("Arc<DeviceBuffer<{}>>", elem) } else { format!("DeviceBuffer<{}>", elem) }
             } else {
                 p.ty.as_ref().map(|t| host_param_type(t, fields)).unwrap_or_else(|| "()".into())
             };
@@ -1627,10 +1650,12 @@ impl HostEmitter {
                         let count = field.ty.as_labeled_array()
                             .and_then(|(_, axes)| labeled_array_total_size_expr(axes))
                             .unwrap_or_else(|| "1".to_string());
-                        self.line(&format!(
-                            "let {} = boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>(({}) as usize)?;",
-                            field.name, elem, count
-                        ));
+                        let value = format!("boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>(({}) as usize)?", elem, count);
+                        if field.binding == FieldBinding::Let {
+                            self.line(&format!("let {} = Arc::new({});", field.name, value));
+                        } else {
+                            self.line(&format!("let {} = {};", field.name, value));
+                        }
                     }
                     GpuQual::Actor | GpuQual::Local => {
                         match &field.ty {
@@ -1812,19 +1837,17 @@ impl HostEmitter {
                                                 self.line("};");
                                                 return;
                                             }
-                                            self.line(&format!(
-                                                "let {} = boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>({} as usize)?;",
-                                                fname, elem, n
-                                            ));
+                                            let value = format!("boring_new_stream_with_priority(&__ctx, 0)?.alloc_zeros::<{}>({} as usize)?", elem, n);
+                                            let value = if field.binding == FieldBinding::Let { format!("Arc::new({value})") } else { value };
+                                            self.line(&format!("let {} = {};", fname, value));
                                             return;
                                         }
                                         ExprKind::Array(elems) => {
                                             let elem = elem_rust_type(&field.ty);
                                             let lit: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
-                                            self.line(&format!(
-                                                "let {} = boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{}>(&vec![{}])?;",
-                                                fname, elem, lit.join(", ")
-                                            ));
+                                            let value = format!("boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{}>(&vec![{}])?", elem, lit.join(", "));
+                                            let value = if field.binding == FieldBinding::Let { format!("Arc::new({value})") } else { value };
+                                            self.line(&format!("let {} = {};", fname, value));
                                             return;
                                         }
                                         _ => {
@@ -1842,10 +1865,9 @@ impl HostEmitter {
                                             } else {
                                                 let rhs_s = self.expr(rhs);
                                                 let elem = elem_rust_type(&field.ty);
-                                                self.line(&format!(
-                                                    "let {} = boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{}>(&{})?;",
-                                                    fname, elem, rhs_s
-                                                ));
+                                                let value = format!("boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{}>(&{})?", elem, rhs_s);
+                                                let value = if field.binding == FieldBinding::Let { format!("Arc::new({value})") } else { value };
+                                                self.line(&format!("let {} = {};", fname, value));
                                             }
                                             return;
                                         }
@@ -1982,7 +2004,11 @@ impl HostEmitter {
         for f in fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    self.line(&format!("launcher.arg(&mut self.{});", f.name));
+                    if f.binding == FieldBinding::Let {
+                        self.line(&format!("launcher.arg(&*self.{});", f.name));
+                    } else {
+                        self.line(&format!("launcher.arg(&mut self.{});", f.name));
+                    }
                 }
                 GpuQual::Const => {
                     if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) && f.ty.as_labeled_array().is_none() {
@@ -2015,7 +2041,9 @@ impl HostEmitter {
             let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
             match &p.ty {
                 Some(ty) => {
-                    let base = rust_type(ty);
+                    let base = if is_gpu_array_param(ty) {
+                        format!("BoringGpuArg<{}>", elem_rust_type(ty))
+                    } else { rust_type(ty) };
                     let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
                         format!("&{}", base)
                     } else {
@@ -2057,9 +2085,12 @@ impl HostEmitter {
         let outer_in_resident_return = self.in_resident_return;
         self.in_resident_return = resident_elem.is_some();
         let outer_ref_params = std::mem::take(&mut self.ref_params);
+        let outer_resident_locals = std::mem::take(&mut self.resident_locals);
         for p in &f.params {
             if let Some(ty) = &p.ty {
-                if is_ref_worthy_type(ty, &self.struct_names) {
+                if is_gpu_array_param(ty) {
+                    self.resident_locals.insert(p.name.clone());
+                } else if is_ref_worthy_type(ty, &self.struct_names) {
                     self.ref_params.insert(p.name.clone());
                 }
             }
@@ -2070,7 +2101,8 @@ impl HostEmitter {
                 if f.throws {
                     if let Stmt::Expr(e) = stmt {
                         let wrapped = if self.in_resident_return {
-                            self.try_resident_field_expr(e).unwrap_or_else(|| {
+                            match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }
+                                .or_else(|| self.try_resident_field_expr(e)).unwrap_or_else(|| {
                                 let s = self.expr(e);
                                 format!("BoringGpuArg::Host({})", s)
                             })
@@ -2082,7 +2114,8 @@ impl HostEmitter {
                     }
                 } else if self.in_resident_return {
                     if let Stmt::Expr(e) = stmt {
-                        let wrapped = self.try_resident_field_expr(e).unwrap_or_else(|| {
+                        let wrapped = match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }
+                            .or_else(|| self.try_resident_field_expr(e)).unwrap_or_else(|| {
                             let s = self.expr(e);
                             format!("BoringGpuArg::Host({})", s)
                         });
@@ -2099,6 +2132,7 @@ impl HostEmitter {
         self.in_throws = outer_in_throws;
         self.in_resident_return = outer_in_resident_return;
         self.ref_params = outer_ref_params;
+        self.resident_locals = outer_resident_locals;
         self.indent -= 1;
         self.line("}");
     }
@@ -2109,12 +2143,13 @@ impl HostEmitter {
         match stmt {
             Stmt::Let(s) => {
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
-                let is_resident_preserving = s.ty.as_ref().and_then(|t| t.gpu_resident_qual()).is_some()
-                    && matches!(&s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Call(callee, _))
-                        if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n.as_str())));
+                let explicit_resident = s.ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some());
+                let resident_call = matches!(&s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Call(callee, _))
+                    if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n.as_str())));
+                let is_resident_preserving = explicit_resident && (resident_call || self.in_resident_return);
                 let ty_ann = if is_resident_preserving {
                     self.resident_locals.insert(s.name.clone());
-                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", elem_rust_type(t))).unwrap_or_default()
+                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", elem_rust_type(t.without_mut()))).unwrap_or_default()
                 } else {
                     s.ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default()
                 };
@@ -2123,7 +2158,7 @@ impl HostEmitter {
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
-                    let rhs = self.expr(val);
+                    let rhs = if is_resident_preserving && !resident_call { format!("BoringGpuArg::Host({})", self.expr(val)) } else { self.expr(val) };
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
@@ -2158,8 +2193,8 @@ impl HostEmitter {
                             self.line(&format!("{}[({}) as usize] = {};", obj_s, idx_s, rhs_s));
                             return;
                         }
-                        let l = self.expr(lhs);
-                        let r = self.expr(rhs);
+                        let l = self.emit_assign_target(lhs);
+                        let r = self.emit_assign_rhs(lhs, rhs);
                         self.line(&format!("{} = {};", l, r));
                     }
                     _ => {
@@ -2475,6 +2510,7 @@ impl HostEmitter {
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return,
             fn_returns_resident: self.fn_returns_resident.clone(),
+            fn_gpu_array_params: self.fn_gpu_array_params.clone(),
             resident_locals: self.resident_locals.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
             top_level_scalars: self.top_level_scalars.clone(),
@@ -2545,7 +2581,7 @@ impl HostEmitter {
                 format!("({}{})", unaryop_rust(op), v)
             }
             ExprKind::Assign(lhs, rhs) => {
-                format!("({} = {})", self.expr(lhs), self.expr(rhs))
+                format!("({} = {})", self.emit_assign_target(lhs), self.emit_assign_rhs(lhs, rhs))
             }
             ExprKind::Index(arr, idx) => {
                 // `k.buf[i]` where buf is a GPU array field → `k.read_buf()?[i as usize]`
@@ -2723,7 +2759,16 @@ impl HostEmitter {
                 }
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
+                let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
+                        if let ExprKind::Var(name) = &a.value.kind {
+                            if self.resident_locals.contains(name.as_str()) {
+                                return format!("{}.clone()", name);
+                            }
+                        }
+                        return format!("BoringGpuArg::Host(({}).clone())", self.expr(&a.value));
+                    }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                     self.coerce_call_arg(&a.value, expects_ref)
                 }).collect();
@@ -3073,7 +3118,7 @@ impl HostEmitter {
     /// render as `DeviceBuffer<T>` (see `emit_kernel_new`) instead of a host
     /// `Vec`, and the kernel-constructor call site must produce a
     /// `DeviceBuffer` for that argument position instead of a `Vec`.
-    fn kernel_ctor_buffer_flags(&self, kernel_name: &str) -> Option<Vec<Option<String>>> {
+    fn kernel_ctor_buffer_flags(&self, kernel_name: &str) -> Option<Vec<Option<(String, bool)>>> {
         let decl = self.kernel_decls.get(kernel_name)?;
         let init = decl.inits.first()?;
         Some(init.params.iter().map(|p| {
@@ -3094,13 +3139,13 @@ impl HostEmitter {
                 // DeviceBuffer<f32>, found struct Vec<f32>`.
                 matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
                     && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some())
-            }).map(|f| elem_rust_type(&f.ty))
+            }).map(|f| (elem_rust_type(&f.ty), f.binding == FieldBinding::Let))
         }).collect())
     }
 
     /// Renders `args` for a call to kernel `name`'s constructor, uploading
     /// each buffer-passthrough argument (see `kernel_ctor_buffer_flags`) via
-    /// `clone_htod` -- or moving it directly if it's already GPU-resident --
+    /// `clone_htod` -- or sharing it when a read-only argument is already resident --
     /// exactly the way a plain `Scale(data)` constructor call has always
     /// worked. Shared by both constructor call sites: plain `Scale(data)`
     /// (`ExprKind::Call`) and arena-qualified `new(g) Scale(data)`
@@ -3110,8 +3155,8 @@ impl HostEmitter {
     fn emit_kernel_ctor_args(&mut self, name: &str, args: &[Arg]) -> Vec<String> {
         let buffer_flags = self.kernel_ctor_buffer_flags(name);
         args.iter().enumerate().map(|(i, a)| {
-            let elem = buffer_flags.as_ref().and_then(|f| f.get(i).cloned()).flatten();
-            if let Some(elem) = elem {
+            let buffer = buffer_flags.as_ref().and_then(|f| f.get(i).cloned()).flatten();
+            if let Some((elem, read_only)) = buffer {
                 if let ExprKind::Field(obj, field) = &a.value.kind {
                     if let ExprKind::Var(obj_name) = &obj.kind {
                         if self.var_kernel_type.contains_key(obj_name.as_str()) {
@@ -3124,24 +3169,32 @@ impl HostEmitter {
                             // `Scale(k1.buf)`) is used again later -- mirrors the
                             // identical E0382 ("use of partially moved value")
                             // fixed in cuda::host, confirmed the same way there.
-                            return format!("{}.{}.clone()", obj_name, field);
+                            let source_read_only = self.var_kernel_type.get(obj_name.as_str())
+                                .and_then(|ty| self.kernel_decls.get(ty))
+                                .and_then(|decl| decl.fields.iter().find(|f| f.name == *field))
+                                .is_some_and(|f| f.binding == FieldBinding::Let);
+                            return match (read_only, source_read_only) {
+                                (true, true) => format!("Arc::clone(&{}.{})", obj_name, field),
+                                (true, false) => format!("Arc::new({}.{}.clone())", obj_name, field),
+                                (false, true) => format!("(*{}.{}).clone()", obj_name, field),
+                                (false, false) => format!("{}.{}.clone()", obj_name, field),
+                            };
                         }
                     }
                 }
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         // Same reasoning as the `k_prev.field` case above.
-                        return format!(
-                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf.clone(), BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&v)? }})",
-                            v = vname, elem = elem
-                        );
+                        return if read_only {
+                            format!("(match &{v} {{ BoringGpuArg::Resident(buf, _) => Arc::clone(buf), BoringGpuArg::Host(v) => Arc::new(boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(v)?) }})", v = vname, elem = elem)
+                        } else {
+                            format!("(match &{v} {{ BoringGpuArg::Resident(buf, _) => (**buf).clone(), BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(v)? }})", v = vname, elem = elem)
+                        };
                     }
                 }
                 let s = self.coerce_call_arg(&a.value, false);
-                return format!(
-                    "boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&{s})?",
-                    elem = elem, s = s
-                );
+                let upload = format!("boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&{s})?", elem = elem, s = s);
+                return if read_only { format!("Arc::new({upload})") } else { upload };
             }
             self.coerce_call_arg(&a.value, false)
         }).collect()
@@ -3192,8 +3245,8 @@ impl HostEmitter {
         let kf = decl.fields.iter().find(|f| &f.name == field)?;
         match kf.qual {
             GpuQual::Unified => match &kf.ty {
-                Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => Some(format!(
-                    "{{ let __n = {obj}.{field}.len(); BoringGpuArg::Resident({obj}.{field}, __n) }}",
+                Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => Some(format!(
+                    "{{ let __n = {obj}.{field}.len(); BoringGpuArg::Resident(Arc::new({obj}.{field}), __n) }}",
                     obj = obj_name, field = field
                 )),
                 _ => None,
@@ -3215,7 +3268,11 @@ impl HostEmitter {
         if matches!(field.qual, GpuQual::Const) && !is_fixed_shape {
             return elem;
         }
-        format!("DeviceBuffer<{}>", elem)
+        if field.binding == FieldBinding::Let {
+            format!("Arc<DeviceBuffer<{}>>", elem)
+        } else {
+            format!("DeviceBuffer<{}>", elem)
+        }
     }
 }
 
