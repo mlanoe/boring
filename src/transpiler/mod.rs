@@ -6754,4 +6754,4 @@ stream int streamFn():\n    yield 1\n";
 }
 
 mod tensor;
-mod tensor_host;
+pub(crate) mod tensor_host;

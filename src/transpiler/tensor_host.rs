@@ -4,12 +4,33 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TensorLinearConfig {
+    pub decode_algorithm: Option<String>,
+    pub prefill_algorithm: Option<String>,
+    pub decode_formats: HashMap<String, String>,
+    pub prefill_formats: HashMap<String, String>,
+}
+
+impl TensorLinearConfig {
+    fn algorithm(&self, format: Option<&str>, decode: bool) -> &str {
+        let formats = if decode { &self.decode_formats } else { &self.prefill_formats };
+        let fallback = if decode { &self.decode_algorithm } else { &self.prefill_algorithm };
+        format.and_then(|name| formats.get(name)).or(fallback.as_ref()).map_or("auto", String::as_str)
+    }
+}
+
 pub(crate) struct Lowered {
     pub program: Program,
     pub errors: Vec<super::TranspileError>,
 }
 
+#[allow(dead_code)]
 pub(crate) fn lower(program: &Program) -> Lowered {
+    lower_with_config(program, &TensorLinearConfig::default())
+}
+
+pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearConfig) -> Lowered {
     let mut types: HashMap<String, Type> = HashMap::new();
     let mut items = Vec::new();
     let mut kernels = Vec::new();
@@ -58,6 +79,7 @@ pub(crate) fn lower(program: &Program) -> Lowered {
                 &mut ordinal,
                 &mut used_kernel_names,
                 &mut used_binding_names,
+                tensor_config,
             );
             items.push(Item::Fn(function));
             continue;
@@ -122,6 +144,7 @@ fn lower_function_body(
     ordinal: &mut usize,
     used_kernel_names: &mut HashSet<String>,
     used_binding_names: &mut HashSet<String>,
+    tensor_config: &TensorLinearConfig,
 ) -> Vec<Stmt> {
     let mut out = Vec::new();
     let mut index = 0usize;
@@ -136,7 +159,7 @@ fn lower_function_body(
             continue;
         }
         if let Some(lowered) = lower_control_flow_stmt(
-            stmt, types, kernels, errors, ordinal, used_kernel_names, used_binding_names,
+            stmt, types, kernels, errors, ordinal, used_kernel_names, used_binding_names, tensor_config,
         ) {
             out.push(lowered);
             index += 1;
@@ -164,7 +187,7 @@ fn lower_function_body(
                 continue;
             };
             let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names);
-            match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format) {
+            match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, tensor_config) {
                 Ok(kernel) => kernels.push(Item::Kernel(kernel)),
                 Err(message) => {
                     errors.push(super::TranspileError::at_line(message, call.line));
@@ -173,7 +196,7 @@ fn lower_function_body(
                     continue;
                 }
             }
-            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic) {
+            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, tensor_config) {
                 Ok(mut replacement) => {
                     let returns_destination = body.get(index + 1).is_some_and(|next| {
                         matches!(next, Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Var(name) if name == dynamic.operands[2]))
@@ -266,6 +289,7 @@ fn lower_nested_body(
     ordinal: &mut usize,
     used_kernel_names: &mut HashSet<String>,
     used_binding_names: &mut HashSet<String>,
+    tensor_config: &TensorLinearConfig,
 ) -> Vec<Stmt> {
     let mut nested_types = outer_types.clone();
     lower_function_body(
@@ -276,6 +300,7 @@ fn lower_nested_body(
         ordinal,
         used_kernel_names,
         used_binding_names,
+        tensor_config,
     )
 }
 
@@ -287,9 +312,10 @@ fn lower_control_flow_stmt(
     ordinal: &mut usize,
     used_kernel_names: &mut HashSet<String>,
     used_binding_names: &mut HashSet<String>,
+    tensor_config: &TensorLinearConfig,
 ) -> Option<Stmt> {
     let mut lower_body = |body: &[Stmt]| {
-        lower_nested_body(body, types, kernels, errors, ordinal, used_kernel_names, used_binding_names)
+        lower_nested_body(body, types, kernels, errors, ordinal, used_kernel_names, used_binding_names, tensor_config)
     };
     Some(match stmt {
         Stmt::If(value) => {
@@ -501,7 +527,7 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str) -> Result<KernelDecl, Str
     }
 }
 
-fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>) -> Result<KernelDecl, String> {
+fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>, tensor_config: &TensorLinearConfig) -> Result<KernelDecl, String> {
     let bias_field = if has_bias { "    let [float32]'global bias\n" } else { "" };
     let bias_param = if has_bias { ", [float32]'global input_bias" } else { "" };
     let bias_assign = if has_bias { "        bias = input_bias\n" } else { "" };
@@ -526,8 +552,33 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     } else {
         "                sum += a[row * k + inner] * b[col * k + inner]\n".to_string()
     };
+    let warp_product = format!("        {}", product.replace("\n                ", "\n                        "));
+    let nested_scalar_product = format!("    {}", product.replace("\n                ", "\n                    "));
+    let q8_decode_algorithm = tensor_config.algorithm(Some("q8_0"), true);
+    let q8_warp_decode = quantized_format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp" | "warp-broadcast");
+    let body = if quantized_format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp-broadcast") {
+        format!(
+            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpSize = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpSize\n            let warpsPerBlock = gpu.blockDim.x / warpSize\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            let row = 0\n            let col = cell\n            var float32 sum = 0.0\n            var int base = 0\n            while base < k:\n                let inner = base + lane\n                let scaleLane = (lane / 32) * 32\n                var float32 scale = 0.0\n                if cell < n and inner < k and lane == scaleLane:\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 34\n                    let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                    let sign = (scaleBits >> 15) & 1\n                    let exponent = (scaleBits >> 10) & 0x1F\n                    let fraction = scaleBits & 0x3FF\n                    if exponent == 0:\n                        scale = (fraction as float32) / 16777216.0\n                    elif exponent == 0x1F:\n                        scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                    else:\n                        scale = 1.0 + (fraction as float32) / 1024.0\n                        var int scaleExponent = exponent - 15\n                        while scaleExponent > 0:\n                            scale *= 2.0\n                            scaleExponent -= 1\n                        while scaleExponent < 0:\n                            scale /= 2.0\n                            scaleExponent += 1\n                    if sign == 1:\n                        scale = 0.0 - scale\n                scale = gpu.warp.shuffle(scale, scaleLane)\n                if cell < n and inner < k:\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 34\n                    let raw = int(b[blockByte + 2 + flat % 32])\n                    let quantized = if raw > 127: raw - 256 else: raw\n                    sum += a[row * k + inner] * ((quantized as float32) * scale)\n                base += warpSize\n            var int offset = warpSize / 2\n            while offset > 0:\n                sum += gpu.warp.shuffleXor(sum, offset)\n                offset /= 2\n            if cell < n:\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            bias = if has_bias { "bias[col]" } else { "0.0" },
+            initial = initial,
+            product = nested_scalar_product,
+        )
+    } else if q8_warp_decode {
+        format!(
+            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpSize = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpSize\n            let warpsPerBlock = gpu.blockDim.x / warpSize\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            let row = 0\n            let col = cell\n            var float32 sum = 0.0\n            var int inner = lane\n            while inner < k:\n                if cell < n:\n{product}                inner += warpSize\n            var int offset = warpSize / 2\n            while offset > 0:\n                sum += gpu.warp.shuffleXor(sum, offset)\n                offset /= 2\n            if cell < n:\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            product = warp_product,
+            bias = if has_bias { "bias[col]" } else { "0.0" },
+            initial = initial,
+        )
+    } else {
+        format!(
+            "        let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n        let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n        if cell < m * n:\n            let row = cell / n\n            let col = cell % n\n            var float32 sum = {initial}\n            for inner in 0..<k:\n{product}            c[row * n + col] = sum\n",
+            initial = initial,
+            product = product,
+        )
+    };
     let source = format!(
-        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, [float32]'{qc} input_c, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = input_c\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n        let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n        let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n        if cell < m * n:\n            let row = cell / n\n            let col = cell % n\n            var float32 sum = {initial}\n            for inner in 0..<k:\n{product}            c[row * n + col] = sum\n",
+        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, [float32]'{qc} input_c, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = input_c\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
         qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]),
     );
     let parsed = crate::parser::parse(
@@ -575,6 +626,7 @@ fn parse_dynamic_replacement_stmts(
     name: &str,
     instance: &str,
     call: &DynamicLinearCall<'_>,
+    tensor_config: &TensorLinearConfig,
 ) -> Result<Vec<Stmt>, String> {
     let bias_guard = call.bias.map(|bias| format!("    guard {bias}.length == {{n}} else throw \"tensor bias length mismatch\"\n")).unwrap_or_default().replace("{n}", &call.n);
     let bias_arg = call.bias.map(|bias| format!("{bias}, ")).unwrap_or_default();
@@ -586,8 +638,24 @@ fn parse_dynamic_replacement_stmts(
     } else {
         format!("    guard {b}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n", b = call.operands[1], n = call.n, k = call.k)
     };
+    // A 256-thread block contains at least four warps on the supported
+    // 32- and 64-lane architectures. Dispatching in groups of four therefore
+    // covers every output column without baking a backend warp width into the
+    // host code; narrower warps simply execute additional guarded work.
+    let q8_decode_algorithm = tensor_config.algorithm(Some("q8_0"), true);
+    let q8_warp_decode = call.format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp" | "warp-broadcast");
+    let dispatch = if q8_warp_decode {
+        format!("    let {instance}_blocks = if {m} == 1: ({n} + 3) / 4 else: ({m} * {n} + 255) / 256\n", instance = instance, m = call.m, n = call.n)
+    } else {
+        String::new()
+    };
+    let grid = if q8_warp_decode {
+        format!("{instance}_blocks")
+    } else {
+        format!("({m} * {n} + 255) / 256", m = call.m, n = call.n)
+    };
     let source = format!(
-        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{c}, {m}, {n}, {k})\n    kernel:\n        {instance}(block = 256, grid = ({m} * {n} + 255) / 256)\n    {c} = {instance}.c\n",
+        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{c}, {m}, {n}, {k})\n{dispatch}    kernel:\n        {instance}(block = 256, grid = {grid})\n    {c} = {instance}.c\n",
         a = call.operands[0], b = call.operands[1], c = call.operands[2],
         m = call.m, n = call.n, k = call.k,
     );

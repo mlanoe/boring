@@ -101,7 +101,11 @@ pub struct CudaOutput {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_cuda(program: &Program, stem: &str, version: &str) -> CudaOutput {
-    let tensor_host = crate::transpiler::tensor_host::lower(program);
+    transpile_cuda_with_tensor_config(program, stem, version, &crate::transpiler::tensor_host::TensorLinearConfig::default())
+}
+
+pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> CudaOutput {
+    let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, tensor_config);
     let program = &tensor_host.program;
     // Collect all kernel names.
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {

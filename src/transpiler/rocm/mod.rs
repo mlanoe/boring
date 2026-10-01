@@ -95,7 +95,11 @@ pub struct RocmOutput {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutput {
-    let tensor_host = crate::transpiler::tensor_host::lower(program);
+    transpile_rocm_with_tensor_config(program, stem, version, &crate::transpiler::tensor_host::TensorLinearConfig::default())
+}
+
+pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> RocmOutput {
+    let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, tensor_config);
     let program = &tensor_host.program;
     // Collect all kernel names.
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {

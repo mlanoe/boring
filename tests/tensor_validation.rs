@@ -187,6 +187,7 @@ fn host_tensor_linear_runs_and_builds_for_all_gpu_targets() {
             .args(["build", "--target", target]).arg(&path).output().unwrap();
         assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
     }
+
 }
 
 #[test]
@@ -251,6 +252,27 @@ fn dynamic_tensor_linear_decodes_q8_0_weights_on_all_gpu_targets() {
             .args(["build", "--target", target]).arg(&path).output().unwrap();
         assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
     }
+
+    let metal_root = root.join("tensor_dynamic_q8_0_metal");
+    let shader = fs::read_to_string(metal_root.join("kernels/main.metal")).unwrap();
+    assert!(shader.contains("simd_shuffle_xor"), "Q8_0 decode must synthesize a warp reduction");
+    assert!(shader.contains("simd_shuffle(scale, scaleLane)"), "automatic Q8_0 decode must broadcast each packed-block scale");
+    let host = fs::read_to_string(metal_root.join("src/main.rs")).unwrap();
+    assert!(host.contains("_blocks = if (1 == 1)"), "Q8_0 dispatch must select launch geometry from m");
+}
+
+#[test]
+fn project_tensor_config_can_force_scalar_q8_decode() {
+    let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_config_scalar_q8");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-config\"\n\n[tensor.linear.decode]\nq8_0 = \"scalar\"\n").unwrap();
+    let path = root.join("main.br");
+    fs::write(&path, "req [float32]'gpu'unified compute([float32]'gpu'global x, [uint8]'gpu'global weight) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32]\n    gpu.tensor.linear(x, weight, y, m = 1, n = 1, k = 32, format = \"q8_0\")\n    y\n").unwrap();
+    let build = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"]).arg(&path).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
+    assert!(!shader.contains("simd_shuffle_xor"), "scalar override must omit the warp reduction");
 }
 
 #[test]

@@ -244,6 +244,7 @@ struct BoringToml {
     /// drained by `resolve_external_fns_includes` — empty again once `load_project_toml`
     /// returns.
     external_fns_includes: Vec<String>,
+    tensor_linear: transpiler::tensor_host::TensorLinearConfig,
 }
 
 /// One `[deps]` entry's interpreted value — see `BoringToml::resolve_deps`. Both variants carry
@@ -312,11 +313,13 @@ impl BoringToml {
         let mut deps = Vec::new();
         let mut external_fns = Vec::new();
         let mut external_fns_includes = Vec::new();
+        let mut tensor_linear = transpiler::tensor_host::TensorLinearConfig::default();
         let mut in_dependencies = false;
         let mut in_external_types = false;
         let mut in_derives = false;
         let mut in_deps = false;
         let mut in_external_fns = false;
+        let mut tensor_linear_section: Option<&str> = None;
 
         for line in src.lines() {
             let line = line.trim();
@@ -329,9 +332,32 @@ impl BoringToml {
                 in_derives = line == "[derives]";
                 in_deps = line == "[deps]";
                 in_external_fns = line == "[external_fns]";
+                tensor_linear_section = match line {
+                    "[tensor.linear]" => Some("all"),
+                    "[tensor.linear.decode]" => Some("decode"),
+                    "[tensor.linear.prefill]" => Some("prefill"),
+                    _ => None,
+                };
                 continue;
             }
-            if in_dependencies {
+            if let Some(shape) = tensor_linear_section {
+                if let Some((key, raw_value)) = line.split_once('=') {
+                    let key = key.trim();
+                    if let Some(value) = Self::extract_value(raw_value) {
+                        match (shape, key) {
+                            ("all", "algorithm") => {
+                                tensor_linear.decode_algorithm = Some(value.clone());
+                                tensor_linear.prefill_algorithm = Some(value);
+                            }
+                            ("decode", "algorithm") => tensor_linear.decode_algorithm = Some(value),
+                            ("prefill", "algorithm") => tensor_linear.prefill_algorithm = Some(value),
+                            ("decode", format) => { tensor_linear.decode_formats.insert(format.to_string(), value); }
+                            ("prefill", format) => { tensor_linear.prefill_formats.insert(format.to_string(), value); }
+                            _ => {}
+                        }
+                    }
+                }
+            } else if in_dependencies {
                 dependencies.push(line.to_string());
             } else if in_deps {
                 // Same one-line-per-entry style as `[dependencies]`, but keyed: split on the
@@ -396,6 +422,7 @@ impl BoringToml {
             external_tuple_structs, external_const_fns, external_optional_fields, external_types_includes,
             derive_traits, derive_includes, deps,
             external_fns, external_fns_includes,
+            tensor_linear,
         }
     }
 
@@ -791,6 +818,15 @@ mod boring_toml_tests {
         let src = "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n";
         let toml = BoringToml::parse(src);
         assert!(toml.dependencies.is_empty());
+    }
+
+    #[test]
+    fn tensor_linear_sections_parse_shape_and_format_overrides() {
+        let src = "[project]\nname = \"demo\"\n\n[tensor.linear]\nalgorithm = \"auto\"\n\n[tensor.linear.decode]\nq8_0 = \"warp\"\n\n[tensor.linear.prefill]\nalgorithm = \"scalar\"\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.tensor_linear.decode_algorithm.as_deref(), Some("auto"));
+        assert_eq!(toml.tensor_linear.prefill_algorithm.as_deref(), Some("scalar"));
+        assert_eq!(toml.tensor_linear.decode_formats.get("q8_0").map(String::as_str), Some("warp"));
     }
 
     #[test]
@@ -2811,6 +2847,31 @@ fn merge_stdlib_into(
     }
 }
 
+fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::TensorLinearConfig {
+    let Some(root) = find_project_root(path) else { return Default::default() };
+    let Ok(source) = std::fs::read_to_string(root.join("boring.toml")) else { return Default::default() };
+    let config = BoringToml::parse(&source).tensor_linear;
+    let valid = |value: &str| matches!(value, "auto" | "scalar" | "warp" | "warp-broadcast");
+    for value in config.decode_algorithm.iter().chain(config.prefill_algorithm.iter())
+        .chain(config.decode_formats.values()).chain(config.prefill_formats.values()) {
+        if !valid(value) {
+            eprintln!("error: unsupported tensor linear algorithm '{}' (expected auto, scalar, warp, or warp-broadcast)", value);
+            process::exit(1);
+        }
+    }
+    for (format, algorithm) in &config.decode_formats {
+        if matches!(algorithm.as_str(), "warp" | "warp-broadcast") && format != "q8_0" {
+            eprintln!("error: tensor linear decode algorithm '{}' is currently implemented only for q8_0, not {}", algorithm, format);
+            process::exit(1);
+        }
+    }
+    if config.prefill_algorithm.as_deref().is_some_and(|value| matches!(value, "warp" | "warp-broadcast")) || config.prefill_formats.values().any(|value| matches!(value.as_str(), "warp" | "warp-broadcast")) {
+        eprintln!("error: tensor linear warp algorithms are not implemented for prefill; use auto or scalar");
+        process::exit(1);
+    }
+    config
+}
+
 fn emit_cuda(path: &str, version: &str) {
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
@@ -2832,7 +2893,8 @@ fn emit_cuda(path: &str, version: &str) {
     let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let project_dir = base_dir.join(format!("{}_cuda", stem));
 
-    let cuda_out = transpiler::cuda::transpile_cuda(&program, &stem, version);
+    let tensor_config = tensor_linear_config_for_source(&path);
+    let cuda_out = transpiler::cuda::transpile_cuda_with_tensor_config(&program, &stem, version, &tensor_config);
     if !cuda_out.errors.is_empty() {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         report_transpile_errors(&path, &source, &cuda_out.errors);
@@ -2901,7 +2963,8 @@ fn emit_rocm(path: &str, version: &str) {
     let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let project_dir = base_dir.join(format!("{}_rocm", stem));
 
-    let rocm_out = transpiler::rocm::transpile_rocm(&program, &stem, version);
+    let tensor_config = tensor_linear_config_for_source(&path);
+    let rocm_out = transpiler::rocm::transpile_rocm_with_tensor_config(&program, &stem, version, &tensor_config);
     if !rocm_out.errors.is_empty() {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         report_transpile_errors(&path, &source, &rocm_out.errors);
@@ -2970,7 +3033,8 @@ fn emit_metal(path: &str, version: &str) {
     let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let project_dir = base_dir.join(format!("{}_metal", stem));
 
-    let metal_out = transpiler::metal::transpile_metal(&program, &stem, version);
+    let tensor_config = tensor_linear_config_for_source(&path);
+    let metal_out = transpiler::metal::transpile_metal_with_tensor_config(&program, &stem, version, &tensor_config);
     if !metal_out.errors.is_empty() {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         report_transpile_errors(&path, &source, &metal_out.errors);
@@ -3032,7 +3096,8 @@ fn emit_wgpu(path: &str, version: &str) {
     let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let project_dir = base_dir.join(format!("{}_wgpu", stem));
 
-    let wgpu_out = transpiler::wgpu::transpile_wgpu(&program, &stem, version);
+    let tensor_config = tensor_linear_config_for_source(&path);
+    let wgpu_out = transpiler::wgpu::transpile_wgpu_with_tensor_config(&program, &stem, version, &tensor_config);
     if !wgpu_out.errors.is_empty() {
         // Best-effort source for pretty-printing (line/col + a caret under the
         // offending text) -- accurate for errors in the entry file itself; an error
@@ -3194,4 +3259,3 @@ path = "src/lib.rs"
     eprintln!("Generated kernel Cargo project at '{}'", project_dir.display());
     eprintln!("  Build with the Linux kernel build system (make -C /path/to/linux M=$PWD)");
 }
-

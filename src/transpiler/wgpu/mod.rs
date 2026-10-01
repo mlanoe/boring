@@ -52,7 +52,11 @@ pub struct WgpuOutput {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutput {
-    let tensor_host = crate::transpiler::tensor_host::lower(program);
+    transpile_wgpu_with_tensor_config(program, stem, version, &crate::transpiler::tensor_host::TensorLinearConfig::default())
+}
+
+pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> WgpuOutput {
+    let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, tensor_config);
     let program = &tensor_host.program;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }

@@ -155,6 +155,28 @@ gpu.tensor.linear(x, packedWeight, bias, y,
                   m = seq, n = dOut, k = dIn, format = "q8_0")
 ```
 
+GPU projects may override the generated dynamic-linear schedule in
+`boring.toml`. Configuration is applied by `boring build`; changing it requires
+regenerating and recompiling the application, but never rebuilding the Boring
+compiler itself:
+
+```toml
+[tensor.linear]
+algorithm = "auto"
+
+[tensor.linear.decode]
+q8_0 = "warp"
+
+[tensor.linear.prefill]
+algorithm = "scalar"
+```
+
+`auto` is the default. The first implementation accepts `auto`, `scalar`, and
+`warp`; `warp` is currently available for Q8_0 single-row decode. Unsupported
+format/algorithm combinations fail during `boring build` instead of silently
+falling back. More algorithms and quantized formats can be added without
+changing source-level tensor calls.
+
 `packedWeight` is a `[uint8]'gpu'global` or `[uint8]'gpu'unified` array in
 native GGUF block layout. Q8_0 uses a little-endian float16 scale followed by
 32 signed int8 values in each 34-byte block. Q5_0 uses the scale, a 32-bit
@@ -434,12 +456,12 @@ behavior inside ordinary `matmul`: dynamic `linear` accepts packed `uint8`
 weights and a literal `format` argument. Inputs and accumulation remain
 float32, and each format defines its own block geometry and decoding rule.
 
-## `boring-llm` migration gap review (2026-09-30)
+## `boring-llm` migration gap review (updated 2026-10-01)
 
-The current tensor milestone functionally covers `boring-llm`'s linear weight
-formats, but it cannot replace the production matrix kernels without measured
-performance validation. That project exposes the concrete requirements more
-precisely than a generic tensor example:
+The tensor API now covers `boring-llm`'s linear weight formats and all of its
+quantized production paths use `gpu.tensor.linear`. The earlier hand-written
+kernels remain as correctness and performance references. That project exposes
+the concrete requirements more precisely than a generic tensor example:
 
 - Model dimensions and sequence lengths come from GGUF metadata and the KV
   cache at runtime. The six-argument `linear` overload now accepts runtime
@@ -471,11 +493,12 @@ precisely than a generic tensor example:
   performs fused Q8_0, Q5_0, Q4_0, IQ4_NL, Q6_K, Q4_K, Q3_K, and Q2_K
   dequantization. These cover every packed format currently implemented by
   `boring-llm`.
-- Single-token decode (`seq == 1`) is a matrix-vector workload. Existing
-  `boring-llm` measurements select warp-broadcast kernels for the 32-element
-  Q4_0/Q5_0/Q8_0/IQ4_NL formats and tiled kernels for prefill. A generic
-  tensor implementation must retain shape-aware selection or demonstrate an
-  equal or better measured path before replacing those kernels.
+- Single-token decode (`seq == 1`) is a matrix-vector workload. Dynamic Q8_0
+  linear now selects a warp-reduction path for `m == 1` and keeps the scalar
+  output-cell path for prefill. On Metal, 200 iterations at `m=1`, `k=896`,
+  `n=896` improved from 2.08 s to 1.26 s. The hand-written scale-broadcast
+  reference remains faster at 0.36 s, so scale broadcast and equivalent
+  scheduling for Q5_0, Q4_0, and IQ4_NL remain performance work.
 - Attention needs runtime rank-three batched products, a mapping from query
   heads to shared KV heads for GQA, a transposed K operand, and separate causal
   mask and softmax stages. Rank-two matmul can migrate linear layers first but
