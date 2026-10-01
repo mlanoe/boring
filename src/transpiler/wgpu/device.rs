@@ -484,6 +484,15 @@ struct DeviceEmitter {
     /// True while emitting the body of a `void`-returning device function/method --
     /// see `metal::device`'s identical field.
     current_fn_is_void: bool,
+    /// Declared Boring type of every local binding/parameter seen so far in the
+    /// device function/method *currently being emitted* (explicit, or a best-effort
+    /// guess from a literal/cast initializer) -- mirrors `metal::device::DeviceEmitter`'s
+    /// identical `locals` field. Lets `infer_shuffle_elem_type` resolve a shuffled
+    /// *local variable*'s real WGSL scalar type under `Emulated` mode instead of
+    /// silently falling back to `f32` for anything not a kernel field (the bug this
+    /// field exists to fix). Reset at the top of each `emit_free_device_fn`/
+    /// `emit_device_fn`/`emit_entry_point`, same as `current_fields`.
+    locals: std::collections::HashMap<String, Type>,
     /// Emitted device-function name (`decl.name` for a free function, `"{kernel}_{method}"`
     /// for a kernel struct's own device helper method) → per-position resolution of its
     /// GPU-array-qualified parameters (`[T]'global`/`'unified`/`'const`/`'actor'global`/
@@ -520,6 +529,7 @@ impl DeviceEmitter {
             warp_tmp_counter: 0,
             current_kernel_consts: std::collections::HashMap::new(),
             current_fn_is_void: true,
+            locals: std::collections::HashMap::new(),
             gpu_array_params: std::collections::HashMap::new(),
             current_gpu_array_subst: std::collections::HashMap::new(),
         }
@@ -722,6 +732,10 @@ impl DeviceEmitter {
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
         let ret = decl.return_ty.as_ref().map(wgsl_type).unwrap_or_else(|| "void".into());
         self.current_gpu_array_subst = self.build_gpu_array_subst(&decl.name, &decl.params);
+        self.locals.clear();
+        for p in &decl.params {
+            if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
+        }
         let params: Vec<String> = self.plain_params_wgsl(&decl.name, &decl.params);
         self.line(&format!("fn {}({}) -> {} {{", decl.name, params.join(", "), ret));
         self.indent += 1;
@@ -872,7 +886,17 @@ impl DeviceEmitter {
         if self.mode == WarpMode::Emulated && self.program_uses_warp {
             let mut elem_types = std::collections::BTreeSet::new();
             for m in &decl.methods {
-                collect_shuffle_elem_types_stmts(&m.body, &decl.fields, &mut elem_types);
+                // Best-effort up-front map of this method's own locals/params, so
+                // a shuffled *local variable* (not just a kernel field) resolves to
+                // its real declared type here too -- must mirror `emit_stmt`'s live
+                // `self.locals` tracking, since this collector runs as a static
+                // pre-pass before any statement is actually emitted.
+                let mut locals = std::collections::HashMap::new();
+                for p in &m.params {
+                    if let Some(ty) = &p.ty { locals.insert(p.name.clone(), ty.clone()); }
+                }
+                collect_locals_stmts(&m.body, &mut locals);
+                collect_shuffle_elem_types_stmts(&m.body, &decl.fields, &locals, &mut elem_types);
             }
             if !elem_types.is_empty() {
                 let (bx, by, bz) = self.block_sizes.get(&decl.name)
@@ -952,6 +976,10 @@ impl DeviceEmitter {
             .unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
         self.current_gpu_array_subst = self.build_gpu_array_subst(&fn_name, &method.params);
+        self.locals.clear();
+        for p in &method.params {
+            if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
+        }
         let params: Vec<String> = self.plain_params_wgsl(&fn_name, &method.params);
         if ret == "void" {
             self.line(&format!("fn {}({}) {{", fn_name, params.join(", ")));
@@ -973,6 +1001,7 @@ impl DeviceEmitter {
         // kernel fields, already plain module-scope `var<storage, ...>` names) — clear
         // whatever the last-emitted device helper method left behind.
         self.current_gpu_array_subst.clear();
+        self.locals.clear();
         let fn_name = format!("{}_main", decl.name);
         let uses_warp = self.program_uses_warp && super::kernel_uses_gpu_warp(decl);
 
@@ -1074,7 +1103,7 @@ impl DeviceEmitter {
     fn emit_emulated_shuffle_let(&mut self, kw: &str, name: &str, ty: Option<&Type>, method: &str, args: &[Arg]) {
         let v = self.expr(&args[0].value);
         let operand = self.expr(&args[1].value);
-        let elem_ty = infer_shuffle_elem_type(&args[0].value, &self.current_fields);
+        let elem_ty = infer_shuffle_elem_type(&args[0].value, &self.current_fields, &self.locals);
         let scratch = warp_scratch_var_name(&self.current_kernel, &elem_ty);
         let n = self.warp_tmp_counter;
         self.warp_tmp_counter += 1;
@@ -1157,6 +1186,18 @@ impl DeviceEmitter {
             Stmt::Let(s) => {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
                 let kw = if mutable { "var" } else { "let" };
+                // Track this binding's Boring type (explicit, or a best-effort guess from
+                // its initializer) so `infer_shuffle_elem_type` can later tell a shuffled
+                // *local*'s real element type instead of guessing `f32` -- mirrors
+                // `metal::device`'s identical `locals` tracking for its own (separate)
+                // shuffle-type inference.
+                let inferred_ty = s.ty.clone().or_else(|| match s.value.as_ref().map(|v| &v.kind) {
+                    Some(ExprKind::Int(_)) => Some(Type::Int),
+                    Some(ExprKind::Float(_)) => Some(Type::Float64),
+                    Some(ExprKind::Cast(_, ty)) => Some(ty.clone()),
+                    _ => None,
+                });
+                if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
                 if let Some(val) = &s.value {
                     let rewritten;
                     let val = if self.mode == WarpMode::Emulated {
@@ -1714,7 +1755,24 @@ impl DeviceEmitter {
                 }
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
-                format!("({} {} {})", l, binop_wgsl(op), r)
+                // WGSL's `<<`/`>>` require the shift-amount (RHS) operand to be `u32`
+                // specifically, with no implicit i32->u32 conversion. Boring's `int`
+                // (and every other signed integer type) transpiles to `i32` on this
+                // backend, so a bare variable/computed RHS (e.g. `x >> some_var`) is
+                // rejected by naga's shader validator at `create_shader_module` time
+                // ("automatic conversions cannot convert elements of `i32` to `u32`"),
+                // even though `cargo build` itself succeeds — WGSL validation happens
+                // at shader-creation runtime, not Rust compile time. A literal RHS
+                // (e.g. `x >> 4`) happens to already work because `ExprKind::Int`
+                // emits an untyped/abstract-int literal that WGSL's own literal
+                // inference coerces to `u32` on its own. Wrapping every shift-amount
+                // in `u32(...)` closes the variable/expression case the same way, and
+                // is a no-op for a RHS that's already `u32` or an abstract-int literal.
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    format!("({} {} u32({}))", l, binop_wgsl(op), r)
+                } else {
+                    format!("({} {} {})", l, binop_wgsl(op), r)
+                }
             }
             ExprKind::UnaryOp(op, operand) => {
                 let v = self.expr(operand);
@@ -2202,6 +2260,23 @@ fn wgsl_scalar(ty: &Type) -> String {
     }
 }
 
+/// Bare (comment-free) WGSL scalar type name — exactly `wgsl_scalar`'s result
+/// with its narrowing/unsupported-width `/* ... */` comment prefix stripped.
+/// `wgsl_scalar`'s comment is only lexically harmless in a genuine
+/// type-annotation position (`var v: /* WARNING */ i32 = ...` — a comment there
+/// is just skipped whitespace); splicing it into something that *isn't* a type
+/// position, such as part of a synthesized identifier, corrupts it into invalid
+/// WGSL instead (e.g. `warp_scratch_var_name`'s scratch-buffer name — see
+/// `infer_shuffle_elem_type`'s doc comment, which is this function's reason to
+/// exist). Every `wgsl_scalar` arm's comment ends in `*/ <fallback>` with the
+/// bare fallback name as the trailing whitespace-separated token, including the
+/// plain (comment-free) arms, which are already just that one token — so taking
+/// the last token recovers the bare name uniformly from any `wgsl_scalar` result.
+fn wgsl_scalar_bare(ty: &Type) -> String {
+    let s = wgsl_scalar(ty);
+    s.rsplit(' ').next().unwrap_or(&s).to_string()
+}
+
 /// Full WGSL type including arrays and structs.
 fn wgsl_type(ty: &Type) -> String {
     match ty {
@@ -2328,25 +2403,75 @@ fn warp_scratch_var_name(kernel: &str, elem_ty: &str) -> String {
 }
 
 /// Best-effort WGSL scalar element type for a `gpu.warp.shuffle_*` value
-/// argument — resolves field/local references via `fields`' declared types
-/// (unwrapping one level of array), literals directly, and falls back to
-/// `f32` for anything else (kernels are numeric-only, and `f32` matches the
-/// most common shuffled-value shape — an accumulator in a tiled reduction).
-fn infer_shuffle_elem_type(expr: &Expr, fields: &[KernelFieldDecl]) -> String {
+/// argument — resolves a local binding/parameter via `locals` (see
+/// `DeviceEmitter::locals`'s doc comment), falling back to a kernel field
+/// lookup in `fields`, both via their declared types (unwrapping one level of
+/// array); literals resolve directly, and anything else falls back to `f32`
+/// (kernels are numeric-only, and `f32` matches the most common shuffled-value
+/// shape — an accumulator in a tiled reduction). `locals` is checked first so
+/// a local that happens to share a name with a kernel field resolves to its
+/// own (shadowing) type, matching ordinary lexical scoping.
+fn infer_shuffle_elem_type(
+    expr: &Expr,
+    fields: &[KernelFieldDecl],
+    locals: &std::collections::HashMap<String, Type>,
+) -> String {
+    fn scalar_elem_ty(ty: &Type) -> String {
+        match ty {
+            Type::Array(inner) | Type::ArrayN(inner, _) => wgsl_scalar_bare(inner),
+            other => wgsl_scalar_bare(other),
+        }
+    }
     fn field_elem_ty(fields: &[KernelFieldDecl], name: &str) -> Option<String> {
-        fields.iter().find(|f| f.name == name).map(|f| match &f.ty {
-            Type::Array(inner) | Type::ArrayN(inner, _) => wgsl_scalar(inner),
-            other => wgsl_scalar(other),
-        })
+        fields.iter().find(|f| f.name == name).map(|f| scalar_elem_ty(&f.ty))
+    }
+    fn var_elem_ty(
+        fields: &[KernelFieldDecl],
+        locals: &std::collections::HashMap<String, Type>,
+        name: &str,
+    ) -> Option<String> {
+        locals.get(name).map(scalar_elem_ty).or_else(|| field_elem_ty(fields, name))
     }
     match &expr.kind {
-        ExprKind::Var(name) => field_elem_ty(fields, name).unwrap_or_else(|| "f32".into()),
+        ExprKind::Var(name) => var_elem_ty(fields, locals, name).unwrap_or_else(|| "f32".into()),
         ExprKind::Field(_, name) => field_elem_ty(fields, name).unwrap_or_else(|| "f32".into()),
-        ExprKind::Index(arr, _) => infer_shuffle_elem_type(arr, fields),
-        ExprKind::Cast(_, ty) => wgsl_scalar(ty),
+        ExprKind::Index(arr, _) => infer_shuffle_elem_type(arr, fields, locals),
+        ExprKind::Cast(_, ty) => wgsl_scalar_bare(ty),
         ExprKind::Int(_) => "i32".into(),
         ExprKind::Float(_) => "f32".into(),
         _ => "f32".into(),
+    }
+}
+
+/// Best-effort up-front companion to `collect_shuffle_elem_types_stmts`: walks
+/// `stmts` the same way, recording each `Stmt::Let` binding's declared (or
+/// literal/cast-inferred) Boring type into `out`. Exists because
+/// `collect_shuffle_elem_types_stmts` runs as a static pre-pass over a whole
+/// method body *before* any statement is emitted, so it has no access to the
+/// live `self.locals` map `emit_stmt` builds incrementally during real codegen
+/// (see that field's doc comment) — this reproduces the same best-effort
+/// inference (`Stmt::Let`'s own logic) as a flat, whole-body scan instead.
+fn collect_locals_stmts(stmts: &[Stmt], out: &mut std::collections::HashMap<String, Type>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let(s) => {
+                let inferred_ty = s.ty.clone().or_else(|| match s.value.as_ref().map(|v| &v.kind) {
+                    Some(ExprKind::Int(_)) => Some(Type::Int),
+                    Some(ExprKind::Float(_)) => Some(Type::Float64),
+                    Some(ExprKind::Cast(_, ty)) => Some(ty.clone()),
+                    _ => None,
+                });
+                if let Some(ty) = inferred_ty { out.insert(s.name.clone(), ty); }
+            }
+            Stmt::If(i) => {
+                for (_, b) in &i.branches { collect_locals_stmts(b, out); }
+                if let Some(eb) = &i.else_body { collect_locals_stmts(eb, out); }
+            }
+            Stmt::While(w) => collect_locals_stmts(&w.body, out),
+            Stmt::For(f) => collect_locals_stmts(&f.body, out),
+            Stmt::Loop(l) => collect_locals_stmts(&l.body, out),
+            _ => {}
+        }
     }
 }
 
@@ -2364,25 +2489,26 @@ fn infer_shuffle_elem_type(expr: &Expr, fields: &[KernelFieldDecl]) -> String {
 fn collect_shuffle_elem_types_stmts(
     stmts: &[Stmt],
     fields: &[KernelFieldDecl],
+    locals: &std::collections::HashMap<String, Type>,
     out: &mut std::collections::BTreeSet<String>,
 ) {
     for stmt in stmts {
         match stmt {
             Stmt::Let(s) => {
-                if let Some(val) = &s.value { collect_shuffle_types_expr(val, fields, out); }
+                if let Some(val) = &s.value { collect_shuffle_types_expr(val, fields, locals, out); }
             }
             Stmt::Expr(e) => {
                 if let ExprKind::Assign(_, rhs) = &e.kind {
-                    collect_shuffle_types_expr(rhs, fields, out);
+                    collect_shuffle_types_expr(rhs, fields, locals, out);
                 }
             }
             Stmt::If(i) => {
-                for (_, b) in &i.branches { collect_shuffle_elem_types_stmts(b, fields, out); }
-                if let Some(eb) = &i.else_body { collect_shuffle_elem_types_stmts(eb, fields, out); }
+                for (_, b) in &i.branches { collect_shuffle_elem_types_stmts(b, fields, locals, out); }
+                if let Some(eb) = &i.else_body { collect_shuffle_elem_types_stmts(eb, fields, locals, out); }
             }
-            Stmt::While(w) => collect_shuffle_elem_types_stmts(&w.body, fields, out),
-            Stmt::For(f) => collect_shuffle_elem_types_stmts(&f.body, fields, out),
-            Stmt::Loop(l) => collect_shuffle_elem_types_stmts(&l.body, fields, out),
+            Stmt::While(w) => collect_shuffle_elem_types_stmts(&w.body, fields, locals, out),
+            Stmt::For(f) => collect_shuffle_elem_types_stmts(&f.body, fields, locals, out),
+            Stmt::Loop(l) => collect_shuffle_elem_types_stmts(&l.body, fields, locals, out),
             _ => {}
         }
     }
@@ -2390,31 +2516,36 @@ fn collect_shuffle_elem_types_stmts(
 
 /// Expression-level counterpart of `collect_shuffle_elem_types_stmts` — walks
 /// exactly the subset of `ExprKind` `hoist_shuffles` rewrites.
-fn collect_shuffle_types_expr(e: &Expr, fields: &[KernelFieldDecl], out: &mut std::collections::BTreeSet<String>) {
+fn collect_shuffle_types_expr(
+    e: &Expr,
+    fields: &[KernelFieldDecl],
+    locals: &std::collections::HashMap<String, Type>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
     if let ExprKind::MethodCall(obj, method, args) = &e.kind {
         if is_gpu_warp_receiver(obj) && is_gpu_warp_shuffle(method) && !args.is_empty() {
-            out.insert(infer_shuffle_elem_type(&args[0].value, fields));
-            for a in args { collect_shuffle_types_expr(&a.value, fields, out); }
+            out.insert(infer_shuffle_elem_type(&args[0].value, fields, locals));
+            for a in args { collect_shuffle_types_expr(&a.value, fields, locals, out); }
             return;
         }
     }
     match &e.kind {
         ExprKind::BinOp(_, l, r) => {
-            collect_shuffle_types_expr(l, fields, out);
-            collect_shuffle_types_expr(r, fields, out);
+            collect_shuffle_types_expr(l, fields, locals, out);
+            collect_shuffle_types_expr(r, fields, locals, out);
         }
-        ExprKind::UnaryOp(_, x) | ExprKind::Cast(x, _) => collect_shuffle_types_expr(x, fields, out),
+        ExprKind::UnaryOp(_, x) | ExprKind::Cast(x, _) => collect_shuffle_types_expr(x, fields, locals, out),
         ExprKind::Index(a, i) => {
-            collect_shuffle_types_expr(a, fields, out);
-            collect_shuffle_types_expr(i, fields, out);
+            collect_shuffle_types_expr(a, fields, locals, out);
+            collect_shuffle_types_expr(i, fields, locals, out);
         }
         ExprKind::Call(callee, args) => {
-            collect_shuffle_types_expr(callee, fields, out);
-            for a in args { collect_shuffle_types_expr(&a.value, fields, out); }
+            collect_shuffle_types_expr(callee, fields, locals, out);
+            for a in args { collect_shuffle_types_expr(&a.value, fields, locals, out); }
         }
         ExprKind::MethodCall(obj, _, args) => {
-            collect_shuffle_types_expr(obj, fields, out);
-            for a in args { collect_shuffle_types_expr(&a.value, fields, out); }
+            collect_shuffle_types_expr(obj, fields, locals, out);
+            for a in args { collect_shuffle_types_expr(&a.value, fields, locals, out); }
         }
         _ => {}
     }

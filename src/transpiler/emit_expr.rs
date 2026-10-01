@@ -543,6 +543,13 @@ impl Transpiler {
                 sub.fn_returns_void = false;
                 sub.suppress_ok_wrap = true;
                 sub.fn_return_ty = None; // prevent spurious Some() wrapping in branch bodies
+                // This if-expression is being emitted as an ordinary value (a let
+                // initializer, a nested sub-expression, ...), not the enclosing
+                // function's own tail position — reset GPU-residency tail-wrapping
+                // state so branch tails aren't wrongly treated as the function's
+                // `'gpu'unified`/`'gpu'global` return (see wgpu-host-residency-let-bug).
+                sub.current_fn_returns_resident = None;
+                sub.current_fn_returns_resident_tuple = None;
                 let emit_branch = |sub: &mut Self, body: &[crate::ast::Stmt]| {
                     if optional_inner.is_some() {
                         sub.emit_body_optional_last(body);
@@ -573,6 +580,10 @@ impl Transpiler {
                 sub.fn_returns_void = false;
                 sub.suppress_ok_wrap = true; // prevent Ok() wrapping; keep ?-propagation
                 sub.fn_return_ty = None; // prevent spurious Some() wrapping in arm bodies
+                // Same reasoning as the `If` arm above: this match is an ordinary
+                // value, not the enclosing function's tail position.
+                sub.current_fn_returns_resident = None;
+                sub.current_fn_returns_resident_tuple = None;
                 sub.emit_match(s, true);
                 sub.out.trim_end().to_string()
             }
@@ -602,6 +613,10 @@ impl Transpiler {
                 sub.fn_returns_void = false;
                 sub.suppress_ok_wrap = true;
                 sub.in_throws = false;
+                // Same reasoning as the `If`/`Match` arms above: this `do:` block is
+                // an ordinary value, not the enclosing function's tail position.
+                sub.current_fn_returns_resident = None;
+                sub.current_fn_returns_resident_tuple = None;
                 sub.emit_body(stmts);
                 format!("{{\n{}}}", sub.out)
             }

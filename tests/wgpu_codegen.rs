@@ -612,6 +612,50 @@ kernel WarpEmulated:
     assert!(emulated.contains("select("), "expected a select() for the warp-boundary clamp;\ngot:\n{emulated}");
 }
 
+/// Regression test for a real bug: `infer_shuffle_elem_type` (and its
+/// `collect_shuffle_elem_types_stmts`/`collect_shuffle_types_expr` collector
+/// counterparts) only resolved a `Var` expression's type via the kernel's own
+/// declared `fields`, with no path at all for a `def()`-body *local* declared
+/// via `Stmt::Let` (e.g. `var int v = 0`) — falling back to `f32` regardless of
+/// the local's real type. Confirmed via a real wgpu/naga shader-module-creation
+/// validation failure on real hardware with the `SUBGROUP` feature disabled
+/// (the adapter-without-subgroups path `Emulated` mode exists for): the scratch
+/// buffer was declared `array<f32, N>` while an `i32` value was written into it,
+/// which `boring build --target wgpu`'s own successful exit code never surfaced
+/// (invisible until real `Device::create_shader_module`).
+#[test]
+fn test_gpu_warp_shuffle_emulated_local_var_non_f32_type() {
+    let src = r#"
+kernel ShuffleIntKernel:
+    mut [float32]'unified out
+
+    init():
+        out = [0.0 for i in 0..<32]
+
+    def ():
+        let lane = gpu.warp.lane
+        var int v = 0
+        if lane == 0:
+            v = 42
+        v = gpu.warp.shuffle(v, 0)
+        out[lane] = v as float32
+"#;
+    let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated_local_var", src);
+
+    assert!(emulated.contains("var<workgroup> bp_warp_scratch_shuffleintkernel_i32: array<i32,"),
+        "expected an i32 (not f32) workgroup scratch buffer for a shuffled `int` local;\ngot:\n{emulated}");
+    assert!(!emulated.contains("f32") || !emulated.contains("bp_warp_scratch_shuffleintkernel_f32"),
+        "must not also declare a stray f32 scratch buffer for this kernel;\ngot:\n{emulated}");
+    // The scratch identifier itself must be a clean WGSL identifier -- specifically,
+    // it must never contain the narrowing-warning comment `wgsl_scalar` embeds for
+    // type-annotation positions (a second, closely related real bug this fix also
+    // closes: that comment text was being spliced directly into an identifier).
+    assert!(!emulated.contains("bp_warp_scratch_shuffleintkernel_/*"),
+        "scratch buffer identifier must not contain an embedded comment;\ngot:\n{emulated}");
+    assert!(emulated.contains("bp_warp_scratch_shuffleintkernel_i32[bp_lidx] = v;"),
+        "expected the i32 local to be written into the i32 scratch slot directly (no type mismatch);\ngot:\n{emulated}");
+}
+
 #[test]
 fn test_gpu_warp_not_used_leaves_output_unchanged() {
     let src = r#"
@@ -684,6 +728,109 @@ kernel Narrow:
         "narrowing `int`/`uint` to 32-bit on wgpu should emit an explicit diagnostic \
          comment naming the 64-bit narrowing, generated wgsl was:\n{wgsl}"
     );
+}
+
+/// Regression test for a real bug: WGSL's `<<`/`>>` require the shift-amount
+/// (RHS) operand to be `u32` specifically -- no implicit i32->u32 conversion.
+/// Boring's `int` transpiles to `i32` on this backend, so a *variable* or
+/// computed shift amount (unlike a literal one, which WGSL's own
+/// abstract-int literal inference already coerces) must be wrapped in an
+/// explicit `u32(...)` cast by the emitter, or naga rejects the shader at
+/// `create_shader_module` time with "automatic conversions cannot convert
+/// elements of `i32` to `u32`" -- a failure `cargo build` itself never sees,
+/// since WGSL validation happens at shader-creation runtime.
+#[test]
+fn test_shift_with_variable_amount_casts_to_u32() {
+    let src = r#"
+kernel ShiftKernel:
+    mut [int]'unified buf
+
+    def ():
+        let shift_amount = buf[1]
+        buf[0] = buf[0] >> shift_amount
+        buf[0] = buf[0] << shift_amount
+"#;
+    let (wgsl, _rs) = wgpu_codegen("shift_variable_amount", src);
+
+    assert!(
+        wgsl.contains(">> u32(") && wgsl.contains("<< u32("),
+        "expected the variable shift amount to be cast to u32 for both `>>` and `<<`;\ngot:\n{wgsl}"
+    );
+}
+
+/// End-to-end companion to `test_shift_with_variable_amount_casts_to_u32` --
+/// a text-only assertion on the generated WGSL can't catch a codegen mistake
+/// that only naga's real shader parser/validator rejects (this is exactly
+/// how the bug was found: `boring build --target wgpu` and `cargo build`
+/// both succeeded, only real `Device::create_shader_module` failed). Mirrors
+/// `test_float_builtin_methods_real_shader_validation`'s pattern. `v = 0xA5`
+/// (`10100101`) is chosen so lane 0 (shift 0, bit 0 = 1) and lane 1 (shift 1,
+/// bit 1 = 0) disagree -- a broken shift that silently ignored the shift
+/// amount (or always shifted by 0) would still happen to produce *some*
+/// output without panicking, so the differing expected bits also confirm
+/// the shift amount is actually applied per-lane, not just that the shader
+/// compiles.
+#[test]
+fn test_shift_with_variable_amount_real_shader_validation() {
+    let src = r#"
+kernel ShiftKernel:
+    mut [float32]'unified out
+
+    init():
+        out = [0.0 for i in 0..<32]
+
+    def ():
+        let lane = gpu.warp.lane
+        let v = 0xA5
+        let shift_amount = lane % 8
+        let result = (v >> shift_amount) & 1
+        out[lane] = result as float32
+
+mut k = ShiftKernel()
+kernel:
+    k(block = 32)
+
+print "r0 = {k.out[0]}"
+print "r1 = {k.out[1]}"
+print "r8 = {k.out[8]}"
+"#;
+    let (_wgsl, _emulated, _rs, _toml) = run_wgpu("shift_variable_amount_real_shader", src);
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("shift_variable_amount_real_shader");
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a \
+         real GPU (no shader-validation panic from an i32 shift amount), but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    fn parsed_value<'a>(stdout: &'a str, prefix: &str) -> f32 {
+        let line = stdout.lines().find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing '{prefix}' line in stdout:\n{stdout}"));
+        line[prefix.len()..].trim().parse::<f32>()
+            .unwrap_or_else(|e| panic!("failed to parse '{line}' as f32: {e}"))
+    }
+    let checks: [(&str, f32); 3] = [
+        ("r0 = ", 1.0),
+        ("r1 = ", 0.0),
+        ("r8 = ", 1.0),
+    ];
+    for (prefix, expected) in checks {
+        let actual = parsed_value(&stdout, prefix);
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "expected {prefix}~{expected}, got {actual} — full stdout:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -4093,4 +4240,102 @@ kernel WarpEmulated:
         "expected @builtin(local_invocation_index);\ngot:\n{emulated}");
     assert!(emulated.contains("let bp_wsize: u32 = 32u;"), "expected fixed 32-lane fallback constant;\ngot:\n{emulated}");
     assert!(emulated.contains("select("), "expected a select() for the warp-boundary clamp;\ngot:\n{emulated}");
+}
+
+/// A plain, non-resident `int`/`float` local inside a `pub req [T]'gpu'unified`
+/// function — used only to compute a grid/block dispatch dimension before a
+/// `kernel:` call, never itself GPU-resident and never returned — used to get
+/// wrongly wrapped in `BoringGpuArg::Host(...)` by the wgpu host-codegen path,
+/// as if it were the function's own return value. Root cause: `ExprKind::If`
+/// (and `Match`/`Do`) used as an ordinary expression value clones the parent
+/// emitter's `current_fn_returns_resident` flag onto its branch sub-emitter
+/// (via `make_sub()`), so the branches of `let int gx = if ...: ... else: ...`
+/// were treated as if they were the *enclosing function's* tail position. The
+/// Metal backend never exhibited this (its host codegen for scalar locals
+/// doesn't consult that flag), only wgpu. Confirmed this test fails to compile
+/// with `E0308: expected struct Vec<_>, found isize` against the pre-fix code
+/// (mismatched types on `BoringGpuArg::Host(blocks.clone())`), and runs to
+/// completion with the correct GPU-computed values after.
+#[test]
+fn wgpu_scalar_local_if_expr_in_resident_fn_not_wrapped_in_boringgpuarg() {
+    let test_name = "scalar_local_if_expr_in_resident_fn";
+    let src = r#"
+kernel AddKernel:
+    let [float32]'global x
+    mut [float32]'unified y
+    let int n
+
+    init([float32]'global xi, int nn):
+        x = xi
+        n = nn
+        y = [0.0 for i in 0..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            y[i] = x[i] + 1.0
+
+pub req [float32]'gpu'unified add_gpu([float32]'global x, int n) throws:
+    let int blocks = (n + 31) / 32
+    let int gx = if blocks > 65535: 65535 else: blocks
+    mut k = AddKernel(x, n)
+    kernel:
+        k(block = 32, grid = gx)
+    k.y
+
+[float32] passthrough([float32] x):
+    x
+
+def main() throws:
+    let x = [1.0, 2.0, 3.0]
+    let result_raw = add_gpu(x, 3)
+    let result = passthrough(result_raw)
+    print "result={result[0]} {result[1]} {result[2]}"
+"#;
+    let (_wgsl, _emulated, rs, _toml) = run_wgpu(test_name, src);
+
+    // Codegen shape: the `if`-expression computing `gx` must emit plain `isize`
+    // branches (bare `65535`/`blocks`, no residency wrapping at all) -- that
+    // wrapping belongs solely to the function's actual tail expression (`k.y`,
+    // emitted as `BoringGpuArg::Resident`). `BoringGpuArg::Host` legitimately
+    // appears elsewhere (e.g. the `x` parameter's host/resident match), so assert
+    // narrowly against `gx`'s own `let` statement rather than the whole file.
+    let gx_let_line = rs.lines().find(|l| l.contains("let gx"))
+        .unwrap_or_else(|| panic!("expected a `let gx` statement in generated code;\ngot:\n{rs}"));
+    assert!(
+        !rs.contains("BoringGpuArg::Host((65535")
+            && !rs.contains("BoringGpuArg::Host((blocks")
+            && !rs.contains("BoringGpuArg::Host(blocks"),
+        "expected `gx`'s if-expression branches (`65535`/`blocks`) to stay plain \
+         `isize`, not wrapped in `BoringGpuArg::Host(...)` as if they were the \
+         function's own return value;\ngx's `let` line:\n{gx_let_line}\nfull output:\n{rs}"
+    );
+    assert!(
+        rs.contains("BoringGpuArg::Resident"),
+        "expected the function's real tail expression (`k.y`) to still emit \
+         `BoringGpuArg::Resident(...)`;\ngot:\n{rs}"
+    );
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join(test_name);
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "expected the generated wgpu project to build AND run to completion against a real \
+         GPU (a `'gpu'unified`-returning function with a plain-scalar dispatch-dimension \
+         local computed via an if-expression), but it failed:\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+    assert!(
+        stdout.contains("result=2 3 4"),
+        "expected the GPU-computed `x[i] + 1.0` values;\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
 }
