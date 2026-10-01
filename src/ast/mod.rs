@@ -1927,14 +1927,26 @@ fn with_stmt_mutates(
 /// never into a called function's own body. Returns `(has_any_use,
 /// has_only_qualifying_uses)` — the second is only meaningful when the first is
 /// `true`. See `Checker::scan_fn_gpu_arg_params` (checker/mod.rs) for the caller.
+///
+/// `treat_len_count_as_qualifying` gates the `name.length`/`name.count` size-query
+/// shortcut below: the caller should only pass `true` when `name`'s declared type is
+/// itself a plain, unqualified array (`[T]`) — the only shape a GPU-resident-candidate
+/// parameter can have. Without this gate, an ordinary struct/enum parameter with a
+/// real field or method literally named `count`/`length` (e.g. `get_count(Thing t):
+/// t.count`) was misclassified as a qualifying GPU size query purely by field name,
+/// wrongly promoting `t` to `BoringGpuArg<T>` and wrapping call sites in
+/// `BoringGpuArg::Host(...)` even on non-GPU (std) targets, where that type doesn't
+/// exist at all — see tests/cases/struct_count_field.br, ext_res_field, and
+/// builtin_name_user_members for the regression coverage.
 pub fn scan_var_call_arg_uses(
     body: &[Stmt],
     name: &str,
     classify: &mut dyn FnMut(&str, usize) -> bool,
+    treat_len_count_as_qualifying: bool,
 ) -> (bool, bool) {
     let mut any = false;
     let mut other = false;
-    for s in body { scan_stmt_var_arg(s, name, classify, &mut any, &mut other); }
+    for s in body { scan_stmt_var_arg(s, name, classify, treat_len_count_as_qualifying, &mut any, &mut other); }
     (any, any && !other)
 }
 
@@ -1942,6 +1954,7 @@ fn scan_stmt_var_arg(
     stmt: &Stmt,
     name: &str,
     classify: &mut dyn FnMut(&str, usize) -> bool,
+    treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
 ) {
@@ -1949,8 +1962,8 @@ fn scan_stmt_var_arg(
     // `classify` (a `&mut dyn FnMut`) by move would conflict with each other, since
     // that reference can't be split. A macro just reborrows it fresh at each
     // expansion site, which is all a `&mut` parameter needs across sequential calls.
-    macro_rules! e { ($ex:expr) => { scan_expr_var_arg($ex, name, classify, any, other) }; }
-    macro_rules! b { ($body:expr) => { for s in $body { scan_stmt_var_arg(s, name, classify, any, other); } }; }
+    macro_rules! e { ($ex:expr) => { scan_expr_var_arg($ex, name, classify, treat_len_count_as_qualifying, any, other) }; }
+    macro_rules! b { ($body:expr) => { for s in $body { scan_stmt_var_arg(s, name, classify, treat_len_count_as_qualifying, any, other); } }; }
     match stmt {
         Stmt::Let(s) => { if let Some(v) = &s.value { e!(v); } }
         Stmt::LetDestructure(s) => e!(&s.value),
@@ -1961,15 +1974,15 @@ fn scan_stmt_var_arg(
             if let Some(body) = &s.else_body { b!(body); }
         }
         Stmt::IfLet(s) => {
-            for c in &s.clauses { scan_cond_clause_var_arg(c, name, classify, any, other); }
+            for c in &s.clauses { scan_cond_clause_var_arg(c, name, classify, treat_len_count_as_qualifying, any, other); }
             b!(&s.then_body);
             for br in &s.elif_branches {
-                for c in &br.clauses { scan_cond_clause_var_arg(c, name, classify, any, other); }
+                for c in &br.clauses { scan_cond_clause_var_arg(c, name, classify, treat_len_count_as_qualifying, any, other); }
                 b!(&br.body);
             }
             if let Some(body) = &s.else_body { b!(body); }
         }
-        Stmt::Match(s) => scan_match_var_arg(s, name, classify, any, other),
+        Stmt::Match(s) => scan_match_var_arg(s, name, classify, treat_len_count_as_qualifying, any, other),
         Stmt::While(s) => { e!(&s.condition); b!(&s.body); }
         Stmt::WhileLet(s) => { e!(&s.value); b!(&s.body); }
         Stmt::DoWhile(s) => { b!(&s.body); e!(&s.condition); }
@@ -1978,7 +1991,7 @@ fn scan_stmt_var_arg(
         Stmt::Guard(s) => {
             match &s.cond {
                 GuardCond::Expr(ex) => e!(ex),
-                GuardCond::Clauses(cs) => { for c in cs { scan_cond_clause_var_arg(c, name, classify, any, other); } }
+                GuardCond::Clauses(cs) => { for c in cs { scan_cond_clause_var_arg(c, name, classify, treat_len_count_as_qualifying, any, other); } }
             }
             b!(&s.else_body);
         }
@@ -2002,15 +2015,16 @@ fn scan_match_var_arg(
     s: &MatchStmt,
     name: &str,
     classify: &mut dyn FnMut(&str, usize) -> bool,
+    treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
 ) {
-    scan_expr_var_arg(&s.subject, name, classify, any, other);
+    scan_expr_var_arg(&s.subject, name, classify, treat_len_count_as_qualifying, any, other);
     for a in &s.arms {
-        if let Some(g) = &a.guard { scan_expr_var_arg(g, name, classify, any, other); }
+        if let Some(g) = &a.guard { scan_expr_var_arg(g, name, classify, treat_len_count_as_qualifying, any, other); }
         match &a.body {
-            MatchBody::Expr(ex) => scan_expr_var_arg(ex, name, classify, any, other),
-            MatchBody::Block(body) => { for s in body { scan_stmt_var_arg(s, name, classify, any, other); } }
+            MatchBody::Expr(ex) => scan_expr_var_arg(ex, name, classify, treat_len_count_as_qualifying, any, other),
+            MatchBody::Block(body) => { for s in body { scan_stmt_var_arg(s, name, classify, treat_len_count_as_qualifying, any, other); } }
         }
     }
 }
@@ -2019,11 +2033,12 @@ fn scan_cond_clause_var_arg(
     c: &CondClause,
     name: &str,
     classify: &mut dyn FnMut(&str, usize) -> bool,
+    treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
 ) {
     match c {
-        CondClause::Expr(ex) | CondClause::Let(_, ex) | CondClause::LetPat(_, ex) => scan_expr_var_arg(ex, name, classify, any, other),
+        CondClause::Expr(ex) | CondClause::Let(_, ex) | CondClause::LetPat(_, ex) => scan_expr_var_arg(ex, name, classify, treat_len_count_as_qualifying, any, other),
     }
 }
 
@@ -2031,11 +2046,12 @@ fn scan_expr_var_arg(
     expr: &Expr,
     name: &str,
     classify: &mut dyn FnMut(&str, usize) -> bool,
+    treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
 ) {
-    macro_rules! e { ($ex:expr) => { scan_expr_var_arg($ex, name, classify, any, other) }; }
-    macro_rules! b { ($body:expr) => { for s in $body { scan_stmt_var_arg(s, name, classify, any, other); } }; }
+    macro_rules! e { ($ex:expr) => { scan_expr_var_arg($ex, name, classify, treat_len_count_as_qualifying, any, other) }; }
+    macro_rules! b { ($body:expr) => { for s in $body { scan_stmt_var_arg(s, name, classify, treat_len_count_as_qualifying, any, other); } }; }
     match &expr.kind {
         ExprKind::Var(v) => { if v == name { *any = true; *other = true; } }
         ExprKind::Assign(lhs, rhs) | ExprKind::QuestionAssign(lhs, rhs) => { e!(lhs); e!(rhs); }
@@ -2091,8 +2107,18 @@ fn scan_expr_var_arg(
         // so treating this as disqualifying would make the exclusive-ctor-arg scan
         // never actually fire for a realistic function -- count it as a qualifying use
         // instead of falling through to the generic `Field` recursion below.
+        //
+        // Gated on `treat_len_count_as_qualifying` (true only when `name`'s declared
+        // type is itself a plain array -- the only shape a GPU-resident candidate can
+        // have): without this gate, an ordinary struct/enum parameter with a real
+        // field or method literally named `count`/`length` (e.g. `get_count(Thing t):
+        // t.count`) matched here purely by field name and got misclassified as a
+        // qualifying GPU size query, wrongly promoting the parameter to
+        // `BoringGpuArg<T>` on every target, including plain std builds where that
+        // type doesn't even exist. See tests/cases/struct_count_field.br.
         ExprKind::Field(ex, field) | ExprKind::OptionalField(ex, field)
-            if (field == "length" || field == "count")
+            if treat_len_count_as_qualifying
+                && (field == "length" || field == "count")
                 && matches!(&ex.kind, ExprKind::Var(v) if v == name) =>
         {
             *any = true;
@@ -2138,7 +2164,7 @@ fn scan_expr_var_arg(
             for (c, body) in &s.branches { e!(c); b!(body); }
             if let Some(body) = &s.else_body { b!(body); }
         }
-        ExprKind::Match(s) => scan_match_var_arg(s, name, classify, any, other),
+        ExprKind::Match(s) => scan_match_var_arg(s, name, classify, treat_len_count_as_qualifying, any, other),
         ExprKind::Block(stmts) | ExprKind::Do(stmts) => b!(stmts),
         ExprKind::Loop(s) => b!(&s.body),
         ExprKind::Task(ex) => e!(ex),

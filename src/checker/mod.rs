@@ -554,7 +554,10 @@ impl Checker {
                         }
                         known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
                     };
-                    let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify);
+                    let is_array_like_param = p.ty.as_ref().is_some_and(|ty| {
+                        matches!(ty.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _))
+                    });
+                    let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, is_array_like_param);
                     new_flags[i] = explicitly_resident || only_qualifying;
                 }
                 if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {

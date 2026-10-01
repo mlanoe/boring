@@ -1226,17 +1226,26 @@ impl Interpreter {
                 });
             let quantized_format = match format {
                 None => None,
-                Some(Value::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") => Some(value.as_str()),
-                Some(_) => return Err(err("unsupported quantized tensor linear format", line)),
+                Some(Value::Str(value)) if crate::tensor_formats::quantized_linear_geometry(value).is_some() => Some(value.as_str()),
+                Some(_) => return Err(err(
+                    format!("unsupported quantized tensor linear format; expected one of: {}", crate::tensor_formats::SUPPORTED_QUANTIZED_LINEAR_FORMATS),
+                    line,
+                )),
             };
             let left_len = m.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
             let weight_elements = n.checked_mul(k).ok_or_else(|| err("tensor dimensions overflow", line))?;
-            let block_elements = if matches!(quantized_format, Some("q6_k" | "q4_k" | "q3_k" | "q2_k")) { 256 } else { 32 };
+            let quantized_geometry = quantized_format.and_then(crate::tensor_formats::quantized_linear_geometry);
+            let block_elements = quantized_geometry.map_or(32, |geometry| geometry.block_elements);
             if quantized_format.is_some() && k % block_elements != 0 {
                 return Err(err(format!("quantized tensor dimension k must be a multiple of {block_elements}"), line));
             }
-            let block_bytes = match quantized_format { Some("q8_0") => 34, Some("q5_0") => 22, Some("q4_0" | "iq4_nl") => 18, Some("q6_k") => 210, Some("q4_k") => 144, Some("q3_k") => 110, Some("q2_k") => 84, _ => 0 };
-            let weight_len = if quantized_format.is_some() { weight_elements / block_elements * block_bytes } else { weight_elements };
+            let block_bytes = quantized_geometry.map_or(0, |geometry| geometry.block_bytes);
+            let weight_len = if quantized_format.is_some() {
+                (weight_elements / block_elements).checked_mul(block_bytes)
+                    .ok_or_else(|| err("quantized tensor weight length overflows", line))?
+            } else {
+                weight_elements
+            };
             let output_len = m.checked_mul(n).ok_or_else(|| err("tensor dimensions overflow", line))?;
             let a = array(0)?;
             let b = if quantized_format.is_some() { None } else { Some(array(1)?) };
@@ -1261,9 +1270,21 @@ impl Interpreter {
             let bias = bias_index.map(array).transpose()?;
             let mut c = Value::rc_vec_into_owned(array(output_index)?);
             let actual_weight_len = packed.as_ref().map_or_else(|| b.as_ref().unwrap().len(), |bytes| bytes.len());
-            if a.len() != left_len || actual_weight_len != weight_len || c.len() != output_len
-                || bias.as_ref().is_some_and(|bias| bias.len() != n) {
-                return Err(err("tensor operand storage length does not match m, n, and k", line));
+            if a.len() != left_len {
+                return Err(err("tensor left operand length mismatch", line));
+            }
+            if actual_weight_len != weight_len {
+                return Err(err(if quantized_format.is_some() {
+                    "quantized tensor weight length mismatch"
+                } else {
+                    "tensor weight length mismatch"
+                }, line));
+            }
+            if bias.as_ref().is_some_and(|bias| bias.len() != n) {
+                return Err(err("tensor bias length mismatch", line));
+            }
+            if c.len() != output_len {
+                return Err(err("tensor destination length mismatch", line));
             }
             for row in 0..m {
                 for col in 0..n {
@@ -1280,7 +1301,7 @@ impl Interpreter {
                             let flat = col * k + inner;
                             let block = flat / block_elements;
                             let offset = block * block_bytes;
-                            let scale_offset = match quantized_format { Some("q6_k") => offset + 208, Some("q3_k") => offset + 108, Some("q2_k") => offset + 80, _ => offset };
+                            let scale_offset = offset + quantized_geometry.unwrap().scale_offset;
                             let bits = u16::from_le_bytes([bytes[scale_offset], bytes[scale_offset + 1]]);
                             let scale = f16_to_f32(bits);
                             let mut minimum = 0.0f32;

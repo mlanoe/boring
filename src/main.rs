@@ -26,6 +26,7 @@ mod semver;
 pub mod stdlib_embed;
 pub mod transpiler;
 pub mod validator;
+mod tensor_formats;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -3193,5 +3194,4 @@ path = "src/lib.rs"
     eprintln!("Generated kernel Cargo project at '{}'", project_dir.display());
     eprintln!("  Build with the Linux kernel build system (make -C /path/to/linux M=$PWD)");
 }
-
 

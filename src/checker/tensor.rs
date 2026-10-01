@@ -43,9 +43,13 @@ impl super::Checker {
             let format = labeled.iter().find(|arg| arg.label.as_deref() == Some("format"));
             let quantized = match format.map(|arg| &arg.value.kind) {
                 None => false,
-                Some(ExprKind::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") => true,
+                Some(ExprKind::Str(value)) if crate::tensor_formats::quantized_linear_geometry(value).is_some() => true,
                 Some(_) => {
-                    self.error("unsupported quantized tensor linear format", call.line, call.col);
+                    self.error(
+                        format!("unsupported quantized tensor linear format; expected one of: {}", crate::tensor_formats::SUPPORTED_QUANTIZED_LINEAR_FORMATS),
+                        call.line,
+                        call.col,
+                    );
                     return;
                 }
             };

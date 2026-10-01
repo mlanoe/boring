@@ -216,6 +216,43 @@ impl Transpiler {
         Some(self.materialize_resident_call(expr, &ret_ty))
     }
 
+    /// Counterpart to `try_materialize_resident_call` for the opposite
+    /// situation: the function currently being emitted is ITSELF
+    /// `fn_returns_resident` (`current_fn_returns_resident`), and its tail
+    /// expression is a bare call to another `fn_returns_resident` function
+    /// (e.g. `outer_gpu(...)` whose whole body is `inner_gpu(...)`). The
+    /// callee's Rust return is already `Result<BoringGpuArg<T>, _>` /
+    /// `BoringGpuArg<T>` — exactly the type this tail position needs — so
+    /// blindly wrapping it a second time in `BoringGpuArg::Host(...)` (which
+    /// expects a `Vec<T>` payload) is a real E0308, confirmed via a real
+    /// `cargo build` on the Metal backend. When both functions' resident
+    /// element types match, pass the call straight through unwrapped (keeps
+    /// the value resident on the GPU, no round trip). When they differ,
+    /// download through `materialize_resident_call` and re-wrap with a cast
+    /// to the caller's own element type so the result still type-checks.
+    pub(crate) fn try_passthrough_resident_call(&self, expr: &Expr) -> Option<String> {
+        let caller_ty = self.current_fn_returns_resident.clone()?;
+        let ExprKind::Call(callee, _) = &expr.kind else { return None };
+        let ExprKind::Var(fn_name) = &callee.kind else { return None };
+        let callee_ty = self.fn_returns_resident.get(fn_name.as_str()).cloned()?;
+        let caller_inner = match &caller_ty {
+            Type::Qualified(inner, _) => array_inner_type(inner),
+            other => array_inner_type(other),
+        };
+        let callee_inner = match &callee_ty {
+            Type::Qualified(inner, _) => array_inner_type(inner),
+            other => array_inner_type(other),
+        };
+        let caller_host_ty = kernel_host_element_type(&caller_inner);
+        if caller_host_ty == kernel_host_element_type(&callee_inner) {
+            return Some(self.emit_expr_owned(expr));
+        }
+        let materialized = self.materialize_resident_call(expr, &callee_ty);
+        Some(format!(
+            "BoringGpuArg::Host(({materialized}).iter().map(|&x| x as {caller_host_ty}).collect::<Vec<{caller_host_ty}>>())"
+        ))
+    }
+
     /// If `s`'s initializer is `GPU(n)`, registers `s.name` as a GPU-device handle
     /// (`gpu_device_vars`) and emits it as a plain `usize` index. See
     /// `emit_call`'s own `"GPU"` special case (this function only adds the

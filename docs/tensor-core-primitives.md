@@ -30,9 +30,10 @@ and the open multi-block question in the feasibility review below.
 - Host dispatch partitions M/N into output tiles. Dependent whole-matrix
   operations use ordered kernel launches, not block barriers. The developer
   owns disjointness for explicit device calls; the host API guarantees it.
-Transpose flags, optional bias, runtime shape validation, and host scheduling
-still need their detailed contracts finalized. The existing compiler review
-remains relevant to each tile's checking and memory visibility.
+Transpose flags and optimized host scheduling still need detailed contracts.
+Runtime shape validation and the optional row-broadcast bias are implemented
+for dynamic `linear`. The existing compiler review remains relevant to each
+tile's checking and memory visibility.
 
 ## Objective
 
@@ -428,14 +429,17 @@ is incorrect when scales vary along K. Differing quantization boundaries
 must be reconciled; affine quantization also needs zero-point corrections.
 Q8 weights alone are not sufficient for an int8 multiplication path.
 
-Quantized matmul deserves a separate API contract rather than hidden behavior
-inside ordinary `matmul`. This document does not choose that API yet.
+Quantized multiplication has a separate, explicit contract rather than hidden
+behavior inside ordinary `matmul`: dynamic `linear` accepts packed `uint8`
+weights and a literal `format` argument. Inputs and accumulation remain
+float32, and each format defines its own block geometry and decoding rule.
 
 ## `boring-llm` migration gap review (2026-09-30)
 
-The current tensor milestone cannot yet replace `boring-llm`'s production
-matrix kernels. That project exposes the concrete requirements more precisely
-than a generic tensor example:
+The current tensor milestone functionally covers `boring-llm`'s linear weight
+formats, but it cannot replace the production matrix kernels without measured
+performance validation. That project exposes the concrete requirements more
+precisely than a generic tensor example:
 
 - Model dimensions and sequence lengths come from GGUF metadata and the KV
   cache at runtime. The six-argument `linear` overload now accepts runtime
@@ -464,9 +468,9 @@ than a generic tensor example:
   argument retains an `Arc<CudaSlice<T>>` or `Arc<DeviceBuffer<T>>` and does
   not submit a device copy. Mutable destinations remain uniquely owned.
 - The production path keeps weights packed as `uint8`. Tensor `linear` now
-  performs fused Q8_0, Q5_0, Q4_0, IQ4_NL, Q6_K, Q4_K, and Q2_K
-  dequantization. Q3_K still needs an equivalent format contract before the tensor path can
-  replace all existing `boring-llm` kernels.
+  performs fused Q8_0, Q5_0, Q4_0, IQ4_NL, Q6_K, Q4_K, Q3_K, and Q2_K
+  dequantization. These cover every packed format currently implemented by
+  `boring-llm`.
 - Single-token decode (`seq == 1`) is a matrix-vector workload. Existing
   `boring-llm` measurements select warp-broadcast kernels for the 32-element
   Q4_0/Q5_0/Q8_0/IQ4_NL formats and tiled kernels for prefill. A generic
@@ -481,19 +485,18 @@ The minimum compiler work for a useful float32 migration is therefore:
 
 1. Add an explicit safe in-place contract where profiling shows that the
    current loop-carried device copy is material.
-2. Extend the implemented 32-element block formats to the remaining packed GGUF formats.
+2. Validate every packed format against non-uniform, multi-block reference
+   vectors and real GGUF model tensors.
 3. Provide output allocation or a concise way to create a correctly shaped
    mutable destination from runtime extents.
 4. Extend fused bias beyond the runtime float32 `linear` path when another
    tensor operation or packed format needs the same epilogue.
 
-After that baseline, migrate and benchmark the unquantized `linear_gpu` path.
-The next independent milestone is a quantized matrix operation whose format
-contract describes packed bytes, block geometry, scales/minima/codebooks, and
-the float32 accumulation policy. It should reuse the existing verified
-`boring-llm` decoding formulas initially; treating quantization as a hidden
-conversion inside ordinary `matmul` would make type, storage, and precision
-behavior too implicit.
+After that baseline, migrate and benchmark the unquantized and quantized
+`linear_gpu` paths. The implemented quantized format contract describes packed
+bytes, block geometry, scales/minima/codebooks, and float32 accumulation. Its
+decoding formulas come from the existing `boring-llm` implementations and now
+need comparison against non-uniform reference vectors and real model tensors.
 
 Attention should follow only after runtime rank-two scheduling is stable. Its
 first extension should be a statically ranked, dynamically sized batched

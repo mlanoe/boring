@@ -184,6 +184,19 @@ impl Transpiler {
                         return;
                     }
                     if self.current_fn_returns_resident.is_some() {
+                        // The tail may itself be a bare call to another
+                        // `fn_returns_resident` function (e.g. `outer_gpu`'s whole
+                        // body is `inner_gpu(...)`) -- its Rust return is already
+                        // `BoringGpuArg<T>`, so `try_passthrough_resident_call`
+                        // passes it straight through instead of this branch's
+                        // default `BoringGpuArg::Host((expr).clone())`, which would
+                        // wrap an already-`BoringGpuArg<T>` value a second time (a
+                        // real E0308, confirmed via a real `cargo build` on the
+                        // Metal backend).
+                        if let Some(passthrough) = self.try_passthrough_resident_call(e) {
+                            self.line(&format!("Ok({passthrough})"));
+                            return;
+                        }
                         self.line(&format!("Ok(BoringGpuArg::Host(({}).clone()))", self.emit_expr_owned(e)));
                         return;
                     }
@@ -220,6 +233,12 @@ impl Transpiler {
                         return;
                     }
                     if self.current_fn_returns_resident.is_some() {
+                        // See the identical `throws`-branch case above for why a
+                        // bare-call tail needs the passthrough check first.
+                        if let Some(passthrough) = self.try_passthrough_resident_call(e) {
+                            self.line(&passthrough);
+                            return;
+                        }
                         self.line(&format!("BoringGpuArg::Host(({}).clone())", self.emit_expr_owned(e)));
                         return;
                     }
