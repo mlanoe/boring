@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Parité du transpileur et des interpréteurs</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="parité-du-transpileur-et-des-interpréteurs">Parité du transpileur et des interpréteurs</h1>
+<p>Audit du 29 septembre 2026, après le premier lot de corrections numériques.</p>
+<h2 id="résultat-et-périmètre">Résultat et périmètre</h2>
+<p>Le transpileur sert de référence fonctionnelle. Les deux interpréteurs sont déjà substantiels, mais leurs suites historiques ne couvrent pas les mêmes programmes. Le statut « Complete » du document <code>interpreter-port-plan.md</code> décrit le portage historique, pas une parité avec toutes les fonctionnalités actuelles du transpileur.</p>
+<p>La comparaison automatique sélectionne les <strong>167 fixtures simples</strong> enregistrées par <code>transpile_test!</code> dans <code>tests/transpile.rs</code> et disposant de fichiers <code>.br</code> et <code>.expected</code>. Chaque programme est lancé avec son chemin réel, et stdout est comparé à la même sortie attendue que dans la suite du transpileur.</p>
+<table><thead><tr><th>Résultat</th><th>Interpréteur Rust</th><th>Interpréteur Boring strict/multi</th></tr></thead><tbody><tr><td>Sortie conforme</td><td>157</td><td>112</td></tr><tr><td>Erreur ou arrêt anormal</td><td>9</td><td>38</td></tr><tr><td>Sortie différente</td><td>1</td><td>4</td></tr><tr><td>Délai de 4 secondes dépassé</td><td>0</td><td>13</td></tr></tbody></table>
+<p><strong>Ces nombres mesurent ce corpus, pas un pourcentage de fonctionnalités du langage.</strong> Un dépassement de délai est un cas à diagnostiquer, pas une preuve de boucle infinie. Le corpus complet n&#x27;a pas été recompilé pendant cet audit : les sorties <code>.expected</code> constituent son oracle. Le Rust généré a été réellement compilé/exécuté pour les cas numériques modifiés (voir validation ci-dessous). Les programmes projet, les cas négatifs, les cibles GPU et les appels à des bibliothèques Rust externes ne sont pas couverts exhaustivement par cette sélection.</p>
+<p>Avant correction, sur les 166 fixtures alors sélectionnées : Rust 154 conformes, Boring 108 conformes. Le nouveau cas numérique ajoute une réussite aux deux moteurs ; les corrections rétablissent deux anciens cas Rust et trois anciens cas Boring. <code>ord_chr</code>, également corrigé côté Boring, appartient à la suite fonctionnelle mais n&#x27;est pas enregistré comme fixture simple dans la suite du transpileur.</p>
+<h2 id="écarts-à-implémenter">Écarts à implémenter</h2>
+<table><thead><tr><th>Domaine</th><th>Interpréteur Rust</th><th>Interpréteur Boring</th><th>Travail restant / reproduction</th></tr></thead><tbody><tr><td>Puissances numériques</td><td>Corrigé : <code>.pow</code> entier manquait</td><td>Corrigé : <code>.pow</code> entier et <code>.pow</code>/<code>.powf</code> flottants manquaient</td><td>Cas <code>pow_method_*</code>, <code>numeric_method_parity</code></td></tr><tr><td><code>ord</code> / <code>chr</code></td><td>Déjà exécutables</td><td>Corrigé : noms enregistrés sans branche dans <code>call_native</code></td><td>Unicode BMP et hors BMP dans <code>numeric_method_parity</code></td></tr><tr><td><code>&#x27;atomic</code></td><td>Lecture/affectation ordinaires possibles, mais <code>.swap</code> absent sur le scalaire</td><td>Qualificateur absent de <code>OwnerQual</code>, syntaxe refusée ; <code>.swap</code> absent</td><td><code>atomic_explicit_ops</code>, <code>atomic_promotion_binding_permission_regression</code> ; préserver aussi partage, droits de mutation et valeur précédente</td></tr><tr><td><code>&#x27;observed</code></td><td>Pas de comportement de souscription sur les objets</td><td>AST/parseur sans suffixe correspondant ; runtime absent</td><td><code>observed_qualifier</code> : callbacks, désinscription et portée des subscriptions</td></tr><tr><td>Qualificateurs, injection et valeurs partagées</td><td><code>singleton_di</code> et retours actor/guard rejetés à la mutation ; <code>inject_di</code> et <code>static_di</code> passent</td><td>Syntaxe des attributs/suffixes manquante ; certains programmes dépassent le délai</td><td><code>singleton_di</code>, <code>actor_guard_shared_return_qualifier</code>, <code>shared_return_callsite_no_double_wrap</code> ; audit du transport des permissions et de l&#x27;identité des objets</td></tr><tr><td>Syntaxe récente et désucrage</td><td>Front-end partagé avec le transpileur : <code>desugar_labeled_array</code>, <code>desugar_array_block</code>, <code>desugar_inject</code></td><td>Parseur indépendant, sans équivalent complet des passes récentes</td><td><code>array_block_*_transpile</code>, <code>try_prefix_in_cond_clause_noparen</code>, <code>inline_if_else_next_line_postfix</code>, <code>qualifier_group_param</code></td></tr><tr><td>Méthodes de type et génériques</td><td>La plupart des cas passent ; <code>monomorphize_mut_arg</code> perd une permission de mutation</td><td>Plusieurs erreurs de parsing/binding ou dépassements du délai</td><td><code>enum_type_def*</code>, <code>type_def_typed_throws</code>, <code>monomorphize_*</code> ; ne pas confondre effacement des types et absence de substitution/binding</td></tr><tr><td>Dictionnaires et optionnels</td><td>Cas concernés conformes</td><td>Lecture d&#x27;une clé absente jette au lieu de fournir l&#x27;optionnel attendu ; différences avec <code>else</code></td><td><code>dict_index_optional_return</code>, <code>if_let_dict_index_no_else</code>, <code>dict_string_key_index</code></td></tr><tr><td>Coercitions numériques</td><td>Cas concernés conformes</td><td>Rétrécissement, débordement/cast et propagation float32 incomplets ; <code>atan2</code> absent</td><td><code>narrowing_cast_if_let</code>, <code>int_literal_overflow_cast</code>, <code>if_else_cast_numeric</code>, <code>float32_struct_method_math</code></td></tr><tr><td>Erreurs natives</td><td><code>Error</code> présent</td><td><code>Error</code> non enregistré</td><td><code>builtin_error_enum</code>, <code>typed_catch_match_error</code> ; ajouter les variantes et la propagation typée</td></tr><tr><td>JSON et attributs serde</td><td>Implémentation dédiée dans <code>src/interpreter/json.rs</code> ; fixtures conformes</td><td>Pas de dispatch <code>json</code>/<code>fromJson</code> équivalent ; les fixtures s&#x27;arrêtent déjà sur <code>@</code></td><td><code>json_serde_shapes</code>, <code>json_serde_rename</code>, <code>json_untagged_enum</code> ; parser les attributs puis porter la matérialisation typée</td></tr><tr><td>Introspection</td><td>Implémentée, mais une représentation affichée diffère de l&#x27;oracle</td><td><code>.introspect()</code> absent</td><td><code>introspect_thread_safety</code> : Rust affiche <code>1.5</code> / <code>&quot;origin&quot;</code> là où l&#x27;oracle attend <code>Float(1.5)</code> / <code>Str(&quot;origin&quot;)</code> ; vérifier le contrat avant correction</td></tr><tr><td>Imports et dépendances</td><td>Sources Boring, stdlib embarquée et dépendances résolues par le front-end</td><td>Imports de fichiers présents ; <code>boring.*</code> explicitement refusé, pas de résolution <code>[deps]</code> équivalente</td><td><code>boring_stdlib_collections</code> ; <code>stdlib.br::exec_use</code> publie aussi tous les symboles globalement, même pour un import sélectif</td></tr><tr><td>Interop Rust</td><td>Émulation limitée : <code>mem.swap/replace/take</code>, <code>Box.pointee</code>, <code>Duration.as_secs</code> manquent dans ces cas</td><td>Pas d&#x27;équivalent général à <code>Value::RustType</code></td><td><code>mem_borrow_builtins</code>, <code>pointee</code>, <code>const_promotion_known_fn</code> ; définir une liste explicite d&#x27;opérations émulées</td></tr><tr><td>Macros</td><td><code>env!</code> et <code>include_str!</code> rendent une chaîne vide ; macro inconnue renvoie le dernier argument ou Void</td><td>Plusieurs macros ne sont pas dispatchées ; fallback Nil</td><td>Inspection de <code>src/interpreter/call.rs::call_macro</code> et <code>eval.br::eval_expr</code> ; définir la sémantique de runtime des macros de compilation et rejeter les autres explicitement</td></tr><tr><td>Concurrence</td><td>Futures exécutées synchroniquement, annulation non opérationnelle, délais partiellement simulés</td><td>Tâches synchrones et délai ignoré</td><td>Inspection <code>eval_expr.rs</code>, <code>methods.rs</code>, <code>eval.br</code> ; les sorties de petites fixtures de tâches ne prouvent pas une concurrence réelle</td></tr><tr><td>GPU</td><td>Simulateur CPU avec tests dédiés</td><td>Émulation propre, non comparée exhaustivement ici</td><td>Conserver la distinction entre équivalence fonctionnelle simulée et exécution GPU réelle ; utiliser les suites GPU séparées</td></tr></tbody></table>
+<p>Les listes de manques ci-dessus reposent soit sur les fixtures en échec, soit sur les branches explicites du code indiquées. Une ligne « inspection » n&#x27;a pas été validée par une comparaison dynamique exhaustive.</p>
+<h2 id="ordre-proposé">Ordre proposé</h2>
+<ol><li><strong>Sécuriser le parseur Boring</strong> : diagnostiquer les 13 dépassements de délai,</li></ol>
+<p>   puis aligner méthodes de type, attributs, suffixes et syntaxe des blocs. 2. <strong>Aligner les comportements usuels</strong> : dictionnaires optionnels, coercitions,    fonctions mathématiques, <code>Error</code>, résolution des paramètres génériques et noms    de méthodes (voir <code>builtin_name_user_members</code>). Ajouter chaque fixture réparée    à <code>tests/run.rs</code> et/ou <code>tests/interpreter_functional.rs</code>. 3. <strong>Aligner les permissions et le partage</strong> : <code>mut</code>, retours qualifiés,    <code>&#x27;atomic</code>, puis <code>&#x27;observed</code>. Tester les alias et les mutations visibles par    plusieurs références, pas seulement les valeurs finales d&#x27;une variable locale. 4. <strong>Porter les services du front-end/runtime Rust</strong> vers Boring : désucrages,    imports stdlib/dépendances, JSON, introspection. Garder le transpileur inchangé    sauf si une comparaison met en évidence un défaut de la référence. 5. <strong>Décider du contrat d&#x27;exécution</strong> : concurrence/délais réels ou simulation    explicitement documentée, et périmètre de l&#x27;interop Rust/GPU. Ces sujets    demandent des tests observant l&#x27;ordonnancement, pas uniquement stdout.</p>
+<h2 id="premier-lot-réalisé">Premier lot réalisé</h2>
+<ul><li><code>.pow</code> sur les douze variantes entières dans les deux interpréteurs : résultat</li></ul>
+<p>  de même largeur, calcul entier exact, exposant converti en <code>uint32</code> comme dans   le transpileur. Les dépassements sont signalés par les interpréteurs via   <code>checked_pow</code>, sans arrondi en flottant. Cela ne promet pas de reproduire le   wrapping d&#x27;un binaire Rust compilé sans vérification de débordement.</p>
+<ul><li><code>.pow</code> et <code>.powf</code> sur float32/float64 dans l&#x27;interpréteur Boring, en conservant</li></ul>
+<p>  la largeur du récepteur.</p>
+<ul><li><code>ord</code> et <code>chr</code> dans son dispatch natif, avec vérification des entrées avant</li></ul>
+<p>  appel aux primitives du langage.</p>
+<ul><li>Réutilisation des cas existants et ajout de <code>numeric_method_parity</code>, incluant</li></ul>
+<p>  les douze largeurs, zéro, base négative, exposant typé, entier supérieur à 2⁵³,   méthode utilisateur homonyme, caractères accentués et emoji.</p>
+<ul><li>Test unitaire Rust de conservation de variante, débordement et arguments invalides.</li></ul>
+<p>Validation : 845 tests unitaires, 195 tests de programmes, 4 constructions de l&#x27;interpréteur Boring et 88 tests fonctionnels (chaque cas sur les 4 variantes). Les 3 cas <code>pow_method_*</code> passent leurs 12 tests de transpilation/exécution. Le nouveau cas <code>numeric_method_parity</code> passe aussi les 4 configurations du transpileur. Le nouvel outil compare également les 4 cas numériques aux 4 interpréteurs Boring, à l&#x27;interpréteur Rust et à un exécutable Rust nouvellement généré en strict/multi.</p>
+<h2 id="reproduire-et-suivre-la-progression">Reproduire et suivre la progression</h2>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>cargo build
+cargo test --test interpreter_build
+python3 tools/interpreter_parity.py --timeout 4 --output /tmp/parity.json
+<span class="co"># Les écarts connus entraînent volontairement un code de sortie 1.</span>
+
+<span class="co"># Comparaison ciblée, incluant une vraie compilation de la référence :</span>
+python3 tools/interpreter_parity.py --all-modes --transpile numeric_method_parity pow_method_int_unaffected pow_method_int_exponent_var pow_method_float_width
+
+cargo test --bin boring --test run
+cargo test --test interpreter_functional
+cargo test --test transpile pow_method</code></pre></div>
+<p><code>--transpile</code> vérifie strict/multi ; la suite Rust <code>tests/transpile.rs</code> reste la référence pour la matrice complète mode/threading. L&#x27;outil produit les diagnostics et sorties divergentes dans le JSON, sans maintenir une liste d&#x27;exclusions qui ferait artificiellement disparaître les manques. Le délai peut être augmenté pour distinguer lenteur et blocage sur une autre machine.</p>
+<h2 id="inventaire-des-écarts-observés-après-corrections">Inventaire des écarts observés après corrections</h2>
+<p>« erreur » inclut les erreurs propres et les panics de l&#x27;hôte ; consulter le JSON pour les distinguer. « délai » signifie seulement que 4 secondes ont été dépassées. Les 112 cas conformes sur les deux moteurs sont omis de cette table.</p>
+<table><thead><tr><th>Fixture dans <code>tests/cases/</code></th><th>Rust</th><th>Boring strict/multi</th></tr></thead><tbody><tr><td><code>trait_type_level_methods</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>array_block_flat_transpile</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>array_block_for_transpile</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>boring_stdlib_collections</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>int_literal_overflow_cast</code></td><td>conforme</td><td>sortie différente</td></tr><tr><td><code>builtin_error_enum</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>typed_catch_match_error</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>type_def_typed_throws</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>type_method_throws_untyped</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>untyped_string_lit_local_to_type_method</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>enum_type_def</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>enum_type_def_throws</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>float32_struct_method_math</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>pointee</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>pub_top_level_const</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>const_promotion_known_fn</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>dict_index_optional_return</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>if_let_dict_index_no_else</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>dict_string_key_index</code></td><td>conforme</td><td>sortie différente</td></tr><tr><td><code>builtin_name_user_members</code></td><td>conforme</td><td>sortie différente</td></tr><tr><td><code>implicit_self_length_nontail</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>throws_method_name_collision</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>narrowing_cast_if_let</code></td><td>conforme</td><td>sortie différente</td></tr><tr><td><code>try_prefix_in_cond_clause_noparen</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>option_owned_methods</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>cast_bare_field_index</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>if_else_cast_numeric</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>mem_borrow_builtins</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>json_serde_rename</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>try_wrap_double_handling</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>json_untagged_enum</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>json_serde_shapes</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>enum_derive_no_debug</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>self_field_loop_match_borrow</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>introspect_thread_safety</code></td><td>sortie différente</td><td>erreur</td></tr><tr><td><code>qualifier_group_param</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>enum_variant_shadow</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>monomorphize_struct</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>monomorphize_mut_arg</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>monomorphize_cross_file_main</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>monomorphize_method</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>monomorphize_method_on_generic_struct</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>monomorphize_optional_method</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>monomorphize_ext_method</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>monomorphize_enum_method</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>guard_let_else_panic_throws</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>atomic_explicit_ops</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>atomic_promotion_binding_permission_regression</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>observed_qualifier</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>singleton_di</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>inject_di</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>static_di</code></td><td>conforme</td><td>délai</td></tr><tr><td><code>actor_guard_shared_return_qualifier</code></td><td>erreur</td><td>erreur</td></tr><tr><td><code>shared_return_callsite_no_double_wrap</code></td><td>conforme</td><td>erreur</td></tr><tr><td><code>inline_if_else_next_line_postfix</code></td><td>conforme</td><td>erreur</td></tr></tbody></table>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

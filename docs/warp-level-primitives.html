@@ -157,6 +157,8 @@ li { margin-bottom: 0.3rem; }
 <h2 id="open-questions">Open Questions</h2>
 <ol><li><strong>Fallback warp size constant on wgpu</strong> (see above) — needs a specific</li></ol>
 <p>   documented value, not left implicit. 2. <strong>Divergent-branch safety</strong> — document, not solve: <code>gpu.warp.*</code> inside    non-uniform control flow is only as safe as the underlying <code>_sync</code>    intrinsics with a full mask; Boring doesn&#x27;t detect or warn about this    today. 3. <strong>Should the checker warn (not error) when <code>gpu.warp.*</code> is used inside    an <code>if</code>/<code>while</code> that isn&#x27;t provably warp-uniform?</strong> A static analysis    nicety, not required for a first version — flagged here so it isn&#x27;t    forgotten, not because it blocks shipping without it.</p>
+<h2 id="gpu-naming-compatibility">GPU naming compatibility</h2>
+<p>The canonical spellings are <code>gpu.blockDim</code>, <code>gpu.gridDim</code>, <code>gpu.warp.shuffleDown</code>, <code>gpu.warp.shuffleUp</code>, and <code>gpu.warp.shuffleXor</code>. The interpreter and CUDA, Metal, ROCm, and wgpu emitters also accept the legacy snake_case spellings for compatibility. The <code>gpu.</code> prefix remains explicit; no leading-dot shorthand is introduced.</p>
 </main>
 <script>
 // Build TOC from headings

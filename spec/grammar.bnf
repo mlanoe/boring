@@ -1082,8 +1082,8 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 # Built-in type aliases (use these instead of explicit qualifiers):
 #   str    →  String'const  →  &str
 #   string →  String'shared →  Arc<str>  (single-thread: Rc<str>; multi-thread: Arc<str>)
-#   int    →  Int'copy      →  i64
-#   uint   →  Uint'copy     →  u64
+#   int    →  Int'copy      →  isize
+#   uint   →  Uint'copy     →  usize
 #   float  →  Float64'copy  →  f64        (float is a pure alias of float64)
 #   float32 → Float32'copy  →  f32
 #   bool   →  Bool'copy     →  bool
@@ -1201,8 +1201,8 @@ type_list       ::= type ("," type)*
 # Exceptions propagate up the call stack until caught by `try/catch`.
 #
 # `throws` with a type narrows the Rust error type from `Box<dyn Error>` to a concrete type:
-#   def int divide(int a, int b) throws:           →  Result<i64, Box<dyn Error>>
-#   def int divide(int a, int b) throws CalcError: →  Result<i64, CalcError>
+#   def int divide(int a, int b) throws:           →  Result<isize, Box<dyn Error>>
+#   def int divide(int a, int b) throws CalcError: →  Result<isize, CalcError>
 #
 # `try expr else default` catches any exception from expr and returns default.
 # The default can be a block (last expression = value):

@@ -126,6 +126,7 @@ li { margin-bottom: 0.3rem; }
 </aside>
 <main class="main" id="content">
 <h1 id="plan-porting-the-rust-interpreter-to-boring">Plan: porting the Rust interpreter to Boring</h1>
+<blockquote>Historical porting report. For the current three-engine comparison and remaining implementation work, see <a href="interpreter-parity.html">Interpreter parity audit (2026-09-29)</a>.</blockquote>
 <p><strong>Date:</strong> 2026-06-10   <strong>Updated:</strong> 2026-09-07 — <code>Dict</code>/<code>Set</code> O(n) limitation documented, §8.3 (real <code>use</code> module-import support, §8.2, landed 2026-08-25)   <strong>Status:</strong> Complete — 83/83 tests passing, single-thread and multi-thread modes   <strong>Goal:</strong> rewrite the interpreter (<code>src/interpreter/</code>) in Boring, transpile it to Rust, and have it pass the existing test suite.</p>
 <hr>
 <h2 id="1-scope">1. Scope</h2>

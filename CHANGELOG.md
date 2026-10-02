@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.9.9] — 2026-10-02 *(cargo test: 2430/2430 passing across 63 suites, 14 ignored · clippy: clean · self-hosted interpreter functional: 112/112)*
+
 ### Added
 
 - **Checker: enriched universal-check family + Rust-specific split**, in anticipation of future non-Rust transpilation backends (Swift, Kotlin). `src/checker/mod.rs` was split into itself (checks whose rule is universal to Boring's own semantics, portable to any backend) and a new `src/checker/rust_checks.rs` (checks that are artifacts of Rust's ownership/borrow model or of the current Rust-only GPU pipeline — `mut 'shared`/`'static`/`'weak`, `'static` provenance, `'atomic` type compatibility, kernel-dispatch-qualifier rejection, `with`-block GPU opacity, use-after-move on `'owned` constructor args), same `Checker` struct and scope-tracking state, no behavior change. The universal side then gained four new non-fatal warnings, each validated against this repo's and several sibling projects' full `.br` corpus for zero false positives: dead/unreachable code (`check_dead_code`) and missing-return-on-some-path (`check_missing_return`), sharing one control-flow "does this settle" engine; function-call arity/labeled-argument validation (`check_call_arity`, plain free-function calls only — skips overloaded names, which Boring resolves by argument type this checker can't infer); and match-exhaustiveness (`check_match_exhaustiveness`) over `bool`, optional (`T?`), and now full user-declared enum variant coverage (`check_enum_match_exhaustiveness`, backed by a new `enums: HashMap<String, Vec<String>>` registry) — a guarded arm never counts toward coverage on its own, matching real Rust's own match-guard semantics. The design doc this whole effort traced back to, `docs/design-notes/checker-portability-draft.md` (universal-vs-Rust-specific inventory of `checker/mod.rs` and `validator/`, rationale, and the still-open qualifier-system-redesign question), is deleted — its still-relevant rationale is now inline in `checker/mod.rs`'s/`rust_checks.rs`'s own file-header doc comments rather than a separate, increasingly-stale inventory; the per-`checker/mod.rs:line` location tables and the update-by-update narrative stay in git history instead of a permanent doc.
@@ -104,7 +108,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.9.8] — 2026-09-13 *(cargo test: 1974/1974 passing across 38 suites, 8 ignored · clippy: clean · self-hosted interpreter functional: 83/83 × 4 modes)*
+## [0.9.8] — 2026-09-13 *(cargo test: 1974/1974 passing across 38 suites, 8 ignored · clippy: clean · self-hosted interpreter functional: 112/112)*
 
 ### Added
 
@@ -162,7 +166,7 @@ GPU kernels (interpreter and Metal/CUDA/ROCm/wgpu backends), all found while ver
 
 ---
 
-## [0.9.7] — 2026-09-08 *(cargo test: 1845/1845 passing across 33 suites · clippy: clean · self-hosted interpreter functional: 83/83 × 4 modes)*
+## [0.9.7] — 2026-09-08 *(cargo test: 1845/1845 passing across 33 suites · clippy: clean · self-hosted interpreter functional: 112/112)*
 
 ### Added
 
