@@ -177,13 +177,19 @@ kernel W:
         let d = gpu.warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + lane + size
 "#);
+    // HIP has no `__syncwarp`/`_sync`-suffixed shuffle intrinsics or mask
+    // argument the way CUDA does (confirmed against a real ROCm 6.2 install's
+    // own `amd_warp_functions.h`, and against a real `hipcc` compile failure
+    // on `__shfl_sync`/`__shfl_xor_sync` -- "use of undeclared identifier").
+    // `gpu.warp.sync()` has no HIP equivalent at all and is left as a visible
+    // unsupported-call marker rather than emitting a nonexistent intrinsic.
     assert!(hip.contains("warpSize"), "expected warpSize;\ngot:\n{hip}");
     assert!(hip.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{hip}");
-    assert!(hip.contains("__syncwarp(0xffffffff)"), "expected __syncwarp;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_down_sync(0xffffffff,"), "expected __shfl_down_sync;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_up_sync(0xffffffff,"), "expected __shfl_up_sync;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_xor_sync(0xffffffff,"), "expected __shfl_xor_sync;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_sync(0xffffffff,"), "expected __shfl_sync;\ngot:\n{hip}");
+    assert!(hip.contains("/* unsupported:"), "expected gpu.warp.sync() to be marked unsupported, not a nonexistent __syncwarp;\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_down(") && !hip.contains("__shfl_down_sync"), "expected __shfl_down (no _sync suffix, no mask);\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_up(") && !hip.contains("__shfl_up_sync"), "expected __shfl_up (no _sync suffix, no mask);\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_xor(") && !hip.contains("__shfl_xor_sync"), "expected __shfl_xor (no _sync suffix, no mask);\ngot:\n{hip}");
+    assert!(hip.contains("__shfl(") && !hip.contains("__shfl_sync"), "expected __shfl (no _sync suffix, no mask);\ngot:\n{hip}");
 }
 
 // ─── host — struct and constructor ───────────────────────────────────────────
@@ -832,8 +838,12 @@ kernel Scale:
         "build.rs must probe hipDeviceAttributeWarpSize from the local hip_runtime_api.h;\ngot:\n{build}");
     assert!(build.contains("hipDeviceAttributeMaxThreadsPerBlock"),
         "build.rs must probe hipDeviceAttributeMaxThreadsPerBlock;\ngot:\n{build}");
-    assert!(build.contains("hipDeviceAttributeSharedMemPerBlock"),
-        "build.rs must probe hipDeviceAttributeSharedMemPerBlock;\ngot:\n{build}");
+    // Not `hipDeviceAttributeSharedMemPerBlock` -- that name doesn't exist in
+    // HIP's own `hip_runtime_api.h` (confirmed against a real ROCm 6.2
+    // install); the probe silently fell back to -1 on every platform until
+    // this was caught by actually compiling it with a real `hipcc`.
+    assert!(build.contains("hipDeviceAttributeMaxSharedMemoryPerBlock"),
+        "build.rs must probe hipDeviceAttributeMaxSharedMemoryPerBlock;\ngot:\n{build}");
     assert!(build.contains("boring_hip_attrs.rs"),
         "build.rs must write the probed values to boring_hip_attrs.rs;\ngot:\n{build}");
 }
@@ -1570,13 +1580,19 @@ kernel W:
         let d = gpu.warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + lane + size
 "#);
+    // HIP has no `__syncwarp`/`_sync`-suffixed shuffle intrinsics or mask
+    // argument the way CUDA does (confirmed against a real ROCm 6.2 install's
+    // own `amd_warp_functions.h`, and against a real `hipcc` compile failure
+    // on `__shfl_sync`/`__shfl_xor_sync` -- "use of undeclared identifier").
+    // `gpu.warp.sync()` has no HIP equivalent at all and is left as a visible
+    // unsupported-call marker rather than emitting a nonexistent intrinsic.
     assert!(hip.contains("warpSize"), "expected warpSize;\ngot:\n{hip}");
     assert!(hip.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{hip}");
-    assert!(hip.contains("__syncwarp(0xffffffff)"), "expected __syncwarp;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_down_sync(0xffffffff,"), "expected __shfl_down_sync;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_up_sync(0xffffffff,"), "expected __shfl_up_sync;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_xor_sync(0xffffffff,"), "expected __shfl_xor_sync;\ngot:\n{hip}");
-    assert!(hip.contains("__shfl_sync(0xffffffff,"), "expected __shfl_sync;\ngot:\n{hip}");
+    assert!(hip.contains("/* unsupported:"), "expected gpu.warp.sync() to be marked unsupported, not a nonexistent __syncwarp;\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_down(") && !hip.contains("__shfl_down_sync"), "expected __shfl_down (no _sync suffix, no mask);\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_up(") && !hip.contains("__shfl_up_sync"), "expected __shfl_up (no _sync suffix, no mask);\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_xor(") && !hip.contains("__shfl_xor_sync"), "expected __shfl_xor (no _sync suffix, no mask);\ngot:\n{hip}");
+    assert!(hip.contains("__shfl(") && !hip.contains("__shfl_sync"), "expected __shfl (no _sync suffix, no mask);\ngot:\n{hip}");
 }
 
 // ─── host — struct and constructor ───────────────────────────────────────────

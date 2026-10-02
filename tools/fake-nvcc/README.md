@@ -55,12 +55,11 @@ cd path/to/generated/project   # from `boring build --target cuda`
 ```
 
 `cudarc`'s own `build.rs` additionally requires a concrete `cuda-XXXXX`
-feature (it won't guess a CUDA version) — add one to the generated
-`Cargo.toml`'s `cudarc` dependency before checking, e.g.:
-
-```toml
-cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-12060"] }
-```
+feature or `cuda-version-from-build-system` (it won't guess a CUDA version)
+— the generated `Cargo.toml` already requests
+`cuda-version-from-build-system`, which has `cudarc` detect the installed
+CUDA version at build time instead of hardcoding one, so no manual edit is
+needed before checking.
 
 Then:
 

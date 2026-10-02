@@ -857,17 +857,28 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     }
 }
 
-/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — HIP
-/// mirrors CUDA's `_sync` shuffle/barrier intrinsic names verbatim, full mask
-/// always (see `cuda::device`'s equivalent function for the divergent-branch
-/// caveat this shares).
+/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — unlike
+/// the comment this replaces claimed, HIP does NOT mirror CUDA's `_sync`
+/// shuffle intrinsic names or their mask argument: confirmed against a real
+/// ROCm 6.2 install's own header
+/// (`include/hip/amd_detail/amd_warp_functions.h`), HIP only declares
+/// unprefixed `__shfl`/`__shfl_up`/`__shfl_down`/`__shfl_xor`, each taking
+/// just `(var, lane, width = warpSize)` -- no mask. The CUDA-shaped
+/// `__shfl_xor_sync`/`__shfl_sync` names this used to emit don't exist in
+/// HIP at all, confirmed via a real `hipcc` compile against
+/// `gpu.tensor.linear`'s q8_0 warp-broadcast decode
+/// (`error: use of undeclared identifier '__shfl_sync'`) -- silently
+/// invisible to `rocm_codegen.rs`'s own tests, which only assert on the
+/// generated text and never invoke a real HIP compiler.
+/// `__syncwarp` doesn't exist in HIP either and has no direct equivalent
+/// (AMD wavefronts have no CUDA-style independent thread scheduling to
+/// reconverge) -- `"sync"` is left unmapped (`None`) rather than guessing.
 fn gpu_warp_method_call(method: &str, args: &[String]) -> Option<String> {
     match method {
-        "sync"         => Some("__syncwarp(0xffffffff)".into()),
-        "shuffle_down" | "shuffleDown" => Some(format!("__shfl_down_sync(0xffffffff, {}, {})", args[0], args[1])),
-        "shuffle_up" | "shuffleUp"     => Some(format!("__shfl_up_sync(0xffffffff, {}, {})", args[0], args[1])),
-        "shuffle_xor" | "shuffleXor"   => Some(format!("__shfl_xor_sync(0xffffffff, {}, {})", args[0], args[1])),
-        "shuffle"      => Some(format!("__shfl_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle_down" | "shuffleDown" => Some(format!("__shfl_down({}, {})", args[0], args[1])),
+        "shuffle_up" | "shuffleUp"     => Some(format!("__shfl_up({}, {})", args[0], args[1])),
+        "shuffle_xor" | "shuffleXor"   => Some(format!("__shfl_xor({}, {})", args[0], args[1])),
+        "shuffle"      => Some(format!("__shfl({}, {})", args[0], args[1])),
         _ => None,
     }
 }

@@ -276,7 +276,7 @@ name = "{stem}"
 path = "src/main.rs"
 
 [dependencies]
-cudarc = {{ version = "0.19", features = ["driver", "nvrtc"] }}
+cudarc = {{ version = "0.19", features = ["driver", "nvrtc", "cuda-version-from-build-system"] }}
 {extra_deps}"#,
         stem = stem,
         version = version,

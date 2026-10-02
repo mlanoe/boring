@@ -227,6 +227,35 @@ fn emit_build_rs() -> String {
 use std::process::Command;
 use std::path::PathBuf;
 
+// The ROCm Windows HIP SDK ships `hipcc` only as `hipcc.bat` (a thin wrapper
+// that shells out to the bundled `hipcc` Perl script) -- there is no plain
+// `hipcc.exe`. `Command::new("hipcc")` resolves directly through
+// `CreateProcessW`, which (unlike a real shell) does not know how to launch
+// a `.bat` file on its own, so on Windows it silently falls through PATH to
+// whatever OTHER program happens to be named `hipcc` (confirmed on a real
+// machine: a Python-installed package's unrelated `hipcc.exe` shadowed the
+// real ROCm one further down PATH, so this build script quietly compiled
+// nothing with the real HIP compiler and nothing ever errored until linking
+// failed for a missing `amdhip64.lib`). Routing through `cmd /C hipcc` gets
+// past that, but `hipcc.bat` itself just shells out to a bundled `hipcc`
+// Perl script, which resolves its own directory with `File::Basename::dirname`
+// -- confirmed on a real machine that this returns "." (not the real
+// directory) under a Windows-targeted but MSYS/Cygwin-flavored Perl (e.g.
+// Git for Windows' bundled perl.exe, since its File::Basename doesn't treat
+// `\` as a separator), which then can't find `hipcc.bin.exe` next to itself
+// and aborts with "hipcc.bin not present". The HIP SDK's own Perl script,
+// stripped of its path-finding, just execs `<its own dir>/hipcc.bin.exe`
+// with the same arguments -- so going straight to that real compiler
+// binary (which this function finds itself, from `rocm_path`) sidesteps
+// `hipcc.bat`, cmd.exe, and any Perl interpreter entirely.
+fn hipcc_command(rocm_path: &str) -> Command {
+    if cfg!(windows) {
+        Command::new(format!("{rocm_path}/bin/hipcc.bin.exe"))
+    } else {
+        Command::new("hipcc")
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=kernels/main.hip");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
@@ -243,7 +272,7 @@ fn main() {
     // `hipModuleLoadData` (see host.rs's `boring_gpu_init`). Set
     // BORING_ROCM_ARCH (e.g. "gfx1100") to target a specific GPU architecture;
     // left unset, hipcc uses its own default detection.
-    let mut cmd = Command::new("hipcc");
+    let mut cmd = hipcc_command(&rocm_path);
     cmd.args(["--genco", "-O2", "-o", co_path.to_str().unwrap(), "kernels/main.hip"]);
     if let Ok(arch) = std::env::var("BORING_ROCM_ARCH") {
         cmd.arg(format!("--offload-arch={}", arch));
@@ -258,18 +287,19 @@ fn main() {
 
     println!("cargo:rustc-env=BORING_HIP_CO_PATH={}", co_path.display());
 
-    probe_hip_device_attributes(&out_dir);
+    probe_hip_device_attributes(&out_dir, &rocm_path);
 }
 
 // Compiles and runs a tiny host-only C program against this machine's own
 // `hip/hip_runtime_api.h` to read the *actual* installed values of
 // `hipDeviceAttributeWarpSize`/`hipDeviceAttributeMaxThreadsPerBlock`/
-// `hipDeviceAttributeSharedMemPerBlock` -- these are NOT hardcoded anywhere
-// in boring itself, because the numeric values of `hipDeviceAttribute_t`
-// are not guaranteed stable across ROCm releases. Reading them from this
-// build's own header is the only way to get a value guaranteed to match
-// what the locally installed `libamdhip64` actually expects.
-fn probe_hip_device_attributes(out_dir: &str) {
+// `hipDeviceAttributeMaxSharedMemoryPerBlock` -- these are NOT hardcoded
+// anywhere in boring itself, because the numeric values of
+// `hipDeviceAttribute_t` are not guaranteed stable across ROCm releases.
+// Reading them from this build's own header is the only way to get a value
+// guaranteed to match what the locally installed `libamdhip64` actually
+// expects.
+fn probe_hip_device_attributes(out_dir: &str, rocm_path: &str) {
     let probe_c = PathBuf::from(out_dir).join("__boring_hip_attr_probe.c");
     let probe_bin = PathBuf::from(out_dir).join("__boring_hip_attr_probe");
     let attrs_rs = PathBuf::from(out_dir).join("boring_hip_attrs.rs");
@@ -289,7 +319,7 @@ int main(void) {\n\
     printf(\"%d %d %d\\n\",\n\
            (int)hipDeviceAttributeWarpSize,\n\
            (int)hipDeviceAttributeMaxThreadsPerBlock,\n\
-           (int)hipDeviceAttributeSharedMemPerBlock);\n\
+           (int)hipDeviceAttributeMaxSharedMemoryPerBlock);\n\
     return 0;\n\
 }\n\
 ").is_err() {
@@ -297,8 +327,21 @@ int main(void) {\n\
         return;
     }
 
-    let compiled = Command::new("hipcc")
-        .args(["-o", probe_bin.to_str().unwrap(), probe_c.to_str().unwrap()])
+    // On Windows this goes straight to `hipcc.bin.exe` (see `hipcc_command`),
+    // bypassing the `hipcc` wrapper script that normally injects the platform
+    // define and the SDK's own include path -- without them the probe can't
+    // find `hip/hip_runtime_api.h` at all, then (once it can) fails to build
+    // with "Must define exactly one of __HIP_PLATFORM_AMD__ or
+    // __HIP_PLATFORM_NVIDIA__", both confirmed on a real ROCm 6.2 install.
+    // Redundant (but harmless) on the real `hipcc` wrapper, which already
+    // sets both itself.
+    let compiled = hipcc_command(rocm_path)
+        .args([
+            "-D__HIP_PLATFORM_AMD__",
+            "-I", &format!("{rocm_path}/include"),
+            "-o", probe_bin.to_str().unwrap(),
+            probe_c.to_str().unwrap(),
+        ])
         .status();
     if !matches!(compiled, Ok(s) if s.success()) {
         eprintln!("cargo:warning=boring: could not compile the hipDeviceAttribute_t probe -- \

@@ -1350,7 +1350,19 @@ impl HostEmitter {
                 // `self.__stream.synchronize()` afterward is cheap defense in
                 // depth: it can only wait on real, already-in-flight work on
                 // the exact stream this copy itself was issued on.
-                self.line(&format!("let v = self.__stream.clone_dtoh(&self.{}).map_err(__boring_cuda_classify_error)?;", field.name));
+                // A `let`-bound field is stored as `Arc<CudaSlice<T>>` (see
+                // `host_field_type`) so it can be shared across multiple
+                // synthesized kernel structs without a real device copy --
+                // `clone_dtoh` needs a `&CudaSlice<T>` (`DevicePtr` isn't
+                // implemented for `Arc<CudaSlice<T>>` itself), so that case
+                // needs an extra deref; a `mut`/`var` field is already a bare
+                // `CudaSlice<T>` and takes `&self.{field}` directly.
+                let field_ref = if field.binding == FieldBinding::Let {
+                    format!("&*self.{}", field.name)
+                } else {
+                    format!("&self.{}", field.name)
+                };
+                self.line(&format!("let v = self.__stream.clone_dtoh({}).map_err(__boring_cuda_classify_error)?;", field_ref));
                 self.line("self.__stream.synchronize().map_err(__boring_cuda_classify_error)?;");
                 self.line("Ok(v)");
                 self.indent -= 1;

@@ -396,7 +396,7 @@ fn dynamic_tensor_linear_decodes_q5_0_weights_on_all_gpu_targets() {
     assert!(host.contains("_blocks = if (1 == 1) { ((1 + 7) / 8)"), "Metal Q5_0 dispatch must schedule one warp per output");
     let rocm_shader = fs::read_to_string(root.join("tensor_dynamic_q5_0_rocm/kernels/main.hip")).unwrap();
     assert!(rocm_shader.contains("const auto scaleLane = ((lane / 32) * 32)"), "ROCm Q5_0 wave64 must select a source lane for each packed block");
-    assert!(rocm_shader.contains("__shfl_sync(0xffffffff, qh, scaleLane)"), "ROCm Q5_0 must broadcast both high-bit words in a wave64");
+    assert!(rocm_shader.contains("__shfl(qh, scaleLane)"), "ROCm Q5_0 must broadcast both high-bit words in a wave64");
 }
 
 #[test]

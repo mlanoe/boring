@@ -99,6 +99,17 @@ impl Interpreter {
             // sharing (confirmed via examples/todo.br's
             // `add_tasks_in_parallel_with_semaphore`).
             if let Some(ty) = &param.ty {
+                // A labeled-array *parameter*'s explicit type never reached
+                // `declared_types` the way a `let`/`mut` local's does (`Stmt::Let`
+                // handling, exec.rs) — only this task-safe check read `param.ty` at
+                // all. `gpu.tensor.matmul`/`mma`/`linear`'s fixed-shape host dispatch
+                // (eval_gpu.rs's `get_declared_type` lookup) silently saw `None` for
+                // any such parameter and failed with "host tensor operands require
+                // explicit labeled-array types" even though the parameter plainly
+                // has one — confirmed via a real `boring run` repro that only
+                // reproduces when the same labeled array is a parameter rather than
+                // a local (locals already worked, through the `Stmt::Let` path).
+                fn_env.borrow_mut().mark_declared_type(&param.name, ty.clone());
                 let resolved = self.resolve_type(ty);
                 if Self::type_annotation_is_task_safe(&resolved) {
                     fn_env.borrow_mut().mark_task_safe(&param.name);
