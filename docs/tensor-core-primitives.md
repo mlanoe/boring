@@ -541,7 +541,7 @@ the concrete requirements more precisely than a generic tensor example:
   mask and softmax stages. Rank-two matmul can migrate linear layers first but
   cannot replace the attention kernels by itself.
 
-The minimum compiler work for a useful float32 migration is therefore:
+The remaining compiler work after the linear migration is therefore:
 
 1. Add an explicit safe in-place contract where profiling shows that the
    current loop-carried device copy is material.
@@ -552,16 +552,15 @@ The minimum compiler work for a useful float32 migration is therefore:
    Q2_K is covered by an extracted real superblock from Llama-2 7B, independently
    checked against Python's GGUF decoder, so the regular GPU test does not need
    to load the 2.6 GB model.
-3. Profile the remaining Q8_0 decode gap after direct device output allocation,
-   then apply the useful schedule pieces to other packed formats.
-4. Extend fused bias beyond the runtime float32 `linear` path when another
-   tensor operation or packed format needs the same epilogue.
+3. Add a runtime-sized rank-three batched product for attention, including
+   explicit transpose and GQA head mapping semantics.
+4. Extend fused epilogues only when another tensor operation needs them and
+   profiling shows that a separate dispatch is material.
 
-After that baseline, migrate and benchmark the unquantized and quantized
-`linear_gpu` paths. The implemented quantized format contract describes packed
-bytes, block geometry, scales/minima/codebooks, and float32 accumulation. Its
-decoding formulas come from the existing `boring-llm` implementations and now
-need comparison against non-uniform reference vectors and real model tensors.
+The unquantized and quantized `boring-llm` linear paths have completed this
+baseline. The implemented quantized contract describes packed bytes, block
+geometry, scales/minima/codebooks, and float32 accumulation. Every supported
+format is covered by non-uniform reference vectors and real GGUF data.
 
 Attention should follow only after runtime rank-two scheduling is stable. Its
 first extension should be a statically ranked, dynamically sized batched
@@ -779,8 +778,10 @@ multi-block kernel containing consecutive `matmulTile` and `mmaTile` calls:
   `gfx1101`, `gfx90a`, and `gfx942`.
 
 These checks establish source validity across the architectures currently
-listed by the repository validation scripts. Real GPU numerical execution and
-memory-ordering validation remain outstanding.
+listed by the repository validation scripts. Host tensor matmul and linear
+paths also produce matching numerical results on real Metal, WGPU, and ROCm
+hardware. CUDA has real-toolchain compilation coverage; numerical CUDA hardware
+coverage and broader cross-kernel memory-ordering stress tests remain open.
 
 The interpreter executes each block collective once, on that block's linear
 lane zero, after all lanes have evaluated the arguments. Its existing merge
@@ -828,13 +829,10 @@ dynamic output allocation is implemented, while batching remains future work.
 orientation without a copy. Native matrix instructions remain a backend
 optimization after the portable behavior is validated on real hardware.
 
-Generated host projects were checked offline with Rust for CUDA, Metal, ROCm,
-and wgpu. CUDA was type-checked with a stubbed nvcc build step, and ROCm with a
-stubbed hipcc build step; this validates generated Rust ownership and launch
-argument types without claiming native device compilation. The synthesized
-Metal shaders compile to AIR and metallib with Apple Metal
-Toolchain 27A266a, and Naga 30.0.1 validates the synthesized WGSL. CUDA and
-ROCm device-source validation uses the same scalar tile lowering already
-compiled for the explicit device API. This environment exposes neither a Metal
-device nor a wgpu adapter to the test process, so numerical execution of the
-automatically dispatched kernels on real GPU hardware remains outstanding.
+CUDA is checked with both the repository's stubbed build step and a real NVIDIA
+toolchain. ROCm is compiled and executed through HIP on real AMD hardware. The
+synthesized Metal shaders compile to AIR and metallib with Apple Metal
+Toolchain 27A266a and execute on real Metal hardware. Naga 30.0.1 validates the
+synthesized WGSL, which also executes through WGPU on real adapters. These runs
+cover automatically dispatched matmul and linear kernels, including packed
+quantized formats.
