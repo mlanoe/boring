@@ -82,7 +82,10 @@ impl Transpiler {
                 // and type parameters are excluded: the fallback would infer 'inline and
                 // emit_param would wrap them incorrectly (Addable'inline → "Addable" instead
                 // of impl Addable, Pt'inline bypasses the non-fn alias expansion, etc.).
-                Type::Named(n) if self.type_sizes.contains_key(n.as_str())
+                // A struct literally named with one uppercase letter (`struct P`) parses its
+                // uses as `Type::TypeParam` (the implicit-generic spelling); when such a
+                // struct is actually declared, treat it as the named type it refers to.
+                Type::Named(n) | Type::TypeParam(n) if self.type_sizes.contains_key(n.as_str())
                     || self.all_struct_types.contains(n.as_str()) => {
                     anonymous_vars.insert(name.clone());
                     // Track the struct/enum type name so resolve_fallback knows it's a user struct type.
@@ -458,6 +461,17 @@ impl Transpiler {
             }
         }
 
+        // `mut [T]` / `mut {K=V}` / `mut {T}` parameters lend the caller's content as `&mut`
+        // (docs/book.md's "`mut` vs `var` on a struct parameter") — unconditionally, so the
+        // signature a caller sees never depends on what the body happens to do with the
+        // parameter (`b[0] = x` as well as `b.append(x)`), and is the same in a free function
+        // and a struct method (whose call sites can't be told anything else).
+        for name in self.fn_current_params_lent.clone() {
+            if self.fn_current_params.contains_key(name.as_str()) {
+                self.inferred_qualifiers.insert(name, OwnerQual::BorrowMut);
+            }
+        }
+
         // Bare `'observed` locals: read back whatever the ordinary bare-struct
         // resolution above just produced (`Inline`/`Owned`/`Actor`/`ActorTask`/`Guard`/
         // `GuardTask` — `Shared` was excluded up front, so it never appears here) and
@@ -827,7 +841,13 @@ impl Transpiler {
                                 &[OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                                 alias_of,
                             );
-                            if auto_ref_param_vars.contains(var_name) {
+                            // Writing through a `mut` param is exactly what its universal
+                            // `&mut T` borrow is for (same as a `def` call on it, above):
+                            // only a write through a *non*-`mut` param is a signal that
+                            // blocks the borrow (and is then rejected as immutable).
+                            if auto_ref_param_vars.contains(var_name)
+                                && !self.fn_current_params_mut.contains(var_name)
+                            {
                                 has_qualifier_constraint.insert(var_name.to_string());
                             }
                         }

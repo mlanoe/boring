@@ -50,7 +50,7 @@ int get_via_fn(Wrapper w, string key):
     unwrap(w)[key] else -1
 
 def main() throws:
-    var {string=int} m = {=}
+    mut {string=int} m = {=}
     m["a"] = 1
     let w = Wrapper.Dict(m)
     let h = Holder(m)

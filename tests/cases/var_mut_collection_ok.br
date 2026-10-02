@@ -1,0 +1,23 @@
+# `var mut` / `mut` bindings and parameters keep full content mutation of built-in collections;
+# a plain `var` collection can still be rebound and read.
+
+def fill(var mut [int] out, mut {string=int} d, mut {int} s):
+    out.push(1)
+    out[0] = 7
+    d["k"] = 2
+    s.add(3)
+    out = [out[0], 8]
+
+def main():
+    var mut [int] a = [0]
+    mut {string=int} d = {"a" = 1}
+    mut {int} s = {1}
+    fill(a, d, s)
+    print a
+    print d["k"]
+    print s.length
+
+    var [int] r = [1, 2, 3]
+    r = r.map((x): x * 2)
+    print r
+    print r.length

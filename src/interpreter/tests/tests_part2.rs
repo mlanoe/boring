@@ -688,6 +688,46 @@ let _result = c.value()
     assert_eq!(run_src(src), Value::Int(42));
 }
 
+#[test]
+fn test_req_method_may_write_through_mut_param() {
+    // a `req` method only promises not to mutate `self` — writing a field of a
+    // `mut` parameter is legal
+    let src = r#"
+struct Counter:
+    var int value = 0
+
+struct Shape:
+    var int n = 0
+
+    req tap(mut Counter c):
+        c.value += 1
+
+mut Counter c = Counter()
+let s = Shape()
+s.tap(c)
+s.tap(c)
+let _result = c.value
+"#;
+    assert_eq!(run_src(src), Value::Int(2));
+}
+
+#[test]
+fn test_req_method_still_rejects_self_field_write() {
+    let src = r#"
+struct Shape:
+    var int n = 0
+
+    req bump():
+        self.n = self.n + 1
+
+let s = Shape()
+s.bump()
+"#;
+    let (_interp, res) = run(src);
+    let err = format!("{:?}", res.expect_err("self field write in a req method must fail"));
+    assert!(err.contains("non-transient field"), "got: {}", err);
+}
+
 // ─── init constructor tests ───────────────────────────────────────────────────
 
 #[test]

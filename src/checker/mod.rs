@@ -99,7 +99,7 @@ struct Binding {
     /// A `'gpu'unified`/`'gpu'global`-qualified variable initialized from anything
     /// else (an array literal/comprehension, a plain function call, ...) is just an
     /// ordinary host array up until it's passed into a kernel constructor — see
-    /// `examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for ..<N]`, freely
+    /// `examples/saxpy.br`'s `var mut [float]'gpu'unified x = [0.0 for ..<N]`, freely
     /// indexed and assigned on the host with no `with` wrapper anywhere. Gating
     /// opacity on the initializer's shape, rather than on the qualifier alone,
     /// is what keeps that existing, working pattern legal.
@@ -110,6 +110,21 @@ struct Binding {
     /// `Checker::infer_gpu_resident`) without requiring `'gpu'unified`/`'gpu'global`
     /// to be written out by hand.
     kernel_type: Option<String>,
+    /// For an unannotated `let h = SomeStruct(...)` — the struct's name, so a later
+    /// `h.method(...)` call can still be resolved to its declaration
+    /// (`check_same_object_lend`). Never set for anything but a direct constructor call.
+    ctor_type: Option<String>,
+    /// `true` only when the binding is *positively known* to hold a built-in collection
+    /// (`[T]`/`[T, N]`/`{K=V}`/`{T}`): an explicit annotation of that shape, or (for an
+    /// unannotated local) an initializer that is a collection literal/comprehension or a
+    /// call to a free function declared to return one. Never guessed — see
+    /// `Checker::check_collection_content_mutation`, the only consumer.
+    builtin_collection: bool,
+    /// Whether the binding grants *content* mutation (`mut`, `var mut`, a `T&`-style
+    /// mutable borrow) as opposed to being only rebindable (`var`) or immutable. Defaults
+    /// to `true` for every binding form that isn't tracked, so an untracked name is never
+    /// rejected. Only meaningful together with `builtin_collection`.
+    content_mutable: bool,
 }
 
 /// Enough of a free function's signature to validate a call's arity and
@@ -191,6 +206,24 @@ struct Checker {
     /// Mirrors `struct_ctor_owned`'s identical "more than one `init` -> skip"
     /// precedent for the same kind of ambiguity.
     fn_overloaded: std::collections::HashSet<String>,
+    /// Free function names whose declared return type is a built-in collection (and does
+    /// not itself grant `mut`), so an unannotated `var v = make()` is known to bind a
+    /// collection. Overloaded names are excluded (same reason as `fn_overloaded`).
+    fn_returns_collection: std::collections::HashSet<String>,
+    /// Field names of the struct whose inits/methods are being checked (empty outside one).
+    /// A bare name that resolves only to a *global* binding but is also a field of the
+    /// enclosing struct is the field (implicit `self`), not that global.
+    current_struct_fields: std::collections::HashSet<String>,
+    /// Name of the struct whose inits/methods are being checked (`None` outside one).
+    current_struct: Option<String>,
+    /// Names of every user struct and enum — what makes a `mut T` parameter a lent `&mut T`
+    /// (mirrors `Transpiler::is_lent_param`'s `all_struct_types` / `all_enum_types`).
+    user_types: std::collections::HashSet<String>,
+    /// (struct name, method name) -> the parameter list of every overload, for
+    /// `check_same_object_lend`.
+    struct_methods: HashMap<(String, String), Vec<Vec<Param>>>,
+    /// Struct name -> its fields' declared types, for resolving `a.b.c` receiver chains.
+    struct_field_types: HashMap<String, Vec<(String, Type)>>,
     /// Enum name -> its variant names in declaration order, collected once up
     /// front (mirrors `kernel_decls`) for `check_enum_match_exhaustiveness`. A
     /// `native` enum (body is `native`, see `EnumDecl::is_native`) parses with
@@ -275,6 +308,12 @@ impl Checker {
             fn_param_types: HashMap::new(),
             fn_arity: HashMap::new(),
             fn_overloaded: std::collections::HashSet::new(),
+            fn_returns_collection: std::collections::HashSet::new(),
+            current_struct_fields: std::collections::HashSet::new(),
+            current_struct: None,
+            user_types: std::collections::HashSet::new(),
+            struct_methods: HashMap::new(),
+            struct_field_types: HashMap::new(),
             struct_ctor_owned: HashMap::new(),
             moved: vec![HashMap::new()],
             kernel_dispatch_only: false,
@@ -307,11 +346,39 @@ impl Checker {
 
     fn define_typed(&mut self, name: &str, kind: BindingKind, ty: Option<Type>) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding { kind, ty, resident_from_field: false, kernel_type: None });
+            scope.insert(name.to_string(), Binding {
+                kind, ty, resident_from_field: false, kernel_type: None, ctor_type: None,
+                builtin_collection: false, content_mutable: true,
+            });
         }
     }
 
-    fn define_let(&mut self, name: &str, kind: BindingKind, ty: Option<Type>, value: Option<&Expr>) {
+    /// Defines a function/method/closure parameter, tracking built-in-collection
+    /// content-mutability (see `Binding::builtin_collection`). A variadic parameter's
+    /// declared type is its *element* type, so it is never tracked as a collection.
+    fn define_param(&mut self, p: &Param) {
+        self.define_typed(&p.name, param_binding(p), p.ty.clone());
+        let builtin_collection = !p.variadic && p.ty.as_ref().is_some_and(is_builtin_collection_type);
+        let content_mutable = param_content_mutable(p);
+        if let Some(b) = self.scopes.last_mut().and_then(|s| s.get_mut(&p.name)) {
+            b.builtin_collection = builtin_collection;
+            b.content_mutable = content_mutable;
+        }
+    }
+
+    fn define_let(&mut self, name: &str, kind: BindingKind, var_mut: bool, ty: Option<Type>, value: Option<&Expr>) {
+        let builtin_collection = match &ty {
+            Some(t) => is_builtin_collection_type(t),
+            None => value.is_some_and(|v| self.is_collection_valued_expr(v)),
+        };
+        let content_mutable = match kind {
+            // Write-once `lazy` bindings aren't part of the var/mut model — never flag.
+            BindingKind::Lazy => true,
+            // The `mut` keyword always requests content mutation. The parser also wraps an
+            // explicit type in `Type::Mut`, but hand-built (desugared) `LetStmt`s don't.
+            BindingKind::Mut => true,
+            _ => crate::ast::binding_grants_mut(&kind, var_mut, ty.as_ref()),
+        };
         // `let k = SomeKernel(...)` — track which kernel type `k` is an instance of,
         // so a later unannotated read of one of its fields can be recognized too.
         let kernel_type = value.and_then(|v| match &v.kind {
@@ -321,6 +388,16 @@ impl Checker {
             },
             _ => None,
         });
+
+        let ctor_type = if ty.is_none() {
+            value.and_then(|v| match &v.kind {
+                ExprKind::Call(callee, _) => match &callee.kind {
+                    ExprKind::Var(n) if self.struct_field_types.contains_key(n.as_str()) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+        } else { None };
 
         let (resident_from_field, ty) = if ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false) {
             // Explicit `'gpu'unified`/`'gpu'global` annotation — resident if sourced
@@ -342,7 +419,9 @@ impl Checker {
         };
 
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding { kind, ty, resident_from_field, kernel_type });
+            scope.insert(name.to_string(), Binding {
+                kind, ty, resident_from_field, kernel_type, ctor_type, builtin_collection, content_mutable,
+            });
         }
     }
 
@@ -405,7 +484,7 @@ impl Checker {
             Item::Fn(f)     => self.collect_fn_signature(f),
             Item::Struct(s) => self.collect_struct_signature(s),
             Item::Kernel(k) => { self.kernel_decls.insert(k.name.clone(), k.clone()); }
-            Item::Enum(e)   => { self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
+            Item::Enum(e)   => { self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
             Item::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
             Item::Stmt(s)   => self.collect_stmt_signatures(s),
             _ => {}
@@ -418,7 +497,7 @@ impl Checker {
         match stmt {
             Stmt::Fn(f)     => self.collect_fn_signature(f),
             Stmt::Struct(s) => self.collect_struct_signature(s),
-            Stmt::Enum(e)   => { self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
+            Stmt::Enum(e)   => { self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
             Stmt::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
             Stmt::If(s)     => { for (_, b) in &s.branches { for st in b { self.collect_stmt_signatures(st); } } if let Some(b) = &s.else_body { for st in b { self.collect_stmt_signatures(st); } } }
             Stmt::While(s)  => { for st in &s.body { self.collect_stmt_signatures(st); } }
@@ -452,7 +531,13 @@ impl Checker {
             let arity = FnArity { param_names, has_default, variadic };
             if self.fn_arity.insert(f.name.clone(), arity).is_some() {
                 self.fn_overloaded.insert(f.name.clone());
+                self.fn_returns_collection.remove(&f.name);
             }
+        }
+        if !self.fn_overloaded.contains(&f.name)
+            && f.return_ty.as_ref().is_some_and(|t| is_builtin_collection_type(t) && !t.grants_mut())
+        {
+            self.fn_returns_collection.insert(f.name.clone());
         }
         if let Some(rt) = &f.return_ty {
             if rt.gpu_resident_qual().is_some() {
@@ -468,8 +553,11 @@ impl Checker {
     }
 
     fn collect_struct_signature(&mut self, s: &StructDecl) {
+        self.user_types.insert(s.name.clone());
+        self.struct_field_types.insert(s.name.clone(), s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect());
         for m in &s.methods {
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
+            self.struct_methods.entry((s.name.clone(), m.name.clone())).or_default().push(m.params.clone());
         }
         // See `struct_ctor_owned`'s doc: exactly one explicit `init` -> use its
         // params; no explicit `init` -> the implicit constructor matches fields
@@ -639,6 +727,11 @@ impl Checker {
         self.check_qualifier_constraint(binding, var_mut, ty, line, col);
         self.check_tuple_mut_constraint(binding, var_mut, ty, value, line, col);
         self.check_scalar_mut_constraint(binding, var_mut, ty, value, line, col);
+        if let Some(ty) = ty {
+            if !self.kernel_dispatch_only && Self::type_has_nested_scalar_mut(ty) {
+                self.report_scalar_mut("element", line, col);
+            }
+        }
     }
 
     // ── Qualifier constraint: `mut` on a tuple-typed binding ───────────────────
@@ -713,6 +806,74 @@ impl Checker {
                 "cannot mark a scalar as `mut`: primitives have no `def` methods to unlock — use `var` for a rebindable scalar",
                 line, col,
             );
+        }
+    }
+
+    // ── Qualifier constraint: `mut` on a scalar, in every non-local position ───
+    //
+    // Same rule as `check_scalar_mut_constraint` (scalars have value semantics
+    // and must not become aliasable mutable instances; `var` is the only way to
+    // get a rebindable scalar), extended from local bindings to every other
+    // place a `mut` can appear: function/method/`init`/`type def` parameters,
+    // struct/enum fields, and `mut` nested inside a type (`[mut int]`,
+    // `{string=mut int}`, `(mut int, string)`). Deliberately NOT applied to
+    // generic positions (`Generic(_, args)`, `TypeParam`): `mut T` there is
+    // resolved only at monomorphization. `mut int'atomic` (a `Qualified`
+    // inner type) and `mut int&` (a borrow qualifier) are not `Type::Mut` of a
+    // bare scalar, so they are untouched; `var int` params are out-params and
+    // carry no `mut` at all.
+    fn type_has_scalar_mut(ty: &Type) -> bool {
+        match ty {
+            Type::Mut(inner) => {
+                Self::is_scalar_type(inner.without_mut()) || Self::type_has_scalar_mut(inner)
+            }
+            Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _)
+                | Type::LabeledArray(inner, _) | Type::Optional(inner) | Type::Set(inner)
+                | Type::Qualified(inner, _) => Self::type_has_scalar_mut(inner),
+            Type::Dict(k, v) => Self::type_has_scalar_mut(k) || Self::type_has_scalar_mut(v),
+            Type::Tuple(elems) => elems.iter().any(Self::type_has_scalar_mut),
+            _ => false,
+        }
+    }
+
+    /// Like `type_has_scalar_mut`, but ignores a `mut` wrapping the type itself —
+    /// for a `let`, whose top-level `mut` is already reported by
+    /// `check_scalar_mut_constraint`.
+    fn type_has_nested_scalar_mut(ty: &Type) -> bool {
+        match ty {
+            Type::Mut(inner) => Self::type_has_scalar_mut(inner),
+            other => Self::type_has_scalar_mut(other),
+        }
+    }
+
+    fn report_scalar_mut(&mut self, what: &str, line: usize, col: usize) {
+        self.error(
+            format!(
+                "cannot mark a scalar {what} as `mut`: scalars have value semantics and cannot be mutated in place — use `var` for a rebindable scalar (`var int` parameters are out-params)"
+            ),
+            line, col,
+        );
+    }
+
+    /// `mut` on a scalar-typed field, or nested in a field's type.
+    fn check_scalar_mut_in_type(&mut self, ty: &Type, what: &str, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        if Self::type_has_scalar_mut(ty) {
+            self.report_scalar_mut(what, line, col);
+        }
+    }
+
+    fn check_scalar_mut_param(&mut self, p: &Param) {
+        if self.kernel_dispatch_only { return; }
+        let Some(ty) = &p.ty else { return };
+        // `mutable && !rebindable` is a plain `mut` keyword (a bare `var` also
+        // sets `mutable`); `var_mut` is `var mut`, rejected for the same reason
+        // `var mut int x` is for locals.
+        let keyword_mut = (p.mutable && !p.rebindable) || p.var_mut;
+        if keyword_mut && Self::is_scalar_type(ty.without_mut()) {
+            self.report_scalar_mut("parameter", p.line, p.col);
+        } else if Self::type_has_scalar_mut(ty) {
+            self.report_scalar_mut("parameter", p.line, p.col);
         }
     }
 
@@ -887,6 +1048,7 @@ impl Checker {
 
     fn check_struct(&mut self, s: &StructDecl) {
         for f in &s.fields {
+            self.check_scalar_mut_in_type(&f.ty, "field", f.line, f.col);
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
             self.check_atomic_compatibility(&Some(f.ty.clone()), f.line, f.col);
             self.check_observed_compatibility(&Some(f.ty.clone()), f.line, f.col);
@@ -895,11 +1057,21 @@ impl Checker {
             // which either synthesizes a real `init` for this struct or exits with a clear
             // resolution error. Nothing left for the checker to reject here.
         }
+        // Implicit-`self` field names are visible bare inside the struct's inits/methods;
+        // a same-named *global* must not be mistaken for them (see
+        // `check_collection_content_mutation`).
+        let prev_fields = std::mem::replace(
+            &mut self.current_struct_fields,
+            s.fields.iter().map(|f| f.name.clone()).collect(),
+        );
+        let prev_struct = self.current_struct.replace(s.name.clone());
         for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }
+        self.current_struct = prev_struct;
+        self.current_struct_fields = prev_fields;
         for m in &s.type_methods {
             self.push_scope();
-            for p in &m.params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }
+            for p in &m.params { self.check_scalar_mut_param(p); self.define_param(p); }
             for stmt in &m.body { self.check_stmt(stmt); }
             self.pop_scope();
         }
@@ -910,6 +1082,7 @@ impl Checker {
     fn check_enum(&mut self, e: &EnumDecl) {
         for v in &e.variants {
             for f in &v.fields {
+                self.check_scalar_mut_in_type(&f.ty, "field", v.line, v.col);
                 self.check_set_mut_constraint(&Some(f.ty.clone()), v.line, v.col);
                 self.check_atomic_compatibility(&Some(f.ty.clone()), v.line, v.col);
                 self.check_observed_compatibility(&Some(f.ty.clone()), v.line, v.col);
@@ -920,7 +1093,7 @@ impl Checker {
         // `check_struct`'s identical loop.
         for m in &e.type_methods {
             self.push_scope();
-            for p in &m.params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }
+            for p in &m.params { self.check_scalar_mut_param(p); self.define_param(p); }
             for stmt in &m.body { self.check_stmt(stmt); }
             self.pop_scope();
         }
@@ -948,10 +1121,15 @@ impl Checker {
             if p.mutable {
                 self.check_qualifier_constraint(&kind, false, &p.ty, p.line, p.col);
             }
+            if let Some(ty) = &p.ty { self.check_scalar_mut_in_type(ty, "parameter", p.line, p.col); }
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
             self.check_atomic_compatibility(&p.ty, p.line, p.col);
             self.check_observed_compatibility(&p.ty, p.line, p.col);
             self.define_typed(&p.name, kind, p.ty.clone());
+            if let Some(b) = self.scopes.last_mut().and_then(|s| s.get_mut(&p.name)) {
+                b.builtin_collection = p.ty.as_ref().is_some_and(is_builtin_collection_type);
+                b.content_mutable = p.mutable || p.ty.as_ref().is_some_and(|t| t.grants_mut());
+            }
             if let Some(def) = &p.default { self.check_expr(def); }
         }
         self.check_dead_code(&init.body);
@@ -1066,12 +1244,13 @@ impl Checker {
             if p.mutable {
                 self.check_qualifier_constraint(&BindingKind::Mut, false, &p.ty, p.line, p.col);
             }
+            self.check_scalar_mut_param(p);
             // `{mut T}` is illegal regardless of whether the parameter itself
             // is `mut` — the illegality lives on the Set's element type.
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
             self.check_atomic_compatibility(&p.ty, p.line, p.col);
             self.check_observed_compatibility(&p.ty, p.line, p.col);
-            self.define_typed(&p.name, param_binding(p), p.ty.clone());
+            self.define_param(p);
         }
         // Return type — same `'shared'observed` rejection as params/fields/locals
         // (`check_observed_compatibility`'s doc). Not covered by the field/param loop
@@ -1347,7 +1526,7 @@ impl Checker {
                 self.check_label_compat(v, &source_ty, target_ty, s.line, s.col);
             }
         }
-        self.define_let(&s.name, s.binding.clone(), s.ty.clone(), s.value.as_ref());
+        self.define_let(&s.name, s.binding.clone(), s.var_mut, s.ty.clone(), s.value.as_ref());
     }
 
     /// Tuple analogue of `define_let`'s interprocedural case: if `s.value` is a call
@@ -1411,6 +1590,9 @@ impl Checker {
                     ty: b.ty.clone(),
                     resident_from_field,
                     kernel_type: None,
+                    ctor_type: None,
+                    builtin_collection: b.ty.as_ref().is_some_and(is_builtin_collection_type),
+                    content_mutable: crate::ast::binding_grants_mut(&b.binding, b.var_mut, b.ty.as_ref()),
                 });
             }
         }
@@ -1835,9 +2017,19 @@ impl Checker {
                     }
                 }
             }
-            ExprKind::MethodCall(recv, _, args) | ExprKind::OptionalMethodCall(recv, _, args) => {
+            ExprKind::MethodCall(recv, method, args) | ExprKind::OptionalMethodCall(recv, method, args) => {
                 self.check_expr(recv);
                 for a in args { self.check_expr(&a.value); }
+                if matches!(&expr.kind, ExprKind::MethodCall(..))
+                    && MUTATING_BUILTIN_COLLECTION_METHODS.contains(&method.as_str())
+                {
+                    self.check_collection_content_mutation(
+                        recv, Some(method), &format!("call `.{method}()` on it"),
+                    );
+                }
+                if matches!(&expr.kind, ExprKind::MethodCall(..)) {
+                    self.check_same_object_lend(recv, method, args);
+                }
             }
             ExprKind::GenericCall(callee, _, args) => {
                 self.check_expr(callee);
@@ -1937,7 +2129,7 @@ impl Checker {
             }
             ExprKind::Closure(params, _, body, _, _) => {
                 self.push_scope();
-                for p in params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }
+                for p in params { self.define_param(p); }
                 match body {
                     ClosureBody::Expr(e)      => self.check_expr(e),
                     ClosureBody::Block(stmts) => self.check_block_in_current_scope(stmts),
@@ -1962,6 +2154,88 @@ impl Checker {
             | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil
             | ExprKind::Void | ExprKind::DotIdent(_) => {}
         }
+    }
+
+
+    // ── Content-mutation check for built-in collections ─────────────────────────
+    //
+    // docs/book.md ("Variables and Mutability"): a bare `var` binding is only
+    // *rebindable*; mutating the contents of a value needs `mut` or `var mut`.
+    // User structs/enums enforce this in the transpiler (`def` calls, field writes);
+    // this is the same rule for the built-in collections `[T]`, `{K=V}` and `{T}`
+    // — in the checker, so `boring run` and `boring build` agree.
+    //
+    // Only fires when the receiver is positively known to be a built-in collection
+    // (`Binding::builtin_collection`: an explicit collection annotation, a collection
+    // literal initializer, or a call to a free function declared to return one), so an
+    // unannotated binding of unknown type is never rejected — same "better a missed
+    // diagnostic than a false positive" stance as the other type-less checks here.
+
+    /// Is `e` an expression that is certainly a fresh built-in collection value?
+    fn is_collection_valued_expr(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Array(_) | ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. }
+            | ExprKind::ArrayComp { .. } | ExprKind::ArrayCompIter { .. }
+            | ExprKind::LabeledArrayComp { .. } | ExprKind::Dict(_) | ExprKind::Set(_) => true,
+            ExprKind::Call(callee, _) => matches!(
+                &callee.kind,
+                ExprKind::Var(n) if self.fn_returns_collection.contains(n.as_str()) && self.lookup(n).is_none()
+            ),
+            _ => false,
+        }
+    }
+
+    /// `container` is the expression whose contents are about to change in place:
+    /// the receiver of a mutating method call (`v.push(..)` → `v`), or the object of an
+    /// index assignment (`v[i] = ..` → `v`, `m[i][j] = ..` → `m[i]`). `action` is the
+    /// human-readable description for the diagnostic. Reports an error when the root
+    /// binding is a known built-in collection that doesn't grant content mutation.
+    ///
+    /// For a nested place (`m[i].push(..)`, `m[i][j] = ..`) the element type is consulted:
+    /// `[mut [int]] m` lets `m[i]` be mutated in place even though `m` itself can't grow
+    /// (docs/book.md's element-mutability), so an element type that grants `mut` anywhere
+    /// along the path permits it. Nested places on a binding with no element type
+    /// information (an inferred literal) are not checked.
+    fn check_collection_content_mutation(&mut self, container: &Expr, method: Option<&str>, action: &str) {
+        if self.kernel_dispatch_only { return; }
+        // Walk `container` down to its root variable through plain index steps.
+        let mut depth = 0usize;
+        let mut cur = container;
+        let root = loop {
+            match &cur.kind {
+                ExprKind::Var(name) => break name,
+                ExprKind::Index(obj, _) | ExprKind::LabeledIndex(obj, _) => { depth += 1; cur = obj; }
+                _ => return,
+            }
+        };
+        let Some(binding) = self.lookup(root) else { return };
+        if !binding.builtin_collection || binding.content_mutable { return; }
+        if self.current_struct_fields.contains(root.as_str()) && self.scopes.len() > 1
+            && !self.scopes[1..].iter().any(|sc| sc.contains_key(root.as_str()))
+        {
+            return; // resolves to a global only; inside the struct that name is its field
+        }
+        // The type of the thing actually being mutated, when statically known.
+        let mut target_is_collection = depth == 0;
+        if depth > 0 {
+            let Some(mut t) = binding.ty.as_ref() else { return };
+            for _ in 0..depth {
+                let Some(elem) = t.index_element_type() else { return };
+                if elem.grants_mut() { return; }
+                t = elem;
+            }
+            target_is_collection = is_builtin_collection_type(t);
+            if !target_is_collection { return; }
+        }
+        // A method call on a non-collection element (e.g. a struct with its own `push`)
+        // is the struct rules' business, not this check's.
+        if method.is_some() && !target_is_collection { return; }
+        let kind = match binding.kind {
+            BindingKind::Var => "`var` (rebindable only, not content-mutable)",
+            _ => "immutable",
+        };
+        let msg = format!("`{root}` is {kind} — cannot {action}; fix: declare it `mut` or `var mut`");
+        self.error(msg, container.line, container.col);
     }
 
     // ── Immutability check on assignment targets ───────────────────────────────
@@ -2032,8 +2306,13 @@ impl Checker {
             }
             // Unknown variable — undefined-var check belongs to the interpreter/transpiler.
         }
-        // Field and index targets are not checked here: mutability of those
-        // requires type information not yet available at this pass.
+        // Element assignment into a built-in collection (`v[i] = x`, `m[i][j] = x`):
+        // content mutation of the indexed container — see
+        // `check_collection_content_mutation`. Other index/field targets (a struct
+        // field, an unknown type) still need type information this pass lacks.
+        if let ExprKind::Index(obj, _) | ExprKind::LabeledIndex(obj, _) = &lhs.kind {
+            self.check_collection_content_mutation(obj, None, "assign to its elements");
+        }
     }
 
 }
@@ -2226,6 +2505,35 @@ fn kernel_init_field_for_param<'a>(decl: &'a KernelDecl, param_name: &str) -> Op
     }
     None
 }
+
+/// Does this parameter grant *content* mutation (structural collection mutation, `def`
+/// calls, field writes)? A bare `var` parameter is rebindable only — `Param.mutable` is
+/// `true` for both `var` and `mut`, so the two must be told apart via `rebindable`/`var_mut`.
+/// Mirrors `Transpiler::content_mutable_params`.
+fn param_content_mutable(p: &Param) -> bool {
+    (p.mutable && !p.rebindable) || p.var_mut || p.ty.as_ref().is_some_and(|t| t.grants_mut())
+}
+
+/// Is `ty` (looking through `mut`, qualifiers) one of the built-in collection types —
+/// `[T]`, `[T, N]`, labeled multi-dim arrays, `{K=V}`, `{T}`?
+fn is_builtin_collection_type(ty: &Type) -> bool {
+    match ty {
+        Type::Mut(inner) | Type::Qualified(inner, _) => is_builtin_collection_type(inner),
+        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)
+        | Type::Dict(_, _) | Type::Set(_) => true,
+        _ => false,
+    }
+}
+
+/// Built-in collection methods that mutate their receiver in place. Deliberately narrower
+/// than `transpiler::helpers::MUTATING_COLLECTION_METHODS` (which is conservative for
+/// `'actor` gating / by-ref inference): `removeAt`/`remove_at` return a *new* collection
+/// (`BoringArrayIndex::remove_at(&self) -> Vec<T>`), so they are not content mutation.
+const MUTATING_BUILTIN_COLLECTION_METHODS: &[&str] = &[
+    "push", "pop", "append", "extend", "insert", "remove", "add", "set", "put", "clear",
+    "sort", "sortBy", "sort_by", "reverse", "shuffle", "dedup", "retain", "truncate", "drain",
+    "swap", "fill",
+];
 
 fn param_binding(p: &Param) -> BindingKind {
     if p.rebindable { BindingKind::Var }
@@ -2459,7 +2767,7 @@ with fc:
         // from a kernel field, is just a plain host array — freely indexed/assigned
         // with no `with` wrapper required anywhere.
         let src = r#"
-var [float]'gpu'unified x = [0.0, 0.0, 0.0]
+var mut [float]'gpu'unified x = [0.0, 0.0, 0.0]
 x[0] = 1.0
 print "{x[0]}"
 for v in x:
@@ -3134,3 +3442,282 @@ mod match_exhaustiveness_tests {
 }
 
 pub(crate) mod tensor;
+
+/// Content mutation of built-in collections (`[T]`, `{K=V}`, `{T}`) requires `mut` /
+/// `var mut` — a bare `var` is rebindable only (docs/book.md "Variables and Mutability").
+#[cfg(test)]
+mod collection_content_mut_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    fn assert_rejected(src: &str, name: &str) {
+        let errs = errors_for(src);
+        assert!(
+            errs.iter().any(|e| e.contains(&format!("`{name}`")) && (e.contains("`var`") || e.contains("immutable")) && e.contains("`mut` or `var mut`")),
+            "expected a content-mutation rejection for `{name}`, got {errs:?}"
+        );
+    }
+
+    fn assert_ok(src: &str) {
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn var_array_push_is_rejected() {
+        assert_rejected("def main():\n    var [int] v = [1]\n    v.push(2)\n", "v");
+    }
+
+    #[test]
+    fn var_array_index_assign_is_rejected() {
+        assert_rejected("def main():\n    var [int] v = [1]\n    v[0] = 5\n", "v");
+    }
+
+    #[test]
+    fn var_array_compound_index_assign_is_rejected() {
+        assert_rejected("def main():\n    var [int] v = [1]\n    v[0] += 5\n", "v");
+    }
+
+    #[test]
+    fn var_inferred_array_literal_is_rejected() {
+        assert_rejected("def main():\n    var v = [1, 2]\n    v.push(3)\n", "v");
+        assert_rejected("def main():\n    var v = [0 for i in 0..<3]\n    v[1] = 1\n", "v");
+    }
+
+    #[test]
+    fn var_dict_mutation_is_rejected() {
+        assert_rejected("def main():\n    var {string=int} d = {\"a\" = 1}\n    d[\"b\"] = 2\n", "d");
+        assert_rejected("def main():\n    var {string=int} d = {\"a\" = 1}\n    d.remove(\"a\")\n", "d");
+        assert_rejected("def main():\n    var d = {\"a\" = 1}\n    d[\"b\"] = 2\n", "d");
+    }
+
+    #[test]
+    fn var_set_mutation_is_rejected() {
+        assert_rejected("def main():\n    var {int} s = {1}\n    s.add(2)\n", "s");
+        assert_rejected("def main():\n    var {int} s = {1}\n    s.remove(1)\n", "s");
+    }
+
+    #[test]
+    fn every_mutating_method_is_rejected_on_var() {
+        for m in ["pop()", "clear()", "sort()", "reverse()", "append([2])", "insert(0, 1)", "remove(0)", "extend([2])", "truncate(0)", "retain((x): true)"] {
+            assert_rejected(&format!("def main():\n    var [int] v = [1]\n    v.{m}\n"), "v");
+        }
+    }
+
+    #[test]
+    fn let_collection_mutation_is_rejected() {
+        assert_rejected("def main():\n    let [int] v = [1]\n    v.push(2)\n", "v");
+        assert_rejected("def main():\n    let [int] v = [1]\n    v[0] = 2\n", "v");
+    }
+
+    #[test]
+    fn mut_and_var_mut_locals_are_fine() {
+        assert_ok("def main():\n    var mut [int] w = [1]\n    w.push(2)\n    w[0] = 5\n    mut [int] m = [1]\n    m.push(2)\n    m[0] = 3\n");
+        assert_ok("def main():\n    var mut {string=int} d = {\"a\" = 1}\n    d[\"b\"] = 2\n    mut {int} s = {1}\n    s.add(2)\n");
+        assert_ok("def main():\n    var mut w = [1]\n    w.push(2)\n    var mut d = {\"a\" = 1}\n    d[\"b\"] = 2\n");
+    }
+
+    #[test]
+    fn rebinding_and_reading_a_var_collection_is_fine() {
+        assert_ok("def main():\n    var [int] v = [1]\n    v = [1, 2, 3]\n    v = v.map((x): x * 2)\n    print v[0]\n    print v.length\n    var w = v.sorted()\n    w = w.removeAt(w.firstIndex())\n");
+    }
+
+    #[test]
+    fn var_param_mutation_is_rejected() {
+        assert_rejected("def f(var [int] b):\n    b.push(1)\n", "b");
+        assert_rejected("def f(var [int] b):\n    b[0] = 1\n", "b");
+        assert_rejected("def f(var {string=int} d):\n    d[\"k\"] = 1\n", "d");
+        assert_rejected("def f(var {int} s):\n    s.add(1)\n", "s");
+    }
+
+    #[test]
+    fn plain_param_mutation_is_rejected() {
+        assert_rejected("def f([int] b):\n    b.push(1)\n", "b");
+    }
+
+    #[test]
+    fn mut_and_var_mut_params_are_fine() {
+        assert_ok("def f(mut [int] b):\n    b.push(1)\n    b[0] = 1\n");
+        assert_ok("def f(var mut [int] b):\n    b.push(1)\n    b[0] = 1\n    b = [2]\n");
+        assert_ok("def f(mut {string=int} d, mut {int} s):\n    d[\"k\"] = 1\n    s.add(1)\n");
+    }
+
+    #[test]
+    fn var_param_rebinding_is_still_fine() {
+        assert_ok("def f(var [int] b):\n    b = [1, 2]\n");
+    }
+
+    #[test]
+    fn nested_index_mutation_blames_the_root_binding() {
+        assert_rejected("def main():\n    var [[int]] m = [[1]]\n    m[0].push(2)\n", "m");
+        assert_rejected("def main():\n    var [[int]] m = [[1]]\n    m[0][0] = 2\n", "m");
+        assert_ok("def main():\n    var mut [[int]] m = [[1]]\n    m[0].push(2)\n    m[0][0] = 2\n");
+    }
+
+    #[test]
+    fn mut_element_type_permits_in_place_element_mutation() {
+        // `[mut [int]] m`: `m` can't grow/shrink, but each element can be mutated.
+        assert_ok("def main():\n    var [mut [int]] m = [[1]]\n    m[0].push(2)\n    m[0][0] = 3\n");
+        assert_rejected("def main():\n    var [mut [int]] m = [[1]]\n    m.push([2])\n", "m");
+        assert_rejected("def main():\n    var [mut [int]] m = [[1]]\n    m[0] = [2]\n", "m");
+    }
+
+    #[test]
+    fn function_return_type_infers_a_collection() {
+        assert_rejected("[int] make():\n    return [1]\n\ndef main():\n    var v = make()\n    v.push(2)\n", "v");
+        assert_ok("[int] make():\n    return [1]\n\ndef main():\n    var mut v = make()\n    v.push(2)\n");
+    }
+
+    #[test]
+    fn unknown_receiver_types_are_never_flagged() {
+        // `x`'s type is unknown to the checker (opaque call result): no diagnostic.
+        assert_ok("def main():\n    var x = unknown_fn()\n    x.push(2)\n    x[0] = 1\n");
+    }
+
+    #[test]
+    fn user_struct_method_named_like_a_collection_method_is_not_this_checks_business() {
+        // `Bag.push` is the struct's own method — the struct `def`/`req` rules own it.
+        assert_ok("struct Bag:\n    var int n = 0\n    def push(int k):\n        n = n + k\n\ndef main():\n    mut Bag b = Bag(0)\n    b.push(1)\n");
+    }
+
+    #[test]
+    fn implicit_self_field_is_not_confused_with_a_same_named_global() {
+        let src = "var [int] items = [1]\n\nstruct Bag:\n    var mut [int] items = []\n    def add_item(int k):\n        items.push(k)\n\ndef main():\n    mut Bag b = Bag([])\n    b.add_item(1)\n";
+        assert_ok(src);
+    }
+
+    #[test]
+    fn shadowing_uses_the_innermost_binding() {
+        assert_ok("def main():\n    var [int] v = [1]\n    if true:\n        var mut [int] v = [2]\n        v.push(3)\n");
+    }
+
+    #[test]
+    fn mutating_a_captured_var_collection_in_a_closure_is_rejected() {
+        assert_rejected("def main():\n    var [int] v = [1]\n    let f = (): v.push(2)\n    f()\n", "v");
+    }
+}
+
+#[cfg(test)]
+mod scalar_mut_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    fn assert_rejected(src: &str) {
+        let errs = errors_for(src);
+        assert!(
+            errs.iter().any(|e| e.contains("scalar") && e.contains("`var`")),
+            "expected a scalar/mut rejection pointing to `var`, got {errs:?}\nsrc:\n{src}"
+        );
+    }
+
+    fn assert_ok(src: &str) {
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}\nsrc:\n{src}");
+    }
+
+    #[test]
+    fn mut_scalar_param_is_rejected() {
+        assert_rejected("def f(mut int n):\n    n = n + 1\n\ndef main():\n    f(1)\n");
+        assert_rejected("def f(mut float x):\n    print x\n\ndef main():\n    f(1.0)\n");
+        assert_rejected("def f(mut bool b):\n    print b\n\ndef main():\n    f(true)\n");
+        assert_rejected("def f(mut int32 n):\n    print n\n\ndef main():\n    f(1)\n");
+    }
+
+    #[test]
+    fn var_mut_scalar_param_is_rejected() {
+        assert_rejected("def f(var mut int n):\n    n = n + 1\n\ndef main():\n    f(1)\n");
+    }
+
+    #[test]
+    fn var_scalar_param_out_param_is_fine() {
+        assert_ok("def f(var int n):\n    n = n + 1\n\ndef main():\n    var int x = 1\n    f(x)\n");
+    }
+
+    #[test]
+    fn plain_scalar_param_is_fine() {
+        assert_ok("def f(int n):\n    print n\n\ndef main():\n    f(1)\n");
+    }
+
+    #[test]
+    fn mut_struct_param_is_fine() {
+        assert_ok(
+            "struct C:\n    var int n\n    def inc():\n        self.n = self.n + 1\n\ndef f(mut C c):\n    c.inc()\n\ndef main():\n    var C c = C(n: 0)\n    f(c)\n",
+        );
+    }
+
+    #[test]
+    fn mut_scalar_method_param_is_rejected() {
+        assert_rejected(
+            "struct S:\n    int v\n    def bump(mut int by):\n        print by\n\ndef main():\n    let S s = S(v: 1)\n    s.bump(1)\n",
+        );
+    }
+
+    #[test]
+    fn mut_scalar_init_param_nested_is_rejected() {
+        assert_rejected(
+            "struct S:\n    int v\n    init([mut int] xs):\n        self.v = 0\n\ndef main():\n    let S s = S([1])\n",
+        );
+    }
+
+    #[test]
+    fn mut_scalar_field_is_rejected() {
+        assert_rejected("struct S:\n    mut int n\n\ndef main():\n    let S s = S(n: 1)\n");
+        assert_rejected("struct S:\n    var mut int n\n\ndef main():\n    let S s = S(n: 1)\n");
+    }
+
+    #[test]
+    fn plain_and_var_scalar_fields_are_fine() {
+        assert_ok("struct S:\n    int a\n    var int b\n\ndef main():\n    let S s = S(a: 1, b: 2)\n");
+    }
+
+    #[test]
+    fn mut_struct_field_is_fine() {
+        assert_ok("struct C:\n    var int n\n\nstruct S:\n    mut C c\n\ndef main():\n    let S s = S(c: C(n: 1))\n");
+    }
+
+    #[test]
+    fn mut_scalar_array_element_is_rejected() {
+        assert_rejected("def main():\n    var [mut int] xs = [1, 2]\n    print xs[0]\n");
+        assert_rejected("def f([mut int] xs):\n    print xs[0]\n\ndef main():\n    f([1])\n");
+        assert_rejected("struct S:\n    [mut int] xs\n\ndef main():\n    let S s = S(xs: [1])\n");
+    }
+
+    #[test]
+    fn mut_struct_array_element_is_fine() {
+        assert_ok("struct C:\n    var int n\n\ndef f([mut C] cs):\n    print cs[0].n\n\ndef main():\n    f([C(n: 1)])\n");
+    }
+
+    #[test]
+    fn mut_scalar_dict_value_is_rejected() {
+        assert_rejected("def main():\n    var {string=mut int} d = {}\n    print d.len()\n");
+        assert_rejected("struct S:\n    {string=mut int} d\n\ndef main():\n    print 1\n");
+    }
+
+    #[test]
+    fn mut_scalar_tuple_slot_is_rejected() {
+        assert_rejected("def main():\n    let (mut int, string) t = (1, \"a\")\n    print t.1\n");
+        assert_rejected("def f((mut int, string) t):\n    print t.1\n\ndef main():\n    f((1, \"a\"))\n");
+    }
+
+    #[test]
+    fn plain_tuple_slot_is_fine() {
+        assert_ok("def main():\n    let (int, string) t = (1, \"a\")\n    print t.1\n");
+    }
+
+    #[test]
+    fn mut_atomic_scalar_still_works() {
+        assert_ok("def main():\n    mut counter'atomic = 0\n    print counter\n");
+    }
+}

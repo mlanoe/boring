@@ -1,0 +1,69 @@
+# Regression test: a `mut` parameter of an associated function (`type def` / `type req`, no
+# `self`) is honoured like any other `mut` parameter (docs/book.md "`mut` vs `var` on a struct
+# parameter"): the callee mutates the caller's content.
+#   - `boring run` bound a type method's parameters as plain `let`s, so the first field write
+#     failed with "cannot mutate field ... on non-mut binding",
+#   - `boring build` emitted `fn make(c: Counter)` called as `Holder::make(c.clone())`,
+#   - now the signature is `&mut Counter` / `&mut [uint8]` and the call site lends
+#     `&mut place` (never a clone), in both backends.
+# Also covers: a lent param forwarded to another associated function, a `type req`, and the
+# same on an enum (`type def` in an enum body).
+
+struct Counter:
+    var int value = 0
+
+struct Holder:
+    var int hits = 0
+
+    type def int make(mut Counter c):
+        c.value = 42
+        1
+
+    type def bump(mut Counter c, mut [uint8] b):
+        c.value += 1
+        b[0] = 7 as uint8
+
+    type def twice(mut Counter c):
+        Holder.bump_only(c)
+        Holder.bump_only(c)
+
+    type def bump_only(mut Counter c):
+        c.value += 10
+
+    type req int peek(Counter c):
+        c.value
+
+enum Shape:
+    Circle(float)
+    Square(float)
+
+    type def int make(mut Counter c):
+        c.value = 99
+        2
+
+    type def twice(mut Counter c, mut [uint8] b):
+        Shape.bump_only(c)
+        Shape.bump_only(c)
+        b[1] = 9 as uint8
+
+    type def bump_only(mut Counter c):
+        c.value += 1
+
+def main():
+    mut Counter c = Counter()
+    print Holder.make(c)
+    print c.value
+    mut [uint8] buf = [0 as uint8 for i in 0..<2]
+    Holder.bump(c, buf)
+    print c.value
+    print buf[0]
+    Holder.twice(c)
+    print c.value
+    print Holder.peek(c)
+
+    mut Counter e = Counter()
+    print Shape.make(e)
+    print e.value
+    Shape.twice(e, buf)
+    print e.value
+    print buf[1]

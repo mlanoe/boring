@@ -1,8 +1,8 @@
 def main():
-    var [int] arr = [1, 2, 3]
+    mut [int] arr = [1, 2, 3]
     arr[0] = 99
     print "{arr[0]}"
-    var {string=int} d = {"a" = 1}
+    mut {string=int} d = {"a" = 1}
     d["a"] = 42
     let v = d["a"]
     print "{v}"

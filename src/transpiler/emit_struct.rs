@@ -74,7 +74,7 @@ impl Transpiler {
                     // `Clone`/`PartialEq` impl, so a struct holding one can't derive
                     // either without a compile error.
                     || matches!(ty, Type::Array(elem) if matches!(
-                        elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
+                        elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
                     || field_is_boxed_trait(ty, &self.trait_method_names).is_some()
             });
             // `Box<dyn Trait>: Debug` (needed for the struct's own auto-derived `Debug`,
@@ -87,7 +87,7 @@ impl Transpiler {
             let has_non_debug_trait_array_field = s.fields.iter().any(|f| {
                 let mut ty = &f.ty;
                 while let Type::Mut(inner) = ty { ty = inner; }
-                matches!(ty, Type::Array(elem) if matches!(elem.as_ref(),
+                matches!(ty, Type::Array(elem) if matches!(elem.without_mut(),
                     Type::Named(n) if self.trait_method_names.contains_key(n.as_str())
                         && !self.trait_requires_debug(n.as_str())))
                     || field_is_boxed_trait(ty, &self.trait_method_names).is_some_and(|n| !self.trait_requires_debug(n))
@@ -1032,6 +1032,9 @@ impl Transpiler {
             }
             _ => {
                 let ps: Vec<String> = tm.params.iter().map(|p| {
+                    // A `mut` user-struct/enum/collection parameter is lent: `&mut T`
+                    // (see `is_lent_param`), matching what `try_emit_type_method_call` passes.
+                    if self.is_lent_param(p, true) { return self.emit_param(p, true); }
                     let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_default();
                     format!("{}: {}", p.name, ty)
                 }).collect();
@@ -1102,6 +1105,7 @@ impl Transpiler {
         let prev_known_local_vars   = std::mem::take(&mut self.known_local_vars);
         let prev_var_types          = std::mem::take(&mut self.var_types);
         let prev_dict_vars          = std::mem::take(&mut self.dict_vars);
+        let prev_set_vars           = std::mem::take(&mut self.set_vars);
         let prev_string_vars        = std::mem::take(&mut self.string_vars);
         let prev_var_mutex_types    = std::mem::take(&mut self.var_mutex_types);
         let prev_var_mutex_task_types = std::mem::take(&mut self.var_mutex_task_types);
@@ -1130,9 +1134,32 @@ impl Transpiler {
         // type-method params to begin with — see the gap noted above) and restore the
         // caller's map afterward, same save/take/restore rationale as every other set here.
         let prev_inferred_qualifiers = std::mem::take(&mut self.inferred_qualifiers);
+        // Lent `mut` params are `&mut T` bindings: record that so a forwarded argument is
+        // reborrowed (`&mut *c`, `emit_lent_arg`) and a buffer call sees a reference.
+        let lent_names: Vec<String> = tm.params.iter()
+            .filter(|p| self.is_lent_param(p, true)).map(|p| p.name.clone()).collect();
+        for n in &lent_names { self.inferred_qualifiers.insert(n.clone(), OwnerQual::BorrowMut); }
+        // `emit_body` re-runs `infer_qualifiers`, which clears the map above and re-adds
+        // `BorrowMut` for exactly `fn_current_params_lent` — so seed that (and only the
+        // lent params in `fn_current_params`, so no other inference is switched on for a
+        // type method's params, whose signature is rendered without it).
+        let prev_fn_current_params = std::mem::take(&mut self.fn_current_params);
+        let prev_fn_current_params_lent = std::mem::take(&mut self.fn_current_params_lent);
+        self.fn_current_params = tm.params.iter()
+            .filter(|p| lent_names.contains(&p.name))
+            .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
+            .collect();
+        self.fn_current_params_lent = lent_names.iter().cloned().collect();
+        let prev_fn_current_params_mut = std::mem::replace(&mut self.fn_current_params_mut, lent_names.iter().cloned().collect());
+        let prev_content_mutable_params = std::mem::take(&mut self.content_mutable_params);
+        self.content_mutable_params = lent_names.into_iter().collect();
         self.seed_param_locals(&tm.params);
         self.emit_body(&tm.body);
+        self.fn_current_params = prev_fn_current_params;
+        self.fn_current_params_lent = prev_fn_current_params_lent;
+        self.fn_current_params_mut = prev_fn_current_params_mut;
         self.inferred_qualifiers = prev_inferred_qualifiers;
+        self.content_mutable_params = prev_content_mutable_params;
         self.var_newtype_type   = prev_var_newtype_type;
         self.throws_fn_params   = prev_throws_fn_params;
         self.task_vars          = prev_task_vars;
@@ -1148,6 +1175,7 @@ impl Transpiler {
         self.var_mutex_types    = prev_var_mutex_types;
         self.string_vars        = prev_string_vars;
         self.dict_vars          = prev_dict_vars;
+        self.set_vars           = prev_set_vars;
         self.var_types          = prev_var_types;
         self.known_local_vars   = prev_known_local_vars;
         self.fn_return_ty = prev_fn_return_ty;
@@ -1589,9 +1617,9 @@ impl Transpiler {
     /// Builds type-level (`type let`/`type def`/`type req`) `Field`/`Method` reflection
     /// entries — the no-`instance` overloads (see `emit_introspect_prelude`'s
     /// `FieldAccess`/`MethodAccess::Type` doc). STRUCT-ONLY (there is no
-    /// `EnumDecl::type_vars` at all, and the transpiler does not yet emit `type_methods`
-    /// for enums regardless — see `EnumDecl::type_methods`'s own doc comment; an
-    /// out-of-scope pre-existing gap, not something this feature works around) and
+    /// `EnumDecl::type_vars` at all, and enums' `type_methods` — emitted in the enum's
+    /// `impl` block — are not reflected here either; an out-of-scope gap, not something
+    /// this feature works around) and
     /// NON-GENERIC-ONLY (a `type let`/`type def` inside `impl<T> Struct<T>` has no single
     /// T-independent Rust item to reference from a plain, non-generic `fn() -> ...`
     /// pointer — the call site gates this by only calling here when `s.type_params` is
@@ -2587,7 +2615,7 @@ impl Transpiler {
     /// `with_self` = true for instance methods (adds `&self` / `&mut self`),
     /// false for associated functions (no self receiver).
     pub(crate) fn emit_fn_sig(&mut self, sig: &FnSignature, with_self: bool) {
-        let params_s: Vec<String> = sig.params.iter().map(|p| self.emit_param(p)).collect();
+        let params_s: Vec<String> = sig.params.iter().map(|p| self.emit_param(p, with_self)).collect();
         let all_params = if with_self {
             let self_ref = if sig.mutating { "&mut self" } else { "&self" };
             if params_s.is_empty() {

@@ -349,12 +349,22 @@ impl Transpiler {
                 }),
                 ExprKind::Var(v) => self.var_types.get(v.as_str())
                     .or_else(|| self.fn_current_params.get(v.as_str()))
-                    .and_then(|ty| match ty {
+                    .and_then(|ty| match ty.without_mut() {
                         Type::Array(elem) => Some(elem.as_ref().clone()),
                         _ => None,
                     }),
                 _ => None,
             };
+            // Anything the narrow arms above don't cover (an indexed/called/qualified
+            // iterable: `self.groups[i]`, `make_all()`, a `[mut T]`/`[T]'shared` local, ...)
+            // resolves through the general declared-type walk.
+            let elem_ty = elem_ty.or_else(|| self.resolve_expr_type(&s.iterable).and_then(|ty| {
+                let mut cur = ty.without_mut();
+                while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+                match cur { Type::Array(elem) => Some(elem.as_ref().clone()), _ => None }
+            }));
+            // `[mut T]` elements: the loop variable is a `T` as far as dispatch goes.
+            let elem_ty = elem_ty.map(|t| t.without_mut().clone());
             match &elem_ty {
                 // `is_known_user_type` (not `struct_fields` alone) so iterating a `[SomeEnum]`
                 // array (`for w in walls: w.position()`) also gets the loop var registered for
@@ -394,6 +404,26 @@ impl Transpiler {
                     self.var_types.insert(s.vars[0].clone(), canonical);
                 }
                 _ => {}
+            }
+        }
+        // `for k, v in dict:` / `for i, v in array:` — the value/element variable of a collection
+        // whose declared type is known gets the same user-type registration as the
+        // single-variable case above, so a method call on it dispatches (and lends `mut`
+        // arguments) through the real type's declaration.
+        if s.vars.len() == 2 {
+            let val_ty = self.resolve_expr_type(&s.iterable).and_then(|ty| {
+                let mut cur = ty.without_mut();
+                while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+                match cur {
+                    Type::Dict(_, val) => Some(val.without_mut().clone()),
+                    Type::Array(elem) => Some(elem.without_mut().clone()),
+                    _ => None,
+                }
+            });
+            if let Some(Type::Named(n)) = &val_ty {
+                if self.is_known_user_type(n.as_str()) {
+                    self.var_struct_types.insert(s.vars[1].clone(), n.clone());
+                }
             }
         }
         // Track loop variables from Vec<Arc<str>> iterables so string methods dispatch correctly.
@@ -612,7 +642,7 @@ impl Transpiler {
         // would otherwise emit `.iter().cloned()` — a hard compile error, E0277) and borrow
         // instead, exactly like the local-variable case.
         let is_trait_array_field = self_field_ty.as_ref().is_some_and(|t| matches!(t,
-            Type::Array(elem) if matches!(elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))));
+            Type::Array(elem) if matches!(elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))));
         let iter_expr = match &s.iterable.kind {
             ExprKind::Range { .. } => iter,
             _ if is_trait_array_field => format!("&{}", iter),
@@ -656,8 +686,8 @@ impl Transpiler {
             // local variable (an owned `Vec<Box<dyn Trait>>`) needs the explicit `&`.
             ExprKind::Var(v) if self.known_local_vars.contains(v.as_str())
                 && (s.vars.len() <= 1 || needs_auto_enumerate)
-                && matches!(self.resolve_iterable_type(&s.iterable),
-                    Some(Type::Array(elem)) if matches!(elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) =>
+                && matches!(self.resolve_iterable_type(&s.iterable).as_ref().map(Type::without_mut),
+                    Some(Type::Array(elem)) if matches!(elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) =>
             {
                 if self.fn_current_params.contains_key(v.as_str()) {
                     iter

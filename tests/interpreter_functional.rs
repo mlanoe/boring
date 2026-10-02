@@ -452,3 +452,12 @@ itest!(option_owned_methods);
 itest!(pub_top_level_const);
 
 itest!(collection_named_methods);
+
+// `var` (rebindable out-param) write-back to the caller, free functions and struct methods.
+itest!(var_param_free);
+itest!(method_var_param);
+// NOT registered yet: `mut_collection_param`'s `Src.forward` calls `self.fill_mut(b)` -- a `def`
+// method calling a sibling mutating method through `self` -- which the self-hosted interpreter
+// rejects ("cannot call mutating method ... on let binding 'self'"), independent of param
+// write-back (with that one call inlined the whole case matches on all four binaries).
+// Register `itest!(mut_collection_param);` once that is fixed.

@@ -165,6 +165,8 @@ mut Counter c = Counter()  # ok — fixed binding, content-mutable instance
 
 (An earlier version of Boring treated `mut` on a scalar as equivalent to `var` — that shortcut is retired.)
 
+The rule is position-independent: `mut` (and `var mut`) on a scalar is rejected for function/method/`init` parameters (`def f(mut int n)`), struct and enum fields, and nested inside a type — `[mut int]`, `{string=mut int}`, `(mut int, string)`. A scalar parameter the callee must update for the caller is spelled `var int n` (an out-parameter); `mut int'atomic` and `mut` on structs/collections are unaffected.
+
 ### Rebindable bindings — `var`
 
 ```boring
@@ -194,6 +196,29 @@ b.inc()          # ok
 # a = Counter()  # ERROR — mut cannot be rebound
 b = Counter()    # ok — var mut can
 ```
+
+### Built-in collections follow the same rule
+
+Arrays `[T]`, dictionaries `{K=V}` and sets `{T}` are not special: *content* mutation — a mutating method (`push`, `pop`, `append`, `extend`, `insert`, `remove`, `add`, `set`, `put`, `clear`, `sort`, `sortBy`, `reverse`, `shuffle`, `dedup`, `retain`, `truncate`, `drain`, `swap`, `fill`) or an element assignment (`v[i] = x`, `d[k] = x`, including `+=` and friends) — needs a content-mutable binding, exactly like a `def` call on a struct:
+
+```boring
+var [int] v = [1]
+v = [1, 2, 3]        # ok — rebinding is what `var` grants
+# v.push(4)          # ERROR — `v` is `var` (rebindable only, not content-mutable)
+# v[0] = 9           # ERROR — same
+
+var mut [int] w = [1]
+w.push(2)            # ok
+w[0] = 9             # ok
+mut {string=int} d = {"a" = 1}
+d["b"] = 2           # ok — fixed binding, content-mutable
+```
+
+Prefer plain `mut` whenever the binding is never reassigned — `var mut` is only for a collection that is both rebound and mutated.
+
+The same holds for parameters: a `mut` or `var mut` parameter may be mutated (and a `mut` collection parameter is lent to the callee by reference, see [`mut` vs `var` on a struct parameter](#mut-vs-var-on-a-struct-parameter)), a bare `var` parameter — rebindable out-parameter — or a plain parameter may not. Non-mutating methods (`length`, `map`, `filter`, `sorted`, `reversed`, `removeAt`, `contains`, ...) work on any binding. Nested places blame the root binding (`m[0].push(2)` needs `m` to be `mut`), unless an element type is itself `mut` (`[mut [int]] m` — `m` can't grow, but `m[0].push(2)` is fine, see [element mutability](#element-mutability--mut-t-vs-mut-t)).
+
+The check lives in the semantic checker, so `boring run` and `boring build` agree. It only fires where the receiver is *known* to be a built-in collection — an explicit collection type, a collection literal/comprehension initializer, or a call to a function declared to return a collection; an unannotated binding of unknown type (e.g. the result of a method call or of a type alias) is never rejected.
 
 ### `mut` composes into any type position
 
@@ -1021,16 +1046,16 @@ nums = nums.removeAt(nums.firstIndex())   # new array without first element
 print nums                                 # [20, 30, 40]
 ```
 
-**Modifying elements with `[]`** — `nums[idx] = value` works for arrays and dicts:
+**Modifying elements with `[]`** — `nums[idx] = value` works for arrays and dicts, on a `mut` (or `var mut`) binding:
 ```boring
-var nums = [10, 20, 30]
+mut nums = [10, 20, 30]
 var i = nums.firstIndex()
 while let idx = i:
     nums[idx] = nums[idx] * 2             # double each element in place
     i = nums.nextIndex(idx)
 print nums                                 # [20, 40, 60]
 
-var d = {"a" = 1, "b" = 2}
+mut d = {"a" = 1, "b" = 2}
 var k = d.firstIndex()
 while let idx = k:
     d[idx] = d[idx] + 10                  # update each value in place
@@ -1130,7 +1155,7 @@ Functions can return any collection type — arrays, sets, and dicts are all sup
 
 ```boring
 [int] first_n(int n):
-    var result = []
+    mut result = []
     for i in 1..=n: result.push(i)
     result
 
@@ -1138,7 +1163,7 @@ Functions can return any collection type — arrays, sets, and dicts are all sup
     {1, 4, 9, 4, 1}                # deduplicates automatically
 
 {string=int} char_count(string s):
-    var counts = {=}
+    mut counts = {=}
     for ch in s.chars():
         counts[ch] = (counts[ch] else 0) + 1
     counts
@@ -1363,7 +1388,22 @@ def reseat(var Point p): p = Point(0, 0)   # callee may replace the caller's p
 
 This is the opposite collapse direction from the bare `mut` keyword on a local binding (`mut` on a local binding ≡ `let mut`, never `var mut` — see [Fixed mutable bindings — `mut`](#fixed-mutable-bindings--mut)) — and deliberately so. For a local binding, `var` only ever affects the same scope, so folding a rebind permission into the bare `mut` shorthand is a low-stakes convenience. For a parameter, `var` grants the callee the ability to overwrite the *caller's own variable* across the call boundary — a materially bigger capability, so it must stay opt-in and spelled out explicitly, never implied by `mut` alone.
 
-**Known gap:** the "mutate content" column above is not yet enforced independently of the "rebind" column — `mut T&` and `var T&` both transpile to the same Rust `&mut T`, so a `var`-parameter callee can still call a `def` method on its parameter today, even though the table says it shouldn't be able to. Only the "rebind caller" column is actually checked (a `mut`-parameter callee reseating `a` is correctly rejected, in both `boring run` and `boring build`). Closing this — introducing `var mut T& m` as a real, checker-distinguished form — is a separate, self-contained follow-up.
+**A `mut` struct (or enum) parameter lends the caller's own value, by `&mut`.** The table above holds in `boring run` and in `boring build` alike: `def poke(mut Point p): p.x = 7` changes the caller's `p` (signature `&mut Point`, call site `poke(&mut p)` — never a `.clone()`, whose write would land on the throwaway copy). For a free function that `&mut` is the universal borrow of "[Universal borrow as inference output](#universal-borrow-as-inference-output)": writing a field (`p.x = 7`, `p.x += 1`), calling a `def` method on it, or doing nothing at all all resolve the same way. For a struct/trait *method* (`def fill(mut Point p)`), where universal borrow inference is off, the lend is unconditional — the signature is `&mut Point` whatever the body does, a header-only trait signature included, and every call site (`s.fill(p)`) lends `&mut p` (a bare struct field `other.fill(inner)` lends `&mut self.inner`; a `mut` parameter of the caller is reborrowed). As with collections the caller must pass a content-mutable binding (`mut` or `var`, not `let`), and `var` is only for rebinding.
+
+**Collections (`mut [T]`, `mut {K=V}`, `mut {T}`) follow the same table, by reference.** `mut [uint8] b` lends the caller's array: the callee's `b[0] = 7` / `b.push(..)` is visible to the caller afterwards, for a free function and a struct method alike, in `boring run` and `boring build` (signature `&mut Vec<u8>`, call site `&mut buf` — never cloned, never moved). The caller must pass a content-mutable binding (`mut` or `var`, not `let`); bare `mut` is enough since nothing is reassigned:
+
+```boring
+def fill(mut [uint8] b): b[0] = 7 as uint8
+
+def main():
+    mut [uint8] buf = [0 as uint8 for i in 0..<4]
+    fill(buf)
+    print buf[0]    # 7
+```
+
+`var [T] b` lets the callee *rebind* the caller's array (`b = [...]`) but, like any bare `var`, not mutate its content — `b.push(..)` / `b[i] = x` on a `var` (or plain) collection parameter is a checker error; write `var mut [T] b` for "both" (the checker tells `var` and `var mut` apart: `Param.var_mut`).
+
+**Known gap (struct parameters):** for a struct-typed `T&` parameter the "mutate content" column above is not yet enforced independently of the "rebind" column — `mut T&` and `var T&` both transpile to the same Rust `&mut T`, so a `var`-parameter callee can still call a `def` method on its parameter today, even though the table says it shouldn't be able to. Only the "rebind caller" column is actually checked (a `mut`-parameter callee reseating `a` is correctly rejected, in both `boring run` and `boring build`). Closing this — introducing `var mut T& m` as a real, checker-distinguished form — is a separate, self-contained follow-up.
 
 > For variadic parameters (`values...`), see [Advanced — Variadic parameters](#advanced--variadic-parameters).
 
@@ -2286,13 +2326,15 @@ struct Ids:
             items.push(id)
 ```
 
-The bare call fails to compile with a Rust error pointing at the missing receiver:
+`boring build` rejects the bare call with a Boring diagnostic:
 
 ```text
-error[E0425]: cannot find function `has` in this scope
+error: cannot call method 'has' without a receiver inside struct 'Ids' — implicit `self` only applies to fields; write `self.has(...)`
 ```
 
-The fix is the compiler's own suggestion — prefix the call with `self.`:
+(A top-level function or a local/parameter with the same name as a sibling method is not flagged — the bare call resolves to that, as usual.)
+
+The fix is the diagnostic's own suggestion — prefix the call with `self.`:
 
 ```boring
 struct Ids:
@@ -8386,6 +8428,34 @@ Same rule as every other hand-verified whitelist in this doc: only add an entry 
 include = ["../shared/external_fns.toml"]   # path relative to this boring.toml
 ```
 
+### Advanced — External calls that fill a byte buffer (`read`, `read_exact`, ...)
+
+Passing a **mutable array** to a `std::io::Read`-family method just works — the transpiler lends it out as a mutable borrow instead of moving it:
+
+```boring
+use std.net.TcpStream
+use std.io.Read
+
+def int fill(mut TcpStream sock, mut [uint8] b) throws:
+    let n = try? sock.read(b)            # sock.read(&mut *b)
+    guard let n else throw "read failed"
+    return n as int
+
+def int fill_local(mut TcpStream sock) throws:
+    var mut [uint8] buf = [0 as uint8 for i in 0..<64]
+    let n = try? sock.read(buf)          # sock.read(&mut buf)
+    guard let n else throw "read failed"
+    return n as int
+```
+
+The rule is deliberately narrow, because the receiver type is open-ended (`File`, `TcpStream`, `Stdin`, `BufReader<_>`, a decompressor, ...) so it is keyed on the **method name** plus the **argument**, not on a declared receiver type: an array binding passed to one of `read`, `read_exact`, `read_to_end`, `read_at`, `read_exact_at`, `recv`, `recv_from`, `peek`, `peek_from` on an **external** receiver is emitted as `&mut buf` (`&mut *buf` for an array parameter, which already is a `&mut Vec<_>`). A `&mut Vec<u8>` deref-coerces to `&mut [u8]`, and is also what `read_to_end` takes.
+
+The callee changes the array's **contents**, so the binding must be content-mutable: a `mut [T]` parameter, or a `mut`/`var mut` local. A bare `var` (rebindable only) array — parameter or local — is rejected with a Boring error instead of silently granting mutation. Nothing else changes: any other method keeps by-value emission (so `tx.send(buf)` still moves the array), a `let`/plain-parameter array is left to rustc, and a method of that name declared by a Boring `struct`/`trait` is untouched.
+
+Not covered (use `boring.toml`'s `[external_fns]` above, or a Boring wrapper): other external methods that take a buffer by `&mut` under a different name, read-only `&[u8]` parameters (`write_all(&[u8])` — declare `"TcpStream::writeAll" = ["&"]`), and `read_line`/`read_to_string`, whose `&mut String` target has no Boring equivalent (`string` is `Rc<str>`/`Arc<str>`).
+
+**By-value arguments of non-`Clone` std types.** Boring's value semantics normally auto-`.clone()` a non-`Copy` argument passed to a Boring function. For std types that are deliberately not `Clone` (`TcpStream`, `TcpListener`, `UdpSocket`, `File`, `Stdin`/`Stdout`/`Stderr`, `BufReader`/`BufWriter`, `Child*`, `JoinHandle`, `Receiver`, `Mutex`, `RwLock`, ...) the argument is **moved** instead, exactly as in hand-written Rust: use it afterwards and rustc reports a use-after-move — call the type's own `try_clone()` first if you need two handles, or declare the parameter `var TcpStream s` to lend a `&mut` instead. A parameter or non-`mut` receiver of such a type that is only used through `&mut self` methods (`sock.read(..)`) must itself be declared `mut`/`var` (`def f(mut TcpStream sock)`), as Rust requires. The same holds for a `let`/`var` binding whose declared type is one of these and whose value is a field read: `var TcpStream server = pair.0` (with `pair` from `listener.accept()`) is a move of the tuple element, not a `.clone()`; `Clone` types (`Duration`, your own structs) keep cloning. The type may also be left off: a small fixed table of well-known std results lets the compiler type the element itself — `TcpListener.accept()`/`UnixListener.accept()` → `(TcpStream, SocketAddr)`/`(UnixStream, SocketAddr)`, `Command.spawn()` → `Child` (whose `stdin`/`stdout`/`stderr` fields are non-`Clone` too) — followed through `try?` and `guard let` (`let l = try? TcpListener.bind(..)`, `guard let listener = l`, `let p = try? listener.accept()`, `guard let pair = p`, `var server = pair.0`). Anything outside that table (a handle returned by your own function, an `if let` binding, a type behind a chain the table does not know) is untyped, so the read still clones: declare the type (`var TcpStream s = pair.0`) or destructure (`var (s, peer) = pair`). A Boring `struct` that reuses a std name (`struct TcpListener`) is your own type and is never looked up in the table.
+
 ### Advanced — String literals as external call arguments (known limitation)
 
 A string literal passed **directly** as an argument to a method or function call on an
@@ -8974,7 +9044,7 @@ A **storage signal** (field assignment, task capture, return with ownership qual
 | `Counter c` | qualifier demand | concrete qualifier |
 | `Counter c` | storage | concrete qualifier |
 
-The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a method parameter.
+The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a *read-only* method parameter. (A `mut Counter c` method parameter needs no annotation: it is lent as `&mut Counter` unconditionally, see "`mut` vs `var` on a struct parameter".)
 
 **A universal borrow is never subject to size-based auto-boxing.** Because it resolves as a *pre-fallback*, before the size-based chain (`docs/transpilation-modes.md`'s "Size-based auto-boxing") even runs, a struct over `--inline-auto-bytes` still renders as a plain `&Counter`/`&mut Counter` when it resolves to a universal borrow — never `&Box<Counter>`/`&mut Box<Counter>`. (`emit_type`'s `OwnerQual::Borrow`/`OwnerQual::BorrowMut` rendering, `src/transpiler/emit_top.rs`, suppresses the size-based fallback on its `Named` inner the same way the `'owned` qualifier's own branch already does — see `tests/cases/oversized_param_borrow_stays_unboxed.br`.)
 

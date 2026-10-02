@@ -940,7 +940,9 @@ impl Transpiler {
             }
         }
         match &expr.kind {
-            ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
+            // `without_mut`: a `mut [float] e` binding is stored as `Type::Mut(Array(..))`
+            // (see `Type::Mut`'s doc) — `mut` has no bearing on the element type.
+            ExprKind::Var(v) => match self.var_types.get(v.as_str()).map(Type::without_mut) {
                 Some(Type::Array(inner)) => float_width(inner),
                 _ => None,
             },

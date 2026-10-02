@@ -97,7 +97,7 @@ def string dedent_triple(string raw):
         min_indent = 0
     if min_indent == 0:
         return s
-    var [string] result = []
+    mut [string] result = []
     for ln in lines:
         if ln.trim().length == 0:
             result.push("")
@@ -291,7 +291,7 @@ struct Lexer:
 
     # ── Lex a string (after opening quote consumed) ────────────────────────
     def TokenKind lex_string() throws:
-        var [RawInterpPart] parts = []
+        mut [RawInterpPart] parts = []
         var current_lit = ""
         while true:
             if self.at_end():
@@ -657,7 +657,7 @@ struct Lexer:
         let save_col = self.col
         self.chars = trimmed_content.chars()
         self.pos = 0
-        var [Token] line_tokens = []
+        mut [Token] line_tokens = []
         while self.pos < self.chars.length:
             let c = self.chars[self.pos]
             if c == " " or c == "\t":

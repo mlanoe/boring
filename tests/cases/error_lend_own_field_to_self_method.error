@@ -1,0 +1,5 @@
+error: cannot lend `inner` to the `mut` parameter `c` of `self.bump()`: it is part of the receiver `self` itself, so the generated Rust would hold two overlapping `&mut` borrows of one object (rustc E0499). Fix: copy it into a local first (`mut <Type> tmp = inner`), pass the local and assign it back afterwards; or make the callee a method of the argument's own type; or call it on a different receiver
+ --> <file>:17:19
+   |
+17 |         self.bump(inner)
+   |                   ^

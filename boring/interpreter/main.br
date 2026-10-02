@@ -35,7 +35,7 @@ struct RunArgs:
 def RunArgs parse_run_args([string] argv):
     var string? gpu_profile = nil
     var string? file = nil
-    var [string] script_args = []
+    mut [string] script_args = []
     var int i = 0
     while i < argv.length:
         let a = argv[i]
@@ -135,7 +135,7 @@ def void main() throws:
             source = source + ln + "\n"
     let prog = parse(source)
     var interp = new_interpreter()
-    var [string] full_args = [program_name]
+    mut [string] full_args = [program_name]
     for a in parsed.script_args:
         full_args.push(a)
     interp.cli_args = full_args

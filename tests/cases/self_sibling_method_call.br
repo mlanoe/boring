@@ -1,0 +1,25 @@
+# A struct method calling a sibling method through an explicit `self.` -- the form docs/book.md
+# ("Implicit `self`") requires. The bare form `one(n)` is a Boring diagnostic instead of
+# invalid Rust; see tests/cases/error_bare_sibling_method_call.br. A top-level function sharing
+# a sibling method's name still resolves bare, to the function.
+def int one(int n):
+    n * 100
+
+struct Src:
+    var int pos = 0
+
+    def step(int n):
+        pos += n
+
+    def two(int n):
+        self.step(n)
+        self.step(n)
+
+    req int far(int n):
+        one(n)
+
+def main():
+    mut Src s = Src()
+    s.two(3)
+    print s.pos
+    print s.far(2)

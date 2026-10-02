@@ -129,7 +129,7 @@ task void add_tasks_in_parallel_with_semaphore(
     uint max_concurrent
 ):
     let semaphore'shared = Semaphore(max_concurrent)
-    var futures = []
+    mut futures = []
 
     for i in 0..<count:
         let future = task:
@@ -157,7 +157,7 @@ task void complete_tasks_with_channels(
     drop sender
 
     let receiver'actor'task = receiver
-    var futures = []
+    mut futures = []
     for 0..<4:
         let future = task:
             while let task_id = receiver.recv():
@@ -178,7 +178,7 @@ task void add_tasks_with_timeout_and_cancellation(
     TodoList'actor'task todo_list,
     Metrics'shared metrics
 ):
-    var futures = []
+    mut futures = []
 
     for i in 0..<3:
         let future = task:
@@ -209,7 +209,7 @@ task void add_and_complete_tasks(
     Metrics'shared metrics,
     [string] descriptions
 ) throws string:
-    var futures = []
+    mut futures = []
     for desc in descriptions:
         let future = task:
             let id = todo_list.add_task(desc)

@@ -57,6 +57,33 @@ fn qualified_named_type_name(ty: &Type) -> Option<String> {
     if let Type::Named(n) = cur { Some(n.clone()) } else { None }
 }
 
+/// Like `qualified_named_type_name`, but also looks through the trait-object / `impl Trait`
+/// spellings (`Type::Dyn`/`Type::Impl`) a bare trait name in type position can parse to —
+/// (and a generic `T`'s bare name) — the receiver-resolution entry point for "which user
+/// type/trait does this value have?".
+fn receiver_type_name(ty: &Type) -> Option<String> {
+    let mut cur = ty.without_mut();
+    loop {
+        match cur {
+            Type::Qualified(inner, _) | Type::Dyn(inner) | Type::Impl(inner) => cur = inner.without_mut(),
+            Type::Named(n) | Type::TypeParam(n) => return Some(n.clone()),
+            _ => return None,
+        }
+    }
+}
+
+/// The type of one element obtained by indexing a value of type `ty`: `[T]`/`[T, N]` → `T`,
+/// `{K=V}` → `V` (looking through `mut` and ownership qualifiers on the container).
+fn indexed_elem_type(ty: &Type) -> Option<&Type> {
+    let mut cur = ty.without_mut();
+    while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+    match cur {
+        Type::Array(elem) | Type::ArrayN(elem, _) => Some(elem.as_ref()),
+        Type::Dict(_, val) => Some(val.as_ref()),
+        _ => None,
+    }
+}
+
 impl Transpiler {
     /// Resolve the user struct type name of an expression, walking `self`/local-var roots
     /// and field chains (`self.encoder`, `a.b.c`). Also resolves bare implicit-self-field
@@ -100,26 +127,50 @@ impl Transpiler {
             // `arr[i]` — resolve the array's declared element type (not `arr`'s own
             // type): `self.blocks[i]` needs `self.blocks`'s field type to be
             // `Type::Array(Named("DecoderBlock"))` to know indexing it yields a
-            // DecoderBlock, one level further than the Field case above.
-            ExprKind::Index(inner, _) => {
-                let elem_ty = match &inner.kind {
-                    ExprKind::Field(obj, field) => {
-                        let owner_ty = self.resolve_expr_struct_type(obj)?;
-                        self.struct_fields.get(owner_ty.as_str())?
-                            .iter()
-                            .find(|(fname, _)| fname == field)
-                            .map(|(_, fty)| fty.clone())
-                    }
-                    ExprKind::Var(v) => self.var_types.get(v.as_str()).cloned(),
-                    _ => None,
-                }?;
-                match elem_ty {
-                    Type::Array(elem) => match elem.as_ref() {
-                        Type::Named(n) => Some(n.clone()),
-                        _ => None,
-                    },
-                    _ => None,
+            // DecoderBlock, one level further than the Field case above. Sees through
+            // `mut` on the collection and on its element (`[mut T]`), ownership qualifiers
+            // and trait-object spellings, and indexes a dict to its value type too.
+            ExprKind::Index(..) => self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name),
+            // `make()` / `obj.make()` — the callee's declared return type.
+            ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+                self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name)
+            }
+            _ => None,
+        }
+    }
+
+    /// The static type of `expr` when it can be read off declarations alone: a local/parameter's
+    /// declared type, a struct field's declared type (through any receiver
+    /// `resolve_expr_struct_type` can resolve), the element/value type of an indexed collection,
+    /// a free function's declared return type, a struct constructor, or a method's declared
+    /// return type. `None` means "unknowable here" — a closure parameter without a type, the
+    /// result of a call to something undeclared, ... — callers must not guess from names.
+    pub(crate) fn resolve_expr_type(&self, expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Var(v) if v == "self" => self.self_type.clone().map(Type::Named),
+            ExprKind::Var(v) => self.var_types.get(v.as_str())
+                .or_else(|| self.fn_current_params.get(v.as_str()))
+                .cloned()
+                .or_else(|| self.var_struct_types.get(v.as_str()).cloned().map(Type::Named))
+                .or_else(|| self.bare_self_field_type(v)),
+            ExprKind::Field(inner, field) => {
+                let owner = self.resolve_expr_struct_type(inner)?;
+                self.struct_fields.get(owner.as_str())?
+                    .iter().find(|(fname, _)| fname == field)
+                    .map(|(_, fty)| fty.clone())
+            }
+            ExprKind::Index(inner, _) => indexed_elem_type(&self.resolve_expr_type(inner)?).cloned(),
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Var(name) = &callee.kind else { return None };
+                if self.known_local_vars.contains(name.as_str()) { return None; }
+                if self.struct_fields.contains_key(name.as_str()) {
+                    return Some(Type::Named(name.clone()));
                 }
+                self.fn_return_types.get(name.as_str()).cloned()
+            }
+            ExprKind::MethodCall(recv, method, _) => {
+                let owner = self.resolve_expr_struct_type(recv)?;
+                self.struct_method_return_types.get(&format!("{}::{}", owner, method)).cloned()
             }
             _ => None,
         }
@@ -249,16 +300,14 @@ impl Transpiler {
                     // `.remove` codegen below instead of dispatching to `Widgets`'s own `remove`
                     // method, even though the wrapper is fully deref-transparent to `Widgets`.
                     let type_name = self.var_struct_types.get(v.as_str()).cloned()
-                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
-                            if let Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
-                        }))
+                        .or_else(|| self.var_types.get(v.as_str()).and_then(receiver_type_name))
                         .or_else(|| self.var_types.get(v.as_str())
                             .and_then(transparent_wrapper_inner_name)
                             .map(|n| n.to_string()));
                     type_name.map(|t| self.is_known_user_type(t.as_str())).unwrap_or(false)
                 }
             }
-            ExprKind::Field(..) | ExprKind::Index(..) => self.resolve_expr_struct_type(obj)
+            ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Call(..) | ExprKind::MethodCall(..) => self.resolve_expr_struct_type(obj)
                 .map(|t| self.is_known_user_type(t.as_str()))
                 .unwrap_or(false),
             _ => false,
@@ -738,7 +787,19 @@ impl Transpiler {
             // arg coercion elsewhere in this file. Without this, `Foo.make("literal")` against
             // a `type def Foo make(string s)` left the arg as a raw `&'static str`, an
             // `Arc<str>` vs `&str` mismatch confirmed via tests/cases/type_def_typed_throws.br.
-            let vals: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+            // A `mut` user-struct/enum/collection parameter is lent as `&mut place` (see
+            // `is_lent_param`) — the signature `emit_type_method` renders — never cloned.
+            let lent: Vec<bool> = self.struct_type_method_params
+                .get(&format!("{}::{}", type_name, method))
+                .map(|ps| ps.iter().map(|p| self.is_lent_param(p, true)).collect())
+                .unwrap_or_default();
+            let vals: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                if lent.get(i).copied().unwrap_or(false) {
+                    self.emit_lent_arg(&a.value)
+                } else {
+                    self.emit_expr_owned(&a.value)
+                }
+            }).collect();
             let _ = is_setter;
             let call = format!("{}::{}({})", type_name, rust_name, vals.join(", "));
             // Propagate `?` when the called type-level method throws -- mirrors the
@@ -1115,7 +1176,8 @@ impl Transpiler {
         } else {
             map_method(method, args.len(), self.want_raw_option_pop.get())
         };
-        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+        let mut args_s: Vec<String> = self.emit_user_method_args(Some(struct_name), method, args);
+        let hoisted = Self::hoist_lent_conflicts(&mut args_s);
         // The generated Rust always needs the `.value` hop to reach `BoringObserved<V>`'s
         // actual payload — `via_value` only changes the *Boring-source* spelling
         // (`c.inc()` vs `c.value.inc()`) and whether the caller notifies afterward, not
@@ -1128,6 +1190,7 @@ impl Transpiler {
             // Inline/strict-mode-Owned — direct call; Box<T> auto-derefs, same syntax as plain T.
             None => format!("{}.{}({})", base_path, rust_method, args_s.join(", ")),
         };
+        let call_expr = Self::with_hoisted_args(&hoisted, call_expr);
         let call_expr = if let Some(wrap) = extra_wrap { format!("{}{}", call_expr, wrap) } else { call_expr };
         (call_expr, is_req)
     }
@@ -1261,7 +1324,8 @@ impl Transpiler {
                 } else {
                     map_method(method, args.len(), self.want_raw_option_pop.get())
                 };
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                let mut args_s: Vec<String> = self.emit_user_method_args(Some(struct_name.as_str()), method, args);
+                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                 let is_req = self.method_is_req_or_task(&struct_name, method);
                 // `'guard` (RwLock) gets no exception from the general rule —
                 // docs/book.md: mutation goes through the lock
@@ -1288,7 +1352,7 @@ impl Transpiler {
                 } else {
                     if is_task { self.guard_task_write_guard(v) } else { self.guard_write_guard(v) }
                 };
-                let call = format!("{}.{}({})", guard, rust_method, args_s.join(", "));
+                let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", guard, rust_method, args_s.join(", ")));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
                 let needs_await = self.instance_task_methods.contains(method)
@@ -1323,7 +1387,12 @@ impl Transpiler {
                             } else {
                                 map_method(method, args.len(), self.want_raw_option_pop.get())
                             };
-                            let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+                            let mut args_s: Vec<String> = if is_known {
+                                self.emit_user_method_args(field_struct_name.as_deref(), method, args)
+                            } else {
+                                args.iter().map(|a| self.emit_expr(&a.value)).collect()
+                            };
+                            let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                             let struct_type_name = self.self_type.as_deref().unwrap_or("");
                             let req_key = format!("{}::{}", struct_type_name, method);
                             let is_req = self.struct_req_methods.contains(&req_key);
@@ -1333,7 +1402,7 @@ impl Transpiler {
                             } else {
                                 self.rwlock_field_write(&k, &field_expr)
                             };
-                            let call = format!("{}.{}({})", guard, rust_method, args_s.join(", "));
+                            let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", guard, rust_method, args_s.join(", ")));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                             return Some(if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
@@ -1462,7 +1531,8 @@ impl Transpiler {
                     if arg_is_collection { rust_method = "extend".into(); }
                 }
                 // Use emit_expr_owned so string interpolations/trim results get Arc<str> wrapping.
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                let mut args_s: Vec<String> = self.emit_user_method_args(Some(struct_name.as_str()), method, args);
+                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                     // Single-thread: T'actor = Rc<RefCell<T>>.
                     // Use borrow() for req (read-only) methods, borrow_mut() for def methods.
@@ -1476,14 +1546,14 @@ impl Transpiler {
                         });
                         if is_req { "borrow" } else { "borrow_mut" }
                     };
-                    let call = format!("{}.{}().{}({})", v, borrow_kind, rust_method, args_s.join(", "));
+                    let call = Self::with_hoisted_args(&hoisted, format!("{}.{}().{}({})", v, borrow_kind, rust_method, args_s.join(", ")));
                     let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                     let throws = (self.in_throws || self.in_try_body)
                         && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
                     return Some(if throws { format!("{}?", call) } else { call });
                 }
                 let guard_expr = self.mutex_var_write(v, v);
-                let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
+                let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", guard_expr, rust_method, args_s.join(", ")));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 // Add .await for user task methods AND known tokio async instance methods (recv, etc.)
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
@@ -1507,16 +1577,18 @@ impl Transpiler {
         if let ExprKind::Var(v) = &obj.kind {
             if self.managed_mutex_vars.contains(v.as_str()) {
                 let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                let call = format!("{}.lock().unwrap().{}({})", v, rust_method, args_s.join(", "));
+                let mut args_s: Vec<String> = self.emit_user_method_args(self.resolve_expr_struct_type(obj).as_deref(), method, args);
+                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let call = Self::with_hoisted_args(&hoisted, format!("{}.lock().unwrap().{}({})", v, rust_method, args_s.join(", ")));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 return Some(call);
             }
             // Managed-mode RefCell var method: w.method(args) → w.borrow_mut().method(args)
             if self.managed_refcell_vars.contains(v.as_str()) {
                 let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                let call = format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", "));
+                let mut args_s: Vec<String> = self.emit_user_method_args(self.resolve_expr_struct_type(obj).as_deref(), method, args);
+                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let call = Self::with_hoisted_args(&hoisted, format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", ")));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 return Some(call);
             }
@@ -1546,9 +1618,14 @@ impl Transpiler {
                             } else {
                                 map_method(method, args.len(), self.want_raw_option_pop.get())
                             };
-                            let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+                            let mut args_s: Vec<String> = if is_known {
+                                self.emit_user_method_args(field_struct_name.as_deref(), method, args)
+                            } else {
+                                args.iter().map(|a| self.emit_expr(&a.value)).collect()
+                            };
+                            let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                             let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
-                            let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
+                            let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", guard_expr, rust_method, args_s.join(", ")));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                             return Some(if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
@@ -1622,7 +1699,8 @@ impl Transpiler {
                         } else {
                             map_method(method, args.len(), self.want_raw_option_pop.get())
                         };
-                        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                        let mut args_s: Vec<String> = self.emit_user_method_args(field_struct_name.as_deref(), method, args);
+                        let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                         // Build the field path directly (`v.field_name`) rather than through
                         // `self.emit_expr(obj)` — the generic field-read path adds an
                         // `Arc::clone`/`Rc::clone` to any Arc-qualified field so it's safe to
@@ -1665,6 +1743,7 @@ impl Transpiler {
                         } else {
                             { let g = self.actor_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
                         };
+                        let call = Self::with_hoisted_args(&hoisted, call);
                         let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                         return Some(call);
                     }
@@ -1755,7 +1834,7 @@ impl Transpiler {
                     if let Some(param) = params.first() {
                         let pname = &param.name;
                         let mut sub = self.make_sub();
-                        for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                        self.bind_closure_params(&mut sub, params);
                         let body_s = match body {
                             ClosureBody::Expr(e) => sub.emit_expr(e),
                             ClosureBody::Block(stmts) => {
@@ -1782,7 +1861,7 @@ impl Transpiler {
             if let Some(param) = params.first() {
                 let pname = &param.name;
                 let mut sub = self.make_sub();
-                for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                self.bind_closure_params(&mut sub, params);
                 let body_s = match body {
                     ClosureBody::Expr(e) => sub.emit_expr(e),
                     ClosureBody::Block(stmts) => {
@@ -2100,7 +2179,7 @@ impl Transpiler {
                         let kname = params.first().map(|p| p.name.as_str()).unwrap_or("k");
                         let vname = params.get(1).map(|p| p.name.as_str()).unwrap_or("v");
                         let mut sub = self.make_sub();
-                        for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                        self.bind_closure_params(&mut sub, params);
                         let body_s = match body {
                             ClosureBody::Expr(e) => sub.emit_expr(e),
                             ClosureBody::Block(stmts) => {
@@ -2268,7 +2347,7 @@ impl Transpiler {
                     if let Some(param) = params.first() {
                         let pname = &param.name;
                         let mut sub = self.make_sub();
-                        for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                        self.bind_closure_params(&mut sub, params);
                         let body_s = match body {
                             ClosureBody::Expr(e) => sub.emit_expr(e),
                             ClosureBody::Block(stmts) => {
@@ -2293,7 +2372,7 @@ impl Transpiler {
                     if let Some(param) = params.first() {
                         let pname = &param.name;
                         let mut sub = self.make_sub();
-                        for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                        self.bind_closure_params(&mut sub, params);
                         let body_s = match body {
                             ClosureBody::Expr(e) => sub.emit_expr(e),
                             ClosureBody::Block(stmts) => {
@@ -2781,6 +2860,251 @@ impl Transpiler {
         })
     }
 
+    /// Rust std types that are deliberately not `Clone` (OS handles, I/O adapters, channel
+    /// ends, ...). Boring's value-semantics auto-clone of a by-value argument
+    /// (`emit_args_coerced`) must not be applied to these: `.clone()` is E0599 on them, and the
+    /// honest Rust behavior is a move (a later use is a use-after-move error, fixed with the
+    /// type's own `try_clone()` — same as writing the Rust by hand).
+    const EXTERNAL_NON_CLONE_TYPES: &'static [&'static str] = &[
+        "TcpStream", "TcpListener", "UdpSocket", "UnixStream", "UnixListener", "UnixDatagram",
+        "File", "Stdin", "Stdout", "Stderr", "StdinLock", "StdoutLock", "StderrLock",
+        "BufReader", "BufWriter", "LineWriter", "Cursor",
+        "Child", "ChildStdin", "ChildStdout", "ChildStderr", "Command",
+        "JoinHandle", "Receiver", "Mutex", "RwLock",
+    ];
+
+    /// Whether `ty` names a std type from `EXTERNAL_NON_CLONE_TYPES` that no Boring `struct`/
+    /// `enum`/`trait` shadows.
+    pub(crate) fn is_external_non_clone_type(&self, ty: Option<&Type>) -> bool {
+        let name = match ty.map(Type::without_mut) {
+            Some(Type::Named(n)) | Some(Type::Generic(n, _)) => n,
+            _ => return false,
+        };
+        Self::EXTERNAL_NON_CLONE_TYPES.contains(&name.as_str()) && !self.is_known_user_type(name)
+    }
+
+    /// Small return-type table for the std calls whose result Boring cannot otherwise type when the
+    /// `let` carries no annotation: `(receiver type, method) -> result type`, spelled in Boring
+    /// types. Deliberately a fixed table, not general inference — it exists only so the auto
+    /// field-read `.clone()` of `let s = pair.0` (E0599 on a non-`Clone` handle) can be skipped for
+    /// the well-known tuple/struct results below (`infer_std_type`). A receiver type enters it only
+    /// through a std constructor (`TcpListener.bind`), a declared type, or another table hit.
+    fn std_call_return_type(recv_ty: &str, method: &str) -> Option<Type> {
+        let named = |n: &str| Type::Named(n.to_string());
+        match (recv_ty, method) {
+            ("TcpListener", "accept") => Some(Type::Tuple(vec![named("TcpStream"), named("SocketAddr")])),
+            ("UnixListener", "accept") => Some(Type::Tuple(vec![named("UnixStream"), named("SocketAddr")])),
+            ("TcpListener", "bind") => Some(named("TcpListener")),
+            ("UnixListener", "bind") => Some(named("UnixListener")),
+            ("Command", "new") => Some(named("Command")),
+            ("Command", "arg" | "args" | "env" | "current_dir" | "stdin" | "stdout" | "stderr") => Some(named("Command")),
+            ("Command", "spawn") => Some(named("Child")),
+            _ => None,
+        }
+    }
+
+    /// Best-effort std type of `expr`, via `std_call_return_type` only — `None` whenever any link of
+    /// the chain is unknown, or when a Boring `struct`/`enum` shadows the std name (then the type is
+    /// the user's own, and `is_known_user_type` keeps every user-visible behavior unchanged).
+    /// Follows `try? e` (-> `T?`), tuple-index reads of a known tuple (`pair.0`), `Child`'s
+    /// `stdin`/`stdout`/`stderr` fields (-> `ChildStdin?`, ...), and locals bound from such an
+    /// expression (`var_types` for a declared type, else `var_std_types`; params as last resort).
+    pub(crate) fn infer_std_type(&self, expr: &Expr) -> Option<Type> {
+        let named_ok = |t: &Type| -> bool {
+            match t.without_mut() {
+                Type::Named(n) | Type::Generic(n, _) => !self.is_known_user_type(n.as_str()),
+                _ => true,
+            }
+        };
+        let ty = match &expr.kind {
+            ExprKind::Var(v) => self.var_types.get(v.as_str())
+                .or_else(|| self.var_std_types.get(v.as_str()))
+                .or_else(|| (!self.known_local_vars.contains(v.as_str()))
+                    .then(|| self.fn_current_params.get(v.as_str())).flatten())
+                .map(|t| t.without_mut().clone()),
+            ExprKind::TryElse(inner, d) if matches!(d.kind, ExprKind::Nil) => {
+                self.infer_std_type(inner).map(|t| Type::Optional(Box::new(t)))
+            }
+            ExprKind::MethodCall(recv, method, _) => {
+                let recv_ty = match &recv.kind {
+                    // `TcpListener.bind(..)`: a bare type name that is not a local.
+                    ExprKind::Var(v) if !self.known_local_vars.contains(v.as_str())
+                        && !self.var_types.contains_key(v.as_str())
+                        && v.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => v.clone(),
+                    _ => match self.infer_std_type(recv)? {
+                        Type::Named(n) => n,
+                        _ => return None,
+                    },
+                };
+                if self.is_known_user_type(recv_ty.as_str()) { return None; }
+                Self::std_call_return_type(recv_ty.as_str(), method)
+            }
+            ExprKind::Field(obj, field) => match self.infer_std_type(obj)? {
+                Type::Tuple(elems) => elems.get(field.parse::<usize>().ok()?).cloned(),
+                Type::Named(n) if n == "Child" => match field.as_str() {
+                    "stdin" => Some(Type::Optional(Box::new(Type::Named("ChildStdin".into())))),
+                    "stdout" => Some(Type::Optional(Box::new(Type::Named("ChildStdout".into())))),
+                    "stderr" => Some(Type::Optional(Box::new(Type::Named("ChildStderr".into())))),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        }?;
+        named_ok(&ty).then_some(ty)
+    }
+
+    /// Record (or, on shadowing, forget) the inferred std type of the local `name` just bound from
+    /// `value`. `unwrap_optional` for a `guard let`/`if let` binding: `guard let pair = p` binds
+    /// the payload of `p: (TcpStream, SocketAddr)?`.
+    pub(crate) fn track_std_binding(&mut self, name: &str, value: &Expr, unwrap_optional: bool) {
+        self.var_std_types.remove(name);
+        let Some(mut ty) = self.infer_std_type(value) else { return };
+        if unwrap_optional {
+            let Type::Optional(inner) = ty else { return };
+            ty = *inner;
+        }
+        self.var_std_types.insert(name.to_string(), ty);
+    }
+
+    /// Whether the (declared or inferred) type of the field-read `value` bound by `s` is a
+    /// non-`Clone` std type, i.e. the let's auto field-read `.clone()` must become a move. An
+    /// `Optional` of one counts too (`Option<ChildStdin>` is not `Clone` either), but only on the
+    /// inferred path — a *declared* `T?` keeps its existing handling.
+    pub(crate) fn let_field_read_is_external_non_clone(&self, declared: Option<&Type>, value: &Expr) -> bool {
+        if declared.is_some() {
+            return self.is_external_non_clone_type(declared);
+        }
+        match self.infer_std_type(value) {
+            Some(Type::Optional(inner)) => self.is_external_non_clone_type(Some(&inner)),
+            Some(t) => self.is_external_non_clone_type(Some(&t)),
+            None => false,
+        }
+    }
+
+    /// External (Rust std / third-party, not Boring-declared) methods that *fill* a caller-owned
+    /// byte buffer through a `&mut [u8]` / `&mut Vec<u8>` parameter — the `std::io::Read` /
+    /// `std::net::{TcpStream,UdpSocket}` / `std::os::unix::fs::FileExt` family. The receiver
+    /// type is open-ended (`File`, `TcpStream`, `Stdin`, `BufReader<_>`, `Cursor<_>`, a
+    /// decompressor, ...), so — unlike `KNOWN_EXTERNAL_FN_BORROWS`, which is keyed on a single
+    /// declared receiver type — these are matched by method name. That is only safe because
+    /// `is_external_mut_buffer_call` additionally requires the argument to be a *mutable array
+    /// binding* (a `var`/`mut` local or a `var`/`mut` parameter of array type): an array the
+    /// caller declared mutable and passed to `read`/`recv`/... can only mean "fill this". No
+    /// other external method is touched, so by-value moves of a `var` array (`tx.send(buf)`,
+    /// `list.extend(buf)`) keep working.
+    ///
+    /// The emitted `&mut buf` / `&mut *buf` is a `&mut Vec<u8>`, which deref-coerces to
+    /// `&mut [u8]` at a non-generic parameter and is also exactly what `read_to_end` wants.
+    const EXTERNAL_MUT_BUFFER_METHODS: &'static [&'static str] = &[
+        "read", "read_exact", "read_to_end", "read_at", "read_exact_at",
+        "recv", "recv_from", "peek", "peek_from",
+    ];
+
+    /// How the array binding `name` can be lent out as a buffer: `Some((reborrow, content_mutable))`
+    /// where `reborrow` = the binding already is a `&mut Vec<_>` (a `mut`/`var` array parameter,
+    /// lent with `&mut *name`) rather than an owned `Vec<_>` place (`&mut name`), and
+    /// `content_mutable` = Boring lets the binding change the array's contents (`mut`, `var mut`,
+    /// `mut T`). A bare `var` is only rebindable, so it is `content_mutable = false` and the
+    /// call is rejected with a diagnostic. `None` = not a mutable-capable array binding (not an
+    /// array, or an immutable `let`/plain parameter, left to rustc as before).
+    fn array_buffer_binding(&self, name: &str) -> Option<(bool, bool)> {
+        let ty = self.var_types.get(name)?;
+        if !matches!(ty.without_mut(), Type::Array(_)) { return None; }
+        // `var` (rebindable) params are `&mut Vec<_>`; so are `mut` (content-mutable) array
+        // params, which the qualifier inference types as `BorrowMut`.
+        if self.var_primitive_params.contains(name)
+            || matches!(self.inferred_qualifiers.get(name), Some(OwnerQual::BorrowMut))
+        {
+            Some((true, self.content_mutable_params.contains(name)))
+        } else if !self.immutable_local_vars.contains(name) {
+            // An untracked local (no `mut_checked` entry) stays permissive, as for `def` calls.
+            let content_mutable = self.content_mutable_local_vars.contains(name)
+                || !self.mut_checked_local_vars.contains(name);
+            Some((false, content_mutable))
+        } else {
+            None
+        }
+    }
+
+    /// Whether `rust_method(args)` on a non-user receiver is an `EXTERNAL_MUT_BUFFER_METHODS`
+    /// call: listed name, not a method any Boring `trait` declares, and some argument is an
+    /// array binding that could be a buffer (see `array_buffer_binding`).
+    fn is_external_mut_buffer_call(&self, rust_method: &str, args: &[Arg]) -> bool {
+        Self::EXTERNAL_MUT_BUFFER_METHODS.contains(&rust_method)
+            && !self.trait_method_names.values().any(|ms| ms.contains(rust_method))
+            && args.iter().any(|a| matches!(&a.value.kind,
+                ExprKind::Var(v) if self.array_buffer_binding(v).is_some()))
+    }
+
+    /// One argument of an `is_external_mut_buffer_call`: an array binding becomes a mutable
+    /// borrow (an error if the binding is only `var`, i.e. not content-mutable); anything else
+    /// (an `offset` for `read_at`, ...) is emitted as usual.
+    fn emit_external_mut_buffer_arg(&self, method: &str, arg: &Expr) -> String {
+        if let ExprKind::Var(v) = &arg.kind {
+            if let Some((reborrow, content_mutable)) = self.array_buffer_binding(v) {
+                if !content_mutable {
+                    let (kind, fix) = if reborrow {
+                        ("parameter", format!("declare the parameter `mut`, e.g. `mut [uint8] {}`", v))
+                    } else {
+                        ("binding", format!("declare it `mut` or `var mut`, e.g. `var mut [uint8] {}`", v))
+                    };
+                    self.push_error(arg.line, arg.col, format!(
+                        "cannot pass `{v}` as a mutable buffer to `.{method}()` — `{v}` is `var` (rebindable only, not content-mutable); {fix}. `var` {kind}s cannot have their contents changed.",
+                    ));
+                }
+                return if reborrow { format!("&mut *{}", v) } else { format!("&mut {}", v) };
+            }
+        }
+        self.emit_expr(arg)
+    }
+
+    /// Iterator-style array methods whose closure takes the element as its first parameter
+    /// (`reduce`/`fold` take it as the second — see `record_closure_param_hints`).
+    const ELEMENT_CLOSURE_METHODS: &'static [&'static str] = &[
+        "map", "filter", "any", "all", "find", "forEach", "for_each", "flatMap", "flat_map",
+        "filterMap", "filter_map", "takeWhile", "skipWhile", "partition", "position", "count",
+    ];
+
+    /// Registers a closure's parameters in the sub-transpiler its body is emitted with: each is
+    /// a known local (so `param.method()` isn't read as a module path); an outer variable of the
+    /// same name no longer lends its struct type; and a parameter whose type is declared — or
+    /// hinted by the collection the closure is applied to (`record_closure_param_hints`) —
+    /// resolves as a receiver of that type (dispatch and `mut`-argument lending).
+    pub(crate) fn bind_closure_params(&self, sub: &mut Transpiler, params: &[Param]) {
+        for p in params {
+            sub.known_local_vars.insert(p.name.clone());
+            sub.var_struct_types.remove(&p.name);
+            let hinted = p.ty.clone()
+                .or_else(|| self.closure_param_hints.borrow().get(&(p.line, p.col)).cloned());
+            if let Some(ty) = hinted {
+                if let Type::Named(n) = ty.without_mut() {
+                    if self.is_known_user_type(n.as_str()) {
+                        sub.var_struct_types.insert(p.name.clone(), n.clone());
+                    }
+                }
+                sub.var_types.insert(p.name.clone(), ty);
+            }
+        }
+    }
+
+    /// For `arr.map((s): ...)`-shaped calls over a collection whose element type is declared
+    /// (`resolve_expr_type`), remember that element type for the closure's untyped element
+    /// parameter, keyed by the parameter's source position (`closure_param_hints`), so the
+    /// closure body can resolve `s`'s type.
+    fn record_closure_param_hints(&self, obj: &Expr, method: &str, args: &[Arg]) {
+        let (closure_arg, param_idx) = match method {
+            "reduce" | "fold" => (args.len().saturating_sub(1), 1),
+            m if Self::ELEMENT_CLOSURE_METHODS.contains(&m) => (0, 0),
+            _ => return,
+        };
+        let Some(ExprKind::Closure(params, ..)) = args.get(closure_arg).map(|a| &a.value.kind) else { return };
+        let Some(p) = params.get(param_idx).filter(|p| p.ty.is_none()) else { return };
+        let Some(obj_ty) = self.resolve_expr_type(obj) else { return };
+        let Some(Type::Array(elem)) = Some(obj_ty.without_mut()) else { return };
+        self.closure_param_hints.borrow_mut().insert((p.line, p.col), elem.without_mut().clone());
+    }
+
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
         let normalized_self_field;
         let obj = if let Some(f) = self.normalize_implicit_self_field(obj) {
@@ -2789,6 +3113,7 @@ impl Transpiler {
         } else {
             obj
         };
+        self.record_closure_param_hints(obj, method, args);
         if let Some(r) = self.try_emit_host_tensor_cpu(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_introspect_handle_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }
@@ -3178,6 +3503,13 @@ impl Transpiler {
         // resolve_expr_struct_type / struct_method_overload_decls for the same struct-type
         // resolution used by overload matching just below.
         let mut struct_method_param_types: Vec<Option<Type>> = Vec::new();
+        // Per-param `var` (rebindable out-parameter) flags of that same method decl — the
+        // arguments for these are lent as `&mut <place>` (see the `is_user_struct_receiver`
+        // arm of `args_s` below), mirroring `emit_args_coerced`'s free-function handling.
+        let mut struct_method_param_rebindable: Vec<bool> = Vec::new();
+        // Per-param lent `mut [T]`/`mut {K=V}`/`mut {T}` flags (`is_lent_collection_param`) of
+        // that same decl — lent as `&mut <place>`, never cloned/moved.
+        let mut struct_method_param_lent: Vec<bool> = Vec::new();
         let (rust_method, extra_wrap) = if is_user_struct_receiver {
             // Check for overloaded struct methods — pick the best-matching overload.
             let struct_type_opt = self.resolve_expr_struct_type(obj);
@@ -3212,6 +3544,12 @@ impl Transpiler {
             });
             struct_method_param_types = chosen_decl
                 .map(|decl| decl.params.iter().map(|p| p.ty.clone()).collect())
+                .unwrap_or_default();
+            struct_method_param_rebindable = chosen_decl
+                .map(|decl| decl.params.iter().map(|p| p.rebindable).collect())
+                .unwrap_or_default();
+            struct_method_param_lent = chosen_decl
+                .map(|decl| decl.params.iter().map(|p| self.is_lent_param(p, true)).collect())
                 .unwrap_or_default();
             let overloaded_name = chosen_decl.filter(|_| {
                 struct_type_opt.as_ref()
@@ -3251,6 +3589,10 @@ impl Transpiler {
         let args_s: Vec<String> = if let Some(borrows) = &external_arg_borrows {
             let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
             Self::apply_arg_borrows(borrows, raw)
+        } else if !is_user_struct_receiver && self.is_external_mut_buffer_call(&rust_method, args) {
+            // `std::io::Read`-style buffer fill (`sock.read(buf)`): see
+            // `EXTERNAL_MUT_BUFFER_METHODS`.
+            args.iter().map(|a| self.emit_external_mut_buffer_arg(&rust_method, &a.value)).collect()
         } else if rust_method == "contains_key" && receiver_is_dict_var {
             // Use emit_dict_key_borrow so the key is &str (Arc<str> via Deref).
             args.iter().map(|a| self.emit_dict_key_borrow(&a.value)).collect()
@@ -3276,6 +3618,22 @@ impl Transpiler {
             // this is what lets `obj.method(.Left)` pick the right enum when multiple
             // enums share a `Left` variant.
             args.iter().enumerate().map(|(i, a)| {
+                // `var` (rebindable) out-parameter: lend the caller's own place as
+                // `&mut <place>` instead of the by-value clone `emit_expr_owned` would
+                // produce — the callee's signature is `&mut T`, and a clone would also
+                // silently discard its mutations.
+                if struct_method_param_rebindable.get(i).copied().unwrap_or(false)
+                    && !matches!(struct_method_param_types.get(i),
+                        Some(Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor
+                            | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask
+                            | OwnerQual::Weak | OwnerQual::Borrow | OwnerQual::BorrowMut))))
+                {
+                    let param_ty = struct_method_param_types.get(i).and_then(|t| t.as_ref());
+                    return self.emit_rebindable_arg(param_ty, &a.value);
+                }
+                if struct_method_param_lent.get(i).copied().unwrap_or(false) {
+                    return self.emit_lent_arg(&a.value);
+                }
                 if matches!(&a.value.kind, ExprKind::DotIdent(_)) {
                     if let Some(Some(param_ty)) = struct_method_param_types.get(i) {
                         return self.emit_let_value(Some(param_ty), &a.value);
@@ -3312,8 +3670,8 @@ impl Transpiler {
             // desugaring (`desugar_array_block`), which pushes each element
             // raw and relies on this to box it.
             let trait_name = match &obj.kind {
-                ExprKind::Var(v) => self.var_types.get(v.as_str()).and_then(|t| match t {
-                    Type::Array(inner) => match inner.as_ref() {
+                ExprKind::Var(v) => self.var_types.get(v.as_str()).and_then(|t| match t.without_mut() {
+                    Type::Array(inner) => match inner.without_mut() {
                         Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => Some(n.clone()),
                         _ => None,
                     },
@@ -3328,6 +3686,23 @@ impl Transpiler {
         } else {
             args.iter().map(|a| self.emit_expr(&a.value)).collect()
         };
+        // A trait-typed receiver (`Box<dyn Trait>`, a bare-trait param/local/field) has no struct
+        // decl, so the arm above found no param flags for it: lend each `mut` parameter of the *trait's own*
+        // method declaration as `&mut <place>` too, matching the `&mut T` signature every
+        // implementer (and the trait's own header) was given.
+        let mut args_s = args_s;
+        if let Some(trait_params) = self.receiver_trait_method_params(obj, method) {
+            for (i, a) in args.iter().enumerate() {
+                if trait_params.get(i).is_some_and(|p| self.is_lent_param(p, true)) {
+                    if let Some(slot) = args_s.get_mut(i) {
+                        *slot = self.emit_lent_arg(&a.value);
+                    }
+                }
+            }
+        }
+        if !is_user_struct_receiver && external_arg_borrows.is_none() {
+            self.check_unresolved_receiver_lent_args(obj, method, args);
+        }
         // Rust collection methods that take a positional usize index:
         // Boring's `uint` maps to u64, so cast the first argument to usize.
         // Exception: `remove` on HashMap/HashSet takes &K/&T (not a usize index).
@@ -3342,7 +3717,11 @@ impl Transpiler {
         // (Set/Dict-typed struct fields included via expr_is_set/expr_is_dict — see
         // receiver_is_set_var/receiver_is_dict_var above.)
         let receiver_is_set = receiver_is_set_var;
-        let args_s: Vec<String> = if USIZE_INDEX_METHODS.contains(&rust_method.as_str()) && !args_s.is_empty() && !receiver_is_set && !receiver_is_dict_var {
+        // Guarded on `!is_user_struct_receiver` so a Boring-declared struct's own `swap`/`insert`/
+        // `drain`/... method (name-collides with the builtin Vec/iterator methods) keeps its
+        // declared parameter types instead of getting `(arg as usize)` -- same
+        // false-positive-by-name bug class as the `contains`/`contains_key`/`remove` guards.
+        let args_s: Vec<String> = if !is_user_struct_receiver && USIZE_INDEX_METHODS.contains(&rust_method.as_str()) && !args_s.is_empty() && !receiver_is_set && !receiver_is_dict_var {
             let mut v = args_s;
             v[0] = format!("({} as usize)", v[0]);
             v
@@ -3409,7 +3788,9 @@ impl Transpiler {
         } else {
             args_s
         };
-        let call = format!("{}.{}({})", obj_s, rust_method, args_s.join(", "));
+        let mut args_s = args_s;
+        let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+        let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", obj_s, rust_method, args_s.join(", ")));
         let call = if let Some(wrap) = extra_wrap {
             format!("{}{}", call, wrap)
         } else {
@@ -3501,6 +3882,12 @@ impl Transpiler {
     /// handles string-type params via emit_expr_owned, and fills missing args with defaults.
     /// Also reorders labeled (named) arguments to match the declared parameter order.
     pub(crate) fn emit_args_coerced(&self, fn_name: &str, args: &[Arg]) -> String {
+        self.emit_args_coerced_vec(fn_name, args).join(", ")
+    }
+
+    /// `emit_args_coerced` with the arguments left separate, so a call site can run
+    /// `hoist_lent_conflicts` over them before assembling the call.
+    pub(crate) fn emit_args_coerced_vec(&self, fn_name: &str, args: &[Arg]) -> Vec<String> {
         let sig = self.fn_sigs.get(fn_name).cloned().unwrap_or_default();
         let rebindable_flags = self.fn_rebindable.get(fn_name).cloned().unwrap_or_default();
         let mutable_flags = self.fn_mutable.get(fn_name).cloned().unwrap_or_default();
@@ -3762,12 +4149,12 @@ impl Transpiler {
                             || matches!(
                                 self.fn_current_params.get(vname.as_str()),
                                 Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
-                            )
+                            ) && !self.is_external_non_clone_type(self.fn_current_params.get(vname.as_str()))
                             // Local variables whose type was tracked as a named/collection type.
                             || matches!(
                                 self.var_types.get(vname.as_str()),
                                 Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
-                            ) => {
+                            ) && !self.is_external_non_clone_type(self.var_types.get(vname.as_str())) => {
                             format!("{}.clone()", emitted)
                         }
                         _ => emitted,
@@ -3964,19 +4351,7 @@ impl Transpiler {
                     Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask
                         | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Weak))
                 ) {
-                    if let ExprKind::Var(vname) = &a.value.kind {
-                        if self.immutable_local_vars.contains(vname.as_str()) {
-                            self.push_error(a.value.line, a.value.col, format!(
-                                "cannot pass `{}` to a `var` out-parameter — `{}` is immutable (`let` binding). Use `var` instead.",
-                                vname, vname
-                            ));
-                        } else if self.mut_local_vars.contains(vname.as_str()) {
-                            self.push_error(a.value.line, a.value.col, format!(
-                                "cannot pass `{}` to a `var` out-parameter — `{}` is `mut` (non-rebindable). Use `var` instead.",
-                                vname, vname
-                            ));
-                        }
-                    }
+                    self.check_out_param_arg(&a.value);
                     // A bare local/param passed directly to a `var` (rebindable) parameter
                     // must be referenced in place — `&mut` must point at the real variable,
                     // not at a temporary. `emitted` may already carry a trailing `.clone()`
@@ -3989,11 +4364,7 @@ impl Transpiler {
                     // are visible at the call site" (see CLAUDE.md). Only strip the clone for
                     // a plain `Var` argument (an existing place) — a computed/temporary
                     // expression still needs whatever `emit_let_value` produced for it.
-                    let emitted = if matches!(&a.value.kind, ExprKind::Var(_)) {
-                        emitted.strip_suffix(".clone()").map(str::to_owned).unwrap_or(emitted)
-                    } else {
-                        emitted
-                    };
+                    let emitted = Self::borrow_place_arg(&a.value, emitted);
                     format!("&mut {}", emitted)
                 } else {
                     emitted
@@ -4007,7 +4378,219 @@ impl Transpiler {
             }
             i += 1;
         }
-        result.join(", ")
+        result
+    }
+
+    /// Rust two-phase borrows do not apply to a plain `&mut place` argument, so a call that lends a
+    /// place (`&mut v` / `&mut *v` / `&mut self.f`) to a `mut` parameter while another argument
+    /// reads that same place (`Holder { xs: v.clone() }`) is rejected by rustc (E0502). Boring's
+    /// value semantics say the by-value read sees the content *before* the call, so every
+    /// by-value argument is evaluated first into a temporary (`let __arg1 = ..;`, left to right) and
+    /// the call uses the temporaries. Returns the `let` prelude (empty when no argument conflicts —
+    /// the common case, which leaves the emitted call untouched); `args` is rewritten in place.
+    pub(crate) fn hoist_lent_conflicts(args: &mut [String]) -> String {
+        let lent: Vec<String> = args.iter()
+            .filter_map(|a| a.strip_prefix("&mut ").map(|p| p.trim_start_matches('*').trim().to_string()))
+            .collect();
+        if lent.is_empty() { return String::new(); }
+        let conflicts = args.iter().any(|a| !a.starts_with("&mut ")
+            && lent.iter().any(|place| Self::mentions_place(a, place)));
+        if !conflicts { return String::new(); }
+        let mut prelude = String::new();
+        for (i, a) in args.iter_mut().enumerate() {
+            let is_closure = a.starts_with('|') || a.starts_with("move |");
+            if a.starts_with("&mut ") || is_closure { continue; }
+            let tmp = format!("__arg{}", i);
+            prelude.push_str(&format!("let {} = {}; ", tmp, a));
+            *a = tmp;
+        }
+        prelude
+    }
+
+    /// `call` preceded by the `hoist_lent_conflicts` prelude, as a single expression.
+    pub(crate) fn with_hoisted_args(prelude: &str, call: String) -> String {
+        if prelude.is_empty() { call } else { format!("({{ {}{} }})", prelude, call) }
+    }
+
+    /// Does the emitted Rust `code` mention `place` (a local or a `self.field` path) as a whole
+    /// path — not as a suffix of a longer identifier or of another receiver (`h.v`)?
+    fn mentions_place(code: &str, place: &str) -> bool {
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut from = 0;
+        while let Some(pos) = code[from..].find(place) {
+            let start = from + pos;
+            let end = start + place.len();
+            let before_ok = code[..start].chars().next_back().map_or(true, |c| !is_ident(c) && c != '.');
+            let after_ok = code[end..].chars().next().map_or(true, |c| !is_ident(c));
+            if before_ok && after_ok { return true; }
+            from = start + 1;
+            while !code.is_char_boundary(from) { from += 1; }
+        }
+        false
+    }
+
+    /// `let`/`mut` diagnostics for a bare local passed to a `var` (rebindable) out-parameter.
+    /// Shared by free-function calls (`emit_args_coerced`) and user-struct method calls.
+    fn check_out_param_arg(&self, arg: &Expr) {
+        if let ExprKind::Var(vname) = &arg.kind {
+            if self.immutable_local_vars.contains(vname.as_str()) {
+                self.push_error(arg.line, arg.col, format!(
+                    "cannot pass `{}` to a `var` out-parameter — `{}` is immutable (`let` binding). Use `var` instead.",
+                    vname, vname
+                ));
+            } else if self.mut_local_vars.contains(vname.as_str()) {
+                self.push_error(arg.line, arg.col, format!(
+                    "cannot pass `{}` to a `var` out-parameter — `{}` is `mut` (non-rebindable). Use `var` instead.",
+                    vname, vname
+                ));
+            }
+        }
+    }
+
+    /// Strip the trailing `.clone()` the by-value heuristics add to an argument that is an
+    /// existing place (a plain local/param, or a field), so `&mut <place>` points at the
+    /// real storage rather than at a throwaway clone. A computed/temporary expression keeps
+    /// whatever it was emitted as.
+    fn borrow_place_arg(arg: &Expr, emitted: String) -> String {
+        if matches!(&arg.kind, ExprKind::Var(_) | ExprKind::Field(..)) {
+            emitted.strip_suffix(".clone()").map(str::to_owned).unwrap_or(emitted)
+        } else {
+            emitted
+        }
+    }
+
+    /// The declared parameters of `method` on the trait that `obj`'s static type names, if `obj`
+    /// is a bare trait-typed local/parameter/field (dynamic dispatch). `None` for anything else.
+    ///
+    /// Also covers a receiver whose static type is a generic type parameter of the enclosing
+    /// function bounded by a trait (`def f<T as Poker>(mut T p)`): the bound trait declaring
+    /// `method` is the contract the call is checked against.
+    fn receiver_trait_method_params(&self, obj: &Expr, method: &str) -> Option<&Vec<Param>> {
+        let ty_name = self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name)
+            .or_else(|| self.resolve_expr_struct_type(obj))?;
+        if !self.trait_method_names.contains_key(ty_name.as_str()) {
+            if !self.current_fn_type_params.contains(ty_name.as_str()) { return None; }
+            return self.current_fn_type_bounds.iter()
+                .filter(|(tp, _)| *tp == ty_name)
+                .find_map(|(_, bound)| self.trait_method_params.get(&format!("{}::{}", bound, method)));
+        }
+        self.trait_method_params.get(&format!("{}::{}", ty_name, method))
+    }
+
+    /// A call whose receiver type is unknowable (`resolve_expr_type` finds nothing: an untyped
+    /// closure parameter or local, the result of a call/method with no declared return type, an
+    /// element of a collection of unknown type) cannot lend a `mut` argument — the callee's
+    /// signature, which the call site must mirror (`&mut T`, never a by-value clone), is the very
+    /// thing the missing type would select. When some user type/trait declares `method` with a
+    /// lent `mut` parameter at the position of a passed argument, say so in Boring terms instead of
+    /// emitting a by-value argument that rustc rejects (E0308) — or that would silently drop the
+    /// callee's writes. Receivers that are provably builtin collections/strings and the builtin
+    /// mutating-method names (`MUTATING_COLLECTION_METHODS`) are never second-guessed.
+    fn check_unresolved_receiver_lent_args(&self, obj: &Expr, method: &str, args: &[Arg]) {
+        if args.is_empty()
+            || MUTATING_COLLECTION_METHODS.contains(&method)
+            || Self::ELEMENT_CLOSURE_METHODS.contains(&method)
+        { return; }
+        let recv_name = match &obj.kind {
+            ExprKind::Var(v) => {
+                // A path (`mem.swap(..)`, an uppercase type name) or a non-local name is not an
+                // instance value of unknown type; an implicit-self field was resolved above.
+                if !self.known_local_vars.contains(v.as_str()) { return; }
+                format!("`{}`", v)
+            }
+            ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Field(..) => {
+                "this expression".to_string()
+            }
+            _ => return,
+        };
+        if self.resolve_expr_type(obj).is_some() || self.expr_is_dict(obj) || self.expr_is_set(obj) { return; }
+        let suffix = format!("::{}", method);
+        let mut lent_at: Vec<bool> = Vec::new();
+        let mut note = |flags: Vec<bool>| {
+            if lent_at.len() < flags.len() { lent_at.resize(flags.len(), false); }
+            for (i, f) in flags.into_iter().enumerate() { lent_at[i] |= f; }
+        };
+        for (key, decls) in &self.struct_method_overload_decls {
+            if key.ends_with(&suffix) {
+                for d in decls { note(d.params.iter().map(|p| self.is_lent_param(p, true)).collect()); }
+            }
+        }
+        for (key, params) in &self.trait_method_params {
+            if key.ends_with(&suffix) { note(params.iter().map(|p| self.is_lent_param(p, true)).collect()); }
+        }
+        if let Some(a) = args.iter().enumerate().find(|(i, _)| lent_at.get(*i).copied().unwrap_or(false)).map(|(_, a)| a) {
+            let arg_name = match &a.value.kind { ExprKind::Var(v) => format!("`{}`", v), _ => "this argument".to_string() };
+            self.push_error(obj.line, obj.col, format!(
+                "cannot lend {} to the `mut` parameter of `.{}()`: the type of {} is not known here, so the method (and which of its parameters are `mut`) can't be resolved; declare its type (`<Type> name` for a local or a closure parameter, or a return type on the function that produces it)",
+                arg_name, method, recv_name
+            ));
+        }
+    }
+
+    /// The lent-`mut` flags (`is_lent_param`) of each parameter of `type_name::method`: read
+    /// from the struct/enum method's own decl, or — for a trait name — the trait's declaration.
+    /// `None` when the type/method is unknown or the method is overloaded (its by-arity decl is
+    /// picked by `emit_method_call_fallback`, which this flag lookup doesn't redo).
+    fn lent_param_flags(&self, type_name: &str, method: &str) -> Option<Vec<bool>> {
+        let key = format!("{}::{}", type_name, method);
+        if let Some(params) = self.trait_method_params.get(&key) {
+            return Some(params.iter().map(|p| self.is_lent_param(p, true)).collect());
+        }
+        if self.overloaded_method_keys.contains(&key) { return None; }
+        let decl = self.struct_method_overload_decls.get(&key)?.first()?;
+        Some(decl.params.iter().map(|p| self.is_lent_param(p, true)).collect())
+    }
+
+    /// Arguments of a call to the user-type method `struct_name::method` that is reached
+    /// through a lock/guard wrapper (`'actor`/`'guard`/`'observed` locals and fields — the
+    /// dedicated dispatchers that don't go through `emit_method_call_fallback`): each lent `mut`
+    /// parameter gets `&mut <place>` (`emit_lent_arg`), every other argument the by-value
+    /// `emit_expr_owned` those dispatchers always used.
+    fn emit_user_method_args(&self, struct_name: Option<&str>, method: &str, args: &[Arg]) -> Vec<String> {
+        let flags = struct_name.and_then(|t| self.lent_param_flags(t, method)).unwrap_or_default();
+        args.iter().enumerate().map(|(i, a)| {
+            if flags.get(i).copied().unwrap_or(false) { self.emit_lent_arg(&a.value) }
+            else { self.emit_expr_owned(&a.value) }
+        }).collect()
+    }
+
+    /// One argument for a lent `mut` parameter of a user-struct method (`is_lent_param`: a
+    /// `mut [T]`/`mut {K=V}`/`mut {T}` collection or a `mut` user struct/enum): the caller's own
+    /// value as `&mut`, after the `let < mut < var` hierarchy check. A caller binding that already is a
+    /// `&mut` (a lent `mut` parameter of the enclosing function) is reborrowed (`&mut *name`).
+    /// Mirrors `emit_args_coerced`'s `BorrowMut` handling for free functions.
+    fn emit_lent_arg(&self, arg: &Expr) -> String {
+        if let ExprKind::Var(v) = &arg.kind {
+            // Implicit-self field (`self.bump(inner)` inside a method of the struct that
+            // declares `inner`): the place to lend is `self.inner`, not a local.
+            let is_implicit_self_field = !self.known_local_vars.contains(v.as_str())
+                && self.self_type.as_deref()
+                    .and_then(|t| self.struct_fields.get(t))
+                    .map(|fields| fields.iter().any(|(fname, _)| fname == v))
+                    .unwrap_or(false);
+            if is_implicit_self_field {
+                return format!("&mut self.{}", v);
+            }
+            if self.immutable_local_vars.contains(v.as_str()) {
+                self.push_error(arg.line, arg.col, format!(
+                    "cannot pass `{}` to a `mut` parameter — `{}` is immutable (`let` binding). Use `var` or `mut` instead.",
+                    v, v
+                ));
+            }
+            let already_ref = self.var_primitive_params.contains(v.as_str())
+                || matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::BorrowMut));
+            return if already_ref { format!("&mut *{}", v) } else { format!("&mut {}", v) };
+        }
+        format!("&mut {}", Self::borrow_place_arg(arg, self.emit_expr_owned(arg)))
+    }
+
+    /// One argument for a `var` (rebindable) parameter of a user-struct method: the
+    /// out-parameter diagnostics, then `&mut <place>`. Mirrors the rebindable arm of
+    /// `emit_args_coerced`, which handles free functions.
+    fn emit_rebindable_arg(&self, param_ty: Option<&Type>, arg: &Expr) -> String {
+        self.check_out_param_arg(arg);
+        let emitted = Self::borrow_place_arg(arg, self.emit_let_value(param_ty, arg));
+        format!("&mut {}", emitted)
     }
 
     pub(crate) fn emit_macro(&self, name: &str, args: &[Expr]) -> String {
@@ -4464,6 +5047,7 @@ impl Transpiler {
             struct_type_mut_var_names: self.struct_type_mut_var_names.clone(),
             struct_type_static_var_names: self.struct_type_static_var_names.clone(),
             struct_type_method_sigs: self.struct_type_method_sigs.clone(),
+            struct_type_method_params: self.struct_type_method_params.clone(),
             struct_getters: self.struct_getters.clone(),
             enum_field_getters: self.enum_field_getters.clone(),
             struct_setters: self.struct_setters.clone(),
@@ -4484,6 +5068,9 @@ impl Transpiler {
             struct_protocols: self.struct_protocols.clone(),
             struct_derives_clone: self.struct_derives_clone.clone(),
             trait_default_mutating: self.trait_default_mutating.clone(),
+            trait_method_params: self.trait_method_params.clone(),
+            closure_param_hints: std::cell::RefCell::new(std::collections::HashMap::new()),
+            current_fn_type_bounds: self.current_fn_type_bounds.clone(),
             fn_var_params: self.fn_var_params.clone(),
             with_open_names: self.with_open_names.clone(),
             iterable_structs: self.iterable_structs.clone(),
@@ -4527,6 +5114,7 @@ impl Transpiler {
             match_subject_enum: self.match_subject_enum.clone(),
             var_types: self.var_types.clone(),
             var_init_exprs: self.var_init_exprs.clone(),
+            var_std_types: self.var_std_types.clone(),
             string_vars: self.string_vars.clone(),
             str_index_cache_vars: self.str_index_cache_vars.clone(),
             struct_operator_methods: self.struct_operator_methods.clone(),
@@ -4579,6 +5167,7 @@ impl Transpiler {
             rc_vars: self.rc_vars.clone(),
             shared_ref_params: self.shared_ref_params.clone(),
             var_primitive_params: self.var_primitive_params.clone(),
+            content_mutable_params: self.content_mutable_params.clone(),
             managed_mutex_vars: self.managed_mutex_vars.clone(),
             managed_mutex_fn_return_vars: self.managed_mutex_fn_return_vars.clone(),
             in_lhs_assign: std::cell::Cell::new(false),
@@ -4588,6 +5177,7 @@ impl Transpiler {
             managed_param_shadows: self.managed_param_shadows.clone(),
             struct_method_return_types: self.struct_method_return_types.clone(),
             struct_method_throws: self.struct_method_throws.clone(),
+            struct_method_names: self.struct_method_names.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             observed_locals: self.observed_locals.clone(),
             observed_fields: self.observed_fields.clone(),
@@ -4603,6 +5193,8 @@ impl Transpiler {
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
+            fn_current_params_lent: std::collections::HashSet::new(),
+            last_use_sites: self.last_use_sites.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),
             mut_local_vars: self.mut_local_vars.clone(),
             content_mutable_local_vars: self.content_mutable_local_vars.clone(),

@@ -47,6 +47,14 @@ struct Interpreter:
     # `[Type?]` stack double-wraps every read in `Some(...)`; `[Type]` sidesteps that
     # entirely (current_return_ty converts the sentinel back to a real `nil` explicitly).
     var [Type] return_ty_stack = []
+    # The final value of every `mut`/`var` parameter of the user function/method that most
+    # recently finished running, as (param position, param name, value). Repopulated (even
+    # when empty) at the exit of each call_fn / user-method call, so the call site can write
+    # the callee's rebinds/mutations back into the caller's places (see
+    # `capture_var_param_outs` in exec.br and `write_back_var_args` in eval.br) — arrays,
+    # dicts and sets are values here, so without this the changes are lost. Mirrors
+    # `last_var_params` in the Rust interpreter (src/interpreter/call.rs).
+    var [(int, string, Value)] last_var_params = []
 
     def void set_pending_return(Value v):
         has_pending_return = true
@@ -81,7 +89,7 @@ struct Interpreter:
     req FnDecl? find_best_method(string type_name, string method_name, [Value] args):
         let methods_opt = struct_methods.get(type_name)
         if let methods = methods_opt:
-            var [FnDecl] candidates = []
+            mut [FnDecl] candidates = []
             for m in methods:
                 if m.name == method_name:
                     candidates.push(m)
@@ -223,7 +231,7 @@ def string val_to_string(Value v):
         Value.Float32(f): "{f}"
         Value.Str(s): s
         Value.Array(elems):
-            var parts = ["["]
+            mut parts = ["["]
             var first = true
             for e in elems:
                 if not first:
@@ -236,7 +244,7 @@ def string val_to_string(Value v):
                 result = "{result}{p}"
             result
         Value.LabeledArray(elems, _):
-            var parts = ["["]
+            mut parts = ["["]
             var first = true
             for e in elems:
                 if not first:
@@ -249,7 +257,7 @@ def string val_to_string(Value v):
                 result = "{result}{p}"
             result
         Value.Tuple(elems):
-            var parts = ["("]
+            mut parts = ["("]
             var first = true
             for e in elems:
                 if not first:
@@ -262,7 +270,7 @@ def string val_to_string(Value v):
                 result = "{result}{p}"
             result
         Value.Dict(pairs):
-            var parts = ["{{"]
+            mut parts = ["{{"]
             var first = true
             for pair in pairs:
                 if not first:
@@ -277,7 +285,7 @@ def string val_to_string(Value v):
                 result = "{result}{p}"
             result
         Value.Set(elems):
-            var parts = ["{{"]
+            mut parts = ["{{"]
             var first = true
             for e in elems:
                 if not first:
@@ -293,7 +301,7 @@ def string val_to_string(Value v):
             if fields.length == 0:
                 variant
             else:
-                var parts = ["{variant}("]
+                mut parts = ["{variant}("]
                 var first = true
                 for f in fields:
                     if not first:
@@ -657,11 +665,12 @@ def Interpreter'actor new_interpreter():
         in_kernel_context = false,
         cli_args = [],
         return_ty_stack = [],
+        last_var_params = [],
         search_paths = [],
         loaded_modules = []
     )
     register_stdlib(interp)
-    var [EnumVariant] error_variants = []
+    mut [EnumVariant] error_variants = []
     for name in ["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"]:
         error_variants.push(EnumVariant(name= name, fields= [], attrs= [], line= 0))
     let error_decl = EnumDecl(name= "Error", is_pub= true, is_native= false, type_params= [], protocols= [], variants= error_variants, methods= [], type_methods= [], setters= [], conversions= [], attrs= [], line= 0)
@@ -709,7 +718,7 @@ def void register_free_fn(mut Interpreter interp, mut Env'actor target_env, FnDe
                 let idx = existing_variants.length
                 let key = "{fn_name}#{idx}"
                 interp.set_fn_decl(key, decl)
-                var new_variants = [Value]{}
+                mut new_variants = [Value]{}
                 for v in existing_variants:
                     new_variants.push(v)
                 new_variants.push(Value.Fn(key, target_env.clone()))
@@ -847,7 +856,7 @@ def void exec_use(mut Interpreter interp, UseDecl decl):
     # names), while also recording which names are `pub` — so a selective
     # import's validation below doesn't need a second pass over
     # `program.items` (which `for item in program.items` already consumes).
-    var {string} pub_names = {}
+    mut {string} pub_names = {}
     for item in program.items:
         if let nm = item_name(item.clone()):
             if item_is_pub(item.clone()):
@@ -867,7 +876,7 @@ def void exec_use(mut Interpreter interp, UseDecl decl):
 # Separate namespace: associated functions have no self, even when an instance
 # method has the same name. Reuse overload selection and ordinary call frames.
 def void register_type_methods(mut Interpreter interp, string owner, [TypeMethod] methods):
-    var [FnDecl] functions = []
+    mut [FnDecl] functions = []
     for m in methods:
         functions.push(FnDecl(name= m.name, qualifier= nil, params= m.params, return_ty= m.return_ty, body= m.body, is_pub= m.is_pub, can_throw= m.can_throw, is_task= m.is_task, is_stream= false, stream_capacity= nil, mutating= false, is_native= false, throws_ty= nil, type_params= [], where_clause= [], attrs= [], line= m.line))
     interp.set_method_decls("__type__." + owner, functions)
@@ -887,7 +896,7 @@ def void exec_item(mut Interpreter interp, Item item):
             interp.set_struct_decl(sname, decl)
             register_type_methods(interp, sname, decl.type_methods)
             # Collect own methods into final list; build a comma-separated name index
-            var all_struct_methods = [FnDecl]{}
+            mut all_struct_methods = [FnDecl]{}
             var own_names_str = ","
             for m in decl.methods:
                 own_names_str = own_names_str + m.name + ","
@@ -947,7 +956,7 @@ def void exec_item(mut Interpreter interp, Item item):
             # Name-only dedup here would silently drop every other overload
             # of that name the moment any single ext method shared its name.
             let existing_methods_opt = interp.struct_methods.get(decl.type_name)
-            var all_methods = [FnDecl]{}
+            mut all_methods = [FnDecl]{}
             var di = 0
             while di < decl.methods.length:
                 all_methods.push(decl.methods[di])

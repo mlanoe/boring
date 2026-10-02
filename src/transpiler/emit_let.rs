@@ -321,6 +321,10 @@ impl Transpiler {
             && !val.starts_with("Arc::")
             && !val.starts_with("Rc::")
             && !val.starts_with("{ let __g")
+            // Non-`Clone` std handle (`var TcpStream server = pair.0`): `.clone()` is E0599 on
+            // it; the field read is a move, as in hand-written Rust (`EXTERNAL_NON_CLONE_TYPES`). Without a
+            // declared type the element type comes from `infer_std_type`'s small std-return table.
+            && !self.let_field_read_is_external_non_clone(s.ty.as_ref(), s_value)
             && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128))
@@ -476,6 +480,9 @@ impl Transpiler {
         // `infer_float_width` lookup on a bare `Var(rad)` would otherwise have nothing to go on
         // and silently default a builtin math call like `sin(rad)` to f64.
         self.var_init_exprs.insert(s.name.clone(), s_value.clone());
+        // Inferred std type of an unannotated binding (`let p = try? listener.accept()`), see
+        // `infer_std_type`; a declared type is already in `var_types`.
+        self.track_std_binding(&s.name, s_value, false);
         // A fresh `let <name> = ...` always starts a brand-new binding — reset any
         // `optional_vars` marking left over from an *unrelated*, identically-named `let`
         // elsewhere in the same top-level fn (optional_vars is a flat per-fn set, not
@@ -550,20 +557,26 @@ impl Transpiler {
             self.vec_vars.remove(s.name.as_str());
             self.collection_vars.remove(s.name.as_str());
         }
+        // The declared type with a bare-`mut` marker looked through: `mut {K=V} x = other` parses
+        // to `Type::Mut(Dict(..))` (`wrap_type_mut`, an owned permission with no Rust type of its
+        // own), which none of the `Type::Dict`/`Array`/`Set`/`Tuple` shape checks below would match
+        // -- leaving the local out of `dict_vars`/`vec_vars`/`set_vars` and so emitting
+        // `x["k"] = v` / `x.add(v)` as array-style code. `var` has no wrapper, hence the divergence.
+        let decl_ty: Option<&Type> = s.ty.as_ref().map(Type::without_mut);
         // Track variables that hold collections (for {:?} formatting later)
-        if looks_like_collection(val) || is_collection_type(s.ty.as_ref()) {
+        if looks_like_collection(val) || is_collection_type(decl_ty) {
             self.collection_vars.insert(s.name.clone());
         }
         // Track variables that unambiguously hold a Vec<T> (not HashMap/HashSet, not scalars from reduce).
         // Only consider expressions that END as a Vec — this excludes reduce/fold chains that
         // contain intermediate .collect::<Vec<_>>() but terminate as a scalar.
         if (expr_ends_as_vec(val) && !looks_like_map_or_set(val))
-            || matches!(&s.ty, Some(Type::Array(_)))
+            || matches!(decl_ty, Some(Type::Array(_)))
         {
             self.vec_vars.insert(s.name.clone());
         }
         // Track Vec<Arc<str>> variables: assigned from split/chars or declared as [string].
-        let is_str_array_ty = matches!(&s.ty, Some(Type::Array(inner))
+        let is_str_array_ty = matches!(decl_ty, Some(Type::Array(inner))
             if matches!(inner.as_ref(), Type::Str)
             || matches!(inner.as_ref(), Type::Named(n) if n == "string" || n == "str"));
         let is_split_or_chars = matches!(&s_value.kind,
@@ -586,7 +599,7 @@ impl Transpiler {
             self.var_types.insert(s.name.clone(), Type::Array(Box::new(Type::Named("string".to_string()))));
         }
         // Track HashSet variables for `remove(&v)` and `add`→`insert` dispatch.
-        if matches!(&s.ty, Some(Type::Set(_)))
+        if matches!(decl_ty, Some(Type::Set(_)))
             || val.starts_with("HashSet::")
             || (val.starts_with("HashSet::from(") || val.contains(".collect::<HashSet"))
         {
@@ -623,7 +636,7 @@ impl Transpiler {
                         .and_then(|t| t.without_mut().index_element_type().cloned())
                         .is_some_and(|vt| matches!(vt.without_mut(), Type::Dict(..)))));
         let is_dict_index_else = is_dict_index_else
-            && !matches!(&s.ty, Some(Type::Array(_)) | Some(Type::Set(_)));
+            && !matches!(decl_ty, Some(Type::Array(_)) | Some(Type::Set(_)));
         // `let x = some_struct.dict_field.clone()` — a plain `.clone()` method call on a
         // dict-typed receiver, with NO explicit type annotation. The string checks above
         // (`HashMap::`/`.collect::<HashMap`) never catch this shape: the emitted Rust for
@@ -640,7 +653,7 @@ impl Transpiler {
             if method == "clone"
                 && self.resolve_expr_declared_type(recv)
                     .is_some_and(|t| matches!(t.without_mut(), Type::Dict(..))));
-        if matches!(&s.ty, Some(Type::Dict(..)))
+        if matches!(decl_ty, Some(Type::Dict(..)))
             || val.starts_with("HashMap::")
             || val.contains(".collect::<HashMap")
             || is_dict_index_else
@@ -665,8 +678,8 @@ impl Transpiler {
         // Track tuple variables for method dispatch (length, isEmpty, first, last).
         if let ExprKind::Tuple(elems) = &s_value.kind {
             self.tuple_vars.insert(s.name.clone(), elems.len());
-        } else if matches!(&s.ty, Some(Type::Tuple(elems)) if !elems.is_empty()) {
-            if let Some(Type::Tuple(elems)) = &s.ty {
+        } else if matches!(decl_ty, Some(Type::Tuple(elems)) if !elems.is_empty()) {
+            if let Some(Type::Tuple(elems)) = decl_ty {
                 self.tuple_vars.insert(s.name.clone(), elems.len());
             }
         }
@@ -917,7 +930,7 @@ impl Transpiler {
                 if let ExprKind::Var(arr_name) = &arr_expr.kind {
                     let elem_ty = self.fn_current_params.get(arr_name.as_str())
                         .or_else(|| self.var_types.get(arr_name.as_str()))
-                        .and_then(|t| if let Type::Array(elem) = t { Some(elem.as_ref().clone()) } else { None });
+                        .and_then(|t| if let Type::Array(elem) = t.without_mut() { Some(elem.as_ref().clone()) } else { None });
                     if let Some(elem_ty) = elem_ty {
                         self.var_types.insert(s.name.clone(), elem_ty);
                     }
@@ -1069,7 +1082,7 @@ impl Transpiler {
             }
         }
         // Track newtype vars from explicit type annotation: `let id: UserId = ...`
-        if let Some(Type::Named(ty_name)) = &s.ty {
+        if let Some(Type::Named(ty_name)) = decl_ty {
             if self.newtype_types.contains(ty_name.as_str()) {
                 self.var_newtype_type.insert(s.name.clone(), ty_name.clone());
             }
@@ -1629,6 +1642,34 @@ impl Transpiler {
         )
     }
 
+    /// True when `v` is a local/param whose declared type (looking through the `mut`
+    /// wrapper — `var mut`/`mut` bindings keep `Type::Mut(..)` in `var_types`) is a
+    /// built-in `[T]`/`{K=V}`/`{T}`. Reading such a name into an owned by-value position
+    /// (struct/enum-variant constructor field, `let` alias, ...) needs `.clone()` to keep
+    /// Boring's value semantics — passing by value never invalidates the caller's variable,
+    /// whatever its `let`/`var`/`mut`/`var mut` spelling (a `&mut Vec<T>` lent param clones
+    /// to an owned `Vec<T>` through auto-deref, so it is covered too).
+    pub(crate) fn is_owned_collection_local(&self, v: &str) -> bool {
+        if self.arc_vars.contains(v) {
+            return false;
+        }
+        match self.var_types.get(v).map(Type::without_mut) {
+            Some(Type::Array(_) | Type::Dict(..) | Type::Set(_)) => true,
+            Some(_) => false,
+            // An unannotated `let b = [1, 2, 3]` never gets a `var_types` entry; its initializer
+            // (recorded for every let) still says it is an owned collection.
+            None => !self.fn_current_params.contains_key(v)
+                && matches!(
+                    self.var_init_exprs.get(v).map(|e| &e.kind),
+                    Some(
+                        ExprKind::Array(_) | ExprKind::Dict(_) | ExprKind::Set(_)
+                        | ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. }
+                        | ExprKind::ArrayComp { .. } | ExprKind::ArrayCompIter { .. }
+                    )
+                ),
+        }
+    }
+
     /// `let T? name = value` — wraps a non-nil value in `Some(...)`, unless it's already
     /// known to produce `Option<T>` (an if-expression with nil/some branches, a throws call,
     /// a function/method/field known to return Optional, etc.), in which case it's passed
@@ -2052,7 +2093,8 @@ impl Transpiler {
                             .collect();
                         format!("vec![{}]", es.join(", "))
                     }
-                    ExprKind::Var(v) if self.is_borrowed_collection_param(v) => {
+                    ExprKind::Var(v) if self.is_borrowed_collection_param(v)
+                        || (self.is_owned_collection_local(v) && !self.is_last_use_move(value)) => {
                         format!("{}.clone()", self.emit_expr(value))
                     }
                     _ => self.emit_expr(value),
@@ -2061,8 +2103,8 @@ impl Transpiler {
             // [Trait] (dynamic dispatch): box each element into `Box<dyn Trait>` so the
             // literal matches the `Vec<Box<dyn Trait>>` type `emit_type` already produces
             // for the declared local/field/param — see docs/book.md "Traits as types".
-            Some(Type::Array(elem_ty)) if matches!(elem_ty.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) => {
-                let trait_name = match elem_ty.as_ref() {
+            Some(Type::Array(elem_ty)) if matches!(elem_ty.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) => {
+                let trait_name = match elem_ty.without_mut() {
                     Type::Named(n) => n.as_str(),
                     _ => unreachable!(),
                 };
@@ -2093,6 +2135,7 @@ impl Transpiler {
             Some(Type::Set(elem_ty)) if Self::is_string_type(elem_ty) || Self::is_str_ref_type(elem_ty) => {
                 match &value.kind {
                     ExprKind::Set(elems) if elems.is_empty() => "HashSet::<Arc<str>>::new()".to_string(),
+                    ExprKind::Var(v) if self.is_owned_collection_local(v) && !self.is_last_use_move(value) => format!("{}.clone()", self.emit_expr(value)),
                     _ => self.emit_expr(value),
                 }
             }
@@ -2377,6 +2420,7 @@ impl Transpiler {
                 && !self.var_mutex_types.contains(v.as_str())
                 && !self.var_primitive_params.contains(v.as_str())
                 && !s.ends_with(".clone()")
+                && !self.is_last_use_move(value)
             {
                 return format!("{}.clone()", s);
             }
@@ -2385,7 +2429,7 @@ impl Transpiler {
             if let Some(Type::Named(type_name)) = declared_ty {
                 let is_user_enum = self.enum_variant_fields.keys()
                     .any(|k| k.starts_with(&format!("{}::", type_name)));
-                if is_user_enum && !s.ends_with(".clone()") {
+                if is_user_enum && !s.ends_with(".clone()") && !self.is_last_use_move(value) {
                     return format!("{}.clone()", s);
                 }
             }
@@ -2397,20 +2441,19 @@ impl Transpiler {
             if self.is_borrowed_collection_param(v) && !s.ends_with(".clone()") {
                 return format!("{}.clone()", s);
             }
+            // Local `[T]`/`{K=V}`/`{T}` (any of `let`/`var`/`mut`/`var mut`) read by value:
+            // clone, same as the dict arm of `emit_let_value` — otherwise `Holder(xs)` /
+            // `Wrapper.List(xs)` moves it and a later use fails rustc (E0382).
+            if self.is_owned_collection_local(v) && !s.ends_with(".clone()") && !self.is_last_use_move(value) {
+                return format!("{}.clone()", s);
+            }
         }
-        // If the value is a field access on a local struct variable, and the field type
-        // is `string` (Rc<str>/Arc<str>), add .clone() to avoid a partial struct move.
-        // In Boring, string is a reference-counted type — cloning is cheap and required.
-        if let ExprKind::Field(obj, field_name) = &value.kind {
+        // A field read of a local/param struct (`h.xs`, `o.inner`, `o.name`) by value would be a
+        // partial move out of the struct in Rust — clone every non-`Copy` field type (string,
+        // collection, user struct/enum), so the struct stays usable (value semantics).
+        if let ExprKind::Field(obj, _) = &value.kind {
             if let ExprKind::Var(obj_var) = &obj.kind {
-                let struct_type_name = self.var_struct_types.get(obj_var.as_str())
-                    .or_else(|| self.var_struct_type.get(obj_var.as_str()));
-                let field_is_string = struct_type_name
-                    .and_then(|sn| self.struct_fields.get(sn.as_str()))
-                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name.as_str()))
-                    .map(|(_, ty)| Self::is_string_type(ty))
-                    .unwrap_or(false);
-                if field_is_string && !s.ends_with(".clone()") {
+                if obj_var != "self" && !s.ends_with(".clone()") && self.field_read_needs_clone(value) {
                     return format!("{}.clone()", s);
                 }
             }

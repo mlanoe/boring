@@ -1,0 +1,49 @@
+# A `mut` argument lent to a method of a DIFFERENT receiver is fine in Rust (disjoint fields /
+# distinct locals), so it must keep compiling -- only an argument inside the receiver's own
+# object is rejected (error_lend_own_field_*.br). Also the suggested fix: copy the field into
+# a local, pass it, assign it back.
+struct Counter:
+    var int value = 0
+
+    def bump(mut Counter other):
+        value += 1
+        other.value += 10
+
+struct Holder:
+    var mut Counter a = Counter()
+    var mut Counter inner = Counter()
+    var int hits = 0
+
+    def bump(mut Counter c):
+        c.value += 1
+        hits += 1
+
+    # receiver `self.a`, argument `self.inner`: disjoint fields
+    def bump_disjoint():
+        self.a.bump(self.inner)
+
+    # same, bare implicit-self field argument
+    def bump_disjoint_bare():
+        a.bump(inner)
+
+    # the documented fix: copy, call, assign back
+    def bump_inner_via_local():
+        mut Counter tmp = inner
+        self.bump(tmp)
+        inner = tmp
+
+def main():
+    mut Holder h = Holder()
+    h.bump_disjoint()
+    h.bump_disjoint_bare()
+    h.bump_inner_via_local()
+    print h.a.value
+    print h.inner.value
+    print h.hits
+
+    # distinct locals
+    mut Counter x = Counter()
+    mut Counter y = Counter()
+    x.bump(y)
+    print x.value
+    print y.value

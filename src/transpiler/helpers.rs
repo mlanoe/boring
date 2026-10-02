@@ -483,6 +483,38 @@ pub(crate) fn collect_lifetimes(ty: &Type, out: &mut Vec<String>) {
 }
 
 /// Does an explicit type annotation indicate a collection?
+/// A `mut [T]` / `mut {K=V}` / `mut {T}` parameter (content-mutable, not `var`-rebindable, not
+/// variadic): docs/book.md's "`mut` vs `var` on a struct parameter" says the callee may mutate
+/// the caller's content, so the collection is lent as `&mut` — callee signature `&mut Vec<T>`,
+/// call site `&mut buf` — never cloned or moved. Free functions and struct methods alike.
+pub(crate) fn is_lent_collection_param(p: &Param) -> bool {
+    p.mutable && !p.rebindable && !p.variadic
+        && matches!(p.ty.as_ref().map(|t| t.without_mut()), Some(Type::Array(_) | Type::Dict(_, _) | Type::Set(_)))
+}
+
+/// A `mut` (non-`var`, non-variadic) parameter whose declared type is a bare user type name —
+/// the *shape* half of `Transpiler::is_lent_param`'s struct/enum case (whether the name really
+/// is a user struct/enum needs the transpiler's own tables, see there). `Type::TypeParam` is
+/// accepted too: a struct literally named with one uppercase letter (`struct P`) is spelled that
+/// way by the parser, the implicit-generic form.
+pub(crate) fn is_mut_user_type_param_shape(p: &Param) -> Option<&str> {
+    if !p.mutable || p.rebindable || p.variadic { return None; }
+    match p.ty.as_ref().map(|t| t.without_mut()) {
+        Some(Type::Named(n) | Type::TypeParam(n)) => Some(n.as_str()),
+        _ => None,
+    }
+}
+
+/// The parameter's type as registered in `fn_sigs`: a lent `mut [T]` is `&mut [T]`
+/// (`BorrowMut`), so the existing `Borrow`/`BorrowMut` call-site machinery lends the argument.
+pub(crate) fn sig_param_type(p: &Param) -> Option<Type> {
+    if is_lent_collection_param(p) {
+        p.ty.as_ref().map(|t| crate::transpiler::infer_qualifiers::apply_inferred_qual(t, OwnerQual::BorrowMut))
+    } else {
+        p.ty.clone()
+    }
+}
+
 pub(crate) fn is_collection_type(ty: Option<&Type>) -> bool {
     match ty {
         Some(Type::Array(_)) | Some(Type::Dict(_, _)) | Some(Type::Set(_)) => true,

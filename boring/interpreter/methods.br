@@ -461,7 +461,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     let val = args[1] else Value.Nil
                     match idx_val:
                         Value.Int(idx):
-                            var result = arr
+                            mut result = arr
                             result.insert(idx, val)
                             Value.Array(result)
                         _: throw "insert: expected int index"
@@ -495,7 +495,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Bool(arr.contains(target))
                 "map":
                     let closure = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < arr.length:
                         let r = call_value(interp, closure, [arr[i]])
@@ -504,7 +504,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Array(result)
                 "filter":
                     let closure = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < arr.length:
                         let r = call_value(interp, closure, [arr[i]])
@@ -542,7 +542,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Array(sorted)
                 "sortedBy":
                     let closure = args[0] else Value.Nil
-                    var keys = []
+                    mut keys = []
                     var i = 0
                     while i < arr.length:
                         let k = call_value(interp, closure, [arr[i]])
@@ -565,7 +565,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         si = si + 1
                     Value.Array(sorted_arr)
                 "reversed":
-                    var result = arr
+                    var mut result = arr
                     result = result.reversed()
                     Value.Array(result)
                 "any":
@@ -653,7 +653,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     let other_val = args[0] else Value.Array([])
                     match other_val:
                         Value.Array(other):
-                            var result = []
+                            mut result = []
                             let len = if arr.length < other.length: arr.length else: other.length
                             var i = 0
                             while i < len:
@@ -662,7 +662,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             Value.Array(result)
                         _: throw "zip: expected array argument"
                 "enumerate":
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < arr.length:
                         result.push(Value.Tuple([Value.Int(i), arr[i]]))
@@ -678,7 +678,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         i = i + 1
                     found_idx
                 "flat":
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < arr.length:
                         match arr[i]:
@@ -693,7 +693,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Array(result)
                 "flatMap":
                     let closure = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < arr.length:
                         let r = call_value(interp, closure, [arr[i]])
@@ -711,7 +711,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     let sep_val = args[0] else Value.Str("")
                     match sep_val:
                         Value.Str(sep):
-                            var [string] parts = []
+                            mut [string] parts = []
                             var i = 0
                             while i < arr.length:
                                 match arr[i]:
@@ -805,7 +805,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 "shuffle":
                     Value.Array(arr)
                 "distinct":
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < arr.length:
                         if not result.contains(arr[i]):
@@ -821,7 +821,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     # No static checker here, so the length check is always
                     # at runtime, unlike the Rust compiler's compile-time
                     # check when both sizes are known constants.
-                    var axes = []
+                    mut axes = []
                     for a in args:
                         match a:
                             Value.Labeled(label, v):
@@ -925,7 +925,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Bool(found)
                 "remove":
                     let key = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < pairs.length:
                         if pairs[i].0 != key:
@@ -933,21 +933,21 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         i = i + 1
                     Value.Dict(result)
                 "keys":
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < pairs.length:
                         result.push(pairs[i].0)
                         i = i + 1
                     Value.Array(result)
                 "values":
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < pairs.length:
                         result.push(pairs[i].1)
                         i = i + 1
                     Value.Array(result)
                 "entries":
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < pairs.length:
                         let (ek, ev) = pairs[i]
@@ -979,7 +979,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Bool(pairs.length == 0)
                 "filter":
                     let closure = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var fi = 0
                     while fi < pairs.length:
                         let pk = pairs[fi].0
@@ -994,7 +994,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Dict(result)
                 "map":
                     let closure = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var mi = 0
                     while mi < pairs.length:
                         let pk = pairs[mi].0
@@ -1051,7 +1051,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Set(result)
                 "remove":
                     let val = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < elements.length:
                         if elements[i] != val:
@@ -1084,7 +1084,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Set(s): s
                         Value.Array(a): a
                         _: throw "intersection: expected set or array"
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < elements.length:
                         if other.contains(elements[i]):
@@ -1097,7 +1097,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Set(s): s
                         Value.Array(a): a
                         _: throw "difference: expected set or array"
-                    var result = []
+                    mut result = []
                     var i = 0
                     while i < elements.length:
                         if not other.contains(elements[i]):
@@ -1384,7 +1384,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Range(start, end, inclusive, step):
             match method_name:
                 "toArray":
-                    var result = []
+                    mut result = []
                     var i = start
                     let lim = if inclusive: end + 1 else: end
                     while i < lim:
@@ -1435,7 +1435,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         _: throw "tuple.get: expected int"
                 "map":
                     let fn_val = args[0] else Value.Nil
-                    var result = []
+                    mut result = []
                     for elem in elems:
                         let mapped = call_value(interp, fn_val, [elem])
                         result.push(mapped)
@@ -1457,7 +1457,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         if let queue = queue_opt:
                             var mut_queue = queue
                             mut_queue.push(val_to_send)
-                            var {string=[Value]} cq = interp.channel_queues
+                            mut {string=[Value]} cq = interp.channel_queues
                             cq[ch_key] = mut_queue
                             interp.channel_queues = cq
                 return Value.Nil
@@ -1476,7 +1476,10 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     env_define(interp, param.name, args[i], param.mutable)
                     i += 1
                 let mutating = method_decl.mutating
+                let method_params = method_decl.params
                 let result = exec_method_body(interp, method_decl)
+                let method_scope = interp.current_env
+                capture_var_param_outs(interp, method_params, method_scope)
                 if mutating:
                     for field in inner.fields:
                         let updated = interp.current_env.get(field.0)
@@ -1515,7 +1518,10 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     let param = method_decl.params[i]
                     env_define(interp, param.name, args[i], param.mutable)
                     i += 1
+                let method_params = method_decl.params
                 let result = exec_method_body(interp, method_decl)
+                let method_scope = interp.current_env
+                capture_var_param_outs(interp, method_params, method_scope)
                 pop_scope(interp)
                 result
             else:

@@ -62,7 +62,7 @@ task def void main():
 
     # Consommateur : traite chaque utilisateur avec un timeout
     # 'actor est nécessaire ici car processed est modifié depuis une task
-    var [User]'actor processed = []
+    mut [User]'actor processed = []
     let h_proc = task:
         for user in user_receiver:
             try:

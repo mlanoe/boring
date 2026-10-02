@@ -569,6 +569,10 @@ impl Transpiler {
                 .filter(|p| p.mutable)
                 .map(|p| p.name.clone())
                 .collect();
+            sub.fn_current_params_lent = f.params.iter()
+                .filter(|p| is_lent_collection_param(p))
+                .map(|p| p.name.clone())
+                .collect();
             sub.fn_return_ty = f.return_ty.clone();
             sub.in_struct_method = false;
 
@@ -1082,7 +1086,7 @@ impl Transpiler {
                 let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
                 format!("{}: BoringGpuArg<{}>", p.name, host_ty)
             } else {
-                self.emit_param(p)
+                self.emit_param(p, self_ty.is_some())
             }
         }).collect();
         match self_ty {
@@ -1313,6 +1317,12 @@ impl Transpiler {
                 if matches!(ty.without_mut(), Type::Dict(..)) {
                     self.dict_vars.insert(p.name.clone());
                 }
+                // Same for set-typed (`{T}`) params: `set_vars` drives `.add` -> `.insert`,
+                // `.remove(v)` -> `.remove(&v)` and the other set-method dispatch, which is
+                // otherwise only populated for `let`/`var` locals (`emit_let.rs`).
+                if matches!(ty.without_mut(), Type::Set(_)) {
+                    self.set_vars.insert(p.name.clone());
+                }
                 // Track string params for string concatenation detection.
                 if Self::is_string_type(ty) {
                     self.string_vars.insert(p.name.clone());
@@ -1442,7 +1452,7 @@ impl Transpiler {
         // Use `entry().or_insert` so user-defined overloads win over native declarations.
         if self_ty.is_none() {
             let param_types: Vec<Type> = f.params.iter()
-                .filter_map(|p| p.ty.clone())
+                .filter_map(sig_param_type)
                 .collect();
             self.fn_sigs.entry(f.name.clone()).or_insert(param_types);
             let rebindable_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
@@ -1580,6 +1590,11 @@ impl Transpiler {
             let prev_param_lines = std::mem::take(&mut self.fn_current_param_lines);
             let prev_param_cols = std::mem::take(&mut self.fn_current_param_cols);
             let prev_mut = std::mem::take(&mut self.fn_current_params_mut);
+            let prev_lent = std::mem::take(&mut self.fn_current_params_lent);
+            self.fn_current_params_lent = f.params.iter()
+                .filter(|p| self.is_lent_param(p, self_ty.is_some()))
+                .map(|p| p.name.clone())
+                .collect();
             self.fn_current_params = f.params.iter()
                 .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
                 .collect();
@@ -1609,6 +1624,7 @@ impl Transpiler {
             self.fn_current_param_lines = prev_param_lines;
             self.fn_current_param_cols = prev_param_cols;
             self.fn_current_params_mut = prev_mut;
+            self.fn_current_params_lent = prev_lent;
         }
         let all_params = self.compute_fn_all_params(f, self_ty, is_cancellable);
 
@@ -1690,6 +1706,10 @@ impl Transpiler {
             &mut self.current_fn_type_params,
             f.type_params.iter().cloned().collect(),
         );
+        let prev_fn_type_bounds = std::mem::replace(
+            &mut self.current_fn_type_bounds,
+            f.where_clause.clone(),
+        );
         // A function is "void" if it has no declared return type, or returns () / Nil / Void,
         // and is not a throws function (which wraps in Result<(),...>).
         let declared_void = match &f.return_ty {
@@ -1739,6 +1759,7 @@ impl Transpiler {
         let prev_vec_vars         = std::mem::take(&mut self.vec_vars);
         let prev_collection_vars  = std::mem::take(&mut self.collection_vars);
         let prev_dict_vars        = std::mem::take(&mut self.dict_vars);
+        let prev_set_vars         = std::mem::take(&mut self.set_vars);
         let prev_managed_refcell_vars = std::mem::take(&mut self.managed_refcell_vars);
         let prev_managed_mutex_vars   = std::mem::take(&mut self.managed_mutex_vars);
         // Pre-seed known_local_vars, var_struct_types, var_types, and var_mutex_types from params.
@@ -1764,6 +1785,11 @@ impl Transpiler {
         let prev_fn_current_param_cols = std::mem::take(&mut self.fn_current_param_cols);
         self.fn_current_param_cols = f.params.iter()
             .map(|p| (p.name.clone(), p.col))
+            .collect();
+        let prev_fn_current_params_lent = std::mem::take(&mut self.fn_current_params_lent);
+        self.fn_current_params_lent = f.params.iter()
+            .filter(|p| self.is_lent_param(p, self_ty.is_some()))
+            .map(|p| p.name.clone())
             .collect();
         let prev_fn_current_params_mut = std::mem::take(&mut self.fn_current_params_mut);
         self.fn_current_params_mut = f.params.iter()
@@ -1804,6 +1830,11 @@ impl Transpiler {
             .filter(|p| p.rebindable && !matches!(&p.ty,
                 Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
             ))
+            .map(|p| p.name.clone())
+            .collect();
+        let prev_content_mutable_params = std::mem::take(&mut self.content_mutable_params);
+        self.content_mutable_params = f.params.iter()
+            .filter(|p| (p.mutable && !p.rebindable) || p.var_mut || p.ty.as_ref().is_some_and(|t| t.grants_mut()))
             .map(|p| p.name.clone())
             .collect();
         let prev_in_cancellable_fn = self.in_cancellable_fn;
@@ -1849,7 +1880,12 @@ impl Transpiler {
                 self.line(&format!("let __strchars_{name}: Vec<char> = {name}.chars().collect();", name = p.name));
             }
         }
+        let prev_last_use_sites = std::mem::replace(
+            &mut self.last_use_sites,
+            crate::transpiler::last_use::last_use_sites(&f.params, &f.body),
+        );
         self.emit_body(&f.body);
+        self.last_use_sites = prev_last_use_sites;
         // Cross-function propagation: update fn_sigs with inferred param qualifiers so that
         // callers defined after this function see the qualified signature and can propagate
         // the constraint to their own anonymous variables.
@@ -1896,12 +1932,14 @@ impl Transpiler {
         self.fn_current_param_lines = prev_fn_current_param_lines;
         self.fn_current_param_cols  = prev_fn_current_param_cols;
         self.fn_current_params_mut  = prev_fn_current_params_mut;
+        self.fn_current_params_lent = prev_fn_current_params_lent;
         self.immutable_local_vars   = prev_immutable_local_vars;
         self.mut_local_vars         = prev_mut_local_vars;
         self.content_mutable_local_vars = prev_content_mutable_local_vars;
         self.mut_checked_local_vars = prev_mut_checked_local_vars;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
+        self.content_mutable_params = prev_content_mutable_params;
         self.task_vars             = prev_task_vars;
         self.arc_vars          = prev_arc_vars;
         self.rc_vars           = prev_rc_vars;
@@ -1920,10 +1958,12 @@ impl Transpiler {
         self.vec_vars          = prev_vec_vars;
         self.collection_vars   = prev_collection_vars;
         self.dict_vars         = prev_dict_vars;
+        self.set_vars          = prev_set_vars;
         self.managed_refcell_vars = prev_managed_refcell_vars;
         self.managed_mutex_vars   = prev_managed_mutex_vars;
         self.in_async          = prev_async;
         self.current_fn_type_params = prev_fn_type_params;
+        self.current_fn_type_bounds = prev_fn_type_bounds;
         self.indent -= 1;
         self.line("}");
     }
@@ -2113,7 +2153,22 @@ impl Transpiler {
         false
     }
 
-    pub(crate) fn emit_param(&self, p: &Param) -> String {
+    /// Is `p` lent to the callee as a plain `&mut` of the caller's own place — never cloned,
+    /// never moved? docs/book.md's "`mut` vs `var` on a struct parameter": a `mut` (non-`var`)
+    /// parameter lets the callee mutate the caller's content. Always true for a `mut` built-in
+    /// collection (`is_lent_collection_param`). A `mut` user struct/enum parameter of a
+    /// *method* (`in_method`, also a trait method signature) is lent too: a free function's
+    /// bare struct parameter is instead resolved by qualifier inference (a universal `&mut T`
+    /// borrow, `infer_qualifiers`), which is excluded for methods — leaving the by-value
+    /// `mut p: T` whose call site clones its argument, so the callee's mutation was lost.
+    pub(crate) fn is_lent_param(&self, p: &Param, in_method: bool) -> bool {
+        if is_lent_collection_param(p) { return true; }
+        in_method && is_mut_user_type_param_shape(p).is_some_and(|n| {
+            self.all_struct_types.contains(n) || self.all_enum_types.contains(n)
+        })
+    }
+
+    pub(crate) fn emit_param(&self, p: &Param, in_method: bool) -> String {
         // FnMut closure params need `mut` so the closure can be called.
         // `req` function params (Fn) do not need mut.
         let resolved_ty = p.ty.as_ref().and_then(|ty| {
@@ -2124,7 +2179,10 @@ impl Transpiler {
         // FnMut closure params also need `mut` so the closure can be called.
         // Struct params do NOT get `mut` automatically — the developer must declare `mut`.
         let escaped_name = escape_rust_keyword(&p.name);
-        let name = if p.mutable || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
+        // A lent `mut [T]` param is itself an `&mut Vec<T>` (see `is_lent_collection_param`):
+        // the binding is never reassigned, so no `mut` on the name.
+        let lent = self.is_lent_param(p, in_method);
+        let name = if (p.mutable && !lent) || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
         match &p.ty {
             Some(ty) if p.variadic => format!("{}: Vec<{}>", name, self.emit_type(ty)),
             Some(ty) => {
@@ -2137,7 +2195,14 @@ impl Transpiler {
                         if matches!(inner.as_ref(), crate::ast::Type::Named(_)
                             | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned)
                             | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_))));
-                let effective_ty = if needs_inference {
+                let lent_ty;
+                let effective_ty = if lent {
+                    // Set directly rather than read from `inferred_qualifiers`: a header-only
+                    // trait method has no body to infer from, yet its signature must match
+                    // the implementing methods' exactly.
+                    lent_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, OwnerQual::BorrowMut);
+                    &lent_ty
+                } else if needs_inference {
                     if let Some(qual) = self.inferred_qualifiers.get(&p.name) {
                         inferred_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, qual.clone());
                         &inferred_ty
@@ -2193,6 +2258,27 @@ impl Transpiler {
             }
             None     => name,
         }
+    }
+
+    /// True when `expr` is a bare read of an owned local that is provably the last use of that
+    /// variable in the current function (`last_use.rs`) — a by-value read here may be a Rust
+    /// *move* instead of a `.clone()`. Declines (→ clone, the always-correct default) for
+    /// anything that might be a Rust reference or a shared pointer rather than an owned value.
+    pub(crate) fn is_last_use_move(&self, expr: &Expr) -> bool {
+        let ExprKind::Var(v) = &expr.kind else { return false };
+        self.last_use_sites.contains(&(v.clone(), expr.line, expr.col))
+            && !self.arc_vars.contains(v.as_str())
+            && !self.var_mutex_types.contains(v.as_str())
+            && !self.var_primitive_params.contains(v.as_str())
+            && !self.fn_current_params.contains_key(v.as_str())
+            // Only a plain owned value: an inferred `'inline` / `'owned` local is a Rust `T` /
+            // `Box<T>` (a move is fine); a borrow, `'weak`, `'observed`, optional, ... may be a
+            // reference or a differently-typed wrapper, where a move would change the type.
+            && match self.var_types.get(v.as_str()).map(|t| t.without_mut()) {
+                Some(Type::Qualified(_, OwnerQual::Inline | OwnerQual::Owned)) | None => true,
+                Some(Type::Qualified(..) | Type::Optional(_)) => false,
+                Some(_) => true,
+            }
     }
 
     /// Emit an expression, coercing string literals to `Arc<str>` (not `&str`).
@@ -2372,6 +2458,10 @@ impl Transpiler {
                 let result = if (obj_s == "self" || field.chars().all(|c| c.is_ascii_digit())) && !field_s.ends_with(')') {
                     // self.field or tuple index .0/.1/... — always clone in owned context (value semantics)
                     format!("{}.{}.clone()", obj_s, field_s)
+                } else if is_user_field && self.field_read_needs_clone(expr) {
+                    // `h.xs` of a local/param struct in owned position: a plain `h.xs` would be a
+                    // partial move out of `h`, so any later use of `h` fails rustc (E0382).
+                    format!("{}.{}.clone()", obj_s, field_s)
                 } else {
                     format!("{}.{}", obj_s, field_s)
                 };
@@ -2393,7 +2483,12 @@ impl Transpiler {
                 && !self.var_mutex_types.contains(v.as_str())
                 && !self.var_primitive_params.contains(v.as_str()) =>
             {
-                format!("{}.clone()", self.emit_expr(expr))
+                // Last use of an owned local: move it instead of cloning (see `last_use.rs`).
+                if self.is_last_use_move(expr) {
+                    self.emit_expr(expr)
+                } else {
+                    format!("{}.clone()", self.emit_expr(expr))
+                }
             }
             // Promoted top-level string-literal constant (`global_string_const_names`) in
             // owned position under single-thread mode: its declaration is ALWAYS `Arc<str>`
@@ -2425,11 +2520,16 @@ impl Transpiler {
                 format!("{}.clone()", v)
             }
             // Non-Copy named types (user enums/structs tracked in var_types): clone to preserve value semantics.
+            // `var_types` keeps a `mut`/`var mut` binding's `Type::Mut(..)` wrapper
+            // (no Rust representation of its own), so strip it first — otherwise a
+            // `var mut {K=V} m` would be moved by `Holder(m)` while the identical
+            // `var {K=V} m` gets `.clone()`d, and any later reuse fails rustc (E0382).
             ExprKind::Var(v) if matches!(
-                self.var_types.get(v.as_str()),
+                self.var_types.get(v.as_str()).map(|t| t.without_mut()),
                 Some(crate::ast::Type::Named(_) | crate::ast::Type::Array(_) | crate::ast::Type::Dict(..) | crate::ast::Type::Set(_))
-            ) => {
-                format!("{}.clone()", v)
+            ) || self.is_owned_collection_local(v) => {
+                // Last use of an owned local: move it instead of cloning (see `last_use.rs`).
+                if self.is_last_use_move(expr) { v.clone() } else { format!("{}.clone()", v) }
             }
             _ => self.emit_expr(expr),
         }
@@ -3205,6 +3305,24 @@ impl Transpiler {
         }
     }
 
+    /// True when reading the struct field `expr` (an `ExprKind::Field`) by value must clone it:
+    /// its declared type is a non-`Copy` value type that is `Clone` — a string, built-in
+    /// collection, user struct/enum, or an optional of one. Anything not positively known
+    /// (trait objects, closures, channels, type parameters, ...) is left as a plain read.
+    pub(crate) fn field_read_needs_clone(&self, expr: &Expr) -> bool {
+        fn needs(t: &Transpiler, ty: &Type) -> bool {
+            match ty.without_mut() {
+                Type::Str | Type::Array(_) | Type::ArrayN(..) | Type::Dict(..) | Type::Set(_) | Type::Tuple(_) => true,
+                Type::Named(n) => n == "string"
+                    || t.struct_fields.contains_key(n.as_str())
+                    || t.all_enum_types.contains(n.as_str()),
+                Type::Optional(inner) => needs(t, inner),
+                _ => false,
+            }
+        }
+        self.resolve_expr_type(expr).map_or(false, |ty| needs(self, &ty))
+    }
+
     /// Returns true if the Boring type maps to a `Copy` Rust type.
     /// Determines whether a `transient` field should use `Cell<T>` (Copy) or `RefCell<T>` (!Copy).
     pub(crate) fn is_copy_type(ty: &Type) -> bool {
@@ -3575,7 +3693,7 @@ impl Transpiler {
                 OwnerQual::Observed => format!("BoringObserved<{}>", self.emit_type(inner)),
                 // Host-context `'gpu'unified`/`'gpu'global`: emits as the plain inner
                 // type. Confirmed against real usage (`examples/saxpy.br`'s
-                // `var [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned
+                // `var mut [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned
                 // as an ordinary host array with no wrapper) — the qualifier only
                 // matters at the point the value is passed into a kernel constructor
                 // (upload happens there, see `emit_kernel::emit_kernel_construction`)

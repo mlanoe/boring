@@ -193,7 +193,10 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let callee = eval_expr(interp, callee_expr)
             let hints = call_hint_types(interp, callee, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
-            call_value(interp, callee, arg_vals)
+            interp.last_var_params = []
+            let result = call_value(interp, callee, arg_vals)
+            write_back_fn_var_args(interp, callee, args)
+            result
 
         ExprKind.GenericCall(callee_expr2, _type_args, gen_args):
             # Runtime type erasure must preserve method-call dispatch. Evaluating
@@ -207,7 +210,10 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     let gen_callee = eval_expr(interp, callee_expr2)
                     let gen_hints = call_hint_types(interp, gen_callee, gen_args.length)
                     let gen_arg_vals = eval_args_with_hints(interp, gen_args, gen_hints)
-                    call_value(interp, gen_callee, gen_arg_vals)
+                    interp.last_var_params = []
+                    let gen_result = call_value(interp, gen_callee, gen_arg_vals)
+                    write_back_fn_var_args(interp, gen_callee, gen_args)
+                    gen_result
 
         # Pipe: `lhs |> name(args)` — free function if one exists, else method call.
         ExprKind.Pipe(left, method, args):
@@ -220,7 +226,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 let all_hints = fn_decl.params.map((p): p.ty)
                 let extra_hints = if all_hints.length > 0: all_hints.slice(1, all_hints.length) else []
                 let extra_args = eval_args_with_hints(interp, args, extra_hints)
-                var all_args = [obj]
+                mut all_args = [obj]
                 for a in extra_args:
                     all_args.push(a)
                 call_fn(interp, fn_decl, all_args, nil)
@@ -235,7 +241,14 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             check_mutating_method_call(interp, recv_expr, recv, method)
             let hints = method_hint_types(interp, recv, method, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
+            interp.last_var_params = []
             let result = call_method(interp, recv, method, arg_vals)
+            # A Boring-declared struct/enum method: write its `mut`/`var` params back to the
+            # caller's places, same as for a free function.
+            match recv:
+                Value.Object(_): write_back_var_args(interp, args)
+                Value.EnumVariant(_, _, _): write_back_var_args(interp, args)
+                _: nil
             # Write back mutating array methods to their source lvalue
             if method == "pop":
                 match recv:
@@ -336,7 +349,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     if lo >= len or lo >= hi:
                         Value.Array([])
                     else:
-                        var result = []
+                        mut result = []
                         var k = lo
                         while k < hi:
                             result.push(items[k])
@@ -364,7 +377,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Array literal
         ExprKind.Array(elems):
-            var vals = []
+            mut vals = []
             for item in elems:
                 vals.push(eval_expr(interp, item))
             Value.Array(vals)
@@ -375,7 +388,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 Value.Int(n): n
                 _: throw "array fill count must be int, got {count_val.type_name()}"
             let v = eval_expr(interp, value_expr)
-            var result = []
+            mut result = []
             for _ in 0..<n:
                 result.push(v)
             Value.Array(result)
@@ -385,7 +398,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let n = match count_val:
                 Value.Int(n): n
                 _: throw "array comp count must be int, got {count_val.type_name()}"
-            var result = []
+            mut result = []
             for i in 0..<n:
                 env_define(interp, var_name, Value.Int(i), false)
                 result.push(eval_expr(interp, comp_expr))
@@ -396,7 +409,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let elems = match col_val:
                 Value.Array(v): v
                 _: throw "array comprehension source must be an array, got {col_val.type_name()}"
-            var result = []
+            mut result = []
             for item in elems:
                 env_define(interp, var_name, item, false)
                 result.push(eval_expr(interp, comp_expr))
@@ -408,7 +421,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # this same node; clauses[0] is axis 0 (fastest-varying, matching
         # row-major storage).
         ExprKind.LabeledArrayComp(comp_expr, clauses):
-            var sizes = []
+            mut sizes = []
             for c in clauses:
                 let cv = eval_expr(interp, c.1)
                 match cv:
@@ -419,7 +432,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             while si < sizes.length:
                 total = total * sizes[si]
                 si = si + 1
-            var elems = []
+            mut elems = []
             var flat = 0
             while flat < total:
                 # Decompose the flat index back into per-axis indices —
@@ -435,7 +448,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     ci = ci + 1
                 elems.push(eval_expr(interp, comp_expr))
                 flat = flat + 1
-            var axes = []
+            mut axes = []
             var ai = 0
             while ai < clauses.length:
                 axes.push((clauses[ai].0, sizes[ai]))
@@ -450,7 +463,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let inner = eval_expr(interp, inner_expr)
             match inner:
                 Value.LabeledArray(elems, axes):
-                    var new_axes = []
+                    mut new_axes = []
                     for pair in pairs:
                         var found = false
                         for ax in axes:
@@ -465,7 +478,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Tuple literal
         ExprKind.Tuple(elems):
-            var vals = []
+            mut vals = []
             for item in elems:
                 vals.push(eval_expr(interp, item))
             Value.Tuple(vals)
@@ -489,7 +502,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Dict literal
         ExprKind.Dict(pairs):
-            var entries = []
+            mut entries = []
             for pair in pairs:
                 let k = eval_expr(interp, pair.0)
                 let v = eval_expr(interp, pair.1)
@@ -498,7 +511,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Set literal
         ExprKind.Set(elems):
-            var vals = []
+            mut vals = []
             for item in elems:
                 let v = eval_expr(interp, item)
                 if not vals.contains(v):
@@ -723,7 +736,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             Value.Object(task_obj2)
 
         ExprKind.JoinAll(exprs):
-            var results = [Value]{}
+            mut results = [Value]{}
             for e in exprs:
                 let join_val = eval_expr(interp, e)
                 # Extract .value from task objects synchronously
@@ -795,7 +808,7 @@ def Value? eval_dot_ident_hint(mut Interpreter interp, string variant_name, Type
 # passes) just means later/all args get no hint and fall back to the plain path — mirrors
 # eval_args_with_hints (src/interpreter/eval_expr.rs).
 def [Value] eval_args_with_hints(mut Interpreter interp, [Arg] args, [Type?] hints):
-    var vals = []
+    mut vals = []
     var i = 0
     while i < args.length:
         let arg = args[i]
@@ -854,7 +867,7 @@ def [Type?] call_hint_types(mut Interpreter interp, Value callee, int arg_count)
                 return decl.params.map((p): p.ty)
             []
         Value.OverloadedFn(_, variants):
-            var [FnDecl] candidates = []
+            mut [FnDecl] candidates = []
             for v in variants:
                 match v:
                     Value.Fn(vname, _):
@@ -882,7 +895,7 @@ def [Type?] call_hint_types(mut Interpreter interp, Value callee, int arg_count)
 # silently guess which overload gets called — so that still yields no hint, falling
 # back to eval_dot_ident's ambiguous-scan default exactly as for a non-overloaded call.
 def [Type?] merged_overload_hint_types(mut Interpreter interp, [FnDecl] candidates, int arg_count):
-    var applicable = [FnDecl]{}
+    mut applicable = [FnDecl]{}
     for d in candidates:
         var min_a = 0
         var pi = 0
@@ -892,10 +905,10 @@ def [Type?] merged_overload_hint_types(mut Interpreter interp, [FnDecl] candidat
             pi += 1
         if arg_count >= min_a and arg_count <= d.params.length:
             applicable.push(d)
-    var [Type?] hints = []
+    mut [Type?] hints = []
     var i = 0
     while i < arg_count:
-        var [string] distinct_bases = []
+        mut [string] distinct_bases = []
         var Type? chosen = nil
         for d in applicable:
             if i < d.params.length:
@@ -930,7 +943,7 @@ def [Type?] method_hint_types(mut Interpreter interp, Value recv, string method_
         _: recv.type_name()
     let methods_opt = interp.struct_methods.get(type_name)
     if let methods = methods_opt:
-        var candidates = [FnDecl]{}
+        mut candidates = [FnDecl]{}
         for m in methods:
             if m.name == method_name:
                 candidates.push(m)
@@ -1893,7 +1906,7 @@ def Value coerce_declared_value(mut Interpreter interp, Value val, Type ty):
 def Value coerce_array_elements(mut Interpreter interp, Value val, Type elem):
     match val:
         Value.Array(items):
-            var [Value] coerced = []
+            mut [Value] coerced = []
             for item in items:
                 coerced.push(coerce_declared_value(interp, item, elem))
             Value.Array(coerced)
@@ -2357,7 +2370,7 @@ req string display_value(Interpreter interp, Value val):
             result + "}}"
         Value.Object(obj):
             # Newtype: single visible 'value' field → display underlying value
-            var visible_obj_fields = []
+            mut visible_obj_fields = []
             for f in obj.fields:
                 if not f.0.starts_with("__"):
                     visible_obj_fields.push(f)
@@ -2571,7 +2584,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                             # helper on each iteration moves it and fails to transpile past the
                             # first iteration.
                             let field_muts = enum_variant_field_mut_flags(find_enum_variant_decl(interp, stype, svariant))
-                            var [Binding] all_bindings = []
+                            mut [Binding] all_bindings = []
                             var ok = true
                             var i = 0
                             while i < sub_patterns.length:
@@ -2596,14 +2609,14 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                     # Struct destructure: MPoint(x, y) pattern on an object
                     if inner.type_name == variant:
                         # Filter out hidden fields (prefixed with __)
-                        var visible_fields = []
+                        mut visible_fields = []
                         for f in inner.fields:
                             if not f.0.starts_with("__"):
                                 visible_fields.push(f)
                         if sub_patterns.length == 0:
                             []
                         else if sub_patterns.length == visible_fields.length:
-                            var [Binding] all_bindings = []
+                            mut [Binding] all_bindings = []
                             var ok = true
                             var i = 0
                             while i < sub_patterns.length:
@@ -2626,7 +2639,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
             match subject:
                 Value.Tuple(items):
                     if items.length == sub_patterns.length:
-                        var [Binding] all_bindings = []
+                        mut [Binding] all_bindings = []
                         var ok = true
                         var i = 0
                         while i < sub_patterns.length:
@@ -2686,6 +2699,51 @@ def void check_mutating_method_call(mut Interpreter interp, Expr recv_expr, Valu
                         if method_decl.mutating and not method_decl.is_task and not interp.current_env.is_mutable(name):
                             throw "cannot call mutating method '{method}' on let binding '{name}'"
                 _: nil
+        _: nil
+
+# After a user-function call: copy the callee's final `mut`/`var` parameter values (captured
+# into `interp.last_var_params` by `capture_var_param_outs`) back into the caller's places —
+# a plain variable (force-set: a `var`/`mut` param may be lent from a `let`-style binding,
+# which is the checker's concern, not the runtime's), or a struct field (`h.data`). An arg
+# that is neither (a literal, a call, an index) has no place to write to and is skipped.
+# `last_var_params` is consumed here so a later, unrelated call can never see stale entries.
+def void write_back_var_args(mut Interpreter interp, [Arg] args):
+    let outs = interp.last_var_params
+    interp.last_var_params = []
+    if outs.length == 0:
+        return
+    var i = 0
+    while i < args.length:
+        let arg = args[i]
+        if not arg.spread and not arg.default_rest:
+            var found = false
+            var Value new_val = Value.Nil
+            let label_opt = arg.label
+            if let label = label_opt:
+                for o in outs:
+                    if o.1 == label:
+                        new_val = o.2
+                        found = true
+            else:
+                for o in outs:
+                    if o.0 == i:
+                        new_val = o.2
+                        found = true
+            if found:
+                match arg.value.kind:
+                    ExprKind.Var(caller_name):
+                        let _written = interp.current_env.force_set(caller_name, new_val)
+                    ExprKind.Field(_, _):
+                        assign_target(interp, arg.value, new_val)
+                    _: nil
+        i += 1
+
+# `write_back_var_args` for a free-function call — only when the callee actually ran a user
+# `def` (a closure/native/struct constructor never repopulates `last_var_params`).
+def void write_back_fn_var_args(mut Interpreter interp, Value callee, [Arg] args):
+    match callee:
+        Value.Fn(_, _): write_back_var_args(interp, args)
+        Value.OverloadedFn(_, _): write_back_var_args(interp, args)
         _: nil
 
 # Assignment to a target expression
@@ -2804,8 +2862,8 @@ def Value default_value_for_type(Type ty):
 # Instantiate a struct from constructor args
 def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] args):
     # Separate labeled and positional args
-    var {string=Value} labeled = {}
-    var positional = []
+    mut {string=Value} labeled = {}
+    mut positional = []
     for arg in args:
         match arg:
             Value.Labeled(label, v): labeled.set(label, v)
@@ -2815,7 +2873,7 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
     # to switch the "no value provided" fallback below from the universal
     # `Value.Nil` sentinel to a type-appropriate default.
     let default_rest = labeled.has("..default_rest..")
-    var fields = []
+    mut fields = []
     var pos_idx = 0
     for field in decl.fields:
         if labeled.has(field.name):

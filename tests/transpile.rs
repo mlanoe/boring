@@ -826,6 +826,86 @@ transpile_project_test!(clear_color_construct);
 // since this exercises the compiler's *built-in* table, not a project-declared one.
 transpile_test!(mem_borrow_builtins);
 
+// A mutable array binding passed to a `std::io::Read`-family method (`sock.read(buf)`) is
+// lent as `&mut` instead of moved, and a non-`Clone` std type (`TcpStream`) passed by value
+// to a Boring function is moved instead of auto-`.clone()`d. See tests/cases/
+// external_read_buffer.br's own doc comment. Loopback TCP only.
+transpile_test!(external_read_buffer);
+
+// A `var` (rebindable out-parameter) param on a Boring-declared struct *method* is lent as
+// `&mut <place>` at the call site (was a by-value `.clone()`: E0308 / lost mutation). See
+// tests/cases/method_var_param.br's own doc comment.
+transpile_test!(method_var_param);
+
+// A `mut [T]`/`mut {K=V}`/`mut {T}` param lends the caller's content as `&mut` (free function
+// and struct method alike; was a by-value clone / move, the callee's writes lost). See
+// tests/cases/mut_collection_param.br's own doc comment; the interpreter side is the same
+// case in tests/run.rs.
+transpile_test!(mut_collection_param);
+
+// A `mut` user-struct param lends the caller's value as `&mut` too: a free function's
+// (field write / compound assign / `def` call on it, incl. a one-uppercase-letter struct name)
+// and a struct method's (incl. a bare struct field as the argument, a forwarded lent param,
+// a trait method's implementer) -- was a by-value clone, the callee's writes lost. See
+// tests/cases/mut_struct_param.br's own doc comment; the interpreter side is the same case in
+// tests/run.rs.
+transpile_test!(mut_struct_param);
+transpile_test!(req_method_mut_param_write);
+
+// The same `mut` struct / `mut [T]` lending when the receiver's type is only reachable through
+// declarations: indexed `[T]`/`[mut T]`/`[Trait]`/dict elements, loop variables, call and method-call
+// results, closure parameters (typed or taken from the collection), a trait-bounded generic `T`,
+// `'actor`/`'shared` receivers -- was a by-value argument against the `&mut T` signature (E0308). See
+// tests/cases/mut_param_unresolved_receiver.br's own doc comment; the interpreter side is the same case
+// in tests/run.rs.
+transpile_test!(mut_param_unresolved_receiver);
+
+// A `mut` parameter of an associated function (`type def`/`type req`) is lent as `&mut` too:
+// the signature is `&mut T`, the `Type.f(x)` call site lends `&mut place`. Interpreter side:
+// the same case in tests/run.rs.
+transpile_test!(mut_param_type_method);
+
+// A `mut` argument lent to a method of a different receiver (`self.a.bump(self.inner)`, `x.bump(y)`)
+// is valid Rust and must keep compiling, as must the documented fix for lending a field to a method
+// of its own struct (copy into a local, call, assign back). Rejected counterparts:
+// tests/lend_own_field_build_fails.rs.
+transpile_test!(lend_disjoint_receiver_ok);
+
+// A bare-`mut` local collection initialised from another variable (`mut {K=V} x = env`) is
+// tracked as a dict/array/set like the `var` form -- `Type::Mut(..)` wrapper looked through in
+// `emit_let`'s metadata tracking (was `x["k"] = v` array-indexing / un-rewritten `.add`).
+transpile_test!(mut_local_collection_alias);
+
+// A `mut`/`var mut` collection local passed by value (struct / enum-variant constructor field, by-value
+// call arg) is cloned like a `var`/`let` one, so it can be reused afterwards (was a move -> rustc E0382);
+// array/set locals of any spelling are cloned in a constructor field too. Lent `mut [T]` params and `var`
+// out-params keep `&mut`. `Type::Mut(..)` wrapper looked through in `emit_expr_owned`'s clone arm.
+transpile_test!(mut_collection_by_value_reuse);
+
+// Last-use analysis (`src/transpiler/last_use.rs`): a by-value read that is provably the variable's
+// last use is a Rust move, every other read (loop body, other branch, later closure/defer, same
+// statement as a borrow, ...) must still clone -- compile+run in all four configs.
+transpile_test!(last_use_move);
+transpile_test!(field_by_value_reuse);
+transpile_test!(lend_and_read_same_local);
+transpile_test!(lend_and_read_same_local_lock_wrapper);
+
+transpile_test!(mut_local_float_array_elem_type);
+
+// `push` onto a `mut`/`var mut` local `[Trait]` array boxes the element like the `var` form --
+// `Type::Mut(..)` wrapper looked through in the push path's element-trait lookup (was E0308).
+transpile_test!(mut_local_trait_array_push);
+
+// An array literal bound to a `mut [mut Trait]` local (element-`mut` spelling,
+// `Type::Array(Type::Mut(Named))`) boxes each element, like the plain `[Trait]` form -- the
+// element's `Type::Mut` wrapper is looked through at every `[Trait]` match (was E0308).
+transpile_test!(mut_elem_trait_array_literal);
+
+// A Boring-declared struct method named like a builtin Vec/iterator index method (`swap`,
+// `insert`, `drain`, ...) no longer gets its first argument cast `as usize`. See
+// tests/cases/method_name_collides_builtin.br's own doc comment.
+transpile_test!(method_name_collides_builtin);
+
 // `@derive(Serialize, Deserialize)`/`fromJson<T>()`/`json()` -- see tests/cases/
 // json_serde_rename.br's own doc comment for the two real bugs this pins (a bare,
 // as-documented `@derive(Serialize, Deserialize)` never compiled at all: no serde
@@ -1278,3 +1358,24 @@ transpile_test!(numeric_method_parity);
 transpile_test!(conditional_cast_boundaries);
 
 transpile_test!(collection_named_methods);
+
+// Regression test: a set-typed (`{T}`) parameter wasn't registered in `set_vars` (only
+// `let`/`var` locals were), so `s.add(x)` was emitted as-is (E0599) and `s.remove(x)` as an
+// array remove-at (E0308); `set_vars` also leaked from one function into the next. See
+// `seed_param_locals` in `src/transpiler/emit_top.rs`.
+transpile_test!(set_param_methods);
+
+// Regression test: a plain `[T]` parameter used only via `.length`/`.count` was promoted to a
+// GPU-resident `BoringGpuArg<T>` parameter by the exclusive-ctor-arg scan (the size query counted
+// as a use without ever disqualifying it), a type that doesn't exist on non-GPU targets. See
+// `scan_expr_var_arg` in `src/ast/mod.rs`.
+transpile_test!(array_param_length_only);
+
+// A struct method calling a sibling through `self.` (the bare form is a diagnostic, covered by
+// `tests/bare_sibling_method_call_build_fails.rs`), and a same-named top-level function still
+// winning a bare call.
+transpile_test!(self_sibling_method_call);
+
+// `var mut`/`mut` collection locals and parameters (the permitted forms of content mutation once a
+// bare `var` collection is rebindable-only) still transpile to Rust that compiles and runs.
+transpile_test!(var_mut_collection_ok);

@@ -1365,7 +1365,7 @@ impl Parser {
         let col = self.col();
         let name = self.expect_ident()?;
         self.expect(&TokenKind::Colon)?;
-        let param = Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col };
+        let param = Param { name, ty: None, mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false, default: None, line, col };
         let body = self.parse_closure_body()?;
         // Check: multiline trailing closure cannot be chained
         if matches!(body, ClosureBody::Block(_)) && matches!(self.peek(), TokenKind::Dot) {
@@ -1408,7 +1408,7 @@ impl Parser {
                 let line = self.line();
                 let col = self.col();
                 let name = self.expect_ident()?;
-                params.push(Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col });
+                params.push(Param { name, ty: None, mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false, default: None, line, col });
             }
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -1627,7 +1627,7 @@ impl Parser {
                 {
                     self.advance(); // consume ident
                     self.advance(); // consume ':'
-                    let param = Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col };
+                    let param = Param { name, ty: None, mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false, default: None, line, col };
                     let body = self.parse_closure_body()?;
                     let (throws, task) = Self::infer_throws_task(&body);
                     return Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line, col, len: self.span_len(line, col)});
@@ -1646,7 +1646,7 @@ impl Parser {
                 self.advance(); // consume ':'
                 let param = Param {
                     name: "__x".to_string(),
-                    ty: None, mutable: false, rebindable: false, owned: false, variadic: false,
+                    ty: None, mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false,
                     default: None, line, col: 0,
                 };
                 let base = Expr { kind: ExprKind::Var("__x".to_string()), line, col, len: self.span_len(line, col)};

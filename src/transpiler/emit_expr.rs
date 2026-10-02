@@ -238,6 +238,10 @@ impl Transpiler {
                 sub.in_throws = false;
                 sub.in_try_body = false;
                 let inner = sub.emit_expr(e);
+                // The sub-transpiler's diagnostics (e.g. an argument-mutability error inside
+                // `try? sock.read(buf)`) belong to this compilation — don't drop them.
+                self.errors.borrow_mut().extend(sub.errors.take());
+                self.warnings.borrow_mut().extend(sub.warnings.take());
                 // `try? expr` desugars to TryElse(expr, Nil) — emit the idiomatic `.ok()`
                 // (Result<T,E> → Option<T>) rather than .unwrap_or_else(|_| None).
                 if matches!(default.kind, ExprKind::Nil) {
@@ -891,14 +895,7 @@ impl Transpiler {
         // Emit the closure body with params registered as known locals so that
         // `param.method()` doesn't get misread as a module path `param::method()`.
         let mut sub = self.make_sub();
-        for p in params.iter() {
-            sub.known_local_vars.insert(p.name.clone());
-            // Remove any outer-scope var_struct_types entry for this param name.
-            // Without this, a closure param `p` would inherit the type of an outer
-            // variable named `p` (e.g. `p: Parrot`), causing field accesses like
-            // `p.name` to be incorrectly emitted as getter calls `p.name()`.
-            sub.var_struct_types.remove(&p.name);
-        }
+        self.bind_closure_params(&mut sub, params);
         if let Some((name, entry)) = observed_param {
             sub.observed_locals.insert(name.to_string(), entry);
         }
@@ -971,6 +968,9 @@ impl Transpiler {
                     inner.join(" ")
                 }
             };
+            // The body's diagnostics belong to this compilation — don't drop them with `sub`.
+            self.errors.borrow_mut().extend(sub.errors.take());
+            self.warnings.borrow_mut().extend(sub.warnings.take());
             return if pre_clones.is_empty() {
                 format!("|{}| async move {{ {} }}", ps.join(", "), body_s)
             } else {
@@ -978,7 +978,7 @@ impl Transpiler {
                 format!("|{}| {{ {} async move {{ {} }} }}", ps.join(", "), pre_clones, body_s)
             };
         }
-        match body {
+        let closure_s = match body {
             ClosureBody::Expr(e) => {
                 let val = sub.emit_expr(e);
                 if throws {
@@ -1019,7 +1019,10 @@ impl Transpiler {
                 }).collect();
                 format!("|{}| {{ {} }}", ps.join(", "), inner.join(" "))
             }
-        }
+        };
+        self.errors.borrow_mut().extend(sub.errors.take());
+        self.warnings.borrow_mut().extend(sub.warnings.take());
+        closure_s
     }
 
     /// Best-effort, purely syntactic check that `expr` is definitely numeric
@@ -3348,6 +3351,22 @@ impl Transpiler {
             if is_type {
                 return self.emit_constructor(name, args);
             }
+            // A bare call to a sibling method of the enclosing struct (`one(n)` inside
+            // `def two`) -- implicit `self` only covers fields (docs/book.md, "Implicit
+            // `self`"), so this would be emitted as a free-function call that doesn't exist
+            // (rustc E0425). A top-level function or a local/param of the same name wins, so
+            // only report when nothing else could be the callee.
+            if let Some(sn) = self.self_type.as_ref() {
+                if self.struct_method_names.get(sn.as_str()).is_some_and(|ms| ms.contains(name.as_str()))
+                    && !self.fn_sigs.contains_key(name.as_str())
+                    && !self.known_local_vars.contains(name.as_str())
+                {
+                    self.push_error(callee.line, callee.col, format!(
+                        "cannot call method '{0}' without a receiver inside struct '{1}' — \
+                         implicit `self` only applies to fields; write `self.{0}(...)`",
+                        name, sn));
+                }
+            }
             // Built-in async primitives take priority over fn_sigs dispatch.
             // `wait` / `sleep` — emit as tokio::time::sleep (or sleep_until for Instant).
             // Must come before fn_sigs check because wait/timeout are now in fn_sigs
@@ -3402,8 +3421,9 @@ impl Transpiler {
 
                 if let Some(decl) = chosen {
                     let mangled = mangle_overload_name(name, &decl.params);
-                    let args_s = self.emit_args_coerced(&mangled, args);
-                    let base = format!("{}({})", mangled, args_s);
+                    let mut args_s = self.emit_args_coerced_vec(&mangled, args);
+                    let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                    let base = Self::with_hoisted_args(&hoisted, format!("{}({})", mangled, args_s.join(", ")));
                     let is_task = self.in_async && self.task_fns.contains(name.as_str());
                     let propagates = (self.in_try_body || self.in_throws) && self.fn_throws.contains(name.as_str());
                     return match (is_task, propagates) {
@@ -3416,8 +3436,9 @@ impl Transpiler {
             }
             // User-defined functions (and stdlib functions registered in fn_sigs).
             if self.fn_sigs.contains_key(name.as_str()) {
-                let args_s = self.emit_args_coerced(name, args);
-                let base = format!("{}({})", escape_rust_keyword(name), args_s);
+                let mut args_s = self.emit_args_coerced_vec(name, args);
+                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let base = Self::with_hoisted_args(&hoisted, format!("{}({})", escape_rust_keyword(name), args_s.join(", ")));
                 let is_task = self.in_async
                     && self.task_fns.contains(name.as_str())
                     && !self.stream_fns.contains(name.as_str());
@@ -3795,8 +3816,9 @@ impl Transpiler {
             let mut all_args: Vec<Arg> = Vec::with_capacity(args.len() + 1);
             all_args.push(Arg { label: None, value: lhs.clone(), spread: false, default_rest: false });
             all_args.extend_from_slice(args);
-            let all_args = self.emit_args_coerced(name, &all_args);
-            let base = format!("{}({})", escape_rust_keyword(name), all_args);
+            let mut all_args = self.emit_args_coerced_vec(name, &all_args);
+            let hoisted = Self::hoist_lent_conflicts(&mut all_args);
+            let base = Self::with_hoisted_args(&hoisted, format!("{}({})", escape_rust_keyword(name), all_args.join(", ")));
             let is_task = self.in_async && self.task_fns.contains(name);
             let propagates = (self.in_try_body || self.in_throws) && self.fn_throws.contains(name);
             match (is_task, propagates) {
@@ -4654,7 +4676,7 @@ impl Transpiler {
             ExprKind::BinOp(_, l, r) => self.infer_float_width_inner(l, visiting).or_else(|| self.infer_float_width_inner(r, visiting)),
             ExprKind::UnaryOp(_, inner) => self.infer_float_width_inner(inner, visiting),
             ExprKind::Index(base, _) => match &base.kind {
-                ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
+                ExprKind::Var(v) => match self.var_types.get(v.as_str()).map(Type::without_mut) {
                     Some(Type::Array(elem)) => width_of(elem),
                     _ => None,
                 },

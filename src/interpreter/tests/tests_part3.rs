@@ -2057,13 +2057,16 @@ p()
     );
 }
 
-// ── mut on scalars ────────────────────────────────────────────────────────────
+// ── var on scalars ────────────────────────────────────────────────────────────
+//
+// `mut` on a scalar is a checker error (see checker::scalar_mut_tests); these tests
+// run the interpreter without the checker, so they use the legal `var` spelling.
 
 #[test]
-fn test_mut_scalar_inferred_int() {
-    // `mut x = 42` with no type annotation — rebindable int
+fn test_var_scalar_inferred_int() {
+    // `var x = 42` with no type annotation — rebindable int
     let src = r#"
-mut x = 42
+var x = 42
 x = 99
 let _result = x
 "#;
@@ -2071,10 +2074,10 @@ let _result = x
 }
 
 #[test]
-fn test_mut_scalar_explicit_int() {
-    // `mut int x = 0` — rebindable with explicit type
+fn test_var_scalar_explicit_int() {
+    // `var int x = 0` — rebindable with explicit type
     let src = r#"
-mut int x = 0
+var int x = 0
 x = 7
 let _result = x
 "#;
@@ -2083,9 +2086,9 @@ let _result = x
 
 #[test]
 #[allow(clippy::approx_constant)] // 3.14 is a test literal, not a stand-in for PI
-fn test_mut_scalar_float() {
+fn test_var_scalar_float() {
     let src = r#"
-mut float f = 1.0
+var float f = 1.0
 f = 3.14
 let _result = f
 "#;
@@ -2093,9 +2096,9 @@ let _result = f
 }
 
 #[test]
-fn test_mut_scalar_bool() {
+fn test_var_scalar_bool() {
     let src = r#"
-mut b = true
+var b = true
 b = false
 let _result = b
 "#;
@@ -2103,9 +2106,9 @@ let _result = b
 }
 
 #[test]
-fn test_mut_scalar_rebind_multiple_times() {
+fn test_var_scalar_rebind_multiple_times() {
     let src = r#"
-mut n = 1
+var n = 1
 n = 2
 n = 3
 n = 4
@@ -2115,11 +2118,11 @@ let _result = n
 }
 
 #[test]
-fn test_mut_scalar_in_function() {
-    // mut scalar inside a function body
+fn test_var_scalar_in_function() {
+    // var scalar inside a function body
     let src = r#"
 int count_up(int start):
-    mut i = start
+    var i = start
     i = i + 1
     i = i + 1
     return i
@@ -2130,10 +2133,10 @@ let _result = count_up(10)
 }
 
 #[test]
-fn test_mut_scalar_toplevel() {
-    // mut at top level (Item::Let path)
+fn test_var_scalar_toplevel() {
+    // var at top level (Item::Let path)
     let (interp, res) = run(r#"
-mut int counter = 0
+var int counter = 0
 counter = 42
 "#);
     assert!(res.is_ok(), "expected no error: {:?}", res);
@@ -2141,9 +2144,9 @@ counter = 42
 }
 
 #[test]
-fn test_mut_uint_scalar() {
+fn test_var_uint_scalar() {
     let src = r#"
-mut uint u = 0
+var uint u = 0
 u = 100
 let _result = u
 "#;

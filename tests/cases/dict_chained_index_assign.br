@@ -19,7 +19,7 @@ pub struct Vars:
     var {string={string=string}} local_table = {=}
 
     pub def set_via_local(string calling_instance_id, string id, string v):
-        var {string=string} by_var = local_table[calling_instance_id] else {=}
+        mut {string=string} by_var = local_table[calling_instance_id] else {=}
         by_var[id] = v
         local_table[calling_instance_id] = by_var
 

@@ -37,7 +37,7 @@
 # src/transpiler/emit_methods.rs (`expr_is_dict`'s `.without_mut()`).
 
 # ── Free function, `var` param (changes visible at the call site) ───────────
-def set_in(var {string=int} table, string k, int v):
+def set_in(mut {string=int} table, string k, int v):
     table[k] = v
 
 def int get_in(var {string=int} table, string k):

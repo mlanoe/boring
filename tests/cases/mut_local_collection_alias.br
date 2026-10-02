@@ -1,0 +1,43 @@
+# Regression test: a bare-`mut` local collection initialised from another variable is tracked
+# as a dict / array / set exactly like the `var` form. `mut {K=V} x = other` parses to
+# `Type::Mut(Dict(..))` (an owned permission marker with no Rust type of its own), which the
+# `emit_let` shape checks didn't look through -- so `x["k"] = v` was emitted as array indexing
+# (`x["k"] = v;`, invalid Rust) and `s.add(v)` was never rewritten to `insert`.
+
+def int dict_mut({string=int} env):
+    mut {string=int} loop_env = env
+    loop_env["k"] = 1
+    loop_env.length
+
+def int dict_var({string=int} env):
+    mut {string=int} loop_env = env
+    loop_env["k"] = 1
+    loop_env.length
+
+def int array_mut([int] a):
+    mut [int] b = a
+    b[0] = 5
+    b[0] + b.length
+
+def int set_mut({int} s):
+    mut {int} t = s
+    t.add(9)
+    t.length
+
+def int set_var({int} s):
+    mut {int} t = s
+    t.add(9)
+    t.length
+
+def main():
+    let env = {"a" = 0}
+    print dict_mut(env)
+    print dict_var(env)
+    print env.length
+    let a = [1, 2, 3]
+    print array_mut(a)
+    print a[0]
+    let s = {1, 2}
+    print set_mut(s)
+    print set_var(s)
+    print s.length

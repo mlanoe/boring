@@ -1,0 +1,120 @@
+# Regression test for the last-use analysis (src/transpiler/last_use.rs): a by-value read of an
+# owned local that is provably the variable's LAST use is emitted as a Rust move instead of a
+# `.clone()`; every other read must still clone, or rustc rejects the program (E0382/E0505) or the
+# program observably changes. Each function below is one "must keep cloning" shape; all of them
+# also have to compile and print the same thing under `boring run`.
+
+struct Holder:
+    pub var [int] xs
+
+enum Wrapper:
+    List([int] items)
+
+enum Boxed:
+    Item(Holder inner)
+
+def int len_of(Holder h):
+    h.xs.length
+
+def int both([int] a, Holder h):
+    a.length + h.xs.length
+
+# plain last use: moved (no observable difference), earlier use cloned
+def int straight():
+    mut [int] v = [1, 2, 3]
+    let h1 = Holder(v)
+    v.push(4)
+    let h2 = Holder(v)
+    len_of(h1) * 10 + len_of(h2)
+
+# declared outside the loop, used inside: every iteration must clone
+def int in_loop():
+    mut [int] base = [1, 2]
+    var int i = 0
+    var int total = 0
+    while i < 3:
+        let h = Holder(base)
+        total += h.xs.length
+        i += 1
+    total + base.length
+
+def int in_for():
+    let b = [1, 2, 3]
+    var int total = 0
+    for k in 0..<2:
+        let w = Wrapper.List(b)
+        match w:
+            List(items): total += items.length
+    total + b.length
+
+# exclusive branches: neither may break the other
+def int branches(bool c):
+    mut [int] v = [1, 2]
+    if c:
+        v.push(3)
+        let h = Holder(v)
+        len_of(h)
+    else:
+        let h = Holder(v)
+        len_of(h) + 100
+
+# a later `defer` read keeps the earlier by-value use a clone
+def int with_defer():
+    mut [int] v = [1, 2, 3]
+    defer:
+        print "defer sees {v.length}"
+    let h = Holder(v)
+    len_of(h)
+
+# a later closure capture keeps the earlier use a clone
+def int with_closure():
+    mut [int] v = [1, 2, 3]
+    let h = Holder(v)
+    let f = (n): v.length + n
+    len_of(h) + f(0)
+
+# same statement borrows the variable and takes it by value: must not move while borrowed
+def int same_statement():
+    mut [int] v = [1, 2, 3]
+    let a = both(v, Holder(v))
+    v.push(9)
+    a + v.length
+
+# shadowing in an inner scope
+def int shadowed(bool c):
+    mut [int] v = [1]
+    if c:
+        mut [int] w = [7, 8, 9]
+        let h = Holder(w)
+        return len_of(h)
+    let h2 = Holder(v)
+    len_of(h2)
+
+# early return of a local, later code still reads other locals
+def Holder early(bool c):
+    mut [int] v = [1, 2]
+    let h = Holder(v)
+    if c:
+        return h
+    v.push(3)
+    Holder(v)
+
+# a struct local used last as an enum payload, an earlier read of it still valid
+def int struct_last():
+    let h = Holder([4, 5, 6])
+    let n = len_of(h)
+    let b = Boxed.Item(h)
+    match b:
+        Item(inner): n + len_of(inner)
+
+def main() throws:
+    print "straight {straight()}"
+    print "in_loop {in_loop()}"
+    print "in_for {in_for()}"
+    print "branches {branches(true)} {branches(false)}"
+    print "with_defer {with_defer()}"
+    print "with_closure {with_closure()}"
+    print "same_statement {same_statement()}"
+    print "shadowed {shadowed(true)} {shadowed(false)}"
+    print "early {early(true).xs.length} {early(false).xs.length}"
+    print "struct_last {struct_last()}"

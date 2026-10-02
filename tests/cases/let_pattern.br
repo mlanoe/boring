@@ -120,7 +120,7 @@ string? nextTok(int n):
     return "tok{n}"
 
 let tok = Tok()
-var [string] tokHistory = []
+mut [string] tokHistory = []
 var n2 = 3
 var word = nextTok(n2)
 while let word:
@@ -153,7 +153,7 @@ string? maybeGreeting(int n):
     if n <= 0: return nil
     return "hi{n}"
 
-var [string] greetHistory = []
+mut [string] greetHistory = []
 let greet1 = maybeGreeting(2) else "default"
 greetHistory.push(greet1)
 let encoded1 = if greetHistory.len() == 1:

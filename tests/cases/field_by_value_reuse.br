@@ -1,0 +1,44 @@
+struct Holder:
+    pub var [int] xs
+
+struct Inner:
+    pub var int n
+
+struct Outer:
+    pub var string name
+    pub var Inner inner
+    pub var {string=int} table
+    pub var int count
+
+enum Wrapper:
+    List([int] items)
+    Named(string name)
+    Boxed(Inner inner)
+    Table({string=int} t)
+
+def int len_of(Holder h):
+    h.xs.length
+
+def int total(Wrapper w):
+    match w:
+        List(items): items.length
+        Named(name): name.length
+        Boxed(inner): inner.n
+        Table(t): t.length
+
+def int f():
+    let h = Holder([4, 5, 6])
+    let w = Wrapper.List(h.xs)
+    match w:
+        List(items): items.length + len_of(h)
+        _: 0
+
+def int g():
+    let o = Outer("abc", Inner(7), {"a" = 1, "b" = 2}, 3)
+    let a = Wrapper.Named(o.name)
+    let b = Wrapper.Boxed(o.inner)
+    let c = Wrapper.Table(o.table)
+    total(a) + total(b) + total(c) + o.name.length + o.inner.n + o.table.length + o.count
+
+print f()
+print g()

@@ -27,6 +27,7 @@ mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
 mod infer_qualifiers;
+mod last_use;
 mod promote_atomic;
 pub(crate) mod monomorphize;
 pub(crate) mod helpers;
@@ -593,6 +594,11 @@ struct Transpiler {
     pub(crate) struct_type_static_var_names: std::collections::HashSet<String>,
     /// StructName → { method_name → TypeMethodKind } for type method dispatch.
     pub(crate) struct_type_method_sigs: std::collections::HashMap<String, std::collections::HashMap<String, TypeMethodKind>>,
+    /// "TypeName::method" → declared params of a type-level (`type def`/`type req`) method, so
+    /// a `Type.f(x)` call site can lend a `mut` parameter (`is_lent_param`) as `&mut place`
+    /// the same way an instance-method call site does. Resolved lazily at the call site
+    /// (`all_struct_types` isn't complete yet while this is being filled in `pre_scan`).
+    pub(crate) struct_type_method_params: std::collections::HashMap<String, Vec<Param>>,
     /// "StructName::getter_name" → present for `req` (property getter) methods.
     /// These are accessed without parens in boring (`t.fahrenheit`) but emit as `t.fahrenheit()` in Rust.
     pub(crate) struct_getters: std::collections::HashSet<String>,
@@ -741,6 +747,21 @@ struct Transpiler {
     /// `emit_methods.rs` consults via `struct_protocols` before concluding a
     /// call is unaccounted-for (and thus assumed mutating).
     pub(crate) trait_default_mutating: std::collections::HashMap<String, std::collections::HashMap<String, bool>>,
+    /// `"Trait::method"` → that trait method's declared parameters (signature or default body).
+    /// A call whose receiver's static type is a trait (`Box<dyn Trait>`) has no struct decl to
+    /// read a `mut` parameter's lent flag from (`is_lent_param`); the trait's own declaration is
+    /// the contract every implementer's signature mirrors.
+    pub(crate) trait_method_params: std::collections::HashMap<String, Vec<Param>>,
+    /// Closure parameter (keyed by the parameter's own source line/col) → the element type the
+    /// closure is applied to, recorded by `emit_method_call` for an untyped parameter of an
+    /// iterator-style closure over a collection of known element type
+    /// (`shapes.map((s): s.tap(c))`). Lets the closure body resolve `s`'s type for dispatch and
+    /// `mut`-argument lending instead of treating it as an unknowable receiver.
+    pub(crate) closure_param_hints: std::cell::RefCell<std::collections::HashMap<(usize, usize), Type>>,
+    /// `(type parameter, trait bound)` pairs of the function currently being emitted
+    /// (`def f<T as Poker>(...)`): a method called on a `T`-typed receiver is the bound trait's
+    /// method, whose declaration says which parameters are lent `mut` ones.
+    pub(crate) current_fn_type_bounds: Vec<(String, String)>,
     /// struct_name → trait names it conforms to (`struct S as Trait1, Trait2:`).
     /// Paired with `trait_default_mutating` — see its doc. Despite the field's name
     /// (it predates enum support), enum names are registered here too (see
@@ -796,6 +817,14 @@ struct Transpiler {
     /// Used by qualifier inference to determine auto-ref mutability and to detect
     /// def calls on immutable parameters.
     pub(crate) fn_current_params_mut: std::collections::HashSet<String>,
+    /// The subset of `fn_current_params_mut` that is a `mut` (non-`var`) array/dict/set
+    /// parameter (`helpers::is_lent_collection_param`): always `BorrowMut` (`&mut Vec<T>`),
+    /// whatever the body does.
+    pub(crate) fn_current_params_lent: std::collections::HashSet<String>,
+    /// `(name, line, col)` of the `Var` occurrences in the function being emitted that are the
+    /// provably last use of their (owned, let-bound) variable — by-value reads there may be a
+    /// Rust move instead of a `.clone()`. See `last_use.rs`; empty outside a function body.
+    pub(crate) last_use_sites: last_use::LastUseSites,
     /// Local variables and parameters that are immutable (`let` binding, or plain param without
     /// `mut`/`var`). Used to reject passing an immutable variable to a `mut` or `var` parameter.
     pub(crate) immutable_local_vars: std::collections::HashSet<String>,
@@ -883,6 +912,10 @@ struct Transpiler {
     /// fallback so a builtin math call on such a variable (`sin(rad)`) can still recover its
     /// float32/float64 width from the initializer instead of silently defaulting to f64.
     pub(crate) var_init_exprs: std::collections::HashMap<String, Expr>,
+    /// Local variable name → std type inferred from its initializer by `infer_std_type` (only for
+    /// the few std calls in `std_call_return_type`'s table; no entry = unknown). Lets an untyped
+    /// `let s = pair.0` (`pair` from `listener.accept()`) be recognized as a non-`Clone` handle.
+    pub(crate) var_std_types: std::collections::HashMap<String, Type>,
     /// "StructName::method_name" for methods that are operator overloads (add, sub, mul, div,
     /// rem, neg, eq, ne, lt, le, gt, ge). BinOp dispatch emits `a.clone().method(b.clone())`
     /// instead of `(a op b)` when the left operand's struct has the method registered.
@@ -1068,6 +1101,10 @@ struct Transpiler {
     pub(crate) shared_ref_params: std::collections::HashSet<String>,
     /// `var` parameters of primitive/stack type — emitted as `&mut T`, so usages are auto-derefed.
     pub(crate) var_primitive_params: std::collections::HashSet<String>,
+    /// Parameters of the current function that grant *content* mutation: a `mut` parameter
+    /// or a `var mut`/`mut T` one. A bare `var` parameter is only rebindable, so it is
+    /// absent. Parameter-level counterpart of `content_mutable_local_vars`.
+    pub(crate) content_mutable_params: std::collections::HashSet<String>,
     /// Variables holding `Arc<std::sync::Mutex<T>>` in managed multi mode (anonymous T/T').
     /// Field reads, method calls, and optional chaining go through `.lock().unwrap()`.
     pub(crate) managed_mutex_vars: std::collections::HashSet<String>,
@@ -1089,6 +1126,11 @@ struct Transpiler {
     /// Method names (bare, without struct prefix) that are declared as `throws`.
     /// Used to add `?` propagation when calling `self.method()` or `obj.method()` inside throws context.
     pub(crate) struct_method_throws: std::collections::HashSet<String>,
+    /// Struct name → names of its inline instance methods. Used to turn a bare sibling-method
+    /// call inside a method body (`one(n)` rather than `self.one(n)`) into a Boring diagnostic:
+    /// implicit `self` covers fields only, so emitting the bare call would produce Rust that
+    /// fails with E0425.
+    pub(crate) struct_method_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Use-site qualifier inference (priority 5).
     /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
     /// function body before emission. Cleared between function bodies.
@@ -1375,6 +1417,7 @@ impl Transpiler {
             struct_type_mut_var_names: std::collections::HashSet::new(),
             struct_type_static_var_names: std::collections::HashSet::new(),
             struct_type_method_sigs: std::collections::HashMap::new(),
+            struct_type_method_params: std::collections::HashMap::new(),
             struct_getters: std::collections::HashSet::new(),
             enum_field_getters: std::collections::HashSet::new(),
             struct_setters: std::collections::HashSet::new(),
@@ -1439,6 +1482,9 @@ impl Transpiler {
             // `as Introspect` (via `struct_protocols`, populated for every struct
             // regardless of whether its protocol names are known traits). `req` (read-only)
             // → `mutating = false`.
+            trait_method_params: std::collections::HashMap::new(),
+            closure_param_hints: std::cell::RefCell::new(std::collections::HashMap::new()),
+            current_fn_type_bounds: Vec::new(),
             trait_default_mutating: std::collections::HashMap::from([
                 ("Introspect".to_string(), std::collections::HashMap::from([
                     ("introspect".to_string(), false),
@@ -1456,6 +1502,8 @@ impl Transpiler {
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
+            fn_current_params_lent: std::collections::HashSet::new(),
+            last_use_sites: std::collections::HashSet::new(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),
             content_mutable_local_vars: std::collections::HashSet::new(),
@@ -1484,6 +1532,7 @@ impl Transpiler {
             match_subject_enum: None,
             var_types: std::collections::HashMap::new(),
             var_init_exprs: std::collections::HashMap::new(),
+            var_std_types: std::collections::HashMap::new(),
             struct_operator_methods: std::collections::HashSet::new(),
             struct_operator_param_types: std::collections::HashMap::new(),
             var_struct_type: std::collections::HashMap::new(),
@@ -1537,6 +1586,7 @@ impl Transpiler {
             rc_vars: std::collections::HashSet::new(),
             shared_ref_params: std::collections::HashSet::new(),
             var_primitive_params: std::collections::HashSet::new(),
+            content_mutable_params: std::collections::HashSet::new(),
             managed_mutex_vars: std::collections::HashSet::new(),
             managed_mutex_fn_return_vars: std::collections::HashSet::new(),
             managed_refcell_vars: std::collections::HashSet::new(),
@@ -1557,6 +1607,7 @@ impl Transpiler {
                 ("Introspect::introspect".to_string(), Type::Named("IntrospectInfo".to_string())),
             ]),
             struct_method_throws: std::collections::HashSet::new(),
+            struct_method_names: std::collections::HashMap::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
             observed_locals: std::collections::HashMap::new(),
             observed_fields: std::collections::HashMap::new(),
@@ -3263,7 +3314,7 @@ impl Transpiler {
                         // `[Trait]` field (`Vec<Box<dyn Trait>>`) — same non-Clone
                         // reasoning as an atomic field; see emit_struct.rs's mirrored check.
                         || matches!(ty, Type::Array(elem) if matches!(
-                            elem.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
+                            elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
                 })
             };
             if derives_clone { self.struct_derives_clone.insert(s.name.clone()); }
@@ -3418,6 +3469,7 @@ impl Transpiler {
         let mut method_map = std::collections::HashMap::new();
         for tm in &s.type_methods {
             method_map.insert(tm.name.clone(), tm.kind.clone());
+            self.struct_type_method_params.insert(format!("{}::{}", s.name, tm.name), tm.params.clone());
             // Register throwing type-level methods the same way instance methods are
             // below -- gates the `?` propagation `try_emit_type_method_call` adds at
             // `TypeName.method(...)` call sites (emit_methods.rs). Qualified key
@@ -3452,6 +3504,8 @@ impl Transpiler {
             self.struct_setters.insert(key);
         }
         // Track instance methods that are `task` for .await at call sites.
+        self.struct_method_names.insert(
+            s.name.clone(), s.methods.iter().map(|m| m.name.clone()).collect());
         for m in &s.methods {
             if m.task { self.instance_task_methods.insert(m.name.clone()); }
             if m.throws {
@@ -4131,6 +4185,7 @@ impl Transpiler {
                     let mut method_map = std::collections::HashMap::new();
                     for tm in &e.type_methods {
                         method_map.insert(tm.name.clone(), tm.kind.clone());
+                        self.struct_type_method_params.insert(format!("{}::{}", e.name, tm.name), tm.params.clone());
                         if tm.throws {
                             self.struct_method_throws.insert(format!("{}::{}", e.name, tm.name));
                             self.struct_method_throws.insert(tm.name.clone());
@@ -4219,6 +4274,12 @@ impl Transpiler {
                         .map(|d| (d.name.clone(), d.mutating && !d.task))
                         .collect();
                     self.trait_default_mutating.insert(t.name.clone(), default_mutating);
+                    for sig in &t.signatures {
+                        self.trait_method_params.insert(format!("{}::{}", t.name, sig.name), sig.params.clone());
+                    }
+                    for d in &t.defaults {
+                        self.trait_method_params.insert(format!("{}::{}", t.name, d.name), d.params.clone());
+                    }
                     // Track associated type names declared in this trait.
                     if !t.assoc_types.is_empty() {
                         let assoc_names: std::collections::HashSet<String> = t.assoc_types.iter()
@@ -4416,7 +4477,7 @@ impl Transpiler {
         for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
         if overloaded { self.overloaded_fn_names.insert(f.name.clone()); }
 
-        let param_types: Vec<Type> = f.params.iter().filter_map(|p| p.ty.clone()).collect();
+        let param_types: Vec<Type> = f.params.iter().filter_map(helpers::sig_param_type).collect();
         let defaults: Vec<Option<String>> = f.params.iter().map(|p| {
             p.default.as_ref().map(|d| self.emit_expr_owned(d))
         }).collect();
@@ -5630,6 +5691,14 @@ mod tests {
         transpile_with_config(&program, config).code
     }
 
+    /// Transpiler error messages (not the generated code) for `src`, joined by newlines.
+    fn transpile_src_errors(src: &str) -> String {
+        let tokens = crate::lexer::lex(src).expect("lex error");
+        let program = crate::parser::parse(tokens).expect("parse error");
+        transpile_with_config(&program, TranspileConfig::default()).errors
+            .iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n")
+    }
+
     #[test]
     fn host_tensor_calls_lower_to_portable_rust_loops() {
         let src = "let [float32, k = 5, m = 3]'gpu'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'gpu'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified c = [float32(0) for ..<21]\ngpu.tensor.matmul(a, b, c)\ngpu.tensor.mma(a, b, c)\n";
@@ -6271,6 +6340,478 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
             "middle by-value arg must stay unprefixed, first/last keep their own borrows, got:\n{}", code);
     }
 
+    // ── `EXTERNAL_MUT_BUFFER_METHODS` / `EXTERNAL_NON_CLONE_TYPES` ───────────────────────
+    // A mutable array binding passed to a `std::io::Read`-family method is lent as `&mut`;
+    // a non-`Clone` std type passed by value to a Boring function is moved, not `.clone()`d.
+    // `tests/cases/external_read_buffer.br` covers the same through a real `cargo run`.
+
+    #[test]
+    fn external_read_var_only_param_array_is_rejected() {
+        // `var` alone is rebindable, not content-mutable: it cannot be a read buffer.
+        let src = "use std.net.TcpStream\nuse std.io.Read\n\ndef f(mut TcpStream sock, var [uint8] b) throws:\n    let n = try? sock.read(b)\n    guard let n else throw \"x\"\n";
+        let errs = transpile_src_errors(src);
+        assert!(errs.contains("cannot pass `b` as a mutable buffer"),
+            "bare `var` array param must be rejected, got: {}", errs);
+    }
+
+    #[test]
+    fn external_read_var_only_local_array_is_rejected() {
+        let src = "use std.net.TcpStream\nuse std.io.Read\n\ndef f(mut TcpStream sock) throws:\n    var [uint8] buf = [0 as uint8 for i in 0..<64]\n    let n = try? sock.read(buf)\n    guard let n else throw \"x\"\n";
+        let errs = transpile_src_errors(src);
+        assert!(errs.contains("cannot pass `buf` as a mutable buffer"),
+            "bare `var` array local must be rejected, got: {}", errs);
+    }
+
+    #[test]
+    fn external_read_mut_param_array_is_reborrowed() {
+        // `mut [T]` (content-mutable) is the idiomatic buffer parameter; `var` also works.
+        let src = "use std.net.TcpStream\nuse std.io.Read\n\ndef int f(mut TcpStream sock, mut [uint8] b) throws:\n    let n = try? sock.read(b)\n    guard let n else throw \"x\"\n    return n as int\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("sock.read(&mut *b)"),
+            "`mut [uint8]` param must be reborrowed (`&mut *b`), not `&mut b`, got:\n{}", code);
+    }
+
+    #[test]
+    fn external_read_var_local_array_is_borrowed_mutably() {
+        let src = "use std.net.TcpStream\nuse std.io.Read\n\ndef int f(mut TcpStream sock) throws:\n    var mut [uint8] buf = [0 as uint8 for i in 0..<64]\n    let n = try? sock.read_exact(buf)\n    guard let n else throw \"x\"\n    return 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("sock.read_exact(&mut buf)"),
+            "`var mut [uint8]` local must be passed as `&mut buf`, got:\n{}", code);
+    }
+
+    // ── `mut [T]` / `mut {K=V}` / `mut {T}` parameters lend the caller's content as `&mut` ──────
+    // (docs/book.md "`mut` vs `var` on a struct parameter"; tests/cases/mut_collection_param.br
+    // covers the same through a real `cargo run` and `boring run`.)
+
+    // ── a bare-`mut` local collection aliasing another variable keeps its dict/set-ness ────────
+    // `mut {K=V} x = other` parses to `Type::Mut(Dict(..))`; `emit_let` must look through the
+    // wrapper (`decl_ty`) so `dict_vars`/`set_vars`/`vec_vars` are populated exactly as for `var`.
+
+    #[test]
+    fn mut_dict_local_from_var_index_assigns_via_insert() {
+        for kw in ["mut", "var"] {
+            let src = format!("def int render({{string=int}} env):\n    {kw} {{string=int}} loop_env = env\n    loop_env[\"k\"] = 1\n    loop_env.length\n\ndef main():\n    print render({{\"a\" = 0}})\n");
+            let code = transpile_src_with_config(&src, TranspileConfig::default());
+            assert!(code.contains("loop_env.insert(Arc::<str>::from(\"k\"), 1);"), "`{}` dict must insert, got:\n{}", kw, code);
+            assert!(!code.contains("loop_env[\"k\"] = 1"), "`{}` must not array-index, got:\n{}", kw, code);
+        }
+    }
+
+    #[test]
+    fn mut_array_local_from_var_index_assigns_as_vec() {
+        let src = "def int f([int] a):\n    mut [int] b = a\n    b[0] = 5\n    b.length\n\ndef main():\n    print f([1, 2])\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("b[(0) as usize] = 5;"), "got:\n{}", code);
+    }
+
+    // `mut [float] e` is stored as `Type::Mut(Array(float))` in `var_types`; the float-element
+    // lookups (`float_array_elem_ty` for `.sum::<T>()`, `infer_float_width_inner`'s index arm,
+    // `let x = arr[i]` tracking, `emit_for`'s element type) must look through the `Mut` wrapper.
+    #[test]
+    fn mut_float_array_local_sum_uses_float_turbofish() {
+        for (kw, elem, rust) in [("mut", "float", "f64"), ("var", "float", "f64"), ("mut", "float32", "f32"), ("var", "float32", "f32")] {
+            let src = format!("def {elem} f([{elem}] x):\n    {kw} [{elem}] e = x |> map((v): v)\n    let {elem} s = e |> sum()\n    s\n\ndef main():\n    print f([1.0, 2.0])\n");
+            let code = transpile_src_with_config(&src, TranspileConfig::default());
+            assert!(code.contains(&format!("sum::<{rust}>()")), "`{kw} [{elem}]` sum must use {rust}, got:\n{code}");
+            assert!(!code.contains("sum::<i64>()"), "`{kw} [{elem}]` must not default to i64, got:\n{code}");
+        }
+    }
+
+    // `push` onto a `mut`/`var mut` local `[Trait]` array must box the element:
+    // `var_types` keeps the `Type::Mut(..)` wrapper, which the push path's element-trait lookup
+    // matched `Type::Array` against directly (was `a.push(Text { .. })`, rustc E0308).
+    #[test]
+    fn mut_trait_array_local_push_boxes_element() {
+        for kw in ["mut", "var mut"] {
+            let src = format!("trait Widget:\n    req string render()\n\nstruct Text as Widget:\n    pub string text\n    req string render(): text\n\ndef main():\n    {kw} [Widget] a = []\n    a.push(Text(\"x\"))\n    print a.length\n");
+            let code = transpile_src_with_config(&src, TranspileConfig::default());
+            assert!(code.contains("a.push(Box::new(Text"), "`{kw} [Widget]` push must box the element, got:\n{code}");
+        }
+    }
+
+    // The element-`mut` spelling `[mut Trait]` (`Type::Array(Type::Mut(Named))`) must be treated as
+    // a `[Trait]` everywhere: literal elements boxed, `push` boxed, `for` borrows instead of
+    // `.iter().cloned()` (`Box<dyn Trait>` is not `Clone`).
+    #[test]
+    fn mut_elem_trait_array_local_boxes_literal_and_push() {
+        let src = "trait Poker:\n    req tap(int x)\n\nstruct Sq as Poker:\n    var int n = 0\n    req tap(int x):\n        print x\n\ndef main():\n    mut [mut Poker] mps = [Sq(), Sq()]\n    mps.push(Sq())\n    for p in mps:\n        p.tap(1)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("vec![Box::new(Sq::new()), Box::new(Sq::new())]"), "literal elements must be boxed, got:\n{code}");
+        assert!(code.contains("mps.push(Box::new(Sq::new()))"), "push must box, got:\n{code}");
+        assert!(code.contains("for p in &mps") && !code.contains("mps.iter().cloned()"), "for must borrow, got:\n{code}");
+    }
+
+    // A `mut`/`var mut` collection local passed by value to a constructor / enum variant must be
+    // cloned like its `var`/`let` twin (was a move -> E0382 on reuse): `var_types` keeps the
+    // `Type::Mut(..)` wrapper, which `emit_expr_owned`'s clone arm didn't look through. Array/set
+    // locals of any spelling are cloned in a constructor field as well.
+    #[test]
+    fn mut_collection_local_passed_by_value_is_cloned_like_var() {
+        for (kw, ty, init) in [
+            ("var", "{string=int}", "{=}"), ("mut", "{string=int}", "{=}"), ("var mut", "{string=int}", "{=}"),
+            ("var", "[int]", "[1]"), ("mut", "[int]", "[1]"), ("var mut", "[int]", "[1]"),
+            ("mut", "{int}", "{1}"), ("var mut", "{int}", "{1}"),
+        ] {
+            let src = format!("struct Holder:\n    pub var {ty} f\n\ndef main():\n    {kw} {ty} x = {init}\n    let a = Holder(x)\n    let b = Holder(x)\n    print a.f.length + b.f.length + x.length\n");
+            let code = transpile_src_with_config(&src, TranspileConfig::default());
+            assert_eq!(code.matches("Holder { f: x.clone() }").count(), 2,
+                "`{kw} {ty}` by-value ctor arg must be cloned both times, got:\n{code}");
+            assert!(!code.contains("Holder { f: x }"), "`{kw} {ty}` must not be moved, got:\n{code}");
+        }
+        let src = "enum W:\n    L([int] items)\n\ndef main():\n    var mut [int] x = [1]\n    let a = W.L(x)\n    let b = W.L(x)\n    print x.length\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert_eq!(code.matches("W::L(x.clone())").count(), 2, "enum variant arg must be cloned, got:\n{code}");
+    }
+
+    // A call that lends `&mut v` and also reads `v` by value in another argument must evaluate
+    // the by-value arguments first: a plain `&mut v` argument has no two-phase borrow (E0502).
+    #[test]
+    fn lent_collection_local_also_read_by_value_hoists_other_args() {
+        let src = "struct Holder:\n    pub [int] xs\n\nstruct Bag:\n    pub int n\n\n    def int grow_with(mut [int] a, Holder h):\n        a.push(9)\n        a.length + h.xs.length\n\ndef int grow_with(mut [int] a, Holder h):\n    a.push(9)\n    a.length + h.xs.length\n\ndef int other(mut [int] a, [int] b):\n    a.push(1)\n    b.length\n\ndef main():\n    mut [int] v = [1, 2, 3]\n    mut [int] w = [4]\n    mut Bag b = Bag(1)\n    print grow_with(v, Holder(v))\n    print b.grow_with(w, Holder(w))\n    print other(v, w)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("({ let __arg1 = Holder { xs: v.clone() }; grow_with(&mut v, __arg1) })"),
+            "free-function call must hoist the by-value argument, got:\n{code}");
+        assert!(code.contains("({ let __arg1 = Holder { xs: w.clone() }; b.grow_with(&mut w, __arg1) })"),
+            "method call must hoist the by-value argument, got:\n{code}");
+        // No overlap -> the call is left exactly as before.
+        assert!(code.contains("other(&mut v, &w)"), "non-overlapping call must stay untouched, got:\n{code}");
+        // A longer identifier / another receiver's field is not a mention of the lent place.
+        let mut args = vec!["&mut v".to_string(), "Holder { xs: vv.clone(), ys: h.v }".to_string()];
+        assert_eq!(Transpiler::hoist_lent_conflicts(&mut args), "");
+        assert_eq!(args[1], "Holder { xs: vv.clone(), ys: h.v }");
+    }
+
+    // Same hazard through the dedicated lock-wrapper dispatchers ('actor / 'guard / 'observed local,
+    // `self.field` of an 'actor type): the by-value arguments are hoisted into temporaries *before*
+    // the lock is taken, and the whole call is wrapped in a block.
+    #[test]
+    fn lent_collection_local_also_read_by_value_hoists_through_lock_wrappers() {
+        let src = "struct Holder:\n    pub [int] xs\n\nstruct Bag:\n    pub int n\n\n    def int grow_with(mut [int] a, Holder h):\n        a.push(9)\n        a.length + h.xs.length\n\nstruct Wrap:\n    mut Bag'actor inner = Bag(1)\n\n    def int via_self(mut [int] a):\n        self.inner.grow_with(a, Holder(a))\n\ndef main():\n    mut [int] v = [1]\n    var mut Bag'actor x = Bag(1)\n    print x.grow_with(v, Holder(v))\n    mut [int] w = [2]\n    var mut Bag'guard y = Bag(1)\n    print y.grow_with(w, Holder(w))\n    mut [int] u = [3]\n    var mut Bag'actor'observed z = Bag(1)\n    print z.grow_with(u, Holder(u))\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        for (lock, v) in [("x.lock().unwrap()", "v"), ("y.write().unwrap()", "w"), ("z.value.lock().unwrap()", "u")] {
+            let want = format!("({{ let __arg1 = Holder {{ xs: {v}.clone() }}; {lock}.grow_with(&mut {v}, __arg1) }})");
+            assert!(code.contains(&want), "lock-wrapper call must hoist the by-value argument ({want}), got:\n{code}");
+        }
+        assert!(code.contains("({ let __arg1 = Holder { xs: a.clone() }; self.inner.lock().unwrap().grow_with(&mut *a, __arg1) })"),
+            "`self.field'actor` call must hoist the by-value argument, got:\n{code}");
+    }
+
+    #[test]
+    fn struct_field_read_by_value_is_cloned_not_partially_moved() {
+        let src = "struct Holder:\n    pub var [int] xs\n    pub var int n\n\nstruct Wrap:\n    pub var Holder inner\n\nenum Wrapper:\n    List([int] items)\n    Boxed(Holder h)\n    Num(int n)\n\ndef int len_of(Holder h):\n    h.xs.length\n\ndef int f():\n    let h = Holder([4, 5, 6], 1)\n    let w = Wrapper.List(h.xs)\n    let k = h.n\n    let nn = Wrapper.Num(h.n)\n    let wr = Wrap(h)\n    let b = Wrapper.Boxed(wr.inner)\n    len_of(h) + k + len_of(wr.inner)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("Wrapper::List(h.xs.clone())"), "collection field must be cloned, got:\n{code}");
+        assert!(code.contains("Wrapper::Boxed(wr.inner.clone())"), "struct field must be cloned, got:\n{code}");
+        assert!(code.contains("len_of(wr.inner.clone())"), "by-value call arg must clone the field, got:\n{code}");
+        assert!(code.contains("Wrapper::Num(h.n)"), "Copy scalar field must stay a plain read, got:\n{code}");
+    }
+
+    // Last-use analysis (`last_use.rs`): the last by-value read of an owned local is a move,
+    // earlier ones still clone; a variable read again afterwards keeps every read a clone.
+    fn last_use_code(body: &str) -> String {
+        let src = format!("struct Holder:\n    pub var [int] xs\n\ndef int len_of(Holder h):\n    h.xs.length\n\ndef int both([int] a, Holder h):\n    a.length\n\n{body}");
+        transpile_src_with_config(&src, TranspileConfig::default())
+    }
+
+    #[test]
+    fn last_use_of_owned_local_is_moved_earlier_use_is_cloned() {
+        let code = last_use_code("def main():\n    mut [int] v = [1]\n    let a = Holder(v)\n    let b = Holder(v)\n    print len_of(a) + len_of(b)\n");
+        assert!(code.contains("let a: Holder = Holder { xs: v.clone() };"), "earlier use must clone, got:\n{code}");
+        assert!(code.contains("let b: Holder = Holder { xs: v };"), "last use must move, got:\n{code}");
+    }
+
+    #[test]
+    fn last_use_move_applies_to_return_of_a_local_struct() {
+        let code = last_use_code("def Holder mk([int] s):\n    let h = Holder(s)\n    return h\n\ndef main():\n    print len_of(mk([1]))\n");
+        assert!(code.contains("return h;") && !code.contains("return h.clone();"), "got:\n{code}");
+    }
+
+    #[test]
+    fn last_use_keeps_clone_when_read_again_later() {
+        let code = last_use_code("def main():\n    mut [int] v = [1]\n    let a = Holder(v)\n    print v.length + len_of(a)\n");
+        assert!(code.contains("Holder { xs: v.clone() }"), "later read must keep the clone, got:\n{code}");
+    }
+
+    #[test]
+    fn last_use_keeps_clone_inside_loop_over_outer_binding() {
+        for head in ["while i < 2:", "for i in 0..<2:", "loop:"] {
+            let body = format!("def main():\n    mut [int] v = [1]\n    var int i = 0\n    {head}\n        let a = Holder(v)\n        i += 1\n        if i > 1:\n            break\n");
+            let code = last_use_code(&body);
+            assert!(code.contains("Holder { xs: v.clone() }"), "`{head}` must keep the clone, got:\n{code}");
+        }
+    }
+
+    #[test]
+    fn last_use_inside_a_loop_is_a_move_when_the_binding_is_declared_in_it() {
+        let code = last_use_code("def main():\n    for i in 0..<2:\n        mut [int] v = [i]\n        let a = Holder(v)\n        print len_of(a)\n");
+        assert!(code.contains("Holder { xs: v }"), "per-iteration binding may be moved, got:\n{code}");
+    }
+
+    #[test]
+    fn last_use_keeps_clone_for_defer_closure_and_same_statement_and_params() {
+        // later defer read
+        let code = last_use_code("def main():\n    mut [int] v = [1]\n    defer:\n        print v.length\n    let a = Holder(v)\n    print len_of(a)\n");
+        assert!(code.contains("Holder { xs: v.clone() }"), "defer: got:\n{code}");
+        // later closure capture
+        let code = last_use_code("def main():\n    mut [int] v = [1]\n    let a = Holder(v)\n    let f = (n): v.length + n\n    print len_of(a) + f(0)\n");
+        assert!(code.contains("Holder { xs: v.clone() }"), "closure: got:\n{code}");
+        // borrowed in the same call (`&v`) — a move would be E0505
+        let code = last_use_code("def main():\n    mut [int] v = [1]\n    print both(v, Holder(v))\n");
+        assert!(code.contains("Holder { xs: v.clone() }"), "same statement: got:\n{code}");
+        // a (borrowed) parameter is never moved
+        let code = last_use_code("def Holder mk([int] s):\n    return Holder(s)\n\ndef main():\n    print len_of(mk([1]))\n");
+        assert!(code.contains("Holder { xs: s.clone() }"), "param: got:\n{code}");
+    }
+
+    #[test]
+    fn last_use_keeps_clone_when_name_is_also_pattern_or_for_bound() {
+        let code = last_use_code("def main():\n    mut [int] v = [1]\n    for v in [[1], [2]]:\n        print v.length\n    let a = Holder(v)\n    print len_of(a)\n");
+        assert!(code.contains("Holder { xs: v.clone() }"), "for-bound name must stay tainted, got:\n{code}");
+    }
+
+    #[test]
+    fn untyped_literal_collection_local_is_cloned_when_reused() {
+        let code = last_use_code("enum W:\n    L([int] items)\n\ndef main():\n    let b = [1, 2]\n    let w = W.L(b)\n    print b.length\n");
+        assert!(code.contains("W::L(b.clone())"), "unannotated literal local must clone, got:\n{code}");
+    }
+
+    // The by-value clone must not touch lent `mut [T]` params / `var` out-params at call sites.
+    #[test]
+    fn by_value_clone_keeps_lent_mut_param_and_var_out_param_by_reference() {
+        let src = "def grow(mut [int] xs):\n    xs.push(1)\n\ndef refill(var [int] o):\n    o = [7]\n\ndef main():\n    var mut [int] v = [1]\n    grow(v)\n    refill(v)\n    print v.length\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("grow(&mut v)"), "lent param must stay `&mut`, got:\n{code}");
+        assert!(code.contains("refill(&mut v)"), "out-param must stay `&mut`, got:\n{code}");
+        assert!(!code.contains("grow(v.clone())") && !code.contains("refill(v.clone())"), "got:\n{code}");
+    }
+
+    #[test]
+    fn mut_set_local_from_var_add_is_insert() {
+        for kw in ["mut", "var"] {
+            let src = format!("def int f({{int}} s):\n    {kw} {{int}} t = s\n    t.add(9)\n    t.length\n\ndef main():\n    print f({{1}})\n");
+            let code = transpile_src_with_config(&src, TranspileConfig::default());
+            assert!(code.contains("t.insert(9);"), "`{}` set add must be insert, got:\n{}", kw, code);
+        }
+    }
+
+    #[test]
+    fn mut_array_param_index_assign_is_lent_not_cloned() {
+        let src = "def fill(mut [uint8] b):\n    b[0] = 7 as uint8\n\ndef main():\n    mut [uint8] buf = [0 as uint8 for i in 0..<4]\n    fill(buf)\n    print buf[0]\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn fill(b: &mut Vec<u8>)"), "signature must be `&mut Vec<u8>`, got:\n{}", code);
+        assert!(code.contains("fill(&mut buf);"), "call site must lend `&mut buf`, got:\n{}", code);
+        assert!(!code.contains("fill(buf.clone())"), "must not clone, got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_array_param_read_only_body_is_still_lent() {
+        // The signature never depends on what the body does with the parameter.
+        let src = "def int first(mut [int] a):\n    a[0]\n\ndef main():\n    mut [int] n = [1, 2]\n    print first(n)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn first(a: &mut Vec<isize>)"), "got:\n{}", code);
+        assert!(code.contains("first(&mut n)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_array_param_on_struct_method_is_lent_not_moved() {
+        let src = "struct Src:\n    var int pos = 0\n\n    def fill(mut [uint8] b):\n        b[0] = 9 as uint8\n\ndef main():\n    mut Src s = Src()\n    mut [uint8] buf = [0 as uint8 for i in 0..<4]\n    s.fill(buf)\n    print buf[0]\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn fill(&mut self, b: &mut Vec<u8>)"), "got:\n{}", code);
+        assert!(code.contains("s.fill(&mut buf);"), "call site must lend `&mut buf` (not move `buf`), got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_dict_and_set_params_are_lent() {
+        let src = "def tag(mut {string=int} d):\n    d[\"k\"] = 1\n\ndef int size(mut {int} s):\n    s.length\n\ndef main():\n    mut {string=int} d = {\"a\" = 0}\n    mut {int} s = {1}\n    tag(d)\n    print size(s)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn tag(d: &mut HashMap<Arc<str>, isize>)"), "got:\n{}", code);
+        assert!(code.contains("tag(&mut d);"), "got:\n{}", code);
+        assert!(code.contains("fn size(s: &mut HashSet<isize>)"), "got:\n{}", code);
+        assert!(code.contains("size(&mut s)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_array_param_forwarded_to_method_is_reborrowed() {
+        let src = "struct Src:\n    var int pos = 0\n\n    def fill(mut [uint8] b):\n        b[0] = 9 as uint8\n\ndef drive(mut Src s, mut [uint8] b):\n    s.fill(b)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.fill(&mut *b)"), "a lent param is reborrowed, not re-borrowed by `&mut b`, got:\n{}", code);
+    }
+
+    #[test]
+    fn let_array_passed_to_mut_param_is_rejected_for_function_and_method() {
+        let src = "def fill(mut [uint8] b):\n    b[0] = 7 as uint8\n\nstruct Src:\n    var int pos = 0\n\n    def fill_m(mut [uint8] b):\n        b[0] = 9 as uint8\n\ndef main():\n    mut Src s = Src()\n    let [uint8] buf = [0 as uint8 for i in 0..<4]\n    fill(buf)\n    s.fill_m(buf)\n";
+        let errs = transpile_src_errors(src);
+        assert_eq!(errs.matches("cannot pass `buf` to a `mut` parameter").count(), 2,
+            "both the function and the method call must reject the `let` binding, got: {}", errs);
+    }
+
+    #[test]
+    fn var_mut_param_form_parses_and_stays_a_rebindable_out_param() {
+        let src = "def f(var mut [int] a):\n    a[0] = 1\n\ndef main():\n    var [int] n = [0]\n    f(n)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn f(") && code.contains("&mut Vec<isize>"), "got:\n{}", code);
+        assert!(code.contains("f(&mut n)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn external_non_buffer_method_still_takes_var_array_by_value() {
+        // Only the listed buffer-filling names borrow: `tx.send(buf)` genuinely moves the Vec.
+        let src = "use std.sync.mpsc\n\ndef f(mut [uint8] b, mut Sender tx) throws:\n    let r = try? tx.send(b)\n    guard let r else throw \"x\"\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("tx.send(&mut"),
+            "a non-buffer method must keep by-value emission, got:\n{}", code);
+    }
+
+    #[test]
+    fn external_read_user_struct_method_is_untouched() {
+        // A Boring-declared `read` is not an external call: the *external-buffer* rule must not
+        // fire — it is the method's own `var` param that lends `&mut buf` (see
+        // `user_struct_method_var_array_param_is_lent_mutably`), not a name-keyed guess.
+        let src = "struct Src:\n    var int pos = 0\n\n    def int read([uint8] b):\n        pos += 1\n        pos\n\ndef main():\n    var mut Src s = Src()\n    var [uint8] buf = [0 as uint8 for i in 0..<4]\n    let n = s.read(buf)\n    print n\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.read(") && !code.contains("s.read(&mut buf)"),
+            "user-declared `read` with a by-value param must not be rewritten to `&mut`, got:\n{}", code);
+    }
+
+    // ── `var` out-parameter on a user-struct *method* ────────────────────────────────────
+    // Free functions already lend `&mut <place>` for a `var` param (`emit_args_coerced`); the
+    // user-struct-receiver arm of `emit_method_call_fallback` used to emit the by-value clone
+    // (`s.read(buf.clone())`) against a `&mut Vec<u8>` signature. See
+    // `tests/cases/method_var_param.br` for the same through a real `cargo run`.
+
+    #[test]
+    fn user_struct_method_var_array_param_is_lent_mutably() {
+        let src = "struct Src:\n    var int pos = 0\n\n    def int read(var [uint8] b):\n        pos += 1\n        pos\n\ndef main():\n    var mut Src s = Src()\n    var [uint8] buf = [0 as uint8 for i in 0..<4]\n    let n = s.read(buf)\n    print n\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.read(&mut buf)"),
+            "`var [uint8]` method param must be passed as `&mut buf`, got:\n{}", code);
+        assert!(!code.contains("buf.clone()"),
+            "the by-value clone must be stripped for an out-parameter, got:\n{}", code);
+    }
+
+    #[test]
+    fn user_struct_method_var_param_forwarded_from_var_param_is_reborrowed() {
+        let src = "struct Src:\n    var int pos = 0\n\n    def int read(var [uint8] b):\n        pos += 1\n        pos\n\nint pump(mut Src s, var [uint8] b):\n    s.read(b)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.read(&mut ") && !code.contains("s.read(b.clone())") && !code.contains("(*b).clone()"),
+            "a forwarded `var` param must be reborrowed, not cloned, got:\n{}", code);
+    }
+
+    #[test]
+    fn user_struct_method_var_param_still_rejects_let_argument() {
+        let src = "struct Src:\n    var int pos = 0\n\n    def int read(var [uint8] b):\n        pos += 1\n        pos\n\ndef main():\n    var mut Src s = Src()\n    let [uint8] buf = [0 as uint8 for i in 0..<4]\n    let n = s.read(buf)\n    print n\n";
+        let err = transpile_src_errors(src);
+        assert!(err.contains("cannot pass `buf` to a `var` out-parameter"),
+            "a `let` argument to a `var` method param must keep the out-parameter diagnostic, got:\n{}", err);
+    }
+
+    // ── user-struct method named like a builtin `USIZE_INDEX_METHODS` entry ─────────────────
+    // `emit_method_call_fallback` used to cast the first argument `as usize` for any method
+    // named `nth`/`insert`/`swap`/... whenever the receiver wasn't a set/dict, even a
+    // Boring-declared struct's own method (`s.swap((&mut buf as usize))` -- invalid cast).
+
+    #[test]
+    fn user_struct_method_named_swap_with_var_array_param_has_no_usize_cast() {
+        let src = "struct Src:\n    var int pos = 0\n\n    def int swap(var [uint8] b):\n        pos += 1\n        b = [1 as uint8, 2 as uint8]\n        pos\n\ndef main():\n    var mut Src s = Src()\n    var [uint8] buf = [0 as uint8 for i in 0..<4]\n    let m = s.swap(buf)\n    print m\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.swap(&mut buf)") && !code.contains("buf as usize"),
+            "user-declared `swap` must keep its `var` out-param borrow with no usize cast, got:\n{}", code);
+    }
+
+    #[test]
+    fn user_struct_method_named_insert_keeps_int_arg_as_isize() {
+        let src = "struct Log:\n    var int last = 0\n\n    def insert(int idx, string s):\n        last = idx\n\ndef main():\n    var mut Log l = Log()\n    let int i = 3\n    l.insert(i, \"x\")\n    l.insert(-1, \"y\")\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("i as usize") && !code.contains("(-1) as usize") && !code.contains("-1 as usize"),
+            "user-declared `insert(int idx, ...)` must not get its `int` arg cast to usize, got:\n{}", code);
+    }
+
+    #[test]
+    fn builtin_vec_swap_and_insert_still_cast_index_to_usize() {
+        let src = "def main():\n    var [int] v = [1, 2, 3]\n    let int i = 0\n    v.swap(i, 1)\n    v.insert(i, 9)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("v.swap((i as usize)") && code.contains("v.insert((i as usize)"),
+            "builtin Vec swap/insert must keep the usize index cast, got:\n{}", code);
+    }
+
+    #[test]
+    fn non_clone_std_type_arg_is_moved_not_cloned() {
+        let src = "use std.net.TcpStream\n\ndef int handle(TcpStream s) throws:\n    return 1\n\ndef int serve(TcpStream sock) throws:\n    return handle(sock)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("handle(sock)?") && !code.contains("sock.clone()"),
+            "TcpStream is not Clone — must be moved into the call, got:\n{}", code);
+    }
+
+    #[test]
+    fn non_clone_std_type_field_read_let_is_moved_not_cloned() {
+        // `var TcpStream server = pair.0` — the declared type is a non-`Clone` std handle, so the
+        // let-binding's auto field-read `.clone()` (E0599) must be suppressed.
+        let src = "use std.net.TcpListener, TcpStream\n\ndef int f(TcpListener l) throws:\n    let p = try? l.accept()\n    guard let pair = p else throw \"x\"\n    var TcpStream server = pair.0\n    return 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("let mut server: TcpStream = pair.0;"),
+            "TcpStream field read must be a move, got:\n{}", code);
+        assert!(!code.contains("pair.0.clone()"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn non_clone_std_type_untyped_tuple_field_read_is_moved_not_cloned() {
+        // No declared type: `pair`'s tuple type comes from the `TcpListener.bind` -> `accept()`
+        // table (`infer_std_type`), through `try?` and `guard let`.
+        let src = "use std.net.TcpListener, TcpStream\n\ndef int f() throws:\n    let l = try? TcpListener.bind(\"127.0.0.1:0\")\n    guard let listener = l else throw \"x\"\n    let p = try? listener.accept()\n    guard let pair = p else throw \"y\"\n    let server = pair.0\n    let peer = pair.1\n    return 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("let server = pair.0;"), "TcpStream element must be moved, got:\n{}", code);
+        assert!(code.contains("let peer = pair.1.clone();"),
+            "the SocketAddr element is Clone and keeps the field-read clone, got:\n{}", code);
+    }
+
+    #[test]
+    fn non_clone_std_type_untyped_tuple_field_read_from_declared_listener_param() {
+        let src = "use std.net.TcpListener\n\ndef int f(TcpListener l) throws:\n    let p = try? l.accept()\n    guard let pair = p else throw \"y\"\n    var server = pair.0\n    return 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("let mut server = pair.0;") && !code.contains("pair.0.clone()"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn non_clone_std_type_untyped_child_stdio_field_read_is_moved() {
+        let src = "use std.process.Command\n\ndef int f() throws:\n    let c = try? Command.new(\"cat\").spawn()\n    guard let child = c else throw \"x\"\n    var pipe = child.stdin\n    return 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("let mut pipe = child.stdin;") && !code.contains("child.stdin.clone()"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn user_type_named_like_std_listener_untyped_tuple_field_read_still_clones() {
+        // A Boring `struct TcpListener` shadows std's: `accept()` is the user's own method, so the
+        // std return table must not apply and the value-semantics clone stays.
+        let src = "struct Conn:\n    int fd\n\nstruct TcpListener:\n    int x\n\n    def (Conn, int) accept():\n        (Conn(1), 2)\n\ndef f(TcpListener l):\n    let pair = l.accept()\n    let c = pair.0\n    print c.fd\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("let c = pair.0;"), "user type must keep the clone, got:\n{}", code);
+    }
+
+    #[test]
+    fn untyped_tuple_field_read_of_unknown_call_still_clones() {
+        // Control: an untyped tuple from a call outside the std table keeps the auto clone.
+        let src = "def (string, int) mk():\n    (\"a\", 1)\n\ndef f():\n    let pair = mk()\n    let s = pair.0\n    print s\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pair.0.clone()"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn clone_type_field_read_let_still_clones() {
+        // Control: `Duration` / user structs are `Clone` and keep the value-semantics clone.
+        let src = "use std.time.Duration\n\nstruct P:\n    int x\n\nstruct H:\n    P p\n    Duration d\n\ndef f(H h):\n    let P q = h.p\n    let Duration e = h.d\n    print q.x\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("h.p.clone()") && code.contains("h.d.clone()"),
+            "Clone types must keep the field-read clone, got:\n{}", code);
+    }
+
+    #[test]
+    fn user_struct_shadowing_non_clone_name_still_clones_on_field_read() {
+        // A Boring `struct File` is a user type, not std's `File`: the exemption must not apply.
+        let src = "struct File:\n    int fd\n\nstruct H:\n    File f\n\ndef g(H h):\n    let File x = h.f\n    print x.fd\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("h.f.clone()"), "got:\n{}", code);
+    }
+
     // ── docs/option-return-double-some-wrap-bug.md ────────────────────────────
     // A `T?`-returning function/method (or a plain assignment into an already-
     // `T?`-typed local) must NOT wrap an expression that is itself statically
@@ -6750,6 +7291,359 @@ stream int streamFn():\n    yield 1\n";
             "Method's struct definition must carry the new `kind` field, got:\n{}", code);
         assert!(code.contains("isCallable: bool,"),
             "Method's struct definition must carry the new `isCallable` field, got:\n{}", code);
+    }
+
+    #[test]
+    fn set_param_add_and_remove_use_hashset_methods() {
+        let src = "\
+def note(mut {int} s):\n    s.add(42)\n\n\
+def drop(mut {int} s):\n    s.remove(1)\n\n\
+def main():\n    mut {int} seen = {1, 2}\n    note(seen)\n    drop(seen)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.insert(42);"), "`mut {{int}}` param `.add` must be `.insert`, got:\n{}", code);
+        assert!(code.contains("s.remove(&1);"), "`mut {{int}}` param `.remove(v)` must be `.remove(&v)`, got:\n{}", code);
+        assert!(!code.contains(".add(42)"), "no raw `.add` may survive, got:\n{}", code);
+        assert!(!code.contains("__boring_idx"), "set `.remove` must not be array remove-at, got:\n{}", code);
+    }
+
+    #[test]
+    fn array_param_used_only_via_length_is_a_plain_vec_ref() {
+        // A size query is neutral for the GPU-resident-arg scan: `.length`/`.count` alone must
+        // not promote the parameter to `BoringGpuArg<T>` (undefined on non-GPU targets).
+        let src = "\
+def int count_seen([int] xs):\n    xs.length\n\n\
+def int count_of([int] xs):\n    xs.count\n\n\
+def main():\n    let [int] a = [5, 6, 7]\n    print count_seen(a)\n    print count_of(a)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn count_seen(xs: &Vec<isize>)"), "got:\n{}", code);
+        assert!(code.contains("fn count_of(xs: &Vec<isize>)"), "got:\n{}", code);
+        assert!(!code.contains("BoringGpuArg"), "no GPU arg type may appear, got:\n{}", code);
+    }
+
+    #[test]
+    fn set_param_in_struct_method_uses_hashset_methods() {
+        let src = "\
+struct Bag:\n    var int total = 0\n\n    def fill(mut {int} s):\n        s.add(7)\n        s.remove(1)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("s.insert(7);"), "got:\n{}", code);
+        assert!(code.contains("s.remove(&1);"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_struct_param_of_free_fn_is_lent_mut_ref() {
+        // A write through a `mut` struct param (field assign, compound assign, `def` call) is
+        // what its universal `&mut T` borrow is for: the signature is `&mut T` and the call
+        // site lends `&mut place` -- never the by-value `mut p: T` + `.clone()` whose mutation
+        // landed on the throwaway clone.
+        let src = r#"
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+def set_value(mut Counter c):
+    c.value = 5
+
+def add_value(mut Counter c):
+    c.value += 10
+
+def call_inc(mut Counter c):
+    c.inc()
+
+def main():
+    mut Counter c = Counter()
+    set_value(c)
+    add_value(c)
+    call_inc(c)
+    print c.value
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        for f in ["set_value", "add_value", "call_inc"] {
+            assert!(code.contains(&format!("fn {}(mut c: &mut Counter)", f)), "{} signature, got:\n{}", f, code);
+            assert!(code.contains(&format!("{}(&mut c);", f)), "{} call site, got:\n{}", f, code);
+        }
+        assert!(!code.contains("c.clone()"), "no argument may be cloned, got:\n{}", code);
+    }
+
+    #[test]
+    fn plain_struct_param_stays_a_shared_borrow() {
+        // Only `mut` lends mutably: a plain parameter stays a read-only `&T` borrow.
+        let src = r#"
+struct Counter:
+    var int value = 0
+
+def show(Counter c):
+    print c.value
+
+def main():
+    mut Counter c = Counter()
+    show(c)
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn show(c: &Counter)"), "got:\n{}", code);
+        assert!(!code.contains("&mut Counter"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn single_uppercase_letter_struct_mut_param_is_lent() {
+        // `struct P` -- a one-uppercase-letter name -- is parsed as `Type::TypeParam` (the
+        // implicit-generic spelling) at its uses; it must still be recognised as the declared
+        // struct it names and lent like any other.
+        let src = r#"
+struct P:
+    var int x = 0
+
+def poke(mut P p):
+    p.x = 7
+
+def main():
+    var mut P p = P()
+    poke(p)
+    print p.x
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn poke(mut p: &mut P)"), "got:\n{}", code);
+        assert!(code.contains("poke(&mut p);"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_struct_param_of_method_is_lent_mut_ref() {
+        // Universal borrow inference is excluded for methods, so the lend is unconditional there:
+        // `&mut T` signature whatever the body does, `&mut place` at every call site (a local, a
+        // bare struct field via implicit self on a *different* field's method -- lending a field
+        // of `self` to a method of `self` itself is rustc's own E0499 -- and a forwarded lent
+        // param of the caller).
+        let src = r#"
+struct Counter:
+    var int value = 0
+
+struct Bumper:
+    var int hits = 0
+
+    def bump(mut Counter c):
+        c.value += 1
+        hits += 1
+
+    def forward(mut Counter c):
+        self.bump(c)
+
+    def noop(mut Counter c):
+        hits += 1
+
+struct Holder:
+    var mut Counter inner = Counter()
+    var mut Bumper b = Bumper()
+
+    def bump_inner():
+        b.bump(inner)
+
+def main():
+    mut Bumper h = Bumper()
+    mut Counter c = Counter()
+    h.bump(c)
+    h.forward(c)
+    h.noop(c)
+    print c.value
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn bump(&mut self, c: &mut Counter)"), "got:\n{}", code);
+        assert!(code.contains("fn noop(&mut self, c: &mut Counter)"), "body-independent, got:\n{}", code);
+        assert!(code.contains("self.b.bump(&mut self.inner);"), "implicit-self field arg, got:\n{}", code);
+        assert!(code.contains("self.bump(&mut *c);"), "forwarded lent param is reborrowed, got:\n{}", code);
+        assert!(code.contains("h.bump(&mut c);"), "local arg, got:\n{}", code);
+        assert!(code.contains("h.noop(&mut c);"), "got:\n{}", code);
+        assert!(!code.contains("c.clone()"), "no argument may be cloned, got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_struct_param_of_trait_method_signature_matches_impl() {
+        // A trait's header-only signature has no body to infer from: it must render `&mut T`
+        // exactly like the implementing method, or the impl would not match the trait.
+        let src = r#"
+struct Counter:
+    var int value = 0
+
+trait Poker:
+    def poke_it(mut Counter c)
+
+struct A as Poker:
+    def poke_it(mut Counter c):
+        c.value += 100
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.matches("fn poke_it(&mut self, c: &mut Counter)").count() >= 2,
+            "trait signature and impl must agree, got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_params_of_trait_typed_receiver_are_lent_from_the_trait_decl() {
+        // A receiver typed as a bare trait (`Box<dyn Poker>`) has no struct method decl: the
+        // lent flags come from the trait's own declaration, struct and collection params alike.
+        let src = r#"
+struct Counter:
+    var int value = 0
+
+trait Poker:
+    def poke_it(mut Counter c)
+    def stamp(mut [uint8] b)
+
+def drive(mut Poker p, mut Counter c, mut [uint8] b):
+    p.poke_it(c)
+    p.stamp(b)
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("p.poke_it(&mut *c);"), "got:\n{}", code);
+        assert!(code.contains("p.stamp(&mut *b);"), "got:\n{}", code);
+        assert!(!code.contains("c.clone()") && !code.contains("b.clone()"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn var_struct_param_stays_the_rebind_out_param() {
+        // `var` (rebindable) is a different capability from `mut`: it keeps its own out-param
+        // path, for a free function and a method alike.
+        let src = r#"
+struct Counter:
+    var int value = 0
+
+struct Holder:
+    var int hits = 0
+
+    def reseat(var Counter c):
+        c = Counter()
+
+def reset(var Counter c):
+    c = Counter()
+
+def main():
+    var Counter c = Counter()
+    var Holder h = Holder()
+    reset(c)
+    h.reseat(c)
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("reset(&mut c);"), "got:\n{}", code);
+        assert!(code.contains("h.reseat(&mut c);"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn set_local_does_not_leak_into_next_function_array_param() {
+        // `seen` is a set local in `first`, but a plain array parameter in `second`: the
+        // stale `set_vars` entry used to make `second`'s `seen.remove(0)` a `HashSet` remove.
+        let src = "\
+def first():\n    mut {int} seen = {1}\n    seen.add(2)\n\n\
+def second(mut [int] seen):\n    seen.remove(0)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("seen.insert(2);"), "got:\n{}", code);
+        assert!(!code.contains("seen.remove(&0)"), "array param must keep array remove-at, got:\n{}", code);
+    }
+
+    #[test]
+    fn bare_sibling_method_call_is_a_boring_diagnostic() {
+        let src = "\
+struct Src:\n    var int pos = 0\n\n    def one(int n):\n        pos += n\n\n    def two(int n):\n        one(n)\n";
+        let errors = transpile_src_errors(src);
+        assert!(errors.contains("cannot call method 'one' without a receiver inside struct 'Src'"), "got: {}", errors);
+        assert!(errors.contains("self.one(...)"), "diagnostic must name the fix, got: {}", errors);
+    }
+
+    #[test]
+    fn explicit_self_sibling_method_call_is_accepted() {
+        let src = "\
+struct Src:\n    var int pos = 0\n\n    def one(int n):\n        pos += n\n\n    def two(int n):\n        self.one(n)\n";
+        assert_eq!(transpile_src_errors(src), "");
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("self.one("), "got:\n{}", code);
+    }
+
+    #[test]
+    fn bare_call_to_same_named_top_level_fn_inside_method_is_not_flagged() {
+        let src = "\
+def int one(int n):\n    n\n\n\
+struct Src:\n    var int pos = 0\n\n    def one(int n):\n        pos += n\n\n    def two(int n):\n        let x = one(n)\n        pos += x\n";
+        assert_eq!(transpile_src_errors(src), "");
+    }
+
+    // ── `mut` parameters lent through receivers whose type needs a declaration walk ──────
+    // `tests/cases/mut_param_unresolved_receiver.br` covers the same through a real `cargo run`.
+
+    /// A `Counter`/`Shape` prelude: `Shape.tap` takes a `mut Counter`, `Shape.mark` a `mut [uint8]`
+    /// (`req`, so loop variables / non-`mut` elements may call them), and a `Poker` trait with `req`
+    /// twins implemented by `Sq`.
+    const LENT_PRELUDE: &str = "\
+struct Counter:\n    var int value = 0\n\n    def inc(int by):\n        value += by\n\n\
+struct Shape:\n    var int n = 0\n\n    req tap(mut Counter c):\n        c.inc(1)\n\n    req mark(mut [uint8] b):\n        b[0] += 1 as uint8\n\n\
+trait Poker:\n    req tap(mut Counter c)\n\n\
+struct Sq as Poker:\n    var int n = 0\n\n    req tap(mut Counter c):\n        c.inc(2)\n\n\
+def Shape make():\n    Shape()\n\n";
+
+    fn lent_case(main_body: &str) -> (String, String) {
+        let src = format!("{}def main():\n    mut Counter c = Counter()\n    mut [uint8] b = [0 as uint8 for i in 0..<4]\n{}", LENT_PRELUDE, main_body);
+        let errs = transpile_src_errors(&src);
+        (transpile_src_with_config(&src, TranspileConfig::default()), errs)
+    }
+
+    #[test]
+    fn mut_args_are_lent_to_an_indexed_mut_element_receiver() {
+        // `[mut Shape]`: the element type carries `mut`, which must not hide the struct.
+        let (code, errs) = lent_case("    mut [mut Shape] ms = [Shape()]\n    ms[0].tap(c)\n    ms[0].mark(b)\n");
+        assert_eq!(errs, "");
+        assert!(code.contains("].tap(&mut c)") && code.contains("].mark(&mut b)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_args_are_lent_to_trait_array_element_and_loop_receivers() {
+        let (code, errs) = lent_case("    let [Poker] ps = [Sq()]\n    ps[0].tap(c)\n    for p in ps:\n        p.tap(c)\n");
+        assert_eq!(errs, "");
+        assert_eq!(code.matches(".tap(&mut c)").count(), 2, "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_args_are_lent_to_call_and_dict_value_receivers() {
+        let (code, errs) = lent_case("    make().tap(c)\n    mut {string=mut Shape} d = {\"a\" = Shape()}\n    d[\"a\"].mark(b)\n    for k, v in d:\n        v.tap(c)\n");
+        assert_eq!(errs, "");
+        assert!(code.contains("make().tap(&mut c)"), "got:\n{}", code);
+        assert!(code.contains(".mark(&mut b)"), "got:\n{}", code);
+        assert!(code.contains("v.tap(&mut c)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_args_are_lent_to_typed_and_collection_hinted_closure_param_receivers() {
+        let (code, errs) = lent_case("    let [Shape] ss = [Shape()]\n    var f = (Shape s): s.tap(c)\n    f(Shape())\n    _ = ss.map((s): s.tap(c))\n");
+        assert_eq!(errs, "");
+        assert_eq!(code.matches("s.tap(&mut c)").count(), 2, "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_args_are_lent_to_trait_bounded_generic_receiver() {
+        let src = format!("{}def run<T as Poker>(mut T p):\n    mut Counter c = Counter()\n    p.tap(c)\n", LENT_PRELUDE);
+        assert_eq!(transpile_src_errors(&src), "");
+        let code = transpile_src_with_config(&src, TranspileConfig::default());
+        assert!(code.contains("p.tap(&mut c)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn mut_args_are_lent_through_an_actor_receiver() {
+        let (code, errs) = lent_case("    mut Shape'actor ac = Shape()\n    ac.tap(c)\n");
+        assert_eq!(errs, "");
+        assert!(code.contains(".tap(&mut c)"), "got:\n{}", code);
+        assert!(!code.contains("tap(c.clone())"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn untyped_closure_param_receiver_with_lent_arg_is_a_boring_diagnostic() {
+        // `s` has no type anywhere: which `tap` (and which of its parameters is `mut`) is
+        // unknowable, so a by-value argument would be invalid Rust -- say so instead.
+        let (_, errs) = lent_case("    let g = (s): s.tap(c)\n");
+        assert!(errs.contains("cannot lend `c` to the `mut` parameter of `.tap()`"), "got: {}", errs);
+        assert!(errs.contains("declare its type"), "diagnostic must name the fix, got: {}", errs);
+    }
+
+    #[test]
+    fn untyped_receiver_with_non_lent_method_args_is_not_flagged() {
+        // `inc`'s parameter is a plain int: nothing to lend, so no diagnostic however unknown the receiver.
+        let (_, errs) = lent_case("    let g = (x): x.inc(1)\n");
+        assert_eq!(errs, "");
     }
 }
 

@@ -709,7 +709,7 @@ pub(crate) fn expr_to_param(expr: &Expr, line: usize, col: usize) -> Param {
         ExprKind::Var(n) => n.clone(),
         _ => "_".to_string(),
     };
-    Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col }
+    Param { name, ty: None, mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false, default: None, line, col }
 }
 
 pub(crate) fn check_no_return(stmts: &[Stmt], context: &str) -> Result<(), ParseError> {

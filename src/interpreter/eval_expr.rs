@@ -600,11 +600,7 @@ impl Interpreter {
         if let Value::Fn { ref decl, .. } = callee {
             for (param, arg) in decl.params.iter().zip(args.iter()) {
                 if param.mutable {
-                    if let ExprKind::Var(caller_name) = &arg.value.kind {
-                        if let Some(new_val) = self.last_var_params.get(&param.name).cloned() {
-                            env.borrow_mut().force_set(caller_name, new_val);
-                        }
-                    }
+                    self.write_back_mut_arg(&param.name, &arg.value, &env, line);
                 }
             }
         }
@@ -612,6 +608,32 @@ impl Interpreter {
         // `check_no_owned_extract`'s loop: a plain call never moves its argument,
         // regardless of `mut`/`var`, so the caller's variable stays usable.
         Ok(result)
+    }
+
+    /// After a call: copy the callee's final value of its `mut`/`var` parameter `param` back into
+    /// the caller's place `arg` (a plain variable, or a struct field such as `holder.data`) —
+    /// arrays/dicts/sets are values here, so this is how the caller sees the callee's changes.
+    fn write_back_mut_arg(&mut self, param: &str, arg: &Expr, env: &EnvRef, line: usize) {
+        let Some(new_val) = self.last_var_params.get(param).cloned() else { return };
+        match &arg.kind {
+            ExprKind::Var(caller_name) => {
+                env.borrow_mut().force_set(caller_name, new_val);
+            }
+            ExprKind::Field(..) => {
+                let _ = self.assign(arg, new_val, Rc::clone(env), line);
+            }
+            _ => {}
+        }
+    }
+
+    /// After a `Type.f(args)` call: write each `mut`/`var` parameter's final value back into the
+    /// caller's argument place (see `write_back_mut_arg`).
+    fn write_back_type_method_mut_args(&mut self, tm: &crate::ast::TypeMethod, args: &[Arg], env: &EnvRef, line: usize) {
+        for (param, arg) in tm.params.iter().zip(args.iter()) {
+            if param.mutable {
+                self.write_back_mut_arg(&param.name, &arg.value, env, line);
+            }
+        }
     }
 
     /// `obj.method(args)` — the `fs`/`GPU.all()` builtin namespaces, type-level calls
@@ -680,7 +702,9 @@ impl Interpreter {
                     let tm = decl.type_methods.iter().find(|m| m.name == *method).cloned();
                     if let Some(type_method) = tm {
                         let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        return self.call_type_method(&decl.name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
+                        let result = self.call_type_method(&decl.name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
+                        self.write_back_type_method_mut_args(&type_method, args, &env, line);
+                        return result;
                     }
                     return Err(err(
                         format!("'{}' has no type method '{}'", type_name, method),
@@ -698,7 +722,9 @@ impl Interpreter {
                     let tm = type_methods.iter().find(|m| m.name == *method).cloned();
                     if let Some(type_method) = tm {
                         let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        return self.call_type_method(&name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
+                        let result = self.call_type_method(&name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
+                        self.write_back_type_method_mut_args(&type_method, args, &env, line);
+                        return result;
                     }
                 }
             }
@@ -965,7 +991,24 @@ impl Interpreter {
             }
         };
         let mut modified_self: Option<Value> = None;
+        // Stale entries from an earlier call must not be mistaken for this method's own
+        // (`call_fn_inner` repopulates it on exit; a builtin method never does).
+        self.last_var_params.clear();
         let result = self.call_method(obj.clone(), method, arg_vals, line, &mut modified_self)?;
+        // Write back mutated `mut`/`var` params to their caller variables, as for a plain
+        // function call: an array/dict/set is a value here, so without this a `mut [T]`
+        // parameter's changes were lost to the caller (docs/book.md: `mut` lends the
+        // caller's content). Only for a Boring-declared method (single or arity-matching
+        // overload) — the same decl `call_method` ran.
+        if let Some(fn_decl) = method_candidates.iter()
+            .find(|d| d.params.len() >= args.len() && d.params.iter().skip(args.len()).all(|p| p.default.is_some() || p.variadic))
+        {
+            for (param, arg) in fn_decl.params.iter().zip(args.iter()) {
+                if param.mutable {
+                    self.write_back_mut_arg(&param.name, &arg.value, &env, line);
+                }
+            }
+        }
         // Write back modified self to source variable (force: mut method on let binding is OK)
         if let Some(new_obj) = modified_self {
             match &obj_expr.kind {

@@ -1,0 +1,41 @@
+# Regression test: an array literal bound to a local declared with the element-`mut` spelling
+# `mut [mut Trait] x = [Impl(), Impl()]` must box each element (`Box<dyn Trait>`) exactly like
+# the plain `[Trait]` / `var mut [Trait]` forms do. The declared type is
+# `Type::Array(Type::Mut(Named))`; `emit_let_value` only stripped the *outer* `Type::Mut`, so
+# the `[Trait]` literal-boxing arm never matched the `Mut`-wrapped element and the literal was
+# emitted as `vec![Sq::new(), Sq::new()]` (rustc E0308: expected `Box<dyn Poker>`, found `Sq`).
+
+trait Poker:
+    req tap(int x)
+
+struct Sq as Poker:
+    var int n = 0
+
+    req tap(int x):
+        print x
+
+struct Tri as Poker:
+    var int n = 0
+
+    req tap(int x):
+        print x + 100
+
+def main():
+    mut [mut Poker] mps = [Sq(), Tri()]
+    mps[0].tap(1)
+    mps[1].tap(2)
+    mps.push(Sq())
+    mps[2].tap(3)
+    for p in mps:
+        p.tap(7)
+    let Bag bag = Bag([Sq(), Tri()])
+    print total(bag.items)
+    mut [mut Poker] other = []
+    other.push(Tri())
+    other[0].tap(9)
+
+struct Bag:
+    pub var [mut Poker] items
+
+def int total([mut Poker] ps):
+    return ps.length

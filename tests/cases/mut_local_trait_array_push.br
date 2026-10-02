@@ -1,0 +1,28 @@
+# Regression test: `push`/`append` onto a bare-`mut` / `var mut` local array of a trait type must
+# box the element (`Box<dyn Trait>`) exactly like a `var` (rebindable-only) local would. The parser wraps a `mut`-bound
+# declared type in `Type::Mut(..)` (an owned permission marker with no Rust type of its own), and
+# the push path's element-trait lookup matched `Type::Array` on `var_types[..]` directly -- so
+# `a.push(Text("x"))` was emitted un-boxed (rustc E0308: expected `Box<dyn Widget>`, found `Text`).
+
+trait Widget:
+    req string render()
+
+struct Text as Widget:
+    pub string text
+    req string render(): text
+
+struct Label as Widget:
+    pub string name
+    req string render(): "<" + name + ">"
+
+def main():
+    var mut [Widget] a = []
+    a.push(Text("x"))
+    a.push(Label("y"))
+    mut [Widget] b = []
+    b.push(Text("v"))
+    b.push(Label("w"))
+    for w in a:
+        print w.render()
+    for w in b:
+        print w.render()

@@ -1,0 +1,25 @@
+# Regression test: a plain `[T]` parameter whose only use is `.length`/`.count` was
+# classified as a GPU-resident-candidate argument by the exclusive-ctor-arg scan
+# (`ast::scan_var_call_arg_uses`, mirrored by `Checker::collect_gpu_arg_params` and
+# `Transpiler::compute_gpu_arg_params`) -- the size query counted as a "use" that never
+# disqualified it -- so it was emitted as `BoringGpuArg<i64>` and called with
+# `BoringGpuArg::Host(a.clone())`, a type that doesn't exist on non-GPU targets (E0425/
+# E0433). A size query alone is now neutral: the parameter stays a plain `&Vec<T>`.
+def int count_seen([int] xs):
+    xs.length
+
+def int count_of([int] xs):
+    xs.count
+
+def int first_and_len([int] xs):
+    xs[0] + xs.length
+
+def int forwarded([int] xs):
+    count_seen(xs)
+
+def main():
+    let [int] a = [5, 6, 7]
+    print count_seen(a)
+    print count_of(a)
+    print first_and_len(a)
+    print forwarded(a)

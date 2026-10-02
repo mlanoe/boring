@@ -539,6 +539,43 @@ interp_test!(setter_param_shadows_field);
 // arr = []`/`mut [Point'static] arr = []`, which are valid and compile fine.
 interp_test!(mut_array_shared_element);
 
+// A `mut [T]`/`mut {K=V}` parameter lends the caller's content: the callee's writes are visible
+// to the caller, for a free function and a struct method alike (a method call used to lose
+// them), including through a struct-field argument. Same case as the transpile_test of the
+// same name -- both backends must print the identical output.
+interp_test!(mut_collection_param);
+interp_test!(mut_local_trait_array_push);
+interp_test!(mut_elem_trait_array_literal);
+
+// Same case as the transpile_test of the same name (a `mut`/`var mut` collection passed by value is
+// never invalidated for the caller) -- the interpreter must print the identical output.
+interp_test!(mut_collection_by_value_reuse);
+
+// Same case as the transpile_test of the same name (last-use move analysis) -- identical output.
+interp_test!(last_use_move);
+interp_test!(field_by_value_reuse);
+interp_test!(lend_and_read_same_local);
+interp_test!(lend_and_read_same_local_lock_wrapper);
+
+// Same for a `mut` user-struct parameter (free function and struct method): the callee's field
+// writes are visible to the caller. Same case as the transpile_test of the same name.
+interp_test!(mut_struct_param);
+interp_test!(req_method_mut_param_write);
+interp_test!(mut_param_unresolved_receiver);
+
+// Same for a `mut` parameter of an associated function (`type def`): the callee's writes are
+// visible to the caller. Same case as the transpile_test of the same name.
+interp_test!(mut_param_type_method);
+
+// A struct method's `var` out-param rebinds the caller's variable under `boring run` too (the
+// interpreter used to propagate only a free function's). Same case as the transpile_test.
+interp_test!(method_var_param);
+
+// A `mut` argument lent to a method of a DIFFERENT receiver (disjoint fields / distinct locals) is
+// valid Rust and stays accepted; the same case is compile+run in tests/transpile.rs. Its rejected
+// counterparts (the argument inside the receiver's own object) are tests/lend_own_field_build_fails.rs.
+interp_test!(lend_disjoint_receiver_ok);
+
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
 // `use boring.<module>` for an unrecognized module name is a hard error,
@@ -550,6 +587,13 @@ error_test_exact!(error_uncaught_throw);
 error_test_exact!(error_move_source);
 error_test_exact!(error_immutable_param);
 error_test_exact!(error_immutable_let);
+// A bare `var` collection (local or parameter) is rebindable only: `.push()`/`v[i] = x`/`d[k] = x`/
+// `s.add()` need `mut`/`var mut` — same content-mutation rule user structs follow.
+error_test_exact!(error_var_collection_content_mutation);
+// `self.bump(inner)` -- a field of `self` lent to a `mut` parameter of a method of `self` -- is two
+// overlapping `&mut` borrows in the generated Rust; rejected at the Boring source (see also
+// tests/lend_own_field_build_fails.rs for the other shapes and `boring build`).
+error_test_exact!(error_lend_own_field_to_self_method);
 error_test_exact!(error_immutable_guard_let_field);
 error_test_exact!(error_immutable_if_let_field);
 error_test_exact!(error_immutable_loop_var);
@@ -712,3 +756,9 @@ interp_test!(numeric_method_parity);
 interp_test!(conditional_cast_boundaries);
 
 interp_test!(collection_named_methods);
+
+// Same cases as the transpile_tests of the same name -- both backends print identical output.
+interp_test!(set_param_methods);
+interp_test!(array_param_length_only);
+interp_test!(self_sibling_method_call);
+interp_test!(var_mut_collection_ok);

@@ -127,6 +127,11 @@ pub struct Param {
     pub ty: Option<Type>,
     pub mutable: bool,
     pub rebindable: bool, // true when declared with `var` — out-parameter semantics
+    /// `true` only for an explicit `var mut T name` (a second `mut` keyword after
+    /// `var`): rebindable AND content-mutable. `mutable` is `true` for both `var` and
+    /// `mut` params, so without this flag a bare `var [int] b` (rebindable only) and
+    /// `var mut [int] b` are indistinguishable. Parameter analogue of `LetStmt.var_mut`.
+    pub var_mut: bool,
     pub owned: bool,
     pub variadic: bool,        // `int... args` — collects remaining args as Array
     pub default: Option<Expr>, // `string name = "world"` — used when arg is absent
@@ -384,8 +389,8 @@ pub struct EnumDecl {
     pub setters: Vec<SetDecl>,
     pub conversions: Vec<AsDecl>,
     /// Type-level (`type def`/`type req`/`type set`) factory/static methods —
-    /// same production as `StructDecl::type_methods`. `boring run` only; the
-    /// transpiler does not yet emit these for enums.
+    /// same production as `StructDecl::type_methods`. Both backends support them
+    /// (the transpiler emits them into the enum's `impl` block, `emit_struct.rs`).
     pub type_methods: Vec<TypeMethod>,
     pub attrs: Vec<Attr>,
     pub line: usize,
@@ -1926,7 +1931,9 @@ fn with_stmt_mutates(
 /// etc. nested in `body` (same bounded-scan convention `with_block_mutates` uses),
 /// never into a called function's own body. Returns `(has_any_use,
 /// has_only_qualifying_uses)` — the second is only meaningful when the first is
-/// `true`. See `Checker::scan_fn_gpu_arg_params` (checker/mod.rs) for the caller.
+/// `true`. A bare `name.length`/`name.count` size query is neutral: it neither sets
+/// `has_any_use` nor disqualifies (see the `Field` arm in `scan_expr_var_arg`). See
+/// `Checker::scan_fn_gpu_arg_params` (checker/mod.rs) for the caller.
 ///
 /// `treat_len_count_as_qualifying` gates the `name.length`/`name.count` size-query
 /// shortcut below: the caller should only pass `true` when `name`'s declared type is
@@ -2105,8 +2112,15 @@ fn scan_expr_var_arg(
         // Every kernel-launcher wrapper in practice sizes its dispatch block off the
         // very array it also passes to the kernel constructor (`k(block = x.length)`),
         // so treating this as disqualifying would make the exclusive-ctor-arg scan
-        // never actually fire for a realistic function -- count it as a qualifying use
-        // instead of falling through to the generic `Field` recursion below.
+        // never actually fire for a realistic function -- it is therefore *neutral*:
+        // it doesn't set `other` (disqualify), instead of falling through to the
+        // generic `Field` recursion below. It deliberately does NOT set `any` either:
+        // a size query alone says nothing about the array reaching a GPU context, so a
+        // parameter whose only use is `xs.length` (`count_seen([int] xs): xs.length`)
+        // must stay a plain `&Vec<T>` -- promoting it to `BoringGpuArg<T>` emitted a
+        // type that doesn't exist on non-GPU targets. Only a genuine qualifying
+        // call-argument use (a kernel constructor / already-qualifying callee) sets
+        // `any`. See tests/cases/array_param_length_only.br.
         //
         // Gated on `treat_len_count_as_qualifying` (true only when `name`'s declared
         // type is itself a plain array -- the only shape a GPU-resident candidate can
@@ -2119,10 +2133,7 @@ fn scan_expr_var_arg(
         ExprKind::Field(ex, field) | ExprKind::OptionalField(ex, field)
             if treat_len_count_as_qualifying
                 && (field == "length" || field == "count")
-                && matches!(&ex.kind, ExprKind::Var(v) if v == name) =>
-        {
-            *any = true;
-        }
+                && matches!(&ex.kind, ExprKind::Var(v) if v == name) => {}
         ExprKind::Field(ex, _) | ExprKind::OptionalField(ex, _) => e!(ex),
         ExprKind::Index(obj, idx) => { e!(obj); e!(idx); }
         ExprKind::LabeledIndex(obj, args) => { e!(obj); for a in args { e!(&a.value); } }

@@ -88,7 +88,7 @@ def Signal? exec_match_as_expr(mut Interpreter interp, MatchStmt s):
     ReturnSignal(result)
 
 def Signal? exec_block_fn(mut Interpreter interp, [Stmt] stmts):
-    var [[Stmt]] defers = []
+    mut [[Stmt]] defers = []
     let n = stmts.length
     var i = 0
     var Signal? final_sig = nil
@@ -228,7 +228,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                         # sizes to attach here; those stay Value.Array until a
                         # later `.reshape()`/assignment gives them a shape.
                         Type.LabeledArray(_, axes):
-                            var pairs = []
+                            mut pairs = []
                             var all_fixed = true
                             var total = 1
                             for ax in axes:
@@ -700,12 +700,12 @@ def [Value] collect_iterable(Value val):
         Set(elems): elems
         Tuple(elems): elems
         Value.Dict(pairs):
-            var out = []
+            mut out = []
             for p in pairs:
                 out.push(Tuple([p.0, p.1]))
             out
         Range(start, end, inclusive, _):
-            var out = []
+            mut out = []
             var i = start
             let limit = if inclusive: end + 1 else: end
             while i < limit:
@@ -713,7 +713,7 @@ def [Value] collect_iterable(Value val):
                 i = i + 1
             out
         Str(s):
-            var out = []
+            mut out = []
             for c in s.chars():
                 out.push(Value.Str(c))
             out
@@ -788,7 +788,7 @@ req EnumVariant? find_enum_variant_decl(Interpreter interp, string type_name, st
     nil
 
 req [bool] enum_variant_field_mut_flags(EnumVariant? variant_decl):
-    var [bool] flags = []
+    mut [bool] flags = []
     if let vdecl = variant_decl:
         for f in vdecl.fields:
             flags.push(f.is_mut)
@@ -994,11 +994,25 @@ def [Value] exec_stream_fn(mut Interpreter interp, [Stmt] stmts):
 
 # ─── call_fn ──────────────────────────────────────────────────────────────────
 
+# Record the final value of each `mut`/`var` parameter (read from the callee's scope `env`)
+# in `interp.last_var_params` so the call site can write it back — see that field's doc.
+def void capture_var_param_outs(mut Interpreter interp, [Param] params, Env'actor env):
+    mut [(int, string, Value)] outs = []
+    var i = 0
+    while i < params.length:
+        let p = params[i]
+        if p.mutable:
+            let cur = env.get(p.name.clone())
+            if let v = cur:
+                outs.push((i, p.name.clone(), v))
+        i += 1
+    interp.last_var_params = outs
+
 def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? captured):
     let base_env = captured else interp.global_env
     mut fn_env = new_env(base_env.clone())
-    var {string=Value} labeled = {}
-    var positional = []
+    mut {string=Value} labeled = {}
+    mut positional = []
     for val in args:
         match val:
             Labeled(label, v):
@@ -1009,7 +1023,7 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
     for param in decl.params:
         if param.variadic:
             # Collect all remaining positional args into an array
-            var rest = [Value]{}
+            mut rest = [Value]{}
             while pos_idx < positional.length:
                 rest.push(positional[pos_idx])
                 pos_idx = pos_idx + 1
@@ -1055,10 +1069,12 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
     if decl.is_stream:
         # Stream function: collect all yielded values into an array
         let stream_result = exec_stream_fn(interp, decl.body)
+        capture_var_param_outs(interp, decl.params, fn_env)
         pop_return_ty(interp)
         interp.current_env = prev_env
         return Value.Array(stream_result)
     let sig = exec_block_fn(interp, decl.body)
+    capture_var_param_outs(interp, decl.params, fn_env)
     pop_return_ty(interp)
     interp.current_env = prev_env
     match sig:
@@ -1138,7 +1154,7 @@ def Value call_value(mut Interpreter interp, Value callee, [Value] args):
             let variant_name = match args[0] else Value.Nil:
                 Value.Str(s): s
                 _: throw "enum constructor requires variant name"
-            var fields = []
+            mut fields = []
             var i = 1
             while i < args.length:
                 fields.push(args[i])

@@ -1,0 +1,29 @@
+# Regression test: a `req` method promises not to mutate `self`, not other objects -- writing
+# through a `mut` parameter's fields is legal (docs/book.md "`mut` vs `var` on a struct
+# parameter": a `mut` parameter's content may be mutated by the callee). `boring run` used to
+# reject `c.value += 1` with "cannot mutate non-transient field 'value' from a req method"
+# (the req gate applied to any object's field, not just `self`'s), while `boring build` +
+# `cargo run` accepted it and printed 1.
+
+struct Counter:
+    var int value = 0
+
+struct Shape:
+    var int n = 0
+
+    req tap(mut Counter c):
+        c.value += 1
+
+    req set(mut Counter c, int v):
+        c.value = v
+
+def main():
+    mut Counter c = Counter()
+    let s = Shape()
+    s.tap(c)
+    print c.value
+    s.tap(c)
+    s.set(c, 40)
+    s.tap(c)
+    s.tap(c)
+    print c.value

@@ -232,7 +232,7 @@ Same syntax as the `'unified` case; the difference is entirely in what it costs,
 > **Implemented, not independently tested for this exact (inter-procedural) shape.** The write-back mechanics for a same-scope alias (mutation scan → mandatory `mut` alias → `copy_..._to_device` on close) are implemented and tested — `test_with_gpu_resident_write_back_on_mutation`. The interprocedural counterpart (`emit_stmt::emit_with`'s `resident_call_vars` branch) reuses the identical mutation scan and, on a detected write, calls the free `__boring_gpu_copy_h2d` helper directly on the retained `Arc<wgpu::Buffer>` (there's no live kernel instance to call a `copy_..._to_device` method on at this point — the kernel that produced the buffer already returned). The codegen exists and follows the same pattern as the tested same-scope case, but no dedicated codegen test exercises a mutating `with` on an inter-procedural resident value specifically.
 
 ```boring
-var [float]'gpu'unified act = gelu_gpu(fc)   # `var` -> mutation is possible for this value
+mut [float]'gpu'unified act = gelu_gpu(fc)   # `mut` -> mutation is possible for this value
 
 with act:
     act[0] = 0.0          # index-assignment detected in this block's body

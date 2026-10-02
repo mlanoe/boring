@@ -1519,7 +1519,8 @@ def main() throws:
         "tuple return type should substitute BoringGpuArg<T> only at the resident position:\n{rs}");
     // Tail expression: element 0 (already a resident local) passes through as a
     // clone, no download; element 1 emits normally.
-    assert!(rs.contains("(doubled.clone(), side.clone())"),
+    // (`side` is the last use of its local, so the last-use analysis moves it: no `.clone()`.)
+    assert!(rs.contains("(doubled.clone(), side)"),
         "resident tuple element should pass through as a clone, not a download:\n{rs}");
     assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur inside tuple_fn:\n{rs}");
     // Destructure at the call site: `r` opted in explicitly, so it binds straight

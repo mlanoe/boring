@@ -436,7 +436,14 @@ impl Interpreter {
         // Bind parameters
         for (i, param) in method.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(Value::Nil);
-            fn_env.borrow_mut().define(&param.name, val);
+            if param.mutable {
+                // Same as `call_function`'s parameter binding: `mut`/`var` both bind a
+                // mutable, content-mutable parameter.
+                fn_env.borrow_mut().define_mut(&param.name, val);
+                fn_env.borrow_mut().mark_content_mutable(&param.name);
+            } else {
+                fn_env.borrow_mut().define(&param.name, val);
+            }
         }
         // Make `TypeName` available in the body so `Counter.MAX` etc. resolve
         // (the global env is already a parent via the captured chain — no extra binding needed)
@@ -447,10 +454,10 @@ impl Interpreter {
         for block in defers.into_iter().rev() {
             let _ = self.eval_block_as_expr(&block, Rc::clone(&captured));
         }
-        match pre {
+        let result = match pre {
             Ok(()) => {
                 if let Some(last) = method.body.last() {
-                    match self.eval_tail_stmt(last, fn_env) {
+                    match self.eval_tail_stmt(last, Rc::clone(&fn_env)) {
                         Err(Signal::Return(v)) => Ok(v),
                         other => other,
                     }
@@ -460,7 +467,18 @@ impl Interpreter {
             }
             Err(Signal::Return(v)) => Ok(v),
             Err(other) => Err(other),
+        };
+        // Populate last_var_params so the call site can write back mutated `mut` args
+        // (arrays/dicts/sets are values here) — same as `call_function`.
+        self.last_var_params.clear();
+        for param in &method.params {
+            if param.mutable {
+                if let Some(val) = fn_env.borrow().get(&param.name) {
+                    self.last_var_params.insert(param.name.clone(), val);
+                }
+            }
         }
+        result
     }
 
     pub(crate) fn instantiate_struct_labeled(&mut self, decl: &StructDecl, captured: &EnvRef, args: Vec<Value>, line: usize) -> Eval {

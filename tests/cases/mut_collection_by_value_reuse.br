@@ -1,0 +1,103 @@
+# Regression test: a `mut` / `var mut` collection local passed BY VALUE (struct / enum-variant
+# constructor field, or a by-value call argument) must be cloned, exactly like a `var`/`let`
+# one -- Boring's value semantics: passing by value never invalidates the caller's variable.
+#
+# The parser wraps a `mut`-bound declared type in `Type::Mut(..)` (an owned permission marker
+# with no Rust type of its own), so `var_types["b"]` was `Mut(Dict(..))` and the by-value
+# clone arm of `emit_expr_owned` (`Dict`/`Array`/`Set`/`Named`) missed it: `Holder(b)` was
+# emitted `Holder { fields: b }` (a move) while the same `var {K=V}` got `b.clone()`, so reusing
+# `b` failed rustc with E0382. Separately, array/set locals (any spelling) were never cloned in
+# a constructor field at all (`emit_let_value_fallback` only cloned structs/enums/borrowed
+# params).
+#
+# Also pins what must NOT change: a lent `mut [T]` parameter still receives `&mut`, a `var`
+# out-parameter still receives `&mut` and its rebind is still visible to the caller.
+
+enum Wrapper:
+    Dict({string=int} fields)
+    List([int] items)
+    Bag({int} items)
+
+struct Holder:
+    pub var {string=int} fields
+    pub var [int] xs
+
+def int total({string=int} d):
+    d["a"] else 0
+
+def int sum_list([int] l):
+    var int s = 0
+    for x in l:
+        s += x
+    s
+
+def grow(mut [int] xs):
+    xs.push(100)
+
+def refill(var [int] out):
+    out = [7, 7]
+
+# A lent `mut [T]` param read by value: clones to an owned Vec, the lent content survives.
+def int lent_then_reuse(mut [int] xs):
+    let h = Holder({=}, xs)
+    let h2 = Holder({=}, xs)
+    xs.push(2)
+    h.xs.length + h2.xs.length + xs.length
+
+def int wrapper_len(Wrapper w):
+    match w:
+        Dict(fields): fields.length
+        List(items): items.length
+        Bag(items): items.length
+
+def main() throws:
+    # dict: `mut` and `var mut`, constructor + enum variant + by-value call arg
+    mut {string=int} c = {=}
+    c["a"] = 1
+    let hc1 = Holder(c, [])
+    let hc2 = Holder(c, [])
+    var mut {string=int} b = {=}
+    b["a"] = 2
+    let hb1 = Holder(b, [])
+    let hb2 = Holder(b, [])
+    let wb1 = Wrapper.Dict(b)
+    let wb2 = Wrapper.Dict(b)
+    print "dict {hc1.fields["a"] else 0} {hc2.fields["a"] else 0} {hb1.fields["a"] else 0} {hb2.fields["a"] else 0} {wrapper_len(wb1)} {wrapper_len(wb2)} {total(b) + total(b)}"
+
+    # array: `var`, `mut`, `var mut` -- all the same
+    var [int] av = [1, 2]
+    mut [int] am = [1, 2, 3]
+    var mut [int] avm = [1, 2, 3, 4]
+    am.push(4)
+    avm.push(5)
+    let ha1 = Holder({=}, av)
+    let ha2 = Holder({=}, av)
+    let hm1 = Holder({=}, am)
+    let hm2 = Holder({=}, am)
+    let hv1 = Holder({=}, avm)
+    let hv2 = Holder({=}, avm)
+    let wm1 = Wrapper.List(am)
+    let wm2 = Wrapper.List(avm)
+    print "array {ha1.xs.length} {ha2.xs.length} {hm1.xs.length} {hm2.xs.length} {hv1.xs.length} {hv2.xs.length} {wrapper_len(wm1)} {wrapper_len(wm2)} {sum_list(am) + sum_list(am)}"
+
+    # set
+    mut {int} sm = {1, 2}
+    sm.add(3)
+    var mut {int} svm = {1}
+    svm.add(9)
+    let wsm1 = Wrapper.Bag(sm)
+    let wsm2 = Wrapper.Bag(sm)
+    let wsv1 = Wrapper.Bag(svm)
+    let wsv2 = Wrapper.Bag(svm)
+    print "set {wrapper_len(wsm1)} {wrapper_len(wsm2)} {wrapper_len(wsv1)} {wrapper_len(wsv2)} {sm.length} {svm.length}"
+
+    # lent `mut` param + `var` out-param must keep their by-reference behaviour
+    mut [int] lent = [1]
+    grow(lent)
+    grow(lent)
+    print "lent {lent.length} {lent_then_reuse(lent)} {lent.length}"
+    var mut [int] out = [1]
+    let before = Holder({=}, out)
+    refill(out)
+    let after = Holder({=}, out)
+    print "out {before.xs.length} {after.xs.length} {out[0]} {out.length}"

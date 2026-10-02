@@ -264,7 +264,13 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         let rebindable = self.eat(&TokenKind::Var);
-        let mutable = rebindable || self.eat(&TokenKind::Mut);
+        // `var mut T name` — rebind *and* content mutation (docs/book.md's "`mut` vs `var` on a
+        // struct parameter" table), recorded in `Param.var_mut`. `mutable` stays `true` for a bare
+        // `var` too (historical: the transpiler still treats every `var`/`mut` param as a mutable
+        // Rust binding); content-mutation permission is `Param.var_mut`/`mut`/`T&`-typed, see
+        // `Transpiler::content_mutable_params` and the checker's `param_content_mutable`.
+        let var_mut = rebindable && self.eat(&TokenKind::Mut);
+        let mutable = rebindable || var_mut || self.eat(&TokenKind::Mut);
         let mut variadic = false;
 
         // Support `Type[qual][...]? name` (Swift-style) or bare `name` parameter syntax.
@@ -349,7 +355,7 @@ impl Parser {
             None
         };
 
-        Ok(Param { name, ty, mutable, rebindable, owned, variadic, default, line, col })
+        Ok(Param { name, ty, mutable, rebindable, var_mut, owned, variadic, default, line, col })
     }
 
     pub(crate) fn parse_set_decl(&mut self, is_pub: bool) -> Result<SetDecl, ParseError> {
@@ -451,7 +457,7 @@ impl Parser {
                 let body = self.parse_method_body()?;
                 let param = crate::ast::Param {
                     name: param_name, ty: Some(param_ty),
-                    mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col,
+                    mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false, default: None, line, col,
                 };
                 Ok(TypeMemberKind::Method(TypeMethod {
                     kind: TypeMethodKind::Set, name, params: vec![param],

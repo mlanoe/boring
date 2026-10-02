@@ -1,0 +1,16 @@
+# A bare call to a sibling struct method (`one(n)` rather than `self.one(n)`) used to be
+# emitted as-is -- `one(n.clone());` -- and failed `cargo build` with rustc E0425. Implicit
+# `self` only covers fields (docs/book.md, "Implicit `self`"), so it is now a Boring
+# diagnostic naming the fix.
+struct Src:
+    var int pos = 0
+
+    def one(int n):
+        pos += n
+
+    def two(int n):
+        one(n)
+
+def main():
+    mut Src s = Src()
+    s.two(3)

@@ -1,0 +1,30 @@
+error: `b` is `var` (rebindable only, not content-mutable) — cannot call `.push()` on it; fix: declare it `mut` or `var mut`
+ --> <file>:6:5
+  |
+6 |     b.push(1)
+  |     ^
+error: `b` is `var` (rebindable only, not content-mutable) — cannot assign to its elements; fix: declare it `mut` or `var mut`
+ --> <file>:7:5
+  |
+7 |     b[0] = 1
+  |     ^
+error: `v` is `var` (rebindable only, not content-mutable) — cannot call `.push()` on it; fix: declare it `mut` or `var mut`
+ --> <file>:14:5
+   |
+14 |     v.push(2)
+   |     ^
+error: `v` is `var` (rebindable only, not content-mutable) — cannot assign to its elements; fix: declare it `mut` or `var mut`
+ --> <file>:15:5
+   |
+15 |     v[0] = 5
+   |     ^
+error: `d` is `var` (rebindable only, not content-mutable) — cannot assign to its elements; fix: declare it `mut` or `var mut`
+ --> <file>:17:5
+   |
+17 |     d["b"] = 2
+   |     ^
+error: `s` is `var` (rebindable only, not content-mutable) — cannot call `.add()` on it; fix: declare it `mut` or `var mut`
+ --> <file>:19:5
+   |
+19 |     s.add(2)
+   |     ^

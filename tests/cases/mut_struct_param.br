@@ -1,0 +1,126 @@
+# Regression test: a `mut` (content-mutable, non-rebindable) user-struct parameter lends the
+# caller's value (docs/book.md "`mut` vs `var` on a struct parameter": `mut Point p` lets the
+# callee mutate p's content). Free function and struct method alike, in both backends:
+#   - the callee's signature is `&mut T`, whether the body writes a field (`p.x = 7`), compound-
+#     assigns it, or calls a `def` method on it,
+#   - the call site lends `&mut place` -- no `.clone()` (the callee's writes landed on the
+#     throwaway clone and were lost),
+#   - `boring run` agrees: the callee's changes are visible to the caller.
+# Also covers: a one-uppercase-letter struct name (`struct P` -- spelled as an implicit type
+# parameter by the parser), a lent param forwarded to another lent param (free fn -> free fn,
+# method -> method), a bare struct field as the argument of a call on a *different* field
+# (`b.bump(inner)` -> `self.b.bump(&mut self.inner)`; lending a field of `self` to a method of
+# `self` itself is rustc's own E0499, not something Boring can emit around), a struct and a
+# `mut [T]` lent side by side, and a trait method whose implementer takes a `mut` struct --
+# called on the concrete struct and through the trait type.
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+struct P:
+    var int x = 0
+
+def poke(mut P p):
+    p.x = 7
+
+def set_value(mut Counter c):
+    c.value = 5
+
+def add_value(mut Counter c):
+    c.value += 10
+
+def call_inc(mut Counter c):
+    c.inc()
+
+def relay(mut Counter c):
+    set_value(c)
+    add_value(c)
+
+def fill_free(mut [uint8] b):
+    b[0] = 5 as uint8
+
+trait Poker:
+    def poke_it(mut Counter c)
+    def stamp(mut [uint8] b)
+
+struct A as Poker:
+    def poke_it(mut Counter c):
+        c.value += 100
+
+    def stamp(mut [uint8] b):
+        b[1] = 8 as uint8
+
+# A call through the trait type (`Box<dyn Poker>`): no struct decl to read the lent flags
+# from, the trait's own declaration is used.
+def drive(mut Poker p, mut Counter c, mut [uint8] b):
+    p.poke_it(c)
+    p.stamp(b)
+
+struct Bumper:
+    var int hits = 0
+
+    def bump(mut Counter c):
+        c.value += 1
+        hits += 1
+
+    def forward(mut Counter c):
+        self.bump(c)
+        self.bump(c)
+
+    def fill(mut Counter c, mut [uint8] b):
+        c.value = 9
+        b[0] = 6 as uint8
+        hits += 1
+
+struct Holder:
+    var mut Counter inner = Counter()
+    var mut Bumper b = Bumper()
+
+    def bump_inner():
+        b.bump(inner)
+
+def main():
+    var mut P p = P()
+    poke(p)
+    print p.x
+
+    mut Counter c = Counter()
+    set_value(c)
+    print c.value
+    add_value(c)
+    print c.value
+    call_inc(c)
+    print c.value
+
+    mut Counter r = Counter()
+    relay(r)
+    print r.value
+
+    var mut [uint8] buf = [0 as uint8 for i in 0..<4]
+    fill_free(buf)
+    print buf[0]
+
+    mut Bumper h = Bumper()
+    h.bump(c)
+    print c.value
+    h.forward(c)
+    print c.value
+    h.fill(c, buf)
+    print c.value
+    print buf[0]
+    print h.hits
+
+    mut Holder hold = Holder()
+    hold.bump_inner()
+    print hold.inner.value
+    print hold.b.hits
+
+    mut A a = A()
+    a.poke_it(c)
+    print c.value
+    drive(a, c, buf)
+    print c.value
+    print buf[1]

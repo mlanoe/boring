@@ -660,7 +660,8 @@ fn desugar_trailing_array_block(
                 is_pub: false,
                 is_static: false,
                 name: CHILDREN_VAR.to_string(),
-                ty: Some(Type::Array(Box::new(Type::Named(trait_name)))),
+                // `Type::Mut` wrapper, exactly like a parser-built `mut` local.
+                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(Type::Named(trait_name)))))),
                 var_mut: false,
                 value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
                 is_lazy: false,
@@ -697,7 +698,7 @@ fn desugar_trailing_array_block(
         }
         Interp::ClosureLiteral => {
             let param = Param {
-                name: name.clone(), ty: None, mutable: false, rebindable: false, owned: false,
+                name: name.clone(), ty: None, mutable: false, rebindable: false, var_mut: false, owned: false,
                 variadic: false, default: None, line, col,
             };
             let (throws, task) = infer_closure_throws_task(&ClosureBody::Block(body.clone()));

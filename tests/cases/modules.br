@@ -37,7 +37,7 @@ def int divide(int a, int b) throws:
 let dres = try divide(10, 2) else -1
 print dres
 
-var sa = []
+mut sa = []
 sa.push(1)
 sa.push(2)
 sa.push(3)

@@ -14,7 +14,7 @@
 # implicit-self form skips lock dispatch for an `'actor`-qualified field.
 
 struct UserSession:
-    var mut int loginCount = 0
+    var int loginCount = 0
     def recordLogin():
         self.loginCount += 1
 

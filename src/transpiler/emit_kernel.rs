@@ -82,7 +82,7 @@ impl Transpiler {
     /// ordinary `let` codegen.
     ///
     /// Otherwise returns `false` — this also covers a `'gpu'unified`/`'gpu'global`
-    /// array *literal* (`examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for
+    /// array *literal* (`examples/saxpy.br`'s `var mut [float]'gpu'unified x = [0.0 for
     /// ..<N]`), which is just a plain host array today (freely indexed/assigned, no
     /// `with` required) and falls through to ordinary `let` codegen unchanged.
     pub(crate) fn try_emit_gpu_resident_let(&mut self, s: &LetStmt) -> bool {

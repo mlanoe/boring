@@ -1,0 +1,32 @@
+# Regression test: a Boring-declared struct method whose name collides with a builtin
+# Vec/iterator method that takes a positional index (`swap`, `insert`, `drain`, ...).
+# `emit_method_call_fallback` used to cast the FIRST argument `as usize` for any such name
+# whenever the receiver wasn't a set/dict -- it wasn't guarded by `!is_user_struct_receiver`,
+# unlike the neighboring `contains`/`contains_key`/`remove` guards -- so a `var [uint8]`
+# out-param emitted `s.swap((&mut buf as usize))` (invalid cast) and an `int` argument was
+# silently narrowed to `usize`. Covers an out-param, and a signed `int` that must stay `isize`.
+# Transpile-only (`transpile_test!`): `boring run`'s interpreter doesn't honor method `var`
+# out-params yet.
+
+struct Src:
+    var int pos = 0
+
+    def int swap(var [uint8] b):
+        pos += 1
+        b = [1 as uint8, 2 as uint8]
+        pos
+
+    def int insert(int idx, string s):
+        pos += idx
+        pos
+
+def main():
+    var mut Src s = Src()
+    var [uint8] buf = [0 as uint8 for i in 0..<4]
+    let m = s.swap(buf)
+    print m
+    print buf.length
+    print buf[0]
+
+    let k = s.insert(-1, "x")
+    print k

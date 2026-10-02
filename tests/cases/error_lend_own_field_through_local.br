@@ -1,0 +1,13 @@
+# Same family through a local receiver: `h.bump(h.inner)` -- the argument is a field of `h`.
+struct Counter:
+    var int value = 0
+
+struct Holder:
+    mut Counter inner = Counter()
+
+    def bump(mut Counter c):
+        c.value += 1
+
+def main():
+    mut Holder h = Holder()
+    h.bump(h.inner)

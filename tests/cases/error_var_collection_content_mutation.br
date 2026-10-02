@@ -1,0 +1,23 @@
+# A bare `var` binding is only rebindable; mutating the *contents* of a built-in collection
+# (`[T]`, `{K=V}`, `{T}`) needs `mut` or `var mut` — same rule user structs already follow.
+# Both the `var` parameter and the `var` locals below are rejected; `var mut`/`mut` are not.
+
+def a_var_param(var [int] b):
+    b.push(1)
+    b[0] = 1
+
+def a_mut_param(mut [int] b):
+    b.push(1)
+
+def main():
+    var [int] v = [1]
+    v.push(2)
+    v[0] = 5
+    var {string=int} d = {"a" = 1}
+    d["b"] = 2
+    var {int} s = {1}
+    s.add(2)
+    var mut [int] w = [1]
+    w.push(2)
+    mut [int] m = [1]
+    m.push(2)

@@ -1,0 +1,11 @@
+straight 34
+in_loop 8
+in_for 9
+branches 3 102
+defer sees 3
+with_defer 3
+with_closure 6
+same_statement 10
+shadowed 3 1
+early 2 3
+struct_last 6

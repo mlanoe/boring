@@ -1,0 +1,31 @@
+# Regression test (self-hosted interpreter): a `var` parameter on a FREE function writes the
+# callee's final value back into the caller's variable. Covers a scalar out-param, a rebound
+# array, a forwarded `var` param (two nested calls) and a struct-field argument. Same output
+# under `boring run` and the self-hosted interpreter.
+
+def bump(var int n):
+    n += 5
+
+def refill(var [int] b):
+    b = [9, 9]
+
+def forward(var int n):
+    bump(n)
+    bump(n)
+
+struct H:
+    var [int] data = [0, 0, 0]
+
+def main():
+    var int x = 1
+    bump(x)
+    print x
+    var [int] a = [0, 0, 0]
+    refill(a)
+    print a.length
+    var int y = 0
+    forward(y)
+    print y
+    var mut H h = H()
+    refill(h.data)
+    print h.data.length

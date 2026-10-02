@@ -2312,6 +2312,18 @@ impl Interpreter {
         })())
     }
 
+    /// True when `expr`'s root binding (walking through field/index/optional-field
+    /// accesses) is `self` — i.e. a write through it mutates `self`'s own state.
+    fn expr_rooted_at_self(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Var(name) => name == "self",
+            ExprKind::Field(inner, _)
+            | ExprKind::OptionalField(inner, _)
+            | ExprKind::Index(inner, _) => Self::expr_rooted_at_self(inner),
+            _ => false,
+        }
+    }
+
     pub(crate) fn assign(&mut self, target: &Expr, val: Value, env: EnvRef, line: usize) -> Result<(), Signal> {
         match &target.kind {
             ExprKind::Var(name) => {
@@ -2487,8 +2499,16 @@ impl Interpreter {
                                         return Err(err(format!("cannot assign to immutable field '{}'", field), line));
                                     }
                                     // In a req (non-mutating) method, only transient fields may be written
-                                    // (init bodies are always allowed to write any field)
-                                    if !self.current_method_mutating && !fd.transient && !self.in_init_body {
+                                    // (init bodies are always allowed to write any field).
+                                    // Only writes rooted at `self` are gated: a `req` method
+                                    // promises not to mutate `self`, not other objects — e.g.
+                                    // a `mut` parameter's content may be mutated by the callee
+                                    // (docs/book.md, "`mut` vs `var` on a struct parameter").
+                                    if !self.current_method_mutating
+                                        && !fd.transient
+                                        && !self.in_init_body
+                                        && Self::expr_rooted_at_self(obj_expr)
+                                    {
                                         return Err(err(
                                             format!("cannot mutate non-transient field '{}' from a req method", field),
                                             line,

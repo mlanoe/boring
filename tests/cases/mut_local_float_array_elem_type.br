@@ -1,0 +1,35 @@
+# Regression test: a bare-`mut` local `[float]`/`[float32]` array keeps its element type for
+# later inference, exactly like the `var` form. `mut [float] e = ...` stores `Type::Mut(Array(..))`
+# in `var_types` (an owned permission marker with no Rust type of its own); `float_array_elem_ty`
+# (the `.sum::<T>()` turbofish pick), `infer_float_width_inner`'s array-index arm, the `let x = arr[i]`
+# element tracking and `emit_for`'s element-type detection all matched `Type::Array` directly -- so
+# `e |> sum()` was emitted `sum::<i64>()` against `f64` elements (E0277).
+
+def float total_mut([float] x):
+    mut [float] e = x |> map((v): v * 2.0)
+    let float s = e |> sum()
+    s
+
+def float total_var([float] x):
+    var [float] e = x |> map((v): v * 2.0)
+    let float s = e |> sum()
+    s
+
+def float32 total_mut32([float32] x):
+    mut [float32] e = x
+    e |> sum()
+
+def float total_loop([float] x):
+    mut [float] e = x |> map((v): v + 0.5)
+    var float acc = 0.0
+    for v in e:
+        acc = acc + v
+    acc + e[0]
+
+def main():
+    print total_mut([1.0, 2.0])
+    print total_var([1.0, 2.0])
+    let float32 a = 1.5
+    let float32 b = 2.5
+    print total_mut32([a, b])
+    print total_loop([1.0, 2.0])

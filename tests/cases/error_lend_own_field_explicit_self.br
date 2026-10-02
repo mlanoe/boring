@@ -1,0 +1,16 @@
+# Same as error_lend_own_field_to_self_method.br, with an explicit `self.inner` argument.
+struct Counter:
+    var int value = 0
+
+struct Holder:
+    mut Counter inner = Counter()
+
+    def bump(mut Counter c):
+        c.value += 1
+
+    def bump_inner():
+        self.bump(self.inner)
+
+def main():
+    mut Holder h = Holder()
+    h.bump_inner()

@@ -1,0 +1,183 @@
+# Regression test: a `mut` struct / `mut [T]` parameter of a method is lent (`&mut place`) at the
+# call site even when the receiver is not a plain local of a struct type the transpiler could
+# resolve right away (tests/cases/mut_struct_param.br covers the plain receivers). Before, each
+# shape below passed the argument by value (`.clone()` / a move) against the callee's
+# `&mut T` signature: rustc E0308 from `boring build` -- or, on older versions, silently lost
+# writes -- while `boring run` was always right. Receiver shapes covered, each with a `mut Counter`
+# and a `mut [uint8]` argument:
+#   - an element of a `[mut T]` / `[T]` local (`shapes[1].poke(c)`) and of a `[Trait]` array,
+#   - a `for` loop variable (`for s in shapes`, `for i, s in shapes`, `for k, v in dict`),
+#   - a value of a `{K=V}` dict (`d["a"].tap(c)`), elements of a struct's own array fields
+#     (`self.shapes[i]`, a bare field name),
+#   - the result of a call / a method call (`make().tap(c)`, `scene.first().tap(c)`),
+#   - a closure parameter, typed (`(Shape s): ...`) or taken from the collection the closure is
+#     applied to (`shapes.any((s): s.ping(c))`),
+#   - a generic `T` receiver bounded by a trait (`def run<T as Poker>(mut T p)`),
+#   - a `'actor` / `'shared` receiver (locked / ref-counted around the struct).
+# `req` methods are used where the receiver is a loop variable / non-`mut` element (a `def`
+# call needs a content-mutable binding), `def` methods where the element type is `[mut T]`.
+
+struct Counter:
+    var int value = 0
+
+    def inc(int by):
+        value += by
+
+struct Shape:
+    var int n = 0
+
+    def poke(mut Counter c):
+        c.inc(1)
+        n += 1
+
+    def stamp(mut [uint8] b):
+        b[0] += 1 as uint8
+        n += 1
+
+    req tap(mut Counter c):
+        c.inc(10)
+
+    req mark(mut [uint8] b):
+        b[1] += 1 as uint8
+
+    req bool ping(mut Counter c):
+        c.inc(100)
+        true
+
+trait Poker:
+    def poke(mut Counter c)
+    def stamp(mut [uint8] b)
+    req tap(mut Counter c)
+    req mark(mut [uint8] b)
+
+struct Sq as Poker:
+    var int n = 0
+
+    def poke(mut Counter c):
+        c.inc(2)
+        n += 1
+
+    def stamp(mut [uint8] b):
+        b[2] += 1 as uint8
+        n += 1
+
+    req tap(mut Counter c):
+        c.inc(20)
+
+    req mark(mut [uint8] b):
+        b[3] += 1 as uint8
+
+def Shape make():
+    Shape()
+
+def Poker make_poker():
+    Sq()
+
+struct Scene:
+    var [Shape] shapes = [Shape(), Shape()]
+    var [Poker] pokers = [Sq()]
+
+    def Shape first():
+        shapes[0]
+
+    def go(mut Counter c, mut [uint8] b):
+        shapes[0].tap(c)
+        self.shapes[1].mark(b)
+        for s in shapes:
+            s.tap(c)
+        for p in pokers:
+            p.tap(c)
+        pokers[0].mark(b)
+
+def run<T as Poker>(mut T p):
+    mut Counter c = Counter()
+    mut [uint8] b = [0 as uint8 for i in 0..<4]
+    p.poke(c)
+    p.stamp(b)
+    p.tap(c)
+    p.mark(b)
+    print c.value
+    print b[2]
+    print b[3]
+
+def main():
+    mut Counter c = Counter()
+    mut [uint8] b = [0 as uint8 for i in 0..<4]
+
+    # Elements of a `[mut T]` (`def` calls) and of a plain `[T]` (`req` calls).
+    mut [mut Shape] ms = [Shape(), Shape()]
+    ms[1].poke(c)
+    ms[0].stamp(b)
+    print c.value
+    print b[0]
+    let [Shape] plain = [Shape(), Shape()]
+    plain[1].tap(c)
+    plain[0].mark(b)
+    print c.value
+    print b[1]
+
+    # Loop variables.
+    for s in plain:
+        s.tap(c)
+        s.mark(b)
+    for i, s in plain:
+        s.tap(c)
+    print c.value
+    print b[1]
+
+    # `[Trait]` array: indexed and iterated.
+    let [Poker] ps = [Sq(), Sq()]
+    ps[1].tap(c)
+    ps[0].mark(b)
+    for p in ps:
+        p.tap(c)
+        p.mark(b)
+    print c.value
+    print b[3]
+
+    # Dict values.
+    mut {string=mut Shape} d = {"a" = Shape()}
+    d["a"].tap(c)
+    d["a"].poke(c)
+    for k, v in d:
+        v.tap(c)
+    print c.value
+
+    # Results of calls / method calls.
+    make().tap(c)
+    make().mark(b)
+    make_poker().tap(c)
+    make_poker().mark(b)
+    print c.value
+    print b[1]
+    print b[3]
+
+    # A struct's own array fields (and a method-call result).
+    mut Scene sc = Scene()
+    sc.go(c, b)
+    sc.first().tap(c)
+    print c.value
+    print b[1]
+    print b[3]
+
+    # Closure parameters: typed, and taken from the collection the closure is applied to.
+    var f = (Shape s): s.tap(c)
+    f(Shape())
+    let some = plain.any((s): s.ping(c))
+    let pinged = plain.filter((s): s.ping(c))
+    _ = plain.map((s): s.tap(c))
+    print c.value
+    print some
+    print pinged.length
+
+    # A generic `T` receiver bounded by a trait.
+    mut Sq sq = Sq()
+    run(sq)
+
+    # `'actor` / `'shared` receivers.
+    mut Shape'actor ac = Shape()
+    ac.tap(c)
+    ac.poke(c)
+    let Shape'shared sh = Shape()
+    sh.tap(c)
+    print c.value

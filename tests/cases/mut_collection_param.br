@@ -1,0 +1,104 @@
+# Regression test: a `mut [T]` / `mut {K=V}` / `mut {T}` parameter lends the caller's content
+# (docs/book.md "`mut` vs `var` on a struct parameter": `mut` = the callee may mutate the
+# caller's content). Free function and struct method alike, in both backends:
+#   - the callee's signature is `&mut Vec<T>` / `&mut HashMap<..>` / `&mut HashSet<..>`
+#     (whatever the body does: plain index-assign, compound assign, a mutating method call, or
+#     nothing at all),
+#   - the call site lends `&mut buf` -- no `.clone()` (the callee's writes were lost) and no
+#     move (the caller's later use was E0382),
+#   - `boring run` agrees: the callee's changes are visible to the caller.
+# The caller binds with a bare `mut` (content-mutable, never reassigned) -- `var` is only
+# needed to rebind. Also covers a lent param forwarded to another lent param, a struct field
+# as the argument, and `var mut T x` as a parameter form.
+
+def fill_free(mut [uint8] b):
+    b[0] = 7 as uint8
+
+def bump_all(mut [int] a):
+    a[0] += 10
+    a[1] = a[1] * 2
+
+def tag(mut {string=int} d):
+    d["seen"] = 1
+
+# A set parameter is lent too, but its mutating methods (`add`/`remove`) are not usable on a
+# set *parameter* yet (a separate, pre-existing gap) -- so this only reads it.
+def int size(mut {int} s):
+    s.length
+
+def forward_free(mut [uint8] b):
+    fill_free(b)
+    b[1] = 8 as uint8
+
+def int read_only(mut [int] a):
+    a[0] + a[1]
+
+struct Src:
+    var int pos = 0
+
+    def fill_mut(mut [uint8] b):
+        b[0] = 9 as uint8
+        pos += 1
+
+    def forward(mut [uint8] b):
+        fill_free(b)
+        self.fill_mut(b)
+        b[2] = 3 as uint8
+
+    def fill_dict(mut {string=int} d):
+        d["m"] = 2
+
+    def int size_of(mut {int} s):
+        s.length
+
+struct Holder:
+    var [uint8] data = [0 as uint8 for i in 0..<4]
+
+def drive(mut Src s, mut [uint8] b):
+    s.fill_mut(b)
+    b[3] = 5 as uint8
+
+def both_forms(var mut [int] a):
+    a[0] = 99
+
+def main():
+    mut Src s = Src()
+    mut [uint8] buf = [0 as uint8 for i in 0..<4]
+    fill_free(buf)
+    print buf[0]
+    s.fill_mut(buf)
+    print buf[0]
+    print buf.length
+
+    forward_free(buf)
+    print buf[1]
+    s.forward(buf)
+    print buf[2]
+    drive(s, buf)
+    print buf[3]
+    print s.pos
+
+    mut [int] nums = [1, 2, 3]
+    bump_all(nums)
+    print nums[0]
+    print nums[1]
+    print read_only(nums)
+    print nums[0]
+
+    mut {string=int} dict = {"a" = 0}
+    tag(dict)
+    s.fill_dict(dict)
+    print dict["seen"]
+    print dict["m"]
+
+    mut {int} seen = {1, 2}
+    print size(seen)
+    print s.size_of(seen)
+
+    mut Holder h = Holder()
+    s.fill_mut(h.data)
+    print h.data[0]
+
+    var [int] rebindable = [1, 2]
+    both_forms(rebindable)
+    print rebindable[0]

@@ -1,0 +1,45 @@
+# Same shape as lend_and_read_same_local.br, but the receiver of the method sits behind a lock
+# wrapper ('actor / 'guard / 'observed, as a local, a `self` field and an outer-var field), so
+# the call is built by a dedicated lock dispatcher rather than the generic method fallback: the
+# lent `mut [int]` local is also read by value in the next argument. The by-value arguments are
+# evaluated into temporaries before the lock is taken.
+struct Holder:
+    pub [int] xs
+
+struct Bag:
+    pub int n
+
+    def int grow_with(mut [int] a, Holder h):
+        a.push(9)
+        a.length + h.xs.length + n
+
+struct Wrap:
+    mut Bag'actor inner = Bag(40)
+
+    def int through_self(mut [int] a):
+        self.inner.grow_with(a, Holder(a))
+
+def main():
+    mut [int] v = [1, 2, 3]
+    var mut Bag'actor x = Bag(10)
+    print x.grow_with(v, Holder(v))
+    print v.length
+
+    mut [int] w = [1, 2]
+    var mut Bag'guard y = Bag(20)
+    print y.grow_with(w, Holder(w))
+    print w.length
+
+    mut [int] u = [4]
+    var mut Bag'actor'observed z = Bag(30)
+    print z.grow_with(u, Holder(u))
+    print u.length
+
+    mut [int] s = [7, 7]
+    var mut Wrap wr = Wrap()
+    print wr.through_self(s)
+    print s.length
+
+    mut [int] t = [5]
+    print wr.inner.grow_with(t, Holder(t))
+    print t.length

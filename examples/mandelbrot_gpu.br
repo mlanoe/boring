@@ -69,7 +69,7 @@ def [int] colorize(float32 t):
 let header      = "P6\n{width} {height}\n255\n"
 let header_chars = header.chars()
 var [int] header_bytes = [ord(header_chars[i]) for i in ..<header_chars.length]
-var [int] pixels = [0 for ..<width * height * 3]
+mut [int] pixels = [0 for ..<width * height * 3]
 let total_pixels = width * height
 let flat_image = k.image.flatten()
 with flat_image:
@@ -79,7 +79,7 @@ with flat_image:
         pixels[i * 3 + 1] = rgb[1]
         pixels[i * 3 + 2] = rgb[2]
 
-var [int] ppm_data = []
+mut [int] ppm_data = []
 for b in header_bytes:
     ppm_data.push(b)
 for b in pixels:

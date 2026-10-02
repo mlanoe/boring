@@ -1,0 +1,50 @@
+# Regression test: a `var` (rebindable out-parameter) param on a Boring-declared struct
+# METHOD. `var` lets the callee *rebind the caller's variable* (`b = ...`); content mutation is
+# `mut`'s job (docs/book.md "`mut` vs `var` on a struct parameter"). The call site used to emit
+# the by-value clone (`s.refill(buf.clone())`) against the `&mut Vec<u8>` signature -- E0308, or,
+# for a type that happened to type-check, the callee's rebind silently lost. It now lends
+# `&mut <place>` exactly as a free function already did (`emit_args_coerced`); see the
+# user-struct-receiver arm of `emit_method_call_fallback` (src/transpiler/emit_methods.rs).
+# Covers a local array, a forwarded `var` param, a struct field, and a scalar out-param.
+# Compile+run (`transpile_test!`) and `boring run` (`interp_test!` in tests/run.rs): both backends
+# print the same output.
+
+struct Src:
+    var int pos = 0
+
+    def int refill(var [uint8] b):
+        pos += 1
+        b = [(pos * 10) as uint8, 0 as uint8]
+        pos
+
+    def bump(var int n):
+        n += 5
+
+struct Holder:
+    var [uint8] data = [0 as uint8 for i in 0..<4]
+
+def int pump(var [uint8] b):
+    var mut Src t = Src()
+    t.pos = 4
+    t.refill(b)
+
+def main():
+    var mut Src s = Src()
+    var [uint8] buf = [0 as uint8 for i in 0..<4]
+    let n = s.refill(buf)
+    print n
+    print buf.length
+    print buf[0]
+
+    let m = pump(buf)
+    print m
+    print buf[0]
+
+    var mut Holder h = Holder()
+    _ = s.refill(h.data)
+    print h.data.length
+    print h.data[0]
+
+    var int x = 1
+    s.bump(x)
+    print x

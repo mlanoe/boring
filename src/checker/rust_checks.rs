@@ -30,6 +30,7 @@
 
 use crate::ast::*;
 use super::Checker;
+use crate::transpiler::helpers::{is_lent_collection_param, is_mut_user_type_param_shape};
 
 impl Checker {
     pub(super) fn check_qualifier_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, line: usize, col: usize) {
@@ -513,5 +514,134 @@ impl Checker {
             return params.iter().find(|(n, _)| n == label).map(|(_, o)| *o).unwrap_or(false);
         }
         params.get(index).map(|(_, o)| *o).unwrap_or(false)
+    }
+}
+
+// ─── Lending a place of the receiver's own object to the receiver ──────────────
+//
+// A `mut` struct/enum/collection parameter of a method is lent as `&mut T` and the call site
+// lends `&mut <place>` (`Transpiler::emit_lent_arg`). When that place lives inside the object
+// the method is called on (`self.bump(inner)` with `inner` a field of `self`, `h.bump(h.inner)`),
+// the generated Rust holds two overlapping `&mut` borrows (E0499) — while `boring run` accepts
+// the program, because the interpreter has no borrow checker. Reported here, at the Boring
+// source, so both backends agree and the user is not sent to a rustc error in generated code.
+// A call on a *different* receiver (`self.b.bump(self.inner)`: disjoint fields) is fine in Rust
+// and is not flagged — only a receiver place and an argument place where one is a prefix of
+// the other overlap.
+
+impl Checker {
+    /// Does a bare `name` inside the struct being checked resolve to one of its fields
+    /// (implicit `self`) rather than a local or a global of the same name?
+    fn bare_name_is_self_field(&self, name: &str) -> bool {
+        self.current_struct_fields.contains(name)
+            && !self.scopes.get(1..).unwrap_or_default().iter().any(|sc| sc.contains_key(name))
+    }
+
+    /// The root-to-leaf path of a place expression (`self.a.b` -> `["self","a","b"]`; a bare
+    /// implicit-self field `inner` -> `["self","inner"]`; an index step stays on its base,
+    /// since Rust cannot tell two indices of one collection apart). `None` for anything that is
+    /// not a place (calls, literals, arithmetic, ...): such a value is a temporary.
+    fn lend_place_path(&self, expr: &Expr) -> Option<Vec<String>> {
+        match &expr.kind {
+            ExprKind::Var(n) if n == "self" => Some(vec!["self".into()]),
+            ExprKind::Var(n) if self.bare_name_is_self_field(n) => Some(vec!["self".into(), n.clone()]),
+            ExprKind::Var(n) => Some(vec![n.clone()]),
+            ExprKind::Field(obj, f) => {
+                let mut p = self.lend_place_path(obj)?;
+                p.push(f.clone());
+                Some(p)
+            }
+            ExprKind::Index(obj, _) | ExprKind::LabeledIndex(obj, _) => self.lend_place_path(obj),
+            _ => None,
+        }
+    }
+
+    /// Declared user-struct name of `ty` (looking through `mut`), when it is one.
+    fn plain_struct_name(&self, ty: &Type) -> Option<String> {
+        match ty.without_mut() {
+            Type::Named(n) | Type::TypeParam(n) if self.struct_field_types.contains_key(n.as_str()) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// Statically known user-struct name of an expression: `self`, a typed (or
+    /// constructor-initialised) local/parameter, an implicit-self field, or a field chain
+    /// off any of those. `None` when not positively known — then nothing is reported.
+    fn static_struct_of(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Var(n) if n == "self" => self.current_struct.clone(),
+            ExprKind::Var(n) => {
+                if let Some(b) = self.scopes.get(1..).unwrap_or_default().iter().rev().find_map(|sc| sc.get(n.as_str())) {
+                    return b.ty.as_ref().and_then(|t| self.plain_struct_name(t)).or_else(|| b.ctor_type.clone());
+                }
+                if self.current_struct_fields.contains(n.as_str()) {
+                    let fields = self.struct_field_types.get(self.current_struct.as_deref()?)?;
+                    return fields.iter().find(|(f, _)| f == n).and_then(|(_, t)| self.plain_struct_name(t));
+                }
+                let b = self.scopes.first()?.get(n.as_str())?;
+                b.ty.as_ref().and_then(|t| self.plain_struct_name(t)).or_else(|| b.ctor_type.clone())
+            }
+            ExprKind::Field(obj, f) => {
+                let owner = self.static_struct_of(obj)?;
+                let (_, t) = self.struct_field_types.get(&owner)?.iter().find(|(n, _)| n == f)?;
+                self.plain_struct_name(t)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_lent_method_param(&self, p: &Param) -> bool {
+        is_lent_collection_param(p)
+            || is_mut_user_type_param_shape(p).is_some_and(|n| self.user_types.contains(n))
+    }
+
+    pub(super) fn check_same_object_lend(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
+        if self.kernel_dispatch_only { return; }
+        let Some(recv_path) = self.lend_place_path(recv) else { return };
+        let Some(owner) = self.static_struct_of(recv) else { return };
+        let Some(overloads) = self.struct_methods.get(&(owner.clone(), method.to_string())) else { return };
+        // Overloads are told apart by argument *type*, which this checker cannot see: report
+        // only when every overload that could take this many arguments lends the parameter.
+        let candidates: Vec<&Vec<Param>> = overloads.iter()
+            .filter(|ps| ps.len() >= args.len() || ps.iter().any(|p| p.variadic))
+            .collect();
+        if candidates.is_empty() { return; }
+        let mut found: Option<(usize, usize, String, String)> = None; // (line, col, arg text, param name)
+        for (i, a) in args.iter().enumerate() {
+            if a.spread { continue; }
+            let param_of = |ps: &Vec<Param>| -> Option<Param> {
+                match &a.label {
+                    Some(l) => ps.iter().find(|p| &p.name == l).cloned(),
+                    None => ps.get(i).cloned(),
+                }
+            };
+            let params: Vec<Option<Param>> = candidates.iter().map(|ps| param_of(ps)).collect();
+            if !params.iter().all(|p| p.as_ref().is_some_and(|p| self.is_lent_method_param(p))) { continue; }
+            let Some(arg_path) = self.lend_place_path(&a.value) else { continue };
+            let overlap = arg_path.starts_with(&recv_path) || recv_path.starts_with(&arg_path);
+            if !overlap { continue; }
+            let pname = params[0].as_ref().map(|p| p.name.clone()).unwrap_or_default();
+            found = Some((a.value.line, a.value.col, Self::place_text(&a.value), pname));
+            break;
+        }
+        let Some((line, col, arg_text, pname)) = found else { return };
+        let recv_text = Self::place_text(recv);
+        self.error(format!(
+            "cannot lend `{arg_text}` to the `mut` parameter `{pname}` of `{recv_text}.{method}()`: \
+             it is part of the receiver `{recv_text}` itself, so the generated Rust would hold two overlapping `&mut` borrows \
+             of one object (rustc E0499). Fix: copy it into a local first (`mut <Type> tmp = {arg_text}`), pass the local \
+             and assign it back afterwards; or make the callee a method of the argument's own type; \
+             or call it on a different receiver"
+        ), line, col);
+    }
+
+    /// Source-like text of a place expression for a diagnostic (`self.inner`, `h.inner`, `buf`).
+    fn place_text(expr: &Expr) -> String {
+        match &expr.kind {
+            ExprKind::Var(n) => n.clone(),
+            ExprKind::Field(o, f) => format!("{}.{}", Self::place_text(o), f),
+            ExprKind::Index(o, _) | ExprKind::LabeledIndex(o, _) => format!("{}[..]", Self::place_text(o)),
+            _ => "this argument".to_string(),
+        }
     }
 }

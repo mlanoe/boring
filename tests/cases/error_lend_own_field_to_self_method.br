@@ -1,0 +1,22 @@
+# Passing one of a struct's OWN fields to a `mut` parameter of a method of the same struct
+# (`self.bump(inner)`) is valid under `boring run`, but the generated Rust would lend
+# `&mut self.inner` while `self` is already mutably borrowed for the call (rustc E0499,
+# pointing at generated code). It is now a Boring diagnostic naming the fix.
+struct Counter:
+    var int value = 0
+
+struct Holder:
+    mut Counter inner = Counter()
+    var int hits = 0
+
+    def bump(mut Counter c):
+        c.value += 1
+        hits += 1
+
+    def bump_inner():
+        self.bump(inner)
+
+def main():
+    mut Holder h = Holder()
+    h.bump_inner()
+    print h.inner.value

@@ -1,0 +1,33 @@
+# A call that lends a `mut [T]` local to a `mut` parameter while another argument reads the
+# same local by value: the by-value read sees the content *before* the call (value semantics).
+struct Holder:
+    pub [int] xs
+
+struct Bag:
+    pub int n
+
+    def int grow_with(mut [int] a, Holder h):
+        a.push(9)
+        a.length + h.xs.length + n
+
+def int grow_with(mut [int] a, Holder h):
+    a.push(9)
+    a.length + h.xs.length
+
+def int relay(mut [int] a):
+    # `a` is itself a lent parameter (`&mut Vec`): reborrowed for the lend, read for the holder.
+    grow_with(a, Holder(a))
+
+def main():
+    mut [int] v = [1, 2, 3]
+    print grow_with(v, Holder(v))
+    print v.length
+
+    mut [int] w = [1, 2]
+    mut Bag b = Bag(10)
+    print b.grow_with(w, Holder(w))
+    print w.length
+
+    mut [int] r = [5]
+    print relay(r)
+    print r.length

@@ -338,6 +338,7 @@ impl Transpiler {
                 for clause in clauses {
                     match clause {
                         CondClause::Let(name, expr) => {
+                            self.track_std_binding(name, expr, true);
                             // Track the inner type of the optional — after the guard let,
                             // `name` has the unwrapped type (e.g. string? → string).
                             if let ExprKind::Var(src) = &expr.kind {

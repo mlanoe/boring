@@ -1,0 +1,73 @@
+# Regression test for two external-call argument bugs found while spiking a TCP server
+# (docs/book.md "Advanced -- External calls that fill a byte buffer"):
+#
+#  1. A content-mutable array binding (`mut [uint8]` parameter, or `mut`/`var mut` local) passed to a
+#     `std::io::Read`-family method (`read`, `read_exact`, ...) was emitted by value
+#     (`sock.read(buf)` / `sock.read((*b))`, E0308: expected `&mut [u8]`). It is now lent as a
+#     mutable borrow (`&mut buf` / `&mut *b`; a bare `var` binding is rejected, it is only rebindable; a `&mut Vec<u8>` deref-coerces to `&mut [u8]`).
+#     See `Transpiler::EXTERNAL_MUT_BUFFER_METHODS` (src/transpiler/emit_methods.rs).
+#  2. A by-value argument of a non-`Clone` std type (`TcpStream`, `File`, ...) passed to a
+#     Boring function got an auto `.clone()` appended (E0599). It is now moved, as in Rust.
+#     See `Transpiler::EXTERNAL_NON_CLONE_TYPES`.
+#  3. A let-binding of a field read with a declared non-`Clone` std type (`var TcpStream server =
+#     pair.0`, `pair` from `accept()`) got the same auto `.clone()` (E0599). Now a move too.
+#  4. The same without a declared type (`var server2 = pair2.0`): the element type comes from the
+#     small std-return table behind `Transpiler::infer_std_type` (`TcpListener.accept()` ->
+#     `(TcpStream, SocketAddr)`), followed through `try?` / `guard let`.
+#
+# Loopback sockets only (127.0.0.1, ephemeral port) -- no network access needed. Transpiler-only,
+# no interpreter support for raw `std.net` (not added to tests/run.rs).
+
+use std.net.TcpListener, TcpStream
+use std.io.Read, Write
+
+def int fill_param(var TcpStream sock, mut [uint8] b) throws:
+    let n = try? sock.read(b)
+    guard let n else throw "read failed"
+    return n as int
+
+def int fill_local(var TcpStream sock) throws:
+    var mut [uint8] buf = [0 as uint8 for i in 0..<5]
+    let n = try? sock.read(buf)
+    guard let n else throw "read failed"
+    return (n as int) * 100 + (buf[0] as int)
+
+def int fill_exact(var TcpStream sock) throws:
+    var mut [uint8] buf = [0 as uint8 for i in 0..<2]
+    let ok = try? sock.read_exact(buf)
+    guard let ok else throw "read_exact failed"
+    return (buf[0] as int) + (buf[1] as int)
+
+def int consume(TcpStream s) throws:
+    return 7
+
+def main() throws:
+    let l = try? TcpListener.bind("127.0.0.1:0")
+    guard let listener = l else throw "bind failed"
+    let a = try? listener.local_addr()
+    guard let addr = a else throw "addr failed"
+    let c = try? TcpStream.connect(addr)
+    guard let cl = c else throw "connect failed"
+    var TcpStream client = cl
+    let w = try? client.write_all("ABCDEFGHIJ".as_bytes())
+    guard let w else throw "write failed"
+    let p = try? listener.accept()
+    guard let pair = p else throw "accept failed"
+    var TcpStream server = pair.0
+    var mut [uint8] b = [0 as uint8 for i in 0..<3]
+    print fill_param(server, b)
+    print b[2]
+    print fill_local(server)
+    print fill_exact(server)
+    print consume(client)
+
+    # Variant 4: no declared type on the tuple-element read.
+    let c2 = try? TcpStream.connect(addr)
+    guard let cl2 = c2 else throw "connect2 failed"
+    var TcpStream client2 = cl2
+    let w2 = try? client2.write_all("XYZ".as_bytes())
+    guard let w2 else throw "write2 failed"
+    let p2 = try? listener.accept()
+    guard let pair2 = p2 else throw "accept2 failed"
+    var server2 = pair2.0
+    print fill_local(server2)

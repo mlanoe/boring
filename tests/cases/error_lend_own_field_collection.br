@@ -1,0 +1,13 @@
+# Same family for a `mut [T]` field lent to a `mut [T]` parameter of a method of its own struct.
+struct Filler:
+    mut [int] buf = [0, 0, 0]
+
+    def fill(mut [int] xs):
+        xs[0] = 7
+
+    def run():
+        self.fill(buf)
+
+def main():
+    mut Filler f = Filler()
+    f.run()

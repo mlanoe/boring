@@ -48,7 +48,7 @@ req mut T get():                # read-only method, returns a mutable instance
 - `req` — read-only method, callable on `let` and `var` bindings → `&self`
 - `def` — mutating method, callable on `var` bindings only → `&mut self`
 - `def mut` / `req mut` — the `mut` after the keyword applies to the **return value**, not `self`
-- Bare field access inside a method resolves to `self.field` automatically, but calling another method of the same struct does **not** — write `self.other_method(...)` explicitly, or Rust rejects the bare call with `error[E0425]: cannot find function` (see [book.md](docs/book.md#implicit-self)).
+- Bare field access inside a method resolves to `self.field` automatically, but calling another method of the same struct does **not** — write `self.other_method(...)` explicitly, or `boring build` rejects the bare call with a diagnostic naming the `self.` fix (see [book.md](docs/book.md#implicit-self)).
 
 ### Parameter passing
 
@@ -142,6 +142,8 @@ model.value.setName("Ada")   # renames silently — `.value` is the explicit esc
 | `var` | yes | no | no longer implies `mut` |
 | `var mut` | yes | yes | only form with both |
 
+The table covers the built-in collections `[T]`/`{K=V}`/`{T}` too (checker-enforced, see "Collections" below): `var [int] v` then `v.push(1)` / `v[0] = 1` is an error — write `var mut [int] v` (or `mut [int] v` if it is never rebound). Parameters: `mut`/`var mut` grant content mutation, a bare `var` (out-parameter, rebindable only) or plain parameter does not.
+
 Permission comes from the **type** (`mut Type`), not the binding keyword alone — see [book.md](docs/book.md#2-variables-and-mutability). This is why `'actor`/`'guard` get no exception below: `var T'actor x` alone no longer suffices for `def` calls, only `var mut T'actor x` does — the lock provides the *mechanism*, Boring's own `mut` bookkeeping still gates it, matching every other type.
 
 Qualifier constraints: `mut 'shared` (and `var mut 'shared`) → compile error in both `boring run` and `boring build` (caught by the semantic checker) — `'shared` has no interior mutability for `mut` to unlock. `var 'guard` compiles cleanly with no warning today.
@@ -220,12 +222,12 @@ var {int} s     = {}     # empty set
 var {string=int} d = {=} # empty dict  ← NOT {} which would be an empty set
 ```
 
-Index assignment (`arr[i] = v`, `dict[k] = v`) mutates in place and requires a `var`/`mut` binding — `let` raises `cannot assign to immutable variable`. Dict assignment inserts the key if absent, updates it otherwise. Sets are **not** index-assignable (`s[i] = v` is a compile/runtime error) — use `s.add(v)` / `s.remove(v)`.
+Index assignment (`arr[i] = v`, `dict[k] = v`) mutates in place and requires a content-mutable binding — `mut` or `var mut`. A bare `var` is rebindable only (`v = [..]` is fine, `v[0] = 1`/`v.push(1)` is a checker error, same as for a user struct's `def` methods), and `let` is immutable. The same rule covers every mutating built-in method on `[T]`/`{K=V}`/`{T}` (`push`, `pop`, `append`, `extend`, `insert`, `remove`, `add`, `set`, `put`, `clear`, `sort`, `sortBy`, `reverse`, `shuffle`, `dedup`, `retain`, `truncate`, `drain`, `swap`, `fill`) and applies to parameters too (`mut`/`var mut` param, not bare `var`). Enforced by the semantic checker (`boring run` and `boring build` alike) wherever the receiver is positively known to be a built-in collection — an explicit `[T]`/`{K=V}`/`{T}` annotation or an initializer that is a collection literal/comprehension or a call to a function declared to return one; an unannotated binding of unknown type is never flagged. Dict assignment inserts the key if absent, updates it otherwise. Sets are **not** index-assignable (`s[i] = v` is a compile/runtime error) — use `s.add(v)` / `s.remove(v)`.
 
 `mut` on the **element/value type** (inside the brackets) is a separate axis from `mut` on the collection itself ([book.md](docs/book.md#element-mutability--mut-t-vs-mut-t)): `[mut Point] arr` — `arr` itself can't grow/shrink/reassign entries, but every element already in it can have `def` called on it (`arr[0].move_to(...)`); `mut [Point] arr` — the reverse, structural mutation only. `{K = mut V}` is the dict analogue (value position only — keys never accept `mut`, mutating one in place would invalidate the hash table). `{mut T}` (sets) is rejected outright — `HashSet<T>` has no mutable element access in Rust (`iter_mut`/`get_mut` don't exist on it), not a Boring design choice.
 
 ```boring
-var {string=int} md = {"a" = 1}
+mut {string=int} md = {"a" = 1}
 md["x"] = 99     # insert
 md["a"] = 100    # update
 ```

@@ -1,6 +1,6 @@
 # array.pop() and array.remove() — write-back and return value
 
-var arr = [1, 2, 3]
+mut arr = [1, 2, 3]
 let v = arr.pop()
 print v        # expected 3
 print arr      # expected [1, 2]
@@ -10,7 +10,7 @@ arr.pop()
 print arr      # expected [1]
 
 # remove returns the removed element
-var arr2 = [10, 20, 30, 40]
+mut arr2 = [10, 20, 30, 40]
 let r = arr2.remove(1)
 print r        # expected 20
 print arr2     # expected [10, 30, 40]
