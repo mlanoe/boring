@@ -2859,11 +2859,8 @@ impl Transpiler {
         };
         let shape = |name: &str| -> Option<[usize; 2]> {
             let mut ty = type_of(name)?;
-            loop {
-                match ty {
-                    Type::Qualified(inner, _) | Type::Mut(inner) => ty = inner,
-                    _ => break,
-                }
+            while let Type::Qualified(inner, _) | Type::Mut(inner) = ty {
+                ty = inner;
             }
             let Type::LabeledArray(_, axes) = ty else { return None };
             if axes.len() != 2 { return None; }

@@ -169,7 +169,7 @@ fn var_alone_does_not_unlock_def_call_through_value_escape_hatch() {
 #[test]
 fn var_mut_does_unlock_direct_def_call() {
     let src = "struct Counter:\n    var int value = 0\n    def inc():\n        value += 1\n    req int current():\n        value\n\ndef main():\n    var mut Counter'actor'observed c = Counter(0)\n    c.inc()\n    print \"{c.current()}\"\n";
-    let out = emit_rust(&src);
+    let out = emit_rust(src);
     assert!(
         out.status.success(),
         "expected `var mut` to unlock a direct def call, got:\n{}",
@@ -182,7 +182,7 @@ fn plain_mut_unlocks_direct_def_call() {
     // `mut` (bare, no `var`) also grants content mutation — the fixed-binding half
     // of the same row, distinct from the two rebind-axis cases above.
     let src = "struct Counter:\n    var int value = 0\n    def inc():\n        value += 1\n    req int current():\n        value\n\ndef main():\n    mut Counter'guard'observed c = Counter(0)\n    c.inc()\n    print \"{c.current()}\"\n";
-    let out = emit_rust(&src);
+    let out = emit_rust(src);
     assert!(
         out.status.success(),
         "expected plain `mut` to unlock a direct def call, got:\n{}",

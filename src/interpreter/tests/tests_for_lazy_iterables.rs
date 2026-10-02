@@ -102,7 +102,7 @@ for i, c in "abc":
     let (interp, res) = run(src);
     res.expect("no runtime error");
     assert_eq!(get_var(&interp, "letters"), Value::Str("abd".to_string()));
-    assert_eq!(get_var(&interp, "idxsum"), Value::Int(0 + 1 + 2));
+    assert_eq!(get_var(&interp, "idxsum"), Value::Int(1 + 2));
 }
 
 #[test]

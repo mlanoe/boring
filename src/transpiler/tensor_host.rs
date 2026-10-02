@@ -170,6 +170,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
     Lowered { program: Program { items: kernels }, errors }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_function_body(
     body: &[Stmt],
     types: &mut HashMap<String, Type>,
@@ -315,6 +316,7 @@ fn lower_function_body(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_nested_body(
     body: &[Stmt],
     outer_types: &HashMap<String, Type>,
@@ -338,6 +340,7 @@ fn lower_nested_body(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_control_flow_stmt(
     stmt: &Stmt,
     types: &HashMap<String, Type>,
@@ -536,8 +539,8 @@ fn qual_source(qual: &GpuQual) -> &'static str {
 }
 
 fn parse_kernel(name: &str, spec: &Spec, method: &str) -> Result<KernelDecl, String> {
-    let tile_rows = spec.m.min(16).max(1);
-    let tile_cols = spec.n.min(16).max(1);
+    let tile_rows = spec.m.clamp(1, 16);
+    let tile_cols = spec.n.clamp(1, 16);
     let tile_method = match method {
         "mma" => "mmaTile",
         "linear" => "linearTile",
@@ -685,8 +688,8 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
 }
 
 fn parse_replacement(name: &str, instance: &str, operands: [&str; 3], spec: &Spec) -> Result<Vec<Item>, String> {
-    let tile_rows = spec.m.min(16).max(1);
-    let tile_cols = spec.n.min(16).max(1);
+    let tile_rows = spec.m.clamp(1, 16);
+    let tile_cols = spec.n.clamp(1, 16);
     let gx = spec.n.div_ceil(tile_cols);
     let gy = spec.m.div_ceil(tile_rows);
     let source = format!(
@@ -699,8 +702,8 @@ fn parse_replacement(name: &str, instance: &str, operands: [&str; 3], spec: &Spe
 }
 
 fn parse_replacement_stmts(name: &str, instance: &str, operands: [&str; 3], spec: &Spec) -> Result<Vec<Stmt>, String> {
-    let tile_rows = spec.m.min(16).max(1);
-    let tile_cols = spec.n.min(16).max(1);
+    let tile_rows = spec.m.clamp(1, 16);
+    let tile_cols = spec.n.clamp(1, 16);
     let gx = spec.n.div_ceil(tile_cols);
     let gy = spec.m.div_ceil(tile_rows);
     let source = format!(
@@ -724,8 +727,8 @@ fn parse_dynamic_replacement_stmts(
 ) -> Result<Vec<Stmt>, String> {
     let bias_guard = call.bias.map(|bias| format!("    guard {bias}.length == {{n}} else throw \"tensor bias length mismatch\"\n")).unwrap_or_default().replace("{n}", &call.n);
     let bias_arg = call.bias.map(|bias| format!("{bias}, ")).unwrap_or_default();
-    let weight_guard = if call.format.is_some() {
-        let geometry = crate::tensor_formats::quantized_linear_geometry(call.format.unwrap()).unwrap();
+    let weight_guard = if let Some(format) = call.format {
+        let geometry = crate::tensor_formats::quantized_linear_geometry(format).unwrap();
         let block_bytes = geometry.block_bytes;
         let block_elements = geometry.block_elements;
         format!("    guard {k} % {block_elements} == 0 else throw \"quantized tensor dimension k must be a multiple of {block_elements}\"\n    guard {b}.length == ({n} * {k} / {block_elements}) * {block_bytes} else throw \"quantized tensor weight length mismatch\"\n", k = call.k, b = call.operands[1], n = call.n)

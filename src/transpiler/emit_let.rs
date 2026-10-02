@@ -1374,12 +1374,13 @@ impl Transpiler {
         // loop-carried residency slot even when its initial value is ordinary
         // host data. Start it in the Host variant so a later synthesized tensor
         // dispatch can replace it with Resident without changing the Rust type.
-        if self.is_gpu_target
-            && self.current_fn_returns_resident.is_some()
-            && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
-            && s.value.is_some()
-        {
-            let value = self.emit_expr_owned(s.value.as_ref().unwrap());
+        let resident_init = s.value.as_ref().filter(|_| {
+            self.is_gpu_target
+                && self.current_fn_returns_resident.is_some()
+                && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
+        });
+        if let Some(value_expr) = resident_init {
+            let value = self.emit_expr_owned(value_expr);
             let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
             self.line(&format!("{kw} {} = BoringGpuArg::Host({value});", escape_rust_keyword(&s.name)));
             self.resident_call_vars.insert(s.name.clone(), s.ty.clone().unwrap());

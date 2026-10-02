@@ -24,7 +24,7 @@ impl Interpreter {
                 Value::Int64(n) => *n as u32,
                 Value::Int128(n) => *n as u32,
                 Value::Uint16(n) => *n as u32,
-                Value::Uint32(n) => *n as u32,
+                Value::Uint32(n) => *n,
                 Value::Uint64(n) => *n as u32,
                 Value::Uint128(n) => *n as u32,
                 _ => return Err(err("pow: expected one integer exponent", line)),

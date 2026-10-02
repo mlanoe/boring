@@ -403,7 +403,7 @@ print "pow = {k.out[4]}"
         "expected the generated wgpu project to build AND run to completion against a \
          real GPU, but it failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
-    fn parsed_value<'a>(stdout: &'a str, prefix: &str) -> f32 {
+    fn parsed_value(stdout: &str, prefix: &str) -> f32 {
         let line = stdout.lines().find(|l| l.starts_with(prefix))
             .unwrap_or_else(|| panic!("missing '{prefix}' line in stdout:\n{stdout}"));
         line[prefix.len()..].trim().parse::<f32>()
@@ -813,7 +813,7 @@ print "r8 = {k.out[8]}"
          real GPU (no shader-validation panic from an i32 shift amount), but it failed:\n\
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
-    fn parsed_value<'a>(stdout: &'a str, prefix: &str) -> f32 {
+    fn parsed_value(stdout: &str, prefix: &str) -> f32 {
         let line = stdout.lines().find(|l| l.starts_with(prefix))
             .unwrap_or_else(|| panic!("missing '{prefix}' line in stdout:\n{stdout}"));
         line[prefix.len()..].trim().parse::<f32>()

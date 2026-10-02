@@ -988,7 +988,7 @@ fn dynamic_tensor_linear_q2_k_matches_position_varying_reference() {
     let block_min_scales = [0.25f32, 0.5];
     let sub_scales = [1u8, 3, 5, 7, 9, 11, 13, 15, 2, 4, 6, 8, 10, 12, 14, 15];
     let sub_mins = [15u8, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 1];
-    let mut packed = vec![0u8; N * BLOCK_BYTES];
+    let mut packed = [0u8; N * BLOCK_BYTES];
     let mut decoded = vec![0.0f32; N * K];
     for block in 0..N {
         let base = block * BLOCK_BYTES;
