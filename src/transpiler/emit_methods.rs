@@ -282,6 +282,12 @@ impl Transpiler {
                     self.self_type.as_deref()
                         .map(|t| self.is_known_user_type(t))
                         .unwrap_or(false)
+                } else if self.var_types.get(v.as_str()).is_some_and(Self::is_weak_qualified) {
+                    // A `T'weak` local is a `Weak<T>`, not a `T`: its only operations are
+                    // `.upgrade()`/`.clone()` (see the checker's `'weak` rule), so it must go
+                    // through `map_method` (which unwraps `upgrade()`'s `Option`), never be
+                    // dispatched verbatim as a user-struct method.
+                    false
                 } else {
                     // `var_struct_types` is the primary source (also gates the
                     // mut/content-mutation diagnostics), but it's only reliably populated for
@@ -4420,8 +4426,8 @@ impl Transpiler {
         while let Some(pos) = code[from..].find(place) {
             let start = from + pos;
             let end = start + place.len();
-            let before_ok = code[..start].chars().next_back().map_or(true, |c| !is_ident(c) && c != '.');
-            let after_ok = code[end..].chars().next().map_or(true, |c| !is_ident(c));
+            let before_ok = code[..start].chars().next_back().is_none_or(|c| !is_ident(c) && c != '.');
+            let after_ok = code[end..].chars().next().is_none_or(|c| !is_ident(c));
             if before_ok && after_ok { return true; }
             from = start + 1;
             while !code.is_char_boundary(from) { from += 1; }

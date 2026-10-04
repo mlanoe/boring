@@ -7039,6 +7039,16 @@ struct Outer as Introspect:\n    type let Inner origin = Inner(v = 0)\n";
     }
 
     #[test]
+    fn weak_annotated_local_upgrade_is_unwrapped() {
+        // Regression: a local declared `T'shared'weak` was resolved to the user struct `T`
+        // by name, so `.upgrade()` was dispatched verbatim as a user-struct method and kept
+        // its `Option` (`upgraded.val` then failed with E0609 on `Option<Arc<T>>`).
+        let src = "struct WNode:\n    init(pub int val)\n\nlet WNode'shared strong = WNode(val = 42)\nlet WNode'shared'weak weakn = strong\nlet upgraded = weakn.upgrade()\nprint upgraded.val\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("weakn.upgrade().expect("), "got:\n{}", code);
+    }
+
+    #[test]
     fn introspect_actor_guard_weak_wrappers_do_not_delegate_as_any() {
         // `RefCell`/`Mutex`/`RwLock` (single-threaded test → RefCell) deliberately do NOT
         // delegate `__introspectAsAny`/`Mut` — they return the wrapper itself, `self`,

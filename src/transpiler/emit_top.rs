@@ -3320,7 +3320,7 @@ impl Transpiler {
                 _ => false,
             }
         }
-        self.resolve_expr_type(expr).map_or(false, |ty| needs(self, &ty))
+        self.resolve_expr_type(expr).is_some_and(|ty| needs(self, &ty))
     }
 
     /// Returns true if the Boring type maps to a `Copy` Rust type.

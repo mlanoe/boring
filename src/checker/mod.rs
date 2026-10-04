@@ -870,9 +870,7 @@ impl Checker {
         // sets `mutable`); `var_mut` is `var mut`, rejected for the same reason
         // `var mut int x` is for locals.
         let keyword_mut = (p.mutable && !p.rebindable) || p.var_mut;
-        if keyword_mut && Self::is_scalar_type(ty.without_mut()) {
-            self.report_scalar_mut("parameter", p.line, p.col);
-        } else if Self::type_has_scalar_mut(ty) {
+        if (keyword_mut && Self::is_scalar_type(ty.without_mut())) || Self::type_has_scalar_mut(ty) {
             self.report_scalar_mut("parameter", p.line, p.col);
         }
     }
