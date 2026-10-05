@@ -1,0 +1,11 @@
+struct Src:
+    var int pos = 0
+    def bump():
+        pos += 1
+    def twice():
+        self.bump()
+        self.bump()
+def main():
+    mut Src s = Src()
+    s.twice()
+    print s.pos

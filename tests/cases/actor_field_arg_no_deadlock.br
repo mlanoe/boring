@@ -1,0 +1,174 @@
+# Regression test for a self-deadlock when an argument of a call reads a field of an
+# `'actor` value that the callee (or the call's own receiver) locks again.
+#
+# `helper(interp, method_params, interp.current_env)` was emitted
+#
+#   helper(&interp, &params, &Arc::clone(&interp.lock().unwrap().current_env))
+#
+# The `MutexGuard` produced by `interp.lock().unwrap()` is a temporary of the *enclosing call
+# statement*, so it lives until `helper` returns — and `helper` locks `interp` again. A
+# `std::sync::Mutex` is not reentrant: the generated Rust compiles cleanly and then hangs
+# forever at 0% CPU (no panic). The same applies to a scalar / string / arithmetic argument
+# (`f(x, x.hits)`) and to a method call whose receiver is locked before its arguments are
+# evaluated (`x.bump(x.hits, x.hits)` -> `x.lock().unwrap().bump(x.lock().unwrap().hits, ..)`).
+#
+# An argument that takes a lock is now evaluated inside its own `{ let __a = ..; __a }` block
+# (free-function call: the guard is dropped at the inner `;`, before the call), and for a call
+# through a locked receiver the arguments are hoisted into `let __argN` temporaries *before*
+# the receiver is locked.
+#
+# A *collection* field passed to a by-reference `[T]` parameter used to be emitted as a borrow
+# INTO the guard (`h_arr(&interp, &interp.lock().unwrap().log)`) and hung the same way. When the
+# field's element type is positively known to be `Clone` (ints, strings, `Clone` structs/enums,
+# `'actor` handles, nested collections of those) it is now cloned out of the guard inside its own
+# block — `&{ let __a = interp.lock().unwrap().log.clone(); __a }` — the same clone a by-value
+# read makes. A `[Trait]` field is NOT `Clone` (`Vec<Box<dyn Trait>>`), so it keeps the borrow:
+# `with_shapes` below does not lock again, and exists to prove that case still compiles.
+#
+# This program only passes if it completes — see tests/actor_field_arg_no_deadlock.rs, which
+# runs the compiled binary (all four mode/threading builds) under a timeout. The workaround
+# (`let scope = interp.current_env` on its own line) is deliberately NOT used here.
+
+struct Env:
+    var int depth
+
+trait Sized:
+    req int size()
+
+struct Sq as Sized:
+    var int n
+
+    req int size():
+        n
+
+struct Interp:
+    var Env'actor current_env
+    var int hits
+    var string name
+    var [int] last_outs
+    var [string] words
+    var {string=int} table
+    var [Env'actor] envs
+    var [Sized] shapes
+
+    def int bump(int k, int other):
+        hits += k
+        hits + other
+
+    def int bump_all([int] vs, {string=int} t, [Env'actor] es):
+        hits += vs.length + t.length + es.length
+        hits
+
+def Env'actor new_env(int d):
+    let e'actor = Env(depth = d)
+    e
+
+def Interp'actor new_interp():
+    mut global = new_env(3)
+    let interp'actor = Interp(current_env = global, hits = 10, name = "abc", last_outs = [], words = ["a", "bb"], table = {"k" = 5}, envs = [global], shapes = [Sq(n = 4), Sq(n = 6)])
+    interp
+
+# The shape from the self-hosted interpreter's `capture_var_param_outs`: locks `interp`
+# itself while an argument already read `interp.current_env`.
+def int h_arr(mut Interp interp, [int] v):
+    interp.hits += v.length
+    interp.hits
+
+def int capture(mut Interp interp, [int] params, Env'actor env):
+    mut outs = [env.depth]
+    for p in params:
+        outs.push(p)
+    interp.last_outs = outs
+    interp.hits += outs.length
+    interp.hits
+
+def int with_scalar(mut Interp interp, int v):
+    interp.hits += v
+    interp.hits
+
+def int with_string(mut Interp interp, string v):
+    interp.hits += v.length
+    interp.hits
+
+def int with_env(mut Interp interp, Env'actor e):
+    interp.hits += e.depth
+    interp.hits
+
+def int with_words(mut Interp interp, [string] v):
+    interp.hits += v.length
+    interp.hits
+
+def int with_table(mut Interp interp, {string=int} v):
+    interp.hits += v.length
+    interp.hits
+
+def int with_envs(mut Interp interp, [Env'actor] v):
+    interp.hits += v.length
+    interp.hits
+
+# Does not lock `interp` again, so the retained borrow into the guard is harmless here.
+def int with_shapes(Interp interp, [Sized] v):
+    var total = 0
+    for s in v:
+        total += s.size()
+    total
+
+def int arg_actor_field(mut Interp interp):
+    capture(interp, [7, 8], interp.current_env)
+
+def int arg_scalar_field(mut Interp interp):
+    with_scalar(interp, interp.hits)
+
+def int arg_arithmetic(mut Interp interp):
+    with_scalar(interp, interp.hits * 2 + 1)
+
+def int arg_string_field(mut Interp interp):
+    with_string(interp, interp.name)
+
+def int arg_nested_actor_field(mut Interp interp):
+    with_env(interp, interp.current_env)
+
+def int locked_receiver(mut Interp interp):
+    interp.bump(interp.hits, interp.hits)
+
+def int arg_array_field(mut Interp interp):
+    h_arr(interp, interp.last_outs)
+
+# Explicitly `'actor`-qualified receiver parameter (as opposed to the inferred one above).
+def int arg_array_field_qualified(mut Interp'actor interp):
+    h_arr(interp, interp.last_outs)
+
+def int arg_string_array_field(mut Interp interp):
+    with_words(interp, interp.words)
+
+def int arg_dict_field(mut Interp interp):
+    with_table(interp, interp.table)
+
+def int arg_actor_array_field(mut Interp interp):
+    with_envs(interp, interp.envs)
+
+def int arg_trait_array_field(mut Interp interp):
+    with_shapes(interp, interp.shapes)
+
+# A collection field passed BY VALUE to a method called through the locked receiver: the read
+# used to be emitted `{ let __a = interp.lock().unwrap().last_outs; __a }`, a move out of the
+# `MutexGuard` (E0507). It is now cloned inside the guard-releasing block.
+def int by_value_method_args(mut Interp'actor interp):
+    interp.bump_all(interp.last_outs, interp.table, interp.envs)
+
+def main():
+    mut interp = new_interp()
+    print arg_actor_field(interp)
+    print arg_scalar_field(interp)
+    print arg_arithmetic(interp)
+    print arg_string_field(interp)
+    print arg_nested_actor_field(interp)
+    print locked_receiver(interp)
+    print interp.last_outs.length
+    print arg_array_field(interp)
+    print arg_string_array_field(interp)
+    print arg_dict_field(interp)
+    print arg_actor_array_field(interp)
+    print arg_trait_array_field(interp)
+    print arg_array_field_qualified(interp)
+    print by_value_method_args(interp)

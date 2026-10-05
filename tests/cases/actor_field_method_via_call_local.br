@@ -1,0 +1,28 @@
+# A local bound (unannotated `mut`/`let`) to a free-function call returning `T'actor` is an
+# actor handle, and a method call on one of ITS `'actor` fields (`interp.bound_env.bump()`) must
+# take both locks: the outer local's, then the field's own. The local's type used to be recorded
+# only in the managed-mutex/refcell membership sets, not `var_types`, so the field-actor lookup
+# lost the struct name and emitted only the outer lock (rustc E0599: no method `bump` on
+# `Arc<Mutex<Env>>`). The same program with an explicit `mut interp'actor = ...` already worked.
+struct Env:
+    var int depth = 0
+
+    def bump():
+        depth += 1
+
+    req int get():
+        depth
+
+struct Interp:
+    var mut Env'actor bound_env
+
+def Interp'actor make():
+    let bound'actor = Env(depth = 7)
+    let i'actor = Interp(bound_env = bound)
+    i
+
+def main():
+    mut interp = make()
+    interp.bound_env.bump()
+    interp.bound_env.bump()
+    print interp.bound_env.get()

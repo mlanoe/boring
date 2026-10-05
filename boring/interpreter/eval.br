@@ -242,7 +242,18 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let hints = method_hint_types(interp, recv, method, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
             interp.last_var_params = []
+            let recv_is_self = is_self_var(recv_expr)
+            # `self.m()` from inside a method: the caller's field bindings (injected by
+            # call_method) and the shared object are two copies of the same state, and the
+            # callee binds its own copy from the object. Push the caller's copy into the
+            # object before the call and pull the callee's result back out after it, so
+            # neither side's writes are lost (the outer method's end-of-call write-back
+            # would otherwise overwrite the callee's with stale values).
+            if recv_is_self:
+                sync_self_fields_to_object(interp, recv)
             let result = call_method(interp, recv, method, arg_vals)
+            if recv_is_self:
+                sync_self_fields_from_object(interp, recv)
             # A Boring-declared struct/enum method: write its `mut`/`var` params back to the
             # caller's places, same as for a free function.
             match recv:
@@ -2678,6 +2689,29 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
         _:
             nil
 
+def bool is_self_var(Expr e):
+    match e.kind:
+        ExprKind.Var(name): name == "self"
+        _: false
+
+# Caller scope's field bindings -> the shared object (see the MethodCall case).
+def void sync_self_fields_to_object(mut Interpreter interp, Value recv):
+    match recv:
+        Value.Object(inner):
+            for field in inner.fields:
+                let cur = interp.current_env.get(field.0)
+                if let v = cur:
+                    inner.set_field(field.0, v)
+        _: nil
+
+# The shared object -> caller scope's field bindings (see the MethodCall case).
+def void sync_self_fields_from_object(mut Interpreter interp, Value recv):
+    match recv:
+        Value.Object(inner):
+            for field in inner.fields:
+                interp.current_env.set(field.0, field.1)
+        _: nil
+
 # Enforce: a mutating method cannot be called on an immutable (`let`) binding.
 # Qualifiers ('actor/'guard/'shared) are not tracked by this interpreter — every
 # binding is treated the same regardless of qualifier, which is enough for
@@ -2692,6 +2726,11 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
 def void check_mutating_method_call(mut Interpreter interp, Expr recv_expr, Value recv, string method):
     match recv_expr.kind:
         ExprKind.Var(name):
+            # `self` is exempt (same as src/interpreter/eval_expr.rs): it is always bound
+            # immutably here, but real Rust's `&mut self` always permits calling another
+            # `&mut self` method on the same receiver, in `def` and `req` methods alike.
+            if name == "self":
+                return
             match recv:
                 Value.Object(inner):
                     let method_decl_opt = interp.find_method(inner.type_name, method)

@@ -770,6 +770,14 @@ impl Transpiler {
                 }
             }
         }
+        // `var_types` is name-keyed and never un-scoped: an `Optional` shape recorded by an
+        // earlier same-named un-annotated `let` (`let result = env.get(n)` → `Value?`) must not
+        // survive into this fresh binding (`let result = call_method(..)` → `Value`), or
+        // `match result:` would be emitted with `Some(..)` arms against a plain value. The
+        // `Optional`-return arms below re-record it when this binding really is optional.
+        if s.ty.is_none() && matches!(self.var_types.get(s.name.as_str()), Some(Type::Optional(_))) {
+            self.var_types.remove(s.name.as_str());
+        }
         // Track variables bound to user struct/enum constructors for getter and method dispatch
         // on non-self receivers. Also handle type method calls: `let c2 = Counter2.zero()` →
         // c2 is Counter2; and enum variant refs: `let ec = EColor.Red` → ec is EColor (parsed
@@ -892,6 +900,19 @@ impl Transpiler {
                             Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) => {
                                 self.var_types.insert(s.name.clone(), ret_ty.clone());
                             }
+                            // `let opt = recv.find(..)` where `find` returns `T?`: keep the full
+                            // `Optional(T)` shape (as the free-function `Call` path above does) so
+                            // a later `if let x = opt:` / `guard let` / `while let` can propagate
+                            // the unwrapped `T` into `x`'s tracking. Without it `x` was left
+                            // untyped, so a by-value read of `x` (`f(x)`) was emitted as a bare
+                            // move with no `.clone()` and a later `x.field` failed rustc (E0382).
+                            // Deliberately NOT `optional_vars`: it is name-keyed and never
+                            // un-scoped, so in a long function a later, differently-typed
+                            // `let result = ...` reusing the name would be pattern-matched as an
+                            // `Option` (`Some(..)` arms against a plain value, E0308).
+                            Type::Optional(_) => {
+                                self.var_types.insert(s.name.clone(), ret_ty.clone());
+                            }
                             _ => {}
                         }
                     }
@@ -923,17 +944,13 @@ impl Transpiler {
                 }
             }
         }
-        // Track element type for `let x = arr[i]` when arr has a known Array type.
-        // e.g. `let key = args[0]` where `args: [Value]` → var_types["key"] = Named("Value").
+        // Track element type for `let x = collection[i]`. Use the general declared-type
+        // walk so this also covers `let layer = m.layers[i]`, nested field chains,
+        // qualified arrays and dict values rather than only a bare `arr[i]`.
         if s.ty.is_none() {
-            if let ExprKind::Index(arr_expr, _) = &s_value.kind {
-                if let ExprKind::Var(arr_name) = &arr_expr.kind {
-                    let elem_ty = self.fn_current_params.get(arr_name.as_str())
-                        .or_else(|| self.var_types.get(arr_name.as_str()))
-                        .and_then(|t| if let Type::Array(elem) = t.without_mut() { Some(elem.as_ref().clone()) } else { None });
-                    if let Some(elem_ty) = elem_ty {
-                        self.var_types.insert(s.name.clone(), elem_ty);
-                    }
+            if matches!(&s_value.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..)) {
+                if let Some(elem_ty) = self.resolve_expr_type(s_value) {
+                    self.var_types.insert(s.name.clone(), elem_ty);
                 }
             }
         }
@@ -1207,8 +1224,10 @@ impl Transpiler {
             if let ExprKind::MethodCall(recv_expr, method_name, _) = &s_value.kind {
                 // String-only methods: always return a string regardless of receiver tracking.
                 const STRING_ONLY_METHODS: &[&str] = &[
-                    "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase",
-                    "upper", "lower", "replace", "replaceAll",
+                    "trim", "trimStart", "trimEnd",
+                    "upper", "toUpper", "toUpperCase", "uppercased", "to_upper",
+                    "lower", "toLower", "toLowerCase", "lowercased", "to_lower",
+                    "replace", "replaceAll",
                 ];
                 // Mixed methods: only return string when receiver is tracked as string.
                 const STRING_CONDITIONAL_METHODS: &[&str] = &["slice"];
@@ -1486,6 +1505,7 @@ impl Transpiler {
         // different type (e.g. `let d = Doubler()` then `let d'weak = c`) doesn't inherit
         // the old struct type and incorrectly suppress `.await.unwrap()` on `.value`.
         self.var_struct_types.remove(&s.name);
+        self.var_struct_type.remove(&s.name);
         // `let v` / `var v` — deferred initialisation: emit `let v;` and let Rust
         // enforce definite assignment via its own control-flow analysis.
         if s.value.is_none() {
@@ -1540,7 +1560,19 @@ impl Transpiler {
                 }
                 _ => None,
             };
-            if let Some(Type::Qualified(_, crate::ast::OwnerQual::Actor)) = ret_ty {
+            if let Some(actor_ty @ Type::Qualified(_, crate::ast::OwnerQual::Actor)) = ret_ty {
+                // Record the local's struct name too, not just the mutex/refcell membership
+                // flags — `try_emit_actor_field_method` resolves the outer struct name for
+                // `local.actor_field.method()` from it, and without an entry the inner
+                // field's own lock was silently dropped (E0599 on `Arc<Mutex<T>>`).
+                // Deliberately `var_struct_type`, not `var_types`/`var_struct_types`: those
+                // also drive the non-mut-binding `def`-call diagnostic, which stays
+                // permissive for a call-bound actor local (`let a = make(); a.inc()`).
+                if let Type::Qualified(inner, _) = &actor_ty {
+                    if let Type::Named(n) = inner.without_mut() {
+                        self.var_struct_type.insert(s.name.clone(), n.clone());
+                    }
+                }
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Multi => {
                         self.managed_mutex_vars.insert(s.name.clone());
@@ -2390,6 +2422,36 @@ impl Transpiler {
             }
             _ => self.emit_let_value_fallback(declared_ty, value),
         }
+    }
+
+    /// Coerce a value specifically for a stored struct field. Resident-qualified fields have
+    /// a different Rust representation from same-qualified locals, so this must not live in
+    /// the general `emit_let_value` path.
+    pub(crate) fn emit_struct_field_value(&self, field_ty: Option<&Type>, value: &Expr) -> String {
+        let field_ty = field_ty.map(Type::without_mut);
+        if self.config.is_gpu_target
+            && field_ty.is_some_and(|t| t.gpu_resident_qual().is_some())
+        {
+            if matches!(&value.kind, ExprKind::Call(callee, _)
+                if matches!(&callee.kind, ExprKind::Var(name)
+                    if self.fn_returns_resident.contains_key(name.as_str())))
+            {
+                return self.emit_expr(value);
+            }
+            if self.expr_is_gpu_resident_field(value)
+                || matches!(&value.kind, ExprKind::Var(v)
+                    if self.resident_call_vars.contains_key(v.as_str())
+                        || self.current_fn_gpu_arg_param_names.contains(v.as_str()))
+            {
+                return format!("({}).clone()", self.emit_expr(value));
+            }
+            let inner = match field_ty.unwrap() {
+                Type::Qualified(inner, _) => inner.as_ref(),
+                other => other,
+            };
+            return format!("BoringGpuArg::Host({})", self.emit_let_value(Some(inner), value));
+        }
+        self.emit_let_value(field_ty, value)
     }
 
     /// Fallback for `let`/`var` bindings whose declared type didn't match any of the

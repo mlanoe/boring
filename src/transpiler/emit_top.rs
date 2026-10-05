@@ -1729,6 +1729,7 @@ impl Transpiler {
         // var_struct_types / var_mutex_types / var_rwlock_types accumulate across the whole program;
         // save/restore so variable names from one function body don't shadow another.
         let prev_var_struct_types  = std::mem::take(&mut self.var_struct_types);
+        let prev_var_struct_type   = std::mem::take(&mut self.var_struct_type);
         let prev_var_mutex_types   = std::mem::take(&mut self.var_mutex_types);
         // `var_mutex_types`'s 'actor'task sibling — was missing from this save/restore
         // entirely (unlike every other per-function var-tracking set here), so a name
@@ -1946,6 +1947,7 @@ impl Transpiler {
         self.shared_ref_params = prev_shared_ref_params;
         self.weak_vars         = prev_weak_vars;
         self.var_struct_types  = prev_var_struct_types;
+        self.var_struct_type   = prev_var_struct_type;
         self.var_mutex_types   = prev_var_mutex_types;
         self.var_mutex_task_types = prev_var_mutex_task_types;
         self.var_rwlock_types  = prev_var_rwlock_types;
@@ -2375,7 +2377,7 @@ impl Transpiler {
                             // Arc<str> fields can't be moved out of a MutexGuard — clone them.
                             format!("{}.{}.clone()", access, field)
                         } else {
-                            format!("{}.{}", access, field)
+                            self.clone_out_of_guard_read(expr, format!("{}.{}", access, field))
                         };
                     }
                     // Managed param shadow: use pre-locked guard variable.
@@ -2384,11 +2386,11 @@ impl Transpiler {
                     }
                     // Managed-mode mutex var (std::sync::Mutex, synchronous):
                     if self.managed_mutex_vars.contains(v.as_str()) {
-                        return format!("{}.lock().unwrap().{}", v, field);
+                        return self.clone_out_of_guard_read(expr, format!("{}.lock().unwrap().{}", v, field));
                     }
                     // Managed-mode RefCell var (single-thread):
                     if self.managed_refcell_vars.contains(v.as_str()) {
-                        return format!("{}.borrow().{}", v, field);
+                        return self.clone_out_of_guard_read(expr, format!("{}.borrow().{}", v, field));
                     }
                 }
                 // RwLock var access (owned context): c.field → c.read().await.field (async) or c.read().unwrap().field (sync)
@@ -2399,7 +2401,7 @@ impl Transpiler {
                         } else {
                             self.guard_read_access(v)
                         };
-                        return format!("{}.{}", access, field);
+                        return self.clone_out_of_guard_read(expr, format!("{}.{}", access, field));
                     }
                 }
                 // Mutex struct field (owned context): self.worker.field → self.worker.lock().[await|unwrap()].field
@@ -2883,6 +2885,31 @@ impl Transpiler {
         }
     }
 
+    /// True when `e` is a call to a free function whose declared return type is exactly
+    /// `T'<qual>` — i.e. the call already yields a ready-made actor/guard handle, so a
+    /// constructor argument for a matching qualified field must not wrap it again.
+    pub(crate) fn call_returns_qualified(&self, e: &Expr, qual: OwnerQual) -> bool {
+        if let ExprKind::Call(callee, _) = &e.kind {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                return matches!(
+                    self.fn_return_types.get(fn_name.as_str()).map(|t| t.without_mut()),
+                    Some(Type::Qualified(_, q)) if *q == qual
+                );
+            }
+        }
+        false
+    }
+
+    /// Whether an expression reads a struct field whose declared representation is a
+    /// `BoringGpuArg<T>` on GPU targets.
+    pub(crate) fn expr_is_gpu_resident_field(&self, e: &Expr) -> bool {
+        let ExprKind::Field(base, field) = &e.kind else { return false };
+        let Some(struct_name) = self.resolve_struct_name(base) else { return false };
+        self.struct_fields.get(struct_name.as_str())
+            .and_then(|fields| fields.iter().find(|(name, _)| name == field))
+            .is_some_and(|(_, ty)| ty.without_mut().gpu_resident_qual().is_some())
+    }
+
     pub(crate) fn is_atomic_binding(ty: &Type) -> bool {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Atomic))
     }
@@ -3323,6 +3350,18 @@ impl Transpiler {
         self.resolve_expr_type(expr).is_some_and(|ty| needs(self, &ty))
     }
 
+    /// `code` is an owned-context read of the field `expr` straight out of a lock guard
+    /// (`x.lock().unwrap().field`). A non-`Copy` value cannot be moved out of a guard (E0507), so
+    /// when the field's type is positively `Clone` (`type_is_known_clone`) the read is cloned,
+    /// matching the by-value read of a plain struct local. Anything else is left unchanged.
+    pub(crate) fn clone_out_of_guard_read(&self, expr: &Expr, code: String) -> String {
+        if code.ends_with(".clone()") { return code; }
+        match self.guarded_field_type(expr) {
+            Some(ty) if !Self::is_copy_type(&ty) && self.type_is_known_clone(&ty) => format!("{}.clone()", code),
+            _ => code,
+        }
+    }
+
     /// Returns true if the Boring type maps to a `Copy` Rust type.
     /// Determines whether a `transient` field should use `Cell<T>` (Copy) or `RefCell<T>` (!Copy).
     pub(crate) fn is_copy_type(ty: &Type) -> bool {
@@ -3724,6 +3763,13 @@ impl Transpiler {
     /// the containing struct/enum.
     pub(crate) fn emit_field_type(&self, ty: &Type, _rebindable: bool) -> String {
         match ty {
+            // Stored resident arrays must retain their Host/Resident state across scopes.
+            Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal)
+                if self.config.is_gpu_target =>
+            {
+                let elem = super::emit_kernel::array_inner_type(inner);
+                format!("BoringGpuArg<{}>", super::emit_kernel::kernel_host_element_type(&elem))
+            }
             Type::Fn(ret, params, throws, _task, _req) => {
                 let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");
                 let base = ret.as_ref().map(|r| self.emit_type(r)).unwrap_or_else(|| "()".into());

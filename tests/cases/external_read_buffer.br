@@ -14,6 +14,9 @@
 #  4. The same without a declared type (`var server2 = pair2.0`): the element type comes from the
 #     small std-return table behind `Transpiler::infer_std_type` (`TcpListener.accept()` ->
 #     `(TcpStream, SocketAddr)`), followed through `try?` / `guard let`.
+#  5. External calls borrow non-literal Boring strings as `&str`, so the interpolated bind
+#     address satisfies `impl ToSocketAddrs`; comparing its `Option<TcpListener>` result with
+#     nil uses `.is_some()` and does not require `TcpListener: PartialEq`.
 #
 # Loopback sockets only (127.0.0.1, ephemeral port) -- no network access needed. Transpiler-only,
 # no interpreter support for raw `std.net` (not added to tests/run.rs).
@@ -42,7 +45,9 @@ def int consume(TcpStream s) throws:
     return 7
 
 def main() throws:
-    let l = try? TcpListener.bind("127.0.0.1:0")
+    let port = 0
+    let l = try? TcpListener.bind("127.0.0.1:{port}")
+    print l != nil
     guard let listener = l else throw "bind failed"
     let a = try? listener.local_addr()
     guard let addr = a else throw "addr failed"

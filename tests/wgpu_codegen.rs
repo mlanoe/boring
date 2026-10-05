@@ -1202,6 +1202,33 @@ with fc2:
 }
 
 #[test]
+fn packed_resident_return_keeps_exact_element_count() {
+    let src = r#"
+kernel CopyBytes:
+    mut [uint8]'unified out
+    let int n
+    init(int nn):
+        n = nn
+        out = [0 as uint8 for ..<nn]
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = (i + 1) as uint8
+
+req [uint8]'gpu'unified make_bytes(int n):
+    mut k = CopyBytes(n)
+    kernel:
+        k(block = 4, grid = (n + 3) / 4)
+    k.out
+"#;
+    let (_wgsl, rs) = wgpu_codegen("packed_resident_exact_len", src);
+    assert!(rs.contains("BoringGpuArg::Resident(std::sync::Arc::clone(&k.out_buf), k.out_len)"),
+        "packed resident return must carry the separately tracked logical length:\n{rs}");
+    assert!(!rs.contains("k.out_buf.size() as usize) / std::mem::size_of::<u8>()"),
+        "padded wgpu byte size is not the logical uint8 element count:\n{rs}");
+}
+
+#[test]
 fn test_with_gpu_resident_call_infers_qualifier_without_annotation() {
     // Same shape as the chain test above, but neither `fc` nor `fc2` has an explicit
     // `'gpu'unified` annotation -- inferred from `scale_gpu`'s own declared return

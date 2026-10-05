@@ -1,0 +1,13 @@
+# Regression: string builtins on an indexed string value must remain instance calls.
+# This covers a synthesized `[string]` from split as well as a declared array.
+def string first_word(string text):
+    let parts = text.split("\n")[0].split(" ")
+    parts[0]
+
+def main() throws:
+    let [string] values = [" Mixed Case "]
+    print first_word("hello world\nsecond")
+    print "{values[0].trim()}"
+    print "{values[0].replace("Mixed", "Lower")}"
+    print "{values[0].startsWith(" Mixed")}"
+    print "{values[0].toLower()}"

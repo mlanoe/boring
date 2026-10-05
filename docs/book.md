@@ -995,6 +995,14 @@ let empty_map: HashMap<isize, isize> = HashMap::new();
 
 #### Dictionary methods
 
+A dictionary subscript has two context-dependent forms. A plain value read,
+`d[k]`, requires the key to exist and traps with `dict key not found` when it
+does not. In an optional-lookup context—`d[k] == nil`, `d[k] != nil`,
+`if let value = d[k]`, a `T?` return/binding, or `d[k] else fallback`—a missing
+key is `nil` instead. Thus `d[k] == nil` is a valid absence test (equivalent to
+`!d.contains(k)`), while `d.contains(k)` is the clearest choice when only
+membership is needed. This rule is independent of the dictionary's value type.
+
 | Boring                      | Rust                              |
 |-----------------------------|-----------------------------------|
 | `d.keys()`                  | `d.keys().cloned().collect()`     |
@@ -9454,7 +9462,23 @@ with act:
 
 A parameter is only ever eligible for this zero-copy handoff when it's used *exclusively* as a kernel-constructor argument in the function's body — `x` above, in both functions; the block size instead comes from an ordinary `int` parameter (`n`, `d * 4`), which is why `gelu_gpu` doesn't read `x.length`. A parameter used more richly than that (indexed, measured, passed elsewhere) keeps the ordinary host-array behavior for that one parameter — no speedup, but no error either. The `'gpu'unified`/`'gpu'global` annotation on `let fc`/`let act` is optional here too, inferred the same way as the same-scope case.
 
-> Both halves of this design — same-scope kernel-field materialization and cross-function residency — are implemented and shipped. See [Scoped Access Blocks](scoped-access-blocks.html) for the full design, the codegen this actually produces, and current known limitations (cuda/metal targets don't share this yet).
+A resident value can also be retained in a struct field. Declare the field as
+`[T]'gpu'unified` or `[T]'gpu'global`; constructing it from a resident return preserves the
+device buffer, while constructing it from a plain `[T]` stores a host value that is uploaded
+on first GPU use. Reading the field for another GPU call clones only the device-buffer handle:
+
+```boring
+struct Layer:
+    [float32]'gpu'unified weights
+
+let layer = Layer(upload_gpu(host_weights, n))
+let y = linear_gpu(layer.weights, x, n)  # no weight download or re-upload
+```
+
+Arrays and nested structs work the same way, so a model can own `[Layer]` and keep all of its
+weights resident for its lifetime. Use `with layer.weights:` for host element access.
+
+> Same-scope materialization, cross-function residency, and resident struct fields are implemented on the GPU host targets. See [Scoped Access Blocks](scoped-access-blocks.html) for the generated-code design and current backend limitations.
 
 ### Further reading
 
@@ -9686,7 +9710,7 @@ Deep dive into the three binding forms (`let` / `mut` / `var`), their interactio
 Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
 
 **[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
-Full design and implementation notes for `with` — see [chapter 21](#scoped-access-blocks--with) above for the `'actor`/`'guard` per-block locking language reference, and [chapter 32, GPU Computing](#32-gpu-computing) for the GPU-specific `'gpu'unified`/`'gpu'global` kernel-field materialization, including [residency across a function boundary](#residency-across-a-function-boundary). Both halves are implemented and shipped. This document records the full design, exactly what the generated Rust looks like, and current known limitations (cuda/metal targets don't share this yet).
+Full design and implementation notes for `with` — see [chapter 21](#scoped-access-blocks--with) above for the `'actor`/`'guard` per-block locking language reference, and [chapter 32, GPU Computing](#32-gpu-computing) for GPU materialization, function-boundary residency, and resident struct fields. These features are implemented on the GPU host targets; the design document records the generated Rust and current backend limitations.
 
 ### Compilation targets
 

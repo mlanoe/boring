@@ -1,0 +1,25 @@
+# Regression: a builtin that emits a trailing `as <type>` (`ord(..)`, the closure
+# form of `count`) used as the LEFT operand of `<` / `<<` was emitted without
+# parentheses -- `x as isize < 32` -- which rustc parses as generic arguments for
+# `isize` ("`<` is interpreted as a start of generic arguments"). `boring run` was
+# fine; only `boring build` + cargo showed it. Explicit `(x as T) < y` casts were
+# already parenthesised; they are covered here too.
+
+def bool is_ctrl(string ch):
+    ord(ch) < 32
+
+def main() throws:
+    let c = "a"
+    let n = 5
+    let f = 2.5
+    print "{is_ctrl("a")} {is_ctrl(chr(1))}"
+    print ord(c) << 1
+    print ord(c) <= 100
+    print ord(c) > 3 and ord(c) < 200
+    print ((5 as int) < 7)
+    print ((n as int) < 9)
+    print ((f as int) < 3)
+    print ((n as float) < 9.5)
+    print c.length < 3
+    let [int] xs = [1, 2, 3, 4]
+    print xs.count((x): x > 1) < 5

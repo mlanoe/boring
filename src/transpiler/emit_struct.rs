@@ -1117,6 +1117,7 @@ impl Transpiler {
         let prev_managed_mutex_vars = std::mem::take(&mut self.managed_mutex_vars);
         let prev_managed_refcell_vars = std::mem::take(&mut self.managed_refcell_vars);
         let prev_var_struct_types   = std::mem::take(&mut self.var_struct_types);
+        let prev_var_struct_type    = std::mem::take(&mut self.var_struct_type);
         let prev_task_vars          = std::mem::take(&mut self.task_vars);
         let prev_throws_fn_params   = std::mem::take(&mut self.throws_fn_params);
         let prev_var_newtype_type   = std::mem::take(&mut self.var_newtype_type);
@@ -1164,6 +1165,7 @@ impl Transpiler {
         self.throws_fn_params   = prev_throws_fn_params;
         self.task_vars          = prev_task_vars;
         self.var_struct_types   = prev_var_struct_types;
+        self.var_struct_type    = prev_var_struct_type;
         self.managed_refcell_vars = prev_managed_refcell_vars;
         self.managed_mutex_vars = prev_managed_mutex_vars;
         self.optional_vars      = prev_optional_vars;

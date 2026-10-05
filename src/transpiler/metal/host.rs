@@ -513,6 +513,8 @@ impl HostEmitter {
         // dispatch here is single-threaded.
         self.line("thread_local! {");
         self.indent += 1;
+        self.line("static __BORING_METAL_DEVICE: std::cell::RefCell<Option<Device>> = std::cell::RefCell::new(None);");
+        self.line("static __BORING_METAL_DEVICES: std::cell::RefCell<Option<Vec<Device>>> = std::cell::RefCell::new(None);");
         self.line("static __BORING_METAL_LIBRARY: std::cell::RefCell<Option<Library>> = std::cell::RefCell::new(None);");
         self.line("static __BORING_METAL_PIPELINES: std::cell::RefCell<std::collections::HashMap<&'static str, ComputePipelineState>> = std::cell::RefCell::new(std::collections::HashMap::new());");
         self.indent -= 1;
@@ -561,21 +563,39 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // Default device helper.
+        // Cache Metal device discovery. `Device::system_default()` reaches
+        // through CoreGraphics/SkyLight to WindowServer on every invocation;
+        // kernel constructors and the general-pipeline compatibility helpers
+        // call this on every dispatch/readback/upload. Metal handles are cheap
+        // to clone (ObjC retain), but device discovery is not. Keep these
+        // thread-local for the same reason as the library/pipeline caches above:
+        // metal-rs's ObjC wrapper types are not Send/Sync in metal 0.29.
         self.line("fn boring_metal_device() -> Device {");
         self.indent += 1;
-        self.line("Device::system_default().expect(\"no Metal device found — macOS 10.14+ required\")");
+        self.line("__BORING_METAL_DEVICE.with(|c| {");
+        self.indent += 1;
+        self.line("if let Some(device) = &*c.borrow() { return device.clone(); }");
+        self.line("let device = Device::system_default().expect(\"no Metal device found — macOS 10.14+ required\");");
+        self.line("*c.borrow_mut() = Some(device.clone());");
+        self.line("device");
+        self.indent -= 1;
+        self.line("})");
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // GPU(n) → indexed device.
+        // GPU(n) → indexed device. Cache enumeration too, while preserving the
+        // existing index semantics and error for an out-of-range device.
         self.line("fn boring_metal_device_n(idx: usize) -> Result<Device, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
-        self.line("let devices = Device::all();");
-        self.line("devices.into_iter().nth(idx)");
+        self.line("__BORING_METAL_DEVICES.with(|c| {");
+        self.indent += 1;
+        self.line("if c.borrow().is_none() { *c.borrow_mut() = Some(Device::all()); }");
+        self.line("c.borrow().as_ref().and_then(|devices| devices.get(idx).cloned())");
         self.indent += 1;
         self.line(".ok_or_else(|| format!(\"GPU index {} out of range\", idx).into())");
         self.indent -= 1;
+        self.indent -= 1;
+        self.line("})");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -729,10 +749,21 @@ impl HostEmitter {
         // when the tail expression is a bare `k.field` read, skipping the
         // read-to-Vec-then-reupload round trip a chained GPU call used to always pay.
         self.line("#[allow(dead_code)]");
-        self.line("enum BoringGpuArg<T> {");
+        self.line("pub enum BoringGpuArg<T> {");
         self.indent += 1;
         self.line("Resident(Buffer, usize),");
         self.line("Host(Vec<T>),");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T> {");
+        self.indent += 1;
+        self.line("fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringGpuArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringGpuArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } }");
+        self.indent -= 1;
+        self.line("}");
+        self.line("impl<T: PartialEq> PartialEq for BoringGpuArg<T> {");
+        self.indent += 1;
+        self.line("fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringGpuArg::Resident(a, an), BoringGpuArg::Resident(b, bn)) => std::ptr::eq(&**a, &**b) && an == bn, (BoringGpuArg::Host(a), BoringGpuArg::Host(b)) => a == b, _ => false } }");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -766,7 +797,7 @@ impl HostEmitter {
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_d2h<T>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<f32> {");
+        self.line("fn __boring_gpu_copy_d2h<T: Copy>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<T> {");
         self.indent += 1;
         // `__boring_launch` no longer waits synchronously (see the prelude's
         // `__boring_metal_flush` doc) -- flush here before reading, exactly
@@ -777,8 +808,8 @@ impl HostEmitter {
         // touching function that calls another one returning a GPU-resident
         // value, not just this file's own always-`Result` `main()`.
         self.line("__boring_metal_flush().expect(\"metal: GPU dispatch failed before D2H copy\");");
-        self.line("let n = buf.length() as usize / mem::size_of::<f32>();");
-        self.line("let ptr = buf.contents() as *const f32;");
+        self.line("let n = buf.length() as usize / mem::size_of::<T>();");
+        self.line("let ptr = buf.contents() as *const T;");
         self.line("unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }");
         self.indent -= 1;
         self.line("}");
@@ -1180,7 +1211,14 @@ impl HostEmitter {
             if let Some(value) = self.try_resident_field_expr(rhs) { return value; }
             if let ExprKind::Field(obj, field) = &rhs.kind {
                 if let ExprKind::Var(obj) = &obj.kind {
-                    return format!("BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<f32>())");
+                    if let Some(kernel_type) = self.var_kernel_type.get(obj.as_str()) {
+                        if let Some(decl) = self.kernel_decls.get(kernel_type) {
+                            if let Some(kf) = decl.fields.iter().find(|f| f.name == *field) {
+                                let device_ty = elem_rust_type(&kf.ty);
+                                return format!("BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<{device_ty}>())");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2672,8 +2710,9 @@ impl HostEmitter {
                     // general pass's `f64` convention, not this backend's native
                     // `f32`.
                     let elem = general_host_elem_type(&ret_ty);
+                    let device_elem = elem_rust_type(&ret_ty);
                     return format!(
-                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
+                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_elem}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
                     );
                 }
                 call
@@ -3227,10 +3266,13 @@ impl HostEmitter {
         match kf.qual {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 match &kf.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => Some(format!(
-                        "BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<f32>())",
-                        obj = obj_name, field = field
-                    )),
+                    Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => {
+                        let device_ty = elem_rust_type(&kf.ty);
+                        Some(format!(
+                            "BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<{device_ty}>())",
+                            obj = obj_name, field = field
+                        ))
+                    }
                     _ => None,
                 }
             }

@@ -598,8 +598,8 @@ impl Interpreter {
         let result = self.call_value(callee.clone(), arg_vals, line, false)?;
         // Write back mutated `var` params to their caller variables.
         if let Value::Fn { ref decl, .. } = callee {
-            for (param, arg) in decl.params.iter().zip(args.iter()) {
-                if param.mutable {
+            for (idx, arg) in args.iter().enumerate() {
+                if let Some(param) = Self::param_for_arg(&decl.params, idx, arg).filter(|p| p.mutable) {
                     self.write_back_mut_arg(&param.name, &arg.value, &env, line);
                 }
             }
@@ -629,10 +629,19 @@ impl Interpreter {
     /// After a `Type.f(args)` call: write each `mut`/`var` parameter's final value back into the
     /// caller's argument place (see `write_back_mut_arg`).
     fn write_back_type_method_mut_args(&mut self, tm: &crate::ast::TypeMethod, args: &[Arg], env: &EnvRef, line: usize) {
-        for (param, arg) in tm.params.iter().zip(args.iter()) {
-            if param.mutable {
+        for (idx, arg) in args.iter().enumerate() {
+            if let Some(param) = Self::param_for_arg(&tm.params, idx, arg).filter(|p| p.mutable) {
                 self.write_back_mut_arg(&param.name, &arg.value, env, line);
             }
+        }
+    }
+
+    /// The declared parameter an argument binds to: the one named by its label
+    /// (`lab(k = 4, n = z)` may reorder), else the one at its position.
+    fn param_for_arg<'a>(params: &'a [crate::ast::Param], idx: usize, arg: &Arg) -> Option<&'a crate::ast::Param> {
+        match &arg.label {
+            Some(label) => params.iter().find(|p| &p.name == label),
+            None => params.get(idx),
         }
     }
 
@@ -1003,8 +1012,8 @@ impl Interpreter {
         if let Some(fn_decl) = method_candidates.iter()
             .find(|d| d.params.len() >= args.len() && d.params.iter().skip(args.len()).all(|p| p.default.is_some() || p.variadic))
         {
-            for (param, arg) in fn_decl.params.iter().zip(args.iter()) {
-                if param.mutable {
+            for (idx, arg) in args.iter().enumerate() {
+                if let Some(param) = Self::param_for_arg(&fn_decl.params, idx, arg).filter(|p| p.mutable) {
                     self.write_back_mut_arg(&param.name, &arg.value, &env, line);
                 }
             }

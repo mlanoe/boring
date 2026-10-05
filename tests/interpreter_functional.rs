@@ -420,6 +420,7 @@ itest!(numeric_method_parity);
 // Optional dictionary lookup and associated-function parity.
 itest!(dict_index_optional_return);
 itest!(if_let_dict_index_no_else);
+itest!(dict_index_nil_context);
 itest!(trait_type_level_methods);
 itest!(type_def_typed_throws);
 itest!(type_method_throws_untyped);
@@ -456,8 +457,7 @@ itest!(collection_named_methods);
 // `var` (rebindable out-param) write-back to the caller, free functions and struct methods.
 itest!(var_param_free);
 itest!(method_var_param);
-// NOT registered yet: `mut_collection_param`'s `Src.forward` calls `self.fill_mut(b)` -- a `def`
-// method calling a sibling mutating method through `self` -- which the self-hosted interpreter
-// rejects ("cannot call mutating method ... on let binding 'self'"), independent of param
-// write-back (with that one call inlined the whole case matches on all four binaries).
-// Register `itest!(mut_collection_param);` once that is fixed.
+itest!(var_param_labeled_reorder);
+itest!(var_param_labeled_reorder_method);
+itest!(mut_collection_param);
+itest!(self_mutating_call);

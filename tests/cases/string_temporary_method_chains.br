@@ -1,0 +1,27 @@
+def string trimmed_replacement(string s):
+    return s.replace("x", " ").trim()
+
+def string repeated_trim(string s):
+    s.trim().trim()
+
+def main() throws:
+    let outside = " X outside X ".toLower().replace("x", "").trim()
+    print outside
+
+    for line in "a: b\r\nContent-Length: 42\r\n".split("\r\n"):
+        let low = line.toLower()
+        if low.startsWith("content-length:"):
+            let value = low.replace("content-length:", "").trim()
+            let n = (value as int) else 0
+            print n
+
+    let lines = [" X while X "]
+    var i = 0
+    while i < lines.length:
+        let upper = lines[i].toUpper()
+        let value = upper.replace("X", "").trimStart().trimEnd()
+        print value
+        i += 1
+
+    print trimmed_replacement(" x direct x ")
+    print repeated_trim("  twice  ")

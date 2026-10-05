@@ -450,6 +450,27 @@ kernel Scale:
 }
 
 #[test]
+fn host_caches_default_and_indexed_metal_devices() {
+    let (_, rs) = metal_codegen("host_device_cache", r#"
+kernel Scale:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(rs.contains("static __BORING_METAL_DEVICE: std::cell::RefCell<Option<Device>>"),
+        "expected a process-thread device cache;\ngot:\n{rs}");
+    assert!(rs.contains("if let Some(device) = &*c.borrow() { return device.clone(); }"),
+        "expected boring_metal_device() to return the cached handle;\ngot:\n{rs}");
+    assert!(rs.contains("static __BORING_METAL_DEVICES: std::cell::RefCell<Option<Vec<Device>>>"),
+        "expected GPU(n) enumeration to be cached too;\ngot:\n{rs}");
+    assert_eq!(rs.matches("Device::system_default()").count(), 1,
+        "default-device discovery must appear only in the cache miss path;\ngot:\n{rs}");
+    assert_eq!(rs.matches("Device::all()").count(), 1,
+        "indexed-device enumeration must appear only in the cache miss path;\ngot:\n{rs}");
+}
+
+#[test]
 fn host_unified_field_is_metal_buffer() {
     let (_, rs) = metal_codegen("host_buffer_field", r#"
 kernel Scale:
@@ -632,6 +653,213 @@ def main() throws:
         "expected the resident GPU argument to remain resident across the chained call;\ngot:\n{rs}");
     assert!(rs.contains("passthrough(&(match &stage2 {"),
         "expected materialization only at the ordinary host-function boundary;\ngot:\n{rs}");
+}
+
+#[test]
+fn resident_buffer_lengths_and_readback_use_declared_device_element_type() {
+    let (_, rs) = metal_codegen("resident_element_sizes", r#"
+kernel Bytes:
+    mut [uint8]'unified out
+    init(int n):
+        out = [0 as uint8 for ..<n]
+    def ():
+        let i = gpu.thread.x
+        out[i] = (i + 1) as uint8
+
+kernel Ints:
+    mut [int32]'unified out
+    init(int n):
+        out = [0 as int32 for ..<n]
+    def ():
+        let i = gpu.thread.x
+        out[i] = (i + 10) as int32
+
+kernel Doubles:
+    mut [float64]'unified out
+    init(int n):
+        out = [0.0 for ..<n]
+    def ():
+        let i = gpu.thread.x
+        out[i] = (i + 20) as float64
+
+pub req [uint8]'gpu'unified bytes_gpu(int n) throws:
+    mut k = Bytes(n)
+    kernel:
+        k(block = n)
+    k.out
+
+pub req [int32]'gpu'unified ints_gpu(int n) throws:
+    mut k = Ints(n)
+    kernel:
+        k(block = n)
+    k.out
+
+pub req [float64]'gpu'unified doubles_gpu(int n) throws:
+    mut k = Doubles(n)
+    kernel:
+        k(block = n)
+    k.out
+"#);
+
+    assert!(rs.contains("fn __boring_gpu_copy_d2h<T: Copy>"));
+    assert!(rs.contains("mem::size_of::<T>()"));
+    assert!(rs.contains("ptr = buf.contents() as *const T"));
+    assert!(rs.contains("k.out.length() as usize) / std::mem::size_of::<u8>()"), "uint8 resident count must use u8 width:\n{rs}");
+    assert!(rs.contains("k.out.length() as usize) / std::mem::size_of::<i32>()"), "int32 resident count must use i32 width:\n{rs}");
+    // Metal represents both Boring float widths as its native f32 buffer element.
+    assert!(rs.contains("k.out.length() as usize) / std::mem::size_of::<f32>()"), "float64 resident count must use Metal's actual device width:\n{rs}");
+    assert!(!rs.contains("fn __boring_gpu_copy_d2h<T>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<f32>"));
+}
+
+#[test]
+fn resident_uint8_int32_float64_lengths_and_readback_run_on_metal() {
+    let test_name = "resident_element_sizes_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, r#"
+kernel CopyU8:
+    let [uint8]'global src
+    mut [uint8]'unified out
+    let int n
+    init([uint8]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as uint8 for ..<nn]
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = src[i]
+
+kernel CopyI32:
+    let [int32]'global src
+    mut [int32]'unified out
+    let int n
+    init([int32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as int32 for ..<nn]
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = src[i]
+
+kernel CopyF64:
+    let [float64]'global src
+    mut [float64]'unified out
+    let int n
+    init([float64]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = src[i]
+
+kernel LengthU8:
+    let [uint8]'global src
+    mut [int32]'unified out
+    let int n
+    init([uint8]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as int32 for ..<1]
+    def ():
+        if gpu.thread.x == 0:
+            out[0] = n as int32
+
+kernel LengthI32:
+    let [int32]'global src
+    mut [int32]'unified out
+    let int n
+    init([int32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as int32 for ..<1]
+    def ():
+        if gpu.thread.x == 0:
+            out[0] = n as int32
+
+kernel LengthF64:
+    let [float64]'global src
+    mut [int32]'unified out
+    let int n
+    init([float64]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as int32 for ..<1]
+    def ():
+        if gpu.thread.x == 0:
+            out[0] = n as int32
+
+pub req [uint8]'gpu'unified upload_u8([uint8]'global src) throws:
+    let n = src.length
+    mut k = CopyU8(src, n)
+    kernel:
+        k(block = n)
+    k.out
+pub req [int32]'gpu'unified upload_i32([int32]'global src) throws:
+    let n = src.length
+    mut k = CopyI32(src, n)
+    kernel:
+        k(block = n)
+    k.out
+pub req [float64]'gpu'unified upload_f64([float64]'global src) throws:
+    let n = src.length
+    mut k = CopyF64(src, n)
+    kernel:
+        k(block = n)
+    k.out
+pub req [int32]'gpu'unified length_u8([uint8]'global src) throws:
+    let n = src.length
+    mut k = LengthU8(src, n)
+    kernel:
+        k(block = 1)
+    k.out
+pub req [int32]'gpu'unified length_i32([int32]'global src) throws:
+    let n = src.length
+    mut k = LengthI32(src, n)
+    kernel:
+        k(block = 1)
+    k.out
+pub req [int32]'gpu'unified length_f64([float64]'global src) throws:
+    let n = src.length
+    mut k = LengthF64(src, n)
+    kernel:
+        k(block = 1)
+    k.out
+
+def main() throws:
+    let a = upload_u8([1 as uint8, 2 as uint8, 3 as uint8, 4 as uint8, 5 as uint8])
+    let an = length_u8(a)
+    with an:
+        print "u8 len={an[0]}"
+    with a:
+        print "u8 value={a[4]}"
+    let b = upload_i32([10 as int32, 20 as int32, 30 as int32])
+    let bn = length_i32(b)
+    with bn:
+        print "i32 len={bn[0]}"
+    with b:
+        print "i32 value={b[2]}"
+    let c = upload_f64([1.5, 2.5])
+    let cn = length_f64(c)
+    with cn:
+        print "f64 len={cn[0]}"
+    with c:
+        print "f64 value={c[1]}"
+"#);
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generated Metal resident-buffer repro failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "u8 len=5\nu8 value=5\ni32 len=3\ni32 value=30\nf64 len=2\nf64 value=2.5");
 }
 
 // ─── host — __boring_launch ───────────────────────────────────────────────────
@@ -1165,6 +1393,132 @@ kernel Img:
 "#);
     assert!(rs.contains("img: Buffer,"),
         "expected bare 'unified LabeledArray field to become a Buffer host field, same as [T]'unified;\ngot:\n{rs}");
+}
+
+#[test]
+fn gpu_resident_struct_field_stays_resident_through_array_elements() {
+    let test_name = "resident_struct_field_array_element";
+    let (_, rs) = metal_codegen(test_name, r#"
+kernel CopyKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = src[i]
+
+kernel MulKernel:
+    let [float32]'global w
+    let [float32]'global x
+    mut [float32]'unified out
+    let int n
+    init([float32]'global ww, [float32]'global xx, int nn):
+        w = ww
+        x = xx
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = w[i] * x[i]
+
+pub req [float32]'gpu'unified upload_gpu([float32]'global src, int n) throws:
+    mut k = CopyKernel(src, n)
+    kernel:
+        k(block = 256, grid = (n + 255) / 256)
+    k.out
+
+pub req [float32]'gpu'unified mul_gpu([float32]'global w, [float32]'global x, int n) throws:
+    mut k = MulKernel(w, x, n)
+    kernel:
+        k(block = 256, grid = (n + 255) / 256)
+    k.out
+
+struct Layer:
+    [float32]'gpu'unified w
+    [float32] host_metadata
+
+struct Model:
+    [Layer] layers
+
+struct Outer:
+    Model model
+
+def float run_param(Layer& layer, int n) throws:
+    let x = [10.0 as float32 for ..<n]
+    let y = mul_gpu(layer.w, x, n)
+    with y:
+        return y[3] as float
+
+def float run_alias(Model& m, int n) throws:
+    let layer = m.layers[0]
+    let x = [10.0 as float32 for ..<n]
+    let y = mul_gpu(layer.w, x, n)
+    with y:
+        return y[3] as float
+
+def float run_direct(Model& m, int n) throws:
+    let x = [10.0 as float32 for ..<n]
+    let y = mul_gpu(m.layers[0].w, x, n)
+    with y:
+        return y[3] as float
+
+def float run_nested(Outer& outer, int n) throws:
+    let x = [10.0 as float32 for ..<n]
+    let y = mul_gpu(outer.model.layers[0].w, x, n)
+    with y:
+        return y[3] as float
+
+def float run_loop(Model& m, int n) throws:
+    for layer in m.layers:
+        return run_param(layer, n)
+    return 0.0
+
+def main() throws:
+    let n = 4
+    let host_w = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+    let w = upload_gpu(host_w, n)
+    var layers = []
+    layers.push(Layer(w, [99.0 as float32]))
+    let m = Model(layers)
+    let outer = Outer(m)
+    print run_direct(m, n)
+    print run_alias(m, n)
+    print run_param(m.layers[0], n)
+    print run_nested(outer, n)
+    print run_loop(m, n)
+"#);
+    assert!(rs.contains("struct Layer"));
+    assert!(rs.contains("w: BoringGpuArg<f32>"), "resident field must retain its wrapper:\n{rs}");
+    assert!(rs.contains("mul_gpu((layer.w).clone()"),
+        "aliased array element's resident field must pass through:\n{rs}");
+    assert!(rs.contains("mul_gpu((m.layers[(0) as usize].w).clone()"),
+        "direct array-element resident field must pass through without cloning the element:\n{rs}");
+    assert!(rs.contains("mul_gpu((outer.model.layers[(0) as usize].w).clone()"),
+        "nested field/index chain must retain resident field type:\n{rs}");
+    assert!(!rs.contains("m.layers[(0) as usize].clone().w"),
+        "reading one resident field must not deep-clone the complete array element:\n{rs}");
+    assert!(!rs.contains("BoringGpuArg::Host((layer.w).clone())"));
+    assert!(!rs.contains("BoringGpuArg::Host((m.layers[(0) as usize].w).clone())"));
+    assert!(rs.contains("pub enum BoringGpuArg<T>"));
+    assert!(rs.contains("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T>"));
+    assert!(rs.contains("impl<T: PartialEq> PartialEq for BoringGpuArg<T>"));
+
+    let project = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal");
+    let run = Command::new("cargo")
+        .args(["run", "--release", "--quiet"])
+        .current_dir(&project)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run generated resident-field project: {e}"));
+    assert!(run.status.success(), "generated resident-field project failed:\n{}",
+        String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "40\n40\n40\n40\n40\n");
 }
 
 #[test]

@@ -328,6 +328,7 @@ macro_rules! transpile_project_test {
 
 transpile_test!(basics);
 transpile_test!(strings);
+transpile_test!(string_temporary_method_chains);
 transpile_test!(control_flow);
 transpile_test!(match_stmt);
 transpile_test!(functions);
@@ -458,6 +459,8 @@ transpile_test!(qualifiers_actor);
 // doc comment and try_emit_mutex_method/try_emit_rwlock_method's fix.
 transpile_test!(actor_guard_camel_case_method);
 transpile_test!(qualified_ctor_positional_args);
+transpile_test!(actor_call_result_ctor_arg);
+transpile_test!(actor_field_method_via_call_local);
 transpile_test!(qualified_struct_literal_positional_args);
 transpile_test!(pipe);
 transpile_test!(inline_match);
@@ -637,6 +640,7 @@ transpile_test!(dict_index_optional_return);
 // over a plain `let` here. See tests/cases/if_let_dict_index_no_else.br's own
 // doc comment.
 transpile_test!(if_let_dict_index_no_else);
+transpile_test!(dict_index_nil_context);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
 // whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`
@@ -719,6 +723,13 @@ transpile_test!(option_owned_methods);
 // `error[E0599]: no method named 'trim' found for type 'f32'` and friends.
 // `(expr * struct.field) as T` already worked; only the bare form was broken.
 transpile_test!(cast_bare_field_index);
+// Explicit `T&` parameters used to hide the pointee struct from nested
+// field/index/method-result type resolution, making numeric casts emit string
+// parsing (`f32.trim().parse()`). Covers immutable/mutable/rebindable borrows
+// and an explicitly borrowed local alias.
+transpile_test!(explicit_borrow_field_type_cast);
+// Regression: `ord(c) < 32` / `ord(c) << 1` — see tests/cases/cast_lhs_of_lt.br.
+transpile_test!(cast_lhs_of_lt);
 // Regression: `(if cond: a else: b) as T`, where every branch is an ordinary
 // numeric expression — the if/else's own branches weren't recognized by any
 // of emit_expr_cast's numeric-source checks, so the cast fell through to the
@@ -887,6 +898,7 @@ transpile_test!(mut_collection_by_value_reuse);
 // statement as a borrow, ...) must still clone -- compile+run in all four configs.
 transpile_test!(last_use_move);
 transpile_test!(field_by_value_reuse);
+transpile_test!(by_value_arg_then_reuse);
 transpile_test!(lend_and_read_same_local);
 transpile_test!(lend_and_read_same_local_lock_wrapper);
 
@@ -1379,3 +1391,4 @@ transpile_test!(self_sibling_method_call);
 // `var mut`/`mut` collection locals and parameters (the permitted forms of content mutation once a
 // bare `var` collection is rebindable-only) still transpile to Rust that compiles and runs.
 transpile_test!(var_mut_collection_ok);
+transpile_test!(string_methods_after_index);

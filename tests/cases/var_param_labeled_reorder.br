@@ -1,0 +1,21 @@
+# Regression test: a `var` parameter written back through a LABELED argument passed out of
+# order. The write-back must match the argument to its parameter by label, not by position.
+# Covers a free function and a mix of positional + labeled arguments. (The METHOD form is in
+# var_param_labeled_reorder_method.br — the self-hosted interpreter doesn't support it yet.)
+
+def lab(var int n, int k):
+    n = n + k
+
+def mix(int a, var int n, int k):
+    n = n + a + k
+
+def main():
+    var int z = 1
+    lab(k= 4, n= z)
+    print z
+    var int w = 10
+    lab(n= w, k= 1)
+    print w
+    var int q = 0
+    mix(1, k= 3, n= q)
+    print q

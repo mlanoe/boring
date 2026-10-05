@@ -100,6 +100,13 @@ Without this, the failure would be especially confusing: `boring build --target 
 
 MSL is compiled at runtime via `newLibraryWithSource` — the Metal compiler is built into macOS. No external toolchain (`xcrun`, LLVM) is needed.
 
+The generated runtime caches Metal's default device, indexed-device enumeration,
+command queue, compiled MSL library, and compute pipeline state objects for the
+life of the calling thread. Subsequent dispatches clone the cached Objective-C
+handles (a cheap retain) instead of rediscovering the device through WindowServer,
+recompiling the shader source, or rebuilding the pipeline. `GPU(n)` keeps its
+existing indexed-device behavior; its `MTLCopyAllDevices` result is cached too.
+
 The generated project has no `build.rs`. Compilation happens once at app startup. An AOT path (`boring build --target metal --aot`) may be added in a later iteration for workloads where startup latency matters.
 
 ---

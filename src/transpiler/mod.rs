@@ -5700,6 +5700,121 @@ mod tests {
     }
 
     #[test]
+    fn string_methods_on_indexed_string_values_use_instance_dispatch() {
+        let src = r#"
+def main() throws:
+    let text = " Hello World\nsecond "
+    let [string] values = [" Mixed Case "]
+    let a = text.split("\n")[0].split(" ")
+    let b = text.split("\n")[0].trim()
+    let c = text.split("\n")[0].replace("World", "there")
+    let d = text.split("\n")[0].startsWith(" Hello")
+    let e = text.split("\n")[0].toLower()
+    let f = values[0].trim()
+    print "{a[1]} {b} {c} {d} {e} {f}"
+"#;
+        for threading in [ThreadingMode::Multi, ThreadingMode::Single] {
+            let code = transpile_src_with_config(src, TranspileConfig {
+                threading,
+                ..TranspileConfig::default()
+            });
+            assert!(!code.contains("]::split("), "got:\n{code}");
+            assert!(!code.contains("]::trim("), "got:\n{code}");
+            assert!(!code.contains("]::replace("), "got:\n{code}");
+            assert!(!code.contains("]::startsWith("), "got:\n{code}");
+            assert!(!code.contains("]::toLower("), "got:\n{code}");
+            assert!(code.contains(".clone().split(\" \")"), "got:\n{code}");
+            assert!(code.contains(".clone().starts_with(\" Hello\")"), "got:\n{code}");
+            assert!(code.contains(".clone().to_lowercase()"), "got:\n{code}");
+        }
+    }
+
+    #[test]
+    fn string_methods_on_inferred_case_conversion_locals_stay_owned() {
+        let src = r#"
+def string direct(string s):
+    return s.replace("x", " ").trim()
+
+def main() throws:
+    let outside = " X ".toLower()
+    let outside_value = outside.replace("x", "").trim()
+    for line in " A ".split(" "):
+        let low = line.toLower()
+        let value = low.replace("a", " A ").trim()
+        print value
+    let lines = [" b "]
+    var i = 0
+    while i < lines.length:
+        let upper = lines[i].toUpper()
+        let value = upper.replace("B", " B ").trimStart().trimEnd()
+        print value
+        i += 1
+    print outside_value.trim().trim()
+    print direct(" x ")
+"#;
+        for (threading, str_ty) in [
+            (ThreadingMode::Multi, "Arc::<str>"),
+            (ThreadingMode::Single, "Rc::<str>"),
+        ] {
+            let code = transpile_src_with_config(src, TranspileConfig {
+                threading,
+                ..TranspileConfig::default()
+            });
+            assert!(code.contains(&format!(
+                "let value = {str_ty}::from({str_ty}::from(low.replace(\"a\", \" A \").as_str()).trim());"
+            )), "got:\n{code}");
+            assert!(code.contains(&format!(
+                "let value = {str_ty}::from({str_ty}::from({str_ty}::from(upper.replace(\"B\", \" B \").as_str()).trim_start()).trim_end());"
+            )), "got:\n{code}");
+            assert!(code.contains(&format!(
+                "{str_ty}::from({str_ty}::from(outside_value.trim()).trim())"
+            )), "got:\n{code}");
+            assert!(!code.contains("let value = low.replace(\"a\", \" A \").trim();"), "got:\n{code}");
+        }
+    }
+
+    #[test]
+    fn explicit_borrow_receivers_keep_nested_field_types_for_numeric_casts() {
+        let src = r#"
+struct Inner:
+    float32 t
+
+struct Outer:
+    Inner d
+    [Inner] items
+
+    req Inner inner():
+        d
+
+def float by_borrow(Outer& o):
+    o.d.t as float
+
+def float by_mut_borrow(mut Outer& o):
+    o.d.t as float
+
+def float by_var_borrow(var Outer& o):
+    o.d.t as float
+
+def float by_alias(Outer& o):
+    let Outer& alias = o
+    alias.d.t as float
+
+def float by_method(Outer& o):
+    o.inner().t as float
+
+def int by_index(Outer& o, int i):
+    o.items[i].t as int
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("(o.d.t as f64)"), "got:\n{code}");
+        assert!(code.contains("(alias.d.t as f64)"), "got:\n{code}");
+        assert!(code.contains("(o.inner().t as f64)"), "got:\n{code}");
+        assert!(code.contains(".t as isize)"), "got:\n{code}");
+        assert!(!code.contains(".trim().parse::<f64>()"), "got:\n{code}");
+        assert!(!code.contains(".trim().parse::<isize>()"), "got:\n{code}");
+    }
+
+    #[test]
     fn host_tensor_calls_lower_to_portable_rust_loops() {
         let src = "let [float32, k = 5, m = 3]'gpu'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'gpu'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified c = [float32(0) for ..<21]\ngpu.tensor.matmul(a, b, c)\ngpu.tensor.mma(a, b, c)\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
@@ -6496,6 +6611,97 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
             "`self.field'actor` call must hoist the by-value argument, got:\n{code}");
     }
 
+    // An argument that reads an `'actor` field takes a `MutexGuard` that is a temporary of the
+    // enclosing call statement; a callee (or locked receiver) that locks the same value again
+    // self-deadlocks. Free-function call: the argument is scoped in its own block. Call through a
+    // locked receiver: the arguments are hoisted before the receiver is locked.
+    #[test]
+    fn actor_field_argument_releases_its_guard_before_the_call() {
+        let src = "struct Env:\n    var int depth\n\nstruct Interp:\n    var Env'actor current_env\n    var int hits\n\n    def int bump(int k, int o):\n        hits += k\n        hits + o\n\ndef int helper(mut Interp'actor interp, int k, Env'actor env):\n    interp.hits += k\n    interp.hits + env.depth\n\ndef int run(mut Interp'actor interp):\n    helper(interp, interp.hits, interp.current_env)\n\ndef int via_method(mut Interp'actor interp):\n    interp.bump(interp.hits, 1)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("helper(&interp, { let __a = interp.lock().unwrap().hits"),
+            "scalar field argument must scope its guard, got:\n{code}");
+        assert!(code.contains("&{ let __a = Arc::clone(&interp.lock().unwrap().current_env); __a })"),
+            "actor field argument must scope its guard, got:\n{code}");
+        assert!(code.contains("({ let __arg0 = { let __a = interp.lock().unwrap().hits"),
+            "locked-receiver call must hoist the lock-taking argument before the receiver lock, got:\n{code}");
+        assert!(code.contains("; interp.lock().unwrap().bump(__arg0, __arg1) })"),
+            "locked-receiver call must use the hoisted temporaries, got:\n{code}");
+    }
+
+    // A collection field of an `'actor` value passed to a by-reference `[T]` parameter used to be
+    // emitted as a borrow *into* the lock guard (`&x.lock().unwrap().log`), holding the guard for
+    // the whole call. When the field type is provably `Clone` it is cloned out of the guard inside
+    // its own block; when it is not (`[Trait]` -> `Vec<Box<dyn Trait>>`, a struct without `Clone`)
+    // or the parameter is `mut`, the borrow is kept.
+    #[test]
+    fn actor_collection_field_by_ref_argument_is_cloned_out_of_the_guard_when_clone() {
+        let src = "trait Sized:\n    req int size()\n\nstruct Sq as Sized:\n    var int n\n\n    req int size():\n        n\n\n@derive(Debug)\nstruct Raw:\n    var int n\n\nstruct Interp:\n    var int hits\n    var [int] log\n    var [string] words\n    var {string=int} table\n    var [[int]] grid\n    var [Sized] shapes\n    var [Raw] raws\n\ndef int h_arr(mut Interp'actor interp, [int] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_words(mut Interp'actor interp, [string] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_table(mut Interp'actor interp, {string=int} v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_grid(mut Interp'actor interp, [[int]] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_shapes(Interp'actor interp, [Sized] v):\n    v.length\n\ndef int h_raws(Interp'actor interp, [Raw] v):\n    v.length\n\ndef int h_mut(mut Interp'actor interp, mut [int] v):\n    v.push(1)\n    v.length\n\ndef int t(mut Interp'actor interp):\n    h_arr(interp, interp.log) + h_words(interp, interp.words) + h_table(interp, interp.table) + h_grid(interp, interp.grid) + h_shapes(interp, interp.shapes) + h_raws(interp, interp.raws) + h_mut(interp, interp.log)\n\ndef main():\n    let interp'actor = Interp(hits = 1, log = [1], words = [\"a\"], table = {\"k\" = 1}, grid = [[1]], shapes = [Sq(n = 1)], raws = [Raw(n = 2)])\n    print t(interp)\n";
+        for (threading, tok) in [
+            (ThreadingMode::Multi, "interp.lock().unwrap()"),
+            (ThreadingMode::Single, "interp.borrow()"),
+        ] {
+            let code = transpile_src_with_config(src, TranspileConfig { threading, ..TranspileConfig::default() });
+            for (callee, field) in [("h_arr", "log"), ("h_words", "words"), ("h_table", "table"), ("h_grid", "grid")] {
+                let want = format!("{callee}(&interp, &{{ let __a = {tok}.{field}.clone(); __a }})");
+                assert!(code.contains(&want), "`Clone` field must be cloned out of the guard ({want}), got:\n{code}");
+            }
+            // Not provably `Clone`: the borrow into the guard is kept.
+            assert!(code.contains(&format!("h_shapes(&interp, &{tok}.shapes)")),
+                "`[Trait]` field must keep its borrow, got:\n{code}");
+            assert!(code.contains(&format!("h_raws(&interp, &{tok}.raws)")),
+                "field of a struct without `Clone` must keep its borrow, got:\n{code}");
+            // A `mut` borrow must reach the real storage: never cloned.
+            assert!(!code.contains("h_mut(&interp, &{ let __a"), "`mut` borrow must not be cloned, got:\n{code}");
+        }
+    }
+
+    // A collection field of an `'actor` value passed BY VALUE to a method called through the
+    // locked receiver was emitted `{ let __a = x.lock().unwrap().log; __a }` — a move out of the
+    // `MutexGuard` (E0507). The by-value read now clones, inside the guard-releasing block.
+    #[test]
+    fn actor_collection_field_by_value_method_argument_is_cloned_out_of_the_guard() {
+        let src = "struct Interp:\n    var int hits\n    var [int] log\n    var {string=int} table\n\n    def int bump_all([int] vs, {string=int} t):\n        hits += vs.length + t.length\n        hits\n\ndef int t(mut Interp'actor interp):\n    interp.bump_all(interp.log, interp.table)\n";
+        for (threading, tok) in [
+            (ThreadingMode::Multi, "interp.lock().unwrap()"),
+            (ThreadingMode::Single, "interp.borrow()"),
+        ] {
+            let code = transpile_src_with_config(src, TranspileConfig { threading, ..TranspileConfig::default() });
+            for (i, field) in [(0, "log"), (1, "table")] {
+                let want = format!("let __arg{i} = {{ let __a = {tok}.{field}.clone(); __a }};");
+                assert!(code.contains(&want), "by-value field read must clone ({want}), got:\n{code}");
+            }
+        }
+    }
+
+    #[test]
+    fn release_guard_temps_only_wraps_owned_lock_taking_arguments() {
+        let mut args = vec![
+            "&interp".to_string(),                                                      // plain place: untouched
+            "&Arc::clone(&x.lock().unwrap().env)".to_string(),                           // owned clone: wrapped, `&` outside
+            "x.lock().unwrap().hits".to_string(),                                       // owned scalar: wrapped
+            "&x.lock().unwrap().log".to_string(),                                       // reference into the guard: untouched
+            "&mut x.lock().unwrap().log".to_string(),                                   // lend: untouched
+            "|v| v + x.lock().unwrap().hits".to_string(),                               // closure: untouched
+            "7".to_string(),
+        ];
+        Transpiler::release_guard_temps(&mut args);
+        assert_eq!(args, vec![
+            "&interp",
+            "&{ let __a = Arc::clone(&x.lock().unwrap().env); __a }",
+            "{ let __a = x.lock().unwrap().hits; __a }",
+            "&x.lock().unwrap().log",
+            "&mut x.lock().unwrap().log",
+            "|v| v + x.lock().unwrap().hits",
+            "7",
+        ]);
+        // A reference into a guard is never hoisted into a `let` (it would dangle).
+        let mut args = vec!["{ let __a = x.lock().unwrap().n; __a }".to_string(), "&y.lock().unwrap().log".to_string()];
+        let prelude = Transpiler::hoist_lent_conflicts_locked(&mut args);
+        assert_eq!(prelude, "let __arg0 = { let __a = x.lock().unwrap().n; __a }; ");
+        assert_eq!(args, vec!["__arg0", "&y.lock().unwrap().log"]);
+    }
+
     #[test]
     fn struct_field_read_by_value_is_cloned_not_partially_moved() {
         let src = "struct Holder:\n    pub var [int] xs\n    pub var int n\n\nstruct Wrap:\n    pub var Holder inner\n\nenum Wrapper:\n    List([int] items)\n    Boxed(Holder h)\n    Num(int n)\n\ndef int len_of(Holder h):\n    h.xs.length\n\ndef int f():\n    let h = Holder([4, 5, 6], 1)\n    let w = Wrapper.List(h.xs)\n    let k = h.n\n    let nn = Wrapper.Num(h.n)\n    let wr = Wrap(h)\n    let b = Wrapper.Boxed(wr.inner)\n    len_of(h) + k + len_of(wr.inner)\n";
@@ -6504,6 +6710,32 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         assert!(code.contains("Wrapper::Boxed(wr.inner.clone())"), "struct field must be cloned, got:\n{code}");
         assert!(code.contains("len_of(wr.inner.clone())"), "by-value call arg must clone the field, got:\n{code}");
         assert!(code.contains("Wrapper::Num(h.n)"), "Copy scalar field must stay a plain read, got:\n{code}");
+    }
+
+    #[test]
+    fn if_let_over_inferred_optional_method_result_clones_by_value_arg() {
+        // `opt` has no annotation: its `Decl?` type comes from `find`'s declared return type.
+        let src = "struct Decl:\n    pub var [int] ps\n\nstruct Reg:\n    pub var int n\n\n    req Decl? find(int k):\n        nil\n\ndef int run_body(Decl d):\n    d.ps.length\n\ndef int f(Reg r):\n    let opt = r.find(1)\n    if let d = opt:\n        let a = run_body(d)\n        return a + d.ps.length\n    0\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("run_body(d.clone())"), "if-let binding passed by value and read again must be cloned, got:\n{code}");
+    }
+
+    #[test]
+    fn optional_method_result_shape_does_not_leak_into_same_named_rebind() {
+        // `result` is first a `Decl?` (method call), then rebound to a plain `Decl` by a free
+        // call: the later `match result:` must not be emitted with `Some(..)` arms.
+        let src = "enum Decl:\n    A(int n)\n    B\n\nstruct Reg:\n    pub var int n\n\n    req Decl? find(int k):\n        nil\n\ndef Decl mk():\n    Decl.B\n\ndef int f(Reg r):\n    let result = r.find(1)\n    if let d = result:\n        return 1\n    let result = mk()\n    match result:\n        A(n): n\n        B: 0\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("Some(Decl::A"), "stale Optional shape leaked into the rebind, got:\n{code}");
+    }
+
+    #[test]
+    fn field_of_indexed_struct_local_passed_to_actor_method_is_cloned() {
+        // `p = ps[i]` is only known through `ps`'s element type; `env` is an `'actor` receiver,
+        // whose method-call arguments take a different emission path than a plain receiver.
+        let src = "struct Param:\n    pub var string name\n\nstruct Env:\n    pub var int n\n\n    req int get(string name):\n        name.length\n\ndef int f([Param] ps, Env'actor env):\n    let p = ps[0]\n    let a = env.get(p.name)\n    a + p.name.length\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains(".get(p.name.clone())"), "field read passed by value to an actor method must be cloned, got:\n{code}");
     }
 
     // Last-use analysis (`last_use.rs`): the last by-value read of an owned local is a move,
@@ -6663,6 +6895,35 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
     }
 
     #[test]
+    fn external_static_call_borrows_non_literal_string_but_not_literal() {
+        let src = "use std.net.TcpListener\nuse std.path.PathBuf\n\ndef main() throws:\n    let port = 0\n    let addr = \"127.0.0.1:{port}\"\n    let a = try? TcpListener.bind(addr)\n    let b = try? TcpListener.bind(\"127.0.0.1:0\")\n    let path = \"tmp/{port}\"\n    let text = try? std.fs.readToString(path)\n    var PathBuf base = PathBuf.new()\n    base.push(path)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("TcpListener::bind((&*addr))"), "got:\n{}", code);
+        assert!(code.contains("TcpListener::bind(\"127.0.0.1:0\")"), "got:\n{}", code);
+        assert!(code.contains("std::fs::read_to_string((&*path))"), "got:\n{}", code);
+        assert!(code.contains("base.push((&*path))"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn explicit_external_metadata_can_keep_owned_string_argument() {
+        let src = "use std.net.TcpListener\n\ndef main() throws:\n    let port = 0\n    let addr = \"127.0.0.1:{port}\"\n    let a = try? TcpListener.bind(addr)\n";
+        let mut config = TranspileConfig::default();
+        config.external_fns.push(("TcpListener".into(), "bind".into(), vec!["".into()]));
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("TcpListener::bind(addr)"), "got:\n{}", code);
+        assert!(!code.contains("TcpListener::bind((&*addr))"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn optional_non_partial_eq_value_compared_with_nil_uses_presence_predicate() {
+        let src = "use std.net.TcpListener\n\ndef main() throws:\n    let l = try? TcpListener.bind(\"127.0.0.1:0\")\n    print l != nil\n    print nil == l\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("l.is_some()"), "got:\n{}", code);
+        assert!(code.contains("l.is_none()"), "got:\n{}", code);
+        assert!(!code.contains("l != None") && !code.contains("None == l"), "got:\n{}", code);
+    }
+
+    #[test]
     fn external_read_user_struct_method_is_untouched() {
         // A Boring-declared `read` is not an external call: the *external-buffer* rule must not
         // fire — it is the method's own `var` param that lends `&mut buf` (see
@@ -6732,6 +6993,28 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(code.contains("v.swap((i as usize)") && code.contains("v.insert((i as usize)"),
             "builtin Vec swap/insert must keep the usize index cast, got:\n{}", code);
+    }
+
+    // ── builtin trailing `as <type>` as the left operand of `<` / `<<` ───────────────────
+    // `ord(c) < 32` was emitted `(c).chars().next().expect(..) as isize < 32`, which rustc
+    // parses as generic arguments for `isize`.
+
+    #[test]
+    fn ord_is_parenthesised_as_left_operand_of_lt_and_shl() {
+        let src = "def bool is_ctrl(string ch):\n    ord(ch) < 32\n\ndef int shl(string ch):\n    ord(ch) << 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("as isize <"),
+            "`ord(..) as isize` must be parenthesised before `<`/`<<`, got:\n{}", code);
+        assert!(code.contains("as isize) < 32") && code.contains("as isize) << 1"),
+            "expected parenthesised ord cast, got:\n{}", code);
+    }
+
+    #[test]
+    fn plain_cast_and_count_closure_are_parenthesised_as_left_operand_of_lt() {
+        let src = "def main():\n    let n = 5\n    let [int] xs = [1, 2]\n    let a = (n as int) < 9\n    let b = xs.count((x): x > 1) < 5\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("as isize <") && !code.contains("as i64 <"),
+            "casts must be parenthesised before `<`, got:\n{}", code);
     }
 
     #[test]

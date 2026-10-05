@@ -1,0 +1,28 @@
+struct Boxed:
+    int value
+
+enum Choice:
+    Number(int)
+    Empty
+
+def main():
+    let {string=int} ints = {"present" = 1}
+    print ints["missing"] == nil
+    print ints["missing"] != nil
+    print ints["present"] == nil
+    print ints["present"] != nil
+
+    let {string=Boxed} structs = {"present" = Boxed(value = 7)}
+    print structs["missing"] == nil
+    print structs["present"] != nil
+
+    let {string=Choice} enums = {"present" = Choice.Number(9)}
+    print enums["missing"] == nil
+    print enums["present"] != nil
+
+    if let value = structs["present"]:
+        print value.value
+    if let value = structs["missing"]:
+        print value.value
+    else:
+        print "absent"

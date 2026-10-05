@@ -1,0 +1,14 @@
+# Regression test (`boring run` only): a `var` parameter of a METHOD written back through a
+# LABELED argument passed out of order is matched to its parameter by label, not by position.
+
+struct Acc:
+    var int total = 0
+
+    def add_to(var int n, int k):
+        n = n + k + total
+
+def main():
+    var int m = 1
+    var mut Acc acc = Acc()
+    acc.add_to(k= 2, n= m)
+    print m

@@ -1,0 +1,55 @@
+# A by-value argument whose later reuse needs the original intact:
+#  1) `if let d = opt:` where `opt` is the (inferred) `T?` result of a method call —
+#     `run_body(interp, d)` must clone `d` because `d.params` is read afterwards;
+#  2) a field of a struct local (`p = params[i]`, so only its declared element type is known)
+#     passed by value to a method of an `'actor` receiver, then read again.
+struct Param:
+    string name
+    bool mutable
+
+struct Decl:
+    [Param] params
+    int n
+
+struct Interp:
+    var int count = 0
+
+    req Decl? find(int n):
+        if n > 0:
+            return Decl([Param("a", true), Param("b", false)], n)
+        nil
+
+struct Env:
+    var {string=int} vars = {=}
+
+    req int? get(string name):
+        vars.get(name)
+
+def int run_body(mut Interp interp, Decl d):
+    interp.count += d.n
+    interp.count
+
+def int count_params([Param] ps):
+    ps.length
+
+def int capture([Param] params, Env'actor env):
+    mut [(int, string, int)] outs = []
+    var i = 0
+    while i < params.length:
+        let p = params[i]
+        if p.mutable:
+            let cur = env.get(p.name)
+            if let v = cur:
+                outs.push((i, p.name, v))
+        i += 1
+    outs.length
+
+def main():
+    mut interp = Interp()
+    let opt = interp.find(3)
+    if let decl = opt:
+        let result = run_body(interp, decl)
+        let k = count_params(decl.params)
+        print "{result} {k}"
+    let env = Env({"a" = 7})
+    print capture([Param("a", true)], env)

@@ -1,0 +1,44 @@
+# Explicit `T&`/`mut T&`/`var T&` receivers must retain their pointee's
+# declared field types through nested fields, aliases, method results, and array
+# indexing. Otherwise numeric casts fall through to string parsing in Rust.
+struct Inner:
+    float32 t
+
+struct Outer:
+    Inner d
+    [Inner] items
+
+    req Inner inner():
+        d
+
+def float by_value(Outer o):
+    o.d.t as float
+
+def float by_borrow(Outer& o):
+    o.d.t as float
+
+def float by_mut_borrow(mut Outer& o):
+    o.d.t as float
+
+def float by_var_borrow(var Outer& o):
+    o.d.t as float
+
+def float by_alias(Outer& o):
+    let Outer& alias = o
+    alias.d.t as float
+
+def float by_method(Outer& o):
+    o.inner().t as float
+
+def int by_index(Outer& o, int i):
+    o.items[i].t as int
+
+def main() throws:
+    var mut Outer o = Outer(Inner(1.5 as float32), [Inner(2.5 as float32)])
+    print by_value(o)
+    print by_borrow(o)
+    print by_mut_borrow(o)
+    print by_var_borrow(o)
+    print by_alias(o)
+    print by_method(o)
+    print by_index(o, 0)

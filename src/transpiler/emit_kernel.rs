@@ -1069,11 +1069,17 @@ impl Transpiler {
         {
             return None;
         }
-        // The GPU buffer holds device-native (32-bit) elements regardless of the
-        // host-facing element type -- divide by *that* size to get the element count.
-        let device_ty = kernel_host_scalar_type(&array_inner_type(&field_decl.ty));
+        let inner_ty = array_inner_type(&field_decl.ty);
+        let len_expr = if crate::transpiler::wgpu::uses_packed_buffer_elements(&inner_ty) {
+            format!("{var_name}.{field}_len")
+        } else {
+            // Non-packed buffers have no padding, so their byte size divided by the
+            // actual device element width is their exact logical element count.
+            let device_ty = kernel_host_scalar_type(&inner_ty);
+            format!("({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>()")
+        };
         Some(format!(
-            "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), ({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>())"
+            "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), {len_expr})"
         ))
     }
 
@@ -1100,9 +1106,15 @@ impl Transpiler {
             {
                 return None;
             }
-            let device_ty = kernel_host_scalar_type(&array_inner_type(&field_decl.ty));
+            let inner_ty = array_inner_type(&field_decl.ty);
+            let len_expr = if crate::transpiler::wgpu::uses_packed_buffer_elements(&inner_ty) {
+                format!("{var_name}.{field}_len")
+            } else {
+                let device_ty = kernel_host_scalar_type(&inner_ty);
+                format!("({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>()")
+            };
             return Some(format!(
-                "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), ({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>())"
+                "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), {len_expr})"
             ));
         }
         if let ExprKind::Var(name) = &expr.kind {

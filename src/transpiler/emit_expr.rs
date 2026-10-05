@@ -1070,34 +1070,6 @@ impl Transpiler {
             && if_stmt.else_body.as_deref().map(tail_is_numeric).unwrap_or(false)
     }
 
-    /// Resolves the struct type name that `e` evaluates to, when known statically —
-    /// a variable bound to a struct (`for src in structs:`, a `let`/`var` of struct
-    /// type), the implicit `self`, or a struct-typed field reached through one of
-    /// those. Used to look up field types for a bare `obj.field` cast operand.
-    fn resolve_struct_name_of(&self, e: &Expr) -> Option<String> {
-        match &e.kind {
-            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
-            ExprKind::Var(v) => {
-                self.var_struct_types.get(v.as_str()).cloned()
-                    .or_else(|| self.var_struct_type.get(v.as_str()).cloned())
-                    .or_else(|| match self.var_types.get(v.as_str()) {
-                        Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str()) => Some(n.clone()),
-                        _ => None,
-                    })
-            }
-            ExprKind::Field(inner, field_name) => {
-                let struct_name = self.resolve_struct_name_of(inner)?;
-                let fields = self.struct_fields.get(struct_name.as_str())?;
-                let (_, fty) = fields.iter().find(|(f, _)| f == field_name)?;
-                match fty.without_mut() {
-                    Type::Named(n) if self.struct_fields.contains_key(n.as_str()) => Some(n.clone()),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
     /// Resolves the Boring type of `e` when it is a bare variable (including an
     /// implicit `self.field` reference to a field not shadowed by a local), a
     /// field access, or an index access — the forms a cast operand can take that
@@ -1117,15 +1089,8 @@ impl Transpiler {
                 }
                 self.var_types.get(v.as_str()).cloned()
             }
-            ExprKind::Field(obj, field_name) => {
-                let struct_name = self.resolve_struct_name_of(obj)?;
-                let fields = self.struct_fields.get(struct_name.as_str())?;
-                fields.iter().find(|(f, _)| f == field_name).map(|(_, t)| t.clone())
-            }
-            ExprKind::Index(base, _) | ExprKind::LabeledIndex(base, _) => {
-                let base_ty = self.resolve_field_or_index_type(base)?;
-                base_ty.index_element_type().cloned()
-            }
+            ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::LabeledIndex(..)
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) => self.resolve_expr_type(e),
             _ => None,
         }
     }
@@ -1741,6 +1706,44 @@ impl Transpiler {
             };
             return format!("{}(&{}, &{})", ptr_eq_fn, ls, rs);
         }
+        // `Option<T> == nil` must not use `PartialEq` on `T`: Rust's
+        // `Option<T> == None` still requires `T: PartialEq`.
+        if matches!(op, BinOp::Eq | BinOp::NotEq) {
+            let value = if matches!(r.kind, ExprKind::Nil) {
+                Some(l)
+            } else if matches!(l.kind, ExprKind::Nil) {
+                Some(r)
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                // A dictionary subscript is an optional lookup when it is tested
+                // against `nil`.  Keep ordinary `d[k]` reads on the deliberately
+                // panicking path, but do not emit that read here: besides panicking
+                // for the very case being tested, it produces `V == None` in Rust.
+                // Using `HashMap::get` directly also avoids imposing Clone or
+                // PartialEq on V (important for user struct/enum values).
+                if let ExprKind::Index(dict, key) = &value.kind {
+                    if self.expr_is_dict(dict) {
+                        let dict_s = self.emit_expr(dict);
+                        let key_ref = self.emit_dict_key_borrow(key);
+                        let method = if matches!(op, BinOp::NotEq) { "is_some" } else { "is_none" };
+                        return format!("{}.get({}).{}()", dict_s, key_ref, method);
+                    }
+                }
+                let is_optional = matches!(&value.kind, ExprKind::Var(v)
+                    if self.optional_vars.contains(v.as_str()))
+                    || self.resolve_expr_type(value)
+                        .is_some_and(|ty| matches!(ty.without_mut(), Type::Optional(_)));
+                if is_optional {
+                    let method = if matches!(op, BinOp::NotEq) { "is_some" } else { "is_none" };
+                    return format!("{}.{}()", self.emit_expr(value), method);
+                }
+                if matches!(value.kind, ExprKind::Nil) {
+                    return matches!(op, BinOp::Eq).to_string();
+                }
+            }
+        }
         // `x is SomeType` / `x is not SomeType` — type/nil check
         if matches!(op, BinOp::Is | BinOp::IsNot) {
             let is_not = matches!(op, BinOp::IsNot);
@@ -2235,7 +2238,23 @@ impl Transpiler {
                 return self.emit_task_await(type_name, field, is_throws_handle, is_join_handle, true);
             }
         }
-        let obj_s = self.emit_expr(obj);
+        // Project a resident field directly out of an indexed element instead of first
+        // cloning the complete struct (`arr[i].clone().field`).  The resident-field
+        // consumer clones the `BoringGpuArg` handle itself, so cloning unrelated host
+        // fields in the element is both unnecessary and potentially very expensive.
+        let obj_s = if matches!(&obj.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..))
+            && self.resolve_expr_struct_type(obj)
+                .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                .and_then(|fields| fields.iter().find(|(name, _)| name == field))
+                .is_some_and(|(_, ty)| ty.without_mut().gpu_resident_qual().is_some())
+        {
+            let old = self.in_lhs_assign.replace(true);
+            let rendered = self.emit_expr(obj);
+            self.in_lhs_assign.set(old);
+            rendered
+        } else {
+            self.emit_expr(obj)
+        };
         // `.value` / `.wait` on a JoinHandle → `.await.unwrap()`.
         // Covers inline task expressions `(task ...).value` and loop vars `future.wait`
         // that aren't tracked in task_vars.
@@ -4108,7 +4127,7 @@ impl Transpiler {
                     let field_ty = self.struct_fields.get(name)
                         .and_then(|fs| fs.iter().find(|(n, _)| n == label))
                         .map(|(_, ty)| ty);
-                    let val = self.emit_let_value(field_ty, &a.value);
+                    let val = self.emit_struct_field_value(field_ty, &a.value);
                     format!("{}: {}", label, val)
                 })
                 .collect();
@@ -4201,6 +4220,11 @@ impl Transpiler {
                                 crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
                                 crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
                             }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::Actor) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
                         } else {
                         let inner_ty = field_ty.and_then(Self::mutex_inner);
                         let raw = self.emit_let_value(inner_ty, eff_value);
@@ -4220,6 +4244,11 @@ impl Transpiler {
                                 crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
                                 crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
                             }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::ActorTask) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
                         } else {
                             let inner_ty = field_ty.and_then(Self::mutex_inner);
                             let raw = self.emit_let_value(inner_ty, eff_value);
@@ -4234,6 +4263,11 @@ impl Transpiler {
                                 crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
                                 crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
                             }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::Guard) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
                         } else {
                             let inner_ty = field_ty.and_then(Self::rwlock_inner);
                             let raw = self.emit_let_value(inner_ty, eff_value);
@@ -4248,6 +4282,11 @@ impl Transpiler {
                                 crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
                                 crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
                             }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::GuardTask) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
                         } else {
                             let inner_ty = field_ty.and_then(Self::rwlock_inner);
                             let raw = self.emit_let_value(inner_ty, eff_value);
@@ -4262,7 +4301,7 @@ impl Transpiler {
                             format!("Box::new({})", raw)
                         }
                     } else {
-                        self.emit_let_value(field_ty, eff_value)
+                        self.emit_struct_field_value(field_ty, eff_value)
                     };
                     format!("{}: {}", label, val)
                 })
@@ -4367,7 +4406,7 @@ impl Transpiler {
                             // value instead. Only plain fields reach here — transient/mutex/
                             // rwlock fields were already filled (with their own defaults) above.
                             if let Some(def) = self.struct_field_defaults.get(&tkey).cloned() {
-                                let val = self.emit_let_value(Some(fty), &def);
+                                let val = self.emit_struct_field_value(Some(fty), &def);
                                 fields.push(format!("{}: {}", fname, val));
                             }
                         }
@@ -4500,7 +4539,7 @@ impl Transpiler {
                                 let raw = if Self::is_arc_qualified(fty) {
                                     self.emit_let_value_arc_qualified(fty, effective_value)
                                 } else {
-                                    self.emit_let_value(Some(fty), effective_value)
+                                    self.emit_struct_field_value(Some(fty), effective_value)
                                 };
                                 if matches!(fty, Type::Optional(_)) {
                                     format!("{}.map(Box::new)", raw)
@@ -4510,7 +4549,7 @@ impl Transpiler {
                             } else if Self::is_arc_qualified(fty) {
                                 self.emit_let_value_arc_qualified(fty, effective_value)
                             } else {
-                                self.emit_let_value(Some(fty), effective_value)
+                                self.emit_struct_field_value(Some(fty), effective_value)
                             };
                             format!("{}: {}", fname, val)
                         })
@@ -4571,18 +4610,10 @@ impl Transpiler {
     /// `var_struct_types` / `var_types` fallback already used by field-access
     /// emission elsewhere in this file (e.g. `field_is_arc` above).
     pub(crate) fn resolve_struct_name(&self, e: &Expr) -> Option<String> {
-        // `without_mut()` first — a `var mut Sprite s = ...`-style binding's own `s.ty` is
-        // `Type::Mut(Named("Sprite"))`, not a bare `Named`/`Qualified` (see `Type::Mut`'s doc
-        // comment); without stripping it here, `var_types.get(v).and_then(named)` below always
-        // missed for any `mut`-qualified struct-typed local, including an external type never
-        // registered in `var_struct_types` (that map is populated by a constructor-call
-        // heuristic gated on `is_known_user_type`, which an external type like Bevy's `Sprite`
-        // never passes) — the only way such a var's type name reaches this function at all is
-        // through this `var_types` fallback.
         let named = |t: &Type| -> Option<String> {
             match t.without_mut() {
                 Type::Named(n) => Some(n.clone()),
-                Type::Qualified(inner, _) => match inner.as_ref() {
+                Type::Qualified(inner, _) => match inner.without_mut() {
                     Type::Named(n) => Some(n.clone()),
                     _ => None,
                 },
@@ -4592,13 +4623,19 @@ impl Transpiler {
         match &e.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
             ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned()
-                .or_else(|| self.var_types.get(v.as_str()).and_then(named)),
+                .or_else(|| self.var_types.get(v.as_str()).and_then(&named)),
             ExprKind::Field(base, field) => {
                 let struct_name = self.resolve_struct_name(base)?;
-                let fields = self.struct_fields.get(struct_name.as_str())?;
-                let (_, fty) = fields.iter().find(|(fname, _)| fname == field)?;
-                named(fty)
+                self.struct_fields.get(struct_name.as_str())?
+                    .iter().find(|(fname, _)| fname == field)
+                    .and_then(|(_, fty)| named(fty))
             }
+            // Unlike the historical resolver above, follow an indexed collection's
+            // declared element/value type. This is the missing `m.layers[i] -> Layer`
+            // edge needed by resident-field lookup, while retaining the permissive
+            // external-type behavior of the Var/Field cases.
+            ExprKind::Index(..) | ExprKind::LabeledIndex(..) =>
+                self.resolve_expr_type(e).as_ref().and_then(named),
             _ => None,
         }
     }
@@ -4993,7 +5030,8 @@ impl Transpiler {
             }
             "ord" => {
                 let s = self.emit_expr(&args[0].value);
-                format!("({}).chars().next().expect(\"ord: empty string\") as isize", s)
+                // Parenthesised: a bare `X as isize` followed by `<` / `<<` parses as generic args.
+                format!("(({}).chars().next().expect(\"ord: empty string\") as isize)", s)
             }
             "chr" => {
                 let n = self.emit_expr(&args[0].value);

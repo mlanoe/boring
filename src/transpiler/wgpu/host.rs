@@ -909,9 +909,16 @@ impl<'a> HostEmitter<'a> {
         // "Kernel Constructor Interaction".
         self.line("#[allow(dead_code)]");
         self.line("#[derive(Clone)]");
-        self.line("enum BoringGpuArg<T> {");
+        self.line("pub enum BoringGpuArg<T> {");
         self.line("    Resident(std::sync::Arc<wgpu::Buffer>, usize),");
         self.line("    Host(Vec<T>),");
+        self.line("}");
+        self.blank();
+        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T> {");
+        self.line("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringGpuArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringGpuArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } }");
+        self.line("}");
+        self.line("impl<T: PartialEq> PartialEq for BoringGpuArg<T> {");
+        self.line("    fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringGpuArg::Resident(a, an), BoringGpuArg::Resident(b, bn)) => std::sync::Arc::ptr_eq(a, b) && an == bn, (BoringGpuArg::Host(a), BoringGpuArg::Host(b)) => a == b, _ => false } }");
         self.line("}");
         self.blank();
         // `<param>.length`/`.count` (mapped to `.len()` by the general `map_field`

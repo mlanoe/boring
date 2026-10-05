@@ -649,12 +649,15 @@ impl HostEmitter {
         // only retains the `Arc`; mutable kernel fields still request their own
         // allocation explicitly.
         self.line("#[allow(dead_code)]");
-        self.line("enum BoringGpuArg<T> {");
+        self.line("pub enum BoringGpuArg<T> {");
         self.indent += 1;
         self.line("Resident(Arc<CudaSlice<T>>, usize),");
         self.line("Host(Vec<T>),");
         self.indent -= 1;
         self.line("}");
+        self.blank();
+        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T> { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringGpuArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringGpuArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } } }");
+        self.line("impl<T: PartialEq> PartialEq for BoringGpuArg<T> { fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringGpuArg::Resident(a, an), BoringGpuArg::Resident(b, bn)) => Arc::ptr_eq(a, b) && an == bn, (BoringGpuArg::Host(a), BoringGpuArg::Host(b)) => a == b, _ => false } } }");
         self.blank();
         self.line("#[allow(dead_code)]");
         self.line("impl<T: Clone> Clone for BoringGpuArg<T> {");
@@ -2818,7 +2821,7 @@ impl HostEmitter {
                 if let Some(ret_ty) = callee_name.and_then(|n| self.fn_returns_resident.get(n)).cloned() {
                     let elem = elem_rust_type(&ret_ty);
                     return format!(
-                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
+                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{elem}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
                     );
                 }
                 call

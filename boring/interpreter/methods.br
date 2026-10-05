@@ -200,6 +200,37 @@ def bool params_same_signature(FnDecl a, FnDecl b):
         i = i + 1
     true
 
+# Order a user method's call-site args into parameter order: a `Value.Labeled` arg is
+# matched to its parameter by name (so `acc.add_to(k= 2, n= m)` binds `n` and `k` correctly
+# even though the labels are out of declaration order), and the remaining unlabeled args fill
+# the still-unmatched params left to right — the same rule `call_fn` applies to free
+# functions. A param no arg supplies stays `Value.Nil`; trailing unsupplied params are dropped
+# so the caller's `i < args.length` bind loop keeps its old behavior for short calls.
+def [Value] order_method_args([Param] params, [Value] args):
+    mut {string=Value} labeled = {}
+    mut positional = [Value]{}
+    for val in args:
+        match val:
+            Value.Labeled(label, v): labeled.set(label, v)
+            _: positional.push(val)
+    mut ordered = [Value]{}
+    var pos_idx = 0
+    var last_filled = 0
+    var i = 0
+    while i < params.length:
+        let pname = params[i].name.clone()
+        var v = Value.Nil
+        if labeled.has(pname):
+            v = labeled[pname]
+            last_filled = i + 1
+        elif pos_idx < positional.length:
+            v = positional[pos_idx]
+            pos_idx = pos_idx + 1
+            last_filled = i + 1
+        ordered.push(v)
+        i += 1
+    ordered.slice(0, last_filled)
+
 def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
     if method_name == "clone" and args.length == 0:
         return recv
@@ -1470,10 +1501,11 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 env_define(interp, "self", self_val, false)
                 for field in inner.fields:
                     env_define(interp, field.0, field.1, true)
+                let bound_args = order_method_args(method_decl.params, args)
                 var i = 0
-                while i < method_decl.params.length and i < args.length:
+                while i < method_decl.params.length and i < bound_args.length:
                     let param = method_decl.params[i]
-                    env_define(interp, param.name, args[i], param.mutable)
+                    env_define(interp, param.name, bound_args[i], param.mutable)
                     i += 1
                 let mutating = method_decl.mutating
                 let method_params = method_decl.params
@@ -1513,10 +1545,11 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 let self_val = Value.EnumVariant(type_name, variant, fields)
                 let child_env = push_scope(interp)
                 env_define(interp, "self", self_val, false)
+                let bound_args = order_method_args(method_decl.params, args)
                 var i = 0
-                while i < method_decl.params.length and i < args.length:
+                while i < method_decl.params.length and i < bound_args.length:
                     let param = method_decl.params[i]
-                    env_define(interp, param.name, args[i], param.mutable)
+                    env_define(interp, param.name, bound_args[i], param.mutable)
                     i += 1
                 let method_params = method_decl.params
                 let result = exec_method_body(interp, method_decl)

@@ -22,6 +22,10 @@ use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKin
 mod device;
 mod host;
 
+pub(crate) fn uses_packed_buffer_elements(ty: &Type) -> bool {
+    device::packed_byte_kind_of_ty(ty).is_some()
+}
+
 // ─── Public output type ───────────────────────────────────────────────────────
 
 pub struct WgpuOutput {

@@ -102,21 +102,39 @@ impl Transpiler {
     pub(crate) fn resolve_expr_struct_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
-            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned().or_else(|| {
-                if let Some(inner) = self.var_types.get(v.as_str())
-                    .and_then(transparent_wrapper_inner_name)
-                {
-                    return Some(inner.to_string());
-                }
-                if self.known_local_vars.contains(v.as_str()) { return None; }
-                let struct_name = self.self_type.as_ref()?;
-                let (_, fty) = self.struct_fields.get(struct_name.as_str())?
-                    .iter().find(|(fname, _)| fname == v)?;
-                match fty {
-                    Type::Named(n) => Some(n.clone()),
-                    _ => None,
-                }
-            }),
+            ExprKind::Var(v) => self
+                .var_struct_types
+                .get(v.as_str())
+                .cloned()
+                .or_else(|| self.var_struct_type.get(v.as_str()).cloned())
+                .or_else(|| {
+                    if let Some(inner) = self
+                        .var_types
+                        .get(v.as_str())
+                        .and_then(transparent_wrapper_inner_name)
+                    {
+                        return Some(inner.to_string());
+                    }
+                    // A local whose declared type is a user struct/enum but that was never
+                    // given a `var_struct_types` entry — including a `T&`/`mut T&` param or
+                    // alias and `let p = params[i]` over `[Param]`. Peel `mut` and ownership
+                    // qualifiers before checking the pointee/element's real struct name.
+                    if let Some(n) = self.var_types.get(v.as_str()).and_then(receiver_type_name) {
+                        if self.struct_fields.contains_key(n.as_str()) {
+                            return Some(n);
+                        }
+                    }
+                    if self.known_local_vars.contains(v.as_str()) {
+                        return None;
+                    }
+                    let struct_name = self.self_type.as_ref()?;
+                    let (_, fty) = self
+                        .struct_fields
+                        .get(struct_name.as_str())?
+                        .iter()
+                        .find(|(fname, _)| fname == v)?;
+                    qualified_named_type_name(fty)
+                }),
             ExprKind::Field(inner, field) => {
                 let inner_ty = self.resolve_expr_struct_type(inner)?;
                 self.struct_fields.get(inner_ty.as_str())?
@@ -130,7 +148,9 @@ impl Transpiler {
             // DecoderBlock, one level further than the Field case above. Sees through
             // `mut` on the collection and on its element (`[mut T]`), ownership qualifiers
             // and trait-object spellings, and indexes a dict to its value type too.
-            ExprKind::Index(..) => self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name),
+            ExprKind::Index(..) | ExprKind::LabeledIndex(..) => {
+                self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name)
+            }
             // `make()` / `obj.make()` — the callee's declared return type.
             ExprKind::Call(..) | ExprKind::MethodCall(..) => {
                 self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name)
@@ -150,6 +170,7 @@ impl Transpiler {
             ExprKind::Var(v) if v == "self" => self.self_type.clone().map(Type::Named),
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))
+                .or_else(|| self.var_std_types.get(v.as_str()))
                 .cloned()
                 .or_else(|| self.var_struct_types.get(v.as_str()).cloned().map(Type::Named))
                 .or_else(|| self.bare_self_field_type(v)),
@@ -159,7 +180,9 @@ impl Transpiler {
                     .iter().find(|(fname, _)| fname == field)
                     .map(|(_, fty)| fty.clone())
             }
-            ExprKind::Index(inner, _) => indexed_elem_type(&self.resolve_expr_type(inner)?).cloned(),
+            ExprKind::Index(inner, _) | ExprKind::LabeledIndex(inner, _) => {
+                indexed_elem_type(&self.resolve_expr_type(inner)?).cloned()
+            }
             ExprKind::Call(callee, _) => {
                 let ExprKind::Var(name) = &callee.kind else { return None };
                 if self.known_local_vars.contains(name.as_str()) { return None; }
@@ -852,10 +875,10 @@ impl Transpiler {
         // Type-call instead — silently emitted `opt` by value, since this function had never
         // been wired to consult the table at all.
         let vals: Vec<String> = {
-            let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
             match self.external_fn_arg_borrows(type_name, &rust_method) {
-                Some(borrows) => Self::apply_arg_borrows(&borrows, raw),
-                None => raw,
+                Some(borrows) => Self::apply_arg_borrows(&borrows,
+                    args.iter().map(|a| self.emit_expr(&a.value)).collect()),
+                None => args.iter().map(|a| self.emit_external_fallback_arg(&a.value)).collect(),
             }
         };
         let call = format!("{}::{}({})", type_name, rust_method, vals.join(", "));
@@ -1183,7 +1206,7 @@ impl Transpiler {
             map_method(method, args.len(), self.want_raw_option_pop.get())
         };
         let mut args_s: Vec<String> = self.emit_user_method_args(Some(struct_name), method, args);
-        let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+        let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
         // The generated Rust always needs the `.value` hop to reach `BoringObserved<V>`'s
         // actual payload — `via_value` only changes the *Boring-source* spelling
         // (`c.inc()` vs `c.value.inc()`) and whether the caller notifies afterward, not
@@ -1331,7 +1354,7 @@ impl Transpiler {
                     map_method(method, args.len(), self.want_raw_option_pop.get())
                 };
                 let mut args_s: Vec<String> = self.emit_user_method_args(Some(struct_name.as_str()), method, args);
-                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                 let is_req = self.method_is_req_or_task(&struct_name, method);
                 // `'guard` (RwLock) gets no exception from the general rule —
                 // docs/book.md: mutation goes through the lock
@@ -1398,7 +1421,7 @@ impl Transpiler {
                             } else {
                                 args.iter().map(|a| self.emit_expr(&a.value)).collect()
                             };
-                            let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                            let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                             let struct_type_name = self.self_type.as_deref().unwrap_or("");
                             let req_key = format!("{}::{}", struct_type_name, method);
                             let is_req = self.struct_req_methods.contains(&req_key);
@@ -1538,7 +1561,7 @@ impl Transpiler {
                 }
                 // Use emit_expr_owned so string interpolations/trim results get Arc<str> wrapping.
                 let mut args_s: Vec<String> = self.emit_user_method_args(Some(struct_name.as_str()), method, args);
-                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                     // Single-thread: T'actor = Rc<RefCell<T>>.
                     // Use borrow() for req (read-only) methods, borrow_mut() for def methods.
@@ -1584,7 +1607,7 @@ impl Transpiler {
             if self.managed_mutex_vars.contains(v.as_str()) {
                 let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 let mut args_s: Vec<String> = self.emit_user_method_args(self.resolve_expr_struct_type(obj).as_deref(), method, args);
-                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                 let call = Self::with_hoisted_args(&hoisted, format!("{}.lock().unwrap().{}({})", v, rust_method, args_s.join(", ")));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 return Some(call);
@@ -1593,7 +1616,7 @@ impl Transpiler {
             if self.managed_refcell_vars.contains(v.as_str()) {
                 let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 let mut args_s: Vec<String> = self.emit_user_method_args(self.resolve_expr_struct_type(obj).as_deref(), method, args);
-                let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                 let call = Self::with_hoisted_args(&hoisted, format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", ")));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 return Some(call);
@@ -1629,7 +1652,7 @@ impl Transpiler {
                             } else {
                                 args.iter().map(|a| self.emit_expr(&a.value)).collect()
                             };
-                            let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                            let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                             let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                             let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", guard_expr, rust_method, args_s.join(", ")));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
@@ -1706,7 +1729,7 @@ impl Transpiler {
                             map_method(method, args.len(), self.want_raw_option_pop.get())
                         };
                         let mut args_s: Vec<String> = self.emit_user_method_args(field_struct_name.as_deref(), method, args);
-                        let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+                        let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                         // Build the field path directly (`v.field_name`) rather than through
                         // `self.emit_expr(obj)` — the generic field-read path adds an
                         // `Arc::clone`/`Rc::clone` to any Arc-qualified field so it's safe to
@@ -1975,6 +1998,23 @@ impl Transpiler {
         None
     }
 
+    /// Emit an argument for an external call whose Rust signature is unknown to Boring.
+    /// Literals already are `&str`; non-literal Boring strings need dereferencing from
+    /// their `Arc<str>`/`Rc<str>` representation. Explicit `[external_fns]` metadata
+    /// bypasses this fallback, which preserves owned arguments where an API requires one.
+    fn emit_external_fallback_arg(&self, arg: &Expr) -> String {
+        let raw = self.emit_expr(arg);
+        let is_string = self.is_string_expr(arg)
+            || self.expr_is_string_receiver(arg)
+            || self.resolve_expr_type(arg)
+                .is_some_and(|ty| matches!(ty.without_mut(), Type::Str));
+        if is_string && !matches!(&arg.kind, ExprKind::Str(_)) {
+            format!("(&*{})", raw)
+        } else {
+            raw
+        }
+    }
+
     /// Whether `obj` is confirmed to be a string receiver: in `string_vars`/`string_arc_vars`
     /// AND not also tracked as a collection (which would be a false positive), cross-checked
     /// against `var_types` — or a string/interpolation literal directly.
@@ -2016,6 +2056,27 @@ impl Transpiler {
                     "replace",
                 ];
                 STRING_RETURNING_METHODS.contains(&m.as_str()) && self.expr_is_string_receiver(inner)
+            }
+            // Indexing a string collection yields a string value too.  The declared-type
+            // route covers ordinary `[string]` arrays/dicts; the method-call route is
+            // needed for builtin `split`/`chars`, whose return types are synthesized by
+            // this emitter rather than recorded in `struct_method_return_types`.
+            //
+            // Without this, `s.split("\n")[0].split(" ")` missed string dispatch and
+            // reached the generic fallback.  Its rendered receiver contains `Arc::<str>`
+            // (or `Rc::<str>`), which the fallback mistook for a path and joined to the
+            // method with `::`, producing the invalid `]::split(`.
+            ExprKind::Index(inner, _) => {
+                let declared_string = self.resolve_expr_type(obj).is_some_and(|ty| {
+                    matches!(ty.without_mut(), Type::Str)
+                        || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+                });
+                let builtin_string_collection = matches!(&inner.kind,
+                    ExprKind::MethodCall(recv, m, _)
+                        if matches!(m.as_str(), "split" | "chars")
+                            && self.expr_is_string_receiver(recv)
+                );
+                declared_string || builtin_string_collection
             }
             _ => false,
         }
@@ -2340,7 +2401,7 @@ impl Transpiler {
             if let Some(first_arg) = args.first() {
                 if let Some(closure_s) = self.emit_owned_closure(first_arg, 0) {
                     let obj_s = self.emit_expr(obj);
-                    return Some(format!("{}.iter().cloned().filter({}).count() as i64", obj_s, closure_s));
+                    return Some(format!("({}.iter().cloned().filter({}).count() as i64)", obj_s, closure_s));
                 }
             }
             // No closure: fallthrough to map_method which maps "count" → "len" as i64.
@@ -3321,10 +3382,10 @@ impl Transpiler {
             };
             let rust_method_name = camel_to_snake(method);
             let vals: Vec<String> = {
-                let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
                 match self.external_fn_arg_borrows(&obj_qualified, &rust_method_name) {
-                    Some(borrows) => Self::apply_arg_borrows(&borrows, raw),
-                    None => raw,
+                    Some(borrows) => Self::apply_arg_borrows(&borrows,
+                        args.iter().map(|a| self.emit_expr(&a.value)).collect()),
+                    None => args.iter().map(|a| self.emit_external_fallback_arg(&a.value)).collect(),
                 }
             };
             let call = format!("{}::{}({})", obj_qualified, rust_method_name, vals.join(", "));
@@ -3690,7 +3751,7 @@ impl Transpiler {
                 None => args.iter().map(|a| self.emit_expr_owned(&a.value)).collect(),
             }
         } else {
-            args.iter().map(|a| self.emit_expr(&a.value)).collect()
+            args.iter().map(|a| self.emit_external_fallback_arg(&a.value)).collect()
         };
         // A trait-typed receiver (`Box<dyn Trait>`, a bare-trait param/local/field) has no struct
         // decl, so the arm above found no param flags for it: lend each `mut` parameter of the *trait's own*
@@ -3795,7 +3856,7 @@ impl Transpiler {
             args_s
         };
         let mut args_s = args_s;
-        let hoisted = Self::hoist_lent_conflicts(&mut args_s);
+        let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
         let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", obj_s, rust_method, args_s.join(", ")));
         let call = if let Some(wrap) = extra_wrap {
             format!("{}{}", call, wrap)
@@ -3973,6 +4034,8 @@ impl Transpiler {
                         } else {
                             format!("BoringGpuArg::Host({}.clone())", vname)
                         }
+                    } else if self.expr_is_gpu_resident_field(&a.value) {
+                        format!("({}).clone()", self.emit_expr(&a.value))
                     } else {
                         // Any other expression shape (most commonly a struct field —
                         // `linear_gpu(x, self.mlp_fc_w, ...)`) needs the same clone the
@@ -4281,7 +4344,11 @@ impl Transpiler {
                                 emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                             }
                         }
-                        _ => format!("{}{}", ref_prefix, emitted),
+                        // A `mut` borrow must reach the real storage, so it is never cloned.
+                        _ => match (!mutable).then(|| self.clone_field_out_of_guard(&a.value, &emitted)).flatten() {
+                            Some(released) => released,
+                            None => format!("{}{}", ref_prefix, emitted),
+                        },
                     }
                 // T'static param: the argument must already be a 'static-typed reference —
                 // either another 'static-typed binding/param (pass through unchanged, same
@@ -4395,6 +4462,7 @@ impl Transpiler {
     /// the call uses the temporaries. Returns the `let` prelude (empty when no argument conflicts —
     /// the common case, which leaves the emitted call untouched); `args` is rewritten in place.
     pub(crate) fn hoist_lent_conflicts(args: &mut [String]) -> String {
+        Self::release_guard_temps(args);
         let lent: Vec<String> = args.iter()
             .filter_map(|a| a.strip_prefix("&mut ").map(|p| p.trim_start_matches('*').trim().to_string()))
             .collect();
@@ -4402,15 +4470,135 @@ impl Transpiler {
         let conflicts = args.iter().any(|a| !a.starts_with("&mut ")
             && lent.iter().any(|place| Self::mentions_place(a, place)));
         if !conflicts { return String::new(); }
+        Self::hoist_args(args)
+    }
+
+    /// `hoist_lent_conflicts` for a method call whose *receiver* is locked (`x.lock().unwrap().m(..)`,
+    /// `x.borrow_mut().m(..)`, `self.f.lock()..m(..)`): the receiver's guard is taken before the
+    /// arguments are evaluated and lives through the whole call, so an argument that itself locks
+    /// the same value (`x.bump(x.hits)`) self-deadlocks even once `release_guard_temps` has scoped
+    /// its own guard. When any argument takes a lock, every hoistable argument is therefore
+    /// evaluated into a `let __argN` temporary, left to right, *before* the receiver is locked.
+    pub(crate) fn hoist_lent_conflicts_locked(args: &mut [String]) -> String {
+        Self::release_guard_temps(args);
+        if args.iter().any(|a| Self::is_guard_released_block(a)) {
+            return Self::hoist_args(args);
+        }
+        Self::hoist_lent_conflicts(args)
+    }
+
+    /// Evaluate every by-value argument into a `let __argN` temporary (left to right) and replace
+    /// it by the temporary; `&mut ..` lends and closures stay inline. Returns the `let` prelude.
+    fn hoist_args(args: &mut [String]) -> String {
         let mut prelude = String::new();
         for (i, a) in args.iter_mut().enumerate() {
             let is_closure = a.starts_with('|') || a.starts_with("move |");
-            if a.starts_with("&mut ") || is_closure { continue; }
+            if a.starts_with("&mut ") || is_closure || Self::is_ref_into_guard(a) { continue; }
             let tmp = format!("__arg{}", i);
             prelude.push_str(&format!("let {} = {}; ", tmp, a));
             *a = tmp;
         }
         prelude
+    }
+
+    /// An argument `release_guard_temps` wrapped: `{ let __a = ..; __a }` / `&{ let __a = ..; __a }`.
+    fn is_guard_released_block(a: &str) -> bool {
+        a.trim_start_matches('&').starts_with("{ let __a = ")
+    }
+
+    /// `&x.lock().unwrap().field` — a borrow *into* a guard temporary. Hoisting it into a `let`
+    /// would drop the guard while the reference is still used (E0716), so it stays inline.
+    fn is_ref_into_guard(a: &str) -> bool {
+        a.starts_with('&') && !Self::is_guard_released_block(a) && Self::LOCK_TOKENS.iter().any(|t| a.contains(t))
+    }
+
+    /// Emitted-Rust spellings of "takes a lock / `RefCell` borrow" — a guard temporary follows.
+    const LOCK_TOKENS: [&'static str; 5] = [".lock()", ".read()", ".write()", ".borrow()", ".borrow_mut()"];
+
+    /// An argument that reads a field of an `'actor` / `'guard` / `'observed` value is emitted as
+    /// `x.lock().unwrap().field` (or `Arc::clone(&x.lock().unwrap().field)`). The `MutexGuard` is a
+    /// temporary of the *enclosing call statement*, so it stays alive until the whole call returns —
+    /// and a callee that locks the same value again (`helper(x, 1, x.field)` where `helper` takes
+    /// `x`) self-deadlocks on the non-reentrant `std::sync::Mutex`: no panic, 0% CPU, forever
+    /// (`RefCell::borrow_mut` panics instead in single-threaded builds). Wrap such an argument in
+    /// `{ let __a = <expr>; __a }`: the guard is a temporary of the inner `let`, dropped at its `;`,
+    /// before the call is made — evaluation order is untouched, no hoisting needed.
+    ///
+    /// Only owned-valued shapes are wrapped: a `&Arc::clone(..)` / `&Rc::clone(..)` keeps its
+    /// leading `&` outside the block, a closure, a `&mut ..` lend and any other `&..` (a reference
+    /// into the guard, which a block would leave dangling) are left alone.
+    pub(crate) fn release_guard_temps(args: &mut [String]) {
+        for a in args.iter_mut() {
+            if a.starts_with('|') || a.starts_with("move |") || a.starts_with("&mut ") { continue; }
+            let (prefix, core) = match a.strip_prefix('&') {
+                Some(rest) if rest.starts_with("Arc::clone(") || rest.starts_with("Rc::clone(") => ("&", rest),
+                Some(_) => continue,
+                None => ("", a.as_str()),
+            };
+            if core.starts_with('{') || !Self::LOCK_TOKENS.iter().any(|t| core.contains(t)) { continue; }
+            *a = format!("{}{{ let __a = {}; __a }}", prefix, core);
+        }
+    }
+
+    /// Whether a value of Boring type `ty` is *positively known* to implement Rust `Clone` in the
+    /// generated code. Stricter than `field_read_needs_clone`, which only asks "is a by-value read
+    /// of this a non-`Copy` value type" and so says yes to every `[T]` whatever `T` is: a
+    /// `[Box<dyn Trait>]` field is not `Clone`, and `.clone()` on it would not compile. Anything
+    /// not provable — a trait object, closure, channel, type parameter, external/unknown type,
+    /// a struct that does not derive `Clone` — answers `false`.
+    pub(crate) fn type_is_known_clone(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Mut(inner) | Type::Optional(inner) | Type::Array(inner) | Type::ArrayN(inner, _)
+                | Type::Set(inner) => self.type_is_known_clone(inner),
+            Type::Dict(k, v) => self.type_is_known_clone(k) && self.type_is_known_clone(v),
+            Type::Tuple(elems) => elems.iter().all(|e| self.type_is_known_clone(e)),
+            // `Rc<T>` / `Arc<T>` (and the lock wrappers around them) are `Clone` whatever `T` is.
+            Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask
+                | OwnerQual::Guard | OwnerQual::GuardTask) => true,
+            // `Box<T>` is `Clone` exactly when `T` is.
+            Type::Qualified(inner, OwnerQual::Owned | OwnerQual::Inline) => self.type_is_known_clone(inner),
+            Type::Named(n) => {
+                if self.trait_method_names.contains_key(n.as_str()) { return false; }
+                if Self::is_copy_type(ty) || n == "string" { return true; }
+                self.struct_derives_clone.contains(n.as_str()) || self.all_enum_types.contains(n.as_str())
+            }
+            Type::Str => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
+            _ => false,
+        }
+    }
+
+    /// Declared type of the field read `arg` (`x.field`). `resolve_expr_type` alone misses a
+    /// receiver whose own type is ownership-qualified (an explicit `Interp'actor interp` parameter
+    /// has no `var_struct_types` entry), so fall back to peeling the receiver's qualifiers.
+    pub(crate) fn guarded_field_type(&self, arg: &Expr) -> Option<Type> {
+        if let Some(t) = self.resolve_expr_type(arg) { return Some(t); }
+        let ExprKind::Field(obj, field) = &arg.kind else { return None };
+        let owner = qualified_named_type_name(&self.resolve_expr_type(obj)?)?;
+        self.struct_fields.get(owner.as_str())?
+            .iter().find(|(fname, _)| fname == field)
+            .map(|(_, fty)| fty.clone())
+    }
+
+    /// A `[T]` / `{K=V}` / `{T}` field of an `'actor` / `'guard` value passed to a by-reference
+    /// (`T&`) parameter is emitted `&x.lock().unwrap().field`: a borrow *into* the lock guard,
+    /// which — being a temporary of the enclosing call statement — lives for the whole call, so a
+    /// callee that locks `x` again self-deadlocks (`release_guard_temps` cannot scope it: moving
+    /// out of a guard does not compile). When the field's type is positively known to be `Clone`
+    /// (`type_is_known_clone`) the value is cloned out of the guard inside its own block
+    /// instead — `&{ let __a = x.lock().unwrap().field.clone(); __a }` — so the guard is dropped
+    /// at the inner `;`, before the call. This is the same clone a by-value read of the field
+    /// makes (Boring value semantics), only taken one step earlier. `None` — keep the borrow —
+    /// when the argument takes no lock, is not a field read, or its type is not provably `Clone`.
+    pub(crate) fn clone_field_out_of_guard(&self, arg: &Expr, emitted: &str) -> Option<String> {
+        if !matches!(arg.kind, ExprKind::Field(..)) || emitted.starts_with('&') { return None; }
+        if !Self::LOCK_TOKENS.iter().any(|t| emitted.contains(t)) { return None; }
+        let ty = self.guarded_field_type(arg)?;
+        if !self.type_is_known_clone(&ty) { return None; }
+        let owned = emitted.strip_suffix(".clone()").unwrap_or(emitted);
+        Some(format!("&{{ let __a = {}.clone(); __a }}", owned))
     }
 
     /// `call` preceded by the `hoist_lent_conflicts` prelude, as a single expression.

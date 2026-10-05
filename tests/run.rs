@@ -423,6 +423,7 @@ interp_test!(struct_custom_remove_call_site);
 // values stay pinned down too (see tests/transpile.rs's registration for the
 // real regression coverage).
 interp_test!(dict_index_optional_return);
+interp_test!(dict_index_nil_context);
 // Dict `[key]` indexing (read + write) with a string key, as a function
 // parameter and as an implicit-self struct field. The interpreter (this
 // test) never caught the underlying bugs -- both were only visible in
@@ -519,6 +520,8 @@ interp_test!(self_field_loop_match_borrow);
 // matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
 interp_test!(qualifier_group_param);
 interp_test!(cast_bare_field_index);
+interp_test!(explicit_borrow_field_type_cast);
+interp_test!(cast_lhs_of_lt);
 interp_test!(if_else_cast_numeric);
 
 // Regression: `boring run` (the interpreter) had the analogous bug to the
@@ -554,8 +557,14 @@ interp_test!(mut_collection_by_value_reuse);
 // Same case as the transpile_test of the same name (last-use move analysis) -- identical output.
 interp_test!(last_use_move);
 interp_test!(field_by_value_reuse);
+interp_test!(by_value_arg_then_reuse);
+interp_test!(actor_call_result_ctor_arg);
+interp_test!(actor_field_method_via_call_local);
 interp_test!(lend_and_read_same_local);
 interp_test!(lend_and_read_same_local_lock_wrapper);
+// Interpreter side of tests/actor_field_arg_no_deadlock.rs (the compiled binaries run under a
+// timeout there, since a regression is a hang) -- identical output.
+interp_test!(actor_field_arg_no_deadlock);
 
 // Same for a `mut` user-struct parameter (free function and struct method): the callee's field
 // writes are visible to the caller. Same case as the transpile_test of the same name.
@@ -570,6 +579,8 @@ interp_test!(mut_param_type_method);
 // A struct method's `var` out-param rebinds the caller's variable under `boring run` too (the
 // interpreter used to propagate only a free function's). Same case as the transpile_test.
 interp_test!(method_var_param);
+interp_test!(var_param_labeled_reorder);
+interp_test!(var_param_labeled_reorder_method);
 
 // A `mut` argument lent to a method of a DIFFERENT receiver (disjoint fields / distinct locals) is
 // valid Rust and stays accepted; the same case is compile+run in tests/transpile.rs. Its rejected

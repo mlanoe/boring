@@ -1,0 +1,53 @@
+# A call whose declared return type is already `T'actor` / `T'guard`, passed directly as the
+# constructor argument for a field of that same qualified type, yields a ready-made handle:
+# the constructor must take it as-is, not wrap it in a second Arc<Mutex<..>> / Arc<RwLock<..>>
+# (rustc E0308). Binding it to a local first, then passing the local, already worked.
+
+struct Env:
+    var int depth = 0
+
+    def bump():
+        depth += 1
+
+    req int get():
+        depth
+
+struct Interp:
+    var mut Env'actor current_env
+    var Env'guard audit_env
+    var mut Env'actor bound_env
+    var int hits
+
+    def bump_envs():
+        current_env.bump()
+        bound_env.bump()
+
+    req int current_depth():
+        current_env.get()
+
+    req int audit_depth():
+        audit_env.get()
+
+    req int bound_depth():
+        bound_env.get()
+
+def Env'actor new_env(int d):
+    let e'actor = Env(depth = d)
+    e
+
+def Env'guard new_audit(int d):
+    let e'guard = Env(depth = d)
+    e
+
+def Interp'actor new_interp():
+    let bound = new_env(7)
+    let interp'actor = Interp(current_env = new_env(3), audit_env = new_audit(5), bound_env = bound, hits = 0)
+    interp
+
+def main():
+    mut interp = new_interp()
+    interp.bump_envs()
+    print interp.hits
+    print interp.current_depth()
+    print interp.audit_depth()
+    print interp.bound_depth()
