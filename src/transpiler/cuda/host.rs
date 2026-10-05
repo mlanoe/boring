@@ -518,6 +518,7 @@ impl HostEmitter {
         // confirmed via `cargo check`.
         self.line("use cudarc::driver::{CudaContext, CudaModule, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};");
         self.line("use cudarc::nvrtc::Ptx;");
+        self.line("use cudarc::cublas::{CudaBlas, Gemm, GemmConfig};");
         self.line("use std::sync::{Arc, OnceLock};");
         self.blank();
         self.line("static BORING_PTX: &str = include_str!(env!(\"BORING_PTX_PATH\"));");
@@ -1375,7 +1376,7 @@ impl HostEmitter {
         }
 
         // __boring_launch.
-        self.emit_boring_launch(name, &decl.fields);
+        self.emit_boring_launch(decl);
 
         self.indent -= 1;
         self.line("}");
@@ -1740,7 +1741,9 @@ impl HostEmitter {
         }
     }
 
-    fn emit_boring_launch(&mut self, name: &str, fields: &[KernelFieldDecl]) {
+    fn emit_boring_launch(&mut self, decl: &KernelDecl) {
+        let name = &decl.name;
+        let fields = &decl.fields;
         // Auto grid sizing: when the first field is a device array ('unified/'global/
         // 'actor'global), `grid_dim` becomes optional and is derived from its length
         // (1D) or, for a fixed-shape LabeledArray field, from its axis sizes (2D/3D).
@@ -1793,6 +1796,41 @@ impl HostEmitter {
             );
             self.indent += 1;
         }
+        if name.starts_with("BoringTensorHostNative") {
+            let entry = decl.methods.iter().find(|method| method.name.is_empty())
+                .expect("native tensor kernel requires an entry point");
+            let call = entry.body.iter().find_map(|stmt| match stmt {
+                Stmt::Expr(expr) if crate::checker::tensor::is_tensor_call(expr) => Some(expr),
+                _ => None,
+            }).expect("native tensor kernel requires a tensor operation");
+            let op = crate::checker::tensor::resolve(call, decl)
+                .expect("native tensor kernel must already be validated");
+            let transa = if op.transpose_b {
+                "cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T"
+            } else {
+                "cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N"
+            };
+            let lda = if op.transpose_b { op.k } else { op.n };
+            let beta = if op.accumulate { "1.0f32" } else { "0.0f32" };
+            self.line("let stream = boring_new_stream_with_priority(&self.__ctx, priority)?;");
+            self.line("for dep in after { stream.join(dep)?; }");
+            self.line("let blas = CudaBlas::new(stream.clone())?;");
+            self.line("unsafe { cudarc::cublas::sys::cublasSetMathMode(*blas.handle(), cudarc::cublas::sys::cublasMath_t::CUBLAS_PEDANTIC_MATH).result()?; }");
+            self.line("let config = GemmConfig {");
+            self.indent += 1;
+            self.line(&format!("transa: {transa},"));
+            self.line("transb: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,");
+            self.line(&format!("m: {}i32, n: {}i32, k: {}i32,", op.n, op.m, op.k));
+            self.line(&format!("alpha: 1.0f32, lda: {}i32, ldb: {}i32, beta: {beta}, ldc: {}i32,", lda, op.k, op.n));
+            self.indent -= 1;
+            self.line("};");
+            self.line("unsafe { blas.gemm(config, &*self.b, &*self.a, &mut self.c) }?;");
+            self.line("Ok(KernelHandle { inner: self, stream })");
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+
         // Compute smem_bytes from dynamic 'shared fields (extern __shared__ T arr[]).
         // Statically-sized 'shared ArrayN fields embed their size in the kernel declaration
         // and do not contribute to smem_bytes.

@@ -107,6 +107,8 @@ pub fn transpile_cuda(program: &Program, stem: &str, version: &str) -> CudaOutpu
 pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> CudaOutput {
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 32;
+    tensor_config.native_fixed_matrices = !matches!(tensor_config.matrix_algorithm.as_deref(), Some("scalar"));
+    tensor_config.portable_tiled_dynamic_q8_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let program = &tensor_host.program;
     // Collect all kernel names.
@@ -276,7 +278,7 @@ name = "{stem}"
 path = "src/main.rs"
 
 [dependencies]
-cudarc = {{ version = "0.19", features = ["driver", "nvrtc", "cuda-version-from-build-system"] }}
+cudarc = {{ version = "0.19", features = ["driver", "nvrtc", "cublas", "cuda-version-from-build-system"] }}
 {extra_deps}"#,
         stem = stem,
         version = version,

@@ -55,6 +55,34 @@ fn wgpu_codegen(test_name: &str, src: &str) -> (String, String) {
     (wgsl, rs)
 }
 
+#[test]
+fn mutable_static_used_by_host_function_is_emitted_once() {
+    let (_, host) = wgpu_codegen("mutable_static_once", GPU_STATIC_VAR_REPRO);
+    assert_eq!(host.matches("static FLAG:").count(), 1, "{host}");
+    assert!(!host.contains("const FLAG:"), "{host}");
+}
+
+const GPU_STATIC_VAR_REPRO: &str = r#"
+kernel Touch:
+    mut [float32]'unified out
+    let int n
+    init(int nn):
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        out[gpu.thread.x] = 1.0
+
+static var bool flag = false
+def set_flag(bool v):
+    flag = v
+
+pub req [float32]'gpu'unified run(int n) throws:
+    mut k = Touch(n)
+    kernel:
+        k(block = 1, grid = n)
+    k.out
+"#;
+
 /// Like `run_wgpu`, but for a source expected to fail `boring build --target wgpu`
 /// itself (before any Rust is even written out) -- returns stderr instead of the
 /// generated files. Mirrors `gpu_kernel_std_target.rs`'s identical "expect a clean

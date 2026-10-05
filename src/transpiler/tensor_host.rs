@@ -13,6 +13,9 @@ pub(crate) struct TensorLinearConfig {
     pub prefill_formats: HashMap<String, String>,
     pub target_warp_width: usize,
     pub native_fixed_matrices: bool,
+    pub native_dynamic_float_linear: bool,
+    pub native_dynamic_q8_linear: bool,
+    pub portable_tiled_dynamic_q8_linear: bool,
 }
 
 impl Default for TensorLinearConfig {
@@ -25,6 +28,9 @@ impl Default for TensorLinearConfig {
             prefill_formats: HashMap::new(),
             target_warp_width: 32,
             native_fixed_matrices: false,
+            native_dynamic_float_linear: false,
+            native_dynamic_q8_linear: false,
+            portable_tiled_dynamic_q8_linear: false,
         }
     }
 }
@@ -34,6 +40,14 @@ fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, us
         (8, 8, 32)
     } else {
         (spec.m.clamp(1, 16), spec.n.clamp(1, 16), 256)
+    }
+}
+
+fn fixed_kernel_prefix(spec: &Spec, config: &TensorLinearConfig) -> &'static str {
+    if config.native_fixed_matrices && spec.m % 8 == 0 && spec.n % 8 == 0 && spec.k % 8 == 0 {
+        "BoringTensorHostNative"
+    } else {
+        "BoringTensorHost"
     }
 }
 
@@ -152,8 +166,9 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
             items.push(item.clone());
             continue;
         };
+        let prefix = fixed_kernel_prefix(&spec, tensor_config);
         let (kernel_name, instance) = loop {
-            let kernel_name = format!("BoringTensorHost{ordinal}");
+            let kernel_name = format!("{prefix}{ordinal}");
             let instance = format!("__boring_tensor_host_{ordinal}");
             ordinal += 1;
             if !used_kernel_names.contains(&kernel_name) && !used_binding_names.contains(&instance) {
@@ -233,7 +248,17 @@ fn lower_function_body(
                 index += 1;
                 continue;
             };
-            let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names);
+            let native_q8 = tensor_config.native_dynamic_q8_linear
+                && dynamic.format == Some("q8_0")
+                && matches!(tensor_config.algorithm(Some("q8_0"), false), "auto" | "native");
+            let prefix = if tensor_config.native_dynamic_float_linear && dynamic.format.is_none() {
+                "BoringTensorDynamicFloatNative"
+            } else if native_q8 {
+                "BoringTensorDynamicQ8Native"
+            } else {
+                "BoringTensorHost"
+            };
+            let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names, prefix);
             match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, tensor_config) {
                 Ok(kernel) => kernels.push(Item::Kernel(kernel)),
                 Err(message) => {
@@ -286,7 +311,7 @@ fn lower_function_body(
             continue;
         };
         let (kernel_name, instance) = allocate_names(
-            ordinal, used_kernel_names, used_binding_names,
+            ordinal, used_kernel_names, used_binding_names, fixed_kernel_prefix(&spec, tensor_config),
         );
         match parse_kernel(&kernel_name, &spec, method, tensor_config) {
             Ok(kernel) => kernels.push(Item::Kernel(kernel)),
@@ -491,9 +516,10 @@ fn allocate_names(
     ordinal: &mut usize,
     used_kernel_names: &mut HashSet<String>,
     used_binding_names: &mut HashSet<String>,
+    kernel_prefix: &str,
 ) -> (String, String) {
     loop {
-        let kernel_name = format!("BoringTensorHost{}", *ordinal);
+        let kernel_name = format!("{}{}", kernel_prefix, *ordinal);
         let instance = format!("__boring_tensor_host_{}", *ordinal);
         *ordinal += 1;
         if !used_kernel_names.contains(&kernel_name) && !used_binding_names.contains(&instance) {
@@ -606,6 +632,10 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     let q5_decode_algorithm = tensor_config.algorithm(Some("q5_0"), true);
     let q4_decode_algorithm = tensor_config.algorithm(Some("q4_0"), true);
     let iq4_decode_algorithm = tensor_config.algorithm(Some("iq4_nl"), true);
+    let portable_tiled_q8 = tensor_config.portable_tiled_dynamic_q8_linear
+        && quantized_format == Some("q8_0")
+        && matches!(tensor_config.algorithm(Some("q8_0"), false), "auto" | "native")
+        && matches!(q8_decode_algorithm, "auto" | "warp-broadcast");
     let q8_warp_decode = quantized_format == Some("q8_0") && matches!(q8_decode_algorithm, "auto" | "warp" | "warp-broadcast");
     let q8_scale_lane = if tensor_config.target_warp_width == 32 {
         "0"
@@ -651,7 +681,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     } else {
         None
     };
-    let body = if let Some((broadcast_block_bytes, broadcast_value_decode)) = scale_broadcast {
+    let mut body = if let Some((broadcast_block_bytes, broadcast_value_decode)) = scale_broadcast {
         format!(
             "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpLen = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpLen\n            let warpsPerBlock = gpu.blockDim.x / warpLen\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * {broadcast_block_bytes}\n                    var float32 scale = 0.0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                    scale = gpu.warp.shuffle(scale, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += gpu.warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
@@ -685,8 +715,23 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
             product = product,
         )
     };
+    if portable_tiled_q8 {
+        let scalar_prefill = format!(
+            "        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            initial = initial,
+            product = nested_scalar_product,
+        );
+        let tiled_prefill = format!(
+            "        else:\n            let tx = gpu.thread.x % 16\n            let ty = gpu.thread.x / 16\n            let row = gpu.block.y * 16 + ty\n            let col = gpu.block.x * 16 + tx\n            var float32 sum = 0.0\n            let tileCount = (k + 15) / 16\n            for tile in 0..<tileCount:\n                let aCol = tile * 16 + tx\n                let bRow = tile * 16 + ty\n                if row < m and aCol < k:\n                    aTile[width = tx, height = ty] = a[row * k + aCol]\n                else:\n                    aTile[width = tx, height = ty] = 0.0\n                if col < n and bRow < k:\n                    let flat = col * k + bRow\n                    let blockByte = (flat / 32) * 34\n                    let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                    let sign = (scaleBits >> 15) & 1\n                    let exponent = (scaleBits >> 10) & 0x1F\n                    let fraction = scaleBits & 0x3FF\n                    var float32 scale = 0.0\n                    if exponent == 0:\n                        scale = (fraction as float32) / 16777216.0\n                    elif exponent == 0x1F:\n                        scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                    else:\n                        scale = 1.0 + (fraction as float32) / 1024.0\n                        var int scaleExponent = exponent - 15\n                        while scaleExponent > 0:\n                            scale *= 2.0\n                            scaleExponent -= 1\n                        while scaleExponent < 0:\n                            scale /= 2.0\n                            scaleExponent += 1\n                    if sign == 1:\n                        scale = 0.0 - scale\n                    let raw = int(b[blockByte + 2 + flat % 32])\n                    let quantized = if raw > 127: raw - 256 else: raw\n                    bTile[width = tx, height = ty] = (quantized as float32) * scale\n                else:\n                    bTile[width = tx, height = ty] = 0.0\n                sync\n                for inner in 0..<16:\n                    sum += aTile[width = inner, height = ty] * bTile[width = tx, height = inner]\n                sync\n            if row < m and col < n:\n                c[row * n + col] = sum + {bias}\n",
+            bias = if has_bias { "bias[col]" } else { "0.0" },
+        );
+        body = body.replacen(&scalar_prefill, &tiled_prefill, 1);
+    }
+    let tile_fields = if portable_tiled_q8 {
+        "    mut [float32, width = 16, height = 16]'actor aTile\n    mut [float32, width = 16, height = 16]'actor bTile\n"
+    } else { "" };
     let source = format!(
-        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
+        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n{tile_fields}    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
         qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]),
     );
     let parsed = crate::parser::parse(
@@ -761,8 +806,25 @@ fn parse_dynamic_replacement_stmts(
     } else {
         format!("({m} * {n} + 255) / 256", m = call.m, n = call.n)
     };
+    let native_float = tensor_config.native_dynamic_float_linear && call.format.is_none();
+    let native_q8 = tensor_config.native_dynamic_q8_linear
+        && call.format == Some("q8_0")
+        && matches!(tensor_config.algorithm(Some("q8_0"), false), "auto" | "native");
+    let portable_tiled_q8 = tensor_config.portable_tiled_dynamic_q8_linear
+        && call.format == Some("q8_0")
+        && matches!(tensor_config.algorithm(Some("q8_0"), false), "auto" | "native")
+        && matches!(decode_algorithm, "auto" | "warp-broadcast");
+    let launch = if native_float {
+        format!("    if {m} % 8 == 0 and {n} % 8 == 0 and {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = ({n} / 8, {m} / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
+    } else if native_q8 {
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 32, grid = (({n} + 7) / 8, ({m} + 7) / 8))\n", m = call.m, n = call.n)
+    } else if portable_tiled_q8 {
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 15) / 16))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
+    } else {
+        format!("    kernel:\n        {instance}(block = 256, grid = {grid})\n")
+    };
     let source = format!(
-        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{dispatch}    kernel:\n        {instance}(block = 256, grid = {grid})\n    {c} = {instance}.c\n",
+        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{dispatch}{launch}    {c} = {instance}.c\n",
         a = call.operands[0], b = call.operands[1], c = call.operands[2],
         m = call.m, n = call.n, k = call.k,
     );
@@ -939,5 +1001,24 @@ mod tests {
         assert_eq!(fixed_geometry(&unaligned, &config), (16, 16, 256));
         config.native_fixed_matrices = false;
         assert_eq!(fixed_geometry(&spec, &config), (16, 16, 256));
+    }
+
+    #[test]
+    fn portable_q8_prefill_adds_shared_tiles_while_scalar_stays_reference() {
+        let quals = [GpuQual::Global, GpuQual::Global, GpuQual::Unified];
+        let mut tiled_config = TensorLinearConfig::default();
+        tiled_config.portable_tiled_dynamic_q8_linear = true;
+        let tiled = parse_dynamic_linear_kernel(
+            "TiledQ8", quals.clone(), true, Some("q8_0"), &tiled_config,
+        ).unwrap();
+        assert!(tiled.fields.iter().any(|field| field.name == "aTile"));
+        assert!(tiled.fields.iter().any(|field| field.name == "bTile"));
+
+        let mut scalar_config = tiled_config;
+        scalar_config.prefill_algorithm = Some("scalar".into());
+        let scalar = parse_dynamic_linear_kernel(
+            "ScalarQ8", quals, true, Some("q8_0"), &scalar_config,
+        ).unwrap();
+        assert!(!scalar.fields.iter().any(|field| field.name == "aTile" || field.name == "bTile"));
     }
 }

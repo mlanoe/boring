@@ -65,6 +65,84 @@ fn run_cuda(test_name: &str, src: &str) -> (String, String, String, String) {
     )
 }
 
+#[test]
+fn fixed_float32_matmul_uses_native_cublas_sgemm() {
+    let (cu, host) = cuda_codegen("native_tensor_matmul", r#"
+let [float32, k = 64, m = 64]'gpu'global a = [1.0 as float32 for ..<4096]
+let [float32, n = 64, k = 64]'gpu'global b = [1.0 as float32 for ..<4096]
+mut [float32, n = 64, m = 64]'gpu'unified c = [0.0 as float32 for ..<4096]
+gpu.tensor.matmul(a, b, c)
+"#);
+    assert!(cu.contains("BoringTensorHostNative0_kernel"), "{cu}");
+    assert!(host.contains("CudaBlas::new"), "{host}");
+    assert!(host.contains("CUBLAS_PEDANTIC_MATH"), "{host}");
+    assert!(host.contains("blas.gemm(config, &*self.b, &*self.a, &mut self.c)"), "{host}");
+    assert!(host.contains("m: 64i32, n: 64i32, k: 64i32"), "{host}");
+    assert!(!host.contains("load_function(\"BoringTensorHostNative0_kernel\")"), "{host}");
+}
+
+#[test]
+fn mutable_static_used_by_host_function_is_emitted_once() {
+    let (_, host) = cuda_codegen("mutable_static_once", GPU_STATIC_VAR_REPRO);
+    assert_eq!(host.matches("static FLAG:").count(), 1, "{host}");
+    assert!(!host.contains("const FLAG:"), "{host}");
+}
+
+const GPU_STATIC_VAR_REPRO: &str = r#"
+kernel Touch:
+    mut [float32]'unified out
+    let int n
+    init(int nn):
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        out[gpu.thread.x] = 1.0
+
+static var bool flag = false
+def set_flag(bool v):
+    flag = v
+
+pub req [float32]'gpu'unified run(int n) throws:
+    mut k = Touch(n)
+    kernel:
+        k(block = 1, grid = n)
+    k.out
+"#;
+
+#[test]
+fn native_cublas_preserves_linear_transpose_and_mma_accumulation() {
+    let (_, linear) = cuda_codegen("native_tensor_linear", r#"
+let [float32, k = 16, m = 8]'gpu'global x = [1.0 as float32 for ..<128]
+let [float32, k = 16, n = 24]'gpu'global w = [1.0 as float32 for ..<384]
+mut [float32, n = 24, m = 8]'gpu'unified y = [0.0 as float32 for ..<192]
+gpu.tensor.linear(x, w, y)
+"#);
+    assert!(linear.contains("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T"), "{linear}");
+    assert!(linear.contains("alpha: 1.0f32, lda: 16i32, ldb: 16i32, beta: 0.0f32, ldc: 24i32"), "{linear}");
+
+    let (_, mma) = cuda_codegen("native_tensor_mma", r#"
+let [float32, k = 16, m = 8]'gpu'global a = [1.0 as float32 for ..<128]
+let [float32, n = 24, k = 16]'gpu'global b = [1.0 as float32 for ..<384]
+mut [float32, n = 24, m = 8]'gpu'unified c = [1.0 as float32 for ..<192]
+gpu.tensor.mma(a, b, c)
+"#);
+    assert!(mma.contains("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N"), "{mma}");
+    assert!(mma.contains("beta: 1.0f32"), "{mma}");
+}
+
+#[test]
+fn unaligned_float32_matmul_keeps_scalar_cuda_kernel() {
+    let (cu, host) = cuda_codegen("scalar_tensor_matmul", r#"
+let [float32, k = 5, m = 3]'gpu'global a = [1.0 as float32 for ..<15]
+let [float32, n = 7, k = 5]'gpu'global b = [1.0 as float32 for ..<35]
+mut [float32, n = 7, m = 3]'gpu'unified c = [0.0 as float32 for ..<21]
+gpu.tensor.matmul(a, b, c)
+"#);
+    assert!(cu.contains("BoringTensorHost0_kernel"), "{cu}");
+    assert!(host.contains("load_function(\"BoringTensorHost0_kernel\")"), "{host}");
+    assert!(!host.contains("CudaBlas::new(stream.clone())"), "{host}");
+}
+
 // ─── device — kernel signature ───────────────────────────────────────────────
 
 #[test]
@@ -417,6 +495,8 @@ kernel Scale:
 "#);
     assert!(toml.contains("cudarc"),
         "Cargo.toml must depend on cudarc;\ngot:\n{toml}");
+    assert!(toml.contains("\"cublas\""),
+        "Cargo.toml must enable cudarc's cuBLAS support;\ngot:\n{toml}");
     // Regression guard for the Screen/display feature (see
     // `screen_present_and_key` below): a compute-only program must stay free
     // of the windowing/present dependencies it needs.

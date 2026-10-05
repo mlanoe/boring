@@ -144,6 +144,10 @@ struct HostEmitter {
     /// preserving call passed as an argument to this outer call is not
     /// incorrectly also suppressed.
     suppress_resident_materialize: bool,
+    /// Last by-value use sites in the current function.  Besides ordinary Rust
+    /// move elision, this lets a read-only kernel input retain a predecessor's
+    /// Metal buffer only when that predecessor cannot be observed again.
+    last_use_sites: crate::transpiler::last_use::LastUseSites,
 }
 
 /// See `cuda::host`'s identical function.
@@ -222,6 +226,7 @@ impl HostEmitter {
             f64_array_locals: std::collections::HashSet::new(),
             resident_locals: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
+            last_use_sites: std::collections::HashSet::new(),
         }
     }
 
@@ -820,30 +825,30 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // A real device-to-device copy: allocate a fresh buffer and memcpy into
-        // it, NOT `Buffer::clone()` -- confirmed against the real `metal` crate
+        // A real device-to-device copy: allocate a fresh buffer and enqueue a
+        // Metal blit, NOT `Buffer::clone()` -- confirmed against the real `metal` crate
         // source that `Clone` on an ObjC wrapper type (`foreign_type!`'s
         // generated impl) is just an ObjC `retain` (reference-count bump), not a
         // content copy. Using `.clone()` here meant two kernel structs silently
         // shared the exact same underlying `MTLBuffer` -- if the source kernel
         // was ever dispatched again afterward, the "copy"'s contents changed
         // too, with no compile error and no warning (unlike cuda::host's
-        // equivalent bug, a real E0382 the compiler catches). The raw
-        // `contents()` memcpy is valid because every buffer this backend
-        // allocates uses `MTLResourceOptions::StorageModeShared` (CPU+GPU
-        // unified memory) -- flushing first (see `__boring_metal_flush`'s doc)
-        // is required since dispatch is deferred: without it, this could copy
-        // from a buffer the GPU hasn't finished writing yet.
+        // equivalent bug, a real E0382 the compiler catches). The blit is
+        // submitted on the backend's shared queue, so FIFO command-
+        // buffer ordering makes it wait for preceding kernel writes without a
+        // CPU-side flush or host memcpy.  Recording it as the latest pending
+        // command buffer also makes a later readback wait for the copy.
         self.line("fn __boring_metal_buffer_copy(dev: &Device, buf: &Buffer) -> Result<Buffer, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
-        self.line("__boring_metal_flush()?;");
         self.line("let len = buf.length();");
         self.line("let new_buf = dev.new_buffer(len, MTLResourceOptions::StorageModeShared);");
-        self.line("unsafe {");
-        self.indent += 1;
-        self.line("std::ptr::copy_nonoverlapping(buf.contents() as *const u8, new_buf.contents() as *mut u8, len as usize);");
-        self.indent -= 1;
-        self.line("}");
+        self.line("let queue = __boring_metal_queue(dev);");
+        self.line("let cmd_buf = queue.new_command_buffer();");
+        self.line("let blit = cmd_buf.new_blit_command_encoder();");
+        self.line("blit.copy_from_buffer(buf, 0, &new_buf, 0, len);");
+        self.line("blit.end_encoding();");
+        self.line("cmd_buf.commit();");
+        self.line("__BORING_METAL_PENDING.with(|c| *c.borrow_mut() = Some(cmd_buf.to_owned()));");
         self.line("Ok(new_buf)");
         self.indent -= 1;
         self.line("}");
@@ -1860,6 +1865,10 @@ impl HostEmitter {
         let outer_ref_params = std::mem::take(&mut self.ref_params);
         let outer_f64_array_locals = std::mem::take(&mut self.f64_array_locals);
         let outer_resident_locals = std::mem::take(&mut self.resident_locals);
+        let outer_last_use_sites = std::mem::replace(
+            &mut self.last_use_sites,
+            crate::transpiler::last_use::last_use_sites(&f.params, &f.body),
+        );
         for p in &f.params {
             if let Some(ty) = &p.ty {
                 if is_gpu_array_param(ty) {
@@ -1937,6 +1946,7 @@ impl HostEmitter {
         self.ref_params = outer_ref_params;
         self.f64_array_locals = outer_f64_array_locals;
         self.resident_locals = outer_resident_locals;
+        self.last_use_sites = outer_last_use_sites;
         self.indent -= 1;
         self.line("}");
     }
@@ -2387,6 +2397,7 @@ impl HostEmitter {
             f64_array_locals: self.f64_array_locals.clone(),
             resident_locals: self.resident_locals.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
+            last_use_sites: self.last_use_sites.clone(),
         };
         let last = stmts.len().saturating_sub(1);
         for (i, st) in stmts.iter().enumerate() {
@@ -3175,6 +3186,18 @@ impl HostEmitter {
                 if let ExprKind::Field(obj, field) = &a.value.kind {
                     if let ExprKind::Var(obj_name) = &obj.kind {
                         if self.var_kernel_type.contains_key(obj_name.as_str()) {
+                            // A read-only destination may retain the exact same
+                            // MTLBuffer when this is the source kernel's final
+                            // use.  The next dispatch stays ordered on the same
+                            // Metal queue, and no later observation of the source
+                            // can distinguish the alias.  If the source is used
+                            // again, or the destination field is mutable, keep
+                            // independent-value semantics with an async GPU blit.
+                            if is_read_only_buffer
+                                && self.last_use_sites.contains(&(obj_name.clone(), obj.line, obj.col))
+                            {
+                                return format!("{obj}.{field}.clone()", obj = obj_name, field = field);
+                            }
                             return format!("__boring_metal_buffer_copy(&{dev}, &{obj}.{field})?", dev = dev, obj = obj_name, field = field);
                         }
                     }

@@ -82,6 +82,35 @@ kernel Scale:
 }
 
 #[test]
+fn mutable_static_used_by_host_function_is_emitted_once() {
+    let (_, host) = metal_codegen("mutable_static_once", GPU_STATIC_VAR_REPRO);
+    assert_eq!(host.matches("static FLAG:").count(), 1, "{host}");
+    assert!(!host.contains("const FLAG:"), "{host}");
+}
+
+const GPU_STATIC_VAR_REPRO: &str = r#"
+kernel Touch:
+    mut [float32]'unified out
+    let int n
+    init(int nn):
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        out[gpu.thread.x] = 1.0
+
+static var bool flag = false
+
+def set_flag(bool v):
+    flag = v
+
+pub req [float32]'gpu'unified run(int n) throws:
+    mut k = Touch(n)
+    kernel:
+        k(block = 1, grid = n)
+    k.out
+"#;
+
+#[test]
 fn fixed_tensor_matmul_uses_native_simdgroup_matrices() {
     let (msl, host) = metal_codegen("native_tensor_matmul", r#"
 let [float32, k = 64, m = 64]'gpu'unified a = [1.0 as float32 for ..<4096]
@@ -93,6 +122,37 @@ gpu.tensor.matmul(a, b, c)
     assert!(msl.contains("simdgroup_float8x8"), "{msl}");
     assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
     assert!(host.contains("__boring_launch((32 as u32, 1, 1), Some((8 as u32, 8 as u32, 1))"), "{host}");
+}
+
+#[test]
+fn dynamic_float_linear_selects_native_or_scalar_geometry_at_runtime() {
+    let (msl, host) = metal_codegen("dynamic_native_tensor_linear", r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [float32]'gpu'global weights, [float32]'gpu'global bias, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, bias, y, m = m, n = n, k = k)
+    y
+"#);
+    assert!(msl.contains("kernel BoringTensorDynamicFloatNative0"), "{msl}");
+    assert!(msl.contains("if ((m % 8) == 0 && (n % 8) == 0 && (k % 8) == 0)"), "{msl}");
+    assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    assert!(host.contains("__boring_launch((32 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
+}
+
+#[test]
+fn dynamic_q8_linear_uses_warp_decode_and_native_tiled_prefill() {
+    let (msl, host) = metal_codegen("dynamic_native_q8_tensor_linear", r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, [float32]'gpu'global bias, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, bias, y, m = m, n = n, k = k, format = "q8_0")
+    y
+"#);
+    assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
+    assert!(msl.contains("if (m == 1)"), "{msl}");
+    assert!(msl.contains("threadgroup float bp_b_tile[64]"), "{msl}");
+    assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("__boring_launch((32 as u32, 1, 1)"), "{host}");
 }
 
 // ─── device — kernel signature ───────────────────────────────────────────────
@@ -1043,7 +1103,7 @@ fn dtod_ctor_arg_uses_real_device_to_device_copy_not_an_objc_retain() {
     // afterward would silently change k2's "own" buffer too, with no compile
     // error (unlike the analogous bug in cuda::host/rocm::host, a real
     // E0382 the Rust compiler catches). `__boring_metal_buffer_copy`
-    // allocates a fresh buffer and memcpy's into it instead.
+    // allocates a fresh buffer and enqueues a GPU blit into it instead.
     let (_, rs) = metal_codegen("dtod_candidate", r#"
 kernel Scale:
     mut [float]'unified buf
@@ -1064,11 +1124,74 @@ kernel:
 print "{k1.buf[0]}"
 "#);
     assert!(rs.contains("fn __boring_metal_buffer_copy(dev: &Device, buf: &Buffer) -> Result<Buffer, Box<dyn std::error::Error + Send + Sync>>"),
-        "expected a real buffer-copy helper (new buffer + memcpy);\ngot:\n{rs}");
-    assert!(rs.contains("std::ptr::copy_nonoverlapping"),
-        "expected the copy helper to actually copy buffer contents;\ngot:\n{rs}");
+        "expected a real buffer-copy helper (new buffer + GPU blit);\ngot:\n{rs}");
+    assert!(rs.contains("blit.copy_from_buffer(buf, 0, &new_buf, 0, len);"),
+        "expected the copy helper to enqueue a Metal blit;\ngot:\n{rs}");
+    assert!(!rs.contains("std::ptr::copy_nonoverlapping"),
+        "device-to-device copies must not memcpy through the CPU;\ngot:\n{rs}");
     assert!(rs.contains("Scale::new(boring_metal_device(), __boring_metal_buffer_copy(&boring_metal_device(), &k1.buf)?)"),
         "expected the k2 constructor call to use the real copy helper, not a bare Buffer::clone() retain;\ngot:\n{rs}");
+}
+
+#[test]
+fn final_use_kernel_output_to_read_only_input_is_zero_copy() {
+    let (_, rs) = metal_codegen("read_only_inline_handoff", r#"
+kernel AddOne:
+    let [float32]'global a
+    mut [float32]'unified out
+    let int n
+    init([float32]'global ai, int nn):
+        a = ai
+        n = nn
+        out = [0.0 for ..<nn]
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = a[i] + 1.0
+
+pub req [float32]'gpu'unified chained([float32]'global x, int n) throws:
+    mut k1 = AddOne(x, n)
+    kernel:
+        k1(block = 256, grid = 1)
+    mut k2 = AddOne(k1.out, n)
+    kernel:
+        k2(block = 256, grid = 1)
+    k2.out
+"#);
+    assert!(rs.contains("AddOne::new(boring_metal_device(), k1.out.clone(), n)"),
+        "a final-use output handed to a read-only input should retain the MTLBuffer;\ngot:\n{rs}");
+    assert!(!rs.contains("__boring_metal_buffer_copy(&boring_metal_device(), &k1.out)"),
+        "the zero-copy hand-off must not allocate or blit;\ngot:\n{rs}");
+}
+
+#[test]
+fn read_only_input_copies_when_source_kernel_is_used_again() {
+    let (_, rs) = metal_codegen("read_only_handoff_source_reused", r#"
+kernel Produce:
+    mut [float]'unified out
+    init([float]'unified initial):
+        out = initial
+    def ():
+        out[gpu.thread.x] = 1.0
+
+kernel Consume:
+    let [float]'global input
+    init([float]'global value):
+        input = value
+    def ():
+        let x = input[gpu.thread.x]
+
+def run() throws:
+    mut k1 = Produce([0.0, 0.0])
+    kernel:
+        k1(block = 2)
+    mut k2 = Consume(k1.out)
+    kernel:
+        k1(block = 2)
+        k2(block = 2)
+"#);
+    assert!(rs.contains("Consume::new(boring_metal_device(), __boring_metal_buffer_copy(&boring_metal_device(), &k1.out)?)"),
+        "a later source-kernel use must preserve independent-value semantics;\ngot:\n{rs}");
 }
 
 #[test]

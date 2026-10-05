@@ -1,8 +1,8 @@
 # `gpu.tensor.*` — portable matrix operations on labeled arrays
 
-> **Status: device tile fallback, host CPU/interpreter fallback, and automatic
-> fixed-shape host GPU dispatch are implemented; native matrix acceleration is
-> not implemented.**
+> **Status: device tile fallback, host CPU/interpreter fallback, automatic
+> fixed-shape host GPU dispatch, and native fixed-shape acceleration on Metal
+> and CUDA are implemented.**
 > CamelCase GPU names and compatibility
 > aliases are implemented. Validated `gpu.tensor.matmulTile` and `mmaTile`
 > calls run in the interpreter and lower to scalar code on CUDA, Metal, ROCm,
@@ -168,7 +168,7 @@ algorithm = "auto"
 q8_0 = "warp-broadcast"
 
 [tensor.linear.prefill]
-algorithm = "scalar"
+algorithm = "auto"
 ```
 
 Statically shaped `matmul`, `mma`, and `linear` calls have a separate matrix
@@ -185,15 +185,32 @@ On Metal, `auto` (the default) and `native` lower float32 matrices whose `m`,
 tile with `simdgroup_multiply_accumulate`. `scalar` retains the portable tile
 loop. Shapes with an incomplete 8x8 tile also retain that fallback, so the
 same source remains valid on Metal, CUDA, ROCm, and WGPU. Other backends
-currently treat this fixed-matrix setting as the portable schedule.
+CUDA uses cuBLAS SGEMM in pedantic math mode for the same aligned fixed-shape
+operations, preserving float32 inputs and accumulation without an implicit TF32
+conversion. Unaligned shapes retain the portable generated CUDA kernel. ROCm
+and WGPU currently treat this fixed-matrix setting as the portable schedule. The same
+selection happens at run time for dynamically shaped, non-quantized
+`gpu.tensor.linear`: compatible calls launch the 32-thread native kernel and
+other shapes launch the 256-thread scalar kernel.
 
-This native path is deliberately separate from dynamic and packed-quantized
-`gpu.tensor.linear`. Their dimensions and formats are selected at run time and
-continue to use the schedules below; adding a tiled dequantize-and-multiply
-schedule is the next step needed for the main boring-llm prefill path.
+Q8_0 dynamic linear has tiled prefill schedules on every GPU backend. Single-row
+decode keeps the scale-broadcast warp reduction. For `m > 1`, WGPU, CUDA, and
+ROCm use a portable 16x16 output tile: the 256-thread block cooperatively loads
+one activation tile and dequantizes one packed weight tile into shared memory,
+then reuses both tiles for the inner products. Partial row, column, and K tiles
+are zero padded and output writes are bounds checked. Dequantization remains
+fused; no float32 weight copy is allocated.
 
-`auto` is the default. The first implementation accepts `auto`, `scalar`,
-`warp`, and `warp-broadcast`; the two warp schedules are currently available
+Metal uses its native schedule for the same operation: each SIMD group
+dequantizes an 8x8 weight tile into threadgroup memory and feeds it to
+`simdgroup_multiply_accumulate`. Other packed formats continue to use the
+portable scalar prefill schedule.
+
+`auto` is the default. The implementation accepts `auto`, `native`, `scalar`,
+`warp`, and `warp-broadcast`; `auto` and `native` select the native Metal Q8_0
+prefill schedule or the portable tiled Q8_0 schedule on WGPU, CUDA, and ROCm.
+`scalar` explicitly retains the one-thread-per-output-cell reference schedule.
+Unsupported packed formats retain that scalar prefill schedule. The two warp schedules are currently available
 for Q8_0 single-row decode. `warp-broadcast` reads one scale per 32-element
 packed block and distributes it with `gpu.warp.shuffle`. Its launch geometry
 uses eight 32-lane warps per block on CUDA, Metal, and WGPU, and four 64-lane
@@ -225,8 +242,8 @@ Q2_K uses 84-byte superblocks for 256 values, with sixteen packed scale/minimum
 pairs, 64 bytes of two-bit values, and two float16 superblock factors.
 
 This overload accepts flat float32 arrays in either `'gpu'global` or
-`'gpu'unified` storage. It assigns one output element to each GPU thread and
-derives a one-dimensional multi-block launch from `m * n`. Calls must be direct
+`'gpu'unified` storage. Scalar schedules assign one output element to each GPU
+thread; tiled Q8_0 prefill uses a two-dimensional output grid. Calls must be direct
 function-body statements for GPU builds, and the containing function must
 declare `throws`. Returning the destination immediately returns the generated
 kernel's resident output and avoids a host readback.

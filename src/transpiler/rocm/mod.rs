@@ -101,6 +101,7 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
 pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> RocmOutput {
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 64;
+    tensor_config.portable_tiled_dynamic_q8_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let program = &tensor_host.program;
     // Collect all kernel names.

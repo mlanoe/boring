@@ -2407,6 +2407,12 @@ impl Transpiler {
             match item {
                 Item::Stmt(_) if host_owns_top_level => {}
                 Item::Stmt(_) => stmts.push(item),
+                // A mutable top-level binding referenced by a function was already
+                // emitted above as a `LazyLock<Mutex<T>>`.  This must precede the
+                // explicit-static arm: `static var` is both mutable and `is_static`,
+                // and emitting the item again would produce `const NAME` (E0428).
+                Item::Let(s) if s.binding.is_mutable()
+                    && self.global_vars_used_in_fns.contains(&s.name) => {}
                 Item::Let(s) if s.is_static || self.let_type_is_static(s) => {
                     // Top-level `static let` (keyword) or `T'static` (qualifier) →
                     // always promoted to module scope, regardless of in-file usage or

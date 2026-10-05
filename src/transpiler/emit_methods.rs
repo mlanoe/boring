@@ -3724,8 +3724,13 @@ impl Transpiler {
         } else if (rust_method == "push" || rust_method == "extend") && {
             // Use emit_expr_owned for any vec push so non-Copy values (e.g. Value enum) are cloned.
             match &obj.kind {
-                ExprKind::Var(v) => self.vec_vars.contains(v.as_str()) || self.str_vec_vars.contains(v.as_str()),
-                _ => false,
+                ExprKind::Var(v) => self.vec_vars.contains(v.as_str()) || self.str_vec_vars.contains(v.as_str())
+                    // A bare struct-field array (`items.push(item)` inside a method of a
+                    // generic `Queue<T>` instantiated with `string`) is not in `vec_vars`;
+                    // without this it fell through to the external-call fallback and
+                    // emitted `push((&*item))` (`&str` into a `Vec<Arc<str>>`).
+                    || self.resolve_expr_type(obj).is_some_and(|t| matches!(t.without_mut(), Type::Array(_))),
+                _ => self.resolve_expr_type(obj).is_some_and(|t| matches!(t.without_mut(), Type::Array(_))),
             }
         } {
             // `.push(x)`/`.extend(x)` onto a `[dyn Trait]`-typed Vec (dynamic
