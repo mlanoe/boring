@@ -333,6 +333,7 @@ impl BoringToml {
                 in_deps = line == "[deps]";
                 in_external_fns = line == "[external_fns]";
                 tensor_linear_section = match line {
+                    "[tensor.matmul]" => Some("matmul"),
                     "[tensor.linear]" => Some("all"),
                     "[tensor.linear.decode]" => Some("decode"),
                     "[tensor.linear.prefill]" => Some("prefill"),
@@ -345,6 +346,7 @@ impl BoringToml {
                     let key = key.trim();
                     if let Some(value) = Self::extract_value(raw_value) {
                         match (shape, key) {
+                            ("matmul", "algorithm") => tensor_linear.matrix_algorithm = Some(value),
                             ("all", "algorithm") => {
                                 tensor_linear.decode_algorithm = Some(value.clone());
                                 tensor_linear.prefill_algorithm = Some(value);
@@ -822,8 +824,9 @@ mod boring_toml_tests {
 
     #[test]
     fn tensor_linear_sections_parse_shape_and_format_overrides() {
-        let src = "[project]\nname = \"demo\"\n\n[tensor.linear]\nalgorithm = \"auto\"\n\n[tensor.linear.decode]\nq8_0 = \"warp\"\n\n[tensor.linear.prefill]\nalgorithm = \"scalar\"\n";
+        let src = "[project]\nname = \"demo\"\n\n[tensor.matmul]\nalgorithm = \"native\"\n\n[tensor.linear]\nalgorithm = \"auto\"\n\n[tensor.linear.decode]\nq8_0 = \"warp\"\n\n[tensor.linear.prefill]\nalgorithm = \"scalar\"\n";
         let toml = BoringToml::parse(src);
+        assert_eq!(toml.tensor_linear.matrix_algorithm.as_deref(), Some("native"));
         assert_eq!(toml.tensor_linear.decode_algorithm.as_deref(), Some("auto"));
         assert_eq!(toml.tensor_linear.prefill_algorithm.as_deref(), Some("scalar"));
         assert_eq!(toml.tensor_linear.decode_formats.get("q8_0").map(String::as_str), Some("warp"));
@@ -2851,6 +2854,10 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
     let Some(root) = find_project_root(path) else { return Default::default() };
     let Ok(source) = std::fs::read_to_string(root.join("boring.toml")) else { return Default::default() };
     let config = BoringToml::parse(&source).tensor_linear;
+    if config.matrix_algorithm.as_deref().is_some_and(|value| !matches!(value, "auto" | "native" | "scalar")) {
+        eprintln!("error: unsupported tensor matrix algorithm '{}' (expected auto, native, or scalar)", config.matrix_algorithm.as_deref().unwrap());
+        process::exit(1);
+    }
     let valid = |value: &str| matches!(value, "auto" | "scalar" | "warp" | "warp-broadcast");
     for value in config.decode_algorithm.iter().chain(config.prefill_algorithm.iter())
         .chain(config.decode_formats.values()).chain(config.prefill_formats.values()) {

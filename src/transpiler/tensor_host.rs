@@ -6,22 +6,34 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub(crate) struct TensorLinearConfig {
+    pub matrix_algorithm: Option<String>,
     pub decode_algorithm: Option<String>,
     pub prefill_algorithm: Option<String>,
     pub decode_formats: HashMap<String, String>,
     pub prefill_formats: HashMap<String, String>,
     pub target_warp_width: usize,
+    pub native_fixed_matrices: bool,
 }
 
 impl Default for TensorLinearConfig {
     fn default() -> Self {
         Self {
+            matrix_algorithm: None,
             decode_algorithm: None,
             prefill_algorithm: None,
             decode_formats: HashMap::new(),
             prefill_formats: HashMap::new(),
             target_warp_width: 32,
+            native_fixed_matrices: false,
         }
+    }
+}
+
+fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, usize) {
+    if config.native_fixed_matrices && spec.m % 8 == 0 && spec.n % 8 == 0 && spec.k % 8 == 0 {
+        (8, 8, 32)
+    } else {
+        (spec.m.clamp(1, 16), spec.n.clamp(1, 16), 256)
     }
 }
 
@@ -150,7 +162,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
                 break (kernel_name, instance);
             }
         };
-        match parse_kernel(&kernel_name, &spec, method) {
+        match parse_kernel(&kernel_name, &spec, method, tensor_config) {
             Ok(kernel) => kernels.push(Item::Kernel(kernel)),
             Err(message) => {
                 errors.push(super::TranspileError::at_line(message, call.line));
@@ -158,7 +170,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
                 continue;
             }
         }
-        match parse_replacement(&kernel_name, &instance, names, &spec) {
+        match parse_replacement(&kernel_name, &instance, names, &spec, tensor_config) {
             Ok(replacement) => items.extend(replacement),
             Err(message) => {
                 errors.push(super::TranspileError::at_line(message, call.line));
@@ -276,7 +288,7 @@ fn lower_function_body(
         let (kernel_name, instance) = allocate_names(
             ordinal, used_kernel_names, used_binding_names,
         );
-        match parse_kernel(&kernel_name, &spec, method) {
+        match parse_kernel(&kernel_name, &spec, method, tensor_config) {
             Ok(kernel) => kernels.push(Item::Kernel(kernel)),
             Err(message) => {
                 errors.push(super::TranspileError::at_line(message, call.line));
@@ -285,7 +297,7 @@ fn lower_function_body(
                 continue;
             }
         }
-        match parse_replacement_stmts(&kernel_name, &instance, names, &spec) {
+        match parse_replacement_stmts(&kernel_name, &instance, names, &spec, tensor_config) {
             Ok(mut replacement) => {
                 let returns_destination = body.get(index + 1).is_some_and(|next| {
                     matches!(next, Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Var(name) if name == names[2]))
@@ -538,9 +550,8 @@ fn qual_source(qual: &GpuQual) -> &'static str {
     }
 }
 
-fn parse_kernel(name: &str, spec: &Spec, method: &str) -> Result<KernelDecl, String> {
-    let tile_rows = spec.m.clamp(1, 16);
-    let tile_cols = spec.n.clamp(1, 16);
+fn parse_kernel(name: &str, spec: &Spec, method: &str, config: &TensorLinearConfig) -> Result<KernelDecl, String> {
+    let (tile_rows, tile_cols, _) = fixed_geometry(spec, config);
     let tile_method = match method {
         "mma" => "mmaTile",
         "linear" => "linearTile",
@@ -687,13 +698,12 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     }
 }
 
-fn parse_replacement(name: &str, instance: &str, operands: [&str; 3], spec: &Spec) -> Result<Vec<Item>, String> {
-    let tile_rows = spec.m.clamp(1, 16);
-    let tile_cols = spec.n.clamp(1, 16);
+fn parse_replacement(name: &str, instance: &str, operands: [&str; 3], spec: &Spec, config: &TensorLinearConfig) -> Result<Vec<Item>, String> {
+    let (tile_rows, tile_cols, block) = fixed_geometry(spec, config);
     let gx = spec.n.div_ceil(tile_cols);
     let gy = spec.m.div_ceil(tile_rows);
     let source = format!(
-        "mut {instance} = {name}({a}, {b}, {c})\nkernel:\n    {instance}(block = 256, grid = ({gx}, {gy}))\n{c} = {instance}.c\n",
+        "mut {instance} = {name}({a}, {b}, {c})\nkernel:\n    {instance}(block = {block}, grid = ({gx}, {gy}))\n{c} = {instance}.c\n",
         a = operands[0], b = operands[1], c = operands[2],
     );
     crate::parser::parse(crate::lexer::lex(&source).map_err(|e| format!("tensor dispatch lex error: {e:?}"))?)
@@ -701,13 +711,12 @@ fn parse_replacement(name: &str, instance: &str, operands: [&str; 3], spec: &Spe
         .map_err(|e| format!("tensor dispatch parse error: {}", e.msg()))
 }
 
-fn parse_replacement_stmts(name: &str, instance: &str, operands: [&str; 3], spec: &Spec) -> Result<Vec<Stmt>, String> {
-    let tile_rows = spec.m.clamp(1, 16);
-    let tile_cols = spec.n.clamp(1, 16);
+fn parse_replacement_stmts(name: &str, instance: &str, operands: [&str; 3], spec: &Spec, config: &TensorLinearConfig) -> Result<Vec<Stmt>, String> {
+    let (tile_rows, tile_cols, block) = fixed_geometry(spec, config);
     let gx = spec.n.div_ceil(tile_cols);
     let gy = spec.m.div_ceil(tile_rows);
     let source = format!(
-        "def __tensor_wrapper():\n    mut {instance} = {name}({a}, {b}, {c})\n    kernel:\n        {instance}(block = 256, grid = ({gx}, {gy}))\n    {c} = {instance}.c\n",
+        "def __tensor_wrapper():\n    mut {instance} = {name}({a}, {b}, {c})\n    kernel:\n        {instance}(block = {block}, grid = ({gx}, {gy}))\n    {c} = {instance}.c\n",
         a = operands[0], b = operands[1], c = operands[2],
     );
     let parsed = crate::parser::parse(
@@ -912,5 +921,23 @@ mod tests {
         let lowered = lower(&program);
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         assert!(lowered.program.items.iter().any(|item| matches!(item, Item::Kernel(kernel) if kernel.name == "BoringTensorHost2")));
+    }
+
+    #[test]
+    fn native_fixed_geometry_requires_aligned_dimensions() {
+        let mut config = TensorLinearConfig::default();
+        config.native_fixed_matrices = true;
+        let spec = Spec {
+            m: 64,
+            n: 32,
+            k: 16,
+            quals: [GpuQual::Global, GpuQual::Global, GpuQual::Unified],
+            transpose_b: false,
+        };
+        assert_eq!(fixed_geometry(&spec, &config), (8, 8, 32));
+        let unaligned = Spec { k: 15, ..spec.clone() };
+        assert_eq!(fixed_geometry(&unaligned, &config), (16, 16, 256));
+        config.native_fixed_matrices = false;
+        assert_eq!(fixed_geometry(&spec, &config), (16, 16, 256));
     }
 }

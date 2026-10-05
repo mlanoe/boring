@@ -10,6 +10,7 @@ pub(super) enum Dialect {
     Cuda,
     Rocm,
     Metal,
+    MetalNative,
     Wgsl,
 }
 
@@ -31,7 +32,29 @@ pub(super) fn emit(
             len: call.len,
         })
     });
-    scalar_source(&op, dialect, &buffers, &row, &col)
+    if matches!(dialect, Dialect::MetalNative) && op.rows == 8 && op.cols == 8 && op.k % 8 == 0 {
+        metal_simdgroup_source(&op, &buffers, &row, &col)
+    } else {
+        scalar_source(&op, dialect, &buffers, &row, &col)
+    }
+}
+
+fn metal_simdgroup_source(op: &TileOperation, buffers: &[String; 3], row: &str, col: &str) -> String {
+    let initial = if op.accumulate {
+        format!("simdgroup_load(bp_tensor_result, {}, {}, ulong2({}, {}), false);", buffers[2], op.n, col, row)
+    } else {
+        "simdgroup_float8x8 bp_tensor_result = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);".into()
+    };
+    let result_decl = if op.accumulate { "simdgroup_float8x8 bp_tensor_result;\n" } else { "" };
+    let b_load = if op.transpose_b {
+        format!("simdgroup_load(bp_tensor_b, {}, {}, ulong2(bp_tensor_k, {}), true);", buffers[1], op.k, col)
+    } else {
+        format!("simdgroup_load(bp_tensor_b, {}, {}, ulong2({}, bp_tensor_k), false);", buffers[1], op.n, col)
+    };
+    format!(
+        "{{\n{result_decl}{initial}\nsimdgroup_float8x8 bp_tensor_a;\nsimdgroup_float8x8 bp_tensor_b;\nfor (uint bp_tensor_k = 0; bp_tensor_k < {k}; bp_tensor_k += 8) {{\n    simdgroup_load(bp_tensor_a, {a}, {k}, ulong2(bp_tensor_k, {row}), false);\n    {b_load}\n    simdgroup_multiply_accumulate(bp_tensor_result, bp_tensor_a, bp_tensor_b, bp_tensor_result);\n}}\nsimdgroup_store(bp_tensor_result, {c}, {n}, ulong2({col}, {row}), false);\n}}",
+        k = op.k, n = op.n, a = buffers[0], c = buffers[2],
+    )
 }
 
 fn scalar_source(
@@ -53,7 +76,7 @@ fn scalar_source(
     let v = |name: &str| format!("{prefix}{name}");
     let (thread, dim, barrier) = match dialect {
         Dialect::Cuda | Dialect::Rocm => ("threadIdx", "blockDim", "__syncthreads();"),
-        Dialect::Metal => (
+        Dialect::Metal | Dialect::MetalNative => (
             "__thread_pos",
             "__block_dim",
             "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);",

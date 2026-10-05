@@ -171,6 +171,27 @@ q8_0 = "warp-broadcast"
 algorithm = "scalar"
 ```
 
+Statically shaped `matmul`, `mma`, and `linear` calls have a separate matrix
+schedule switch:
+
+```toml
+[tensor.matmul]
+algorithm = "auto" # auto, native, or scalar
+```
+
+On Metal, `auto` (the default) and `native` lower float32 matrices whose `m`,
+`n`, and `k` dimensions are multiples of eight to Metal's native 8x8
+`simdgroup_matrix` operations. One 32-lane SIMD group computes each output
+tile with `simdgroup_multiply_accumulate`. `scalar` retains the portable tile
+loop. Shapes with an incomplete 8x8 tile also retain that fallback, so the
+same source remains valid on Metal, CUDA, ROCm, and WGPU. Other backends
+currently treat this fixed-matrix setting as the portable schedule.
+
+This native path is deliberately separate from dynamic and packed-quantized
+`gpu.tensor.linear`. Their dimensions and formats are selected at run time and
+continue to use the schedules below; adding a tiled dequantize-and-multiply
+schedule is the next step needed for the main boring-llm prefill path.
+
 `auto` is the default. The first implementation accepts `auto`, `scalar`,
 `warp`, and `warp-broadcast`; the two warp schedules are currently available
 for Q8_0 single-row decode. `warp-broadcast` reads one scale per 32-element

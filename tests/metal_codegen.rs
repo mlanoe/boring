@@ -81,6 +81,20 @@ kernel Scale:
         "expected using namespace metal;\ngot:\n{msl}");
 }
 
+#[test]
+fn fixed_tensor_matmul_uses_native_simdgroup_matrices() {
+    let (msl, host) = metal_codegen("native_tensor_matmul", r#"
+let [float32, k = 64, m = 64]'gpu'unified a = [1.0 as float32 for ..<4096]
+let [float32, n = 64, k = 64]'gpu'unified b = [1.0 as float32 for ..<4096]
+mut [float32, n = 64, m = 64]'gpu'unified c = [0.0 as float32 for ..<4096]
+gpu.tensor.matmul(a, b, c)
+"#);
+    assert!(msl.contains("#include <metal_simdgroup_matrix>"), "{msl}");
+    assert!(msl.contains("simdgroup_float8x8"), "{msl}");
+    assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    assert!(host.contains("__boring_launch((32 as u32, 1, 1), Some((8 as u32, 8 as u32, 1))"), "{host}");
+}
+
 // ─── device — kernel signature ───────────────────────────────────────────────
 
 #[test]
