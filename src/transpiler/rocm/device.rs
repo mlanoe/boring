@@ -20,10 +20,15 @@ use crate::transpiler::helpers::{
     first_loop_index,
 };
 
+#[cfg(test)]
 pub(super) fn emit_device_hip(program: &Program) -> String {
+    emit_device_hip_with_errors(program).0
+}
+
+pub(super) fn emit_device_hip_with_errors(program: &Program) -> (String, Vec<crate::transpiler::TranspileError>) {
     let mut e = DeviceEmitter::new();
     e.emit_program(program);
-    e.out
+    (e.out, e.errors)
 }
 
 struct DeviceEmitter {
@@ -39,6 +44,7 @@ struct DeviceEmitter {
     /// True while emitting the body of a `void`-returning device function/method --
     /// see `metal::device`'s identical field.
     current_fn_is_void: bool,
+    errors: Vec<crate::transpiler::TranspileError>,
 }
 
 impl DeviceEmitter {
@@ -47,6 +53,7 @@ impl DeviceEmitter {
             out: String::new(), indent: 0, current_fields: vec![], current_kernel: String::new(),
             auto_sync: false, top_level_scalars: std::collections::HashMap::new(),
             current_fn_is_void: true,
+            errors: Vec::new(),
         }
     }
 
@@ -268,6 +275,12 @@ impl DeviceEmitter {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
                 let ty = s.ty.as_ref().map(c_type).unwrap_or_else(|| "auto".into());
                 let kw = if mutable { "" } else { "const " };
+                if let Some(Type::ArrayN(inner, n)) = &s.ty {
+                    let name = c_gpu_safe_ident(&s.name);
+                    self.line(&format!("{} {}[{}];", c_type(inner), name, n));
+                    if let Some(val) = &s.value { self.emit_fixed_array_init(&name, *n, val); }
+                    return;
+                }
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
                     self.line(&format!("{}{} {} = {};", kw, ty, c_gpu_safe_ident(&s.name), rhs));
@@ -665,9 +678,35 @@ impl DeviceEmitter {
             ExprKind::Range { start, end, inclusive: _ } => {
                 format!("/* range {}..{} */", self.expr(start), self.expr(end))
             }
-            _ => "/* expr */".into(),
+            _ => {
+                self.errors.push(crate::transpiler::TranspileError::at(
+                    "expression is not supported in ROCm kernel device code", e.line, e.col,
+                ));
+                "0".into()
+            }
         }
     }
+
+    fn emit_fixed_array_init(&mut self, name: &str, n: usize, value: &Expr) {
+        match &value.kind {
+            ExprKind::Array(values) if values.len() == n => for (i, value) in values.iter().enumerate() {
+                let rhs = self.expr(value);
+                self.line(&format!("{}[{}] = {};", name, i, rhs));
+            },
+            ExprKind::ArrayFill { value, count } if const_array_count(count) == Some(n) => {
+                let rhs = self.expr(value);
+                self.line(&format!("for (size_t bp_array_i = 0; bp_array_i < {}; ++bp_array_i) {{ {}[bp_array_i] = {}; }}", n, name, rhs));
+            }
+            _ => self.errors.push(crate::transpiler::TranspileError::at(
+                "fixed-array kernel locals require an N-element array literal or `[value for ..<N]` initializer",
+                value.line, value.col,
+            )),
+        }
+    }
+}
+
+fn const_array_count(e: &Expr) -> Option<usize> {
+    match e.kind { ExprKind::Int(n) if n >= 0 => Some(n as usize), _ => None }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────

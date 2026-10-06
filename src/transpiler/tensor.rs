@@ -32,7 +32,11 @@ pub(super) fn emit(
             len: call.len,
         })
     });
-    if matches!(dialect, Dialect::MetalNative) && op.rows == 8 && op.cols == 8 && op.k % 8 == 0 {
+    if matches!(dialect, Dialect::MetalNative)
+        && op.rows == 8
+        && op.cols == 8
+        && op.k.is_multiple_of(8)
+    {
         metal_simdgroup_source(&op, &buffers, &row, &col)
     } else {
         scalar_source(&op, dialect, &buffers, &row, &col)

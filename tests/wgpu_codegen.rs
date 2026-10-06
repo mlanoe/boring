@@ -17,6 +17,92 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[test]
+fn init_parameter_used_only_in_host_expressions_is_preserved() {
+    let (_wgsl, rs) = wgpu_codegen("init_expression_only_param", r#"
+kernel SizedOut:
+    let [float32]'global a
+    mut [float32]'unified out
+    let int n
+    let int total
+    init([float32]'global ai, int nn, int extra):
+        a = ai
+        n = nn
+        total = nn + extra
+        out = [0.0 for ..<(nn + extra)]
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = a[i]
+pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
+    mut k = SizedOut(x, n, 2)
+    kernel:
+        k(block = 256, grid = 1)
+    k.out
+"#);
+    assert!(rs.contains("k.total = ((n + 2)) as i32;"), "{rs}");
+    assert!(rs.contains("vec![(0) as f32; ((n + 2)) as usize]"), "{rs}");
+}
+
+#[test]
+fn fixed_array_local_is_declared_and_initialized_in_kernel_body() {
+    let (wgsl, _) = wgpu_codegen("fixed_array_local", r#"
+kernel LocalArr:
+    mut [float32]'unified out
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        var [float32, 8] acc = [0.0 for ..<8]
+        acc[3] = 2.0
+        out[0] = acc[3]
+"#);
+    assert!(wgsl.contains("var acc: array<f32, 8> = array<f32, 8>("), "{wgsl}");
+    assert!(!wgsl.contains("/* expr */"), "{wgsl}");
+}
+
+#[test]
+fn thread_private_fixed_array_kernel_field_is_declared_in_entry_point() {
+    let (wgsl, _) = wgpu_codegen("local_fixed_array_field", r#"
+kernel LocalField:
+    mut [float32]'unified out
+    mut [float32, 8] acc
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        for e in 0..<8:
+            acc[e] = e as float32
+        out[0] = acc[7]
+"#);
+    assert!(wgsl.contains("var acc: array<f32, 8>;"),
+        "expected inferred 'local field declaration in entry point;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("acc[u32(e)] = f32(e);"), "{wgsl}");
+}
+
+#[test]
+fn unsupported_fixed_array_local_initializer_is_a_build_error() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("fixed_array_local_bad_initializer");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, r#"
+kernel LocalArr:
+    mut [float32]'unified out
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        var [float32, 8] acc = [..<8]
+        out[0] = acc[0]
+"#).unwrap();
+    let result = Command::new(bin)
+        .args(["build", "--target", "wgpu"])
+        .arg(&br_file).output().unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "build unexpectedly succeeded");
+    assert!(stderr.contains("fixed-array kernel locals require"), "{stderr}");
+}
+
 fn run_wgpu(test_name: &str, src: &str) -> (String, String, String, String) {
     let bin = env!("CARGO_BIN_EXE_boring");
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))

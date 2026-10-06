@@ -899,6 +899,7 @@ transpile_test!(mut_collection_by_value_reuse);
 transpile_test!(last_use_move);
 transpile_test!(field_by_value_reuse);
 transpile_test!(by_value_arg_then_reuse);
+transpile_test!(destructured_slice_by_value_reuse);
 transpile_test!(lend_and_read_same_local);
 transpile_test!(lend_and_read_same_local_lock_wrapper);
 

@@ -193,30 +193,62 @@ selection happens at run time for dynamically shaped, non-quantized
 `gpu.tensor.linear`: compatible calls launch the 32-thread native kernel and
 other shapes launch the 256-thread scalar kernel.
 
-Q8_0 dynamic linear has tiled prefill schedules on every GPU backend. Single-row
-decode keeps the scale-broadcast warp reduction. For `m > 1`, WGPU, CUDA, and
-ROCm use a portable 16x16 output tile: the 256-thread block cooperatively loads
-one activation tile and dequantizes one packed weight tile into shared memory,
-then reuses both tiles for the inner products. Partial row, column, and K tiles
-are zero padded and output writes are bounds checked. Dequantization remains
-fused; no float32 weight copy is allocated.
+Every packed dynamic linear format has a tiled prefill schedule on WGPU, CUDA,
+and ROCm. Single-row decode keeps its warp reduction. For `m > 1`, these
+portable targets use a 16x16 output tile: the 256-thread block cooperatively
+loads one activation tile and dequantizes one packed weight tile into shared
+memory, then reuses both tiles for the inner products. Q4_K and Q6_K decode
+their super-block scales/minima while staging the current K slice; Q5_0, Q4_0,
+IQ4_NL, Q2_K, and Q3_K use the same fused scheme for their packed layouts.
+Partial row, column, and K tiles are zero padded and output writes are bounds
+checked. No float32 weight copy is allocated.
 
-Metal uses its native schedule for the same operation: each SIMD group
-dequantizes an 8x8 weight tile into threadgroup memory and feeds it to
-`simdgroup_multiply_accumulate`. Other packed formats continue to use the
-portable scalar prefill schedule.
+Metal uses its native schedule for Q8_0, Q4_K, and Q6_K prefill. A 256-thread threadgroup
+computes a 32x16 output tile as eight 8x8 matrix fragments. Four activation
+fragments and two packed-weight fragments are staged cooperatively; the two
+weight fragments are dequantized once and reused across all four row fragments.
+Q8_0 scales and the Q4_K/Q6_K super-block metadata are decoded while staging
+the current K slice. Partial row, column, and K tiles are zero padded and bounds
+checked.
+
+On an Apple M3 with 10 GPU cores, the motivating 512x896x4864 benchmark took
+about 15.3 ms/call (~290 GFLOP/s) with the earlier one-SIMD-group-per-8x8-tile
+schedule. With the 32x16 schedule, three warmed 20-call runs took 8.11-10.60
+ms/call (median 8.84 ms, ~505 GFLOP/s): a 1.73x median speedup. The other model
+shapes measured 10.75-11.06 ms (~404-415 GFLOP/s) for 512x4864x896 and
+1.47-1.68 ms (~488-559 GFLOP/s) for 512x896x896. These figures include the
+generated call path and synchronize only after the final call. The ad-hoc
+benchmark is `examples/tensor_q8_prefill_bench.br`; its `partial` shape also
+checks a 35x896x19 result against a scalar CPU oracle.
 
 `auto` is the default. The implementation accepts `auto`, `native`, `scalar`,
 `warp`, and `warp-broadcast`; `auto` and `native` select the native Metal Q8_0
-prefill schedule or the portable tiled Q8_0 schedule on WGPU, CUDA, and ROCm.
+prefill schedule (and native Metal Q4_K/Q6_K schedules) or the portable tiled
+packed-weight schedule on WGPU, CUDA, and ROCm.
 `scalar` explicitly retains the one-thread-per-output-cell reference schedule.
-Unsupported packed formats retain that scalar prefill schedule. The two warp schedules are currently available
-for Q8_0 single-row decode. `warp-broadcast` reads one scale per 32-element
-packed block and distributes it with `gpu.warp.shuffle`. Its launch geometry
+The two warp schedules are available
+for Q8_0, Q5_0, Q4_0, IQ4_NL, Q6_K, Q4_K, Q3_K, and Q2_K single-row decode.
+`auto` selects warp reduction for all of these formats when `m == 1`.
+`warp-broadcast` reads shared block metadata once and distributes it with
+`gpu.warp.shuffle`; the native Metal Q4_K/Q6_K kernels broadcast their float16
+super-block factors and packed scale/minimum metadata this way while lanes decode
+their strided values. Q2_K/Q3_K use the portable warp-reduction lowering. Partial
+float32 dot products are combined with `gpu.warp.shuffleXor`. Launch geometry
 uses eight 32-lane warps per block on CUDA, Metal, and WGPU, and four 64-lane
 warps on ROCm. Unsupported format/algorithm combinations fail during
 `boring build` instead of silently falling back. More algorithms and quantized
 formats can be added without changing source-level tensor calls.
+
+The portable prefill benchmark is
+`examples/tensor_portable_quant_prefill_bench.br`. It covers all eight packed
+formats at `m = 128`, `k = 2048`, and `n = 11008`, warms the pipeline, queues
+20 calls, and synchronizes on only the final readback.
+
+The decode benchmark is `examples/tensor_k_quant_decode_bench.br`. It covers
+Q4_K, Q6_K, Q3_K, and Q2_K with `m = 1`, `k = 2048`, and both `n = 11008`
+(the motivating Qwen2.5-3B FFN shape) and `n = 151936` (the large output
+projection shape). It warms the pipeline, queues 20 calls, and synchronizes on
+only the final readback.
 
 `packedWeight` is a `[uint8]'gpu'global` or `[uint8]'gpu'unified` array in
 native GGUF block layout. Q8_0 uses a little-endian float16 scale followed by

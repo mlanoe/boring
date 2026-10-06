@@ -23,6 +23,60 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[test]
+fn init_parameter_used_only_in_host_expressions_is_preserved() {
+    let (_, rs) = rocm_codegen("init_expression_only_param", r#"
+kernel SizedOut:
+    let [float32]'global a
+    mut [float32]'unified out
+    let int total
+    init([float32]'global ai, int nn, int extra):
+        a = ai
+        total = nn + extra
+        out = [0.0 for ..<(nn + extra)]
+    def ():
+        out[gpu.thread.x] = a[gpu.thread.x]
+pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
+    mut k = SizedOut(x, n, 2)
+    k.out
+"#);
+    assert!(rs.contains("alloc_zeros::<f32>((nn + extra) as usize)"), "{rs}");
+    assert!(rs.contains("let total: isize = (nn + extra);"), "{rs}");
+}
+
+#[test]
+fn fixed_array_local_is_declared_and_initialized_in_kernel_body() {
+    let (hip, _) = rocm_codegen("fixed_array_local", r#"
+kernel LocalArr:
+    mut [float32]'unified out
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        var [float32, 8] acc = [0.0 for ..<8]
+        acc[3] = 2.0
+        out[0] = acc[3]
+"#);
+    assert!(hip.contains("float acc[8];"), "{hip}");
+    assert!(hip.contains("acc[bp_array_i] = 0"), "{hip}");
+    assert!(!hip.contains("/* expr */"), "{hip}");
+}
+
+#[test]
+fn thread_private_fixed_array_kernel_field_is_declared_in_entry_point() {
+    let (hip, _) = rocm_codegen("local_fixed_array_field", r#"
+kernel LocalField:
+    mut [float32]'unified out
+    mut [float32, 8] acc
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        acc[0] = 1.0
+        out[0] = acc[0]
+"#);
+    assert!(hip.contains("float acc[8];"),
+        "expected inferred 'local field declaration in entry point;\ngot:\n{hip}");
+}
+
 /// Invoke `boring build --target rocm <file>` and return the generated
 /// (kernels/main.hip, src/main.rs) text pair.
 ///

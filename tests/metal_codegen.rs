@@ -17,6 +17,62 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[test]
+fn init_parameter_used_only_in_host_expressions_is_preserved() {
+    let (_, rs) = metal_codegen("init_expression_only_param", r#"
+kernel SizedOut:
+    let [float32]'global a
+    mut [float32]'unified out
+    let int total
+    init([float32]'global ai, int nn, int extra):
+        a = ai
+        total = nn + extra
+        out = [0.0 for ..<(nn + extra)]
+    def ():
+        out[gpu.thread.x] = a[gpu.thread.x]
+pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
+    mut k = SizedOut(x, n, 2)
+    k.out
+"#);
+    assert!(rs.contains("let out: Buffer = __device.new_buffer(((nn + extra) as usize"), "{rs}");
+    assert!(rs.contains("let total: isize = (nn + extra);"), "{rs}");
+}
+
+const FIXED_ARRAY_LOCAL_KERNEL: &str = r#"
+kernel LocalArr:
+    mut [float32]'unified out
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        var [float32, 8] acc = [0.0 for ..<8]
+        acc[3] = 2.0
+        out[0] = acc[3]
+"#;
+
+#[test]
+fn fixed_array_local_is_declared_and_initialized_in_kernel_body() {
+    let (msl, _) = metal_codegen("fixed_array_local", FIXED_ARRAY_LOCAL_KERNEL);
+    assert!(msl.contains("float acc[8];"), "{msl}");
+    assert!(msl.contains("acc[bp_array_i] = 0"), "{msl}");
+    assert!(!msl.contains("/* expr */"), "{msl}");
+}
+
+#[test]
+fn thread_private_fixed_array_kernel_field_is_declared_in_entry_point() {
+    let (msl, _) = metal_codegen("local_fixed_array_field", r#"
+kernel LocalField:
+    mut [float32]'unified out
+    mut [float32, 8] acc
+    init():
+        out = [0.0 for ..<1]
+    def ():
+        acc[0] = 1.0
+        out[0] = acc[0]
+"#);
+    assert!(msl.contains("float acc[8];"),
+        "expected inferred 'local field declaration in entry point;\ngot:\n{msl}");
+}
+
 /// Invoke `boring build --target metal <file>` and return the generated
 /// (kernels/main.metal, src/main.rs) text pair.
 ///
@@ -149,10 +205,137 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
     assert!(msl.contains("if (m == 1)"), "{msl}");
-    assert!(msl.contains("threadgroup float bp_b_tile[64]"), "{msl}");
+    assert!(msl.contains("threadgroup float bp_a_tile[256]"), "{msl}");
+    assert!(msl.contains("threadgroup float bp_b_tile[128]"), "{msl}");
+    assert!(msl.contains("threadgroup float bp_scales[16]"), "{msl}");
+    assert!(msl.contains("const uint bp_row_fragment = bp_warp / 2"), "{msl}");
+    assert!(msl.contains("const uint bp_col_fragment = bp_warp % 2"), "{msl}");
     assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
     assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
-    assert!(host.contains("__boring_launch((32 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("+ 15") && host.contains("+ 31"), "{host}");
+}
+
+#[test]
+fn dynamic_q8_native_prefill_bounds_partial_row_and_column_tiles() {
+    let (msl, host) = metal_codegen("dynamic_native_q8_partial_tiles", r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
+    y
+"#);
+    assert!(msl.contains("bp_input_row < (uint)m"), "{msl}");
+    assert!(msl.contains("bp_output_col < (uint)n"), "{msl}");
+    assert!(msl.contains("bp_output_row < (uint)m && bp_output_col < (uint)n"), "{msl}");
+    assert!(host.contains("+ 15") && host.contains("+ 31"), "{host}");
+}
+
+#[test]
+fn dynamic_k_quant_linear_uses_native_tiled_prefill() {
+    for (format, kernel, bytes) in [
+        ("q4_k", "BoringTensorDynamicQ4KNative0", "* 144"),
+        ("q6_k", "BoringTensorDynamicQ6KNative0", "* 210"),
+    ] {
+        let source = format!(r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, [float32]'gpu'global bias, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, bias, y, m = m, n = n, k = k, format = "{format}")
+    y
+"#);
+        let (msl, host) = metal_codegen(&format!("dynamic_native_{format}_tensor_linear"), &source);
+        assert!(msl.contains(&format!("kernel {kernel}")), "{msl}");
+        assert!(msl.contains("threadgroup float bp_a_tile[256]"), "{msl}");
+        assert!(msl.contains("threadgroup float bp_b_tile[128]"), "{msl}");
+        assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+        assert!(msl.contains(bytes), "{msl}");
+        assert!(msl.contains("bp_input_inner < (uint)k"), "{msl}");
+        assert!(msl.contains("bp_output_row < (uint)m && bp_output_col < (uint)n"), "{msl}");
+        assert!(host.contains("+ 15") && host.contains("+ 31"), "{host}");
+    }
+}
+
+#[test]
+fn dynamic_k_quant_decode_uses_one_simdgroup_per_output_row() {
+    for format in ["q4_k", "q6_k", "q3_k", "q2_k"] {
+        let source = format!(r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+    y
+"#);
+        let (msl, host) = metal_codegen(&format!("dynamic_{format}_warp_decode"), &source);
+        assert!(msl.contains("__simd_lane_id"), "{format}: {msl}");
+        assert!(msl.contains("simd_shuffle_xor"), "{format}: {msl}");
+        if matches!(format, "q4_k" | "q6_k") {
+            assert!(msl.contains("bp_d = simd_shuffle(bp_d, 0)"), "{format}: {msl}");
+            assert!(msl.contains("bp_scale = simd_shuffle"), "{format}: {msl}");
+        }
+        assert!(host.contains("+ 7") || host.contains("/ 8"), "{format}: {host}");
+    }
+}
+
+#[test]
+fn dynamic_quantized_half_bits_are_narrowed_before_metal_bitcast() {
+    for format in ["q8_0", "q4_k", "q6_k"] {
+        let source = format!(r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+    y
+"#);
+        let (msl, _) = metal_codegen(&format!("dynamic_{format}_half_bitcast_width"), &source);
+        assert!(
+            !msl.contains("as_type<half>(ushort(b["),
+            "{format}: a byte-pair expression reaches as_type<half> before explicit 16-bit narrowing:\n{msl}"
+        );
+        assert!(
+            msl.contains("ushort(ushort(b["),
+            "{format}: expected packed half bits to be explicitly narrowed to ushort:\n{msl}"
+        );
+    }
+}
+
+// Text snapshots cannot catch MSL type-system errors: the generated Rust treats
+// the shader as an opaque include_str! and Metal only compiles it at runtime.
+// Compile each native K-quant library through newLibraryWithSource so both the
+// m == 1 warp-decode branch and the tiled prefill branch are checked by Metal.
+#[cfg(target_os = "macos")]
+#[test]
+fn real_metal_compiles_native_q4_k_and_q6_k_prefill_and_decode_msl() {
+    for (format, block_bytes) in [("q4_k", 144), ("q6_k", 210)] {
+        let test_name = format!("real_compile_{format}_prefill_decode");
+        let source = format!(r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+    y
+
+let [float32] x = [0.0 as float32 for ..<256]
+let [uint8] weights = [0 as uint8 for ..<{block_bytes}]
+let result = compute(x, weights, 1, 1, 256)
+with result:
+    print "compiled {format}"
+"#);
+        let (_msl, _rs) = metal_codegen(&test_name, &source);
+        let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("metal_codegen").join(&test_name).join("test_metal").join("Cargo.toml");
+        let run = Command::new("cargo")
+            .args(["run", "--quiet", "--manifest-path"])
+            .arg(&manifest)
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap_or_else(|error| panic!("failed to invoke cargo for {format}: {error}"));
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if stderr.contains("no Metal device found") {
+            eprintln!("skipping real Metal MSL compilation: no Metal device available");
+            return;
+        }
+        assert!(
+            run.status.success(),
+            "generated {format} program failed while compiling its combined prefill/decode MSL library through newLibraryWithSource:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            stderr,
+        );
+    }
 }
 
 // ─── device — kernel signature ───────────────────────────────────────────────

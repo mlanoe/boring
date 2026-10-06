@@ -558,6 +558,7 @@ interp_test!(mut_collection_by_value_reuse);
 interp_test!(last_use_move);
 interp_test!(field_by_value_reuse);
 interp_test!(by_value_arg_then_reuse);
+interp_test!(destructured_slice_by_value_reuse);
 interp_test!(actor_call_result_ctor_arg);
 interp_test!(actor_field_method_via_call_local);
 interp_test!(lend_and_read_same_local);

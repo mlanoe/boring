@@ -86,7 +86,7 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
         false
     });
 
-    let device_msl = device::emit_device_msl(program);
+    let (device_msl, device_errors) = device::emit_device_msl_with_errors(program);
 
     // See this module's doc comment for the full splice architecture.
     let kernel_touching = crate::transpiler::kernel_touching_fn_names(program, &kernel_names_set);
@@ -151,6 +151,7 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
     let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
     let mut errors = general_out.errors;
+    errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
     MetalOutput { host_rs, device_msl, kernel_names, cargo_toml, errors }

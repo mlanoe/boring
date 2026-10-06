@@ -101,7 +101,7 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
 pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> RocmOutput {
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 64;
-    tensor_config.portable_tiled_dynamic_q8_linear = true;
+    tensor_config.portable_tiled_dynamic_quantized_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let program = &tensor_host.program;
     // Collect all kernel names.
@@ -127,7 +127,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
         false
     });
 
-    let device_hip = device::emit_device_hip(program);
+    let (device_hip, device_errors) = device::emit_device_hip_with_errors(program);
 
     // See this module's doc comment for the full splice architecture.
     let kernel_touching = crate::transpiler::kernel_touching_fn_names(program, &kernel_names_set);
@@ -195,6 +195,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
     let mut errors = general_out.errors;
+    errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
     RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors }

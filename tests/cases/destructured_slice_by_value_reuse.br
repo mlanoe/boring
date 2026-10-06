@@ -1,0 +1,25 @@
+# A slice derived from a tuple-destructured array keeps its collection type, so a
+# by-value struct field clones it when the local is used again afterwards.
+struct Slot:
+    [int] tokens
+    int used
+
+struct Cache:
+    int pos
+
+([int], int) make_pair() throws:
+    ([1, 2, 3], 2)
+
+def main() throws:
+    let (all, pos) = make_pair()
+    let covered = all[0..<pos]
+    let s = Slot(covered, 0)
+    print covered.length
+    print s.tokens.length
+
+    # Rust evaluates tuple operands left to right.  The first operand must not move
+    # `new_cache`, because the second operand reads one of its fields.
+    let new_cache = Cache(2)
+    let pair = (new_cache, all[0..<new_cache.pos])
+    print pair.0.pos
+    print pair.1.length

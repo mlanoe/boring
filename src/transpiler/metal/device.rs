@@ -10,10 +10,15 @@ use crate::transpiler::helpers::{
     first_loop_index,
 };
 
+#[cfg(test)]
 pub(super) fn emit_device_msl(program: &Program) -> String {
+    emit_device_msl_with_errors(program).0
+}
+
+pub(super) fn emit_device_msl_with_errors(program: &Program) -> (String, Vec<crate::transpiler::TranspileError>) {
     let mut e = DeviceEmitter::new();
     e.emit_program(program);
-    e.out
+    (e.out, e.errors)
 }
 
 // ── Reserved-word-safe identifiers ────────────────────────────────────────────
@@ -123,6 +128,7 @@ struct DeviceEmitter {
     /// the tail statement of such a body must stay a bare expression statement
     /// (nothing to return), unlike a non-void function's tail expression.
     current_fn_is_void: bool,
+    errors: Vec<crate::transpiler::TranspileError>,
 }
 
 impl DeviceEmitter {
@@ -136,6 +142,7 @@ impl DeviceEmitter {
             top_level_scalars: std::collections::HashMap::new(),
             locals: std::collections::HashMap::new(),
             current_fn_is_void: true,
+            errors: Vec::new(),
         }
     }
 
@@ -443,7 +450,19 @@ impl DeviceEmitter {
         }
 
         if decl.name.starts_with("BoringTensorDynamicQ8Native") {
-            self.emit_dynamic_q8_linear_body(decl.fields.iter().any(|field| field.name == "bias"));
+            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q8_0", true);
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        if decl.name.starts_with("BoringTensorDynamicQ4KNative") {
+            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q4_k", !decl.name.contains("ScalarDecode"));
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        if decl.name.starts_with("BoringTensorDynamicQ6KNative") {
+            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q6_k", !decl.name.contains("ScalarDecode"));
             self.indent -= 1;
             self.line("}");
             return;
@@ -525,7 +544,11 @@ impl DeviceEmitter {
         self.line("}");
     }
 
-    fn emit_dynamic_q8_linear_body(&mut self, has_bias: bool) {
+    fn emit_dynamic_packed_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool) {
+        if format != "q8_0" {
+            self.emit_dynamic_k_quant_linear_body(has_bias, format, warp_decode);
+            return;
+        }
         self.line("if (m == 1) {");
         self.indent += 1;
         self.line("const uint bp_warp = __thread_pos.x / 32;");
@@ -541,7 +564,7 @@ impl DeviceEmitter {
         self.line("float bp_scale = 0.0f;");
         self.line("if (bp_lane == 0) {");
         self.indent += 1;
-        self.line("const ushort bp_bits = ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8);");
+        self.line("const ushort bp_bits = ushort(ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8));");
         self.line("bp_scale = float(as_type<half>(bp_bits));");
         self.indent -= 1;
         self.line("}");
@@ -566,60 +589,75 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        self.line("threadgroup float bp_a_tile[64];");
-        self.line("threadgroup float bp_b_tile[64];");
-        self.line("threadgroup float bp_out_tile[64];");
-        self.line("const uint bp_row = __block_pos.y * 8;");
-        self.line("const uint bp_col = __block_pos.x * 8;");
+        self.line("threadgroup float bp_a_tile[256];");
+        self.line("threadgroup float bp_b_tile[128];");
+        self.line("threadgroup float bp_scales[16];");
+        self.line("threadgroup float bp_out_tile[512];");
+        self.line("const uint bp_warp = __thread_pos.x / 32;");
+        self.line("const uint bp_row_fragment = bp_warp / 2;");
+        self.line("const uint bp_col_fragment = bp_warp % 2;");
+        self.line("const uint bp_row = __block_pos.y * 32;");
+        self.line("const uint bp_col = __block_pos.x * 16;");
         self.line("simdgroup_float8x8 bp_result = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
         self.line("simdgroup_float8x8 bp_a;");
         self.line("simdgroup_float8x8 bp_b;");
         self.line("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 8) {");
         self.indent += 1;
-        self.line("for (uint bp_cell = __simd_lane_id; bp_cell < 64; bp_cell += __simd_size) {");
+        self.line("const uint bp_thread = __thread_pos.x;");
+        self.line("const uint bp_input_row = bp_row + bp_thread / 8;");
+        self.line("const uint bp_input_inner = bp_base + bp_thread % 8;");
+        self.line("bp_a_tile[bp_thread] = bp_input_row < (uint)m ? a[(ulong)bp_input_row * (ulong)k + bp_input_inner] : 0.0f;");
+        self.line("if (bp_thread < 16) {");
         self.indent += 1;
-        self.line("const uint bp_dr = bp_cell / 8;");
-        self.line("const uint bp_dc = bp_cell % 8;");
-        self.line("const uint bp_input_row = bp_row + bp_dr;");
-        self.line("bp_a_tile[bp_cell] = bp_input_row < (uint)m ? a[(ulong)bp_input_row * (ulong)k + bp_base + bp_dc] : 0.0f;");
-        self.line("const uint bp_output_col = bp_col + bp_dc;");
-        self.line("const uint bp_inner = bp_base + bp_dr;");
+        self.line("const uint bp_output_col = bp_col + bp_thread;");
         self.line("if (bp_output_col < (uint)n) {");
         self.indent += 1;
-        self.line("const ulong bp_flat = (ulong)bp_output_col * (ulong)k + bp_inner;");
+        self.line("const ulong bp_flat = (ulong)bp_output_col * (ulong)k + bp_base;");
         self.line("const ulong bp_block = (bp_flat / 32) * 34;");
-        self.line("const ushort bp_bits = ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8);");
-        self.line("const float bp_scale = float(as_type<half>(bp_bits));");
-        self.line("int bp_q = int(b[bp_block + 2 + (bp_flat % 32)]);");
-        self.line("if (bp_q > 127) bp_q -= 256;");
-        self.line("bp_b_tile[bp_cell] = float(bp_q) * bp_scale;");
+        self.line("const ushort bp_bits = ushort(ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8));");
+        self.line("bp_scales[bp_thread] = float(as_type<half>(bp_bits));");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        self.line("bp_b_tile[bp_cell] = 0.0f;");
+        self.line("bp_scales[bp_thread] = 0.0f;");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
-        self.line("simdgroup_barrier(mem_flags::mem_threadgroup);");
-        self.line("simdgroup_load(bp_a, bp_a_tile, 8, ulong2(0, 0), false);");
-        self.line("simdgroup_load(bp_b, bp_b_tile, 8, ulong2(0, 0), false);");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("if (bp_thread < 128) {");
+        self.indent += 1;
+        self.line("const uint bp_dr = bp_thread / 16;");
+        self.line("const uint bp_dc = bp_thread % 16;");
+        self.line("const uint bp_output_col = bp_col + bp_dc;");
+        self.line("const ulong bp_flat = (ulong)bp_output_col * (ulong)k + bp_base + bp_dr;");
+        self.line("const ulong bp_block = (bp_flat / 32) * 34;");
+        self.line("int bp_q = bp_output_col < (uint)n ? int(b[bp_block + 2 + (bp_flat % 32)]) : 0;");
+        self.line("if (bp_q > 127) bp_q -= 256;");
+        self.line("bp_b_tile[bp_thread] = float(bp_q) * bp_scales[bp_dc];");
+        self.indent -= 1;
+        self.line("}");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("simdgroup_load(bp_a, bp_a_tile, 8, ulong2(0, bp_row_fragment * 8), false);");
+        self.line("simdgroup_load(bp_b, bp_b_tile, 16, ulong2(bp_col_fragment * 8, 0), false);");
         self.line("simdgroup_multiply_accumulate(bp_result, bp_a, bp_b, bp_result);");
-        self.line("simdgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
         self.indent -= 1;
         self.line("}");
-        self.line("simdgroup_store(bp_result, bp_out_tile, 8, ulong2(0, 0), false);");
-        self.line("simdgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("simdgroup_store(bp_result, bp_out_tile + bp_warp * 64, 8, ulong2(0, 0), false);");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
         self.line("for (uint bp_cell = __simd_lane_id; bp_cell < 64; bp_cell += __simd_size) {");
         self.indent += 1;
         self.line("const uint bp_dr = bp_cell / 8;");
         self.line("const uint bp_dc = bp_cell % 8;");
-        self.line("if (bp_row + bp_dr < (uint)m && bp_col + bp_dc < (uint)n) {");
+        self.line("const uint bp_output_row = bp_row + bp_row_fragment * 8 + bp_dr;");
+        self.line("const uint bp_output_col = bp_col + bp_col_fragment * 8 + bp_dc;");
+        self.line("if (bp_output_row < (uint)m && bp_output_col < (uint)n) {");
         self.indent += 1;
         if has_bias {
-            self.line("c[(ulong)(bp_row + bp_dr) * (ulong)n + bp_col + bp_dc] = bp_out_tile[bp_cell] + bias[bp_col + bp_dc];");
+            self.line("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_warp * 64 + bp_cell] + bias[bp_output_col];");
         } else {
-            self.line("c[(ulong)(bp_row + bp_dr) * (ulong)n + bp_col + bp_dc] = bp_out_tile[bp_cell];");
+            self.line("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_warp * 64 + bp_cell];");
         }
         self.indent -= 1;
         self.line("}");
@@ -627,6 +665,169 @@ impl DeviceEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+    }
+
+    fn emit_dynamic_k_quant_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool) {
+        self.line("if (m == 1) {");
+        self.indent += 1;
+        if warp_decode {
+            self.line("const uint bp_lane = __simd_lane_id;");
+            self.line("const uint bp_warp = __thread_pos.x / 32;");
+            self.line("const ulong bp_cell = (ulong)__block_pos.x * 8 + bp_warp;");
+        } else {
+            self.line("const ulong bp_cell = (ulong)__thread_pos.x + ((ulong)__block_pos.x + (ulong)__block_pos.y * (ulong)__grid_dim.x) * (ulong)__block_dim.x;");
+        }
+        self.line("float bp_sum = 0.0f;");
+        self.line("if (bp_cell < (ulong)n) {");
+        self.indent += 1;
+        if warp_decode {
+            self.line("for (ulong bp_base = 0; bp_base < (ulong)k; bp_base += 256) {");
+            self.indent += 1;
+            self.line(&format!("const ulong bp_block = (bp_cell * (ulong)k + bp_base) / 256 * {};", if format == "q6_k" { 210 } else { 144 }));
+            self.line(&format!("float bp_d = bp_lane == 0 ? float(as_type<half>(ushort(ushort(b[bp_block + {}]) | (ushort(b[bp_block + {}]) << 8)))) : 0.0f;", if format == "q6_k" { 208 } else { 0 }, if format == "q6_k" { 209 } else { 1 }));
+            self.line("bp_d = simd_shuffle(bp_d, 0);");
+            if format == "q4_k" {
+                self.line("float bp_dm = bp_lane == 0 ? float(as_type<half>(ushort(ushort(b[bp_block + 2]) | (ushort(b[bp_block + 3]) << 8)))) : 0.0f;");
+                self.line("bp_dm = simd_shuffle(bp_dm, 0);");
+                self.line("for (uint bp_group = 0; bp_group < 8; ++bp_group) {");
+                self.indent += 1;
+                self.line("const uint bp_chunk = bp_group / 2, bp_half = bp_group % 2;");
+                self.line("int bp_scale = 0, bp_min = 0;");
+                self.line("if (bp_lane == 0) {");
+                self.indent += 1;
+                self.line("bp_scale = bp_group < 4 ? int(b[bp_block + 4 + bp_group]) & 63 : (int(b[bp_block + 8 + bp_group]) & 15) | ((int(b[bp_block + bp_group]) >> 6) << 4);");
+                self.line("bp_min = bp_group < 4 ? int(b[bp_block + 8 + bp_group]) & 63 : (int(b[bp_block + 8 + bp_group]) >> 4) | ((int(b[bp_block + 4 + bp_group]) >> 6) << 4);");
+                self.indent -= 1;
+                self.line("}");
+                self.line("bp_scale = simd_shuffle(bp_scale, 0); bp_min = simd_shuffle(bp_min, 0);");
+                self.line("const int bp_packed = int(b[bp_block + 16 + bp_chunk * 32 + bp_lane]);");
+                self.line("const int bp_q = bp_half == 0 ? bp_packed & 15 : (bp_packed >> 4) & 15;");
+                self.line("bp_sum += a[bp_base + bp_group * 32 + bp_lane] * (float(bp_q * bp_scale) * bp_d - float(bp_min) * bp_dm);");
+                self.indent -= 1;
+                self.line("}");
+            } else {
+                self.line("for (uint bp_group = 0; bp_group < 8; ++bp_group) {");
+                self.indent += 1;
+                self.line("const uint bp_iteration = bp_group / 4, bp_quarter = bp_group % 4, bp_half = bp_lane / 16;");
+                self.line("const ulong bp_ql = bp_block + bp_iteration * 64, bp_qh = bp_block + 128 + bp_iteration * 32;");
+                self.line("const int bp_low0 = int(b[bp_ql + bp_lane]), bp_low32 = int(b[bp_ql + bp_lane + 32]);");
+                self.line("const int bp_nibble = bp_quarter == 0 ? bp_low0 & 15 : (bp_quarter == 1 ? bp_low32 & 15 : (bp_quarter == 2 ? (bp_low0 >> 4) & 15 : (bp_low32 >> 4) & 15));");
+                self.line("const int bp_high = (int(b[bp_qh + bp_lane]) >> (bp_quarter * 2)) & 3;");
+                self.line("int bp_scale = bp_lane % 16 == 0 ? int(b[bp_block + 192 + bp_iteration * 8 + bp_half + bp_quarter * 2]) : 0;");
+                self.line("bp_scale = simd_shuffle(bp_scale, bp_half * 16); if (bp_scale > 127) bp_scale -= 256;");
+                self.line("bp_sum += a[bp_base + bp_group * 32 + bp_lane] * (float(bp_scale * ((bp_nibble | (bp_high << 4)) - 32)) * bp_d);");
+                self.indent -= 1;
+                self.line("}");
+            }
+            self.indent -= 1;
+            self.line("}");
+        } else {
+            self.line("for (ulong bp_inner = 0; bp_inner < (ulong)k; ++bp_inner) {");
+            self.indent += 1;
+            self.line("const ulong bp_flat = bp_cell * (ulong)k + bp_inner;");
+            self.emit_k_quant_decode(format, "bp_flat", "bp_weight");
+            self.line("bp_sum += a[bp_inner] * bp_weight;");
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
+        if warp_decode {
+            self.line("for (uint bp_offset = 16; bp_offset > 0; bp_offset /= 2) bp_sum += simd_shuffle_xor(bp_sum, bp_offset);");
+            self.line("if (bp_lane == 0 && bp_cell < (ulong)n) {");
+        } else {
+            self.line("if (bp_cell < (ulong)n) {");
+        }
+        self.indent += 1;
+        if has_bias { self.line("c[bp_cell] = bp_sum + bias[bp_cell];"); } else { self.line("c[bp_cell] = bp_sum;"); }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("threadgroup float bp_a_tile[256];");
+        self.line("threadgroup float bp_b_tile[128];");
+        self.line("threadgroup float bp_out_tile[512];");
+        self.line("const uint bp_thread = __thread_pos.x;");
+        self.line("const uint bp_warp = bp_thread / 32;");
+        self.line("const uint bp_row_fragment = bp_warp / 2;");
+        self.line("const uint bp_col_fragment = bp_warp % 2;");
+        self.line("const uint bp_row = __block_pos.y * 32;");
+        self.line("const uint bp_col = __block_pos.x * 16;");
+        self.line("simdgroup_float8x8 bp_result = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
+        self.line("simdgroup_float8x8 bp_a;");
+        self.line("simdgroup_float8x8 bp_b;");
+        self.line("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 8) {");
+        self.indent += 1;
+        self.line("const uint bp_input_row = bp_row + bp_thread / 8;");
+        self.line("const uint bp_input_inner = bp_base + bp_thread % 8;");
+        self.line("bp_a_tile[bp_thread] = bp_input_row < (uint)m && bp_input_inner < (uint)k ? a[(ulong)bp_input_row * (ulong)k + bp_input_inner] : 0.0f;");
+        self.line("if (bp_thread < 128) {");
+        self.indent += 1;
+        self.line("const uint bp_dr = bp_thread / 16;");
+        self.line("const uint bp_dc = bp_thread % 16;");
+        self.line("const uint bp_output_col = bp_col + bp_dc;");
+        self.line("const uint bp_inner = bp_base + bp_dr;");
+        self.line("if (bp_output_col < (uint)n && bp_inner < (uint)k) {");
+        self.indent += 1;
+        self.line("const ulong bp_flat = (ulong)bp_output_col * (ulong)k + bp_inner;");
+        self.emit_k_quant_decode(format, "bp_flat", "bp_weight");
+        self.line("bp_b_tile[bp_thread] = bp_weight;");
+        self.indent -= 1;
+        self.line("} else bp_b_tile[bp_thread] = 0.0f;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("simdgroup_load(bp_a, bp_a_tile, 8, ulong2(0, bp_row_fragment * 8), false);");
+        self.line("simdgroup_load(bp_b, bp_b_tile, 16, ulong2(bp_col_fragment * 8, 0), false);");
+        self.line("simdgroup_multiply_accumulate(bp_result, bp_a, bp_b, bp_result);");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.indent -= 1;
+        self.line("}");
+        self.line("simdgroup_store(bp_result, bp_out_tile + bp_warp * 64, 8, ulong2(0, 0), false);");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("for (uint bp_cell = __simd_lane_id; bp_cell < 64; bp_cell += __simd_size) {");
+        self.indent += 1;
+        self.line("const uint bp_dr = bp_cell / 8, bp_dc = bp_cell % 8;");
+        self.line("const uint bp_output_row = bp_row + bp_row_fragment * 8 + bp_dr;");
+        self.line("const uint bp_output_col = bp_col + bp_col_fragment * 8 + bp_dc;");
+        self.line("if (bp_output_row < (uint)m && bp_output_col < (uint)n) {");
+        self.indent += 1;
+        let bias = if has_bias { " + bias[bp_output_col]" } else { "" };
+        self.line(&format!("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_warp * 64 + bp_cell]{bias};"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_k_quant_decode(&mut self, format: &str, flat: &str, output: &str) {
+        if format == "q6_k" {
+            self.line(&format!("const ulong bp_block = ({flat} / 256) * 210;"));
+            self.line(&format!("const uint bp_pos = uint({flat} % 256), bp_iteration = bp_pos / 128, bp_within = bp_pos % 128;"));
+            self.line("const uint bp_group = bp_within / 32, bp_lane = bp_within % 32, bp_half = bp_lane / 16;");
+            self.line("const ulong bp_ql = bp_block + bp_iteration * 64, bp_qh = bp_block + 128 + bp_iteration * 32;");
+            self.line("const int bp_low0 = int(b[bp_ql + bp_lane]), bp_low32 = int(b[bp_ql + bp_lane + 32]);");
+            self.line("const int bp_nibble = bp_group == 0 ? bp_low0 & 15 : (bp_group == 1 ? bp_low32 & 15 : (bp_group == 2 ? (bp_low0 >> 4) & 15 : (bp_low32 >> 4) & 15));");
+            self.line("const int bp_high = (int(b[bp_qh + bp_lane]) >> (bp_group * 2)) & 3;");
+            self.line("int bp_subscale = int(b[bp_block + 192 + bp_iteration * 8 + bp_half + bp_group * 2]); if (bp_subscale > 127) bp_subscale -= 256;");
+            self.line("const ushort bp_bits = ushort(ushort(b[bp_block + 208]) | (ushort(b[bp_block + 209]) << 8));");
+            self.line(&format!("const float {output} = float(bp_subscale * ((bp_nibble | (bp_high << 4)) - 32)) * float(as_type<half>(bp_bits));"));
+        } else {
+            self.line(&format!("const ulong bp_block = ({flat} / 256) * 144;"));
+            self.line(&format!("const uint bp_pos = uint({flat} % 256), bp_chunk = bp_pos / 64, bp_within = bp_pos % 64;"));
+            self.line("const uint bp_half = bp_within / 32, bp_lane = bp_within % 32, bp_subblock = bp_chunk * 2 + bp_half;");
+            self.line("const ulong bp_scales = bp_block + 4;");
+            self.line("const int bp_subscale = bp_subblock < 4 ? int(b[bp_scales + bp_subblock]) & 63 : (int(b[bp_scales + bp_subblock + 4]) & 15) | ((int(b[bp_scales + bp_subblock - 4]) >> 6) << 4);");
+            self.line("const int bp_submin = bp_subblock < 4 ? int(b[bp_scales + bp_subblock + 4]) & 63 : (int(b[bp_scales + bp_subblock + 4]) >> 4) | ((int(b[bp_scales + bp_subblock]) >> 6) << 4);");
+            self.line("const int bp_packed = int(b[bp_block + 16 + bp_chunk * 32 + bp_lane]);");
+            self.line("const int bp_q = bp_half == 0 ? bp_packed & 15 : (bp_packed >> 4) & 15;");
+            self.line("const ushort bp_d_bits = ushort(ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8));");
+            self.line("const ushort bp_dm_bits = ushort(ushort(b[bp_block + 2]) | (ushort(b[bp_block + 3]) << 8));");
+            self.line(&format!("const float {output} = float(bp_q * bp_subscale) * float(as_type<half>(bp_d_bits)) - float(bp_submin) * float(as_type<half>(bp_dm_bits));"));
+        }
     }
 
     // ── Statements ────────────────────────────────────────────────────────────
@@ -647,6 +848,12 @@ impl DeviceEmitter {
                     _ => None,
                 });
                 if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
+                if let Some(Type::ArrayN(inner, n)) = &s.ty {
+                    let name = msl_safe_ident(&s.name);
+                    self.line(&format!("{} {}[{}];", elem_msl_type(inner), name, n));
+                    if let Some(val) = &s.value { self.emit_fixed_array_init(&name, *n, val); }
+                    return;
+                }
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
                     self.line(&format!("{}{} {} = {};", kw, ty, msl_safe_ident(&s.name), rhs));
@@ -1095,9 +1302,37 @@ impl DeviceEmitter {
             ExprKind::Range { start, end, .. } => {
                 format!("/* range {}..{} */", self.expr(start), self.expr(end))
             }
-            _ => "/* expr */".into(),
+            _ => {
+                self.errors.push(crate::transpiler::TranspileError::at(
+                    "expression is not supported in Metal kernel device code", e.line, e.col,
+                ));
+                "0".into()
+            }
         }
     }
+
+    fn emit_fixed_array_init(&mut self, name: &str, n: usize, value: &Expr) {
+        match &value.kind {
+            ExprKind::Array(values) if values.len() == n => {
+                for (i, value) in values.iter().enumerate() {
+                    let rhs = self.expr(value);
+                    self.line(&format!("{}[{}] = {};", name, i, rhs));
+                }
+            }
+            ExprKind::ArrayFill { value, count } if const_array_count(count) == Some(n) => {
+                let rhs = self.expr(value);
+                self.line(&format!("for (ulong bp_array_i = 0; bp_array_i < {}; ++bp_array_i) {{ {}[bp_array_i] = {}; }}", n, name, rhs));
+            }
+            _ => self.errors.push(crate::transpiler::TranspileError::at(
+                "fixed-array kernel locals require an N-element array literal or `[value for ..<N]` initializer",
+                value.line, value.col,
+            )),
+        }
+    }
+}
+
+fn const_array_count(e: &Expr) -> Option<usize> {
+    match e.kind { ExprKind::Int(n) if n >= 0 => Some(n as usize), _ => None }
 }
 
 

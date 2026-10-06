@@ -1,0 +1,71 @@
+# Portable packed-weight prefill benchmark for WGPU, CUDA, and ROCm.
+# Build for a target, then pass one of the eight packed formats to the binary.
+#
+#   boring build --target wgpu examples/tensor_portable_quant_prefill_bench.br
+#   cd examples/tensor_portable_quant_prefill_bench_wgpu
+#   cargo run --release -- q4_k
+
+req [float32]'gpu'unified q8([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q8_0")
+    y
+
+req [float32]'gpu'unified q5([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q5_0")
+    y
+
+req [float32]'gpu'unified q4([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q4_0")
+    y
+
+req [float32]'gpu'unified iq4([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "iq4_nl")
+    y
+
+req [float32]'gpu'unified q6k([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q6_k")
+    y
+
+req [float32]'gpu'unified q4k([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q4_k")
+    y
+
+req [float32]'gpu'unified q3k([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q3_k")
+    y
+
+req [float32]'gpu'unified q2k([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q2_k")
+    y
+
+def main() throws:
+    let [string] argv = args()
+    let format = if argv.length > 1: argv[1] else: "q4_k"
+    guard format == "q8_0" or format == "q5_0" or format == "q4_0" or format == "iq4_nl" or format == "q6_k" or format == "q4_k" or format == "q3_k" or format == "q2_k" else throw "expected a supported packed tensor format"
+    let m = 128
+    let k = 2048
+    let n = 11008
+    let [float32] x = [((i % 31) as float32 - 15.0 as float32) / 64.0 as float32 for i in 0..<(m * k)]
+    let blockElements = if format == "q8_0" or format == "q5_0" or format == "q4_0" or format == "iq4_nl": 32 else: 256
+    let blockBytes = if format == "q8_0": 34 elif format == "q5_0": 22 elif format == "q4_0" or format == "iq4_nl": 18 elif format == "q6_k": 210 elif format == "q4_k": 144 elif format == "q3_k": 110 else: 84
+    let weightBytes = (n * k / blockElements) * blockBytes
+    let [uint8] weights = [((i * 17 + 29) % 256) as uint8 for i in 0..<weightBytes]
+
+    let warmup = if format == "q8_0": q8(x, weights, m, n, k) elif format == "q5_0": q5(x, weights, m, n, k) elif format == "q4_0": q4(x, weights, m, n, k) elif format == "iq4_nl": iq4(x, weights, m, n, k) elif format == "q6_k": q6k(x, weights, m, n, k) elif format == "q4_k": q4k(x, weights, m, n, k) elif format == "q3_k": q3k(x, weights, m, n, k) else: q2k(x, weights, m, n, k)
+    with warmup:
+        let warmupSink = warmup[0]
+
+    var iteration = 1
+    mut result = if format == "q8_0": q8(x, weights, m, n, k) elif format == "q5_0": q5(x, weights, m, n, k) elif format == "q4_0": q4(x, weights, m, n, k) elif format == "iq4_nl": iq4(x, weights, m, n, k) elif format == "q6_k": q6k(x, weights, m, n, k) elif format == "q4_k": q4k(x, weights, m, n, k) elif format == "q3_k": q3k(x, weights, m, n, k) else: q2k(x, weights, m, n, k)
+    while iteration < 20:
+        result = if format == "q8_0": q8(x, weights, m, n, k) elif format == "q5_0": q5(x, weights, m, n, k) elif format == "q4_0": q4(x, weights, m, n, k) elif format == "iq4_nl": iq4(x, weights, m, n, k) elif format == "q6_k": q6k(x, weights, m, n, k) elif format == "q4_k": q4k(x, weights, m, n, k) elif format == "q3_k": q3k(x, weights, m, n, k) else: q2k(x, weights, m, n, k)
+        iteration += 1
+    with result:
+        print "{format} {m}x{k}x{n}, 20 calls, sink={result[0]}"

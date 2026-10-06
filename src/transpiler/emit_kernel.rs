@@ -384,6 +384,36 @@ impl Transpiler {
         ));
 
         let param_to_field = Self::kernel_param_to_field_map(decl);
+        // Parameters used only by host-side init expressions are just as real as
+        // parameters forwarded directly to a field.  Collect those references up
+        // front so the argument-validation loop below does not reject them before
+        // `substitute_and_emit` gets a chance to translate them.  Keep this scoped
+        // to the two init-expression forms this emitter actually implements:
+        // derived scalar assignments and output array allocation/fill expressions.
+        let mut host_expr_params = Vec::new();
+        for expr in Self::kernel_derived_scalar_field_map(decl).into_values() {
+            crate::transpiler::helpers::collect_vars_in(&expr, &mut host_expr_params);
+        }
+        for init in Self::kernel_output_fill_map(decl).into_values() {
+            match init {
+                KernelOutputInit::Alloc(count) => {
+                    crate::transpiler::helpers::collect_vars_in(&count, &mut host_expr_params);
+                }
+                KernelOutputInit::Fill(value, count) => {
+                    crate::transpiler::helpers::collect_vars_in(&value, &mut host_expr_params);
+                    crate::transpiler::helpers::collect_vars_in(&count, &mut host_expr_params);
+                }
+                KernelOutputInit::Literal(elems) => {
+                    for elem in elems {
+                        crate::transpiler::helpers::collect_vars_in(&elem, &mut host_expr_params);
+                    }
+                }
+                KernelOutputInit::Comp(_, value, count) => {
+                    crate::transpiler::helpers::collect_vars_in(&value, &mut host_expr_params);
+                    crate::transpiler::helpers::collect_vars_in(&count, &mut host_expr_params);
+                }
+            }
+        }
         let init_param_names: Vec<&str> = decl.inits.first()
             .map(|i: &InitDecl| i.params.iter().map(|p| p.name.as_str()).collect())
             .unwrap_or_default();
@@ -414,6 +444,15 @@ impl Transpiler {
                 continue;
             };
             let Some(field_names) = param_to_field.get(param_name) else {
+                if host_expr_params.iter().any(|name| name == param_name) {
+                    // This parameter has no direct field destination, but a later
+                    // derived-field/output initializer needs its caller-side value.
+                    // Record it exactly like a scalar passthrough parameter; the
+                    // expression emitters below substitute this value for the init
+                    // parameter name.
+                    param_to_arg.insert(param_name, self.emit_expr(&arg.value));
+                    continue;
+                }
                 self.push_error(arg.value.line, arg.value.col, format!(
                     "kernel '{}': `init` parameter '{}' is never assigned to a field via a plain `field = {}` statement -- only that pattern is supported for kernel constructor codegen, so this argument would be silently dropped",
                     decl.name, param_name, param_name

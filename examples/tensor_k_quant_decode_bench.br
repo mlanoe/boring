@@ -1,0 +1,53 @@
+# Ad-hoc Metal decode benchmark for the four 256-value GGUF K-quants.
+# It warms once, queues 20 calls, and synchronizes only on final readback.
+#
+#   boring build --target metal examples/tensor_k_quant_decode_bench.br
+#   cd examples/tensor_k_quant_decode_bench_metal
+#   cargo run --release -- q4_k 11008
+#   cargo run --release -- q4_k 151936
+
+req [float32]'gpu'unified q4k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
+    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q4_k")
+    y
+
+req [float32]'gpu'unified q6k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
+    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q6_k")
+    y
+
+req [float32]'gpu'unified q3k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
+    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q3_k")
+    y
+
+req [float32]'gpu'unified q2k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
+    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q2_k")
+    y
+
+def main() throws:
+    let [string] argv = args()
+    let format = if argv.length > 1: argv[1] else: "q4_k"
+    guard format == "q4_k" or format == "q6_k" or format == "q3_k" or format == "q2_k" else throw "expected q4_k, q6_k, q3_k, or q2_k"
+    var n = 11008
+    if argv.length > 2:
+        guard let parsedN = (argv[2] as int) else throw "expected an integer n"
+        n = parsedN
+    guard n == 11008 or n == 151936 else throw "expected n=11008 or n=151936"
+    let k = 2048
+    let [float32] x = [((i % 31) as float32 - 15.0 as float32) / 64.0 as float32 for i in 0..<k]
+    let blockBytes = if format == "q4_k": 144 elif format == "q6_k": 210 elif format == "q3_k": 110 else: 84
+    let [uint8] weights = [((i * 17 + 29) % 256) as uint8 for i in 0..<(n * k / 256 * blockBytes)]
+
+    let warmup = if format == "q4_k": q4k(x, weights, n, k) elif format == "q6_k": q6k(x, weights, n, k) elif format == "q3_k": q3k(x, weights, n, k) else: q2k(x, weights, n, k)
+    with warmup:
+        let warmupSink = warmup[0]
+
+    var iteration = 1
+    mut result = if format == "q4_k": q4k(x, weights, n, k) elif format == "q6_k": q6k(x, weights, n, k) elif format == "q3_k": q3k(x, weights, n, k) else: q2k(x, weights, n, k)
+    while iteration < 20:
+        result = if format == "q4_k": q4k(x, weights, n, k) elif format == "q6_k": q6k(x, weights, n, k) elif format == "q3_k": q3k(x, weights, n, k) else: q2k(x, weights, n, k)
+        iteration += 1
+    with result:
+        print "{format} 1x{k}x{n}, 20 calls, sink={result[0]}"

@@ -947,11 +947,11 @@ impl Transpiler {
         // Track element type for `let x = collection[i]`. Use the general declared-type
         // walk so this also covers `let layer = m.layers[i]`, nested field chains,
         // qualified arrays and dict values rather than only a bare `arr[i]`.
-        if s.ty.is_none() {
-            if matches!(&s_value.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..)) {
-                if let Some(elem_ty) = self.resolve_expr_type(s_value) {
-                    self.var_types.insert(s.name.clone(), elem_ty);
-                }
+        if s.ty.is_none()
+            && matches!(&s_value.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..))
+        {
+            if let Some(elem_ty) = self.resolve_expr_type(s_value) {
+                self.var_types.insert(s.name.clone(), elem_ty);
             }
         }
         // When value is nil (None), the var is always optional.
@@ -2684,14 +2684,21 @@ impl Transpiler {
             bindings.join(", ")
         };
         self.line(&format!("let ({}) = {};", bindings_s, val));
-        // Track optional_vars for tuple destructure: if the RHS function returns a Tuple,
-        // mark bindings whose element type is Optional so they aren't double-wrapped in Some().
+        // Track every tuple slot's declared return type.  Besides driving later method/field
+        // resolution, this is ownership metadata: `let (all, pos) = make_pair()` followed by
+        // `let covered = all[0..<pos]` must let the indexed-expression inference record
+        // `covered` as `[T]`.  Otherwise a later by-value constructor field sees an untyped
+        // local and moves it instead of cloning it, producing E0382 when it is reused.
+        //
+        // Optional slots additionally go in `optional_vars` so they are not double-wrapped in
+        // Some().  Explicit per-slot annotations win over the function's declared return type.
         if let ExprKind::Call(callee, _) = &s.value.kind {
             if let ExprKind::Var(fn_name) = &callee.kind {
                 if let Some(Type::Tuple(elem_tys)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
                     for (i, binding) in s.bindings.iter().enumerate() {
                         if binding.name == "_" { continue; }
-                        if let Some(ty) = elem_tys.get(i) {
+                        if let Some(ty) = binding.ty.as_ref().or_else(|| elem_tys.get(i)) {
+                            self.var_types.insert(binding.name.clone(), ty.clone());
                             if matches!(ty, Type::Optional(_)) {
                                 self.optional_vars.insert(binding.name.clone());
                             }

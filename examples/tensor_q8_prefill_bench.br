@@ -1,0 +1,75 @@
+# Ad-hoc Metal benchmark for the native Q8_0 prefill schedule. The process
+# constructs deterministic packed weights, warms the kernel once, submits 20
+# calls without intermediate readbacks, and synchronizes only on the final
+# result. Time the marked section with Instruments (or the generated host's
+# command-buffer timing) rather than including process startup and allocation.
+#
+#   boring build --target metal examples/tensor_q8_prefill_bench.br
+#   cd examples/tensor_q8_prefill_bench_metal
+#   cargo run --release -- 512x896x4864
+#
+# Shapes: 512x896x4864, 512x4864x896, 512x896x896, and partial.
+
+req [float32]'gpu'unified q8_linear(
+    [float32]'gpu'global x,
+    [uint8]'gpu'global weights,
+    int m,
+    int n,
+    int k,
+) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, weights, y, m = m, n = n, k = k, format = "q8_0")
+    y
+
+def main() throws:
+    let [string] argv = args()
+    let shape = if argv.length > 1: argv[1] else: "512x896x4864"
+    let m = if shape == "partial": 35 else: 512
+    let k = if shape == "512x4864x896": 4864 else: 896
+    let n = if shape == "512x896x4864": 4864 elif shape == "partial": 19 else: 896
+    guard shape == "512x896x4864" or shape == "512x4864x896" or shape == "512x896x896" or shape == "partial" else throw "unknown shape"
+
+    let [float32] x = [((i % 17) as float32 - 8.0 as float32) * 0.015625 as float32 for i in 0..<(m * k)]
+    mut [uint8] weights = []
+    let blocks = (n * k) / 32
+    var block = 0
+    while block < blocks:
+        weights.push(0x00 as uint8)
+        weights.push(0x38 as uint8) # float16 0.5
+        var lane = 0
+        while lane < 32:
+            weights.push(((lane + block) % 31) as uint8)
+            lane += 1
+        block += 1
+
+    let warmup = q8_linear(x, weights, m, n, k)
+    with warmup:
+        let warmup_sink = warmup[0]
+
+    var iteration = 1
+    mut result = q8_linear(x, weights, m, n, k)
+    while iteration < 20:
+        result = q8_linear(x, weights, m, n, k)
+        iteration += 1
+    with result:
+        if shape == "partial":
+            var max_error = 0.0 as float32
+            var row = 0
+            while row < m:
+                var col = 0
+                while col < n:
+                    var expected = 0.0 as float32
+                    var inner = 0
+                    while inner < k:
+                        let packed_block = (col * k + inner) / 32
+                        let q = ((inner % 32 + packed_block) % 31) as float32
+                        expected += x[row * k + inner] * q * 0.5 as float32
+                        inner += 1
+                    let error = abs(result[row * n + col] - expected)
+                    if error > max_error:
+                        max_error = error
+                    col += 1
+                row += 1
+            assert(max_error < 0.01 as float32)
+            print "partial-tile scalar oracle max abs error={max_error}"
+        print "Q8_0 {m}x{k}x{n}, 20 calls, sink={result[0]}"

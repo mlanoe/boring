@@ -1059,15 +1059,30 @@ impl DeviceEmitter {
             }
         }
 
-        // Declare 'local scalar fields as function vars.
+        // Declare thread-private 'local fields as function vars.  Fixed arrays are
+        // kernel fields too, but unlike scalar locals they have no host-side params
+        // binding to unpack and must be materialized explicitly in the entry point.
+        // A function-scope WGSL `var` is private to each shader invocation, matching
+        // CUDA/HIP's stack array and Metal's thread-local array semantics.
         // Skip scalars already unpacked from the params uniform (is_params_field covers those).
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Local) && !is_params_field(f) {
                 match &f.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {}
+                    Type::ArrayN(inner, n) => {
+                        self.line(&format!("var {}: array<{}, {}>;",
+                            wgsl_safe_ident(&f.name), wgsl_scalar(inner), n));
+                    }
+                    Type::Array(_) => {}
+                    ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
+                        let (elem, _) = ty.as_labeled_array().unwrap();
+                        let len = ty.labeled_array_len().unwrap();
+                        self.line(&format!("var {}: array<{}, {}>;",
+                            wgsl_safe_ident(&f.name), wgsl_scalar(elem), len));
+                    }
+                    ty if ty.as_labeled_array().is_some() => {}
                     _ => {
                         self.line(&format!("var {}: {} = {};",
-                            f.name, wgsl_scalar(&f.ty), wgsl_zero(&f.ty)));
+                            wgsl_safe_ident(&f.name), wgsl_scalar(&f.ty), wgsl_zero(&f.ty)));
                     }
                 }
             }
@@ -1198,6 +1213,17 @@ impl DeviceEmitter {
                     _ => None,
                 });
                 if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
+                if let Some(Type::ArrayN(inner, n)) = &s.ty {
+                    let name = wgsl_safe_ident(&s.name);
+                    let Some(val) = &s.value else {
+                        self.line(&format!("var {}: array<{}, {}>;", name, wgsl_type(inner), n));
+                        return;
+                    };
+                    if let Some(rhs) = self.fixed_array_initializer(inner, *n, val) {
+                        self.line(&format!("{} {}: array<{}, {}> = {};", kw, name, wgsl_type(inner), n, rhs));
+                    }
+                    return;
+                }
                 if let Some(val) = &s.value {
                     let rewritten;
                     let val = if self.mode == WarpMode::Emulated {
@@ -1638,6 +1664,24 @@ impl DeviceEmitter {
         }).unwrap_or_else(|| "0".into())
     }
 
+    fn fixed_array_initializer(&mut self, inner: &Type, n: usize, value: &Expr) -> Option<String> {
+        let values = match &value.kind {
+            ExprKind::Array(values) if values.len() == n => values.iter().map(|v| self.expr(v)).collect::<Vec<_>>(),
+            ExprKind::ArrayFill { value, count } if const_array_count(count) == Some(n) => {
+                let value = self.expr(value);
+                vec![value; n]
+            }
+            _ => {
+                self.errors.push(TranspileError::at(
+                    "fixed-array kernel locals require an N-element array literal or `[value for ..<N]` initializer",
+                    value.line, value.col,
+                ));
+                return None;
+            }
+        };
+        Some(format!("array<{}, {}>({})", wgsl_type(inner), n, values.join(", ")))
+    }
+
     fn expr(&mut self, e: &Expr) -> String {
         match &e.kind {
             ExprKind::Int(n)   => {
@@ -2022,9 +2066,18 @@ impl DeviceEmitter {
                 }
                 acc
             }
-            _ => "/* expr */".into(),
+            _ => {
+                self.errors.push(TranspileError::at(
+                    "expression is not supported in wgpu kernel device code", e.line, e.col,
+                ));
+                "0".into()
+            }
         }
     }
+}
+
+fn const_array_count(e: &Expr) -> Option<usize> {
+    match e.kind { ExprKind::Int(n) if n >= 0 => Some(n as usize), _ => None }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
@@ -2056,7 +2109,8 @@ fn is_buffer_field(f: &KernelFieldDecl) -> bool {
 fn is_params_field(f: &KernelFieldDecl) -> bool {
     match f.qual {
         GpuQual::Const => true,
-        GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)),
+        GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+            && f.ty.as_labeled_array().is_none(),
         _ => {
             // Named struct types (e.g. Dimension) in non-buffer fields go into params.
             matches!(&f.ty, Type::Named(_))

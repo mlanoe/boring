@@ -108,7 +108,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 32;
     tensor_config.native_fixed_matrices = !matches!(tensor_config.matrix_algorithm.as_deref(), Some("scalar"));
-    tensor_config.portable_tiled_dynamic_q8_linear = true;
+    tensor_config.portable_tiled_dynamic_quantized_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let program = &tensor_host.program;
     // Collect all kernel names.
@@ -134,7 +134,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
         false
     });
 
-    let device_cu = device::emit_device_cu(program);
+    let (device_cu, device_errors) = device::emit_device_cu_with_errors(program);
 
     // See this module's doc comment for the full splice architecture.
     let kernel_touching = crate::transpiler::kernel_touching_fn_names(program, &kernel_names_set);
@@ -218,6 +218,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
     let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
     let mut errors = general_out.errors;
+    errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
     CudaOutput { host_rs, device_cu, kernel_names, build_rs, cargo_toml, errors }

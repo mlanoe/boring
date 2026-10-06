@@ -62,7 +62,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
 pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> WgpuOutput {
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 32;
-    tensor_config.portable_tiled_dynamic_q8_linear = true;
+    tensor_config.portable_tiled_dynamic_quantized_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let program = &tensor_host.program;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
@@ -174,7 +174,8 @@ pub(super) fn kernel_params_use_storage(decl: &KernelDecl) -> bool {
 fn is_fixed_array_params_field(f: &KernelFieldDecl) -> bool {
     let is_params = match f.qual {
         GpuQual::Const => true,
-        GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)),
+        GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+            && f.ty.as_labeled_array().is_none(),
         _ => false,
     };
     if !is_params {

@@ -180,7 +180,18 @@ impl Transpiler {
                     .iter().find(|(fname, _)| fname == field)
                     .map(|(_, fty)| fty.clone())
             }
-            ExprKind::Index(inner, _) | ExprKind::LabeledIndex(inner, _) => {
+            ExprKind::Index(inner, index) => {
+                let inner_ty = self.resolve_expr_type(inner)?;
+                // A range index materializes another collection (`a[lo..<hi]` emits
+                // `.to_vec()`), not one element of it.  Keeping the receiver's array type is
+                // essential ownership metadata for an unannotated local bound to the slice.
+                if matches!(&index.kind, ExprKind::SliceRange { .. }) {
+                    Some(inner_ty)
+                } else {
+                    indexed_elem_type(&inner_ty).cloned()
+                }
+            }
+            ExprKind::LabeledIndex(inner, _) => {
                 indexed_elem_type(&self.resolve_expr_type(inner)?).cloned()
             }
             ExprKind::Call(callee, _) => {
