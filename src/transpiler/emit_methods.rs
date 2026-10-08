@@ -2013,12 +2013,12 @@ impl Transpiler {
     /// Literals already are `&str`; non-literal Boring strings need dereferencing from
     /// their `Arc<str>`/`Rc<str>` representation. Explicit `[external_fns]` metadata
     /// bypasses this fallback, which preserves owned arguments where an API requires one.
-    fn emit_external_fallback_arg(&self, arg: &Expr) -> String {
+    pub(crate) fn emit_external_fallback_arg(&self, arg: &Expr) -> String {
         let raw = self.emit_expr(arg);
         let is_string = self.is_string_expr(arg)
             || self.expr_is_string_receiver(arg)
             || self.resolve_expr_type(arg)
-                .is_some_and(|ty| matches!(ty.without_mut(), Type::Str));
+                .is_some_and(|ty| Self::is_string_type(&ty));
         if is_string && !matches!(&arg.kind, ExprKind::Str(_)) {
             format!("(&*{})", raw)
         } else {
@@ -3964,12 +3964,8 @@ impl Transpiler {
     /// Like emit_args but coerces non-nil values to Some(v) when the param is Optional,
     /// handles string-type params via emit_expr_owned, and fills missing args with defaults.
     /// Also reorders labeled (named) arguments to match the declared parameter order.
-    pub(crate) fn emit_args_coerced(&self, fn_name: &str, args: &[Arg]) -> String {
-        self.emit_args_coerced_vec(fn_name, args).join(", ")
-    }
-
-    /// `emit_args_coerced` with the arguments left separate, so a call site can run
-    /// `hoist_lent_conflicts` over them before assembling the call.
+    /// Returns the arguments left separate, so a call site can run `hoist_lent_conflicts`
+    /// over them before assembling the call.
     pub(crate) fn emit_args_coerced_vec(&self, fn_name: &str, args: &[Arg]) -> Vec<String> {
         let sig = self.fn_sigs.get(fn_name).cloned().unwrap_or_default();
         let rebindable_flags = self.fn_rebindable.get(fn_name).cloned().unwrap_or_default();
@@ -5396,6 +5392,7 @@ impl Transpiler {
             source_dir: self.source_dir.clone(),
             deps: self.deps.clone(),
             loaded: self.loaded.clone(),
+            emitted_external_uses: self.emitted_external_uses.clone(),
             prelude_emitted: self.prelude_emitted,
             builtins_seeded: self.builtins_seeded,
             emitted_fn_sigs: self.emitted_fn_sigs.clone(),

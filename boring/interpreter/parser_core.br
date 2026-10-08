@@ -211,6 +211,17 @@ def int parser_line(mut Parser p):
 def int parser_pos(mut Parser p):
     p.pos
 
+# Inline if/match expression parsing may consume the newline while scanning
+# for a following branch. Detect that invisible statement boundary so the
+# postfix parser does not attach the next physical line to the expression.
+def bool parser_crossed_statement_boundary(mut Parser p):
+    let pos = p.pos
+    if pos <= 0:
+        return false
+    let previous = p.tokens[pos - 1]
+    let current = p.tokens[pos]
+    token_kind_name(previous.kind) == "Dedent" or previous.line != current.line
+
 def void parser_set_pos(mut Parser p, int pos):
     p.pos = pos
 
@@ -429,7 +440,24 @@ def bool parser_is_type_start_before_ident(mut Parser p):
     let k0 = token_kind_name(parser_peek_token_at(p, 0).kind)
     let k1 = token_kind_name(parser_peek_token_at(p, 1).kind)
     if k0 == "LBracket" or k0 == "LBrace":
-        return true
+        let is_array_type = k0 == "LBracket"
+        let open_kind = if is_array_type: "LBracket" else: "LBrace"
+        let close_kind = if is_array_type: "RBracket" else: "RBrace"
+        var depth = 0
+        var i = 0
+        while i < 40:
+            let kind = token_kind_name(parser_peek_token_at(p, i).kind)
+            if kind == open_kind: depth = depth + 1
+            if kind == close_kind:
+                depth = depth - 1
+                if depth == 0:
+                    # Collection types may carry an ownership qualifier before
+                    # the binding name: `[int]'shared items`.
+                    return parser_token_at_offset_is(p, i + 1, "Ident") or parser_token_at_offset_is(p, i + 1, "Tick")
+            if kind == "Eof" or depth < 0:
+                return false
+            i = i + 1
+        return false
     if k0 != "Ident":
         return false
     if k1 == "Ident":
@@ -445,7 +473,7 @@ def bool parser_is_type_start_before_ident(mut Parser p):
         var scan = 2
         while true:
             let ks = token_kind_name(parser_peek_token_at(p, scan).kind)
-            if ks == "Ident" or ks == "Guard":
+            if ks == "Ident" or ks == "Guard" or ks == "Mut" or ks == "Req":
                 scan = scan + 1
                 let kn = token_kind_name(parser_peek_token_at(p, scan).kind)
                 if kn == "Tick":
@@ -497,12 +525,49 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
     # We need to distinguish `int add(int a, int b):` from `print foo(42)`
     # Key: after `(`, params should start with a type-ident followed by another ident,
     # or the parens should be empty AND followed by colon.
+    # Pattern: tuple return type, e.g. `([int], int) make_pair() throws:`.
+    # Find the closing paren of the return type before looking for the function
+    # name and its own parameter list.
+    if parser_token_at_offset_is(p, 0, "LParen"):
+        var tuple_depth = 0
+        var tuple_i = 0
+        while tuple_i < 40:
+            let tuple_tok = token_kind_name(parser_peek_token_at(p, tuple_i).kind)
+            if tuple_tok == "LParen": tuple_depth = tuple_depth + 1
+            if tuple_tok == "RParen":
+                tuple_depth = tuple_depth - 1
+                if tuple_depth == 0:
+                    let name_off = tuple_i + 1
+                    let lparen_off = tuple_i + 2
+                    if not parser_token_at_offset_is(p, name_off, "Ident") or not parser_token_at_offset_is(p, lparen_off, "LParen"):
+                        return false
+                    let params_off = lparen_off + 1
+                    if parser_token_at_offset_is(p, params_off, "RParen"):
+                        return parser_token_at_offset_is(p, params_off + 1, "Colon") or parser_token_at_offset_is(p, params_off + 1, "Throws")
+                    let p0 = token_kind_name(parser_peek_token_at(p, params_off).kind)
+                    let p1 = token_kind_name(parser_peek_token_at(p, params_off + 1).kind)
+                    if p0 == "Ident" and p1 == "Ident": return true
+                    if p0 == "LBracket" and p1 == "Ident": return true
+                    if p0 == "LBrace" and p1 == "Ident": return true
+                    if p0 == "Var" or p0 == "Mut": return true
+                    return false
+            if tuple_tok == "Eof" or tuple_depth < 0:
+                return false
+            tuple_i = tuple_i + 1
+        return false
     # Pattern: Ident [Question] Ident LParen ... — the optional `Question` handles
     # an optional-type return (`string? name(...)`) shorthand, same shape as the
     # `def string? name(...)` form already handled in parse_fn_decl.
     if parser_token_at_offset_is(p, 0, "Ident"):
         let has_q = parser_token_at_offset_is(p, 1, "Question")
-        let name_off = if has_q: 2 else: 1
+        var name_off = if has_q: 2 else: 1
+        # Qualified return type: `Counter'shared make()` (including chained
+        # forms such as `'shared'weak`). Skip qualifier tokens to find the
+        # actual function name.
+        if parser_token_at_offset_is(p, 1, "Tick"):
+            name_off = 3
+            while parser_token_at_offset_is(p, name_off, "Tick"):
+                name_off = name_off + 2
         let lparen_off = name_off + 1
         if parser_token_at_offset_is(p, name_off, "Ident") and parser_token_at_offset_is(p, lparen_off, "LParen"):
             let params_off = lparen_off + 1
@@ -773,6 +838,9 @@ def FnDecl parse_fn_decl(mut Parser p, bool is_pub, bool is_def) throws:
             elif next1 == "Question":
                 let next2 = token_kind_name(parser_peek_token_at(p, 2).kind)
                 has_ret = token_is_fn_name_like(next2) or next2 == "LParen"
+            elif next1 == "Tick":
+                # `def Counter'actor make()` / `def Counter'shared make()`.
+                has_ret = true
             elif next1 == "Lt":
                 # Generic return type: `Result<int, string> name(` — scan past `<...>`
                 var gi = 2
@@ -961,7 +1029,15 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                 elif parser_check(p, "Req"):
                     methods.push(parse_fn_decl(p, true, false))
                 elif parser_check(p, "Type"):
-                    type_methods.push(parse_type_method(p, true))
+                    if parser_token_at_offset_is(p, 1, "Def") or parser_token_at_offset_is(p, 1, "Req"):
+                        type_methods.push(parse_type_method(p, true))
+                    else:
+                        # Public associated type/type variable declaration
+                        # (`pub type let T default = ...`). It has no runtime
+                        # effect in the erased generic interpreter.
+                        while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+                            p.advance()
+                        p.eat(TokenKind.Newline)
                 elif parser_is_fn_shorthand(p):
                     methods.push(parse_fn_decl_shorthand(p))
                 else:
@@ -2304,7 +2380,10 @@ def GuardStmt parse_guard_stmt(mut Parser p) throws:
                 clauses.push(CondClause.Let(name, self_expr))
             else:
                 p.expect(TokenKind.Eq)
-                let expr = parse_or(p)
+                # `try?` is a prefix expression parsed above the ordinary
+                # `or` precedence level. Accept it here without letting a
+                # normal condition consume the guard's own `else` clause.
+                let expr = if parser_check(p, "Try"): parse_else_expr(p) else: parse_or(p)
                 clauses.push(CondClause.Let(name, expr))
             if parser_eat(p, "Comma"):
                 if parser_check(p, "Let"):
@@ -2359,7 +2438,7 @@ def IfLetStmt parse_if_let_stmt_rest(mut Parser p, int line) throws:
             let saved = parser_get_allow_noparen_closure(p)
             parser_set_allow_noparen_closure(p, false)
             parser_set_allow_trailing_closure(p, false)
-            let expr = parse_or(p)
+            let expr = if parser_check(p, "Try"): parse_else_expr(p) else: parse_or(p)
             parser_set_allow_noparen_closure(p, saved)
             parser_set_allow_trailing_closure(p, true)
             match pat:
@@ -2430,7 +2509,7 @@ def IfLetStmt parse_if_let_stmt(mut Parser p) throws:
             let saved = parser_get_allow_noparen_closure(p)
             parser_set_allow_noparen_closure(p, false)
             parser_set_allow_trailing_closure(p, false)
-            let expr = parse_or(p)
+            let expr = if parser_check(p, "Try"): parse_else_expr(p) else: parse_or(p)
             parser_set_allow_noparen_closure(p, saved)
             parser_set_allow_trailing_closure(p, true)
             match pat:
@@ -2801,42 +2880,54 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Float64(f.sin())
+            Value.Float32(f): return Value.Float32(f.sin())
             Value.Int(n): return Value.Float64(float(n).sin())
             _: throw "sin: expected number"
     if name == "cos":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Float64(f.cos())
+            Value.Float32(f): return Value.Float32(f.cos())
             Value.Int(n): return Value.Float64(float(n).cos())
             _: throw "cos: expected number"
     if name == "tan":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Float64(f.tan())
+            Value.Float32(f): return Value.Float32(f.tan())
             Value.Int(n): return Value.Float64(float(n).tan())
             _: throw "tan: expected number"
     if name == "round":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Int(int(f.round()))
+            Value.Float32(f): return Value.Int(int(f.round()))
             Value.Int(n): return Value.Int(n)
             _: throw "round: expected number"
     if name == "floor":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Int(int(f.floor()))
+            Value.Float32(f): return Value.Int(int(f.floor()))
             Value.Int(n): return Value.Int(n)
             _: throw "floor: expected number"
     if name == "ceil":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Int(int(f.ceil()))
+            Value.Float32(f): return Value.Int(int(f.ceil()))
             Value.Int(n): return Value.Int(n)
             _: throw "ceil: expected number"
     if name == "pow":
         let base = args[0] else Value.Nil
         let exp = args[1] else Value.Nil
         match base:
+            Value.Float32(b):
+                match exp:
+                    Value.Float32(e): return Value.Float32(b.powf(e))
+                    Value.Float64(e): return Value.Float32(b.powf(e as float32))
+                    Value.Int(e): return Value.Float32(b.powf(e as float32))
+                    _: throw "pow: expected number"
             Value.Float64(b):
                 match exp:
                     Value.Float64(e): return Value.Float64(b.powf(e))
@@ -2852,20 +2943,30 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Float64(f.ln())
+            Value.Float32(f): return Value.Float32(f.ln())
             Value.Int(n): return Value.Float64(float(n).ln())
             _: throw "{name}: expected number"
     if name == "log2":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Float64(f.log2())
+            Value.Float32(f): return Value.Float32(f.log2())
             Value.Int(n): return Value.Float64(float(n).log2())
             _: throw "log2: expected number"
     if name == "log10":
         let v = args[0] else Value.Nil
         match v:
             Value.Float64(f): return Value.Float64(f.log10())
+            Value.Float32(f): return Value.Float32(f.log10())
             Value.Int(n): return Value.Float64(float(n).log10())
             _: throw "log10: expected number"
+    if name == "exp":
+        let v = args[0] else Value.Nil
+        match v:
+            Value.Float64(f): return Value.Float64(f.exp())
+            Value.Float32(f): return Value.Float32(f.exp())
+            Value.Int(n): return Value.Float64(float(n).exp())
+            _: throw "exp: expected number"
     if name == "type":
         let v = args[0] else Value.Nil
         return Value.Str(v.type_name())
@@ -2924,12 +3025,19 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
         if p.eat(TokenKind.Question):
             return Type.Optional(qualified)
         return qualified
+    # Named qualifier groups are a compile-time constraint on parameters.
+    # This runtime does not infer ownership, so retain a representative
+    # qualifier while consuming the complete syntax.
+    if p.eat(TokenKind.Mut):
+        return Type.Qualified(base, OwnerQual.Inline)
+    if p.eat(TokenKind.Req):
+        return Type.Qualified(base, OwnerQual.Shared)
     # Bare tick with no qualifier (e.g. `EColorB'`) — treat as just the base type
     if not parser_check(p, "Ident"):
         return base
     # Only consume the ident if it's a known qualifier keyword
     let peeked_name = parser_peek_ident(p)
-    if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "inline" and peeked_name != "owned" and peeked_name != "weak" and peeked_name != "new":
+    if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "inline" and peeked_name != "owned" and peeked_name != "weak" and peeked_name != "new" and peeked_name != "one" and peeked_name != "many" and peeked_name != "observed":
         return base
     let qual_name = parser_expect_ident(p)
     let qual = match qual_name:
@@ -2940,6 +3048,9 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
         "owned": OwnerQual.Owned
         "new": OwnerQual.Owned
         "weak": OwnerQual.Weak
+        "one": OwnerQual.Inline
+        "many": OwnerQual.Shared
+        "observed": OwnerQual.Shared
         _: OwnerQual.Actor
     var qualified = Type.Qualified(base, qual)
     # Allow chained qualifiers: 'T'shared'weak
@@ -2951,7 +3062,7 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
             qualified = Type.Qualified(qualified, OwnerQual.Guard)
         elif next_k == "Ident":
             let peek_q = parser_peek_token_at(p, 1).text()
-            if peek_q != "actor" and peek_q != "shared" and peek_q != "guard" and peek_q != "inline" and peek_q != "owned" and peek_q != "weak" and peek_q != "new":
+            if peek_q != "actor" and peek_q != "shared" and peek_q != "guard" and peek_q != "inline" and peek_q != "owned" and peek_q != "weak" and peek_q != "new" and peek_q != "observed":
                 break
             p.eat(TokenKind.Tick)
             let q2_name = parser_expect_ident(p)
@@ -2963,6 +3074,7 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
                 "owned": OwnerQual.Owned
                 "new": OwnerQual.Owned
                 "weak": OwnerQual.Weak
+                "observed": OwnerQual.Shared
                 _: OwnerQual.Weak
             qualified = Type.Qualified(qualified, q2)
         else:

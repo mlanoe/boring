@@ -445,6 +445,8 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 break
         elif parser_is_newline(p):
             break
+        elif parser_crossed_statement_boundary(p):
+            break
         let line = parser_line(p)
         if parser_check(p, "Dot"):
             parser_advance(p)
@@ -594,7 +596,10 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
             if inclusive and parser_check(p, "RBracket"):
                 expr = make_slice_range(expr, make_hole(line), inclusive, line)
             else:
-                let end = parse_primary(p)
+                # The endpoint may itself use postfix field/index access
+                # (`a[0..<cursor.pos]`). Parsing only a primary leaves `.pos`
+                # attached to the range expression instead of its endpoint.
+                let end = parse_postfix_inner(p, false)
                 expr = make_range(expr, end, inclusive, line)
         elif parser_check(p, "DotDot"):
             # Bare `..` is only still legal as the open-ended slice M.. — the

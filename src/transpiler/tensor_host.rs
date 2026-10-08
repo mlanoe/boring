@@ -4,6 +4,11 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+/// Output rows one Metal SIMD group computes in the native Q4_K single-token
+/// (`m == 1`) schedule. The dispatch grid (`block = 256` = eight SIMD groups)
+/// and the shader (`transpiler::metal::device`) both derive from this.
+pub(crate) const Q4K_ROWS_PER_SIMDGROUP: usize = 2;
+
 #[derive(Clone, Debug)]
 pub(crate) struct TensorLinearConfig {
     pub matrix_algorithm: Option<String>,
@@ -847,6 +852,9 @@ fn parse_dynamic_replacement_stmts(
         format!("    if {m} % 8 == 0 and {n} % 8 == 0 and {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = ({n} / 8, {m} / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
     } else if native_scalar_decode {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 255) / 256)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 31) / 32))\n", m = call.m, n = call.n)
+    } else if native_packed && call.format == Some("q4_k") {
+        let rows_per_block = 8 * Q4K_ROWS_PER_SIMDGROUP;
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 31) / 32))\n", m = call.m, n = call.n, tail = rows_per_block - 1)
     } else if native_packed {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 31) / 32))\n", m = call.m, n = call.n)
     } else if portable_tiled_quantized {

@@ -1,10 +1,54 @@
 # Ad-hoc Metal decode benchmark for the four 256-value GGUF K-quants.
-# It warms once, queues 20 calls, and synchronizes only on final readback.
+#
+# The packed weights are uploaded ONCE (a host array passed as a `'gpu'global`
+# argument is re-uploaded at every kernel use, which would make this a benchmark
+# of host-to-device copies) and every timed call reads the resident buffer. One
+# warm-up call, then 20 queued calls with a single synchronization at the final
+# readback; the reported figure is microseconds per call and the effective
+# bandwidth of the packed weights (bytes of quantized weights / call time).
 #
 #   boring build --target metal examples/tensor_k_quant_decode_bench.br
 #   cd examples/tensor_k_quant_decode_bench_metal
-#   cargo run --release -- q4_k 11008
-#   cargo run --release -- q4_k 151936
+#   cargo run --release -- <q4_k|q6_k|q3_k|q2_k> <n> <k> [calls]
+#   cargo run --release -- q4_k 18944 3584
+#
+# `k` must be a multiple of 256. The printed `sum`/`weighted`/`first`/`last` are
+# a cheap checksum of the result (`weighted` also catches permuted rows): build
+# once with the default schedule and once with
+#   [tensor.linear.decode]
+#   q4_k = "scalar"
+# in a boring.toml next to the source to compare against the reference order.
+
+use std.time.Instant
+
+kernel CopyBytesKernel:
+    let [uint8]'global   src
+    mut [uint8]'unified  out
+    let int              n
+
+    init([uint8]'global s, int nn):
+        src = s
+        n   = nn
+        out = [0 as uint8 for ..<nn]
+
+    def ():
+        let block_idx = gpu.block.x + gpu.block.y * gpu.grid_dim.x
+        let i = gpu.thread.x + block_idx * gpu.block_dim.x
+        let base = i * 16
+        var int j = 0
+        while j < 16:
+            if base + j < n:
+                out[base + j] = src[base + j]
+            j += 1
+
+req [uint8]'gpu'unified upload(int n, [uint8]'global src) throws:
+    let int blocks = (n + 4095) / 4096
+    let int gx = if blocks > 65535: 65535 else: blocks
+    let int gy = (blocks + gx - 1) / gx
+    mut c = CopyBytesKernel(src, n)
+    kernel:
+        c(block = 256, grid = (gx, gy))
+    c.out
 
 req [float32]'gpu'unified q4k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
     mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
@@ -26,28 +70,73 @@ req [float32]'gpu'unified q2k([float32]'gpu'global x, [uint8]'gpu'global w, int 
     gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q2_k")
     y
 
+req [float32]'gpu'unified run(string format, [float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+    if format == "q4_k":
+        q4k(x, w, n, k)
+    elif format == "q6_k":
+        q6k(x, w, n, k)
+    elif format == "q3_k":
+        q3k(x, w, n, k)
+    else:
+        q2k(x, w, n, k)
+
 def main() throws:
     let [string] argv = args()
     let format = if argv.length > 1: argv[1] else: "q4_k"
     guard format == "q4_k" or format == "q6_k" or format == "q3_k" or format == "q2_k" else throw "expected q4_k, q6_k, q3_k, or q2_k"
-    var n = 11008
+    var n = 18944
     if argv.length > 2:
         guard let parsedN = (argv[2] as int) else throw "expected an integer n"
         n = parsedN
-    guard n == 11008 or n == 151936 else throw "expected n=11008 or n=151936"
-    let k = 2048
+    var k = 3584
+    if argv.length > 3:
+        guard let parsedK = (argv[3] as int) else throw "expected an integer k"
+        k = parsedK
+    var calls = 20
+    if argv.length > 4:
+        guard let parsedCalls = (argv[4] as int) else throw "expected an integer call count"
+        calls = parsedCalls
+    guard n > 0 and k > 0 and k % 256 == 0 else throw "expected n > 0 and k a positive multiple of 256"
+
     let [float32] x = [((i % 31) as float32 - 15.0 as float32) / 64.0 as float32 for i in 0..<k]
     let blockBytes = if format == "q4_k": 144 elif format == "q6_k": 210 elif format == "q3_k": 110 else: 84
-    let [uint8] weights = [((i * 17 + 29) % 256) as uint8 for i in 0..<(n * k / 256 * blockBytes)]
+    let totalBytes = n * k / 256 * blockBytes
+    # Deterministic pseudo-random quants. The half-float scale fields get fixed
+    # small finite values (random bits would often be inf/NaN and hide mismatches).
+    let [uint8] weights = [fill_byte(i, blockBytes, format) as uint8 for i in 0..<totalBytes]
+    let resident = upload(totalBytes, weights)
 
-    let warmup = if format == "q4_k": q4k(x, weights, n, k) elif format == "q6_k": q6k(x, weights, n, k) elif format == "q3_k": q3k(x, weights, n, k) else: q2k(x, weights, n, k)
+    let warmup = run(format, x, resident, n, k)
     with warmup:
         let warmupSink = warmup[0]
 
+    let started = Instant.now()
     var iteration = 1
-    mut result = if format == "q4_k": q4k(x, weights, n, k) elif format == "q6_k": q6k(x, weights, n, k) elif format == "q3_k": q3k(x, weights, n, k) else: q2k(x, weights, n, k)
-    while iteration < 20:
-        result = if format == "q4_k": q4k(x, weights, n, k) elif format == "q6_k": q6k(x, weights, n, k) elif format == "q3_k": q3k(x, weights, n, k) else: q2k(x, weights, n, k)
+    mut result = run(format, x, resident, n, k)
+    while iteration < calls:
+        result = run(format, x, resident, n, k)
         iteration += 1
     with result:
-        print "{format} 1x{k}x{n}, 20 calls, sink={result[0]}"
+        let micros = started.elapsed().asMicros() as float64
+        let perCall = micros / (calls as float64)
+        let gbs = (totalBytes as float64) / perCall / 1000.0
+        var sum = 0.0 as float64
+        var weighted = 0.0 as float64
+        for i in 0..<n:
+            sum += result[i] as float64
+            weighted += (result[i] as float64) * ((i % 7 + 1) as float64)
+        print "{format} n={n} k={k}: {perCall:.1f} us/call, {gbs:.2f} GB/s ({totalBytes} packed bytes), sum={sum:.4f} weighted={weighted:.4f} first={result[0]} last={result[n - 1]}"
+
+int fill_byte(int i, int blockBytes, string format):
+    let at = i % blockBytes
+    # d / dmin as little-endian float16: 0x2C00 = 0.0625, 0x2800 = 0.03125.
+    let scaleAt = if format == "q4_k": 0 elif format == "q6_k": 208 elif format == "q3_k": 108 else: 80
+    let scaleLen = if format == "q4_k" or format == "q2_k": 4 else: 2
+    if at >= scaleAt and at < scaleAt + scaleLen:
+        let slot = at - scaleAt
+        if slot == 1:
+            return 44
+        if slot == 3:
+            return 40
+        return 0
+    return (i * 17 + 29) % 256

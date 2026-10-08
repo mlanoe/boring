@@ -916,6 +916,11 @@ def void exec_item(mut Interpreter interp, Item item):
             interp.set_enum_decl(ename, decl)
             register_type_methods(interp, ename, decl.type_methods)
             interp.set_method_decls(ename, decl.methods)
+            # Match the native interpreter: enum variants are constructors in
+            # the surrounding module scope as well as members of `EnumName`.
+            # A later enum declaration with the same bare variant name wins.
+            for variant in decl.variants:
+                env_define(interp.global_env, variant.name, Value.EnumVariant(ename, variant.name, []), false)
             env_define(interp.global_env, ename, Value.EnumDef(ename), false)
         Item.Trait(decl):
             env_define(interp.global_env, decl.name, Value.Nil, false)
@@ -988,4 +993,3 @@ def void run_program(mut Interpreter interp, Program prog):
     let main_decl_opt = interp.get_fn_decl("main")
     if let main_decl = main_decl_opt:
         _ = call_fn(interp, main_decl, [], nil)
-

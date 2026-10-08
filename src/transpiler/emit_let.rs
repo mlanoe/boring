@@ -493,6 +493,12 @@ impl Transpiler {
         // patterns matched against it. The heuristics below re-insert the name if *this*
         // let's own RHS is actually Option-shaped.
         self.optional_vars.remove(s.name.as_str());
+        // Same for `string_vars`/`string_arc_vars`: both are flat per-fn, name-keyed sets, so a
+        // string `let si = val_to_string(x)` in one branch would otherwise turn a later,
+        // unrelated `var si = 1` into a "string" (`si = si + 1` emitted as string concatenation).
+        // Every string-shaped initializer below re-inserts the name.
+        self.string_vars.remove(s.name.as_str());
+        self.string_arc_vars.remove(s.name.as_str());
         // Track mutable Arc<str> vars for read_line / clear() special-casing
         if is_mutable_string_lit || is_mutable_string_ty {
             self.string_arc_vars.insert(s.name.clone());
@@ -512,6 +518,17 @@ impl Transpiler {
             && (matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
                 || matches!(&s_value.kind, ExprKind::Cast(_, dst_ty) if Self::is_string_type(dst_ty)));
         if is_immutable_string_lit {
+            self.string_vars.insert(s.name.clone());
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
+        }
+        // `let path = dir + "/f.tmp"` — an un-annotated binding of a string concatenation is an
+        // `Rc<str>`/`Arc<str>` like any other string local (rebindable or not). Left untracked,
+        // `File.create(path)` passed it by value (E0277: `Arc<str>: AsRef<Path>`).
+        if s.ty.is_none()
+            && matches!(&s_value.kind, ExprKind::BinOp(BinOp::Add, ..))
+            && self.is_string_expr(s_value)
+        {
             self.string_vars.insert(s.name.clone());
             self.vec_vars.remove(s.name.as_str());
             self.collection_vars.remove(s.name.as_str());
@@ -829,6 +846,17 @@ impl Transpiler {
                             // struct literals) and method dispatch recognizes the enum case too.
                             Type::Named(n) if self.is_known_user_type(n.as_str()) => {
                                 self.var_struct_types.insert(s.name.clone(), n.clone());
+                            }
+                            // `let path = name_of(1)` where `name_of` returns `string`: the
+                            // binding is an `Rc<str>`/`Arc<str>` exactly like a `let string path
+                            // = ...` annotation or a string-returning method call (see the
+                            // `struct_method_return_types` twin below). Without this it stayed
+                            // untracked, so a later `File.create(path)` never got the `&*`
+                            // deref `emit_external_fallback_arg` gives every known string
+                            // (E0277: `Arc<str>: AsRef<Path>` not satisfied).
+                            _ if Self::is_string_type(&ret_ty) => {
+                                self.string_vars.insert(s.name.clone());
+                                self.var_types.insert(s.name.clone(), ret_ty.clone());
                             }
                             // Track all Named return types (including enums) in var_types so
                             // auto-clone can detect non-Copy variables at call sites.

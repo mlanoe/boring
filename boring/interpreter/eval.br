@@ -259,6 +259,8 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             match recv:
                 Value.Object(_): write_back_var_args(interp, args)
                 Value.EnumVariant(_, _, _): write_back_var_args(interp, args)
+                Value.StructDef(_): write_back_var_args(interp, args)
+                Value.EnumDef(_): write_back_var_args(interp, args)
                 _: nil
             # Write back mutating array methods to their source lvalue
             if method == "pop":
@@ -1779,17 +1781,17 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
                     else:
                         throw "cannot access field '{field_name}' on enum variant"
         Value.Str(s):
-            if field_name == "length":
+            if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(s.length)
             else:
                 throw "no field '{field_name}' on string"
         Value.Array(items):
-            if field_name == "length":
+            if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(items.length)
             else:
                 throw "no field '{field_name}' on array"
         Value.LabeledArray(items, axes):
-            if field_name == "length":
+            if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(items.length)
             else:
                 # a.width / a.height — read-only shape-query property, one
@@ -1806,12 +1808,12 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
                 else:
                     throw "no field '{field_name}' on labeled array"
         Value.Set(items):
-            if field_name == "length":
+            if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(items.length)
             else:
                 throw "no field '{field_name}' on set"
         Value.Dict(entries):
-            if field_name == "length":
+            if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(entries.length)
             else:
                 throw "no field '{field_name}' on dict"
@@ -2820,8 +2822,13 @@ def void assign_target(mut Interpreter interp, Expr target, Value val):
                             si = si + 1
                     if not setter_called:
                         inner.set_field(field_name, val)
-                        # Also sync the env var copy (injected by method dispatch)
-                        interp.current_env.set(field_name, val)
+                        # A method scope keeps the receiver's fields as local bindings and
+                        # copies them back when the method returns. Keep that local copy in
+                        # sync only for an explicit `self.field` assignment. Updating an
+                        # argument such as `other.value` must not overwrite the receiver's
+                        # unrelated local `value` binding.
+                        if is_self_var(obj_expr):
+                            interp.current_env.set(field_name, val)
                 _:
                     throw "cannot assign field on non-object"
         ExprKind.Index(obj_expr, idx_expr):

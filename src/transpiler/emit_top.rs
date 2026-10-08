@@ -381,14 +381,27 @@ impl Transpiler {
         );
         if full_path_in_prelude { return; }
         if u.items.is_empty() && full_path_in_prelude { return; }
+        // Every `.br` file of a project (and every `--target` GPU flattening of it) ends up in
+        // ONE Rust namespace — `include!`d into `main.rs`, or concatenated into a single
+        // `main.rs` — so two sibling modules that both `use std.fs.File` would otherwise emit
+        // `use std::fs::File;` twice and hit E0252 ("defined multiple times"). Dedupe on the
+        // fully-qualified imported name, per item, so `use std.fs.File` followed by
+        // `use std.fs.File, Read` only re-imports what is actually new. Two *different* paths
+        // importing the same bare name stay a genuine collision and are left to rustc.
         let s = if u.glob {
+            if !self.emitted_external_uses.insert(format!("{path}::*")) { return; }
             format!("use {}::*;", path)
         } else if filtered_items.is_empty() {
             return;
-        } else if filtered_items.len() == 1 {
-            format!("use {}::{};", path, filtered_items[0])
         } else {
-            format!("use {}::{{{}}};", path, filtered_items.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+            let fresh: Vec<&String> = filtered_items.iter().copied()
+                .filter(|item| self.emitted_external_uses.insert(format!("{path}::{item}")))
+                .collect();
+            match fresh.as_slice() {
+                [] => return,
+                [one] => format!("use {}::{};", path, one),
+                many => format!("use {}::{{{}}};", path, many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+            }
         };
         self.line(&s);
     }

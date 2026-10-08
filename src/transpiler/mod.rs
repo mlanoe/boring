@@ -1013,6 +1013,10 @@ struct Transpiler {
     pub(crate) deps: std::collections::HashMap<String, std::path::PathBuf>,
     /// Canonical paths already inlined — prevents duplicate / circular imports.
     pub(crate) loaded: std::collections::HashSet<std::path::PathBuf>,
+    /// Fully-qualified external Rust imports (`std::fs::File`, `std::io::*`, ...) already
+    /// emitted as a `use` line anywhere in this project's single flat Rust namespace — see
+    /// `emit_use`'s dedupe comment. Prevents E0252 when sibling `.br` modules import the same item.
+    pub(crate) emitted_external_uses: std::collections::HashSet<String>,
     /// Per-file Rust output collected from inlined `.br` use imports.
     /// Each entry is (module_name, rust_code). Written as separate .rs files at build time.
     pub(crate) modules: Vec<(String, String)>,
@@ -1559,6 +1563,7 @@ impl Transpiler {
             source_dir: std::path::PathBuf::new(),
             deps: std::collections::HashMap::new(),
             loaded: std::collections::HashSet::new(),
+            emitted_external_uses: std::collections::HashSet::new(),
             modules: Vec::new(),
             prelude_emitted: false,
             builtins_seeded: false,
@@ -6908,6 +6913,30 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         assert!(code.contains("TcpListener::bind(\"127.0.0.1:0\")"), "got:\n{}", code);
         assert!(code.contains("std::fs::read_to_string((&*path))"), "got:\n{}", code);
         assert!(code.contains("base.push((&*path))"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn fs_path_string_args_are_borrowed_in_every_shape() {
+        // E0277 (`Arc<str>: AsRef<Path>`): a `string` local bound to a call/concatenation, and a
+        // `string` passed to an imported free function, used to be passed by value.
+        let src = "use std.fs.File\nuse std.fs.create_dir_all\nuse std.fs.remove_file\n\nstring name_of(int i):\n    \"/tmp/rep_{i}.bin\"\n\ndef f(string dir) throws:\n    let path = name_of(1)\n    let a = try? File.create(path)\n    let joined = dir + \"/x\"\n    let b = try? File.open(joined)\n    let c = try? create_dir_all(dir)\n    let d = try? remove_file(name_of(2))\n    let e = try? remove_file(path)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("File::create((&*path))"), "got:\n{}", code);
+        assert!(code.contains("File::open((&*joined))"), "got:\n{}", code);
+        assert!(code.contains("create_dir_all((&*dir))"), "got:\n{}", code);
+        assert!(code.contains("remove_file((&*name_of(2)))"), "got:\n{}", code);
+        assert!(code.contains("remove_file((&*path))"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn string_local_tracking_does_not_leak_into_a_later_same_named_int() {
+        // `string_vars` is a flat per-fn, name-keyed set: `let si = to_s(x)` (string) must not
+        // make a later `var si = 1` in the same fn a "string" (`si = si + 1` as concatenation).
+        let src = "string to_s(int x):\n    \"{x}\"\n\ndef f(int n):\n    if n > 0:\n        let si = to_s(n)\n        print si\n    else:\n        var si = 1\n        while si < n:\n            si = si + 1\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("(&*si)") && !code.contains("si = Rc::<str>::from") && !code.contains("si = Arc::<str>::from"),
+            "got:\n{}", code);
+        assert!(code.contains("si = (si + 1)") || code.contains("si = si + 1"), "got:\n{}", code);
     }
 
     #[test]

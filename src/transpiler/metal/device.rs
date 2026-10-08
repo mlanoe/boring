@@ -4,6 +4,7 @@
 // MSL (Metal Shading Language) device code emitter.
 
 use crate::ast::*;
+use crate::transpiler::tensor_host::Q4K_ROWS_PER_SIMDGROUP;
 use crate::transpiler::helpers::{
     reachable_free_fns,
     labeled_array_at_index, labeled_array_dim_literal,
@@ -667,9 +668,96 @@ impl DeviceEmitter {
         self.line("}");
     }
 
+    /// Metal single-token (m == 1) Q4_K schedule, the bandwidth-oriented layout of
+    /// llama.cpp's `kernel_mul_mv_q4_K_f32`: one SIMD group computes
+    /// `Q4K_ROWS_PER_SIMDGROUP` output rows and walks each row four 256-value
+    /// super-blocks at a time, eight lanes per super-block. A lane owns 16 packed
+    /// bytes (two 8-byte runs, read as `uint2`) = 32 values spanning four of the
+    /// super-block's eight 32-value groups, and the 16-byte header (`d`, `dmin`,
+    /// the 12 bytes of 6-bit scales/minimums) is a single `uint4` load that every
+    /// lane of the super-block decodes for itself with a few masks: no lane-0
+    /// decode, no shuffles. The dot product is accumulated in the quantized domain
+    /// (`sum(q * y)` per group, `sum(y)` per group) and the group scale/minimum
+    /// are applied once per group: `d * sum(sc_g * dot_g) - dmin * sum(min_g * sumy_g)`.
+    /// The activation slice is loaded once and reused for every row. Rows past
+    /// `n` are clamped for the loads and masked at the store. Requires `k` to be a
+    /// multiple of 256 and 16-byte-aligned weight/activation buffers (blocks are
+    /// 144 B; Metal buffers are bound at offset 0).
+    fn emit_q4_k_rows_decode(&mut self, has_bias: bool) {
+        let rows = Q4K_ROWS_PER_SIMDGROUP;
+        self.line(&format!("constexpr uint bp_rows = {rows};"));
+        self.line("const uint bp_lane = __simd_lane_id;");
+        self.line("const uint bp_warp = __thread_pos.x / 32;");
+        self.line("const ulong bp_row0 = ((ulong)__block_pos.x * 8 + bp_warp) * bp_rows;");
+        self.line("const uint bp_slot = bp_lane / 8, bp_it = bp_lane % 8, bp_iq = bp_it / 4, bp_ir = bp_it % 4;");
+        self.line("const ulong bp_nb = (ulong)k / 256;");
+        self.line("const uint bp_sh = 16 * bp_iq;");
+        self.line("float bp_sumf[bp_rows];");
+        self.line("device const uchar* bp_rowp[bp_rows];");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("bp_sumf[bp_r] = 0.0f;");
+        self.line("bp_rowp[bp_r] = b + min(bp_row0 + bp_r, (ulong)n - 1) * bp_nb * 144 + bp_slot * 144;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("device const float* bp_y = a + bp_slot * 256 + 64 * bp_iq + 8 * bp_ir;");
+        self.line("for (ulong bp_ib = bp_slot; bp_ib < bp_nb; bp_ib += 4) {");
+        self.indent += 1;
+        self.line("const float4 bp_ya0 = *(device const float4*)(bp_y), bp_ya1 = *(device const float4*)(bp_y + 4);");
+        self.line("const float4 bp_yb0 = *(device const float4*)(bp_y + 32), bp_yb1 = *(device const float4*)(bp_y + 36);");
+        self.line("const float4 bp_yc0 = *(device const float4*)(bp_y + 128), bp_yc1 = *(device const float4*)(bp_y + 132);");
+        self.line("const float4 bp_yd0 = *(device const float4*)(bp_y + 160), bp_yd1 = *(device const float4*)(bp_y + 164);");
+        self.line("const float4 bp_sa = bp_ya0 + bp_ya1, bp_sb = bp_yb0 + bp_yb1, bp_sc = bp_yc0 + bp_yc1, bp_sd = bp_yd0 + bp_yd1;");
+        self.line("const float bp_sumy0 = bp_sa.x + bp_sa.y + bp_sa.z + bp_sa.w, bp_sumy1 = bp_sb.x + bp_sb.y + bp_sb.z + bp_sb.w;");
+        self.line("const float bp_sumy2 = bp_sc.x + bp_sc.y + bp_sc.z + bp_sc.w, bp_sumy3 = bp_sd.x + bp_sd.y + bp_sd.z + bp_sd.w;");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("device const uchar* bp_blk = bp_rowp[bp_r];");
+        self.line("const uint4 bp_hdr = *(device const uint4*)bp_blk;");
+        self.line("const uint2 bp_qa = *(device const uint2*)(bp_blk + 16 + 32 * bp_iq + 8 * bp_ir);");
+        self.line("const uint2 bp_qb = *(device const uint2*)(bp_blk + 80 + 32 * bp_iq + 8 * bp_ir);");
+        self.line("const half2 bp_dd = as_type<half2>(bp_hdr.x);");
+        self.line("const uint bp_s0 = (bp_hdr.y >> bp_sh) & 0xffffu, bp_s1 = (bp_hdr.z >> bp_sh) & 0xffffu, bp_s2 = (bp_hdr.w >> bp_sh) & 0xffffu;");
+        self.line("const uint bp_scA = bp_s0 & 0x3f3fu, bp_mnA = bp_s1 & 0x3f3fu;");
+        self.line("const uint bp_scB = (bp_s2 & 0x0f0fu) | ((bp_s0 & 0xc0c0u) >> 2);");
+        self.line("const uint bp_mnB = ((bp_s2 >> 4) & 0x0f0fu) | ((bp_s1 & 0xc0c0u) >> 2);");
+        self.line("const uint4 bp_lo = uint4(bp_qa.x & 0x0f0f0f0fu, bp_qa.y & 0x0f0f0f0fu, bp_qb.x & 0x0f0f0f0fu, bp_qb.y & 0x0f0f0f0fu);");
+        self.line("const uint4 bp_hi = uint4((bp_qa.x >> 4) & 0x0f0f0f0fu, (bp_qa.y >> 4) & 0x0f0f0f0fu, (bp_qb.x >> 4) & 0x0f0f0f0fu, (bp_qb.y >> 4) & 0x0f0f0f0fu);");
+        self.line("const float bp_a0 = dot(float4(as_type<uchar4>(bp_lo.x)), bp_ya0) + dot(float4(as_type<uchar4>(bp_lo.y)), bp_ya1);");
+        self.line("const float bp_a1 = dot(float4(as_type<uchar4>(bp_hi.x)), bp_yb0) + dot(float4(as_type<uchar4>(bp_hi.y)), bp_yb1);");
+        self.line("const float bp_a2 = dot(float4(as_type<uchar4>(bp_lo.z)), bp_yc0) + dot(float4(as_type<uchar4>(bp_lo.w)), bp_yc1);");
+        self.line("const float bp_a3 = dot(float4(as_type<uchar4>(bp_hi.z)), bp_yd0) + dot(float4(as_type<uchar4>(bp_hi.w)), bp_yd1);");
+        self.line("const float bp_dsum = bp_a0 * float(bp_scA & 0xffu) + bp_a1 * float(bp_scA >> 8) + bp_a2 * float(bp_scB & 0xffu) + bp_a3 * float(bp_scB >> 8);");
+        self.line("const float bp_msum = bp_sumy0 * float(bp_mnA & 0xffu) + bp_sumy1 * float(bp_mnA >> 8) + bp_sumy2 * float(bp_mnB & 0xffu) + bp_sumy3 * float(bp_mnB >> 8);");
+        self.line("bp_sumf[bp_r] += float(bp_dd.x) * bp_dsum - float(bp_dd.y) * bp_msum;");
+        self.line("bp_rowp[bp_r] += 4 * 144;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("bp_y += 4 * 256;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("const float bp_total = simd_sum(bp_sumf[bp_r]);");
+        self.line("if (bp_lane == 0 && bp_row0 + bp_r < (ulong)n) {");
+        self.indent += 1;
+        if has_bias {
+            self.line("c[bp_row0 + bp_r] = bp_total + bias[bp_row0 + bp_r];");
+        } else {
+            self.line("c[bp_row0 + bp_r] = bp_total;");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_dynamic_k_quant_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool) {
         self.line("if (m == 1) {");
         self.indent += 1;
+        if warp_decode && format == "q4_k" {
+            self.emit_q4_k_rows_decode(has_bias);
+        } else {
         if warp_decode {
             self.line("const uint bp_lane = __simd_lane_id;");
             self.line("const uint bp_warp = __thread_pos.x / 32;");
@@ -742,6 +830,7 @@ impl DeviceEmitter {
         if has_bias { self.line("c[bp_cell] = bp_sum + bias[bp_cell];"); } else { self.line("c[bp_cell] = bp_sum;"); }
         self.indent -= 1;
         self.line("}");
+        }
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;

@@ -5049,10 +5049,36 @@ impl Transpiler {
             }
             _ => {
                 // Look up registered signature for optional-arg coercion
-                let args_s = self.emit_args_coerced(name, args);
-                format!("{}({})", escape_rust_keyword(name), args_s)
+                let mut args_s = self.emit_args_coerced_vec(name, args);
+                // A free function Boring has no declaration for — one pulled in by
+                // `use std.fs.create_dir_all` and the like — has no signature to coerce
+                // against, so the generic path above would pass a `string` argument by value
+                // (`create_dir_all(Arc::clone(&dir))`, E0277: `Arc<str>: AsRef<Path>`). Give it
+                // the same `(&*s)` deref the external instance/static-method fallback applies
+                // (`emit_external_fallback_arg`), so the shape of the callee doesn't change how
+                // a string argument is lowered.
+                if self.is_external_free_fn(name) {
+                    for (slot, a) in args_s.iter_mut().zip(args.iter()) {
+                        if a.label.is_none() {
+                            *slot = self.emit_external_fallback_arg(&a.value);
+                        }
+                    }
+                }
+                format!("{}({})", escape_rust_keyword(name), args_s.join(", "))
             }
         }
+    }
+
+    /// Is a bare `name(...)` call a free function Boring never saw a declaration for — i.e. an
+    /// external Rust function brought in by `use`? Not a Boring `def`, not a local/parameter
+    /// (closure or function value), not a callable-struct instance.
+    fn is_external_free_fn(&self, name: &str) -> bool {
+        !self.fn_sigs.contains_key(name)
+            && !self.known_local_vars.contains(name)
+            && !self.fn_current_params.contains_key(name)
+            && !self.var_struct_types.contains_key(name)
+            && !self.task_fns.contains(name)
+            && !self.user_top_level_names.contains(name)
     }
 
     pub(crate) fn emit_print_call(&self, newline: bool, args: &[Arg]) -> String {

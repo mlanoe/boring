@@ -226,6 +226,10 @@ checks a 35x896x19 result against a scalar CPU oracle.
 prefill schedule (and native Metal Q4_K/Q6_K schedules) or the portable tiled
 packed-weight schedule on WGPU, CUDA, and ROCm.
 `scalar` explicitly retains the one-thread-per-output-cell reference schedule.
+On Metal, Q4_K single-row decode (`auto`) uses a dedicated multi-row schedule instead: each SIMD
+group computes two output rows, four 256-value super-blocks at a time with eight lanes per
+super-block, accumulating quantized-domain dot products and applying the per-group
+scale/minimum once; `scalar` selects the one-thread-per-row reference.
 The two warp schedules are available
 for Q8_0, Q5_0, Q4_0, IQ4_NL, Q6_K, Q4_K, Q3_K, and Q2_K single-row decode.
 `auto` selects warp reduction for all of these formats when `m == 1`.

@@ -442,6 +442,8 @@ itest!(monomorphize_enum_method);
 itest!(builtin_error_enum);
 itest!(typed_catch_match_error);
 itest!(float32_struct_method_math);
+itest!(float32_math_builtins);
+itest!(float32_local_var_math);
 itest!(if_else_cast_numeric);
 
 itest!(narrowing_cast_if_let);
@@ -453,6 +455,25 @@ itest!(option_owned_methods);
 itest!(pub_top_level_const);
 
 itest!(collection_named_methods);
+itest!(array_param_length_only);
+itest!(destructured_slice_by_value_reuse);
+itest!(try_prefix_in_cond_clause_noparen);
+
+#[test]
+fn enum_variant_shadow() {
+    // This fixture imports two sibling modules, so it must run from its real
+    // file path rather than through the stdin-only `itest!` harness.
+    run_file_case_ok(".", "enum_variant_shadow.br", "enum_variant_shadow.expected");
+}
+itest!(inline_if_else_next_line_postfix);
+itest!(qualifier_group_param);
+itest!(shared_return_callsite_no_double_wrap);
+itest!(monomorphize_struct);
+
+#[test]
+fn monomorphize_cross_file_main() {
+    run_file_case_ok(".", "monomorphize_cross_file_main.br", "monomorphize_cross_file_main.expected");
+}
 
 // `var` (rebindable out-param) write-back to the caller, free functions and struct methods.
 itest!(var_param_free);
@@ -461,3 +482,6 @@ itest!(var_param_labeled_reorder);
 itest!(var_param_labeled_reorder_method);
 itest!(mut_collection_param);
 itest!(self_mutating_call);
+itest!(mut_param_type_method);
+itest!(lend_disjoint_receiver_ok);
+itest!(lend_and_read_same_local_lock_wrapper);

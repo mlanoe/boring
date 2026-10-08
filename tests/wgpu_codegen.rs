@@ -807,7 +807,7 @@ kernel Narrow:
     mut [int]'unified buf
 
     def ():
-        let x: int = 42
+        let int x = 42
         buf[0] = x
 "#;
     let (wgsl, _rs) = wgpu_codegen("narrowing", src);
@@ -828,9 +828,9 @@ kernel Narrow:
     mut [uint]'unified ubuf
 
     def ():
-        let x: int = 42
+        let int x = 42
         buf[0] = x
-        let y: uint = 7
+        let uint y = 7
         ubuf[0] = y
 "#;
     let (wgsl, _rs) = wgpu_codegen("narrow_warn", src);

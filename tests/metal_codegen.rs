@@ -254,7 +254,7 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 }
 
 #[test]
-fn dynamic_k_quant_decode_uses_one_simdgroup_per_output_row() {
+fn dynamic_k_quant_decode_uses_warp_reduction_schedules() {
     for format in ["q4_k", "q6_k", "q3_k", "q2_k"] {
         let source = format!(r#"
 req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
@@ -264,8 +264,17 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 "#);
         let (msl, host) = metal_codegen(&format!("dynamic_{format}_warp_decode"), &source);
         assert!(msl.contains("__simd_lane_id"), "{format}: {msl}");
+        if format == "q4_k" {
+            // Multi-row schedule: eight lanes per super-block, header decoded by
+            // every lane from one uint4 load, no lane-0 decode/shuffles.
+            assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{format}: {msl}");
+            assert!(msl.contains("*(device const uint4*)bp_blk"), "{format}: {msl}");
+            assert!(!msl.contains("bp_scale = simd_shuffle"), "{format}: {msl}");
+            assert!(host.contains("+ 15) / 16"), "{format}: {host}");
+            continue;
+        }
         assert!(msl.contains("simd_shuffle_xor"), "{format}: {msl}");
-        if matches!(format, "q4_k" | "q6_k") {
+        if format == "q6_k" {
             assert!(msl.contains("bp_d = simd_shuffle(bp_d, 0)"), "{format}: {msl}");
             assert!(msl.contains("bp_scale = simd_shuffle"), "{format}: {msl}");
         }
