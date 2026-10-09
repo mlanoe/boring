@@ -453,7 +453,11 @@ struct Lexer:
                             while not self.at_end() and self.chars[self.pos] >= "0" and self.chars[self.pos] <= "9":
                                 s = s + self.consume()
                     return TokenKind.Float((s as float) else 0.0)
-        return TokenKind.Int((s as int) else 0)
+        if let n = s as int:
+            return TokenKind.Int(n)
+        if let n = s as uint64:
+            return TokenKind.Uint64(n)
+        throw "integer literal '{s}' is too large"
 
     # ── Lex an identifier (first char already read) ────────────────────────
     def string lex_ident(string first):

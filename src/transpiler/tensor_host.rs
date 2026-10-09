@@ -14,6 +14,7 @@ pub(crate) struct TensorLinearConfig {
     pub matrix_algorithm: Option<String>,
     pub decode_algorithm: Option<String>,
     pub prefill_algorithm: Option<String>,
+    pub prefill_precision: Option<String>,
     pub decode_formats: HashMap<String, String>,
     pub prefill_formats: HashMap<String, String>,
     pub target_warp_width: usize,
@@ -29,6 +30,7 @@ impl Default for TensorLinearConfig {
             matrix_algorithm: None,
             decode_algorithm: None,
             prefill_algorithm: None,
+            prefill_precision: None,
             decode_formats: HashMap::new(),
             prefill_formats: HashMap::new(),
             target_warp_width: 32,
@@ -268,11 +270,17 @@ fn lower_function_body(
             let prefix = if tensor_config.native_dynamic_float_linear && dynamic.format.is_none() {
                 "BoringTensorDynamicFloatNative"
             } else if native_packed {
+                let half_prefill = tensor_config.prefill_precision.as_deref() == Some("half");
                 match dynamic.format {
+                    Some("q4_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" && half_prefill => "BoringTensorDynamicQ4KNativeScalarDecodeHalfPrefill",
+                    Some("q6_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" && half_prefill => "BoringTensorDynamicQ6KNativeScalarDecodeHalfPrefill",
                     Some("q4_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" => "BoringTensorDynamicQ4KNativeScalarDecode",
                     Some("q6_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" => "BoringTensorDynamicQ6KNativeScalarDecode",
+                    Some("q4_k") if half_prefill => "BoringTensorDynamicQ4KNativeHalfPrefill",
+                    Some("q6_k") if half_prefill => "BoringTensorDynamicQ6KNativeHalfPrefill",
                     Some("q4_k") => "BoringTensorDynamicQ4KNative",
                     Some("q6_k") => "BoringTensorDynamicQ6KNative",
+                    _ if half_prefill => "BoringTensorDynamicQ8NativeHalfPrefill",
                     _ => "BoringTensorDynamicQ8Native",
                 }
             } else {
@@ -844,6 +852,8 @@ fn parse_dynamic_replacement_stmts(
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
         && !(call.format == Some("q8_0") && decode_algorithm == "scalar");
     let native_scalar_decode = native_packed && decode_algorithm == "scalar";
+    let native_prefill_rows = if tensor_config.prefill_precision.as_deref() == Some("half") { 128 } else { 64 };
+    let native_prefill_columns = 64;
     let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
         && call.format.is_some()
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
@@ -851,12 +861,14 @@ fn parse_dynamic_replacement_stmts(
     let launch = if native_float {
         format!("    if {m} % 8 == 0 and {n} % 8 == 0 and {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = ({n} / 8, {m} / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
     } else if native_scalar_decode {
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 255) / 256)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 31) / 32))\n", m = call.m, n = call.n)
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 255) / 256)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed && call.format == Some("q4_k") {
         let rows_per_block = 8 * Q4K_ROWS_PER_SIMDGROUP;
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 31) / 32))\n", m = call.m, n = call.n, tail = rows_per_block - 1)
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
+    } else if native_packed && call.format == Some("q6_k") {
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed {
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 31) / 32))\n", m = call.m, n = call.n)
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if portable_tiled_quantized {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 15) / 16))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else {

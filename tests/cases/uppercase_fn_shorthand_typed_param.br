@@ -1,0 +1,18 @@
+# Regression: uppercase-led names in bare return-type-first function
+# declarations must not be mistaken for another type or a constructor call.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+int WithLog(int x): x + 1
+
+pub string Row([Widget] children):
+    "row:{children.length}"
+
+def main():
+    print WithLog(41)
+    print Row([Text("hello")])

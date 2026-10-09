@@ -204,12 +204,46 @@ Partial row, column, and K tiles are zero padded and output writes are bounds
 checked. No float32 weight copy is allocated.
 
 Metal uses its native schedule for Q8_0, Q4_K, and Q6_K prefill. A 256-thread threadgroup
-computes a 32x16 output tile as eight 8x8 matrix fragments. Four activation
-fragments and two packed-weight fragments are staged cooperatively; the two
-weight fragments are dequantized once and reused across all four row fragments.
-Q8_0 scales and the Q4_K/Q6_K super-block metadata are decoded while staging
-the current K slice. Partial row, column, and K tiles are zero padded and bounds
-checked.
+computes a 64x32 output tile as thirty-two 8x8 matrix fragments. Each of the
+eight SIMD groups retains four float accumulator fragments across the complete
+K loop. The group cooperatively stages a 64x32 activation slab and a 32x32
+dequantized weight slab as float16, then performs four K fragments per barrier
+pair. Q8_0 scales and the Q4_K/Q6_K super-block metadata are decoded while
+staging the current K slab. Partial row, column, and K tiles are zero padded and
+bounds checked. Float16 operand staging can differ numerically from the float32
+scalar path; `scalar` remains the accumulation-order reference.
+
+The 64x32 activation slab is divided into 256 aligned eight-value segments.
+Each thread loads its segment as two `float4` vectors and stores two `half4`
+vectors into threadgroup memory. Partial row tiles write zero vectors instead.
+This replaces eight scalar, strided activation loads per thread.
+
+For complete Q8_0 output tiles, each SIMD group stores its four accumulator
+fragments directly to the destination matrix. Only partial edge tiles use the
+threadgroup output scratch and scalar bounds-checked copy.
+
+Q4_K and Q6_K staging assigns four adjacent K values from one output column to
+each thread. The thread uses aligned 32-bit loads for their packed low bits (and
+for Q6_K high bits), decodes the shared block factor and subscale once, and emits
+four consecutive float16 matrix operands. This avoids repeating the full
+super-block address and metadata decode for every scalar weight.
+
+Q8_0 uses the same four-adjacent-values ownership with an unaligned
+`packed_char4` load. The packed vector is required because each 32-value block
+occupies 34 bytes, so successive block payloads are not necessarily aligned to
+four bytes. Its scale remains staged once per output column and K slab.
+
+Complete Q6_K 64x32 tiles store their four accumulator fragments per SIMD group
+directly to device output. Its activation and weight staging allocations share
+an 8 KiB scratch area; only boundary tiles reinterpret that storage as a guarded
+float output tile. Q4_K and Q8_0 retain the separate output tile because the
+same scratch/direct-store arrangement was slower for those formats.
+
+Q6_K also derives each packed super-block address from a per-column weight-row
+base and the current K slab. This keeps the 64-bit multiply and row geometry out
+of the loop and replaces the flattened-index division/remainder pair. Q4_K keeps
+its flattened addressing because the derived form regressed its large-output
+projection despite helping smaller shapes.
 
 On an Apple M3 with 10 GPU cores, the motivating 512x896x4864 benchmark took
 about 15.3 ms/call (~290 GFLOP/s) with the earlier one-SIMD-group-per-8x8-tile
@@ -226,6 +260,22 @@ checks a 35x896x19 result against a scalar CPU oracle.
 prefill schedule (and native Metal Q4_K/Q6_K schedules) or the portable tiled
 packed-weight schedule on WGPU, CUDA, and ROCm.
 `scalar` explicitly retains the one-thread-per-output-cell reference schedule.
+Native Metal Q8_0, Q4_K, and Q6_K prefill stages float32 activations and
+dequantized weights by default and uses float32 simdgroup matrix operands and
+accumulators. This avoids the roughly `5e-4` per-matmul relative error observed
+when both operands are rounded to float16, which can amplify across transformer
+layers. The faster, lower-accuracy 64x32 half-input schedule is available only
+by explicit opt-in:
+
+```toml
+[tensor.linear.prefill]
+precision = "half"
+```
+
+`precision = "float"` is equivalent to the default. It changes native Metal
+prefill only; decode and the portable GPU schedules are unaffected. Regression
+coverage compares 40 outputs on irrational-ish activations with the scalar
+schedule, with relative bounds of `1e-5` for float staging and `1e-3` for half.
 On Metal, Q4_K single-row decode (`auto`) uses a dedicated multi-row schedule instead: each SIMD
 group computes two output rows, four 256-value super-blocks at a time with eight lanes per
 super-block, accumulating quantized-domain dot products and applying the per-group

@@ -500,6 +500,9 @@ def void register_stdlib(mut Interpreter interp):
     let float_fn = Value.NativeFn("float", Value.Nil)
     env_define(env, "float", float_fn, false)
 
+    let float_to_bits_fn = Value.NativeFn("floatToBits", Value.Nil)
+    env_define(env, "floatToBits", float_to_bits_fn, false)
+
     let string_fn = Value.NativeFn("string", Value.Nil)
     env_define(env, "string", string_fn, false)
 
@@ -743,10 +746,8 @@ def void register_free_fn(mut Interpreter interp, mut Env'actor target_env, FnDe
 # same effect), `use a.b.c.X, Y` (selective). Circular/duplicate imports are
 # deduped via `loaded_modules`, same as the real interpreter's `loaded` set.
 #
-# NOT supported: first-party `boring.*` stdlib (real, embedded Boring
-# source, src/stdlib_embed.rs — nothing here embeds it) fails fast with a
-# clear error instead of silently no-oping, unlike the previous dead
-# `Item.Use` branch this replaces. `std.*`/`crate.*` (opaque Rust-type
+# First-party `boring.*` modules are loaded from the checkout's `stdlib/`
+# directory. `std.*`/`crate.*` (opaque Rust-type
 # stand-ins in the real interpreter — this one has no `Value::RustType`
 # equivalent) and `boring.toml [deps]` named cross-project dependencies
 # (src/git_deps.rs — nothing here parses `[deps]` or resolves them) get no
@@ -804,6 +805,15 @@ def string use_module_rel_path(UseDecl decl):
         i = i + 1
     rel + ".br"
 
+# `use boring.collections.*` → repository-relative `stdlib/collections.br`.
+def string use_boring_stdlib_rel_path(UseDecl decl):
+    var string rel = "stdlib"
+    var int i = 1
+    while i < decl.path.length:
+        rel = rel + "/" + decl.path[i]
+        i = i + 1
+    rel + ".br"
+
 def string use_dirname(string path):
     let parts = path.split("/")
     if parts.length <= 1:
@@ -819,13 +829,16 @@ def void exec_use(mut Interpreter interp, UseDecl decl):
     if decl.path.length == 0:
         return
     let prefix = decl.path[0]
-    if prefix == "boring":
-        error "use: 'boring.*' first-party stdlib imports are not supported by the self-hosted interpreter (boring/interpreter) — only relative sibling-module imports like `use a.b.c` are. Run this program with the native `boring` compiler (`boring run` / `boring build`) instead."
-        exit(1)
-        return
-    let rel = use_module_rel_path(decl)
-    let found = interp.find_module_file(rel)
+    let rel = if prefix == "boring": use_boring_stdlib_rel_path(decl) else: use_module_rel_path(decl)
+    var string? found = nil
+    if prefix == "boring" and fs.exists(rel):
+        found = rel
+    else:
+        found = interp.find_module_file(rel)
     guard let abs = found else:
+        if prefix == "boring":
+            error "unknown Boring standard library module '{decl.path.join(".")}'"
+            exit(1)
         # No .br file found on any search path — treat as an unresolvable
         # native/external reference and ignore, same as the real interpreter.
         return

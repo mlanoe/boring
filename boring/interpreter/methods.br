@@ -487,6 +487,50 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             let idx = if raw_idx < 0: arr.length + raw_idx else raw_idx
                             arr[idx] else Value.Nil
                         _: throw "remove: expected int index"
+                "move":
+                    let from_val = args[0] else Value.Nil
+                    let to_val = args[1] else Value.Nil
+                    match from_val:
+                        Value.Int(from):
+                            match to_val:
+                                Value.Int(to):
+                                    if from < 0 or from >= arr.length or to < 0 or to >= arr.length:
+                                        throw "move: indices {from} -> {to} out of range for array of length {arr.length}"
+                                    mut result = arr
+                                    if from != to:
+                                        let item = result[from]
+                                        result.remove(from)
+                                        result.insert(to, item)
+                                    Value.Array(result)
+                                _: throw "move: expected int destination index"
+                        _: throw "move: expected int source index"
+                "removeIndices":
+                    let indices_val = args[0] else Value.Nil
+                    match indices_val:
+                        Value.Array(indices):
+                            var previous = -1
+                            var i = 0
+                            while i < indices.length:
+                                match indices[i]:
+                                    Value.Int(idx):
+                                        if idx < 0 or idx >= arr.length:
+                                            throw "removeIndices: index {idx} out of range for array of length {arr.length}"
+                                        if idx <= previous:
+                                            throw "removeIndices: indices must be unique and strictly ascending"
+                                        previous = idx
+                                    _: throw "removeIndices: expected int indices"
+                                i = i + 1
+                            mut result = []
+                            var source_idx = 0
+                            var drop_idx = 0
+                            while source_idx < arr.length:
+                                if drop_idx < indices.length and indices[drop_idx] == Value.Int(source_idx):
+                                    drop_idx = drop_idx + 1
+                                else:
+                                    result.push(arr[source_idx])
+                                source_idx = source_idx + 1
+                            Value.Array(result)
+                        _: throw "removeIndices: expected an array of indices"
                 "insert":
                     let idx_val = args[0] else Value.Int(0)
                     let val = args[1] else Value.Nil

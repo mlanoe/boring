@@ -167,6 +167,31 @@ impl Transpiler {
     /// result of a call to something undeclared, ... — callers must not guess from names.
     pub(crate) fn resolve_expr_type(&self, expr: &Expr) -> Option<Type> {
         match &expr.kind {
+            // An explicit cast determines the expression's type even when the
+            // operand itself is otherwise not statically resolvable here.  In
+            // particular this lets an unannotated `[1.0 as float32, ...]`
+            // literal retain its element width when bound to a local.
+            ExprKind::Cast(_, ty) => Some(ty.clone()),
+            ExprKind::Array(items) => items.first()
+                .and_then(|item| self.resolve_expr_type(item))
+                .map(|ty| Type::Array(Box::new(ty))),
+            // If-expression locals are common for selecting between resident
+            // GPU buffers.  Preserve a type only when every branch has a tail
+            // expression and all tails resolve to the same type.
+            ExprKind::If(if_stmt) => {
+                let tail_type = |body: &[Stmt]| match body.last() {
+                    Some(Stmt::Expr(tail)) => self.resolve_expr_type(tail),
+                    _ => None,
+                };
+                let mut branch_types = if_stmt.branches.iter()
+                    .map(|(_, body)| tail_type(body));
+                let first = branch_types.next()??;
+                if !branch_types.all(|ty| ty.as_ref() == Some(&first)) {
+                    return None;
+                }
+                let else_ty = tail_type(if_stmt.else_body.as_deref()?)?;
+                (else_ty == first).then_some(first)
+            }
             ExprKind::Var(v) if v == "self" => self.self_type.clone().map(Type::Named),
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))

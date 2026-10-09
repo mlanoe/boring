@@ -634,6 +634,10 @@ def Expr parse_primary(mut Parser p) throws:
         let n = parser_peek_int(p)
         parser_advance(p)
         return make_int_expr(n, line)
+    if parser_check(p, "Uint64"):
+        let n = parser_peek_uint64(p)
+        parser_advance(p)
+        return make_uint64_expr(n, line)
     if parser_check(p, "Float"):
         let f = parser_peek_float(p)
         parser_advance(p)

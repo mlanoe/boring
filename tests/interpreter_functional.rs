@@ -187,6 +187,7 @@ itest!(float_width_cross_eq);
 itest!(int_width_cross_assert_eq);
 itest!(scalar_catch);
 itest!(modules);
+itest!(boring_stdlib_collections);
 itest!(ownership);
 itest!(let_pattern);
 itest!(result_compat);
@@ -288,9 +289,7 @@ fn run_file_case_ok(dir: &str, entry: &str, expected_name: &str) {
 }
 
 /// Runs `dir/entry` against all 4 interpreter binaries and asserts it fails
-/// fast (nonzero exit) with `expected_stderr_substr` somewhere in stderr —
-/// for `use` forms that are deliberately unsupported (see
-/// `use_boring_stdlib_unsupported` below).
+/// fast (nonzero exit) with `expected_stderr_substr` somewhere in stderr.
 fn run_file_case_err(dir: &str, entry: &str, expected_stderr_substr: &str) {
     for (mode, threading, rust_dir) in MODES {
         let label = format!("{}+{}", mode, threading);
@@ -315,11 +314,6 @@ fn run_file_case_err(dir: &str, entry: &str, expected_stderr_substr: &str) {
 #[test]
 fn use_modules() {
     run_file_case_ok("use_modules", "main.br", "main.expected");
-}
-
-#[test]
-fn use_boring_stdlib_unsupported() {
-    run_file_case_err("use_boring_stdlib_unsupported", "main.br", "boring.*");
 }
 
 // Regression test for `parse_hex_str`/`parse_bin_str`/`parse_oct_str`
@@ -485,3 +479,9 @@ itest!(self_mutating_call);
 itest!(mut_param_type_method);
 itest!(lend_disjoint_receiver_ok);
 itest!(lend_and_read_same_local_lock_wrapper);
+itest!(guard_let_else_panic_throws);
+itest!(array_index_as_cast);
+itest!(int_literal_overflow_cast);
+itest!(array_block_flat_transpile);
+itest!(array_move_remove_indices);
+itest!(array_block_for_transpile);

@@ -434,6 +434,7 @@ enum ClosureBody:
 
 enum ExprKind:
     Int(int n)
+    UInt64(uint64 n)
     Float(float f)
     Str(string s)
     StringInterp([StringSegment] segments)

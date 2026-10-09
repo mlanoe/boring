@@ -28,9 +28,44 @@ def uint32 widen_dict_let({string=uint8} scores):
     let doubled = (scores["a"] as uint32) * 2
     doubled
 
+def [float32] low_values():
+    [1.5 as float32, 2.5 as float32]
+
+def [float32] high_values():
+    [3.5 as float32, 4.5 as float32]
+
+def float inferred_float32_element_cast(bool high):
+    # The explicit casts determine the inferred literal's element type. This
+    # used to be recorded only when `[float32] xs` was written explicitly.
+    let xs = [1.5 as float32, 2.5 as float32]
+    let selected = if high:
+        high_values()
+    else:
+        low_values()
+    (xs[0] as float) + (selected[1] as float)
+
+def float annotated_float32_element_cast():
+    let [float32] xs = [1.5 as float32, 2.5 as float32]
+    xs[1] as float
+
+def float call_result_element_cast():
+    let xs = low_values()
+    xs[0] as float
+
+def float inferred_int32_element_cast():
+    let xs = [2 as int32, 3 as int32]
+    xs[0] as float
+
 def main():
     let [uint8] bytes = [1, 0, 1, 44]
     print widen_let(bytes)
     print widen_inline(bytes)
     let {string=uint8} scores = {"a" = 200}
     print widen_dict_let(scores)
+    print inferred_float32_element_cast(false)
+    print inferred_float32_element_cast(true)
+    print annotated_float32_element_cast()
+    print call_result_element_cast()
+    print inferred_int32_element_cast()
+    let xs = [1.5 as float32, 2.5 as float32]
+    print floatToBits(xs[0] as float)

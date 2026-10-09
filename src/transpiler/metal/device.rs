@@ -451,19 +451,19 @@ impl DeviceEmitter {
         }
 
         if decl.name.starts_with("BoringTensorDynamicQ8Native") {
-            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q8_0", true);
+            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q8_0", true, &decl.name);
             self.indent -= 1;
             self.line("}");
             return;
         }
         if decl.name.starts_with("BoringTensorDynamicQ4KNative") {
-            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q4_k", !decl.name.contains("ScalarDecode"));
+            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q4_k", !decl.name.contains("ScalarDecode"), &decl.name);
             self.indent -= 1;
             self.line("}");
             return;
         }
         if decl.name.starts_with("BoringTensorDynamicQ6KNative") {
-            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q6_k", !decl.name.contains("ScalarDecode"));
+            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q6_k", !decl.name.contains("ScalarDecode"), &decl.name);
             self.indent -= 1;
             self.line("}");
             return;
@@ -545,9 +545,12 @@ impl DeviceEmitter {
         self.line("}");
     }
 
-    fn emit_dynamic_packed_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool) {
+    fn emit_dynamic_packed_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool, kernel_name: &str) {
+        let activation = if kernel_name.contains("HalfPrefill") || kernel_name.contains("WeightFloatPrefill") { "half" } else { "float" };
+        let weight = if kernel_name.contains("HalfPrefill") || kernel_name.contains("ActivationFloatPrefill") { "half" } else { "float" };
+        let full_float = activation == "float" && weight == "float";
         if format != "q8_0" {
-            self.emit_dynamic_k_quant_linear_body(has_bias, format, warp_decode);
+            self.emit_dynamic_k_quant_linear_body(has_bias, format, warp_decode, activation, weight);
             return;
         }
         self.line("if (m == 1) {");
@@ -590,25 +593,48 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        self.line("threadgroup float bp_a_tile[256];");
-        self.line("threadgroup float bp_b_tile[128];");
-        self.line("threadgroup float bp_scales[16];");
-        self.line("threadgroup float bp_out_tile[512];");
+        self.emit_blocked_quant_prefill(has_bias, "q8_0", activation, weight);
+        self.indent -= 1;
+        self.line("}");
+        if false {
+        self.line(&format!("threadgroup {activation} bp_a_tile[{}];", if full_float { 1024 } else { 2048 }));
+        self.line(&format!("threadgroup {weight} bp_b_tile[1024];"));
+        self.line("threadgroup float bp_scales[32];");
+        self.line(&format!("threadgroup float bp_out_tile[{}];", if full_float { 1024 } else { 2048 }));
         self.line("const uint bp_warp = __thread_pos.x / 32;");
-        self.line("const uint bp_row_fragment = bp_warp / 2;");
-        self.line("const uint bp_col_fragment = bp_warp % 2;");
-        self.line("const uint bp_row = __block_pos.y * 32;");
-        self.line("const uint bp_col = __block_pos.x * 16;");
-        self.line("simdgroup_float8x8 bp_result = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
-        self.line("simdgroup_float8x8 bp_a;");
-        self.line("simdgroup_float8x8 bp_b;");
-        self.line("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 8) {");
+        if full_float {
+            self.line("const uint bp_row_fragment = bp_warp % 4;");
+            self.line("const uint bp_col_fragment = (bp_warp / 4) * 16;");
+        } else {
+            self.line("const uint bp_row_fragment = bp_warp;");
+        }
+        self.line(&format!("const uint bp_row = __block_pos.y * {};", if full_float { 32 } else { 64 }));
+        self.line("const uint bp_col = __block_pos.x * 32;");
+        let fragments = if full_float { 2 } else { 4 };
+        for i in 0..fragments { self.line(&format!("simdgroup_float8x8 bp_result{i} = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);")); }
+        self.line(&format!("simdgroup_{activation}8x8 bp_a;"));
+        self.line(&format!("simdgroup_{weight}8x8 {};", (0..fragments).map(|i| format!("bp_b{i}")).collect::<Vec<_>>().join(", ")));
+        self.line("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 32) {");
         self.indent += 1;
         self.line("const uint bp_thread = __thread_pos.x;");
-        self.line("const uint bp_input_row = bp_row + bp_thread / 8;");
-        self.line("const uint bp_input_inner = bp_base + bp_thread % 8;");
-        self.line("bp_a_tile[bp_thread] = bp_input_row < (uint)m ? a[(ulong)bp_input_row * (ulong)k + bp_input_inner] : 0.0f;");
-        self.line("if (bp_thread < 16) {");
+        let per_thread = if full_float { 4 } else { 8 };
+        let threads_per_row = 32 / per_thread;
+        self.line(&format!("const uint bp_input_row = bp_row + bp_thread / {threads_per_row};"));
+        self.line(&format!("const uint bp_input_inner = bp_base + (bp_thread % {threads_per_row}) * {per_thread};"));
+        self.line(&format!("threadgroup {activation}* bp_ap = bp_a_tile + (bp_thread / {threads_per_row}) * 32 + (bp_thread % {threads_per_row}) * {per_thread};"));
+        self.line("if (bp_input_row < (uint)m) {");
+        self.indent += 1;
+        self.line("device const float* bp_as = a + (ulong)bp_input_row * (ulong)k + bp_input_inner;");
+        self.line(&format!("*(threadgroup {activation}4*)(bp_ap) = {activation}4(*(device const float4*)(bp_as));"));
+        if !full_float { self.line(&format!("*(threadgroup {activation}4*)(bp_ap + 4) = {activation}4(*(device const float4*)(bp_as + 4));")); }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!("*(threadgroup {activation}4*)(bp_ap) = {activation}4(0.0f);"));
+        if !full_float { self.line(&format!("*(threadgroup {activation}4*)(bp_ap + 4) = {activation}4(0.0f);")); }
+        self.indent -= 1;
+        self.line("}");
+        self.line("if (bp_thread < 32) {");
         self.indent += 1;
         self.line("const uint bp_output_col = bp_col + bp_thread;");
         self.line("if (bp_output_col < (uint)n) {");
@@ -618,47 +644,74 @@ impl DeviceEmitter {
         self.line("const ushort bp_bits = ushort(ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8));");
         self.line("bp_scales[bp_thread] = float(as_type<half>(bp_bits));");
         self.indent -= 1;
+        self.line("} else bp_scales[bp_thread] = 0.0f;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("const uint bp_dc = bp_thread % 32, bp_dr0 = (bp_thread / 32) * 4;");
+        self.line("const uint bp_output_col = bp_col + bp_dc;");
+        self.line("if (bp_output_col < (uint)n) {");
+        self.indent += 1;
+        self.line("const ulong bp_flat0 = (ulong)bp_output_col * (ulong)k + bp_base + bp_dr0;");
+        self.line("const ulong bp_block = (bp_flat0 / 32) * 34;");
+        self.line("const packed_char4 bp_q4 = *(device const packed_char4*)(b + bp_block + 2 + bp_dr0);");
+        self.line(&format!("for (uint bp_j = 0; bp_j < 4; ++bp_j) bp_b_tile[(bp_dr0 + bp_j) * 32 + bp_dc] = {weight}(float(bp_q4[bp_j]) * bp_scales[bp_dc]);"));
+        self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        self.line("bp_scales[bp_thread] = 0.0f;");
-        self.indent -= 1;
-        self.line("}");
+        self.line(&format!("for (uint bp_j = 0; bp_j < 4; ++bp_j) bp_b_tile[(bp_dr0 + bp_j) * 32 + bp_dc] = {weight}(0.0f);"));
         self.indent -= 1;
         self.line("}");
         self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-        self.line("if (bp_thread < 128) {");
+        self.line("for (uint bp_kk = 0; bp_kk < 32; bp_kk += 8) {");
         self.indent += 1;
-        self.line("const uint bp_dr = bp_thread / 16;");
-        self.line("const uint bp_dc = bp_thread % 16;");
-        self.line("const uint bp_output_col = bp_col + bp_dc;");
-        self.line("const ulong bp_flat = (ulong)bp_output_col * (ulong)k + bp_base + bp_dr;");
-        self.line("const ulong bp_block = (bp_flat / 32) * 34;");
-        self.line("int bp_q = bp_output_col < (uint)n ? int(b[bp_block + 2 + (bp_flat % 32)]) : 0;");
-        self.line("if (bp_q > 127) bp_q -= 256;");
-        self.line("bp_b_tile[bp_thread] = float(bp_q) * bp_scales[bp_dc];");
+        self.line("simdgroup_load(bp_a, bp_a_tile, 32, ulong2(bp_kk, bp_row_fragment * 8), false);");
+        for i in 0..fragments {
+            let col = if full_float { format!("bp_col_fragment + {}", i * 8) } else { format!("{}", i * 8) };
+            self.line(&format!("simdgroup_load(bp_b{i}, bp_b_tile, 32, ulong2({col}, bp_kk), false);"));
+            self.line(&format!("simdgroup_multiply_accumulate(bp_result{i}, bp_a, bp_b{i}, bp_result{i});"));
+        }
         self.indent -= 1;
         self.line("}");
         self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-        self.line("simdgroup_load(bp_a, bp_a_tile, 8, ulong2(0, bp_row_fragment * 8), false);");
-        self.line("simdgroup_load(bp_b, bp_b_tile, 16, ulong2(bp_col_fragment * 8, 0), false);");
-        self.line("simdgroup_multiply_accumulate(bp_result, bp_a, bp_b, bp_result);");
-        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
         self.indent -= 1;
         self.line("}");
-        self.line("simdgroup_store(bp_result, bp_out_tile + bp_warp * 64, 8, ulong2(0, 0), false);");
-        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-        self.line("for (uint bp_cell = __simd_lane_id; bp_cell < 64; bp_cell += __simd_size) {");
+        self.line(&format!("if (bp_row + {} < (uint)m && bp_col + 31 < (uint)n) {{", if full_float { 31 } else { 63 }));
         self.indent += 1;
-        self.line("const uint bp_dr = bp_cell / 8;");
-        self.line("const uint bp_dc = bp_cell % 8;");
-        self.line("const uint bp_output_row = bp_row + bp_row_fragment * 8 + bp_dr;");
-        self.line("const uint bp_output_col = bp_col + bp_col_fragment * 8 + bp_dc;");
+        for i in 0..fragments {
+            let col = if full_float { format!("bp_col + bp_col_fragment + {}", i * 8) } else { format!("bp_col + {}", i * 8) };
+            self.line(&format!("simdgroup_store(bp_result{i}, c, (ulong)n, ulong2({col}, bp_row + bp_row_fragment * 8), false);"));
+        }
+        if has_bias {
+            // Every SIMD group stores a different row fragment.  The bias loop
+            // below is distributed across the whole threadgroup, so without a
+            // device-memory barrier it can read/modify/write a cell before the
+            // owning SIMD group's store reaches device memory.
+            self.line("threadgroup_barrier(mem_flags::mem_device);");
+            self.line(&format!("for (uint bp_cell = __thread_pos.x; bp_cell < {}; bp_cell += 256) c[(ulong)(bp_row + bp_cell / 32) * (ulong)n + bp_col + bp_cell % 32] += bias[bp_col + bp_cell % 32];", if full_float { 1024 } else { 2048 }));
+        }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        for i in 0..fragments { self.line(&format!("simdgroup_store(bp_result{i}, bp_out_tile + (bp_warp * {fragments} + {i}) * 64, 8, ulong2(0, 0), false);")); }
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line(&format!("for (uint bp_cell = __thread_pos.x; bp_cell < {}; bp_cell += 256) {{", if full_float { 1024 } else { 2048 }));
+        self.indent += 1;
+        self.line("const uint bp_fragment = bp_cell / 64, bp_local = bp_cell % 64;");
+        if full_float {
+            self.line("const uint bp_fragment_warp = bp_fragment / 2;");
+            self.line("const uint bp_output_row = bp_row + (bp_fragment_warp % 4) * 8 + bp_local / 8;");
+            self.line("const uint bp_output_col = bp_col + (bp_fragment_warp / 4) * 16 + (bp_fragment % 2) * 8 + bp_local % 8;");
+        } else {
+            self.line("const uint bp_output_row = bp_row + (bp_fragment / 4) * 8 + bp_local / 8;");
+            self.line("const uint bp_output_col = bp_col + (bp_fragment % 4) * 8 + bp_local % 8;");
+        }
         self.line("if (bp_output_row < (uint)m && bp_output_col < (uint)n) {");
         self.indent += 1;
         if has_bias {
-            self.line("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_warp * 64 + bp_cell] + bias[bp_output_col];");
+            self.line("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_cell] + bias[bp_output_col];");
         } else {
-            self.line("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_warp * 64 + bp_cell];");
+            self.line("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_cell];");
         }
         self.indent -= 1;
         self.line("}");
@@ -666,6 +719,9 @@ impl DeviceEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        }
     }
 
     /// Metal single-token (m == 1) Q4_K schedule, the bandwidth-oriented layout of
@@ -752,7 +808,7 @@ impl DeviceEmitter {
         self.line("}");
     }
 
-    fn emit_dynamic_k_quant_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool) {
+    fn emit_dynamic_k_quant_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool, activation: &str, weight: &str) {
         self.line("if (m == 1) {");
         self.indent += 1;
         if warp_decode && format == "q4_k" {
@@ -834,62 +890,356 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        self.line("threadgroup float bp_a_tile[256];");
-        self.line("threadgroup float bp_b_tile[128];");
-        self.line("threadgroup float bp_out_tile[512];");
+        self.emit_blocked_quant_prefill(has_bias, format, activation, weight);
+        self.indent -= 1;
+        self.line("}");
+        if false {
+        let both_half = activation == "half" && weight == "half";
+        if format == "q6_k" && both_half {
+            self.line("threadgroup uint bp_scratch[2048];");
+            self.line("threadgroup half* bp_a_tile = (threadgroup half*)bp_scratch;");
+            self.line("threadgroup half* bp_b_tile = bp_a_tile + 2048;");
+        } else {
+            self.line(&format!("threadgroup {activation} bp_a_tile[2048];"));
+            self.line(&format!("threadgroup {weight} bp_b_tile[1024];"));
+            self.line("threadgroup float bp_out_tile[2048];");
+        }
         self.line("const uint bp_thread = __thread_pos.x;");
         self.line("const uint bp_warp = bp_thread / 32;");
-        self.line("const uint bp_row_fragment = bp_warp / 2;");
-        self.line("const uint bp_col_fragment = bp_warp % 2;");
-        self.line("const uint bp_row = __block_pos.y * 32;");
-        self.line("const uint bp_col = __block_pos.x * 16;");
-        self.line("simdgroup_float8x8 bp_result = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
-        self.line("simdgroup_float8x8 bp_a;");
-        self.line("simdgroup_float8x8 bp_b;");
-        self.line("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 8) {");
+        self.line("const uint bp_row_fragment = bp_warp;");
+        self.line("const uint bp_row = __block_pos.y * 64;");
+        self.line("const uint bp_col = __block_pos.x * 32;");
+        self.line("simdgroup_float8x8 bp_result0 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
+        self.line("simdgroup_float8x8 bp_result1 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
+        self.line("simdgroup_float8x8 bp_result2 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
+        self.line("simdgroup_float8x8 bp_result3 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
+        self.line(&format!("simdgroup_{activation}8x8 bp_a;"));
+        self.line(&format!("simdgroup_{weight}8x8 bp_b0, bp_b1, bp_b2, bp_b3;"));
+        if format == "q6_k" {
+            self.line("const uint bp_dc = bp_thread % 32;");
+            self.line("const uint bp_dr0 = (bp_thread / 32) * 4;");
+            self.line("const uint bp_output_col = bp_col + bp_dc;");
+            self.line("const ulong bp_blocks_per_row = (ulong)k / 256;");
+            self.line("const ulong bp_weight_row = (ulong)bp_output_col * bp_blocks_per_row;");
+        }
+        self.line("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 32) {");
         self.indent += 1;
-        self.line("const uint bp_input_row = bp_row + bp_thread / 8;");
-        self.line("const uint bp_input_inner = bp_base + bp_thread % 8;");
-        self.line("bp_a_tile[bp_thread] = bp_input_row < (uint)m && bp_input_inner < (uint)k ? a[(ulong)bp_input_row * (ulong)k + bp_input_inner] : 0.0f;");
-        self.line("if (bp_thread < 128) {");
+        self.line("const uint bp_input_row = bp_row + bp_thread / 4;");
+        self.line("const uint bp_input_inner = bp_base + (bp_thread % 4) * 8;");
+        self.line(&format!("threadgroup {activation}* bp_ap = bp_a_tile + (bp_thread / 4) * 32 + (bp_thread % 4) * 8;"));
+        self.line("if (bp_input_row < (uint)m) {");
         self.indent += 1;
-        self.line("const uint bp_dr = bp_thread / 16;");
-        self.line("const uint bp_dc = bp_thread % 16;");
-        self.line("const uint bp_output_col = bp_col + bp_dc;");
-        self.line("const uint bp_inner = bp_base + bp_dr;");
-        self.line("if (bp_output_col < (uint)n && bp_inner < (uint)k) {");
-        self.indent += 1;
-        self.line("const ulong bp_flat = (ulong)bp_output_col * (ulong)k + bp_inner;");
-        self.emit_k_quant_decode(format, "bp_flat", "bp_weight");
-        self.line("bp_b_tile[bp_thread] = bp_weight;");
+        self.line("device const float* bp_as = a + (ulong)bp_input_row * (ulong)k + bp_input_inner;");
+        self.line(&format!("*(threadgroup {activation}4*)(bp_ap) = {activation}4(*(device const float4*)(bp_as));"));
+        self.line(&format!("*(threadgroup {activation}4*)(bp_ap + 4) = {activation}4(*(device const float4*)(bp_as + 4));"));
         self.indent -= 1;
-        self.line("} else bp_b_tile[bp_thread] = 0.0f;");
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!("*(threadgroup {activation}4*)(bp_ap) = {activation}4(0.0f);"));
+        self.line(&format!("*(threadgroup {activation}4*)(bp_ap + 4) = {activation}4(0.0f);"));
+        self.indent -= 1;
+        self.line("}");
+        if format == "q4_k" {
+            self.line("const uint bp_dc = bp_thread % 32;");
+            self.line("const uint bp_dr0 = (bp_thread / 32) * 4;");
+            self.line("const uint bp_output_col = bp_col + bp_dc;");
+        }
+        self.line("if (bp_output_col < (uint)n) {");
+        self.indent += 1;
+        if format == "q4_k" {
+            self.line("const ulong bp_flat0 = (ulong)bp_output_col * (ulong)k + bp_base + bp_dr0;");
+            self.line("const ulong bp_block = (bp_flat0 / 256) * 144;");
+            self.line("const uint bp_pos = uint(bp_flat0 % 256), bp_chunk = bp_pos / 64, bp_within = bp_pos % 64;");
+            self.line("const uint bp_half = bp_within / 32, bp_lane = bp_within % 32, bp_subblock = bp_chunk * 2 + bp_half;");
+            self.line("const ulong bp_scales = bp_block + 4;");
+            self.line("const int bp_subscale = bp_subblock < 4 ? int(b[bp_scales + bp_subblock]) & 63 : (int(b[bp_scales + bp_subblock + 4]) & 15) | ((int(b[bp_scales + bp_subblock - 4]) >> 6) << 4);");
+            self.line("const int bp_submin = bp_subblock < 4 ? int(b[bp_scales + bp_subblock + 4]) & 63 : (int(b[bp_scales + bp_subblock + 4]) >> 4) | ((int(b[bp_scales + bp_subblock]) >> 6) << 4);");
+            self.line("const uchar4 bp_packed4 = as_type<uchar4>(*(device const uint*)(b + bp_block + 16 + bp_chunk * 32 + bp_lane));");
+            self.line("const half2 bp_dd = as_type<half2>(*(device const uint*)(b + bp_block));");
+            self.line("for (uint bp_j = 0; bp_j < 4; ++bp_j) {");
+            self.indent += 1;
+            self.line("const int bp_q = bp_half == 0 ? int(bp_packed4[bp_j] & 15) : int((bp_packed4[bp_j] >> 4) & 15);");
+            self.line(&format!("bp_b_tile[(bp_dr0 + bp_j) * 32 + bp_dc] = {weight}(float(bp_q * bp_subscale) * float(bp_dd.x) - float(bp_submin) * float(bp_dd.y));"));
+            self.indent -= 1;
+            self.line("}");
+        } else {
+            self.line("const ulong bp_block = (bp_weight_row + bp_base / 256) * 210;");
+            self.line("const uint bp_pos = (bp_base & 255) + bp_dr0, bp_iteration = bp_pos / 128, bp_within = bp_pos % 128;");
+            self.line("const uint bp_group = bp_within / 32, bp_lane = bp_within % 32, bp_half = bp_lane / 16;");
+            self.line("const ulong bp_ql = bp_block + bp_iteration * 64, bp_qh = bp_block + 128 + bp_iteration * 32;");
+            self.line("const ulong bp_low_addr = bp_ql + bp_lane + ((bp_group & 1) * 32);");
+            self.line("const uchar4 bp_low4 = as_type<uchar4>(*(device const uint*)(b + bp_low_addr));");
+            self.line("const uchar4 bp_high4 = as_type<uchar4>(*(device const uint*)(b + bp_qh + bp_lane));");
+            self.line("int bp_subscale = int(b[bp_block + 192 + bp_iteration * 8 + bp_half + bp_group * 2]); if (bp_subscale > 127) bp_subscale -= 256;");
+            self.line("const half bp_d = as_type<half>(ushort(ushort(b[bp_block + 208]) | (ushort(b[bp_block + 209]) << 8)));");
+            self.line("for (uint bp_j = 0; bp_j < 4; ++bp_j) {");
+            self.indent += 1;
+            self.line("const int bp_nibble = (bp_group < 2) ? int(bp_low4[bp_j] & 15) : int((bp_low4[bp_j] >> 4) & 15);");
+            self.line("const int bp_high = (int(bp_high4[bp_j]) >> (bp_group * 2)) & 3;");
+            self.line(&format!("bp_b_tile[(bp_dr0 + bp_j) * 32 + bp_dc] = {weight}(float(bp_subscale * ((bp_nibble | (bp_high << 4)) - 32)) * float(bp_d));"));
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!("for (uint bp_j = 0; bp_j < 4; ++bp_j) bp_b_tile[(bp_dr0 + bp_j) * 32 + bp_dc] = {weight}(0.0f);"));
         self.indent -= 1;
         self.line("}");
         self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-        self.line("simdgroup_load(bp_a, bp_a_tile, 8, ulong2(0, bp_row_fragment * 8), false);");
-        self.line("simdgroup_load(bp_b, bp_b_tile, 16, ulong2(bp_col_fragment * 8, 0), false);");
-        self.line("simdgroup_multiply_accumulate(bp_result, bp_a, bp_b, bp_result);");
+        self.line("for (uint bp_kk = 0; bp_kk < 32; bp_kk += 8) {");
+        self.indent += 1;
+        self.line("simdgroup_load(bp_a, bp_a_tile, 32, ulong2(bp_kk, bp_row_fragment * 8), false);");
+        self.line("simdgroup_load(bp_b0, bp_b_tile, 32, ulong2(0, bp_kk), false);");
+        self.line("simdgroup_load(bp_b1, bp_b_tile, 32, ulong2(8, bp_kk), false);");
+        self.line("simdgroup_load(bp_b2, bp_b_tile, 32, ulong2(16, bp_kk), false);");
+        self.line("simdgroup_load(bp_b3, bp_b_tile, 32, ulong2(24, bp_kk), false);");
+        self.line("simdgroup_multiply_accumulate(bp_result0, bp_a, bp_b0, bp_result0);");
+        self.line("simdgroup_multiply_accumulate(bp_result1, bp_a, bp_b1, bp_result1);");
+        self.line("simdgroup_multiply_accumulate(bp_result2, bp_a, bp_b2, bp_result2);");
+        self.line("simdgroup_multiply_accumulate(bp_result3, bp_a, bp_b3, bp_result3);");
+        self.indent -= 1;
+        self.line("}");
         self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
         self.indent -= 1;
         self.line("}");
-        self.line("simdgroup_store(bp_result, bp_out_tile + bp_warp * 64, 8, ulong2(0, 0), false);");
-        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
-        self.line("for (uint bp_cell = __simd_lane_id; bp_cell < 64; bp_cell += __simd_size) {");
+        if format == "q6_k" && both_half {
+        self.line("if (bp_row + 63 < (uint)m && bp_col + 31 < (uint)n) {");
         self.indent += 1;
-        self.line("const uint bp_dr = bp_cell / 8, bp_dc = bp_cell % 8;");
-        self.line("const uint bp_output_row = bp_row + bp_row_fragment * 8 + bp_dr;");
-        self.line("const uint bp_output_col = bp_col + bp_col_fragment * 8 + bp_dc;");
+        self.line("simdgroup_store(bp_result0, c, (ulong)n, ulong2(bp_col + 0, bp_row + bp_warp * 8), false);");
+        self.line("simdgroup_store(bp_result1, c, (ulong)n, ulong2(bp_col + 8, bp_row + bp_warp * 8), false);");
+        self.line("simdgroup_store(bp_result2, c, (ulong)n, ulong2(bp_col + 16, bp_row + bp_warp * 8), false);");
+        self.line("simdgroup_store(bp_result3, c, (ulong)n, ulong2(bp_col + 24, bp_row + bp_warp * 8), false);");
+        if has_bias {
+            self.line("threadgroup_barrier(mem_flags::mem_device);");
+            self.line("for (uint bp_cell = bp_thread; bp_cell < 2048; bp_cell += 256) c[(ulong)(bp_row + bp_cell / 32) * (ulong)n + bp_col + bp_cell % 32] += bias[bp_col + bp_cell % 32];");
+        }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("threadgroup float* bp_out_tile = (threadgroup float*)bp_scratch;");
+        self.line("simdgroup_store(bp_result0, bp_out_tile + (bp_warp * 4 + 0) * 64, 8, ulong2(0, 0), false);");
+        self.line("simdgroup_store(bp_result1, bp_out_tile + (bp_warp * 4 + 1) * 64, 8, ulong2(0, 0), false);");
+        self.line("simdgroup_store(bp_result2, bp_out_tile + (bp_warp * 4 + 2) * 64, 8, ulong2(0, 0), false);");
+        self.line("simdgroup_store(bp_result3, bp_out_tile + (bp_warp * 4 + 3) * 64, 8, ulong2(0, 0), false);");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("for (uint bp_cell = bp_thread; bp_cell < 2048; bp_cell += 256) {");
+        self.indent += 1;
+        self.line("const uint bp_fragment = bp_cell / 64, bp_local = bp_cell % 64;");
+        self.line("const uint bp_output_row = bp_row + (bp_fragment / 4) * 8 + bp_local / 8;");
+        self.line("const uint bp_output_col = bp_col + (bp_fragment % 4) * 8 + bp_local % 8;");
         self.line("if (bp_output_row < (uint)m && bp_output_col < (uint)n) {");
         self.indent += 1;
         let bias = if has_bias { " + bias[bp_output_col]" } else { "" };
-        self.line(&format!("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_warp * 64 + bp_cell]{bias};"));
+        self.line(&format!("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_cell]{bias};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        } else {
+            self.line("simdgroup_store(bp_result0, bp_out_tile + (bp_warp * 4 + 0) * 64, 8, ulong2(0, 0), false);");
+            self.line("simdgroup_store(bp_result1, bp_out_tile + (bp_warp * 4 + 1) * 64, 8, ulong2(0, 0), false);");
+            self.line("simdgroup_store(bp_result2, bp_out_tile + (bp_warp * 4 + 2) * 64, 8, ulong2(0, 0), false);");
+            self.line("simdgroup_store(bp_result3, bp_out_tile + (bp_warp * 4 + 3) * 64, 8, ulong2(0, 0), false);");
+            self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            self.line("for (uint bp_cell = bp_thread; bp_cell < 2048; bp_cell += 256) {");
+            self.indent += 1;
+            self.line("const uint bp_fragment = bp_cell / 64, bp_local = bp_cell % 64;");
+            self.line("const uint bp_output_row = bp_row + (bp_fragment / 4) * 8 + bp_local / 8;");
+            self.line("const uint bp_output_col = bp_col + (bp_fragment % 4) * 8 + bp_local % 8;");
+            self.line("if (bp_output_row < (uint)m && bp_output_col < (uint)n) {");
+            self.indent += 1;
+            let bias = if has_bias { " + bias[bp_output_col]" } else { "" };
+            self.line(&format!("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_cell]{bias};"));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.indent -= 1;
+        self.line("}");
+        }
+    }
+
+    /// Fragment-blocked native quantized prefill.  Every 8x8 fragment is
+    /// contiguous in threadgroup memory, and the weight tile is n-major so it
+    /// can be loaded transposed.  The scratch allocation is reused for the
+    /// edge output tile after the final multiply.
+    fn emit_blocked_quant_prefill(&mut self, has_bias: bool, format: &str, activation: &str, weight: &str) {
+        let half = activation == "half" && weight == "half";
+        let (bm, bk, sg_n, fm, fn_) = if half { (128, 64, 2, 4, 4) } else { (64, 32, 4, 4, 2) };
+        let kf = bk / 8;
+        let fragments = fm * fn_;
+        let out_cells = bm * 64;
+        self.line("threadgroup uint bp_scratch[8192];");
+        self.line(&format!("threadgroup {activation}* bp_a_tile = (threadgroup {activation}*)bp_scratch;"));
+        self.line(&format!("threadgroup {weight}* bp_b_tile = bp_a_tile + {};", bm * bk));
+        self.line("const uint bp_thread = __thread_pos.x;");
+        self.line("const uint bp_warp = bp_thread / 32;");
+        self.line(&format!("const uint bp_sg_m = bp_warp / {sg_n}, bp_sg_n = bp_warp % {sg_n};"));
+        self.line(&format!("const uint bp_row = __block_pos.y * {bm};"));
+        self.line("const uint bp_col = __block_pos.x * 64;");
+        for i in 0..fragments {
+            self.line(&format!("simdgroup_float8x8 bp_result{i} = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);"));
+        }
+        self.line(&format!("simdgroup_{activation}8x8 {} ;", (0..fm).map(|i| format!("bp_a{i}")).collect::<Vec<_>>().join(", ")));
+        self.line(&format!("simdgroup_{weight}8x8 {} ;", (0..fn_).map(|i| format!("bp_b{i}")).collect::<Vec<_>>().join(", ")));
+        self.line("const ulong bp_blocks_per_row = (ulong)k / 256;");
+        self.line(&format!("for (uint bp_base = 0; bp_base < (uint)k; bp_base += {bk}) {{"));
+        self.indent += 1;
+        self.line(&format!("for (uint bp_g = bp_thread; bp_g < {}; bp_g += 256) {{", bm * kf));
+        self.indent += 1;
+        self.line(&format!("const uint bp_r = bp_g / {kf}, bp_kq = (bp_g % {kf}) * 8;"));
+        self.line(&format!("threadgroup {activation}* bp_dst_a = bp_a_tile + ((bp_r / 8) * {kf} + bp_kq / 8) * 64 + (bp_r % 8) * 8;"));
+        self.line("if (bp_row + bp_r < (uint)m) {");
+        self.indent += 1;
+        self.line("device const float* bp_src_a = a + (ulong)(bp_row + bp_r) * (ulong)k + bp_base + bp_kq;");
+        self.line(&format!("*(threadgroup {activation}4*)bp_dst_a = {activation}4(*(device const float4*)bp_src_a);"));
+        self.line(&format!("*(threadgroup {activation}4*)(bp_dst_a + 4) = {activation}4(*(device const float4*)(bp_src_a + 4));"));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!("*(threadgroup {activation}4*)bp_dst_a = {activation}4(0.0f);"));
+        self.line(&format!("*(threadgroup {activation}4*)(bp_dst_a + 4) = {activation}4(0.0f);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("for (uint bp_g = bp_thread; bp_g < 256; bp_g += 256) {");
+        self.indent += 1;
+        self.line("const uint bp_ni = bp_g / 4, bp_lane8 = bp_g % 4;");
+        self.line("const uint bp_output_col = bp_col + bp_ni;");
+        self.line(&format!("threadgroup {weight}* bp_dst_b0 = bp_b_tile + ((bp_ni / 8) * {kf} + bp_lane8) * 64 + (bp_ni % 8) * 8;"));
+        self.line("if (bp_output_col < (uint)n) {");
+        self.indent += 1;
+        if format == "q4_k" {
+            self.line("const ulong bp_block = ((ulong)bp_output_col * bp_blocks_per_row + bp_base / 256) * 144;");
+            if half {
+                self.line("const uint bp_chunk = (bp_base & 255) / 64;");
+                self.line("const uint bp_s0 = bp_chunk * 2, bp_s1 = bp_s0 + 1;");
+                self.emit_blocked_q4_scale("bp_s0", "bp_sc0", "bp_mn0");
+                self.emit_blocked_q4_scale("bp_s1", "bp_sc1", "bp_mn1");
+            } else {
+                self.line("const uint bp_s0 = (bp_base & 255) / 32;");
+                self.line("const uint bp_chunk = bp_s0 / 2;");
+                self.emit_blocked_q4_scale("bp_s0", "bp_sc0", "bp_mn0");
+            }
+            self.line("const float bp_d = float(as_type<half>(*(device const ushort*)(b + bp_block)));");
+            self.line("const float bp_dm = float(as_type<half>(*(device const ushort*)(b + bp_block + 2)));");
+            self.line("const uint2 bp_raw = *(device const uint2*)(b + bp_block + 16 + bp_chunk * 32 + bp_lane8 * 8);");
+            self.line("const uint bp_shift0 = ((bp_base & 32) != 0) ? 4 : 0;");
+            self.emit_blocked_q4_vector(weight, "bp_dst_b0", "bp_sc0", "bp_mn0", "bp_shift0");
+            if half {
+                self.line(&format!("threadgroup {weight}* bp_dst_b1 = bp_b_tile + ((bp_ni / 8) * {kf} + 4 + bp_lane8) * 64 + (bp_ni % 8) * 8;"));
+                self.emit_blocked_q4_vector(weight, "bp_dst_b1", "bp_sc1", "bp_mn1", "4");
+            }
+        } else if format == "q6_k" {
+            self.line("const ulong bp_block = ((ulong)bp_output_col * bp_blocks_per_row + bp_base / 256) * 210;");
+            let passes = if half { 2 } else { 1 };
+            for pass in 0..passes {
+                let suffix = pass;
+                self.line(&format!("const uint bp_pos{suffix} = (bp_base & 255) + {} + bp_lane8 * 8;", pass * 32));
+                self.line(&format!("const uint bp_it{suffix} = bp_pos{suffix} / 128, bp_group{suffix} = (bp_pos{suffix} % 128) / 32, bp_lane{suffix} = bp_pos{suffix} % 32;"));
+                self.line(&format!("const uint2 bp_low{suffix} = uint2(uint(*(device const ushort*)(b + bp_block + bp_it{suffix} * 64 + (bp_group{suffix} & 1) * 32 + bp_lane{suffix})) | (uint(*(device const ushort*)(b + bp_block + bp_it{suffix} * 64 + (bp_group{suffix} & 1) * 32 + bp_lane{suffix} + 2)) << 16), uint(*(device const ushort*)(b + bp_block + bp_it{suffix} * 64 + (bp_group{suffix} & 1) * 32 + bp_lane{suffix} + 4)) | (uint(*(device const ushort*)(b + bp_block + bp_it{suffix} * 64 + (bp_group{suffix} & 1) * 32 + bp_lane{suffix} + 6)) << 16));"));
+                self.line(&format!("const uint2 bp_high{suffix} = uint2(uint(*(device const ushort*)(b + bp_block + 128 + bp_it{suffix} * 32 + bp_lane{suffix})) | (uint(*(device const ushort*)(b + bp_block + 128 + bp_it{suffix} * 32 + bp_lane{suffix} + 2)) << 16), uint(*(device const ushort*)(b + bp_block + 128 + bp_it{suffix} * 32 + bp_lane{suffix} + 4)) | (uint(*(device const ushort*)(b + bp_block + 128 + bp_it{suffix} * 32 + bp_lane{suffix} + 6)) << 16));"));
+                self.line(&format!("int bp_sc{suffix} = int(b[bp_block + 192 + bp_it{suffix} * 8 + (bp_lane{suffix} / 16) + bp_group{suffix} * 2]); if (bp_sc{suffix} > 127) bp_sc{suffix} -= 256;"));
+                let dst = if pass == 0 { "bp_dst_b0".to_string() } else { format!("bp_dst_b{pass}") };
+                if pass > 0 { self.line(&format!("threadgroup {weight}* {dst} = bp_b_tile + ((bp_ni / 8) * {kf} + 4 + bp_lane8) * 64 + (bp_ni % 8) * 8;")); }
+                self.emit_blocked_q6_vector(weight, &dst, suffix);
+            }
+        } else {
+            self.line("const ulong bp_block = ((ulong)bp_output_col * (ulong)k + bp_base) / 32 * 34;");
+            self.line("const float bp_scale = float(as_type<half>(*(device const ushort*)(b + bp_block)));");
+            self.line("const packed_char4 bp_q0 = *(device const packed_char4*)(b + bp_block + 2 + bp_lane8 * 8);");
+            self.line("const packed_char4 bp_q1 = *(device const packed_char4*)(b + bp_block + 6 + bp_lane8 * 8);");
+            self.line(&format!("*(threadgroup {weight}4*)bp_dst_b0 = {weight}4(float4(bp_q0) * bp_scale);"));
+            self.line(&format!("*(threadgroup {weight}4*)(bp_dst_b0 + 4) = {weight}4(float4(bp_q1) * bp_scale);"));
+            if half {
+                self.line(&format!("threadgroup {weight}* bp_dst_b1 = bp_b_tile + ((bp_ni / 8) * {kf} + 4 + bp_lane8) * 64 + (bp_ni % 8) * 8;"));
+                self.line("const ulong bp_block1 = bp_block + 34;");
+                self.line("const float bp_scale1 = float(as_type<half>(*(device const ushort*)(b + bp_block1)));");
+                self.line("const packed_char4 bp_q2 = *(device const packed_char4*)(b + bp_block1 + 2 + bp_lane8 * 8);");
+                self.line("const packed_char4 bp_q3 = *(device const packed_char4*)(b + bp_block1 + 6 + bp_lane8 * 8);");
+                self.line(&format!("*(threadgroup {weight}4*)bp_dst_b1 = {weight}4(float4(bp_q2) * bp_scale1);"));
+                self.line(&format!("*(threadgroup {weight}4*)(bp_dst_b1 + 4) = {weight}4(float4(bp_q3) * bp_scale1);"));
+            }
+        }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!("*(threadgroup {weight}4*)bp_dst_b0 = {weight}4(0.0f);"));
+        self.line(&format!("*(threadgroup {weight}4*)(bp_dst_b0 + 4) = {weight}4(0.0f);"));
+        if half {
+            self.line(&format!("threadgroup {weight}* bp_dst_b1 = bp_dst_b0 + 4 * 64;"));
+            self.line(&format!("*(threadgroup {weight}4*)bp_dst_b1 = {weight}4(0.0f);"));
+            self.line(&format!("*(threadgroup {weight}4*)(bp_dst_b1 + 4) = {weight}4(0.0f);"));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line(&format!("for (uint bp_ks = 0; bp_ks < {kf}; ++bp_ks) {{"));
+        self.indent += 1;
+        for i in 0..fm { self.line(&format!("simdgroup_load(bp_a{i}, bp_a_tile + ((bp_sg_m * {fm} + {i}) * {kf} + bp_ks) * 64, 8);")); }
+        for j in 0..fn_ { self.line(&format!("simdgroup_load(bp_b{j}, bp_b_tile + ((bp_sg_n * {fn_} + {j}) * {kf} + bp_ks) * 64, 8, ulong2(0, 0), true);")); }
+        for i in 0..fm { for j in 0..fn_ { let r = i * fn_ + j; self.line(&format!("simdgroup_multiply_accumulate(bp_result{r}, bp_a{i}, bp_b{j}, bp_result{r});")); } }
+        self.indent -= 1;
+        self.line("}");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("if (bp_row + {} < (uint)m && bp_col + 63 < (uint)n) {{", bm - 1));
+        self.indent += 1;
+        for i in 0..fm { for j in 0..fn_ {
+            let r = i * fn_ + j;
+            self.line(&format!("simdgroup_store(bp_result{r}, c, (ulong)n, ulong2(bp_col + (bp_sg_n * {fn_} + {j}) * 8, bp_row + (bp_sg_m * {fm} + {i}) * 8), false);"));
+        } }
+        if has_bias {
+            self.line("threadgroup_barrier(mem_flags::mem_device);");
+            self.line(&format!("for (uint bp_cell = bp_thread; bp_cell < {out_cells}; bp_cell += 256) c[(ulong)(bp_row + bp_cell / 64) * (ulong)n + bp_col + bp_cell % 64] += bias[bp_col + bp_cell % 64];"));
+        }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("threadgroup float* bp_out_tile = (threadgroup float*)bp_scratch;");
+        for i in 0..fm { for j in 0..fn_ {
+            let r = i * fn_ + j;
+            self.line(&format!("simdgroup_store(bp_result{r}, bp_out_tile + ((bp_sg_m * {fm} + {i}) * 8 + bp_sg_n * {fn_} + {j}) * 64, 8, ulong2(0, 0), false);"));
+        } }
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line(&format!("for (uint bp_cell = bp_thread; bp_cell < {out_cells}; bp_cell += 256) {{"));
+        self.indent += 1;
+        self.line("const uint bp_fragment = bp_cell / 64, bp_local = bp_cell % 64;");
+        self.line("const uint bp_output_row = bp_row + (bp_fragment / 8) * 8 + bp_local / 8;");
+        self.line("const uint bp_output_col = bp_col + (bp_fragment % 8) * 8 + bp_local % 8;");
+        self.line("if (bp_output_row < (uint)m && bp_output_col < (uint)n) {");
+        self.indent += 1;
+        let bias = if has_bias { " + bias[bp_output_col]" } else { "" };
+        self.line(&format!("c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_cell]{bias};"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_blocked_q4_scale(&mut self, s: &str, scale: &str, min: &str) {
+        self.line(&format!("const int {scale} = {s} < 4 ? int(b[bp_block + 4 + {s}]) & 63 : (int(b[bp_block + 8 + {s}]) & 15) | ((int(b[bp_block + {s}]) >> 6) << 4);"));
+        self.line(&format!("const int {min} = {s} < 4 ? int(b[bp_block + 8 + {s}]) & 63 : (int(b[bp_block + 8 + {s}]) >> 4) | ((int(b[bp_block + 4 + {s}]) >> 6) << 4);"));
+    }
+
+    fn emit_blocked_q4_vector(&mut self, weight: &str, dst: &str, scale: &str, min: &str, shift: &str) {
+        self.line(&format!("const float bp_ds_{dst} = float({scale}) * bp_d, bp_dm_{dst} = float({min}) * bp_dm;"));
+        self.line(&format!("for (uint bp_h = 0; bp_h < 2; ++bp_h) {{ uint bp_word = bp_h == 0 ? bp_raw.x : bp_raw.y; {weight}4 bp_v; for (uint bp_i = 0; bp_i < 4; ++bp_i) bp_v[bp_i] = {weight}(float((bp_word >> (bp_i * 8 + {shift})) & 15) * bp_ds_{dst} - bp_dm_{dst}); *(threadgroup {weight}4*)({dst} + bp_h * 4) = bp_v; }}"));
+    }
+
+    fn emit_blocked_q6_vector(&mut self, weight: &str, dst: &str, suffix: usize) {
+        self.line(&format!("const float bp_d{suffix} = float(as_type<half>(*(device const ushort*)(b + bp_block + 208)));"));
+        self.line(&format!("for (uint bp_h = 0; bp_h < 2; ++bp_h) {{ uint bp_l = bp_h == 0 ? bp_low{suffix}.x : bp_low{suffix}.y; uint bp_hh = bp_h == 0 ? bp_high{suffix}.x : bp_high{suffix}.y; {weight}4 bp_v; for (uint bp_i = 0; bp_i < 4; ++bp_i) {{ int bp_lo = int((bp_l >> (bp_i * 8 + (bp_group{suffix} >= 2 ? 4 : 0))) & 15); int bp_hi = int((bp_hh >> (bp_i * 8 + bp_group{suffix} * 2)) & 3); bp_v[bp_i] = {weight}(float(bp_sc{suffix} * ((bp_lo | (bp_hi << 4)) - 32)) * bp_d{suffix}); }} *(threadgroup {weight}4*)({dst} + bp_h * 4) = bp_v; }}"));
     }
 
     fn emit_k_quant_decode(&mut self, format: &str, flat: &str, output: &str) {

@@ -417,7 +417,7 @@ impl Parser {
     }
 
     /// Returns true when the token stream looks like a shorthand function declaration:
-    ///   `RetType funcName(` — a return type followed by a lowercase identifier and `(`
+    ///   `RetType funcName(` — a return type followed by an identifier and `(`
     ///
     /// This covers top-level bare functions without `def`/`req`:
     ///   `string greet(string name):`
@@ -483,10 +483,21 @@ impl Parser {
                 TokenKind::Question => { i += 1; } // optional T?
                 TokenKind::Ident(_) if depth > 0 => { i += 1; } // inside brackets
                 TokenKind::Ident(s) if depth == 0 => {
+                    // Once at least one top-level type token has been consumed, an
+                    // identifier immediately followed by a parameter list is the
+                    // function name even when it is uppercase-led.  Uppercase names
+                    // are otherwise classified as types by `is_type_name`, which used
+                    // to make `int WithLog(int x): x` look like an expression call.
+                    if i > self.pos {
+                        let next = self.tokens.get(i + 1).map(|t| &t.kind);
+                        if matches!(next, Some(TokenKind::LParen) | Some(TokenKind::Lt)) {
+                            return true;
+                        }
+                    }
                     if Self::is_type_name(s) {
                         i += 1; // part of the type
                     } else {
-                        // Lowercase non-type ident at depth 0 → this is the function name
+                        // Non-type ident at depth 0 → this is the function name
                         // Check: function name followed by `(`
                         let next = self.tokens.get(i + 1).map(|t| &t.kind);
                         return matches!(next,
@@ -500,14 +511,12 @@ impl Parser {
                 _ => {
                     // End of type at depth 0 — what follows?
                     let next = self.tokens.get(i).map(|t| &t.kind);
-                    // If next is a lowercase ident followed by `(`, it's a fn name
-                    if let Some(TokenKind::Ident(name)) = next {
-                        if !Self::is_type_name(name) {
-                            let after = self.tokens.get(i + 1).map(|t| &t.kind);
-                            return matches!(after,
-                                Some(TokenKind::LParen) | Some(TokenKind::Lt)
-                            );
-                        }
+                    // If next is an ident followed by `(`, it's a fn name
+                    if let Some(TokenKind::Ident(_)) = next {
+                        let after = self.tokens.get(i + 1).map(|t| &t.kind);
+                        return matches!(after,
+                            Some(TokenKind::LParen) | Some(TokenKind::Lt)
+                        );
                     }
                     return false;
                 }

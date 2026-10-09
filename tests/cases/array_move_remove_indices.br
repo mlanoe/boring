@@ -1,0 +1,19 @@
+# `array.move(from, to)` and `array.removeIndices(indices)` -- the collection helpers boring-ui's
+# `List(onMove:, onDelete:)` callbacks rely on (docs/design-notes/boring-ui-draft.md, "List").
+# `to` is the element's final index; `removeIndices` takes unique, strictly ascending indices
+# into the pre-mutation array and removes them all as one operation.
+
+def main():
+    mut [string] a = ["a", "b", "c", "d"]
+    a.move(1, 3)
+    print a
+    a.move(3, 0)
+    print a
+    a.move(2, 2)
+    print a
+
+    mut [int] n = [10, 20, 30, 40, 50]
+    n.removeIndices([0, 2, 4])
+    print n
+    n.removeIndices([])
+    print n

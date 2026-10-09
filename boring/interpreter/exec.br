@@ -1127,6 +1127,66 @@ def Value call_closure(mut Interpreter interp, [Param] params, ClosureBody body,
 
 # ─── call_value ───────────────────────────────────────────────────────────────
 
+# Evaluate a trailing array-block body as a list of values. The main front-end
+# desugars this syntax before evaluation; the self-hosted parser currently
+# represents the same block as the constructor's final closure argument, so
+# collect its expression statements (and control-flow bodies) here.
+def [Value] collect_array_block_stmts(mut Interpreter interp, [Stmt] stmts):
+    mut [Value] out = []
+    for stmt in stmts:
+        match stmt:
+            Stmt.Expr(e):
+                out.push(eval_expr(interp, e))
+            Stmt.For(for_stmt):
+                let iterable = eval_expr(interp, for_stmt.iterable)
+                match iterable:
+                    Value.Array(items):
+                        for item in items:
+                            let child = push_scope(interp)
+                            if for_stmt.vars.length > 0:
+                                env_define(interp, for_stmt.vars[0], item, false)
+                            let nested = collect_array_block_stmts(interp, for_stmt.body)
+                            for value in nested:
+                                out.push(value)
+                            pop_scope(interp)
+                    Value.Range(start, end, inclusive, _):
+                        let limit = if inclusive: end + 1 else: end
+                        var n = start
+                        while n < limit:
+                            let child = push_scope(interp)
+                            if for_stmt.vars.length > 0:
+                                env_define(interp, for_stmt.vars[0], Value.Int(n), false)
+                            let nested = collect_array_block_stmts(interp, for_stmt.body)
+                            for value in nested:
+                                out.push(value)
+                            pop_scope(interp)
+                            n += 1
+                    _: throw "array block for-loop requires an iterable"
+            Stmt.If(if_stmt):
+                var matched = false
+                for branch in if_stmt.branches:
+                    if not matched and val_to_bool(eval_expr(interp, branch.cond)):
+                        let nested = collect_array_block_stmts(interp, branch.body)
+                        for value in nested:
+                            out.push(value)
+                        matched = true
+                if not matched:
+                    if let else_body = if_stmt.else_body:
+                        let nested = collect_array_block_stmts(interp, else_body)
+                        for value in nested:
+                            out.push(value)
+            _: throw "unsupported statement in trailing array block"
+    out
+
+def [Value] collect_array_block(mut Interpreter interp, ClosureBody body, Env? captured):
+    let prev_env = interp.current_env
+    interp.current_env = new_env(captured)
+    let values = match body:
+        ClosureBody.Block(stmts): collect_array_block_stmts(interp, stmts)
+        ClosureBody.Expr(e): [eval_expr(interp, e)]
+    interp.current_env = prev_env
+    values
+
 def Value call_value(mut Interpreter interp, Value callee, [Value] args):
     match callee:
         Value.Fn(name, captured):
@@ -1146,7 +1206,18 @@ def Value call_value(mut Interpreter interp, Value callee, [Value] args):
         Value.StructDef(name):
             let decl_opt = interp.get_struct_decl(name)
             if let decl = decl_opt:
-                instantiate_struct(interp, decl, args)
+                var ctor_args = args
+                if decl.fields.length > 0 and ctor_args.length > 0:
+                    let last_field = decl.fields[decl.fields.length - 1]
+                    match last_field.ty:
+                        Type.Array(_):
+                            let last_idx = ctor_args.length - 1
+                            match ctor_args[last_idx]:
+                                Value.Closure(_, body, captured):
+                                    ctor_args[last_idx] = Value.Array(collect_array_block(interp, body, captured))
+                                _: nil
+                        _: nil
+                instantiate_struct(interp, decl, ctor_args)
             else:
                 throw "struct not found: {name}"
 
@@ -1297,4 +1368,3 @@ def bool value_equals(Value a, Value b):
                         all_found
                 _: false
         _: false
-

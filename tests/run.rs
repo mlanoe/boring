@@ -141,6 +141,7 @@ interp_test!(strings);
 interp_test!(control_flow);
 interp_test!(match_stmt);
 interp_test!(functions);
+interp_test!(uppercase_fn_shorthand_typed_param);
 interp_test!(closures);
 interp_test!(structs);
 interp_test!(collections);

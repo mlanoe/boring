@@ -99,18 +99,17 @@
 //! rewritten by the time its parent is examined — by then it's just an
 //! ordinary `Call`/`Do`/`Closure` expression like any other.
 //!
-//! ## Known limitation — single-file resolution only
+//! ## Imported callees
 //!
-//! The callee/trait tables this pass builds (`Signatures::collect`) are
-//! built from *this* `Program`'s own top-level items only — the same
-//! `Item`-list shape `desugar_labeled_array` itself walks, gathered before
-//! any cross-file `use` merging that a given `boring build`/`boring run`
-//! entry point might do downstream. A struct/trait/function declared in a
-//! different `.br` file and only reachable via `use` is invisible to this
-//! resolution step; per the decision table above, that reads as "not a
-//! known callable" — which resolves to **Tail** or **Closure literal**
-//! (never a hard error) depending on `has_parens`. Extending this to a real
-//! cross-file symbol table is a natural follow-up, not attempted here.
+//! `desugar_array_block_with_imports` also feeds the signature table from files
+//! reached through `use` (same-project siblings, `[deps]` projects, the embedded
+//! `boring.*` stdlib), so a library `Column` declared elsewhere resolves exactly
+//! like a local one. Visibility follows ordinary import resolution (bare `use`:
+//! everything; multi-segment/dep `use`: `pub` items, narrowed by an explicit item
+//! list); local declarations shadow imports. Transparent `use Alias as Original`
+//! aliases follow the original callable's signature (including local `Stmt::Alias`
+//! declarations); `type … as` newtypes remain distinct constructors.
+//! Without a `source_dir` (`desugar_array_block`), resolution stays single-file.
 
 use crate::ast::*;
 use crate::parser::{infer_closure_throws_task, ParseError};
@@ -118,6 +117,7 @@ use std::collections::{HashMap, HashSet};
 
 /// Per-callee signature info needed to resolve the sugar — only the LAST
 /// entry of each `Vec<Type>` is ever consulted.
+#[derive(Default)]
 struct Signatures {
     /// Free-function name -> parameter types, in declaration order.
     fns: HashMap<String, Vec<Type>>,
@@ -135,38 +135,57 @@ struct Signatures {
 }
 
 impl Signatures {
-    fn collect(items: &[Item]) -> Self {
-        let mut s = Signatures { fns: HashMap::new(), structs: HashMap::new(), traits: HashSet::new() };
-        s.collect_items(items);
-        s
+    fn collect_items(&mut self, items: &[Item]) {
+        self.collect_items_filtered(items, &|_, _| true);
     }
 
-    fn collect_items(&mut self, items: &[Item]) {
+    /// Make every transparent `use Alias as Original` name resolve like its
+    /// original callable. The parser stores top-level aliases as `Item::Alias`
+    /// and function-local aliases as `Stmt::Alias`; both carry the original in
+    /// `AliasDecl::ty`. Iterate to a fixed point so alias chains work regardless
+    /// of declaration order.
+    fn collect_aliases(&mut self, items: &[Item]) {
+        let mut aliases = Vec::new();
+        collect_alias_decls(items, &mut aliases);
+        for _ in 0..aliases.len() {
+            let mut changed = false;
+            for alias in &aliases {
+                if alias.newtype { continue; }
+                let Type::Named(original) = &alias.ty else { continue; };
+                if let Some(params) = self.fns.get(original).cloned() {
+                    changed |= self.fns.insert(alias.name.clone(), params).is_none();
+                } else if let Some(params) = self.structs.get(original).cloned() {
+                    changed |= self.structs.insert(alias.name.clone(), params).is_none();
+                }
+            }
+            if !changed { break; }
+        }
+    }
+
+    /// Same as `collect_items`, but only records a top-level fn/struct/trait
+    /// when `accept(name, is_pub)` says so — used for imported files, where
+    /// `pub` and a selective `use x.(A, B)` list gate what is visible.
+    fn collect_items_filtered(&mut self, items: &[Item], accept: &dyn Fn(&str, bool) -> bool) {
+        let fn_tys = |f: &FnDecl| -> Vec<Type> {
+            f.params.iter()
+                .map(|p| p.ty.clone().unwrap_or_else(|| Type::Named("_".to_string())))
+                .collect()
+        };
         for item in items {
             match item {
-                Item::Fn(f) => {
-                    let tys = f.params.iter()
-                        .map(|p| p.ty.clone().unwrap_or_else(|| Type::Named("_".to_string())))
-                        .collect();
-                    self.fns.insert(f.name.clone(), tys);
+                Item::Fn(f) | Item::Stmt(Stmt::Fn(f)) => {
+                    if accept(&f.name, f.is_pub) { self.fns.insert(f.name.clone(), fn_tys(f)); }
                 }
-                Item::Struct(s) => {
-                    let tys = s.fields.iter().map(|f| f.ty.clone()).collect();
-                    self.structs.insert(s.name.clone(), tys);
+                Item::Struct(s) | Item::Stmt(Stmt::Struct(s)) => {
+                    if accept(&s.name, s.is_pub) {
+                        self.structs.insert(s.name.clone(), s.fields.iter().map(|f| f.ty.clone()).collect());
+                    }
                 }
+                // Trait names are always recorded: an imported signature's own
+                // `[dyn View]` parameter must classify as "collect" even when
+                // the importing file never names `View` itself.
                 Item::Trait(t) => { self.traits.insert(t.name.clone()); }
-                Item::Mod(m) => self.collect_items(&m.items),
-                Item::Stmt(Stmt::Fn(f)) => {
-                    let tys = f.params.iter()
-                        .map(|p| p.ty.clone().unwrap_or_else(|| Type::Named("_".to_string())))
-                        .collect();
-                    self.fns.insert(f.name.clone(), tys);
-                }
-                Item::Stmt(Stmt::Struct(s)) => {
-                    let tys = s.fields.iter().map(|f| f.ty.clone()).collect();
-                    self.structs.insert(s.name.clone(), tys);
-                }
-                Item::Stmt(Stmt::Mod(m)) => self.collect_items(&m.items),
+                Item::Mod(m) | Item::Stmt(Stmt::Mod(m)) => self.collect_items_filtered(&m.items, accept),
                 _ => {}
             }
         }
@@ -293,7 +312,7 @@ fn stmt_to_array_block_elem(stmt: Stmt, line: usize, col: usize, len: usize) -> 
             Ok(ArrayBlockElem::If { branches, else_body })
         }
         Stmt::For(f) => Ok(ArrayBlockElem::For {
-            vars: f.vars, iterable: f.iterable, body: stmts_to_array_block_elems(f.body, line, col, len)?,
+            vars: f.vars, iterable: f.iterable, key: f.key, body: stmts_to_array_block_elems(f.body, line, col, len)?,
         }),
         other => Err(ParseError::Generic {
             line, col, len,
@@ -307,10 +326,148 @@ fn stmt_to_array_block_elem(stmt: Stmt, line: usize, col: usize, len: usize) -> 
     }
 }
 
-pub fn desugar_array_block(mut program: Program) -> Result<Program, ParseError> {
-    let sigs = Signatures::collect(&program.items);
+pub fn desugar_array_block(program: Program) -> Result<Program, ParseError> {
+    desugar_array_block_with_imports(program, None, &HashMap::new())
+}
+
+/// Like `desugar_array_block`, but also resolves callee signatures declared in
+/// files reached through `use` — same-project siblings (bare `use name`,
+/// `use sub.mod.*`), `boring.toml` `[deps]` projects (`use dep.mod.Item`), and
+/// the embedded first-party stdlib (`use boring.mod.*`). `source_dir` is the
+/// directory of the file being compiled (`None` skips every on-disk import).
+///
+/// Visibility follows ordinary import resolution: a bare single-segment `use`
+/// imports every top-level item (book.md, "Same-project multi-file"); any
+/// multi-segment or dep-qualified `use` imports only `pub` items, narrowed to
+/// the named ones for `use mod.A, B`. Local declarations always shadow imports.
+/// An unreadable or unparseable import is skipped — the checker/transpiler
+/// re-parse it independently and report the real error. Transparent
+/// `use Alias as Original` aliases inherit the original callable's signature.
+pub fn desugar_array_block_with_imports(
+    mut program: Program,
+    source_dir: Option<&std::path::Path>,
+    deps: &HashMap<String, std::path::PathBuf>,
+) -> Result<Program, ParseError> {
+    let mut sigs = Signatures::default();
+    if let Some(dir) = source_dir {
+        let mut visited = HashSet::new();
+        sigs.collect_imports(&program.items, dir, deps, &mut visited);
+    }
+    // Local declarations last, so they override any imported name.
+    sigs.collect_items(&program.items);
+    sigs.collect_aliases(&program.items);
     program.items = desugar_items(program.items, &sigs)?;
     Ok(program)
+}
+
+fn collect_alias_decls<'a>(items: &'a [Item], out: &mut Vec<&'a AliasDecl>) {
+    for item in items {
+        match item {
+            Item::Alias(alias) => out.push(alias),
+            Item::Fn(f) => collect_stmt_alias_decls(&f.body, out),
+            Item::Struct(s) => {
+                for method in &s.methods { collect_stmt_alias_decls(&method.body, out); }
+                for init in &s.inits { collect_stmt_alias_decls(&init.body, out); }
+                for method in &s.type_methods { collect_stmt_alias_decls(&method.body, out); }
+            }
+            Item::Enum(e) => {
+                for method in &e.methods { collect_stmt_alias_decls(&method.body, out); }
+            }
+            Item::Ext(e) => {
+                for method in &e.methods { collect_stmt_alias_decls(&method.body, out); }
+            }
+            Item::Mod(m) => collect_alias_decls(&m.items, out),
+            Item::Stmt(stmt) => collect_stmt_alias_decl(stmt, out),
+            _ => {}
+        }
+    }
+}
+
+fn collect_stmt_alias_decls<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a AliasDecl>) {
+    for stmt in stmts { collect_stmt_alias_decl(stmt, out); }
+}
+
+fn collect_stmt_alias_decl<'a>(stmt: &'a Stmt, out: &mut Vec<&'a AliasDecl>) {
+    match stmt {
+        Stmt::Alias(alias) => out.push(alias),
+        Stmt::Fn(f) => collect_stmt_alias_decls(&f.body, out),
+        Stmt::Mod(m) => collect_alias_decls(&m.items, out),
+        _ => {}
+    }
+}
+
+impl Signatures {
+    /// Parses `path` and records its (filtered) signatures, then recurses into
+    /// its own `use` items relative to `dir`.
+    fn import_file(
+        &mut self,
+        path: &std::path::Path,
+        pub_only: bool,
+        only: &[String],
+        deps: &HashMap<String, std::path::PathBuf>,
+        visited: &mut HashSet<(std::path::PathBuf, bool)>,
+    ) {
+        let Ok(path) = path.canonicalize() else { return };
+        if !visited.insert((path.clone(), pub_only)) { return; }
+        let Ok(src) = std::fs::read_to_string(&path) else { return };
+        // A bare `use` inside the imported file resolves against that file's own directory.
+        let Some(file_dir) = path.parent() else { return };
+        self.import_source(&src, file_dir, pub_only, only, deps, visited);
+    }
+
+    fn import_source(
+        &mut self,
+        src: &str,
+        dir: &std::path::Path,
+        pub_only: bool,
+        only: &[String],
+        deps: &HashMap<String, std::path::PathBuf>,
+        visited: &mut HashSet<(std::path::PathBuf, bool)>,
+    ) {
+        let Ok(tokens) = crate::lexer::lex_all(src) else { return };
+        let Ok(file) = crate::parser::parse(tokens) else { return };
+        self.collect_items_filtered(&file.items, &|name, is_pub| {
+            (!pub_only || is_pub) && (only.is_empty() || only.iter().any(|n| n == name))
+        });
+        self.collect_imports(&file.items, dir, deps, visited);
+    }
+
+    fn collect_imports(
+        &mut self,
+        items: &[Item],
+        dir: &std::path::Path,
+        deps: &HashMap<String, std::path::PathBuf>,
+        visited: &mut HashSet<(std::path::PathBuf, bool)>,
+    ) {
+        for item in items {
+            let Item::Use(u) = item else {
+                if let Item::Mod(m) = item { self.collect_imports(&m.items, dir, deps, visited); }
+                continue;
+            };
+            let Some(first) = u.path.first() else { continue };
+            // `use boring.<module>` — embedded first-party stdlib.
+            if first == "boring" {
+                let module = u.path.get(1).map(String::as_str).unwrap_or("");
+                if let Some(src) = crate::stdlib_embed::lookup(module) {
+                    let key = (crate::stdlib_embed::synthetic_path(module), true);
+                    if visited.insert(key) {
+                        self.import_source(src, dir, true, &u.items, deps, visited);
+                    }
+                }
+                continue;
+            }
+            // `use <dep>.<mod>.…` — a `[deps]` project; its own bare `use`s resolve
+            // against that dependency's root.
+            if let Some(dep_root) = deps.get(first.as_str()) {
+                let rel: std::path::PathBuf = u.path[1..].iter().collect();
+                self.import_file(&dep_root.join(rel).with_extension("br"), true, &u.items, deps, visited);
+                continue;
+            }
+            let rel: std::path::PathBuf = u.path.iter().collect();
+            let bare = u.path.len() == 1;
+            self.import_file(&dir.join(rel).with_extension("br"), !bare, &u.items, deps, visited);
+        }
+    }
 }
 
 fn desugar_items(items: Vec<Item>, sigs: &Signatures) -> Result<Vec<Item>, ParseError> {
@@ -661,13 +818,13 @@ fn desugar_trailing_array_block(
                 is_static: false,
                 name: CHILDREN_VAR.to_string(),
                 // `Type::Mut` wrapper, exactly like a parser-built `mut` local.
-                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(Type::Named(trait_name)))))),
+                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(Type::Named(trait_name.clone())))))),
                 var_mut: false,
                 value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
                 is_lazy: false,
                 line, col,
             }));
-            stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, line, col));
+            stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, &trait_name, line, col));
             let mut new_args = args;
             new_args.push(Arg {
                 label: None,
@@ -713,7 +870,7 @@ fn desugar_trailing_array_block(
 /// Builds the imperative push-statement list for the control-flow collect
 /// case: `ArrayBlockElem::Item(e)` -> `__children.push(e)`; `If`/`For` -> the
 /// matching `Stmt::If`/`Stmt::For`, recursing into their own bodies.
-fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, line: usize, col: usize) -> Vec<Stmt> {
+fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name: &str, line: usize, col: usize) -> Vec<Stmt> {
     elems.iter().map(|elem| match elem {
         ArrayBlockElem::Item(e) => {
             let push_arg = Arg { label: None, value: e.clone(), spread: false, default_rest: false };
@@ -725,18 +882,53 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, line: usize
         }
         ArrayBlockElem::If { branches, else_body } => {
             let branches = branches.iter()
-                .map(|(c, b)| (c.clone(), elems_to_push_stmts(b, children_var, line, col)))
+                .map(|(c, b)| (c.clone(), elems_to_push_stmts(b, children_var, trait_name, line, col)))
                 .collect();
-            let else_body = else_body.as_ref().map(|b| elems_to_push_stmts(b, children_var, line, col));
+            let else_body = else_body.as_ref().map(|b| elems_to_push_stmts(b, children_var, trait_name, line, col));
             Stmt::If(IfStmt { branches, else_body, line, col })
         }
-        ArrayBlockElem::For { vars, iterable, body } => {
+        ArrayBlockElem::For { vars, iterable, key: None, body } => {
             Stmt::For(ForStmt {
                 vars: vars.clone(),
                 iterable: iterable.clone(),
-                body: elems_to_push_stmts(body, children_var, line, col),
+                key: None,
+                body: elems_to_push_stmts(body, children_var, trait_name, line, col),
                 line, col,
             })
+        }
+        // Keyed iteration: the iteration's items are gathered into their own array and
+        // pushed as ONE `KeyedGroup(key, items)` element, so the key identifies the whole
+        // iteration subtree (docs/design-notes/boring-ui-draft.md, "Identity & lifecycle").
+        // `KeyedGroup` is an ordinary library symbol the caller must have in scope; the
+        // compiler assigns it no meaning beyond this call shape.
+        ArrayBlockElem::For { vars, iterable, key: Some(key), body } => {
+            let iter_var = format!("{children_var}_it");
+            let var = |name: &str| Expr { kind: ExprKind::Var(name.to_string()), line, col, len: 0 };
+            let mut inner = vec![Stmt::Let(LetStmt {
+                binding: BindingKind::Mut,
+                is_pub: false,
+                is_static: false,
+                name: iter_var.clone(),
+                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(Type::Named(trait_name.to_string())))))),
+                var_mut: false,
+                value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
+                is_lazy: false,
+                line, col,
+            })];
+            inner.extend(elems_to_push_stmts(body, &iter_var, trait_name, line, col));
+            let group = Expr {
+                kind: ExprKind::Call(Box::new(var("KeyedGroup")), vec![
+                    Arg { label: None, value: key.clone(), spread: false, default_rest: false },
+                    Arg { label: None, value: var(&iter_var), spread: false, default_rest: false },
+                ]),
+                line, col, len: 0,
+            };
+            inner.push(Stmt::Expr(Expr {
+                kind: ExprKind::MethodCall(Box::new(var(children_var)), "push".to_string(),
+                    vec![Arg { label: None, value: group, spread: false, default_rest: false }]),
+                line, col, len: 0,
+            }));
+            Stmt::For(ForStmt { vars: vars.clone(), iterable: iterable.clone(), key: None, body: inner, line, col })
         }
     }).collect()
 }

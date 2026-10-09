@@ -26,6 +26,8 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Literals
         ExprKind.Int(n):
             Value.Int(n)
+        ExprKind.UInt64(n):
+            Value.Uint64(n)
         ExprKind.Float(f):
             Value.Float64(f)
         ExprKind.Str(s):
@@ -289,7 +291,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     Value.Set(_):
                         assign_target(interp, recv_expr, result)
                     _: nil
-            elif method == "push" or method == "append" or method == "insert":
+            elif method == "push" or method == "append" or method == "insert" or method == "move" or method == "removeIndices":
                 # Collection write-back belongs to the receiver, not to every
                 # user method with the same name and a collection return value.
                 match recv:
@@ -548,6 +550,20 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Closure
         ExprKind.Closure(params, _, body, _, _):
+            # The legacy bare `Name:` parser shape is a one-param closure whose
+            # implicit param is `Name`. Resolve it as trailing array-block sugar
+            # when that name is a known struct with an array as its final field.
+            if params.length == 1:
+                let ctor_name = params[0].name
+                let decl_opt = interp.get_struct_decl(ctor_name)
+                if let decl = decl_opt:
+                    if decl.fields.length > 0:
+                        let last_field = decl.fields[decl.fields.length - 1]
+                        match last_field.ty:
+                            Type.Array(_):
+                                let values = collect_array_block(interp, body, interp.current_env)
+                                return instantiate_struct(interp, decl, [Value.Array(values)])
+                            _: nil
             Value.Closure(params, body, interp.current_env)
 
         # Type cast
@@ -1974,6 +1990,15 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Int(n): Value.Float64(n as float64)
                 Value.Uint(n): Value.Float64(n as float64)
                 Value.Uint8(n): Value.Float64(n as float64)
+                Value.Int8(n): Value.Float64(n as float64)
+                Value.Int16(n): Value.Float64(n as float64)
+                Value.Int32(n): Value.Float64(n as float64)
+                Value.Int64(n): Value.Float64(n as float64)
+                Value.Int128(n): Value.Float64(n as float64)
+                Value.Uint16(n): Value.Float64(n as float64)
+                Value.Uint32(n): Value.Float64(n as float64)
+                Value.Uint64(n): Value.Float64(n as float64)
+                Value.Uint128(n): Value.Float64(n as float64)
                 Value.Str(s):
                     let f = s.parse_float()
                     if let v = f:
@@ -2002,6 +2027,15 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Int(n): Value.Float32(n as float32)
                 Value.Uint(n): Value.Float32(n as float32)
                 Value.Uint8(n): Value.Float32(n as float32)
+                Value.Int8(n): Value.Float32(n as float32)
+                Value.Int16(n): Value.Float32(n as float32)
+                Value.Int32(n): Value.Float32(n as float32)
+                Value.Int64(n): Value.Float32(n as float32)
+                Value.Int128(n): Value.Float32(n as float32)
+                Value.Uint16(n): Value.Float32(n as float32)
+                Value.Uint32(n): Value.Float32(n as float32)
+                Value.Uint64(n): Value.Float32(n as float32)
+                Value.Uint128(n): Value.Float32(n as float32)
                 Value.Str(s):
                     let f = s.parse_float()
                     if let v = f:

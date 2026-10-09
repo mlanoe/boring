@@ -45,6 +45,7 @@ struct Parser:
 def string token_kind_name(TokenKind k):
     match k:
         TokenKind.Int(_): "Int"
+        TokenKind.Uint64(_): "Uint64"
         TokenKind.Float(_): "Float"
         TokenKind.Str(_): "Str"
         TokenKind.StringInterp(_): "StringInterp"
@@ -256,6 +257,11 @@ def int parser_peek_int(mut Parser p):
     match p.peek():
         TokenKind.Int(n): n
         _: 0
+
+def uint64 parser_peek_uint64(mut Parser p):
+    match p.peek():
+        TokenKind.Uint64(n): n
+        _: 0 as uint64
 
 def float parser_peek_float(mut Parser p):
     match p.peek():
@@ -547,6 +553,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
                     let p0 = token_kind_name(parser_peek_token_at(p, params_off).kind)
                     let p1 = token_kind_name(parser_peek_token_at(p, params_off + 1).kind)
                     if p0 == "Ident" and p1 == "Ident": return true
+                    if p0 == "Ident" and p1 == "Question" and parser_token_at_offset_is(p, params_off + 2, "Ident"): return true
                     if p0 == "LBracket" and p1 == "Ident": return true
                     if p0 == "LBrace" and p1 == "Ident": return true
                     if p0 == "Var" or p0 == "Mut": return true
@@ -578,6 +585,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
             let p0 = token_kind_name(parser_peek_token_at(p, params_off).kind)
             let p1 = token_kind_name(parser_peek_token_at(p, params_off + 1).kind)
             if p0 == "Ident" and p1 == "Ident": return true
+            if p0 == "Ident" and p1 == "Question" and parser_token_at_offset_is(p, params_off + 2, "Ident"): return true
             # [type] param — p1 must be Ident (type name), not a literal
             if p0 == "LBracket" and p1 == "Ident": return true
             if p0 == "LBrace" and p1 == "Ident": return true
@@ -608,6 +616,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
                         let p0 = token_kind_name(parser_peek_token_at(p, after_lparen).kind)
                         let p1 = token_kind_name(parser_peek_token_at(p, after_lparen + 1).kind)
                         if p0 == "Ident" and p1 == "Ident": return true
+                        if p0 == "Ident" and p1 == "Question" and parser_token_at_offset_is(p, after_lparen + 2, "Ident"): return true
                         if p0 == "LBracket" and p1 == "Ident": return true
                         if p0 == "LBrace" and p1 == "Ident": return true
                         if p0 == "Var" or p0 == "Mut": return true
@@ -1252,6 +1261,15 @@ def bool trait_method_has_body(mut Parser p) throws:
 
 def Item parse_item(mut Parser p) throws:
     match p.peek():
+        TokenKind.At:
+            # Attributes affect checking/code generation, not this dynamic
+            # interpreter. Consume each complete attribute line and parse the
+            # declaration it decorates.
+            while parser_check(p, "At"):
+                while not parser_is_newline(p) and not parser_check(p, "Eof"):
+                    p.advance()
+                parser_expect_newline_soft(p)
+            parse_item(p)
         TokenKind.Def:
             Item.Fn(parse_fn_decl_auto(p, false, true))
         TokenKind.Req:
@@ -1930,6 +1948,9 @@ def Expr make_bool_expr(bool b, int line):
 def Expr make_int_expr(int n, int line):
     Expr(kind= ExprKind.Int(n), line= line)
 
+def Expr make_uint64_expr(uint64 n, int line):
+    Expr(kind= ExprKind.UInt64(n), line= line)
+
 def Expr make_float_expr(float f, int line):
     Expr(kind= ExprKind.Float(f), line= line)
 
@@ -2369,6 +2390,11 @@ def UseDecl parse_use_import_decl(mut Parser p) throws:
 def GuardStmt parse_guard_stmt(mut Parser p) throws:
     let line = p.current_line()
     p.expect(TokenKind.Guard)
+    # A guard condition ends at its own `else`; a `name:` sequence inside the
+    # condition must therefore not start a no-paren or trailing closure.
+    let saved = parser_get_allow_noparen_closure(p)
+    parser_set_allow_noparen_closure(p, false)
+    parser_set_allow_trailing_closure(p, false)
     var GuardCond cond = GuardCond.Expr(make_bool_expr(true, line))
     if p.eat(TokenKind.Let):
         mut clauses = []
@@ -2400,9 +2426,10 @@ def GuardStmt parse_guard_stmt(mut Parser p) throws:
     else:
         let expr = parse_or(p)
         cond = GuardCond.Expr(expr)
+    parser_set_allow_noparen_closure(p, saved)
+    parser_set_allow_trailing_closure(p, true)
     parser_expect(p, "Else")
-    p.eat(TokenKind.Colon)
-    let body = parse_fn_body(p)
+    let body = parse_else_body_stmts(p)
     GuardStmt(cond= cond, else_body= body, line= line)
 
 def [Stmt] parse_defer_stmt(mut Parser p) throws:
@@ -2719,6 +2746,11 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
                     throw "chr: invalid codepoint {n}"
                 return Value.Str(chr(n))
             _: throw "chr: expected an int argument"
+    if name == "floatToBits":
+        match args[0] else Value.Nil:
+            Value.Float64(f): return Value.Int(floatToBits(f))
+            Value.Int(n): return Value.Int(floatToBits(n as float))
+            _: throw "floatToBits: expected number"
     if name == "int":
         let v = args[0] else Value.Nil
         match v:

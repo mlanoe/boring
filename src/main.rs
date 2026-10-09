@@ -353,6 +353,7 @@ impl BoringToml {
                             }
                             ("decode", "algorithm") => tensor_linear.decode_algorithm = Some(value),
                             ("prefill", "algorithm") => tensor_linear.prefill_algorithm = Some(value),
+                            ("prefill", "precision") => tensor_linear.prefill_precision = Some(value),
                             ("decode", format) => { tensor_linear.decode_formats.insert(format.to_string(), value); }
                             ("prefill", format) => { tensor_linear.prefill_formats.insert(format.to_string(), value); }
                             _ => {}
@@ -824,11 +825,12 @@ mod boring_toml_tests {
 
     #[test]
     fn tensor_linear_sections_parse_shape_and_format_overrides() {
-        let src = "[project]\nname = \"demo\"\n\n[tensor.matmul]\nalgorithm = \"native\"\n\n[tensor.linear]\nalgorithm = \"auto\"\n\n[tensor.linear.decode]\nq8_0 = \"warp\"\n\n[tensor.linear.prefill]\nalgorithm = \"scalar\"\n";
+        let src = "[project]\nname = \"demo\"\n\n[tensor.matmul]\nalgorithm = \"native\"\n\n[tensor.linear]\nalgorithm = \"auto\"\n\n[tensor.linear.decode]\nq8_0 = \"warp\"\n\n[tensor.linear.prefill]\nalgorithm = \"scalar\"\nprecision = \"half\"\n";
         let toml = BoringToml::parse(src);
         assert_eq!(toml.tensor_linear.matrix_algorithm.as_deref(), Some("native"));
         assert_eq!(toml.tensor_linear.decode_algorithm.as_deref(), Some("auto"));
         assert_eq!(toml.tensor_linear.prefill_algorithm.as_deref(), Some("scalar"));
+        assert_eq!(toml.tensor_linear.prefill_precision.as_deref(), Some("half"));
         assert_eq!(toml.tensor_linear.decode_formats.get("q8_0").map(String::as_str), Some("warp"));
     }
 
@@ -2874,6 +2876,10 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
     }
     if config.prefill_algorithm.as_deref().is_some_and(|value| matches!(value, "warp" | "warp-broadcast")) || config.prefill_formats.values().any(|value| matches!(value.as_str(), "warp" | "warp-broadcast")) {
         eprintln!("error: tensor linear warp algorithms are not implemented for prefill; use auto or scalar");
+        process::exit(1);
+    }
+    if config.prefill_precision.as_deref().is_some_and(|value| !matches!(value, "float" | "half")) {
+        eprintln!("error: unsupported tensor linear prefill precision '{}' (expected float or half)", config.prefill_precision.as_deref().unwrap());
         process::exit(1);
     }
     config

@@ -1,0 +1,118 @@
+# Real-Metal regression fixture for biased native quantized prefill.
+# Prints every output so the Rust harness can compare complete matrices.
+kernel CopyBytesKernel:
+    let [uint8]'global src
+    mut [uint8]'unified out
+    let int n
+    init([uint8]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as uint8 for ..<nn]
+    def ():
+        let block_idx = gpu.block.x + gpu.block.y * gpu.grid_dim.x
+        let base = (gpu.thread.x + block_idx * gpu.block_dim.x) * 16
+        for j in 0..<16:
+            if base + j < n:
+                out[base + j] = src[base + j]
+
+kernel CopyFloatsKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+    def ():
+        let block_idx = gpu.block.x + gpu.block.y * gpu.grid_dim.x
+        let base = (gpu.thread.x + block_idx * gpu.block_dim.x) * 4
+        for j in 0..<4:
+            if base + j < n:
+                out[base + j] = src[base + j]
+
+req [uint8]'gpu'unified upload_bytes([uint8]'global src) throws:
+    let n = src.length
+    let blocks = (n + 4095) / 4096
+    let gx = if blocks > 65535: 65535 else: blocks
+    mut copy = CopyBytesKernel(src, n)
+    kernel:
+        copy(block = 256, grid = (gx, (blocks + gx - 1) / gx))
+    copy.out
+
+req [float32]'gpu'unified upload_floats([float32]'global src) throws:
+    let n = src.length
+    let blocks = (n + 1023) / 1024
+    let gx = if blocks > 65535: 65535 else: blocks
+    mut copy = CopyFloatsKernel(src, n)
+    kernel:
+        copy(block = 256, grid = (gx, (blocks + gx - 1) / gx))
+    copy.out
+
+req [float32]'gpu'unified q8([float32]'gpu'global x, [uint8]'gpu'global w, [float32]'gpu'global bias, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, bias, y, m = m, n = n, k = k, format = "q8_0")
+    y
+
+req [float32]'gpu'unified q4k([float32]'gpu'global x, [uint8]'gpu'global w, [float32]'gpu'global bias, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, bias, y, m = m, n = n, k = k, format = "q4_k")
+    y
+
+req [float32]'gpu'unified q6k([float32]'gpu'global x, [uint8]'gpu'global w, [float32]'gpu'global bias, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, bias, y, m = m, n = n, k = k, format = "q6_k")
+    y
+
+req [float32]'gpu'unified q8_no_bias([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q8_0")
+    y
+
+req [float32]'gpu'unified q4k_no_bias([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q4_k")
+    y
+
+req [float32]'gpu'unified q6k_no_bias([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q6_k")
+    y
+
+def main() throws:
+    let [string] argv = args()
+    let format = argv[1]
+    guard let m = (argv[2] as int) else throw "m"
+    guard let n = (argv[3] as int) else throw "n"
+    guard let k = (argv[4] as int) else throw "k"
+    let with_bias = argv.length < 6 or argv[5] == "bias"
+    let block_elements = if format == "q8_0": 32 else: 256
+    let block_bytes = if format == "q8_0": 34 elif format == "q4_k": 144 else: 210
+    let [float32] host_x = [(((i * 7919) % 10007) as float32) / 10007.0 as float32 * 2.0 as float32 - 1.0 as float32 for i in 0..<m * k]
+    let total_bytes = n * k / block_elements * block_bytes
+    let [uint8] host_weights = [fill_byte(i, block_bytes, format) as uint8 for i in 0..<total_bytes]
+    let [float32] host_bias = [(((i * 131) % 97) as float32) / 97.0 as float32 + 1.0 as float32 for i in 0..<n]
+    let x = upload_floats(host_x)
+    let w = upload_bytes(host_weights)
+    let bias = upload_floats(host_bias)
+    let result = if with_bias:
+        if format == "q8_0": q8(x, w, bias, m, n, k) elif format == "q4_k": q4k(x, w, bias, m, n, k) else: q6k(x, w, bias, m, n, k)
+    else:
+        if format == "q8_0": q8_no_bias(x, w, m, n, k) elif format == "q4_k": q4k_no_bias(x, w, m, n, k) else: q6k_no_bias(x, w, m, n, k)
+    with result:
+        for i in 0..<m * n:
+            print "value={result[i]}"
+
+int fill_byte(int i, int block_bytes, string format):
+    let at = i % block_bytes
+    let scale_at = if format == "q8_0": 0 elif format == "q4_k": 0 else: 208
+    let scale_len = if format == "q4_k": 4 else: 2
+    if at >= scale_at and at < scale_at + scale_len:
+        let slot = at - scale_at
+        if slot == 0:
+            return 102
+        if slot == 1:
+            return 46
+        if slot == 2:
+            return 51
+        return 43
+    return (i * 17 + 29) % 256

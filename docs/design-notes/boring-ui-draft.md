@@ -43,11 +43,16 @@ toolkit" (Xamarin.Forms/.NET MAUI) has a rocky, leaky-abstraction track record o
 
 ### 1. Composition — trailing array-block sugar (**shipped**)
 
-`Column:` / `Column(spacing: 8):` followed by an indented block of expression lines (plus
+`Column:` / `Column(spacing = 8):` followed by an indented block of expression lines (plus
 `if`/`elif`/`else`/`for`) desugars to a trailing `[dyn Trait]` array argument — recovers
 SwiftUI-style nested indentation for widget trees with zero new grammar production: it's the
 *same* trailing-closure call shape Boring already had, resolved by looking up the callee's
 signature:
+
+All labelled call arguments in this document use Boring's existing `name = value` syntax, for
+example `TextField(value = name, label = "Name")`. A colon after a call or expression introduces a
+trailing closure/array block; it cannot also denote a labelled argument. Consequently Swift-style
+`TextField(value: name)` is deliberately invalid Boring syntax rather than contextual shorthand.
 
 | `Ident` resolves to... | Interpretation |
 |---|---|
@@ -63,10 +68,9 @@ resolved by their own callee's signature before this path is ever reached.
 Implemented on `main` (commit `b4f8a88`, `src/desugar_array_block.rs` +
 `src/parser/parse_array_block.rs`); documented in `docs/book.md`'s "Trailing array-block sugar"
 section and `spec/grammar.bnf`. Full test suite green (unit 789/0, run 182/0, transpile 628/0,
-interpreter_build 4/0, interpreter_functional 83/0). The shipped resolver currently consults only
-same-file declarations.
+interpreter_build 4/0, interpreter_functional 83/0). Imported callables are resolved too (see below).
 
-#### Imported array-block callables (**designed, not shipped**)
+#### Imported array-block callables (**shipped** 2026-10-10: same-project, `[deps]`, `boring.*`, and `use … as` aliases)
 
 **Design decision (2026-09-30):** extend the same resolution rule to imported callable signatures.
 This is required for `boring-ui`; components such as `Column` must remain ordinary library symbols,
@@ -95,10 +99,18 @@ semantics; any other known signature produces the existing error. Visibility, al
 selection, ambiguous glob imports, and dependency metadata/incremental-compilation details must
 follow ordinary import resolution rather than introduce an array-block-only namespace.
 
+Transparent `use Alias as Original` declarations copy an imported function or struct
+constructor's signature into the resolver under `Alias` (including aliases represented as
+`Stmt::Alias` inside a body). Alias chains are followed; `type … as` newtypes are deliberately
+excluded because they declare distinct constructors.
+
 This language extension is a prerequisite for implementing the toolkit as a reusable library.
 
 `for`-generated dynamic children have an optional keyed form, designed below under Identity &
-lifecycle: `for item in items with item.id:`. It is not implemented yet.
+lifecycle: `for item in items with item.id:`. **Shipped 2026-10-10 (syntax + lowering only):** it parses,
+is rejected outside a collect block, and lowers each iteration to `KeyedGroup(key, [items])` (a library
+symbol, see book.md). Not yet done: the `IdentityKey` bound check on the key expression, omitting `with`
+for an `Identifiable` element, and the runtime duplicate-key validation.
 
 ### 2. `view` — a declaration kind distinct from `struct`
 
@@ -115,7 +127,7 @@ view FormView:
 
     body():
         Column:
-            TextField(value: name, label: "Name")
+            TextField(value = name, label = "Name")
             Button("Submit").onActivate (): print "submitted {name}"
 ```
 
@@ -224,7 +236,7 @@ view Counter:
     string title
     state int count = 0
 
-let counter = Counter(title: "Inbox", count: 10)  # seeds count on first mount
+let counter = Counter(title = "Inbox", count = 10)  # seeds count on first mount
 counter.count = 11                                 # compile error: state is private
 ```
 
@@ -354,16 +366,16 @@ view NameEditor:
     body():
         Column:
             Text(name)
-            TextField(value: name, label: "Name")
+            TextField(value = name, label = "Name")
 
 view FormView:
     state string name = ""
 
     body():
-        NameEditor(name: name)
+        NameEditor(name = name)
 ```
 
-The expected `bind` field at the call site makes the projection contextual. `NameEditor(name:
+The expected `bind` field at the call site makes the projection contextual. `NameEditor(name =
 name)` passes a handle to the parent's persistent slot rather than copying the current string.
 There is no special call-site marker. Passing an existing `bind` onward to another `bind` field is
 the same operation.
@@ -508,7 +520,8 @@ actions that would create one must expose an asynchronous `task` API.
 An async callback or `onTask` captures the same handles plus snapshots of ordinary values at task
 start. At each suspension boundary it ends the current transaction. Its continuation is queued on
 the UI executor, validates every mounted handle generation, and begins a new transaction. A parent
-rebuild does not silently replace the ordinary snapshots of a running task; use `onTask(id:)` when
+rebuild does not silently replace the ordinary snapshots of a running task; use
+`onTask(id = ...)` when
 changed inputs must restart it.
 
 ##### Error boundary for event dispatch
@@ -602,7 +615,7 @@ resources across rebuilds.
 
   ```boring
   for item in items with item.id:
-      TodoRow(item: item)  # TodoRow declares `bind Todo item`
+      TodoRow(item = item)  # TodoRow declares `bind Todo item`
   ```
 
   The runtime binding resolves through the iteration's stable key, not a permanently captured array
@@ -632,7 +645,8 @@ trait Identifiable:
     req ID id()
 ```
 
-`IdentityKey` is a marker backed by a native blanket implementation for owned, static values that
+**Shipped 2026-10-10** as `use boring.identity.*` (`stdlib/identity.br`; the transpiler emits the
+blanket impl, the interpreter checks `type ID as IdentityKey` against it). `IdentityKey` is a marker backed by a native blanket implementation for owned, static values that
 satisfy `Clone + Eq + Hash`. The checker understands that blanket implementation when validating
 the associated type and an explicit `with` expression; applications do not write an empty
 `as IdentityKey` implementation for every key type. Integers, booleans, characters, strings,
@@ -720,7 +734,7 @@ Content().onTask () task:
     let result = fetchData().value
     data = result
 
-Content().onTask(id: query) () task:
+Content().onTask(id = query) () task:
     results = search(query).value
 ```
 
@@ -735,7 +749,7 @@ the callback a task context in which awaiting a `Future` through `.value`/`.wait
 - `onTask` starts after mount hooks and their resulting synchronous update have completed, provided
   the identity is still mounted. An ordinary rebuild of the same identity does not restart a
   finished or running task. Unmount requests cancellation and releases the task handle.
-- `onTask(id: value)` additionally stores the supplied value. When it changes by equality, update
+- `onTask(id = value)` additionally stores the supplied value. When it changes by equality, update
   requests cancellation of the old task and starts the new task with the rebuilt inputs. The id
   must be stable/hashable under the same broad requirements as dynamic view identity, but it is a
   restart token, not part of the view's structural identity: changing it does not reset unrelated
@@ -781,7 +795,7 @@ released by ordinary runtime cleanup.
 
 #### Scoped task runs and cancellation
 
-Each start of an `onTask`/`onTask(id:)` body receives a private task-run generation in addition to
+Each start of an `onTask`/`onTask(id = ...)` body receives a private task-run generation in addition to
 the mounted-node generation. State/bind access from its continuation is valid only while both match.
 When an id changes, the runtime increments the task-run generation before requesting cancellation
 of the previous run, then starts the replacement after the current update commits. This prevents a
@@ -872,7 +886,7 @@ use boring_ui.Window
 
 def main():
     runUI:
-        Window(title: "Todos"):
+        Window(title = "Todos"):
             TodoList()
 ```
 
@@ -885,7 +899,7 @@ application type on the common case.
 requires exactly one root view so that the scene never invents a layout for siblings:
 
 ```boring
-Window(title: "Todos"):
+Window(title = "Todos"):
     Column:
         Toolbar()
         TodoList()
@@ -1100,7 +1114,7 @@ new descriptor without evaluating its seed expression and retains the existing s
 This makes the already-specified behavior precise:
 
 ```boring
-Counter(title: title, count: expensiveInitialCount())
+Counter(title = title, count = expensiveInitialCount())
 ```
 
 `expensiveInitialCount()` runs only when that `Counter` identity mounts, not on every parent
@@ -1211,7 +1225,7 @@ previous view rather than set unordered properties on one shared style object.
 
 ```boring
 Text("Bonjour").width(200).padding(10)
-# Inner fixed-width frame: 200; outer padding: 10 on each side; total width: 220.
+# Inner fixed-width frame: 200; outer padding: 10 on each side; total width = 220.
 
 Text("Bonjour").padding(10).width(200)
 # Outer fixed-width frame: 200; padding occupies 20 within that width.
@@ -1280,16 +1294,16 @@ numeric-looking value to mean "accept the parent's finite proposal." Filling is 
 own modifier.
 
 ```boring
-Text("Bonjour").frame(width: 200)
-Text("Bonjour").frame(minWidth: 100, maxWidth: 300)
+Text("Bonjour").frame(width = 200)
+Text("Bonjour").frame(minWidth = 100, maxWidth = 300)
 Text("Bonjour").frame(
-    minWidth: 100,
-    idealWidth: 200,
-    maxWidth: 300,
-    alignment: leading,
+    minWidth = 100,
+    idealWidth = 200,
+    maxWidth = 300,
+    alignment = leading,
 )
 
-Text("Bonjour").fillWidth(alignment: leading)
+Text("Bonjour").fillWidth(alignment = leading)
 Text("Bonjour").fillHeight()
 Text("Bonjour").fill()
 ```
@@ -1306,7 +1320,7 @@ Convenience modifiers preserve the same ordered wrapper semantics and desugar to
 ```boring
 Text("Bonjour").width(200)
 Text("Bonjour").height(40)
-Text("Bonjour").size(width: 200, height: 40)
+Text("Bonjour").size(width = 200, height = 40)
 ```
 
 `fillWidth`, `fillHeight`, and `fill` accept the finite size proposed by their parent on the
@@ -1402,11 +1416,11 @@ to the rounded container extent.
 spacing. Omitting spacing is semantically different from specifying zero.
 
 ```boring
-Row(alignment: center, spacing: 8):
+Row(alignment = center, spacing = 8):
     Text("Name")
-    TextField(value: name, label: "Name")
+    TextField(value = name, label = "Name")
 
-Column(alignment: leading):
+Column(alignment = leading):
     Text("Title")
     Text("Details")
 ```
@@ -1414,7 +1428,7 @@ Column(alignment: leading):
 - A `Row` aligns children on the cross (vertical) axis and defaults to `center`.
 - A `Column` aligns children on the cross (horizontal) axis and defaults to `center`.
 - An omitted `spacing` asks the active theme for adaptive spacing based on the adjacent component
-  pair and platform conventions. `spacing: 0` explicitly removes the gap; any other finite,
+  pair and platform conventions. `spacing = 0` explicitly removes the gap; any other finite,
   non-negative value is an exact gap in layout units.
 - Horizontal `leading` and `trailing` are direction-aware and reverse in right-to-left layout.
   Absolute `left` and `right` alignments may exist for the uncommon cases that require physical
@@ -1439,10 +1453,10 @@ platform themes without changing application code.
 not implicitly create scrolling. Both behaviors require explicit composition.
 
 ```boring
-Image(photo).frame(width: 100, height: 100).clip()
-Image(photo).frame(width: 100, height: 100).clip(RoundedRect(radius: 8))
+Image(photo).frame(width = 100, height = 100).clip()
+Image(photo).frame(width = 100, height = 100).clip(RoundedRect(radius = 8))
 
-Scroll(axis: vertical):
+Scroll(axis = vertical):
     Column:
         for item in items with item.id:
             ItemRow(item)
@@ -1460,7 +1474,7 @@ position in the modifier chain matters. The first implementation supports rectan
 rectangles. Arbitrary paths may be added without changing the modifier contract; a path affects
 painting and hit testing but never measurement.
 
-`Scroll(axis: vertical)` creates a finite viewport from the proposal it receives. It proposes an
+`Scroll(axis = vertical)` creates a finite viewport from the proposal it receives. It proposes an
 unspecified height to its content and passes through the available width; the horizontal form does
 the symmetric operation. Its content can therefore choose its full extent on the scrolling axis,
 while the viewport reports a finite size to its parent and clips rendering at its own bounds.
@@ -1541,7 +1555,7 @@ not implicitly remove layout, hit testing, focus, or accessibility; conditional 
 Affine paint transforms do not participate in size negotiation. They transform painting, hit-test
 geometry, focus rings, and reported accessibility bounds consistently around an explicit/default
 anchor. Their inverses are used for input; a non-invertible transform is invalid. Translation can be
-exposed first as `.offset(x:y:)`; scale/rotation and animated transforms may follow once their public
+exposed first as `.offset(x = ..., y = ...)`; scale/rotation and animated transforms may follow once their public
 APIs are needed.
 
 ### Clips, layers, and physical pixels
@@ -1625,7 +1639,7 @@ No state change animates by default. An ordinary library function establishes an
 the current UI transaction:
 
 ```boring
-animate(.EaseInOut(duration: Duration.milliseconds(200))):
+animate(.EaseInOut(duration = Duration.milliseconds(200))):
     expanded = !expanded
     opacity = 1
 ```
@@ -1641,7 +1655,7 @@ The value-triggered modifier follows SwiftUI's scoped form:
 
 ```boring
 Details()
-    .animation(.EaseOut(duration: Duration.milliseconds(150)), value: expanded)
+    .animation(.EaseOut(duration = Duration.milliseconds(150)), value = expanded)
 ```
 
 When `value` changes by equality after the initial mount, animatable presentation differences inside
@@ -1650,7 +1664,8 @@ rebuilt. Its trigger must be `Eq + Clone`; it is a change detector, not view ide
 an explicit `withoutAnimation` transaction, then the nearest triggered `.animation` wrapper, then
 the originating `animate` transaction, then no animation.
 
-Initial curves are `.Linear`, `.EaseIn`, `.EaseOut`, `.EaseInOut`, and `.Spring(response: damping:)`.
+Initial curves are `.Linear`, `.EaseIn`, `.EaseOut`, `.EaseInOut`, and
+`.Spring(response = ..., damping = ...)`.
 Durations/parameters must be finite and non-negative. A zero duration is a valid immediate change.
 The animation clock is monotonic and driven by the platform frame scheduler.
 
@@ -1687,12 +1702,13 @@ if showingDetails:
 
 if showingEditor:
     Editor().transition(
-        .Asymmetric(insertion: .Scale(0.96), removal: .Opacity),
+        .Asymmetric(insertion = .Scale(0.96), removal = .Opacity),
     )
 ```
 
-Initial transitions are `.Identity`, `.Opacity`, `.Scale(float)`, `.Offset(x:y:)`, and
-`.Asymmetric(insertion:removal:)`; compatible transitions can be combined. The transition modifier
+Initial transitions are `.Identity`, `.Opacity`, `.Scale(float)`,
+`.Offset(x = ..., y = ...)`, and `.Asymmetric(insertion = ..., removal = ...)`; compatible
+transitions can be combined. The transition modifier
 does nothing when insertion/removal occurs without an animation transaction, except for a
 component-provided platform transition such as `Sheet`'s default presentation.
 
@@ -1747,29 +1763,29 @@ alignment/spacing rules above. `Spacer`, `Separator`, and `Layer` complete the i
 set:
 
 ```boring
-Column(alignment: leading, spacing: 8):
+Column(alignment = leading, spacing = 8):
     Text("Title")
     Separator()
     Row:
         Text("Status")
         Spacer()
-        Toggle(value: enabled, label: "Enabled")
+        Toggle(value = enabled, label = "Enabled")
 ```
 
 `Spacer()` is flexible on its containing `Row`/`Column` main axis and uses the active theme's
-adaptive minimum length. `Spacer(min: 0)` permits complete compression. A spacer outside a
+adaptive minimum length. `Spacer(min = 0)` permits complete compression. A spacer outside a
 one-dimensional stack is flexible on every axis for which it receives a finite proposal; whether
 that uncommon use remains supported after implementation experience is open.
 
 `Separator()` infers a vertical orientation inside `Row` and a horizontal orientation inside
-`Column` or `List`. Outside a container that supplies this layout context, `axis:` is required.
+`Column` or `List`. Outside a container that supplies this layout context, `axis = ...` is required.
 Thickness, color, and surrounding adaptive spacing come from the theme and contribute normally to
 measurement.
 
 `Layer` is the overlay stack name:
 
 ```boring
-Layer(alignment: bottomTrailing):
+Layer(alignment = bottomTrailing):
     Image(photo)
     Text("New").padding(6).background(badgeColor)
 ```
@@ -1839,13 +1855,13 @@ Image.url(avatarURL)
     .placeholder(ProgressIndicator())
     .fallback(Image.asset("default-avatar"))
     .resizable()
-    .aspectRatio(mode: fill)
-    .frame(width: 48, height: 48)
+    .aspectRatio(mode = fill)
+    .frame(width = 48, height = 48)
     .clip(Circle())
 ```
 
 An image is intrinsic-sized by default; `resizable()` permits proposal-driven scaling and
-`aspectRatio(mode: fit|fill)` preserves its ratio. `fill` can overflow and therefore commonly pairs
+`aspectRatio(mode = fit|fill)` preserves its ratio. `fill` can overflow and therefore commonly pairs
 with explicit clipping. While loading, a bundled asset can use dimensions from its manifest; other
 sources use the placeholder's measurement or an explicit frame. With neither, their provisional
 ideal size is zero and successful metadata/decoding invalidates layout.
@@ -1860,7 +1876,7 @@ Video.url(trailerURL)
     .playing(playing)
     .controls()
     .loop()
-    .aspectRatio(mode: fit)
+    .aspectRatio(mode = fit)
 ```
 
 `playing` conceptually accepts `bind bool` (implicitly `var`), so application changes control playback and native
@@ -1892,7 +1908,7 @@ enum ButtonRole:
 Button("Add").onActivate ():
     addItem()
 
-Button("Delete", role: .Destructive).disabled(selection is nil).onActivate ():
+Button("Delete", role = .Destructive).disabled(selection is nil).onActivate ():
     deleteItem()
 ```
 
@@ -1930,7 +1946,7 @@ scroll offset, and undo state remain inside the persistent mounted control. `onS
 action generated by Enter or the platform's equivalent input action.
 
 ```boring
-TextField(value: name, label: "Name", placeholder: "Ada").onSubmit ():
+TextField(value = name, label = "Name", placeholder = "Ada").onSubmit ():
     save()
 ```
 
@@ -1993,7 +2009,7 @@ enum Validation:
     Valid
     Invalid(string message)
 
-TextField(value: email, label: "Email")
+TextField(value = email, label = "Email")
     .validation(validateEmail(email))
 ```
 
@@ -2010,7 +2026,7 @@ typed values are a later API rather than hidden behavior in the string field.
 Text-input hints are typed semantic options, not raw platform strings:
 
 ```boring
-TextField(value: email, label: "Email")
+TextField(value = email, label = "Email")
     .contentType(.EmailAddress)
     .keyboard(.EmailAddress)
     .capitalization(.Never)
@@ -2051,7 +2067,7 @@ bound. Selection binding, attributed text, input masks, and rich editing remain 
 theme may render it as a checkbox or switch without changing application state or event handling.
 
 ```boring
-Toggle(value: completed, label: "Completed")
+Toggle(value = completed, label = "Completed")
 ```
 
 If the application requires a specific interaction idiom rather than a themed choice, explicit
@@ -2084,7 +2100,7 @@ are attached to the nearest semantic ancestor in structural order. The initial c
 
 | Component | Default semantics |
 |---|---|
-| `Text` | static text with its content as name; `.accessibilityHeading(level:)` additionally marks document/section hierarchy |
+| `Text` | static text with its content as name; `.accessibilityHeading(level = ...)` additionally marks document/section hierarchy |
 | `Button` | button role, constructor label as name, enabled/focused state, activate action; `ButtonRole` adds semantic intent without changing the role |
 | `TextField` | single-line text-input role, required `label` as name, accepted text and selection as editable value, focus/set-value actions; placeholder is only a hint |
 | `SecureField` | protected single-line text-input role and required label; never exposes plaintext value or selection content |
@@ -2114,10 +2130,10 @@ Image.asset("warning")
     .accessibilityLabel("Warning")
 
 Text("Settings")
-    .accessibilityHeading(level: 1)
+    .accessibilityHeading(level = 1)
 
-UserSummary(name: name, status: status)
-    .accessibilityGroup(label: name)
+UserSummary(name = name, status = status)
+    .accessibilityGroup(label = name)
 ```
 
 - `.accessibilityLabel(string)` replaces the computed name of the receiving semantic element.
@@ -2149,7 +2165,7 @@ actions while remaining readable.
 
 The backend-neutral action set initially includes focus, activate, set text/value, set selection,
 increment/decrement, scroll in each supported direction, expand/collapse, dismiss, and named custom
-actions. A future public `.accessibilityAction(name:)` may expose named actions to application views;
+actions. A future public `.accessibilityAction(name = ...)` may expose named actions to application views;
 the first vertical slice does not need it because its controls already have semantic operations.
 
 Boring `view` declarations normally obtain complete semantics by composing standard controls. A
@@ -2190,8 +2206,8 @@ Theme appTheme():
         .metric(.ControlRadius, 10)
 
 def main():
-    runUI(theme: appTheme()):
-        Window(title: "Todos"):
+    runUI(theme = appTheme()):
+        Window(title = "Todos"):
             TodoList()
 
 view Card:
@@ -2213,7 +2229,7 @@ on it. Standard controls declare internal environment dependencies for theme, lo
 direction, enabled state, and accessibility preferences; application views declare them only when
 they read those values directly.
 
-`runUI(theme: ...)` installs the root `Theme`; `.theme(...)` wraps a subtree with a nearer provider.
+`runUI(theme = ...)` installs the root `Theme`; `.theme(...)` wraps a subtree with a nearer provider.
 A future general `.environment(value)` can use the declared environment type as its key, with
 distinct wrapper types when an application needs several values of the same underlying type. This
 runtime, per-subtree mechanism is separate from compile-time `@inject` dependency resolution.
@@ -2230,9 +2246,9 @@ struct RoundedButtonStyle as ButtonStyle:
     float radius
 
     <View> body(ButtonStyleContext context):
-        context.label().padding(8).clip(RoundedRect(radius: radius))
+        context.label().padding(8).clip(RoundedRect(radius = radius))
 
-Button("Save").style(RoundedButtonStyle(radius: 12))
+Button("Save").style(RoundedButtonStyle(radius = 12))
 ```
 
 `<View>` is the exact opaque return spelling. A button style context exposes the label, role,
@@ -2249,7 +2265,7 @@ by shared persistent tables. It is not a trait and not a process global. `Theme.
 on every supported platform; builder-style overrides return a new theme sharing unchanged data.
 Applications can therefore replace one token without implementing an entire theme contract.
 
-`runUI(theme:)` installs the root value; omitting it uses `Theme.system()`. `.theme(theme)` installs a
+`runUI(theme = ...)` installs the root value; omitting it uses `Theme.system()`. `.theme(theme)` installs a
 complete derived value for a subtree. Specialized providers such as `.tint(color)`,
 `.buttonStyle(style)`, or `.textScale(...)` may override one environment facet without manufacturing
 a new public theme type. Nearest provider wins, and removal reveals the next ancestor value.
@@ -2306,7 +2322,7 @@ Adaptive stack spacing is a theme query over axis plus the adjacent children's `
 Initial roles include text, control, container, separator, and neutral/custom. Native components
 publish their role; transparent application views forward the nearest meaningful descendant roles.
 The platform-neutral fallback table provides small text-to-text gaps, standard label-to-control
-gaps, and larger section/container gaps. Explicit `spacing:` bypasses the table entirely.
+gaps, and larger section/container gaps. Explicit `spacing = ...` bypasses the table entirely.
 
 #### Component styles
 
@@ -2359,7 +2375,7 @@ view Form:
     state bool nameFocused = false
 
     body():
-        TextField(value: name, label: "Name").focused(nameFocused)
+        TextField(value = name, label = "Name").focused(nameFocused)
 ```
 
 Native focus writes `true`/`false` through the binding. Assigning `true` requests focus when the
@@ -2378,12 +2394,12 @@ view TodoList:
 
     body():
         Column:
-            TextField(value: newTitle, label: "New item title")
-                .focused(focus, equals: Field.newItem)
+            TextField(value = newTitle, label = "New item title")
+                .focused(focus, equals = Field.newItem)
 
             for item in items with item.id:
-                TextField(value: item.title, label: "Item title")
-                    .focused(focus, equals: Field.item(item.id))
+                TextField(value = item.title, label = "Item title")
+                    .focused(focus, equals = Field.item(item.id))
 ```
 
 Setting `focus` to a token requests the matching mounted control; setting it to `nil` clears focus.
@@ -2402,7 +2418,7 @@ keys; silently choosing one control would make two-way synchronization incoheren
 Each `Window` owns a root focus scope and at most one logical keyboard-focused mounted identity.
 `Sheet` creates an active child scope that traps traversal while presented. A general
 `.focusScope()` wrapper creates a nested scope without trapping by default; Tab may leave it for the
-next control in its parent scope. `.focusScope(trap: true)` is reserved for components with genuine
+next control in its parent scope. `.focusScope(trap = true)` is reserved for components with genuine
 modal semantics and should rarely appear in application code.
 
 The default sequential order is structural order after conditionals and keyed loops have produced
@@ -2488,9 +2504,9 @@ repeat the source collection. Dynamic identity remains the responsibility of the
 
 ```boring
 List(
-    selection: selection,
-    onMove: (from, to): items.move(from, to),
-    onDelete: (indices): items.removeIndices(indices),
+    selection = selection,
+    onMove = (from, to): items.move(from, to),
+    onDelete = (indices): items.removeIndices(indices),
 ):
     for item in items with item.id:
         ItemRow(item)
@@ -2555,7 +2571,7 @@ view TodoList:
             List:
                 # rows
 
-            Sheet(isPresented: showingEditor):
+            Sheet(isPresented = showingEditor):
                 ItemEditor()
 ```
 
@@ -2609,10 +2625,10 @@ view TodoRow:
     bind TodoFocus? focus
 
     body():
-        Row(spacing: 8):
-            Toggle(value: item.completed, label: "Completed")
-            TextField(value: item.title, label: "Item title")
-                .focused(focus, equals: TodoFocus.Item(item.id))
+        Row(spacing = 8):
+            Toggle(value = item.completed, label = "Completed")
+            TextField(value = item.title, label = "Item title")
+                .focused(focus, equals = TodoFocus.Item(item.id))
 
 view NewTodoSheet:
     bind [mut Todo] items
@@ -2626,27 +2642,27 @@ view NewTodoSheet:
         let cleanTitle = title.trim()
         if cleanTitle.isEmpty(): return
 
-        items.push(Todo(id: nextId, title: cleanTitle, completed: false))
+        items.push(Todo(id = nextId, title = cleanTitle, completed = false))
         nextId += 1
         isPresented = false
 
     body():
-        Column(alignment: leading, spacing: 12):
+        Column(alignment = leading, spacing = 12):
             Text("New item").font(.Title)
-            TextField(value: title, label: "Title", placeholder: "Title")
+            TextField(value = title, label = "Title", placeholder = "Title")
                 .focused(titleFocused)
 
             Row:
                 Spacer()
-                Button("Cancel", role: .Cancel).onActivate ():
+                Button("Cancel", role = .Cancel).onActivate ():
                     isPresented = false
                 Button("Add").disabled(title.trim().isEmpty()).defaultAction().onActivate ():
                     self.add()
 
 view TodoApp:
     state [mut Todo] items = [
-        Todo(id: 1, title: "Design boring-ui", completed: false),
-        Todo(id: 2, title: "Implement the vertical slice", completed: false),
+        Todo(id = 1, title = "Design boring-ui", completed = false),
+        Todo(id = 2, title = "Implement the vertical slice", completed = false),
     ]
     state int nextId = 3
     state int? selection = nil
@@ -2654,8 +2670,8 @@ view TodoApp:
     state bool showingNewItem = false
 
     body():
-        Column(spacing: 0):
-            Row(spacing: 8):
+        Column(spacing = 0):
+            Row(spacing = 8):
                 Text("Todos").font(.Title)
                 Spacer()
                 Button("Add").onActivate ():
@@ -2664,23 +2680,23 @@ view TodoApp:
             Separator()
 
             List(
-                selection: selection,
-                onMove: (from, to): items.move(from, to),
-                onDelete: (indices): items.removeIndices(indices),
+                selection = selection,
+                onMove = (from, to): items.move(from, to),
+                onDelete = (indices): items.removeIndices(indices),
             ):
                 for item in items with item.id:
-                    TodoRow(item: item, focus: focus)
+                    TodoRow(item = item, focus = focus)
 
-            Sheet(isPresented: showingNewItem):
+            Sheet(isPresented = showingNewItem):
                 NewTodoSheet(
-                    items: items,
-                    nextId: nextId,
-                    isPresented: showingNewItem,
+                    items = items,
+                    nextId = nextId,
+                    isPresented = showingNewItem,
                 )
 
 def main():
     runUI:
-        Window(title: "Todos"):
+        Window(title = "Todos"):
             TodoApp()
 ```
 
@@ -2690,8 +2706,7 @@ Important implications made concrete by the sketch:
   for collection structure. A keyed loop variable preserves the projection needed by `TodoRow`'s
   `bind Todo item`.
 - `items.move(from, to)` and `items.removeIndices(indices)` are proposed standard collection
-  helpers required by `List`'s semantic callbacks; they do not exist in the shipped collection API
-  yet. `removeIndices` consumes unique ascending snapshot indices and performs safe bulk removal.
+  helpers required by `List`'s semantic callbacks; they now exist in the shipped collection API (2026-10-10). `removeIndices` consumes unique ascending snapshot indices and performs safe bulk removal.
 - Adding uses a modal with its own draft `state`; dismissing destroys that draft. The parent-owned
   collection, id counter, and presentation flag cross the boundary through `bind`.
 - Editing a row writes directly into its parent collection element. Reordering changes positions
@@ -2806,14 +2821,14 @@ line; the deferred APIs above do not need speculative designs before implementat
 | `Text`, `Button`, `VStack`, `HStack` | base widgets | `Text`, `Button`, `Column`, `Row` — to be written as the actual `boring-ui` stdlib |
 | `@ViewBuilder` (implicit result builder on `body`) | lets `body` read as nested indentation | the array-block sugar (§1, shipped) |
 | `.onTapGesture { }` / `Button(action:)` | interaction callback | `.onActivate (): ...` for semantic controls — existing trailing-closure sugar |
-| `TextField("...", text: $name)` | labeled editable input bound to state | `TextField(value: name, label: "Name")` where `value` is declared `bind string` (implicitly `var`); the control is custom-rendered, retains transient editing state, and uses a native text-input service for IME/software keyboards (§3, §5) |
+| `TextField("...", text: $name)` | labeled editable input bound to state | `TextField(value = name, label = "Name")` where `value` is declared `bind string` (implicitly `var`); the control is custom-rendered, retains transient editing state, and uses a native text-input service for IME/software keyboards (§3, §5) |
 | `List(items) { }` / `ForEach(items, id: \.id)` | dynamic content with stable per-element identity | `for item in items with item.id:` inside the array-block sugar; omit `with` when the element implements `Identifiable` (§4) |
 | `Identifiable` protocol | supplies the stable identity `ForEach` needs | standard `Identifiable` trait with associated `ID as IdentityKey` and ordinary `req ID id()` method; explicit `with` remains available (§4) |
 | `.onAppear { }` / `.onDisappear { }` | lifecycle hooks | ordered `.onMount ():` / `.onUnmount ():` view modifiers scoped to the wrapper identity (§4) |
-| `.task { }` / `.task(id:)` | lifecycle-scoped async action | `.onTask () task:` / `.onTask(id: value) () task:`; starts on mount, restarts on id change, and cancels on unmount (§4) |
-| `@Environment` / `.environment()` | inherited per-subtree runtime context | explicit read-only `env T name` view field plus root/specialized providers such as `runUI(theme:)` and `.theme(...)`; a changed nearest provider invalidates dependent views (§ Initial component contracts) |
+| `.task { }` / `.task(id:)` | lifecycle-scoped async action | `.onTask () task:` / `.onTask(id = value) () task:`; starts on mount, restarts on id change, and cancels on unmount (§4) |
+| `@Environment` / `.environment()` | inherited per-subtree runtime context | explicit read-only `env T name` view field plus root/specialized providers such as `runUI(theme = ...)` and `.theme(...)`; a changed nearest provider invalidates dependent views (§ Initial component contracts) |
 | `@EnvironmentObject` / `.environmentObject()` | inherited shared observable model | `env Model'observed model` combines subtree lookup with the ordinary automatic observed subscription; compile-time application-wide construction without subtree overrides remains available separately through shipped `@inject`/`@provide` ([book.md §33](../book.md#33-dependency-injection)) |
-| `.sheet(isPresented:) { }` | modal presentation | `Sheet(isPresented: flag):` portal component with one root, a bound presentation flag, identity-scoped content, and platform presentation defaults (§ Initial component contracts) |
+| `.sheet(isPresented:) { }` | modal presentation | `Sheet(isPresented = flag):` portal component with one root, a bound presentation flag, identity-scoped content, and platform presentation defaults (§ Initial component contracts) |
 | `NavigationStack` / navigation push | hierarchical navigation | **open question** — not required by the first editable-list vertical slice |
 
 Rows marked "open question" are genuine gaps, not settled design compressed for brevity — treat

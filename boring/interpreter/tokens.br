@@ -8,6 +8,7 @@ enum RawInterpPart:
 enum TokenKind:
     # Literals
     Int(int n)
+    Uint64(uint64 n)
     Float(float f)
     Str(string s)
     StringInterp([RawInterpPart] parts)

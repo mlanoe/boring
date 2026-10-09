@@ -1106,6 +1106,15 @@ var Index<[int]> cursor = nums.firstIndex()
 | `c.removeAt(idx)`         | new collection      | new collection        | Copy of collection without `idx`     |
 | `c.getAt(idx)`            | element             | value                 | Element at index (required for sets) |
 
+**Reordering and bulk removal (arrays only, mutating — need a `mut`/`var mut` binding):**
+
+| Method | Effect |
+|---|---|
+| `a.move(from, to)` | Moves one element so it ends at final index `to` (`[a,b,c,d].move(1, 3)` → `[a,c,d,b]`). Equal indices are a no-op. |
+| `a.removeIndices(idxs)` | Removes every index in `idxs` as one operation. `idxs` must be unique and strictly ascending, and refers to the array *before* removal. |
+
+An out-of-range index (or unordered/duplicate `removeIndices` list) is a runtime error raised before the array changes.
+
 **Rust equivalent** — the transpiler emits `BoringArrayIndex`, `BoringDictIndex`, and `BoringSetIndex` extension traits in the preamble:
 ```rust
 // arrays / sets → Option<usize>; dicts → Option<K>
@@ -4695,6 +4704,8 @@ conceptually desugars to:
 
 Nesting works: a line inside the block that is itself another trailing array-block call (`Row:` above) is resolved the same way, independently, before its parent is.
 
+**Keyed iteration — `for x in xs with <key>:`.** Inside a collect block, a `for` may carry a `with <key>` clause giving each iteration an identity. The iteration's items are gathered into one array and pushed as a single `KeyedGroup(key, items)` element (so the key identifies the whole iteration subtree, however many items it emits); nested keyed loops nest their groups. `KeyedGroup` is an ordinary symbol the caller must have in scope — the compiler gives it no meaning beyond this call shape, and the library that defines the collecting trait (e.g. a UI toolkit) provides it. A `for … with` anywhere else (an imperative loop, a trailing-closure body) is a checker error: there is no iteration identity to attach the key to. Key *types* are bounded by `IdentityKey` (see `boring.identity`); the call-site bound check and omitting `with` for an `Identifiable` element are not implemented yet.
+
 **Disambiguation is by resolution, not by spelling.** `Column:` (bare) shares its exact token shape — `Ident Colon` followed by a real indented block — with the pre-existing no-paren closure shorthand just above (`n: n * 2`'s multi-line form), and `Column(args):` shares its shape with the pre-existing "zero-arg trailing body" sugar (`timeout(...): body`). Rather than telling these apart by how the callee is spelled (an earlier revision required an uppercase-led name — abandoned, since PascalCase-for-types is a convention this compiler doesn't otherwise check as a semantic rule, and it wrongly forced *every* uppercase-led `Ident: <block>` into this sugar even when it should have been an ordinary trailing closure), the parser produces one generic node for the ambiguous shape and resolution decides its meaning by looking `callee` up in this file's own declarations:
 
 | `callee` resolves to... | Meaning |
@@ -4705,7 +4716,7 @@ Nesting works: a line inside the block that is itself another trailing array-blo
 | not a known callable in this file at all, written **with** an (even empty) `(...)` argument list | the ordinary trailing-closure sugar (tail semantics) — this is what `Column():`/`timeout(...):` already meant before this sugar existed, for any callee this resolution step simply doesn't know about (a builtin, an external function, anything not declared in *this* file) |
 | not a known callable in this file at all, written **without** any parentheses | the pre-existing no-paren closure-literal shorthand, unchanged — `callee`'s own name becomes the closure's single implicit parameter |
 
-Only the "known callable, wrong last-parameter type" row is a hard error — every other outcome resolves to something runnable, so this sugar can never misfire on a call site whose callee it simply doesn't recognize (crucially, this keeps builtins/external functions used with the pre-existing zero-arg trailing-body sugar working exactly as before). The one limitation this carries over from the desugaring pass that implements it: resolution only sees *this file's* own top-level `fn`/`struct` declarations — a callee only reachable through a cross-file `use` resolves as "not a known callable" (see the table above), not a hard error.
+Only the "known callable, wrong last-parameter type" row is a hard error — every other outcome resolves to something runnable, so this sugar can never misfire on a call site whose callee it simply doesn't recognize (crucially, this keeps builtins/external functions used with the pre-existing zero-arg trailing-body sugar working exactly as before). Resolution also sees callees declared in imported files — same-project siblings (`use lib`, `use lib.Column`), `[deps]` projects, and `boring.*` stdlib modules — with the ordinary import visibility (a bare `use` imports everything; a multi-segment or dependency `use` imports only `pub` items, narrowed to the named ones), and a local declaration shadows an imported one. A transparent `use Alias as Original` declaration also gives `Alias` the imported callable's signature, so the alias selects the same collect or trailing-closure semantics; a `type Alias as Original` newtype remains a distinct constructor.
 
 **Scoping rules**
 
@@ -4810,6 +4821,7 @@ from a module named `boring`". Always write `.*` or name concrete items.
 | Module | Provides |
 |---|---|
 | `boring.collections` | `Stack<T>` (LIFO) and `Queue<T>` (FIFO) — genuine composite types built on `[T]`, not re-exports of anything already global |
+| `boring.identity` | `IdentityKey` (marker trait with a native blanket implementation for every owned `Clone + Eq + Hash` type — floats, dicts, sets and function values are excluded) and `Identifiable` (`type ID as IdentityKey` + `req ID id()`), the element-identity contract for keyed iteration (`for x in xs with key:`, see [Trailing array-block sugar](#trailing-array-block-sugar)) |
 
 **Nothing already free moves behind an import.** `[T]`/`{T}`/`{K=V}`
 literals and every native method already callable on them, the always-
@@ -5067,6 +5079,11 @@ Rename or qualify a type:
 use NodeRef as Node'shared      # Arc<Node> or Rc<Node> depending on --threading
 use Score   as int              # isize
 ```
+
+When the original names a callable type such as an imported struct constructor,
+the alias is callable too and keeps the original signature. This includes
+trailing array-block resolution: `use Stack as Column` makes `Stack:` collect
+children exactly as `Column:` does.
 
 **Rust equivalent**
 ```rust

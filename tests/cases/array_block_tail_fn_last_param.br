@@ -8,14 +8,7 @@
 # trailing-closure sugar (tail semantics): exactly as if written
 # `WithLog((): body)`.
 #
-# Uses an explicit `def` (rather than the bare `int WithLog(...):` return-
-# type-first shorthand) -- an uppercase-led bare-shorthand function name
-# combined with a typed parameter hits a separate, pre-existing parser bug
-# unrelated to this feature (reproduces with e.g. `int WithLog(int x): x`,
-# same failure without any array-block/closure syntax involved at all);
-# not this task's to fix (see this crate's final report).
-
-def int WithLog(int action()):
+int WithLog(int action()):
     print "before"
     let r = action()
     print "after"

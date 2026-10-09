@@ -89,6 +89,10 @@ fn cargo_toml(test_name: &str, src: &str) -> String {
 }
 
 fn run_metal(test_name: &str, src: &str) -> (String, String, String) {
+    run_metal_with_config(test_name, src, None)
+}
+
+fn run_metal_with_config(test_name: &str, src: &str, config: Option<&str>) -> (String, String, String) {
     let bin = env!("CARGO_BIN_EXE_boring");
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name);
@@ -99,6 +103,7 @@ fn run_metal(test_name: &str, src: &str) -> (String, String, String) {
     let br_file   = tmp.join("test.br");
     let metal_dir = tmp.join("test_metal");
     fs::write(&br_file, src).unwrap();
+    if let Some(config) = config { fs::write(tmp.join("boring.toml"), config).unwrap(); }
 
     let result = Command::new(bin)
         .args(["build", "--target", "metal"])
@@ -205,14 +210,18 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
     assert!(msl.contains("if (m == 1)"), "{msl}");
-    assert!(msl.contains("threadgroup float bp_a_tile[256]"), "{msl}");
-    assert!(msl.contains("threadgroup float bp_b_tile[128]"), "{msl}");
-    assert!(msl.contains("threadgroup float bp_scales[16]"), "{msl}");
-    assert!(msl.contains("const uint bp_row_fragment = bp_warp / 2"), "{msl}");
-    assert!(msl.contains("const uint bp_col_fragment = bp_warp % 2"), "{msl}");
+    assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
+    assert!(msl.contains("const uint bp_sg_m = bp_warp / 4, bp_sg_n = bp_warp % 4"), "{msl}");
+    assert!(msl.contains("const packed_char4 bp_q0"), "{msl}");
+    assert!(msl.contains("float4(*(device const float4*)bp_src_a)"), "{msl}");
+    assert!(msl.contains("ulong2(0, 0), true"), "{msl}");
     assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    let store = msl.find("simdgroup_store(bp_result7, bp_out_tile").unwrap();
+    let barrier = msl[store..].find("threadgroup_barrier(mem_flags::mem_threadgroup);").unwrap() + store;
+    let bias = msl[barrier..].find("+ bias[bp_output_col]").unwrap() + barrier;
+    assert!(store < barrier && barrier < bias, "bias must be added only after the complete output tile is visible:\n{msl}");
     assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
-    assert!(host.contains("+ 15") && host.contains("+ 31"), "{host}");
+    assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
 }
 
 #[test]
@@ -223,10 +232,29 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
     gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
     y
 "#);
-    assert!(msl.contains("bp_input_row < (uint)m"), "{msl}");
+    assert!(msl.contains("bp_row + bp_r < (uint)m"), "{msl}");
     assert!(msl.contains("bp_output_col < (uint)n"), "{msl}");
     assert!(msl.contains("bp_output_row < (uint)m && bp_output_col < (uint)n"), "{msl}");
-    assert!(host.contains("+ 15") && host.contains("+ 31"), "{host}");
+    assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
+}
+
+#[test]
+fn dynamic_quantized_prefill_half_precision_is_explicit_opt_in() {
+    let source = r#"
+req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
+    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
+    y
+"#;
+    let (msl, host, _) = run_metal_with_config(
+        "dynamic_q8_half_prefill", source,
+        Some("[tensor.linear.prefill]\nprecision = \"half\"\n"),
+    );
+    assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill"), "{msl}");
+    assert!(msl.contains("threadgroup half* bp_a_tile"), "{msl}");
+    assert!(msl.contains("bp_a_tile + 8192"), "{msl}");
+    assert!(msl.contains("bp_base += 64"), "{msl}");
+    assert!(host.contains("+ 127") && host.contains("/ 128"), "{host}");
 }
 
 #[test]
@@ -243,13 +271,22 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 "#);
         let (msl, host) = metal_codegen(&format!("dynamic_native_{format}_tensor_linear"), &source);
         assert!(msl.contains(&format!("kernel {kernel}")), "{msl}");
-        assert!(msl.contains("threadgroup float bp_a_tile[256]"), "{msl}");
-        assert!(msl.contains("threadgroup float bp_b_tile[128]"), "{msl}");
+        if format == "q6_k" {
+            assert!(msl.contains("* 210"), "{msl}");
+            assert!(msl.contains("const uint2 bp_low0"), "{msl}");
+        } else {
+            assert!(msl.contains("const uint2 bp_raw"), "{msl}");
+            assert!(msl.contains("bp_lane8 * 8"), "{msl}");
+        }
+        assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
+        assert!(msl.contains("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 32)"), "{msl}");
+        assert!(msl.contains("float4(*(device const float4*)bp_src_a)"), "{msl}");
+        assert!(msl.contains("ulong2(0, 0), true"), "{msl}");
         assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
         assert!(msl.contains(bytes), "{msl}");
-        assert!(msl.contains("bp_input_inner < (uint)k"), "{msl}");
+        assert!(msl.contains("bp_row + bp_r < (uint)m"), "{msl}");
         assert!(msl.contains("bp_output_row < (uint)m && bp_output_col < (uint)n"), "{msl}");
-        assert!(host.contains("+ 15") && host.contains("+ 31"), "{host}");
+        assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
     }
 }
 
@@ -297,8 +334,10 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
             "{format}: a byte-pair expression reaches as_type<half> before explicit 16-bit narrowing:\n{msl}"
         );
         assert!(
-            msl.contains("ushort(ushort(b["),
-            "{format}: expected packed half bits to be explicitly narrowed to ushort:\n{msl}"
+            msl.contains("ushort(ushort(b[")
+                || msl.contains("as_type<half2>(*(device const uint*)(b + bp_block))")
+                || msl.contains("as_type<half>(*(device const ushort*)(b + bp_block"),
+            "{format}: expected packed half bits to be narrowed or loaded as an exact-width word:\n{msl}"
         );
     }
 }

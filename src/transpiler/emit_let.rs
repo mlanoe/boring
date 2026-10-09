@@ -947,6 +947,23 @@ impl Transpiler {
                 }
             }
         }
+        // Track the collection type for an unannotated expression. Besides
+        // constructor arrays, this covers numeric cast literals such as
+        // `[1.5 as float32, ...]` and if-expressions selecting between two
+        // array-returning calls. Without this, indexing the resulting local
+        // loses the element type and a later `xs[i] as float` is mistaken for
+        // a string parse by `emit_expr_cast`.
+        if s.ty.is_none() {
+            if let Some(inferred) = self.resolve_expr_type(s_value) {
+                let mut collection_ty = inferred.without_mut();
+                while let Type::Qualified(inner, _) = collection_ty {
+                    collection_ty = inner.without_mut();
+                }
+                if matches!(collection_ty, Type::Array(_) | Type::Dict(..) | Type::Set(_)) {
+                    self.var_types.insert(s.name.clone(), inferred);
+                }
+            }
+        }
         // Track element type for an un-annotated array-literal `let`, e.g.
         // `let shapes = [Shape.Circle(2.0), Shape.Point]` or `let pts = [Point(1,2)]`,
         // by inspecting the first element's own constructor shape (same
