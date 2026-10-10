@@ -1430,6 +1430,23 @@ impl Transpiler {
                 }
             }
         }
+        // `looks_like_collection(val)` is intentionally a generated-Rust heuristic, but a
+        // scalar-returning call can contain a collection expression in one of its arguments:
+        //
+        //     let after = join_from(text.split("<"), 1, "<")
+        //
+        // The split argument contains `.collect::<Vec<_>>()`, so the heuristic above marks
+        // `after` as a collection even though `join_from` returns `string`. String method
+        // dispatch deliberately rejects variables that are also in `collection_vars`, which
+        // made a later `after.split(...)` miss `try_emit_string_method` and fall back to Rust's
+        // borrowed `str::split` (`Vec<&str>`). Once the declared/inferred type is known to be
+        // scalar string, it is authoritative: clear the contradictory collection metadata.
+        let is_typed_string = s.ty.as_ref().is_some_and(Self::is_string_type)
+            || self.var_types.get(s.name.as_str()).is_some_and(Self::is_string_type);
+        if is_typed_string {
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
+        }
         false
     }
 

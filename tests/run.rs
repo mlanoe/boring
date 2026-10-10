@@ -190,6 +190,8 @@ interp_test!(modules);
 // See tests/cases/boring_stdlib_collections.br's own doc comment. Paired
 // with tests/transpile.rs's registration below for the `boring build` side.
 interp_test!(boring_stdlib_collections);
+interp_test!(boring_stdlib_identity);
+error_test!(boring_stdlib_identity_float_key);
 
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib
@@ -687,9 +689,13 @@ interp_test!(array_block_flat);
 interp_test!(array_block_nested);
 interp_test!(array_block_if);
 interp_test!(array_block_for);
+interp_test!(array_block_keyed_for);
+interp_test!(view_decl_parse);
+error_test!(array_block_keyed_for_imperative);
 interp_test!(array_block_labeled_args);
 interp_test!(array_block_trailing_closure_regression);
 interp_test!(array_block_flat_transpile);
+interp_test!(array_move_remove_indices);
 interp_test!(array_block_for_transpile);
 error_test!(array_block_wrong_type);
 

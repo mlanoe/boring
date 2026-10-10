@@ -931,6 +931,7 @@ fn labeled_comp_fill_stmts(
                 },
                 line, col, len: 0,
             },
+            key: None,
             body,
             line, col,
         })];

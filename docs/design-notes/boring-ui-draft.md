@@ -131,6 +131,16 @@ view FormView:
             Button("Submit").onActivate (): print "submitted {name}"
 ```
 
+**Status (2026-10-10): parse + checker shipped, lowering not.** `view Name:` (contextual keyword — `view`,
+`state`, `bind`, `env` remain ordinary identifiers elsewhere), `state`/`bind`/`env` fields with optional
+`let`/`var`/`mut`/`var mut`, and the implicit `body():` / `body(): native` parse into a `StructDecl` with
+`is_view` plus `FieldDecl::view_kind`/`explicit_perm`. The checker enforces: no `pub` on them, no
+`'observed` state, no `bind let`, no initializer on `bind`/`env`, `env` read-only, a trait-object/opaque
+`state`/`bind` needs an explicit permission, `body()` takes no parameters and appears once, and a struct
+cannot declare `as View`. Not done: default-permission resolution (needs type classification), seeds,
+slot layout, binding handles, and everything after — `boring build` reports an explicit
+"cannot be transpiled yet" error for a `view`.
+
 `state` is a `view`-specific field-declaration keyword, not an attribute or a qualifier (§3).
 The omitted binding permission defaults to `var` for this scalar; explicit `let`/`var`/`mut` forms
 and the defaults for other value categories are specified below.

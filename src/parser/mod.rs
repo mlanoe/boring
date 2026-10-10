@@ -258,6 +258,9 @@ impl Parser {
     }
 
     fn parse_item(&mut self, is_pub: bool) -> Result<Item, ParseError> {
+        if self.is_view_decl_start() {
+            return Ok(Item::Struct(self.parse_struct_or_view(is_pub, vec![], true)?));
+        }
         match self.peek().clone() {
             TokenKind::Comment(text) => {
                 self.advance();
@@ -1530,9 +1533,22 @@ impl Parser {
     }
 
     fn parse_struct_decl_with_attrs(&mut self, is_pub: bool, attrs: Vec<Attr>) -> Result<StructDecl, ParseError> {
+        self.parse_struct_or_view(is_pub, attrs, false)
+    }
+
+    /// `view Name:` — a contextual keyword (`view` stays an ordinary identifier everywhere else),
+    /// recognised only as `view <Ident> (':' | 'as' | '<')` at item position.
+    fn is_view_decl_start(&self) -> bool {
+        matches!(self.peek(), TokenKind::Ident(s) if s == "view")
+            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+            && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(TokenKind::Colon) | Some(TokenKind::As) | Some(TokenKind::Lt))
+    }
+
+    fn parse_struct_or_view(&mut self, is_pub: bool, attrs: Vec<Attr>, is_view: bool) -> Result<StructDecl, ParseError> {
         let line = self.line();
         let col = self.col();
-        self.expect(&TokenKind::Struct)?;
+        if is_view { self.advance(); } else { self.expect(&TokenKind::Struct)?; }
         let name = self.expect_ident()?;
         let (type_params, where_clause) = self.parse_type_params();
         let mut protocols = Vec::new();
@@ -1548,20 +1564,20 @@ impl Parser {
         if self.check(&TokenKind::Pass) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(StructDecl { name, is_pub, is_native: false, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line, col });
+            return Ok(StructDecl { name, is_pub, is_view, is_native: false, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line, col });
         }
         if self.check(&TokenKind::Native) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(StructDecl { name, is_pub, is_native: true, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line, col });
+            return Ok(StructDecl { name, is_pub, is_view, is_native: true, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line, col });
         }
         self.expect_newline()?;
         self.expect(&TokenKind::Indent)?;
-        self.parse_struct_body(name, is_pub, protocols, type_params, where_clause, attrs, line, col)
+        self.parse_struct_body(name, is_pub, is_view, protocols, type_params, where_clause, attrs, line, col)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn parse_struct_body(&mut self, name: String, is_pub: bool, protocols: Vec<String>, type_params: Vec<String>, where_clause: Vec<(String, String)>, attrs: Vec<Attr>, line: usize, col: usize) -> Result<StructDecl, ParseError> {
+    fn parse_struct_body(&mut self, name: String, is_pub: bool, is_view: bool, protocols: Vec<String>, type_params: Vec<String>, where_clause: Vec<(String, String)>, attrs: Vec<Attr>, line: usize, col: usize) -> Result<StructDecl, ParseError> {
 
         let mut fields = Vec::new();
         let mut inits = Vec::new();
@@ -1578,6 +1594,14 @@ impl Parser {
                 break;
             }
             match self.peek().clone() {
+                // `view` bodies: contextual `state`/`bind`/`env` fields and the implicit `body()`.
+                TokenKind::Ident(ref s) if is_view && matches!(s.as_str(), "state" | "bind" | "env") => {
+                    fields.push(self.parse_view_field()?);
+                }
+                TokenKind::Ident(ref s) if is_view && s == "body"
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) => {
+                    methods.push(self.parse_view_body()?);
+                }
                 TokenKind::Init => {
                     inits.push(self.parse_init_decl()?);
                 }
@@ -1654,6 +1678,8 @@ impl Parser {
                         }
                     } else if matches!(next, Some(TokenKind::Init)) {
                         inits.push(self.parse_init_decl()?);
+                    } else if is_view && matches!(next, Some(TokenKind::Ident(s)) if matches!(s.as_str(), "state" | "bind" | "env")) {
+                        fields.push(self.parse_view_field()?);
                     } else {
                         // Try to parse as field declaration (starts with `pub` already consumed above? No.)
                         // Actually pub is NOT consumed here yet — parse_field_decl handles the `pub` keyword
@@ -1674,7 +1700,7 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
-        Ok(StructDecl { name, is_pub, is_native: false, protocols, fields, inits, methods, conversions, type_params, where_clause, setters, type_methods, type_vars, assoc_type_defs, attrs, line, col })
+        Ok(StructDecl { name, is_pub, is_view, is_native: false, protocols, fields, inits, methods, conversions, type_params, where_clause, setters, type_methods, type_vars, assoc_type_defs, attrs, line, col })
     }
 
     fn parse_ext_decl(&mut self) -> Result<ExtDecl, ParseError> {

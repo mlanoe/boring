@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — boring.identity
+#
+# Stable element identity for keyed iteration (docs/design-notes/boring-ui-draft.md,
+# "`IdentityKey` and `Identifiable`"):
+#
+#   use boring.identity.*
+#
+# `IdentityKey` is a marker with a NATIVE blanket implementation: every owned
+# `Clone + Eq + Hash` type is a key, so applications never write `as IdentityKey`
+# for a key type. Floats are not keys (NaN has no total equality), nor are
+# dictionaries, sets, or function values. The compiler recognises the name
+# `IdentityKey` (see `emit_trait`'s blanket impl and the interpreter's
+# associated-type bound check).
+#
+# `Identifiable` supplies an element's intrinsic identity. There is no property
+# syntax: the key is the ordinary `req` method `id()`.
+
+pub trait IdentityKey as Clone, Eq, Hash:
+    pass
+
+pub trait Identifiable:
+    type ID as IdentityKey
+    req ID id()

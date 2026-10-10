@@ -2660,6 +2660,21 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Whether `ty` can serve as an `IdentityKey` (docs/design-notes/boring-ui-draft.md,
+    /// "`IdentityKey` and `Identifiable`"): the native blanket implementation covers owned
+    /// `Clone + Eq + Hash` values, which excludes floats (no total equality) and the
+    /// unhashable/unowned categories.
+    fn is_identity_key_type(ty: &Type) -> bool {
+        match ty {
+            Type::Float32 | Type::Float64 | Type::Dict(..) | Type::Set(_) | Type::Fn(..) | Type::Dyn(_) => false,
+            // Lowercase primitives reach here as plain names (normalized later).
+            Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64" | "Float" | "Float32" | "Float64" | "f32" | "f64") => false,
+            Type::Optional(t) | Type::Array(t) | Type::ArrayN(t, _) | Type::Mut(t) => Self::is_identity_key_type(t),
+            Type::Tuple(ts) => ts.iter().all(Self::is_identity_key_type),
+            _ => true,
+        }
+    }
+
     fn check_conformance(&self, decl: &StructDecl) -> Result<(), Signal> {
         // All method names available in the struct (from all sources)
         let available: std::collections::HashSet<&str> = decl.methods.iter()
@@ -2705,7 +2720,20 @@ impl Interpreter {
                 if let (Some(constraint), Some(def)) = (&assoc.constraint, def) {
                     let constraint_name = Self::display_type(constraint);
                     let def_name = Self::display_type(&def.ty);
-                    if constraint_name != def_name {
+                    // A constraint naming a declared *trait* is a bound, not a type to match
+                    // exactly (`type ID as IdentityKey`); only the `IdentityKey` marker is
+                    // verified here, other trait bounds are left to the Rust compile.
+                    let is_trait_bound = matches!(constraint, Type::Named(n) if self.traits.contains_key(n.as_str()));
+                    if is_trait_bound {
+                        if constraint_name == "IdentityKey" && !Self::is_identity_key_type(&def.ty) {
+                            return Err(err(
+                                format!("struct '{}': associated type '{}' is '{}', which cannot be an identity key \
+                                         (keys must be Clone + Eq + Hash: no floats, dictionaries, sets, or function values)",
+                                    decl.name, assoc.name, def_name),
+                                def.line,
+                            ));
+                        }
+                    } else if constraint_name != def_name {
                         return Err(err(
                             format!("struct '{}': associated type '{}' must be '{}' (as required by '{}'), but got '{}'",
                                 decl.name, assoc.name, constraint_name, trait_name, def_name),

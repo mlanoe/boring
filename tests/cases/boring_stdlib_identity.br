@@ -1,0 +1,26 @@
+# use boring.identity -- `IdentityKey` (marker with a native blanket impl) and `Identifiable`
+# (associated `ID as IdentityKey` + `req ID id()`), the element-identity contract behind keyed
+# iteration (docs/design-notes/boring-ui-draft.md). `type ID = int` must satisfy the
+# `IdentityKey` bound without the struct ever writing `as IdentityKey`.
+#
+# The key field deliberately shares its name with the `id()` method (the draft's own shape).
+use boring.identity.*
+
+struct Todo as Identifiable:
+    pub int id
+    pub string title
+
+    type ID = int
+    req int id(): self.id
+
+struct Tag as Identifiable:
+    pub string name
+
+    type ID = string
+    req string id(): name
+
+def main():
+    let todo = Todo(id = 4, title = "write tests")
+    let tag = Tag(name = "urgent")
+    print todo.id()
+    print tag.id()

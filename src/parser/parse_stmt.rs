@@ -1209,7 +1209,7 @@ impl Parser {
         let saved = self.allow_noparen_closure;
         self.allow_noparen_closure = false; self.allow_trailing_closure = false;
 
-        let (vars, iterable) = if self.is_for_with_vars() {
+        let (vars, iterable, key) = if self.is_for_with_vars() {
             // `for i in expr:` or `for i, j in expr:` — explicit variable(s)
             let mut vars = vec![self.expect_ident()?];
             while self.eat(&TokenKind::Comma) {
@@ -1217,11 +1217,13 @@ impl Parser {
             }
             self.expect(&TokenKind::In)?;
             let iterable = self.parse_expr()?;
-            (vars, iterable)
+            // `for x in xs with <key>:` — iteration identity (boring-ui keyed rows).
+            let key = if self.eat(&TokenKind::With) { Some(self.parse_expr()?) } else { None };
+            (vars, iterable, key)
         } else {
             // `for expr:` — no variable, implicit `_` (e.g. `for 1..<8:`)
             let iterable = self.parse_expr()?;
-            (vec!["_".to_string()], iterable)
+            (vec!["_".to_string()], iterable, None)
         };
 
         self.allow_noparen_closure = saved; self.allow_trailing_closure = true;
@@ -1234,7 +1236,7 @@ impl Parser {
             self.expect_newline()?;
             self.parse_block()?
         };
-        Ok(ForStmt { vars, iterable, body, line, col })
+        Ok(ForStmt { vars, iterable, key, body, line, col })
     }
 
     /// `with <name> [, <name> ...]:` — scoped access block.

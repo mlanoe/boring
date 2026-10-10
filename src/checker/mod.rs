@@ -1044,7 +1044,107 @@ impl Checker {
 
     // ── Struct / enum / ext ───────────────────────────────────────────────────
 
+    /// `view` declaration rules (docs/design-notes/boring-ui-draft.md, §2–§3, "Implicit and explicit
+    /// binding permissions", "Environment, theme, and control styles"). Purely declarative checks —
+    /// default permissions and lowering are resolved later, with type information.
+    fn check_view_decl(&mut self, s: &StructDecl) {
+        fn has_observed(ty: &Type) -> bool {
+            match ty {
+                Type::Qualified(inner, q) => matches!(q, OwnerQual::Observed) || has_observed(inner),
+                Type::Mut(inner) => has_observed(inner),
+                _ => false,
+            }
+        }
+        fn is_unclassifiable(ty: &Type) -> bool {
+            match ty {
+                Type::Mut(inner) => is_unclassifiable(inner),
+                Type::Dyn(_) | Type::Impl(_) => true,
+                _ => false,
+            }
+        }
+        for f in &s.fields {
+            let Some(kind) = f.view_kind else { continue };
+            let word = match kind { ViewFieldKind::State => "state", ViewFieldKind::Bind => "bind", ViewFieldKind::Env => "env" };
+            if f.is_pub {
+                self.error(format!("`pub {word}` is not allowed: `{word}` fields are private to their view"), f.line, f.col);
+            }
+            match kind {
+                ViewFieldKind::State => {
+                    if has_observed(&f.ty) {
+                        self.error(
+                            format!("`state {}` cannot be `'observed`: state is exclusive to its view; \
+                                     share a model with an `'observed` input field instead", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                    if !f.explicit_perm && is_unclassifiable(&f.ty) {
+                        self.error(
+                            format!("`state {}` holds a trait object or opaque value whose mutation surface \
+                                     can't be classified — write `state let`, `state var`, `state mut` or \
+                                     `state var mut` explicitly", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                }
+                ViewFieldKind::Bind => {
+                    if f.explicit_perm && !f.mutable && !f.ty.grants_mut() {
+                        self.error(
+                            format!("`bind let {}` is rejected: a read-only parent value is an ordinary view \
+                                     input — drop `bind`", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                    if f.default.is_some() {
+                        self.error(
+                            format!("`bind {}` has no initializer: its parent must supply it", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                    if !f.explicit_perm && is_unclassifiable(&f.ty) {
+                        self.error(
+                            format!("`bind {}` holds a trait object or opaque value whose mutation surface \
+                                     can't be classified — write `bind var`, `bind mut` or `bind var mut` explicitly", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                }
+                ViewFieldKind::Env => {
+                    if f.mutable || f.ty.grants_mut() {
+                        self.error(
+                            format!("`env {}` is read-only: `env var`/`env mut` are not allowed", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                    if f.default.is_some() {
+                        self.error(
+                            format!("`env {}` has no initializer: it is resolved from the nearest provider", f.name),
+                            f.line, f.col,
+                        );
+                    }
+                }
+            }
+        }
+        let mut bodies = s.methods.iter().filter(|m| m.name == "body");
+        if let Some(first) = bodies.next() {
+            if !first.params.is_empty() {
+                self.error("a view's `body()` takes no parameters".to_string(), first.line, first.col);
+            }
+            if let Some(dup) = bodies.next() {
+                self.error(format!("view '{}' declares `body()` more than once", s.name), dup.line, dup.col);
+            }
+        }
+    }
+
     fn check_struct(&mut self, s: &StructDecl) {
+        if s.is_view {
+            self.check_view_decl(s);
+        } else if s.protocols.iter().any(|p| p == "View") {
+            self.error(
+                format!("struct '{}' cannot conform to `View` by hand: a struct has neither a `body()` nor a \
+                         native adapter — declare it with `view {}` instead", s.name, s.name),
+                s.line, s.col,
+            );
+        }
         for f in &s.fields {
             self.check_scalar_mut_in_type(&f.ty, "field", f.line, f.col);
             self.check_set_mut_constraint(&Some(f.ty.clone()), f.line, f.col);
@@ -1475,6 +1575,13 @@ impl Checker {
             }
             Stmt::Loop(s)      => self.check_block(&s.body),
             Stmt::For(s)       => {
+                if let Some(k) = &s.key {
+                    self.error(
+                        "`for … with <key>` is only valid directly inside a trailing array-block \
+                         that collects views (e.g. `Column:`); an ordinary loop has no iteration identity",
+                        k.line, k.col,
+                    );
+                }
                 self.check_expr(&s.iterable);
                 self.push_scope();
                 for v in &s.vars { self.define(v, BindingKind::Let); }
@@ -2530,7 +2637,7 @@ fn is_builtin_collection_type(ty: &Type) -> bool {
 const MUTATING_BUILTIN_COLLECTION_METHODS: &[&str] = &[
     "push", "pop", "append", "extend", "insert", "remove", "add", "set", "put", "clear",
     "sort", "sortBy", "sort_by", "reverse", "shuffle", "dedup", "retain", "truncate", "drain",
-    "swap", "fill",
+    "swap", "fill", "move", "removeIndices",
 ];
 
 fn param_binding(p: &Param) -> BindingKind {
@@ -3717,5 +3824,75 @@ mod scalar_mut_tests {
     #[test]
     fn mut_atomic_scalar_still_works() {
         assert_ok("def main():\n    mut counter'atomic = 0\n    print counter\n");
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    fn has(errs: &[String], needle: &str) -> bool { errs.iter().any(|e| e.contains(needle)) }
+
+    #[test]
+    fn well_formed_view_is_accepted() {
+        let src = "struct Profile:\n    var string name = \"\"\n\nview Badge:\n    string title\n    state int count = 0\n    state let string token = \"t\"\n    state var mut Profile profile = Profile()\n    bind string name\n    bind var mut Profile owner\n    env string theme\n\n    body():\n        print title\n";
+        assert_eq!(errors_for(src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn native_body_and_contextual_names_are_accepted() {
+        let src = "view Leaf:\n    body(): native\n\ndef main():\n    let state = 1\n    let view = state + 1\n    print view\n";
+        assert_eq!(errors_for(src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn pub_state_is_rejected() {
+        assert!(has(&errors_for("view V:\n    pub state int n = 0\n"), "`pub state` is not allowed"));
+    }
+
+    #[test]
+    fn observed_state_is_rejected() {
+        let errs = errors_for("struct M:\n    var int x = 0\n\nview V:\n    state M'actor'observed m = M()\n");
+        assert!(has(&errs, "cannot be `'observed`"), "{errs:?}");
+    }
+
+    #[test]
+    fn bind_let_is_rejected() {
+        assert!(has(&errors_for("view V:\n    bind let string name\n"), "`bind let name` is rejected"));
+    }
+
+    #[test]
+    fn bind_with_initializer_is_rejected() {
+        assert!(has(&errors_for("view V:\n    bind string name = \"x\"\n"), "has no initializer"));
+    }
+
+    #[test]
+    fn env_var_and_mut_are_rejected() {
+        assert!(has(&errors_for("view V:\n    env var string theme\n"), "`env theme` is read-only"));
+        assert!(has(&errors_for("struct T:\n    var int x = 0\n\nview V:\n    env mut T theme\n"), "`env theme` is read-only"));
+    }
+
+    #[test]
+    fn env_let_is_redundant_but_accepted() {
+        assert_eq!(errors_for("view V:\n    env let string theme\n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn manual_view_conformance_is_rejected() {
+        let errs = errors_for("trait View:\n    req string label()\n\nstruct Foo as View:\n    req string label(): \"x\"\n");
+        assert!(has(&errs, "cannot conform to `View` by hand"), "{errs:?}");
+    }
+
+    #[test]
+    fn body_with_parameters_and_duplicate_body_are_rejected() {
+        assert!(has(&errors_for("view V:\n    body(int x): native\n"), "takes no parameters"));
+        assert!(has(&errors_for("view V:\n    body(): native\n    body(): native\n"), "more than once"));
     }
 }

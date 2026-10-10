@@ -328,6 +328,7 @@ macro_rules! transpile_project_test {
 
 transpile_test!(basics);
 transpile_test!(strings);
+transpile_test!(split_call_arg_then_split);
 transpile_test!(string_temporary_method_chains);
 transpile_test!(control_flow);
 transpile_test!(match_stmt);
@@ -394,6 +395,8 @@ transpile_test!(do_expr_value_for_loop);
 // same desugaring paths already covered here in real Rust, so a full 4-way
 // rustc build per case would be redundant.
 transpile_test!(array_block_flat_transpile);
+transpile_test!(array_block_keyed_for);
+transpile_test!(array_move_remove_indices);
 transpile_test!(array_block_for_transpile);
 transpile_test!(numeric);
 transpile_test!(uint_int_cross_eq);
@@ -406,6 +409,7 @@ transpile_test!(modules);
 // See tests/cases/boring_stdlib_collections.br's own doc comment. Paired
 // with tests/run.rs's registration above for the `boring run` side.
 transpile_test!(boring_stdlib_collections);
+transpile_test!(boring_stdlib_identity);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
 // tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its

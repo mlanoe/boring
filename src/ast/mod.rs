@@ -156,6 +156,9 @@ pub struct SetDecl {
 pub struct StructDecl {
     pub name: String,
     pub is_pub: bool,
+    /// Declared with `view` instead of `struct` (docs/design-notes/boring-ui-draft.md, §2).
+    /// Its fields may carry a `ViewFieldKind`, and it may declare a `body()`.
+    pub is_view: bool,
     pub is_native: bool, // body is `native` — implemented by the runtime
     pub protocols: Vec<String>,
     pub fields: Vec<FieldDecl>,
@@ -225,6 +228,17 @@ pub struct AsDecl {
     pub col: usize,
 }
 
+/// The three `view`-only field categories (draft, §3 and "Environment, theme, and control styles").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewFieldKind {
+    /// Identity-scoped persistent slot, private, seeded once at first mount.
+    State,
+    /// Non-owning read/write connection to reactive storage owned by an ancestor.
+    Bind,
+    /// Read-only value resolved from the nearest provider in the mounted ancestor path.
+    Env,
+}
+
 #[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub name: String,
@@ -239,6 +253,13 @@ pub struct FieldDecl {
     /// instead, matching local bindings/tuple slots/collection elements exactly.
     pub mutable: bool,
     pub transient: bool,
+    /// `state`/`bind`/`env` prefix of a `view` field; `None` for an ordinary field/input.
+    pub view_kind: Option<ViewFieldKind>,
+    /// `true` when a `let`/`var`/`mut` keyword was written after `state`/`bind`. When `false`,
+    /// the permission is the closed default for the value's category (draft, "Implicit and
+    /// explicit binding permissions"), which needs type information and is resolved by the
+    /// checker/lowering rather than at parse time.
+    pub explicit_perm: bool,
     pub ty: Type,
     pub default: Option<Expr>,
     /// `@name(args)` lines directly above the field, e.g. `@serde(rename = "current_costume")`.
@@ -813,6 +834,11 @@ pub struct ThrowStmt {
 pub struct ForStmt {
     pub vars: Vec<String>,
     pub iterable: Expr,
+    /// `for x in xs with <key>:` — per-iteration identity key. Only meaningful inside a
+    /// trailing array-block that collects into a trait-object array, where
+    /// `desugar_array_block` consumes it; any ForStmt still carrying a key afterwards is
+    /// a checker error.
+    pub key: Option<Expr>,
     pub body: Vec<Stmt>,
     pub line: usize,
     pub col: usize,
@@ -1122,6 +1148,8 @@ pub enum ArrayBlockElem {
     For {
         vars: Vec<String>,
         iterable: Expr,
+        /// `with <key>` — see `ForStmt::key`.
+        key: Option<Expr>,
         body: Vec<ArrayBlockElem>,
     },
 }

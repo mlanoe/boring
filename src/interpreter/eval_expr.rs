@@ -317,7 +317,7 @@ impl Interpreter {
         line: usize,
     ) -> Option<Eval> {
         const FAST_MUTATING_ARRAY_METHODS: &[&str] =
-            &["push", "append", "insert", "remove", "sort", "reverse"];
+            &["push", "append", "insert", "remove", "sort", "reverse", "move", "removeIndices"];
         if !FAST_MUTATING_ARRAY_METHODS.contains(&method)
             || !matches!(env.borrow().get(name), Some(Value::Array(_) | Value::ByteArray(_)))
         {

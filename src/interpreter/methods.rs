@@ -200,14 +200,14 @@ impl Interpreter {
                     "map", "filter", "reduce", "join", "any", "all", "find", "indexOf", "flatMap", "flat",
                     "zip", "enumerate", "slice", "insert", "remove", "append", "count", "min", "max", "sum",
                     "isEmpty", "reversed", "sorted", "sortedBy", "take", "drop", "joined",
-                    "firstIndex", "nextIndex", "removeAt", "getAt",
+                    "firstIndex", "nextIndex", "removeAt", "getAt", "move", "removeIndices",
                 ];
                 if KNOWN_ARRAY_METHODS.contains(&method) {
                     let result = match self.call_array_method(obj, method, args, line)? {
                         Some(result) => result,
                         None => return Err(err(format!("no method '{}' on Array", method), line)),
                     };
-                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt"];
+                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -217,7 +217,7 @@ impl Interpreter {
                 }
                 if let Some(result) = self.call_array_method(obj.clone(), method, args.clone(), line)? {
                     // For mutating array methods, set out_self so the caller can write back.
-                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt"];
+                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -1442,6 +1442,50 @@ impl Interpreter {
                     new_arr.remove(idx as usize);
                 }
                 Ok(Some(Value::Array(new_arr.into())))
+            }
+            // `move(from, to)`: `to` is the element's final index. Both indices are validated
+            // before anything changes; equal indices are a no-op.
+            "move" => {
+                let from = self.expect_int(args.first().cloned().unwrap_or(Value::Nil), line)?;
+                let to = self.expect_int(args.get(1).cloned().unwrap_or(Value::Nil), line)?;
+                let len = arr.len() as i64;
+                if from < 0 || from >= len || to < 0 || to >= len {
+                    return Err(err(format!("move: indices {from} -> {to} out of range for array of length {len}"), line));
+                }
+                let mut new_arr = Value::rc_vec_into_owned(arr);
+                if from != to {
+                    let item = new_arr.remove(from as usize);
+                    new_arr.insert(to as usize, item);
+                }
+                Ok(Some(Value::Array(new_arr.into())))
+            }
+            // `removeIndices(indices)`: unique, strictly ascending indices into the
+            // pre-mutation array, removed atomically.
+            "removeIndices" => {
+                let idxs = match args.into_iter().next() {
+                    Some(Value::Array(a)) => a,
+                    _ => return Err(err("removeIndices: expected an array of indices".to_string(), line)),
+                };
+                let len = arr.len() as i64;
+                let mut prev = -1i64;
+                let mut drop = Vec::with_capacity(idxs.len());
+                for v in idxs.iter() {
+                    let i = self.expect_int(v.clone(), line)?;
+                    if i < 0 || i >= len {
+                        return Err(err(format!("removeIndices: index {i} out of range for array of length {len}"), line));
+                    }
+                    if i <= prev {
+                        return Err(err("removeIndices: indices must be unique and strictly ascending".to_string(), line));
+                    }
+                    prev = i;
+                    drop.push(i as usize);
+                }
+                let mut next_drop = drop.iter().peekable();
+                let kept: Vec<Value> = Value::rc_vec_into_owned(arr).into_iter().enumerate()
+                    .filter(|(i, _)| if next_drop.peek() == Some(&&*i) { next_drop.next(); false } else { true })
+                    .map(|(_, v)| v)
+                    .collect();
+                Ok(Some(Value::Array(kept.into())))
             }
             "append" => {
                 let other = match args.into_iter().next() {

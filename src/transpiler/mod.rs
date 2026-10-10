@@ -2076,6 +2076,8 @@ impl Transpiler {
              \x20   fn next_index(&self, i: Option<usize>) -> Option<usize>;\n\
              \x20   fn remove_at(&self, i: Option<usize>) -> Vec<Self::Item>;\n\
              \x20   fn get_at(&self, i: Option<usize>) -> Self::Item;\n\
+             \x20   fn move_item(&mut self, from: isize, to: isize);\n\
+             \x20   fn remove_indices<I: AsRef<[isize]>>(&mut self, idx: I);\n\
              }\n\
              impl<T: Clone> BoringArrayIndex for Vec<T> {\n\
              \x20   type Item = T;\n\
@@ -2092,6 +2094,22 @@ impl Transpiler {
              \x20   }\n\
              \x20   fn get_at(&self, i: Option<usize>) -> T {\n\
              \x20       self[i.expect(\"get_at called with no index (empty collection or exhausted cursor)\")].clone()\n\
+             \x20   }\n\
+             \x20   fn move_item(&mut self, from: isize, to: isize) {\n\
+             \x20       let len = self.len() as isize;\n\
+             \x20       assert!(from >= 0 && from < len && to >= 0 && to < len, \"move: indices {} -> {} out of range for array of length {}\", from, to, len);\n\
+             \x20       if from != to { let item = self.remove(from as usize); self.insert(to as usize, item); }\n\
+             \x20   }\n\
+             \x20   fn remove_indices<I: AsRef<[isize]>>(&mut self, idx: I) {\n\
+             \x20       let idx = idx.as_ref();\n\
+             \x20       let len = self.len() as isize;\n\
+             \x20       let mut prev = -1isize;\n\
+             \x20       for &ix in idx {\n\
+             \x20           assert!(ix >= 0 && ix < len, \"removeIndices: index {} out of range for array of length {}\", ix, len);\n\
+             \x20           assert!(ix > prev, \"removeIndices: indices must be unique and strictly ascending\");\n\
+             \x20           prev = ix;\n\
+             \x20       }\n\
+             \x20       for &ix in idx.iter().rev() { self.remove(ix as usize); }\n\
              \x20   }\n\
              }\n\
              trait BoringDictIndex<K: Clone + Eq + std::hash::Hash, V: Clone> {\n\

@@ -81,7 +81,16 @@ fn report_error(path: &Path, source: &str, line: usize, col: usize, len: usize, 
 /// point below — see `desugar_array_block`'s own module doc comment for what
 /// this pass does and why it can fail.
 fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program) -> ast::Program {
-    match desugar_array_block::desugar_array_block(program) {
+    // Imported callables (sibling files, `[deps]`, stdlib) take part in resolution. A `[deps]`
+    // error is deliberately not reported here — the pass that consumes the same map right
+    // after (`desugar_inject_or_exit`'s caller) already reports it with its own diagnostic.
+    let deps = find_project_root(path)
+        .and_then(|root| {
+            let toml_src = std::fs::read_to_string(root.join("boring.toml")).ok()?;
+            BoringToml::parse(&toml_src).resolve_deps(&root).ok()
+        })
+        .unwrap_or_default();
+    match desugar_array_block::desugar_array_block_with_imports(program, path.parent(), &deps) {
         Ok(p) => p,
         Err(e) => {
             report_error(path, source, e.line(), e.col(), e.len(), &e.msg());

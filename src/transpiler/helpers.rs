@@ -532,7 +532,7 @@ pub(crate) fn is_collection_type(ty: Option<&Type>) -> bool {
 pub(crate) const MUTATING_COLLECTION_METHODS: &[&str] = &[
     "append", "add", "push", "extend", "insert", "set", "remove", "removeAt", "remove_at",
     "pop", "clear", "sort", "sortBy", "sort_by", "reverse", "shuffle", "dedup",
-    "retain", "truncate", "drain",
+    "retain", "truncate", "drain", "move", "removeIndices",
 ];
 
 /// Normalize boring primitive type names (lowercase aliases) to Rust equivalents.
@@ -700,6 +700,8 @@ pub(crate) fn map_method(name: &str, _arity: usize, want_raw_option: bool) -> (S
         "firstIndex"       => ("first_index".into(), None),
         "nextIndex"        => ("next_index".into(), None),
         "removeAt"         => ("remove_at".into(), None),
+        // `move` is a Rust keyword; see `BoringArrayIndex::move_item`.
+        "move"             => ("move_item".into(), None),
         // get_at(i) — explicit positional read via opaque index (useful for sets where
         // `set[i]` is not valid Rust syntax for HashSet).
         "getAt"            => ("get_at".into(), None),

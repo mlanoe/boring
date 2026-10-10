@@ -565,7 +565,101 @@ impl Parser {
             None
         };
         self.expect_newline()?;
-        Ok(FieldDecl { name, is_pub, mutable, transient, ty, default, attrs, line, col })
+        Ok(FieldDecl { name, is_pub, mutable, transient, view_kind: None, explicit_perm: false, ty, default, attrs, line, col })
+    }
+
+    /// `state`/`bind`/`env` field inside a `view` body (draft, §3):
+    ///
+    /// ```text
+    /// [pub] (state|bind|env) [let|var|mut|var mut] Type name [= default]
+    /// ```
+    ///
+    /// `pub` is parsed (so the checker can reject `pub state` with a precise message) but
+    /// never granted. The permission keyword is optional; its absence is recorded in
+    /// `explicit_perm` because the default depends on the value's category, which needs type
+    /// information the parser does not have.
+    pub(crate) fn parse_view_field(&mut self) -> Result<FieldDecl, ParseError> {
+        let attrs = if self.check(&TokenKind::At) { self.parse_attrs() } else { vec![] };
+        let line = self.line();
+        let col = self.col();
+        let is_pub = self.eat(&TokenKind::Pub);
+        let kind = match self.peek().clone() {
+            TokenKind::Ident(s) if s == "state" => ViewFieldKind::State,
+            TokenKind::Ident(s) if s == "bind" => ViewFieldKind::Bind,
+            TokenKind::Ident(s) if s == "env" => ViewFieldKind::Env,
+            _ => return Err(ParseError::Generic {
+                msg: "expected `state`, `bind` or `env`".into(), line, col, len: 1,
+            }),
+        };
+        self.advance();
+        let (mutable, wrap_mut, explicit_perm) = if self.eat(&TokenKind::Mut) {
+            (false, true, true)
+        } else if self.eat(&TokenKind::Let) {
+            (false, self.eat(&TokenKind::Mut), true)
+        } else if self.eat(&TokenKind::Var) {
+            (true, self.eat(&TokenKind::Mut), true)
+        } else {
+            (false, false, false)
+        };
+        let ty = self.parse_type()?;
+        let ty = if wrap_mut { Self::wrap_type_mut(ty) } else { ty };
+        let name = self.expect_ident()?;
+        let default = if self.eat(&TokenKind::Eq) { Some(self.parse_expr()?) } else { None };
+        self.expect_newline()?;
+        Ok(FieldDecl {
+            name, is_pub, mutable, transient: false, view_kind: Some(kind), explicit_perm,
+            ty, default, attrs, line, col,
+        })
+    }
+
+    /// `body():` inside a `view` — the implicit `<View>`-returning method (draft, "`View`,
+    /// opaque return types, and native components"). Its block is the ordinary function body
+    /// (locals, then one root view expression); `body(): native` marks a runtime-supplied
+    /// component adapter. No `def`/`req` and no return type are written.
+    pub(crate) fn parse_view_body(&mut self) -> Result<FnDecl, ParseError> {
+        let line = self.line();
+        let col = self.col();
+        self.advance(); // `body`
+        let params = self.parse_params()?;
+        self.expect(&TokenKind::Colon)?;
+        let (body, is_native) = if self.check(&TokenKind::Native) {
+            self.advance();
+            self.expect_newline_soft();
+            (vec![], true)
+        } else if self.is_newline() || self.check(&TokenKind::Eof) {
+            self.expect_newline()?;
+            (self.parse_block()?, false)
+        } else {
+            let expr_line = self.line();
+            let stmt = self.parse_inline_stmt()?;
+            self.expect_newline_soft();
+            let s = match stmt {
+                Stmt::Expr(ref e) => vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line, col: e.col })],
+                other => vec![other],
+            };
+            (s, false)
+        };
+        Ok(FnDecl {
+            name: "body".into(),
+            qualifier: None,
+            params,
+            return_ty: Some(Type::Impl(Box::new(Type::Named("View".into())))),
+            body,
+            is_pub: false,
+            throws: false,
+            throws_ty: None,
+            task: false,
+            stream: false,
+            stream_capacity: None,
+            mutating: false,
+            return_mutable: false,
+            is_native,
+            type_params: vec![],
+            where_clause: vec![],
+            attrs: vec![],
+            line,
+            col,
+        })
     }
 
     pub(crate) fn parse_init_decl(&mut self) -> Result<InitDecl, ParseError> {

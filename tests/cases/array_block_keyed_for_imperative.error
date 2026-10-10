@@ -1,0 +1,1 @@
+`for … with <key>` is only valid directly inside a trailing array-block

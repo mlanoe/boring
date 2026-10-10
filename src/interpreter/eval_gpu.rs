@@ -765,6 +765,7 @@ fn run_kernel_parallel(
         let synthetic_decl = crate::ast::StructDecl {
             name: decl_name.to_string(),
             is_pub: false,
+            is_view: false,
             is_native: false,
             protocols: vec![],
             fields: vec![],

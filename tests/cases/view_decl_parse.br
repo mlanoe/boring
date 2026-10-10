@@ -1,0 +1,29 @@
+# `view` declarations (docs/design-notes/boring-ui-draft.md, §2-§3): `state`/`bind`/`env` fields and
+# the implicit `body()` parse, and `view`/`state` stay ordinary identifiers outside a view body.
+# Declaration-only: lowering/runtime are not implemented yet.
+
+struct Profile:
+    var string name = ""
+
+pub view Badge:
+    string title
+    state int count = 0
+    state let string token = "t"
+    state var Profile profile = Profile()
+    bind string name
+    bind var mut Profile owner
+    env string theme
+
+    def bump():
+        count += 1
+
+    body():
+        print title
+
+view Leaf:
+    body(): native
+
+def main():
+    let state = 3
+    let view = state + 1
+    print view

@@ -1,0 +1,34 @@
+# `for x in xs with <key>:` inside a trailing array-block (docs/design-notes/boring-ui-draft.md,
+# "Identity & lifecycle"): each iteration's items are gathered into ONE `KeyedGroup(key, items)`
+# element, so the key identifies the whole iteration subtree. `KeyedGroup` is an ordinary
+# symbol here -- a throwaway fixture, not a UI stdlib.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct KeyedGroup as Widget:
+    int key
+    [Widget] children
+    req string label(): "#{self.key}({self.children.length})"
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+def main():
+    let ids = [7, 3, 9]
+    let c = Column:
+        Text("head")
+        for id in ids with id:
+            Text("a{id}")
+            Text("b{id}")
+        for id in ids:
+            Text("plain{id}")
+    print c.label()
+    print c.children[1].label()
+    print c.children[3].label()
+    print c.children[4].label()

@@ -31,6 +31,7 @@
 //! See `stdlib/README.md` for how to add a new module.
 
 const STD_COLLECTIONS: &str = include_str!("../stdlib/collections.br");
+const STD_IDENTITY: &str = include_str!("../stdlib/identity.br");
 
 /// Look up the embedded source for `use boring.<module>`.
 ///
@@ -42,6 +43,7 @@ const STD_COLLECTIONS: &str = include_str!("../stdlib/collections.br");
 pub fn lookup(module: &str) -> Option<&'static str> {
     Some(match module {
         "collections" => STD_COLLECTIONS,
+        "identity" => STD_IDENTITY,
         _ => return None,
     })
 }

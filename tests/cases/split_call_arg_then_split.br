@@ -1,0 +1,10 @@
+string join_from([string] parts, int from, string sep):
+    "x>y"
+
+string pieces_of(string text):
+    let after = join_from(text.split("<"), 1, "<")
+    let [string] closed = after.split(">")
+    closed[0]
+
+def main():
+    print pieces_of("\<a>b")

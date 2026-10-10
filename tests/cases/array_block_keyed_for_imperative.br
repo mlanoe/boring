@@ -1,0 +1,5 @@
+# `for ... with <key>` outside a trailing array-block has no iteration identity: checker error.
+
+def main():
+    for i in [1, 2] with i:
+        print i

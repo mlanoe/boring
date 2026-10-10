@@ -4,6 +4,16 @@ use super::helpers::*;
 
 impl Transpiler {
     pub(crate) fn emit_struct(&mut self, s: &StructDecl) {
+        if s.is_view {
+            // Parsed and checked, but not lowered yet (draft, "Implementation sequence", step 1):
+            // emitting it as a plain struct would produce invalid Rust (`impl View` has no definition).
+            self.push_error(s.line, s.col, format!(
+                "`view {}` cannot be transpiled yet: view lowering (state slots, bindings, the UI runtime) \
+                 is not implemented — `view` declarations currently only parse and type-check",
+                s.name,
+            ));
+            return;
+        }
         if s.is_native { return; }
         // Auto-derive Clone (and Debug) for all structs so that Vec<Struct>.iter().cloned()
         // and {:?} format work without requiring explicit annotations.
@@ -2582,7 +2592,12 @@ impl Transpiler {
         // type keeps trait and impl declarations consistent without needing `Self::Item<'_>`.
         for assoc in &t.assoc_types {
             if let Some(constraint) = &assoc.constraint {
-                let c = self.emit_type(constraint);
+                // A declared trait used as a bound is emitted by name — `emit_type` would turn a
+                // bare trait name into `Box<dyn Trait>`, which is not a valid bound.
+                let c = match constraint {
+                    Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => n.clone(),
+                    _ => self.emit_type(constraint),
+                };
                 // Only emit the bound if it's a trait name (a PascalCase identifier),
                 // not a concrete type like `Arc<str>`, `i64`, etc.
                 // Concrete type constraints from `type X as string` are dropped (emit plain `type X;`).
@@ -2611,6 +2626,12 @@ impl Transpiler {
         }
         self.indent -= 1;
         self.line("}");
+        // `IdentityKey` is a marker with a native blanket implementation (boring-ui draft,
+        // "`IdentityKey` and `Identifiable`"): every owned `Clone + Eq + Hash` type is a key,
+        // so applications never write `as IdentityKey` themselves.
+        if t.name == "IdentityKey" && t.signatures.is_empty() && t.type_params.is_empty() {
+            self.line("impl<T: Clone + Eq + std::hash::Hash> IdentityKey for T {}");
+        }
     }
 
     /// Emit a trait method signature.

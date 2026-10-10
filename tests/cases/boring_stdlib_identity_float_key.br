@@ -1,0 +1,11 @@
+# A float cannot be an `IdentityKey` (NaN has no total equality).
+use boring.identity.*
+
+struct Reading as Identifiable:
+    pub float value
+
+    type ID = float
+    req float id(): value
+
+def main():
+    print "unreachable"
