@@ -1282,6 +1282,10 @@ struct Transpiler {
     /// resident tuple, so the tail-expression emitter can recognize a tuple-literal
     /// tail and chain its resident positions instead of materializing them.
     pub(crate) current_fn_returns_resident_tuple: Option<Vec<bool>>,
+    /// Body of the free function being emitted (empty when unknown: methods, closures,
+    /// or no resident-tuple function exists). Lets a resident-tuple destructure see the
+    /// later uses of its own slots; see `helpers::resident_slot_uses_stay_resident`.
+    pub(crate) current_fn_body: Vec<Stmt>,
     /// Scoped to the function currently being emitted, same convention as
     /// `current_fn_returns_resident`: per-position flags copied from
     /// `fn_gpu_arg_params` for whichever function is being emitted right now, so
@@ -1632,6 +1636,7 @@ impl Transpiler {
             resident_call_vars: std::collections::HashMap::new(),
             current_fn_returns_resident: None,
             current_fn_returns_resident_tuple: None,
+            current_fn_body: Vec::new(),
             current_fn_gpu_arg_params: Vec::new(),
             current_fn_gpu_arg_param_names: std::collections::HashSet::new(),
             gpu_device_vars: std::collections::HashSet::new(),
@@ -3242,7 +3247,11 @@ impl Transpiler {
             for f in &all_fns {
                 let mut new_flags = vec![false; f.params.len()];
                 for (i, p) in f.params.iter().enumerate() {
-                    let resident_boundary = f.return_ty.as_ref().is_some_and(|ty| ty.gpu_resident_qual().is_some())
+                    let returns_resident = f.return_ty.as_ref().is_some_and(|ty| match ty {
+                        Type::Tuple(elems) => elems.iter().any(|t| t.gpu_resident_qual().is_some()),
+                        other => other.gpu_resident_qual().is_some(),
+                    });
+                    let resident_boundary = returns_resident
                         && p.ty.as_ref().is_some_and(|ty| {
                             matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
                                 if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
@@ -3279,6 +3288,22 @@ impl Transpiler {
                 self.fn_gpu_arg_params.insert(name.to_string(), flags);
             }
         }
+    }
+
+    /// Does position `arg_idx` of a call to `fn_name` take a `BoringGpuArg<T>` natively —
+    /// a kernel constructor's `'unified`/`'global` array field, or a function parameter
+    /// `compute_gpu_arg_params` flagged? Same classification as that fixed point, over
+    /// its final result.
+    pub(crate) fn gpu_arg_position_qualifies(&self, fn_name: &str, arg_idx: usize) -> bool {
+        if let Some(decl) = self.kernel_decls.get(fn_name) {
+            let Some(init) = decl.inits.first() else { return false };
+            let Some(init_param) = init.params.get(arg_idx) else { return false };
+            let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
+            let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
+            return matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
+                && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+        }
+        self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
     }
 
     fn gather_gpu_arg_fns_item<'a>(item: &'a Item, out: &mut Vec<&'a FnDecl>) {

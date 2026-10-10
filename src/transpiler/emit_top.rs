@@ -1691,6 +1691,7 @@ impl Transpiler {
         // `Item::Fn` (see `pre_scan`).
         let prev_current_fn_returns_resident = self.current_fn_returns_resident.take();
         let prev_current_fn_returns_resident_tuple = self.current_fn_returns_resident_tuple.take();
+        let prev_current_fn_body = std::mem::take(&mut self.current_fn_body);
         let prev_current_fn_gpu_arg_params = std::mem::take(&mut self.current_fn_gpu_arg_params);
         let prev_current_fn_gpu_arg_param_names = std::mem::take(&mut self.current_fn_gpu_arg_param_names);
         // `resident_call_vars` is genuinely per-function/method local state (a local
@@ -1708,6 +1709,9 @@ impl Transpiler {
         if self_ty.is_none() {
             self.current_fn_returns_resident = self.fn_returns_resident.get(&f.name).cloned();
             self.current_fn_returns_resident_tuple = self.fn_returns_resident_tuple.get(&f.name).cloned();
+            if !self.fn_returns_resident_tuple.is_empty() {
+                self.current_fn_body = f.body.clone();
+            }
             self.current_fn_gpu_arg_params = self.fn_gpu_arg_params.get(&f.name).cloned().unwrap_or_default();
             self.current_fn_gpu_arg_param_names = f.params.iter().enumerate()
                 .filter(|(i, _)| self.current_fn_gpu_arg_params.get(*i).copied().unwrap_or(false))
@@ -1939,6 +1943,7 @@ impl Transpiler {
         self.fn_return_ty      = prev_fn_return_ty;
         self.current_fn_returns_resident = prev_current_fn_returns_resident;
         self.current_fn_returns_resident_tuple = prev_current_fn_returns_resident_tuple;
+        self.current_fn_body = prev_current_fn_body;
         self.resident_call_vars = prev_resident_call_vars;
         self.current_fn_gpu_arg_params = prev_current_fn_gpu_arg_params;
         self.current_fn_gpu_arg_param_names = prev_current_fn_gpu_arg_param_names;

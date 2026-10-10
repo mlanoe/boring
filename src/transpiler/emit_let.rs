@@ -1464,6 +1464,9 @@ impl Transpiler {
         if self.try_emit_gpu_resident_call_let(s) {
             return;
         }
+        if self.try_emit_gpu_resident_alias_let(s) {
+            return;
+        }
         // A GPU-qualified local inside a resident-returning GPU function is a
         // loop-carried residency slot even when its initial value is ordinary
         // host data. Start it in the Host variant so a later synthesized tensor
@@ -2822,6 +2825,24 @@ impl Transpiler {
     /// itself must run exactly once, so this can't reuse `materialize_resident_call`
     /// (which re-embeds the whole call expression per element); it destructures
     /// once into per-position temps, then downloads only the ones that didn't opt in.
+    /// Whether an unannotated resident-tuple slot can skip the download at its binding
+    /// because every later use in this function takes a `BoringGpuArg<T>` natively
+    /// (see `helpers::resident_slot_uses_stay_resident`). Needs the enclosing function's
+    /// body (`current_fn_body`); without it (a method, a closure) the old
+    /// download-unless-annotated default applies.
+    fn unannotated_tuple_slot_stays_resident(&self, name: &str) -> bool {
+        if self.current_fn_body.is_empty() {
+            return false;
+        }
+        let mut classify = |fn_name: &str, idx: usize| self.gpu_arg_position_qualifies(fn_name, idx);
+        super::helpers::resident_slot_uses_stay_resident(
+            &self.current_fn_body,
+            name,
+            self.current_fn_returns_resident_tuple.as_deref(),
+            &mut classify,
+        )
+    }
+
     fn emit_resident_tuple_destructure(&mut self, s: &LetDestructureStmt, flags: &[bool]) {
         let elem_tys: Vec<Type> = match &s.value.kind {
             ExprKind::Call(callee, _) => match &callee.kind {
@@ -2837,6 +2858,7 @@ impl Transpiler {
         let needs_materialize: Vec<bool> = s.bindings.iter().enumerate().map(|(i, b)| {
             flags.get(i).copied().unwrap_or(false)
                 && !b.ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false)
+                && !(b.ty.is_none() && b.name != "_" && self.unannotated_tuple_slot_stays_resident(&b.name))
         }).collect();
         let names: Vec<String> = s.bindings.iter().enumerate().map(|(i, b)| {
             if b.name == "_" { "_".to_string() }

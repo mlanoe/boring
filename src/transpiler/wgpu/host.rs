@@ -296,6 +296,7 @@ impl<'a> HostEmitter<'a> {
         // `use` at the same scope is a duplicate-name error (E0252).
         self.line("use wgpu::util::DeviceExt;");
         self.line("use bytemuck::{Pod, Zeroable};");
+        self.line("fn set_gpu_batch_limit(_limit: i64) {}");
         if self.has_screen {
             self.line("use winit::application::ApplicationHandler;");
             self.line("use winit::event::{WindowEvent, ElementState};");

@@ -431,6 +431,42 @@ This is not a Boring limitation — it mirrors real GPU host/device memory separ
 
 **The correct pattern**: after a `kernel:` block completes, always read results back through `k.<field>` — never through the original host variable passed into the constructor. Every example in this repo already follows this: `examples/saxpy.br` and `linguist/samples/gpu.br`'s SAXPY section read `k.y[...]`; `examples/vector_add_gpu.br` reads back via `let result = k.result`; and `linguist/samples/gpu.br`'s `TileSum` section reads `ts.result`, not the `partial` array passed to its constructor.
 
+#### Warning: writing to a copy that nobody reads
+
+The same rule bites inside a `req` that wraps a kernel. A `mut` field initialized from an `init` parameter is a copy of the argument, so writing it from the kernel body updates the copy only. That is invisible to whoever passed the argument, even when the argument is itself a resident `'gpu'unified`/`'gpu'global` value (the generated wrapper copies the buffer, e.g. `__boring_metal_buffer_copy` on Metal):
+
+```boring
+kernel BumpKernel:
+    mut [float32]'unified a
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'unified aa, int nn):
+        a = aa
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            a[i] = a[i] + 1.0    # lands in the copy: the caller's buffer is untouched
+            out[i] = a[i]
+
+pub req [float32]'gpu'unified bump([float32]'global a, int n) throws:
+    mut k = BumpKernel(a, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out                         # only `out` leaves; the write to `a` is lost
+```
+
+`boring build` (every target) and `boring run` report this at the constructor call:
+
+```
+warning: write to `a` is discarded: `a` is a copy of the argument `aa`, so the caller never sees the write and `k.a` is never returned or read; return `k.a` (alone or in a tuple) or write to an output field instead
+```
+
+Return the field (`k.a`, or `(k.a, k.out)` for two outputs) or write to an output field built from a fresh allocation like `out`. The warning is deliberately narrow, so it stays quiet when the field is only read, when the field comes from a fresh allocation, when the constructor argument is a fresh temporary (`K([0.0 for ..<n])`, a scratch buffer written by design), when `k.<field>` is read anywhere in the function (returned, inside a returned tuple, or handed to a later kernel), and when the instance `k` escapes the function. It is a warning, not an error: the program still builds and runs.
+
 ### `'unified` — zero-copy host/device
 
 `'unified` fields share physical memory between host and device. No explicit H2D/D2H copy is needed. The `kernel:` block guarantees completion before the next host line.

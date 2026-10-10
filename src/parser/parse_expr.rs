@@ -310,24 +310,38 @@ impl Parser {
             let line = self.line();
             let col = self.col();
             self.advance(); // consume `|>`
-            // RHS: either `.method` (method pipe) or `func` (function pipe).
-            // After a dot, allow keyword-named methods like `.wait`, `.done`.
-            let (name, method_pipe) = if self.eat(&TokenKind::Dot) {
+            // RHS forms:
+            //   `name`       projects a field (`lhs.name`)
+            //   `name(args)` uses the pipe's normal function/method resolution
+            //   `.name(args)` forces a method call on `lhs`
+            //
+            // Calls require parentheses, including zero-argument calls.  Besides
+            // making the field form unambiguous, this matches the rule the pipe
+            // documentation has always advertised.  After a dot, allow
+            // keyword-named methods like `.wait()` and `.done()`.
+            let (name, forced_method) = if self.eat(&TokenKind::Dot) {
                 (self.expect_ident_or_keyword()?, true)
             } else {
                 (self.expect_ident()?, false)
             };
-            // Optional argument list
-            let args = if self.check(&TokenKind::LParen) {
-                self.parse_call_args()?
+            if self.check(&TokenKind::LParen) {
+                let args = self.parse_call_args()?;
+                if forced_method {
+                    // `lhs |> .method(args)` → `lhs.method(args)`.
+                    lhs = Expr { kind: ExprKind::MethodCall(Box::new(lhs), name, args), line, col, len: self.span_len(line, col)};
+                } else {
+                    lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line, col, len: self.span_len(line, col)};
+                }
+            } else if forced_method {
+                return Err(ParseError::Generic {
+                    line,
+                    col,
+                    len: self.span_len(line, col),
+                    msg: format!("method `{name}` in a pipe requires parentheses; write `|> .{name}()`"),
+                });
             } else {
-                vec![]
-            };
-            if method_pipe {
-                // `lhs |> .method(args)` → `lhs.method(args)` — emit as MethodCall
-                lhs = Expr { kind: ExprKind::MethodCall(Box::new(lhs), name, args), line, col, len: self.span_len(line, col)};
-            } else {
-                lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line, col, len: self.span_len(line, col)};
+                // `lhs |> field` → `lhs.field`.
+                lhs = Expr { kind: ExprKind::Field(Box::new(lhs), name), line, col, len: self.span_len(line, col)};
             }
         }
         // Consume Dedents corresponding to any Indents we skipped over

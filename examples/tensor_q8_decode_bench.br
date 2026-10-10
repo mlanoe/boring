@@ -1,0 +1,99 @@
+# Resident-buffer Metal benchmark for the five Qwen2.5-0.5B Q8_0 decode
+# projections that motivated the native schedule. Inputs and packed weights are
+# uploaded once per shape. Timed calls are queued back-to-back and only the final
+# result is read, so the measurement excludes repeated host uploads/readbacks.
+#
+#   boring build --target metal examples/tensor_q8_decode_bench.br
+#   cd examples/tensor_q8_decode_bench_metal
+#   BORING_METAL_BATCH=1 cargo run --release -- [calls]
+#
+# To compare against the accumulation-order oracle, rebuild with:
+#   [tensor.linear.decode]
+#   q8_0 = "scalar"
+
+use std.time.Instant
+
+kernel CopyQ8BytesKernel:
+    let [uint8]'global src
+    mut [uint8]'unified out
+    let int n
+
+    init([uint8]'global input, int count):
+        src = input
+        n = count
+        out = [0 as uint8 for ..<count]
+
+    def ():
+        let i = (gpu.thread.x + (gpu.block.x + gpu.block.y * gpu.grid_dim.x) * gpu.block_dim.x) * 16
+        var int j = 0
+        while j < 16:
+            if i + j < n:
+                out[i + j] = src[i + j]
+            j += 1
+
+req [uint8]'gpu'unified upload_q8(int n, [uint8]'global src) throws:
+    let blocks = (n + 4095) / 4096
+    let gx = if blocks > 65535: 65535 else: blocks
+    let gy = (blocks + gx - 1) / gx
+    mut copy = CopyQ8BytesKernel(src, n)
+    kernel:
+        copy(block = 256, grid = (gx, gy))
+    copy.out
+
+req [float32]'gpu'unified q8([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
+    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q8_0")
+    y
+
+def benchmark(int n, int k, int calls) throws:
+    let [float32] x = [((i * 13 % 37) as float32 - 18.0 as float32) / 32.0 as float32 for i in 0..<k]
+    let totalBytes = n * k / 32 * 34
+    let [uint8] packed = [q8_byte(i) as uint8 for i in 0..<totalBytes]
+    let resident = upload_q8(totalBytes, packed)
+
+    let warmup = q8(x, resident, n, k)
+    with warmup:
+        let warmupSink = warmup[0]
+
+    let started = Instant.now()
+    var iteration = 1
+    mut result = q8(x, resident, n, k)
+    while iteration < calls:
+        result = q8(x, resident, n, k)
+        iteration += 1
+    with result:
+        let micros = started.elapsed().asMicros() as float64
+        let perCall = micros / (calls as float64)
+        let gbs = (totalBytes as float64) / perCall / 1000.0
+        var sum = 0.0 as float64
+        var weighted = 0.0 as float64
+        for i in 0..<n:
+            sum += result[i] as float64
+            weighted += (result[i] as float64) * ((i % 7 + 1) as float64)
+        print "q8_0 n={n} k={k}: {perCall:.1f} us/call, {gbs:.2f} GB/s, sum={sum:.5f} weighted={weighted:.5f} first={result[0]} last={result[n - 1]}"
+
+int q8_byte(int i):
+    let at = i % 34
+    # Alternating signed float16 scales: +0.0625 (0x2c00), -0.03125 (0xa800).
+    let block = i / 34
+    if at == 0:
+        return 0
+    if at == 1:
+        if block % 2 == 0:
+            return 44
+        return 168
+    return (block * 29 + (at - 2) * 17 + 131) % 256
+
+def main() throws:
+    let [string] argv = args()
+    var calls = 20
+    if argv.length > 1:
+        guard let parsed = (argv[1] as int) else throw "expected an integer call count"
+        calls = parsed
+    guard calls > 0 else throw "call count must be positive"
+
+    benchmark(896, 896, calls)
+    benchmark(128, 896, calls)
+    benchmark(4864, 896, calls)
+    benchmark(896, 4864, calls)
+    benchmark(151936, 896, calls)

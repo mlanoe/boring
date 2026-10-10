@@ -131,7 +131,7 @@ The generated project has no `build.rs`. Compilation happens once at app startup
 
 ## Error handling
 
-Kernel dispatch is deferred: `__boring_launch` only commits the command buffer, and the actual `wait_until_completed()` happens lazily, at the next point host code actually reads GPU-written data back (`read_<field>()`, or the shared `__boring_gpu_copy_d2h` helper) — see the generated prelude's `__boring_metal_flush` for the full rationale (this is a real, measured performance win, not just plumbing).
+Kernel dispatch is deferred: `__boring_launch` commits one command buffer per launch by default. Setting `BORING_METAL_BATCH=N` (N > 1, opt-in) instead encodes launches into the thread's open command buffer (one compute encoder per launch) and commits it when it holds N launches, when a host read needs the results, or before a first-use pipeline compile; the actual `wait_until_completed()` happens lazily, at the next point host code actually reads GPU-written data back (`read_<field>()`, or the shared `__boring_gpu_copy_d2h` helper) — see the generated prelude's `__boring_metal_flush` for the full rationale. Committed batches are throttled to `BORING_METAL_INFLIGHT` launches in flight (default 64), which bounds the memory their retained buffers keep alive. Committing a command buffer per launch cost about 22 µs of CPU time each; encoding into a shared command buffer costs about 1.5 µs (a 435-launch chain of trivial kernels went from 26-28 to 4-5 µs per launch). Batching helps CPU-bound launch chains; it does not help GPU-bound workloads (boring-llm's decode is 90% blocked on the GPU), and on an idle machine it made boring-llm's first token about 8% later, because the CPU down-clocks during the longer GPU waits. Ordering and hazards are unchanged: Metal still tracks them between the launches' encoders, and the command buffer retains every buffer its launches use until it completes.
 
 That flush point is also where a GPU-side failure (invalid threadgroup size, out-of-bounds buffer access, device removal, ...) actually surfaces: the command buffer's own `status()` is checked after `wait_until_completed()`, and `read_<field>()` returns `Result<Vec<T>, Box<dyn std::error::Error + Send + Sync>>` instead of the plain `Vec<T>` it used to — propagating via `?` up to `boring_main()`'s own `Result` (always present once any kernel is involved). Previously, a failed dispatch completed with `status() == Error` and nothing ever looked — `read_<field>()` read back whatever garbage or zeroed memory was left, and the Boring program reported success regardless.
 
@@ -147,9 +147,11 @@ This is a message improvement, not a catchable [`GpuError`](gpu-module.html#gpu-
 
 ## Device-to-device chaining
 
-Feeding one kernel's output directly into a read-only field of another kernel's constructor (`Consume(k1.out)`) retains the same `MTLBuffer` when that expression is the final use of `k1`. Queue ordering makes the consumer wait for the producer without a CPU flush. If the source kernel is used again later, or the destination field is mutable, `__boring_metal_buffer_copy` preserves independent-value semantics by allocating a fresh buffer and enqueuing a Metal blit on the shared command queue. The blit is asynchronous: it performs neither `wait_until_completed()` nor a host `memcpy`.
+Feeding one kernel's output directly into a read-only field of another kernel's constructor (`Consume(k1.out)`) retains the same `MTLBuffer` when that expression is the final use of `k1`. Queue ordering makes the consumer wait for the producer without a CPU flush. If the source kernel is used again later, or the destination field is mutable, `__boring_metal_buffer_copy` preserves independent-value semantics by allocating a fresh buffer and encoding a Metal blit into the open launch batch (so it stays ordered after the launches encoded before it). The blit is asynchronous: it performs neither `wait_until_completed()` nor a host `memcpy`.
 
 The independent-value path is deliberately **not** `Buffer::clone()`: in the real `metal` crate, `Clone` on an Objective-C wrapper type is just an ObjC `retain` (a reference-count bump), not a content copy. Aliasing is only selected for a read-only destination at a proven final use of the source kernel; otherwise a later source dispatch must not change the consumer's value.
+
+A `mut` kernel field initialized from a constructor argument always takes the independent-value path above, so a kernel write to it lands in the copy and never reaches the caller's buffer. `boring build` warns when such a write is discarded (the field is neither returned nor read in the enclosing function); see [GPU computing — Host variables never alias kernel fields](gpu-module.html#host-variables-never-alias-kernel-fields) for the rule and its exceptions.
 
 ---
 
@@ -211,5 +213,5 @@ transpiler to handle.
 
 - **Host crate**: `metal` v0.29 — simpler API, still maintained.
 - **Buffer index ordering**: unified/global/actor arrays → const fields → local scalars → dynamic shared (`threadgroup`). Device and host use the same fixed order.
-- **Dispatch**: synchronous — `wait_until_completed()` is called inside `__boring_launch`. `after =` is accepted syntactically but has no effect.
+- **Dispatch**: deferred — launches are batched into shared command buffers and waited on at the next host read (see Error handling). `after =` is accepted syntactically but has no effect.
 - **Atomics**: `atomicSub` has no MSL equivalent — emitted as `atomic_fetch_add_explicit` with a negated value, `memory_order_relaxed`.

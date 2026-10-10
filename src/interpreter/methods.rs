@@ -2001,7 +2001,15 @@ impl Interpreter {
                     let inner = inner_rc.borrow();
                     (inner.type_name.clone(), inner.fields.clone())
                 };
-                // Check for zero-param req method acting as property getter
+                // A stored field wins over a same-named zero-param method. Explicit
+                // calls (`obj.name()`) use method dispatch, while field expressions
+                // (`obj.name`) must read the field; checking the getter first makes a
+                // method such as `req int uid(): self.uid` recurse forever.
+                for (name, val) in &fields {
+                    if name == field { return Ok(val.clone()); }
+                }
+                // With no stored field, allow a zero-param req method to act as a
+                // property getter.
                 let struct_val = self.global.borrow().get(&type_name);
                 if let Some(Value::Struct { decl, captured }) = struct_val {
                     if let Some(method) = decl.methods.iter().find(|m| m.name == field && !m.mutating && m.params.is_empty()).cloned() {
@@ -2030,10 +2038,6 @@ impl Interpreter {
                         if pushed { self.type_param_stack.pop(); }
                         return result;
                     }
-                }
-                // Fall through to raw field access
-                for (name, val) in &fields {
-                    if name == field { return Ok(val.clone()); }
                 }
                 Err(err(format!("field '{}' not found on '{}'", field, type_name), line))
             }

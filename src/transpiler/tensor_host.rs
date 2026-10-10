@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 /// and the shader (`transpiler::metal::device`) both derive from this.
 pub(crate) const Q4K_ROWS_PER_SIMDGROUP: usize = 2;
 
+/// Output rows one Metal SIMD group computes in the native Q8_0 single-token
+/// schedule. Four eight-lane partitions walk four packed blocks concurrently;
+/// keeping four row accumulators amortizes each activation load across four
+/// independent weight rows without excessive register pressure.
+pub(crate) const Q8_ROWS_PER_SIMDGROUP: usize = 4;
+
 #[derive(Clone, Debug)]
 pub(crate) struct TensorLinearConfig {
     pub matrix_algorithm: Option<String>,
@@ -868,7 +874,8 @@ fn parse_dynamic_replacement_stmts(
     } else if native_packed && call.format == Some("q6_k") {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed {
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
+        let rows_per_block = 8 * Q8_ROWS_PER_SIMDGROUP;
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if portable_tiled_quantized {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 15) / 16))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else {

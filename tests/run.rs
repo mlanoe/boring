@@ -396,6 +396,10 @@ interp_test!(pub_top_level_string_const);
 // was never affected (its Array/Set/Dict shortcuts are gated by value type,
 // never reached for a struct/Object); this is here to lock that in.
 interp_test!(struct_count_field);
+// A stored field and a method may share a name: bare access reads the field,
+// while call syntax dispatches the method. Method-first field lookup used to
+// make the method's `self.uid` recursively call itself until stack overflow.
+interp_test!(field_method_same_name);
 // String-interpolating a struct field whose type is an array (`[int]`,
 // `[string]`, and one level of field chaining). The interpreter never had
 // this bug (see tests/transpile.rs's registration for the real regression

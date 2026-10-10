@@ -110,12 +110,22 @@ struct HostEmitter {
     /// Free function name → its `Type` when GPU-resident-returning. See
     /// `cuda::host`'s identical field.
     fn_returns_resident: std::collections::HashMap<String, Type>,
+    /// Free function name -> resident positions in a tuple return type.
+    fn_returns_resident_tuple: std::collections::HashMap<String, Vec<bool>>,
+    /// Resident tuple positions for the function currently being emitted.
+    in_resident_tuple_return: Option<Vec<bool>>,
     /// Free function name → per-parameter "is this a `[float]` array?" flags.
     /// See `is_float_array_param`'s doc for why this backend, uniquely among
     /// the three GPU targets, needs this (Metal's native buffer width is f32,
     /// but the general pass's host convention is fixed at f64).
     fn_float_array_params: std::collections::HashMap<String, Vec<bool>>,
-    fn_gpu_array_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Free function name -> per-parameter `Some(host element type)` for each
+    /// `'gpu'global`/`'gpu'unified` array parameter (`None` for any other
+    /// parameter). The element type is `general_host_elem_type` of the param,
+    /// i.e. the `T` in the callee's own `BoringGpuArg<T>` signature, so a
+    /// host value wrapped at a call site converts to exactly that width
+    /// (`f32` for `[float32]`, `f64` for `[float]`) instead of a fixed `f64`.
+    fn_gpu_array_params: std::collections::HashMap<String, Vec<Option<String>>>,
     /// Local variable names (current function only, reset per `emit_fn` call,
     /// mirrors `ref_params`' scoping) bound directly to a materializing call
     /// (`let k_t = transpose_gpu(...)`) -- these are `Vec<f64>` (the general
@@ -221,6 +231,8 @@ impl HostEmitter {
             ref_params: std::collections::HashSet::new(),
             in_resident_return: None,
             fn_returns_resident: std::collections::HashMap::new(),
+            fn_returns_resident_tuple: std::collections::HashMap::new(),
+            in_resident_tuple_return: None,
             fn_float_array_params: std::collections::HashMap::new(),
             fn_gpu_array_params: std::collections::HashMap::new(),
             f64_array_locals: std::collections::HashSet::new(),
@@ -364,11 +376,20 @@ impl HostEmitter {
                 self.fn_float_array_params.insert(f.name.clone(), float_array_flags);
                 self.fn_gpu_array_params.insert(
                     f.name.clone(),
-                    f.params.iter().map(|p| p.ty.as_ref().is_some_and(is_gpu_array_param)).collect(),
+                    f.params.iter()
+                        .map(|p| p.ty.as_ref().filter(|t| is_gpu_array_param(t)).map(general_host_elem_type))
+                        .collect(),
                 );
                 if let Some(rt) = &f.return_ty {
                     if rt.gpu_resident_qual().is_some() {
                         self.fn_returns_resident.insert(f.name.clone(), rt.clone());
+                    } else if let Type::Tuple(elems) = rt {
+                        let flags: Vec<bool> = elems.iter()
+                            .map(|t| t.gpu_resident_qual().is_some())
+                            .collect();
+                        if flags.iter().any(|&resident| resident) {
+                            self.fn_returns_resident_tuple.insert(f.name.clone(), flags);
+                        }
                     }
                 }
             }
@@ -532,6 +553,11 @@ impl HostEmitter {
         self.line("return Ok(__p);");
         self.indent -= 1;
         self.line("}");
+        // A first-use pipeline compile (and the MSL library compile before it)
+        // stalls the CPU for milliseconds: submit the open launch batch first
+        // so the GPU keeps working through the stall instead of idling on
+        // launches that are encoded but not yet committed.
+        self.line("__boring_metal_commit();");
         self.line("let __library = __BORING_METAL_LIBRARY.with(|c| c.borrow().clone());");
         self.line("let __library = match __library {");
         self.indent += 1;
@@ -651,6 +677,114 @@ impl HostEmitter {
         self.indent += 1;
         self.line("static __BORING_METAL_QUEUE: std::cell::RefCell<Option<CommandQueue>> = std::cell::RefCell::new(None);");
         self.line("static __BORING_METAL_PENDING: std::cell::RefCell<Option<CommandBuffer>> = std::cell::RefCell::new(None);");
+        self.line("static __BORING_METAL_BATCH: std::cell::RefCell<Option<__BoringBatch>> = std::cell::RefCell::new(None);");
+        self.line("static __BORING_METAL_BATCH_LIMIT: std::cell::Cell<usize> = std::cell::Cell::new(std::env::var(\"BORING_METAL_BATCH\").ok().and_then(|v| v.parse().ok()).unwrap_or(1));");
+        self.line("static __BORING_METAL_INFLIGHT_LIMIT: usize = std::env::var(\"BORING_METAL_INFLIGHT\").ok().and_then(|v| v.parse().ok()).unwrap_or(64);");
+        self.line("static __BORING_METAL_INFLIGHT: std::cell::RefCell<std::collections::VecDeque<(CommandBuffer, usize)>> = std::cell::RefCell::new(std::collections::VecDeque::new());");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+
+        // Launch batching. Committing one command buffer per kernel launch
+        // costs ~22 us of CPU time each (command buffer + encoder creation
+        // and the commit itself); encoding consecutive launches into one
+        // command buffer costs ~1.5 us each. So `__boring_launch` encodes
+        // into the thread's open batch (one command buffer) instead, and the
+        // batch is committed only when
+        //   * something needs the results (`__boring_metal_flush`: host
+        //     reads), or another queue consumes them (screen present), or
+        //     the next launch needs a first-use pipeline compile, or
+        //   * it holds `BORING_METAL_BATCH` dispatches. The default is 1 (the
+        //     old one-command-buffer-per-launch behaviour): batching is
+        //     opt-in because it only pays off for CPU-bound launch chains.
+        //     On GPU-bound workloads (boring-llm decode) the launch cost is
+        //     hidden behind kernel time, and on an idle machine the main
+        //     thread's longer GPU waits let the CPU down-clock, which slowed
+        //     the CPU phases between forward passes (first token ~8% later).
+        // Committed batches are throttled to `BORING_METAL_INFLIGHT` launches
+        // (default 64) in flight: past that, `__boring_metal_commit` waits for
+        // the oldest. The old path was throttled implicitly by Metal's cap on
+        // uncompleted command buffers; without a bound the CPU encodes a whole
+        // forward pass ahead of the GPU and every intermediate buffer stays
+        // alive at once (boring-llm's prefill peaked at 2.4 GB instead of
+        // 1.7 GB).
+        // The command buffer retains every buffer its encoders use until it
+        // completes (Metal's default retained references), so a buffer
+        // dropped on the host while its launch is still queued stays alive.
+        // Per-launch scalar arguments go through `set_bytes`, copied at
+        // encode time.
+        self.line("struct __BoringBatch { cmd: CommandBuffer, n: usize }");
+        self.blank();
+        self.line("fn __boring_metal_batch_cmd<'a>(b: &'a mut Option<__BoringBatch>, queue: &CommandQueue) -> &'a mut __BoringBatch {");
+        self.indent += 1;
+        self.line("b.get_or_insert_with(|| __BoringBatch { cmd: queue.new_command_buffer().to_owned(), n: 0 })");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // Each launch gets its own compute encoder on the batch's command
+        // buffer (~1.5 us, the same as encoding every launch into one shared
+        // encoder, measured in plain Metal). Not a shared encoder: a serial
+        // one runs every dispatch to completion before the next starts, and a
+        // concurrent one does not order dependent dispatches at all, even on
+        // hazard-tracked buffers (measured on boring-llm: wrong logits, top-1
+        // 92/613 instead of 594). Separate encoders keep Metal's own tracking
+        // of hazards between encoders, which orders exactly the launches that
+        // conflict.
+        self.line("fn __boring_metal_encoder(queue: &CommandQueue) -> ComputeCommandEncoder {");
+        self.indent += 1;
+        self.line("__BORING_METAL_BATCH.with(|c| {");
+        self.indent += 1;
+        self.line("let mut g = c.borrow_mut();");
+        self.line("__boring_metal_batch_cmd(&mut g, queue).cmd.new_compute_command_encoder().to_owned()");
+        self.indent -= 1;
+        self.line("})");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // Called after each dispatch is encoded.
+        self.line("fn __boring_metal_launched() {");
+        self.indent += 1;
+        self.line("let full = __BORING_METAL_BATCH.with(|c| {");
+        self.indent += 1;
+        self.line("let mut g = c.borrow_mut();");
+        self.line("match g.as_mut() { Some(b) => { b.n += 1; b.n >= __BORING_METAL_BATCH_LIMIT.with(|l| l.get()) } None => false }");
+        self.indent -= 1;
+        self.line("});");
+        self.line("if full { __boring_metal_commit(); }");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // Runtime-selectable batching lets an application batch a launch-heavy
+        // decode section without imposing the same policy on GPU-bound prefill.
+        // Commit the current partial batch before changing its threshold so one
+        // command buffer never straddles two policies.
+        self.line("fn set_gpu_batch_limit(limit: i64) {");
+        self.indent += 1;
+        self.line("__boring_metal_commit();");
+        self.line("__BORING_METAL_BATCH_LIMIT.with(|l| l.set(limit.max(1) as usize));");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // Close the open batch (if any) and submit it; the result is now the
+        // latest pending command buffer. Does not wait.
+        self.line("fn __boring_metal_commit() {");
+        self.indent += 1;
+        self.line("let batch = __BORING_METAL_BATCH.with(|c| c.borrow_mut().take());");
+        self.line("if let Some(b) = batch {");
+        self.indent += 1;
+        self.line("b.cmd.commit();");
+        self.line("let limit = __BORING_METAL_INFLIGHT_LIMIT.with(|l| *l);");
+        self.line("__BORING_METAL_INFLIGHT.with(|q| {");
+        self.indent += 1;
+        self.line("let mut q = q.borrow_mut();");
+        self.line("q.push_back((b.cmd.clone(), b.n));");
+        self.line("while q.front().map_or(false, |(c, _)| matches!(c.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error)) { q.pop_front(); }");
+        self.line("while q.len() > 1 && q.iter().map(|(_, n)| *n).sum::<usize>() > limit { if let Some((c, _)) = q.pop_front() { c.wait_until_completed(); } }");
+        self.indent -= 1;
+        self.line("});");
+        self.line("__BORING_METAL_PENDING.with(|c| *c.borrow_mut() = Some(b.cmd));");
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -676,11 +810,13 @@ impl HostEmitter {
         // instead of silent wrong behavior.
         self.line("fn __boring_metal_flush() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
+        self.line("__boring_metal_commit();");
         self.line("__BORING_METAL_PENDING.with(|c| {");
         self.indent += 1;
         self.line("if let Some(buf) = c.borrow_mut().take() {");
         self.indent += 1;
         self.line("buf.wait_until_completed();");
+        self.line("__BORING_METAL_INFLIGHT.with(|q| q.borrow_mut().clear());");
         self.line("if buf.status() == MTLCommandBufferStatus::Error {");
         self.indent += 1;
         // `CommandBufferRef` doesn't expose a safe `.error()` getter (checked
@@ -836,19 +972,26 @@ impl HostEmitter {
         // equivalent bug, a real E0382 the compiler catches). The blit is
         // submitted on the backend's shared queue, so FIFO command-
         // buffer ordering makes it wait for preceding kernel writes without a
-        // CPU-side flush or host memcpy.  Recording it as the latest pending
-        // command buffer also makes a later readback wait for the copy.
+        // CPU-side flush or host memcpy.  It is encoded into the open batch, so
+        // a later readback (which commits the batch) also waits for the copy.
         self.line("fn __boring_metal_buffer_copy(dev: &Device, buf: &Buffer) -> Result<Buffer, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         self.line("let len = buf.length();");
         self.line("let new_buf = dev.new_buffer(len, MTLResourceOptions::StorageModeShared);");
         self.line("let queue = __boring_metal_queue(dev);");
-        self.line("let cmd_buf = queue.new_command_buffer();");
-        self.line("let blit = cmd_buf.new_blit_command_encoder();");
+        // The blit joins the open batch's command buffer, so it stays ordered
+        // after the launches encoded before it (Metal tracks the hazard
+        // between encoders).
+        self.line("__BORING_METAL_BATCH.with(|c| {");
+        self.indent += 1;
+        self.line("let mut g = c.borrow_mut();");
+        self.line("let b = __boring_metal_batch_cmd(&mut g, &queue);");
+        self.line("let blit = b.cmd.new_blit_command_encoder();");
         self.line("blit.copy_from_buffer(buf, 0, &new_buf, 0, len);");
         self.line("blit.end_encoding();");
-        self.line("cmd_buf.commit();");
-        self.line("__BORING_METAL_PENDING.with(|c| *c.borrow_mut() = Some(cmd_buf.to_owned()));");
+        self.indent -= 1;
+        self.line("});");
+        self.line("__boring_metal_launched();");
         self.line("Ok(new_buf)");
         self.indent -= 1;
         self.line("}");
@@ -918,6 +1061,9 @@ impl HostEmitter {
         self.indent -= 1;
         self.line(") {");
         self.indent += 1;
+        // The pixels may be written by launches still sitting in the open
+        // batch; submit them before this (separate-queue) present.
+        self.line("__boring_metal_commit();");
         self.line("let drawable = match layer.next_drawable() { Some(d) => d, None => return };");
         self.line("let cmd_buf = queue.new_command_buffer();");
         self.line("let blit = cmd_buf.new_blit_command_encoder();");
@@ -1720,8 +1866,7 @@ impl HostEmitter {
             .collect();
 
         // Dispatch.
-        self.line("let __cmd_buf = self.__queue.new_command_buffer();");
-        self.line("let __encoder = __cmd_buf.new_compute_command_encoder();");
+        self.line("let __encoder = __boring_metal_encoder(&self.__queue);");
         self.line("__encoder.set_compute_pipeline_state(&self.__pipeline);");
 
         // Set buffers in the same order as MSL parameters.
@@ -1786,8 +1931,7 @@ impl HostEmitter {
         self.indent -= 1;
         self.line(");");
         self.line("__encoder.end_encoding();");
-        self.line("__cmd_buf.commit();");
-        self.line("__BORING_METAL_PENDING.with(|c| *c.borrow_mut() = Some(__cmd_buf.to_owned()));");
+        self.line("__boring_metal_launched();");
         self.line("Ok(())");
         self.indent -= 1;
         self.line("}");
@@ -1836,9 +1980,22 @@ impl HostEmitter {
         // function's doc for why the two diverge here specifically (Metal's
         // native device-buffer width vs the general pass's fixed host convention).
         let resident_elem = f.return_ty.as_ref().and_then(|t| t.gpu_resident_qual().map(|_| general_host_elem_type(t)));
+        let resident_tuple = self.fn_returns_resident_tuple.get(&f.name).cloned();
         let plain_ret = match &resident_elem {
             Some(elem) => format!("BoringGpuArg<{}>", elem),
-            None => f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into()),
+            None => match (&f.return_ty, &resident_tuple) {
+                (Some(Type::Tuple(elems)), Some(flags)) => {
+                    let parts: Vec<String> = elems.iter().enumerate().map(|(i, ty)| {
+                        if flags.get(i).copied().unwrap_or(false) {
+                            format!("BoringGpuArg<{}>", general_host_elem_type(ty))
+                        } else {
+                            rust_type(ty)
+                        }
+                    }).collect();
+                    format!("({})", parts.join(", "))
+                }
+                _ => f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into()),
+            },
         };
         // `throws` → `Result<T, Box<dyn std::error::Error + Send + Sync>>`. See
         // `cuda::host`'s identical change for the full rationale — previously
@@ -1862,6 +2019,8 @@ impl HostEmitter {
         self.in_throws = f.throws;
         let outer_in_resident_return = self.in_resident_return.take();
         self.in_resident_return = resident_elem.clone();
+        let outer_in_resident_tuple_return = self.in_resident_tuple_return.take();
+        self.in_resident_tuple_return = resident_tuple;
         let outer_ref_params = std::mem::take(&mut self.ref_params);
         let outer_f64_array_locals = std::mem::take(&mut self.f64_array_locals);
         let outer_resident_locals = std::mem::take(&mut self.resident_locals);
@@ -1909,7 +2068,9 @@ impl HostEmitter {
                         // element type already matches (e.g. int arrays). Tries
                         // `try_resident_field_expr` FIRST, before emitting the
                         // materializing read at all -- see its doc comment.
-                        let wrapped = if self.in_resident_return.is_some() {
+                        let wrapped = if let Some(tuple) = self.try_resident_tuple_expr(e) {
+                            tuple
+                        } else if self.in_resident_return.is_some() {
                             if let Some(resident) = match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }.or_else(|| self.try_resident_field_expr(e)) {
                                 resident
                             } else {
@@ -1943,6 +2104,7 @@ impl HostEmitter {
         self.self_type = outer_self_type;
         self.in_throws = outer_in_throws;
         self.in_resident_return = outer_in_resident_return;
+        self.in_resident_tuple_return = outer_in_resident_tuple_return;
         self.ref_params = outer_ref_params;
         self.f64_array_locals = outer_f64_array_locals;
         self.resident_locals = outer_resident_locals;
@@ -2044,6 +2206,20 @@ impl HostEmitter {
                 let names: Vec<String> = s.bindings.iter().map(|b| b.name.clone()).collect();
                 let rhs = self.expr(&s.value);
                 self.line(&format!("{} ({}) = {};", binding, names.join(", "), rhs));
+                if let ExprKind::Call(callee, _) = &s.value.kind {
+                    if let ExprKind::Var(fn_name) = &callee.kind {
+                        if let Some(flags) = self.fn_returns_resident_tuple.get(fn_name).cloned() {
+                            for (i, b) in s.bindings.iter().enumerate() {
+                                if flags.get(i).copied().unwrap_or(false)
+                                    && b.ty.as_ref().is_some_and(|t| t.gpu_resident_qual().is_some())
+                                    && b.name != "_"
+                                {
+                                    self.resident_locals.insert(b.name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
             // Non-tail-position `match` — see `cuda::host`'s identical case.
             Stmt::Match(m) => {
@@ -2392,6 +2568,8 @@ impl HostEmitter {
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
+            fn_returns_resident_tuple: self.fn_returns_resident_tuple.clone(),
+            in_resident_tuple_return: self.in_resident_tuple_return.clone(),
             fn_float_array_params: self.fn_float_array_params.clone(),
             fn_gpu_array_params: self.fn_gpu_array_params.clone(),
             f64_array_locals: self.f64_array_locals.clone(),
@@ -2668,14 +2846,17 @@ impl HostEmitter {
                 let float_flags = callee_name.and_then(|n| self.fn_float_array_params.get(n)).cloned();
                 let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
-                    if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
+                    if let Some(elem) = gpu_flags.as_ref().and_then(|f| f.get(i)).and_then(|e| e.as_deref()) {
                         if let ExprKind::Var(name) = &a.value.kind {
                             if self.resident_locals.contains(name.as_str()) {
                                 return format!("{}.clone()", name);
                             }
                         }
+                        // Convert to the callee's own `BoringGpuArg<elem>` width
+                        // (not a fixed `f64`): a `[float32]` param is
+                        // `BoringGpuArg<f32>`.
                         let value = self.expr(&a.value);
-                        return format!("BoringGpuArg::Host(({}).iter().map(|&x| x as f64).collect::<Vec<f64>>())", value);
+                        return format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", value);
                     }
                     // A `[float]` position on the callee expects `&Vec<f64>` (see
                     // `is_float_array_param`'s doc), but every value flowing
@@ -3302,6 +3483,30 @@ impl HostEmitter {
             _ => None,
         }
     }
+
+    /// Render a tuple tail according to the declared per-position residency.
+    /// Resident kernel fields and already-resident locals pass through without
+    /// invoking the normal field-read/D2H expression path.
+    fn try_resident_tuple_expr(&mut self, e: &Expr) -> Option<String> {
+        let flags = self.in_resident_tuple_return.clone()?;
+        let ExprKind::Tuple(elems) = &e.kind else { return None; };
+        if elems.len() != flags.len() { return None; }
+        let parts = elems.iter().enumerate().map(|(i, elem)| {
+            if !flags[i] {
+                return self.expr(elem);
+            }
+            if let ExprKind::Var(name) = &elem.kind {
+                if self.resident_locals.contains(name.as_str()) {
+                    return format!("{}.clone()", name);
+                }
+            }
+            self.try_resident_field_expr(elem).unwrap_or_else(|| {
+                let value = self.expr(elem);
+                format!("BoringGpuArg::Host({value})")
+            })
+        }).collect::<Vec<_>>();
+        Some(format!("({})", parts.join(", ")))
+    }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
@@ -3431,6 +3636,10 @@ fn rust_type(ty: &Type) -> String {
         Type::Generic(n, args) => {
             let s: Vec<String> = args.iter().map(rust_type).collect();
             format!("{}<{}>", n, s.join(", "))
+        }
+        Type::Tuple(elems) => {
+            let s: Vec<String> = elems.iter().map(rust_type).collect();
+            format!("({})", s.join(", "))
         }
         _ => "()".into(),
     }

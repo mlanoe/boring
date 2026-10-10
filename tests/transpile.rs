@@ -581,6 +581,7 @@ transpile_test!(const_promotion_known_fn);
 // case's real value is exactly that real `cargo run` compile, same rationale
 // as `top_level_const` above.
 transpile_test!(struct_count_field);
+transpile_test!(field_method_same_name);
 // String-interpolating a struct field whose type is an array (`[int]`,
 // `[string]`, and one level of field chaining) emitted a bare
 // `println!("{}", p.scores)` on a `Vec<isize>`/`Vec<Rc<str>>` field -- these

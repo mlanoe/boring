@@ -5447,6 +5447,7 @@ impl Transpiler {
             resident_call_vars: self.resident_call_vars.clone(),
             current_fn_returns_resident: self.current_fn_returns_resident.clone(),
             current_fn_returns_resident_tuple: self.current_fn_returns_resident_tuple.clone(),
+            current_fn_body: Vec::new(),
             current_fn_gpu_arg_params: self.current_fn_gpu_arg_params.clone(),
             current_fn_gpu_arg_param_names: self.current_fn_gpu_arg_param_names.clone(),
             gpu_device_vars: self.gpu_device_vars.clone(),

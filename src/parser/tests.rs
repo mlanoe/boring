@@ -1,6 +1,47 @@
 use crate::ast;
 
 #[test]
+fn test_pipe_bare_name_projects_field() {
+    let tokens = crate::lexer::lex("let result = value |> output").expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    let ast::Item::Let(binding) = &program.items[0] else {
+        panic!("expected let statement");
+    };
+    let Some(ast::Expr { kind: ast::ExprKind::Field(lhs, field), .. }) = &binding.value else {
+        panic!("expected field projection, got {:?}", binding.value);
+    };
+    assert!(matches!(&lhs.kind, ast::ExprKind::Var(name) if name == "value"));
+    assert_eq!(field, "output");
+}
+
+#[test]
+fn test_pipe_parentheses_select_call_and_dot_forces_method() {
+    for (src, forced_method) in [
+        ("let result = value |> output()", false),
+        ("let result = value |> .output()", true),
+    ] {
+        let tokens = crate::lexer::lex(src).expect("lex");
+        let program = crate::parser::parse(tokens).expect("parse");
+        let ast::Item::Let(binding) = &program.items[0] else {
+            panic!("expected let statement");
+        };
+        let value = binding.value.as_ref().expect("initializer");
+        if forced_method {
+            assert!(matches!(&value.kind, ast::ExprKind::MethodCall(_, name, args) if name == "output" && args.is_empty()));
+        } else {
+            assert!(matches!(&value.kind, ast::ExprKind::Pipe(_, name, args) if name == "output" && args.is_empty()));
+        }
+    }
+}
+
+#[test]
+fn test_pipe_forced_method_requires_parentheses() {
+    let tokens = crate::lexer::lex("let result = value |> .output").expect("lex");
+    let err = crate::parser::parse(tokens).expect_err("expected missing-parentheses error");
+    assert!(err.msg().contains("requires parentheses"), "unexpected error: {}", err.msg());
+}
+
+#[test]
 fn test_fn_type_param() {
     // `def Int apply(Int f(Int), Int x):` should parse with Fn-typed first param
     let src = "def Int apply(Int f(Int), Int x):\n    f(x)";

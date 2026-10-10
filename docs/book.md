@@ -5260,8 +5260,10 @@ let result = value |> f(extra_args)
 
 | Right-hand side | Boring desugaring | Rust output |
 |-----------------|-------------------|-------------|
+| Field name      | `value |> field`  | `value.field` |
 | Known function  | `f(value, args)`  | `f(value, args)` |
 | Method name     | `value.f(args)`   | `value.f(args)` |
+| Forced method   | `value |> .f(args)` | `value.f(args)` |
 
 ### Examples
 
@@ -5300,9 +5302,19 @@ let nums = [-1, 2, -3, 4]
     |> reversed()        # method dispatch:  nums.reversed()
 ```
 
+Field projection and forced method dispatch:
+
+```boring
+let name = user |> profile |> display_name  # user.profile.display_name
+let text = value |> .toString()              # always a method call
+```
+
 ### Rules
 
-- The RHS of `|>` must be an identifier followed by an optional argument list `(…)`.
+- A bare identifier projects a field: `value |> field` is `value.field`.
+- An identifier followed by `(…)` uses normal pipe dispatch: a known standalone
+  function receives the piped value as its first argument; otherwise it is a method.
+- A leading dot forces method dispatch: `value |> .method(args)`.
 - Argument-free calls still require `()`: `value |> double()`.
 - Multi-line pipes must indent the continuation lines relative to the start of the expression.
 
@@ -9494,6 +9506,8 @@ let y = linear_gpu(layer.weights, x, n)  # no weight download or re-upload
 
 Arrays and nested structs work the same way, so a model can own `[Layer]` and keep all of its
 weights resident for its lifetime. Use `with layer.weights:` for host element access.
+
+A `mut` kernel field initialized from an `init` parameter is a **copy** of the argument (for a resident array the wrapper copies the device buffer), so a kernel write to it is not visible to the caller unless the field itself is returned (`k.a`, or `(k.a, k.out)` for two outputs). `boring build` and `boring run` warn when such a write can never be observed; see [GPU computing](gpu-module.html#warning-writing-to-a-copy-that-nobody-reads).
 
 > Same-scope materialization, cross-function residency, and resident struct fields are implemented on the GPU host targets. See [Scoped Access Blocks](scoped-access-blocks.html) for the generated-code design and current backend limitations.
 

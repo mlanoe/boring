@@ -4,7 +4,7 @@
 // MSL (Metal Shading Language) device code emitter.
 
 use crate::ast::*;
-use crate::transpiler::tensor_host::Q4K_ROWS_PER_SIMDGROUP;
+use crate::transpiler::tensor_host::{Q4K_ROWS_PER_SIMDGROUP, Q8_ROWS_PER_SIMDGROUP};
 use crate::transpiler::helpers::{
     reachable_free_fns,
     labeled_array_at_index, labeled_array_dim_literal,
@@ -555,41 +555,7 @@ impl DeviceEmitter {
         }
         self.line("if (m == 1) {");
         self.indent += 1;
-        self.line("const uint bp_warp = __thread_pos.x / 32;");
-        self.line("const uint bp_col = __block_pos.x * 8 + bp_warp;");
-        self.line("const uint bp_lane = __simd_lane_id;");
-        self.line("float bp_sum = 0.0f;");
-        self.line("if (bp_col < (uint)n) {");
-        self.indent += 1;
-        self.line("for (uint bp_inner = bp_lane; bp_inner < (uint)k; bp_inner += 32) {");
-        self.indent += 1;
-        self.line("const ulong bp_flat = (ulong)bp_col * (ulong)k + bp_inner;");
-        self.line("const ulong bp_block = (bp_flat / 32) * 34;");
-        self.line("float bp_scale = 0.0f;");
-        self.line("if (bp_lane == 0) {");
-        self.indent += 1;
-        self.line("const ushort bp_bits = ushort(ushort(b[bp_block]) | (ushort(b[bp_block + 1]) << 8));");
-        self.line("bp_scale = float(as_type<half>(bp_bits));");
-        self.indent -= 1;
-        self.line("}");
-        self.line("bp_scale = simd_shuffle(bp_scale, 0);");
-        self.line("int bp_q = int(b[bp_block + 2 + bp_lane]);");
-        self.line("if (bp_q > 127) bp_q -= 256;");
-        self.line("bp_sum += a[bp_inner] * (float(bp_q) * bp_scale);");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line("for (uint bp_offset = 16; bp_offset > 0; bp_offset /= 2) bp_sum += simd_shuffle_xor(bp_sum, bp_offset);");
-        self.line("if (bp_lane == 0 && bp_col < (uint)n) {");
-        self.indent += 1;
-        if has_bias {
-            self.line("c[bp_col] = bp_sum + bias[bp_col];");
-        } else {
-            self.line("c[bp_col] = bp_sum;");
-        }
-        self.indent -= 1;
-        self.line("}");
+        self.emit_q8_rows_decode(has_bias);
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -722,6 +688,82 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("}");
         }
+    }
+
+    /// Bandwidth-oriented Metal Q8_0 matrix-vector schedule. A SIMD group is
+    /// split into four eight-lane partitions, each consuming one 32-value block
+    /// with packed four-byte loads. Four weight rows share every float4
+    /// activation load, and four blocks remain in flight per loop iteration.
+    /// Only the first lane in a partition reads the half scale; a partition-local
+    /// shuffle broadcasts it before `simd_sum` combines all four partitions.
+    fn emit_q8_rows_decode(&mut self, has_bias: bool) {
+        self.line("if (n >= 4096 || k >= 4096) {");
+        self.indent += 1;
+        self.emit_q8_rows_decode_variant(has_bias, true);
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.emit_q8_rows_decode_variant(has_bias, false);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_q8_rows_decode_variant(&mut self, has_bias: bool, unroll_rows: bool) {
+        let rows = Q8_ROWS_PER_SIMDGROUP;
+        self.line(&format!("constexpr uint bp_rows = {rows};"));
+        self.line("const uint bp_lane = __simd_lane_id;");
+        self.line("const uint bp_warp = __thread_pos.x / 32;");
+        self.line("const ulong bp_row0 = ((ulong)__block_pos.x * 8 + bp_warp) * bp_rows;");
+        self.line("const uint bp_slot = bp_lane / 8, bp_it = bp_lane % 8;");
+        self.line("const ulong bp_nb = (ulong)k / 32;");
+        self.line("float bp_sumf[bp_rows];");
+        self.line("device const uchar* bp_rowp[bp_rows];");
+        if unroll_rows {
+            self.line("#pragma clang loop unroll(full)");
+        }
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("bp_sumf[bp_r] = 0.0f;");
+        self.line("bp_rowp[bp_r] = b + min(bp_row0 + bp_r, (ulong)n - 1) * bp_nb * 34 + bp_slot * 34;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("device const float* bp_y = a + bp_slot * 32 + bp_it * 4;");
+        self.line("for (ulong bp_ib = bp_slot; bp_ib < bp_nb; bp_ib += 4) {");
+        self.indent += 1;
+        self.line("const float4 bp_y4 = *(device const float4*)bp_y;");
+        if unroll_rows {
+            self.line("#pragma clang loop unroll(full)");
+        }
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("device const uchar* bp_blk = bp_rowp[bp_r];");
+        self.line("float bp_scale = bp_it == 0 ? float(as_type<half>(*(device const ushort*)bp_blk)) : 0.0f;");
+        self.line("bp_scale = simd_shuffle(bp_scale, bp_slot * 8);");
+        self.line("const packed_char4 bp_q4 = *(device const packed_char4*)(bp_blk + 2 + bp_it * 4);");
+        self.line("bp_sumf[bp_r] += bp_scale * dot(float4(bp_q4), bp_y4);");
+        self.line("bp_rowp[bp_r] += 4 * 34;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("bp_y += 4 * 32;");
+        self.indent -= 1;
+        self.line("}");
+        if unroll_rows {
+            self.line("#pragma clang loop unroll(full)");
+        }
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("const float bp_total = simd_sum(bp_sumf[bp_r]);");
+        self.line("if (bp_lane == 0 && bp_row0 + bp_r < (ulong)n) {");
+        self.indent += 1;
+        if has_bias {
+            self.line("c[bp_row0 + bp_r] = bp_total + bias[bp_row0 + bp_r];");
+        } else {
+            self.line("c[bp_row0 + bp_r] = bp_total;");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// Metal single-token (m == 1) Q4_K schedule, the bandwidth-oriented layout of

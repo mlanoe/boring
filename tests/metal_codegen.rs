@@ -38,6 +38,256 @@ pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
     assert!(rs.contains("let total: isize = (nn + extra);"), "{rs}");
 }
 
+#[test]
+fn resident_tuple_return_and_explicit_destructure_stay_on_gpu() {
+    let (_, rs) = metal_codegen("resident_tuple_return", r#"
+kernel AddRmsNorm:
+    let [float32]'global x
+    mut [float32]'unified sum
+    mut [float32]'unified normed
+    init([float32]'global xi):
+        x = xi
+        sum = [0.0 for ..<xi.length]
+        normed = [0.0 for ..<xi.length]
+    def ():
+        sum[gpu.thread.x] = x[gpu.thread.x]
+        normed[gpu.thread.x] = x[gpu.thread.x]
+
+kernel Consume:
+    let [float32]'global sum
+    let [float32]'global normed
+    mut [float32]'unified out
+    init([float32]'global si, [float32]'global ni):
+        sum = si
+        normed = ni
+        out = [0.0 for ..<si.length]
+    def ():
+        out[gpu.thread.x] = sum[gpu.thread.x] + normed[gpu.thread.x]
+
+req ([float32]'gpu'unified, [float32]'gpu'unified) add_rms_norm_gpu([float32] x) throws:
+    mut k = AddRmsNorm(x)
+    kernel:
+        k(block = x.length)
+    (k.sum, k.normed)
+
+def main() throws:
+    let [float32] x = [1.0, 2.0]
+    let ([float32]'gpu'unified sum, [float32]'gpu'unified normed) = add_rms_norm_gpu(x)
+    mut c = Consume(sum, normed)
+    kernel:
+        c(block = x.length)
+"#);
+
+    assert!(rs.contains("fn add_rms_norm_gpu(x: &Vec<f32>) -> Result<(BoringGpuArg<f32>, BoringGpuArg<f32>),"),
+        "resident tuple positions should be reflected in the Rust return type:\n{rs}");
+    assert!(rs.contains("Ok((BoringGpuArg::Resident(k.sum.clone()")
+        && rs.contains("BoringGpuArg::Resident(k.normed.clone()"),
+        "both tuple elements should return their resident Metal buffers:\n{rs}");
+    assert!(rs.contains("let (sum, normed) = add_rms_norm_gpu("),
+        "explicitly resident destructuring should bind the returned buffers directly:\n{rs}");
+    assert!(rs.contains("match &sum { BoringGpuArg::Resident(buf, _) => buf.clone()")
+        && rs.contains("match &normed { BoringGpuArg::Resident(buf, _) => buf.clone()"),
+        "both explicitly resident bindings should be forwarded as resident kernel arguments:\n{rs}");
+    assert!(!rs.contains("k.read_sum()") && !rs.contains("k.read_normed()"),
+        "resident return positions must not read kernel buffers back to the host:\n{rs}");
+    assert!(!rs.contains("__boring_gpu_copy_d2h::<f32>"),
+        "explicitly resident tuple bindings must not emit a device-to-host copy:\n{rs}");
+}
+
+// A `req` returning a tuple of GPU-resident arrays, called twice with the first
+// call's destructured (unannotated) slots as the second call's arguments, plus a
+// `req` calling another tuple `req` and building its own tuple tail from resident
+// locals. Expected output of `main`: x = 3, y = 1, so s = 4, d = 2, then s2 = 6.
+const RESIDENT_TUPLE_CHAIN: &str = r#"
+kernel PairKernel:
+    let [float32]'global a
+    let [float32]'global b
+    mut [float32]'unified sum
+    mut [float32]'unified diff
+    let int n
+
+    init([float32]'global aa, [float32]'global bb, int nn):
+        a = aa
+        b = bb
+        n = nn
+        sum = [0.0 as float32 for ..<nn]
+        diff = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            sum[i] = a[i] + b[i]
+            diff[i] = a[i] - b[i]
+
+pub req ([float32]'gpu'unified, [float32]'gpu'unified) pair([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+    mut k = PairKernel(a, b, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    (k.sum, k.diff)
+
+kernel AddOneKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = src[i] + 1.0
+
+pub req [float32]'gpu'unified fill([float32]'global src, int n) throws:
+    mut k = AddOneKernel(src, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+pub req ([float32]'gpu'unified, [float32]'gpu'unified) twice([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+    let (s, d) = pair(a, b, n)
+    let (s2, d2) = pair(s, d, n)
+    (s2, d2)
+
+pub req [float32]'gpu'unified pipeline([float32]'gpu'global x, [float32]'gpu'global y, int n) throws:
+    let (s, d) = twice(x, y, n)
+    let (p, q) = twice(d, s, n)
+    fill(q, n)
+
+def main() throws:
+    let n = 8
+    let x = fill([2.0 as float32 for ..<n], n)
+    let y = fill([0.0 as float32 for ..<n], n)
+    let (s, d) = pair(x, y, n)
+    let (s2, d2) = pair(s, d, n)
+    with s2:
+        print "{s2[0]}"
+"#;
+
+#[test]
+fn resident_tuple_call_keeps_args_and_unannotated_slots_resident() {
+    let (_, rs) = metal_codegen("resident_tuple_chain", RESIDENT_TUPLE_CHAIN);
+    let main_start = rs.find("fn boring_main()").expect("boring_main emitted");
+    let main = &rs[main_start..];
+    let main = &main[..main.find("\nfn main()").unwrap_or(main.len())];
+
+    assert!(main.contains("let (s, d) = pair(x.clone(), y.clone(), n)?;"),
+        "resident arguments must be cloned handles, not downloaded, and unannotated \
+         slots used only as resident arguments must bind the returned buffers directly:\n{main}");
+    assert!(main.contains("pair(s.clone(), d.clone(), n)?"),
+        "the second call must forward the first call's slots resident:\n{main}");
+    assert!(!main.contains("BoringGpuArg::Host(s") && !main.contains("BoringGpuArg::Host(d"),
+        "destructured slots must not be re-uploaded as host values:\n{main}");
+    // `s2` is indexed on the host inside `with`, so it is the one slot that downloads;
+    // `d2` is never used and must stay resident (a download would be pure waste).
+    assert_eq!(main.matches("__boring_gpu_copy_d2h").count(), 1,
+        "only the slot actually read on the host may be downloaded:\n{main}");
+    assert!(main.contains("let s2 = match __resid_tmp_0"), "{main}");
+    assert!(main.contains(", d2) = pair("), "unused slot must bind the resident value directly:\n{main}");
+
+    // Tuple req called from another req, tail tuple built from resident locals.
+    assert!(rs.contains("pub fn twice(a: BoringGpuArg<f32>, b: BoringGpuArg<f32>, n: isize) -> Result<(BoringGpuArg<f32>, BoringGpuArg<f32>),"), "{rs}");
+    assert!(rs.contains("Ok((s2.clone(), d2.clone()))"),
+        "a tuple tail of resident locals must pass them through:\n{rs}");
+    assert!(rs.contains("twice(d.clone(), s.clone(), n.clone())?"), "{rs}");
+}
+
+#[test]
+fn resident_tuple_slot_with_host_use_still_downloads() {
+    // Unannotated slots that are indexed right away keep the pre-existing
+    // download-at-the-binding behavior (they cannot be indexed as `BoringGpuArg<T>`).
+    let (_, rs) = metal_codegen("resident_tuple_host_use", &format!("{}\n{}", &RESIDENT_TUPLE_CHAIN
+        [..RESIDENT_TUPLE_CHAIN.find("def main()").unwrap()], r#"
+def main() throws:
+    let n = 8
+    let x = fill([2.0 as float32 for ..<n], n)
+    let y = fill([0.0 as float32 for ..<n], n)
+    let (s, d) = pair(x, y, n)
+    print "{s[0]} {d[0]}"
+"#));
+    let main = &rs[rs.find("fn boring_main()").unwrap()..];
+    assert!(main.contains("let s = match __resid_tmp_0") && main.contains("let d = match __resid_tmp_1"),
+        "host-indexed slots must be downloaded once at the binding:\n{main}");
+    assert!(main.contains("pair(x.clone(), y.clone(), n)?"),
+        "its resident arguments still must not be downloaded:\n{main}");
+}
+
+#[test]
+fn resident_tuple_chain_runs_on_metal() {
+    let test_name = "resident_tuple_chain_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, RESIDENT_TUPLE_CHAIN);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generated Metal resident-tuple chain failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "6");
+}
+
+const FLOAT32_HOST_ARG_TO_GPU_REQ: &str = r#"
+kernel AddOneKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = src[i] + 1.0
+
+pub req [float32]'gpu'unified fill([float32]'global src, int n) throws:
+    mut k = AddOneKernel(src, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+def main() throws:
+    let n = 8
+    let x = fill([2.0 as float32 for ..<n], n)
+    mut k = AddOneKernel(x, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    print "{k.out[0]}"
+"#;
+
+#[test]
+fn host_array_passed_to_float32_gpu_param_is_wrapped_as_f32() {
+    let (_, rs) = metal_codegen("float32_host_arg_codegen", FLOAT32_HOST_ARG_TO_GPU_REQ);
+    assert!(rs.contains("BoringGpuArg::Host((") && rs.contains(".iter().map(|&x| x as f32).collect::<Vec<f32>>())"),
+        "a host array at a `[float32]'gpu'global` position must be wrapped as Vec<f32>:\n{rs}");
+    assert!(!rs.contains("x as f64).collect::<Vec<f64>>())"),
+        "no f64 wrap may remain for a float32 callee parameter:\n{rs}");
+}
+
+#[test]
+fn host_array_passed_to_float32_gpu_param_runs_on_metal() {
+    let test_name = "float32_host_arg_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, FLOAT32_HOST_ARG_TO_GPU_REQ);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generated Metal float32 host-arg program failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "4");
+}
+
 const FIXED_ARRAY_LOCAL_KERNEL: &str = r#"
 kernel LocalArr:
     mut [float32]'unified out
@@ -210,6 +460,12 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
     assert!(msl.contains("if (m == 1)"), "{msl}");
+    assert!(msl.contains("if (n >= 4096 || k >= 4096)"), "{msl}");
+    assert!(msl.contains("constexpr uint bp_rows = 4"), "{msl}");
+    assert!(msl.contains("#pragma clang loop unroll(full)"), "{msl}");
+    assert!(msl.contains("const packed_char4 bp_q4"), "{msl}");
+    assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{msl}");
+    assert!(msl.contains("bp_scale = simd_shuffle(bp_scale, bp_slot * 8)"), "{msl}");
     assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
     assert!(msl.contains("const uint bp_sg_m = bp_warp / 4, bp_sg_n = bp_warp % 4"), "{msl}");
     assert!(msl.contains("const packed_char4 bp_q0"), "{msl}");
@@ -221,6 +477,7 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
     let bias = msl[barrier..].find("+ bias[bp_output_col]").unwrap() + barrier;
     assert!(store < barrier && barrier < bias, "bias must be added only after the complete output tile is visible:\n{msl}");
     assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("+ 31") && host.contains("/ 32"), "{host}");
     assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
 }
 
@@ -236,6 +493,52 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
     assert!(msl.contains("bp_output_col < (uint)n"), "{msl}");
     assert!(msl.contains("bp_output_row < (uint)m && bp_output_col < (uint)n"), "{msl}");
     assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
+}
+
+#[test]
+fn q8_four_block_partition_math_matches_scalar_for_signed_values_and_scales() {
+    // Mirrors the native decode ownership: four eight-lane partitions consume
+    // four 32-value blocks concurrently and four output rows reuse each input.
+    // Odd row/block counts exercise both masked rows and the final partial set
+    // of four blocks. Explicit negative i8 values and negative half-representable
+    // scales catch unsigned extension or scale-broadcast mistakes.
+    const N: usize = 35;
+    const K: usize = 160;
+    const ROWS: usize = 4;
+    let x: Vec<f32> = (0..K).map(|i| ((i * 13 % 37) as f32 - 18.0) / 32.0).collect();
+    let q: Vec<i8> = (0..N * K).map(|i| ((i * 17 + 131) % 256) as u8 as i8).collect();
+    let scales = [0.0625f32, -0.03125, 0.5, -0.25, 0.125];
+
+    let scalar: Vec<f32> = (0..N).map(|row| {
+        (0..K).map(|i| x[i] * q[row * K + i] as f32 * scales[i / 32]).sum()
+    }).collect();
+    let mut scheduled = vec![0.0f32; N];
+    for row0 in (0..N).step_by(ROWS) {
+        let mut lane_sums = [[0.0f32; 32]; ROWS];
+        for lane in 0..32 {
+            let slot = lane / 8;
+            let it = lane % 8;
+            for block in (slot..K / 32).step_by(4) {
+                for r in 0..ROWS {
+                    let row = (row0 + r).min(N - 1);
+                    for j in 0..4 {
+                        let i = block * 32 + it * 4 + j;
+                        lane_sums[r][lane] += scales[block] * q[row * K + i] as f32 * x[i];
+                    }
+                }
+            }
+        }
+        for r in 0..ROWS {
+            if row0 + r < N {
+                scheduled[row0 + r] = lane_sums[r].iter().sum();
+            }
+        }
+    }
+    for (row, (&actual, &expected)) in scheduled.iter().zip(&scalar).enumerate() {
+        let error = (actual - expected).abs();
+        assert!(error <= 1.0e-4 * (expected.abs() + 1.0),
+            "row {row}: scheduled={actual}, scalar={expected}, error={error}");
+    }
 }
 
 #[test]
@@ -958,6 +1261,70 @@ def main() throws:
         "expected the resident GPU argument to remain resident across the chained call;\ngot:\n{rs}");
     assert!(rs.contains("passthrough(&(match &stage2 {"),
         "expected materialization only at the ordinary host-function boundary;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_fn_alias_of_resident_local_stays_resident() {
+    // Regression test: a plain alias of a resident GPU local (`let z = y`, where
+    // `y` is bound to a `'gpu'unified`-returning call) used to fall through to
+    // the host-array `let` path, so `z` was never registered as resident and
+    // `add2(y, z, n)` wrapped it as `BoringGpuArg::Host(z.clone())` -- a hard
+    // E0308 (`expected Vec<f32>, found BoringGpuArg<f32>`) -- and `let z = y;`
+    // also moved `y` out from under its own later uses. The alias must be a
+    // cheap `Arc::clone`-style `.clone()` that stays resident, exactly like `y`.
+    let (_, rs) = metal_codegen("host_fn_resident_alias", r#"
+kernel AddKernel:
+    let [float32]'global a
+    let [float32]'global b
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global aa, [float32]'global bb, int nn):
+        a = aa
+        b = bb
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = a[i] + b[i]
+
+pub req [float32]'gpu'unified add2([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+    mut k = AddKernel(a, b, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+[float32] passthrough([float32] x):
+    x
+
+def main() throws:
+    let n = 8
+    let x = add2([1.0 as float32 for ..<n], [2.0 as float32 for ..<n], n)
+    let y = add2(x, x, n)
+    let z = y
+    var v = x
+    v = y
+    let [float32] h = z
+    let w = add2(y, z, n)
+    let u = add2(v, w, n)
+    let r = passthrough(h)
+    with u:
+        print "{u[0]} {r[0]}"
+"#);
+    assert!(rs.contains("let z = y.clone();"),
+        "a plain alias of a resident local must be a resident clone;\ngot:\n{rs}");
+    assert!(rs.contains("add2(y.clone(), z.clone(), n)"),
+        "the alias must be passed exactly like the original (resident), not Host-wrapped;\ngot:\n{rs}");
+    assert!(!rs.contains("BoringGpuArg::Host(z.clone())"),
+        "the alias must never be re-wrapped as a host array;\ngot:\n{rs}");
+    assert!(rs.contains("let mut v = x.clone();") && rs.contains("v = y.clone();"),
+        "`var` aliases and reassignment from a resident local must stay resident;\ngot:\n{rs}");
+    assert!(rs.contains("add2(v.clone(), w.clone(), n)"),
+        "an alias of an alias must stay resident;\ngot:\n{rs}");
+    assert!(rs.contains("let h = match &z {"),
+        "an explicit non-resident annotation must materialize the alias by reference;\ngot:\n{rs}");
 }
 
 #[test]
@@ -2762,3 +3129,473 @@ kernel B:
 }
 
 // ─── device — 'actor'global atomics ──────────────────────────────────────────
+
+// ─── host — launches are batched into shared command buffers ─────────────────
+
+// Each kernel launch used to be committed as its own command buffer (~22 us of
+// CPU time per launch). Launches are now encoded into an open batch (one command
+// buffer, one compute encoder per launch) that is committed when a host read
+// needs the results, when it holds `BORING_METAL_BATCH` launches, or before a
+// first-use pipeline compile; committed batches are throttled to
+// `BORING_METAL_INFLIGHT` launches in flight.
+const BATCHED_LAUNCH_PROGRAM: &str = r#"
+kernel AddOneKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global s, int nn):
+        src = s
+        n   = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = src[i] + 1.0
+
+kernel SumKernel:
+    let [float32]'global a
+    let [float32]'global b
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global x, [float32]'global y, int nn):
+        a = x
+        b = y
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = a[i] + b[i]
+
+pub req [float32]'gpu'unified add_one([float32]'gpu'global x, int n) throws:
+    mut k = AddOneKernel(x, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+pub req [float32]'gpu'unified add2([float32]'gpu'global x, [float32]'gpu'global y, int n) throws:
+    mut k = SumKernel(x, y, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+pub req [float32]'gpu'unified fill([float32]'global src) throws:
+    let n = src.length
+    mut k = AddOneKernel(src, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+def main() throws:
+    let n = 1000
+    let host = [0.0 as float32 for i in 0..<n]
+    var x = fill(host)
+    var y = fill(host)
+    var i = 0
+    while i < 300:
+        x = add_one(x, n)
+        y = add_one(y, n)
+        i += 1
+    var w = add2(x, y, n)
+    i = 0
+    while i < 100:
+        w = add_one(w, n)
+        i += 1
+    with w:
+        print "{w[0]} {w[n - 1]}"
+"#;
+
+#[test]
+fn launches_are_encoded_into_shared_command_buffers() {
+    let (_msl, rs) = metal_codegen("batched_launch_codegen", BATCHED_LAUNCH_PROGRAM);
+    let launch = rs.split("fn __boring_launch").nth(1).expect("no __boring_launch emitted");
+    let launch = launch.split("\n    }\n").next().unwrap();
+    assert!(!launch.contains("new_command_buffer") && !launch.contains(".commit()"),
+        "a launch must not open or commit its own command buffer;\ngot:\n{launch}");
+    assert!(launch.contains("__boring_metal_encoder(") && launch.contains("__boring_metal_launched();"),
+        "a launch must encode into the open batch;\ngot:\n{launch}");
+    assert!(rs.contains("BORING_METAL_BATCH") && rs.contains("BORING_METAL_INFLIGHT"),
+        "expected the batch and in-flight limits;\ngot:\n{rs}");
+    assert!(rs.contains("fn set_gpu_batch_limit(limit: i64)"),
+        "expected the runtime batch-limit hook;\ngot:\n{rs}");
+    assert!(rs.contains("__BORING_METAL_BATCH_LIMIT.with(|l| l.set(limit.max(1) as usize))"),
+        "expected a mutable, clamped batch limit;\ngot:\n{rs}");
+    // Every host read goes through the flush, which commits the open batch.
+    let flush = rs.split("fn __boring_metal_flush").nth(1).expect("no flush emitted");
+    assert!(flush.trim_start().starts_with("() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {\n    __boring_metal_commit();"),
+        "the flush must commit the open batch before waiting;\ngot:\n{flush}");
+}
+
+// Real GPU: two interleaved independent chains of 300 dependent launches, a
+// kernel joining them, then 100 more; each launch's input is the previous
+// launch's output, whose host handle is dropped while the launch is still
+// queued. The result must not depend on the batch size (1 = the old
+// one-command-buffer-per-launch behaviour) or the in-flight bound.
+#[test]
+fn real_metal_batched_launches_keep_dependencies_and_lifetimes() {
+    let test_name = "batched_launch_run";
+    let _ = run_metal(test_name, BATCHED_LAUNCH_PROGRAM);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let build = Command::new("cargo")
+        .args(["build", "--release", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(build.status.success(), "cargo build failed:\n{}", String::from_utf8_lossy(&build.stderr));
+    let exe = manifest.parent().unwrap().join("target").join("release").join("test");
+    // 1 + 300 on each chain, joined (602), then 100 more.
+    for (batch, inflight) in [("1", "64"), ("3", "64"), ("16", "64"), ("16", "20"), ("1000", "1000")] {
+        let run = Command::new(&exe)
+            .env("BORING_METAL_BATCH", batch)
+            .env("BORING_METAL_INFLIGHT", inflight)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {exe:?}: {e}"));
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "batch={batch} inflight={inflight} failed:\n{}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(stdout.trim_end(), "702 702",
+            "batch={batch} inflight={inflight}: wrong chain result");
+    }
+}
+
+// Real GPU: the device-to-device copy (`Scale(k1.buf)`) is a blit encoded into
+// the open batch; it must see `k1`'s first launch and not its second, whatever
+// the batch size. (`k2` scales the copy; a blit ordered after the second `k1`
+// launch would make `k2.buf[0]` 8 instead of 4, one shared with `k1` would
+// make `k1.buf[0]` 8.)
+#[test]
+fn real_metal_batched_blit_copy_is_ordered_between_launches() {
+    let test_name = "batched_blit_copy_run";
+    let _ = run_metal(test_name, r#"
+kernel Scale:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0 as float32, 2.0 as float32]
+mut k1 = Scale(data)
+kernel:
+    k1(block = 2)
+mut k2 = Scale(k1.buf)
+kernel:
+    k1(block = 2)
+    k2(block = 2)
+print "{k1.buf[0]} {k2.buf[0]}"
+"#);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let build = Command::new("cargo")
+        .args(["build", "--release", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(build.status.success(), "cargo build failed:\n{}", String::from_utf8_lossy(&build.stderr));
+    let exe = manifest.parent().unwrap().join("target").join("release").join("test");
+    for batch in ["1", "2", "16"] {
+        let run = Command::new(&exe)
+            .env("BORING_METAL_BATCH", batch)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {exe:?}: {e}"));
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "batch={batch} failed:\n{}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(stdout.trim_end(), "4 4", "batch={batch}: blit ordered wrongly");
+    }
+}
+
+// Real GPU: aliases of a resident local (`let z = y`, `var v = x; v = y`, an alias of
+// an alias) keep their resident classification through a real Metal dispatch.
+// Before the fix the generated Rust did not even compile (`BoringGpuArg::Host(z.clone())`
+// where a `Vec<f32>` was expected). x = 1+2 = 3, y = 3+3 = 6, w = y+z = 12,
+// u = v+w = 6+12 = 18.
+#[test]
+fn real_metal_alias_of_resident_local_builds_and_runs() {
+    let test_name = "resident_alias_run";
+    let _ = run_metal(test_name, r#"
+kernel AddKernel:
+    let [float32]'global a
+    let [float32]'global b
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global aa, [float32]'global bb, int nn):
+        a = aa
+        b = bb
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = a[i] + b[i]
+
+pub req [float32]'gpu'unified add2([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+    mut k = AddKernel(a, b, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+[float32] passthrough([float32] x):
+    x
+
+def main() throws:
+    let n = 8
+    let x = add2([1.0 as float32 for ..<n], [2.0 as float32 for ..<n], n)
+    let y = add2(x, x, n)
+    let z = y
+    let z2 = z
+    var v = x
+    v = y
+    let w = add2(y, z2, n)
+    let u = add2(v, w, n)
+    let [float32] h = z
+    let r = passthrough(h)
+    with w:
+        print "{w[0]}"
+    with u:
+        print "{u[0]}"
+    print "{r[0]}"
+"#);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(),
+        "the generated Metal project must build and run:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+    assert_eq!(stdout.trim_end(), "12\n18\n6",
+        "--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+}
+
+// ─── Writes to a mut kernel field that is a copy of an init argument ─────────
+//
+// A `mut` kernel field initialized from an `init` parameter is a COPY of the
+// caller's argument, so a kernel write to it is invisible to the caller unless
+// the field itself is returned. `check_kernel_copy_writes` (checker/rust_checks.rs)
+// warns about the write that is silently dropped.
+
+/// Builds `src` for `target` and returns `boring build`'s stderr; asserts the
+/// build itself still succeeds (the diagnostic is a warning, never an error).
+fn build_stderr(target: &str, test_name: &str, src: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join(target);
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, src).unwrap();
+    let result = Command::new(bin)
+        .args(["build", "--target", target])
+        .arg(&br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("[{test_name}] failed to invoke boring: {e}"));
+    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+    assert!(result.status.success(), "[{test_name}] boring build --target {target} failed:\n{stderr}");
+    stderr
+}
+
+const DISCARDED_WRITE_WARNING: &str = "write to `a` is discarded: `a` is a copy of the argument `aa`";
+
+/// The report's repro: `a` is updated in place but only `out` is returned.
+const LOST_WRITE_REPRO: &str = r#"
+kernel BumpKernel:
+    mut [float32]'unified a
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'unified aa, int nn):
+        a = aa
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            a[i] = a[i] + 1.0
+            out[i] = a[i]
+
+pub req [float32]'gpu'unified bump([float32]'global a, int n) throws:
+    mut k = BumpKernel(a, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+"#;
+
+/// Same kernel as `LOST_WRITE_REPRO`; `tail` is the `req` body's return expression.
+fn bump_with_tail(ret_ty: &str, tail: &str) -> String {
+    let (kernel, _) = LOST_WRITE_REPRO.split_once("pub req").unwrap();
+    format!(
+        "{kernel}pub req {ret_ty} bump([float32]'global a, int n) throws:\n    \
+         mut k = BumpKernel(a, n)\n    kernel:\n        k(block = 256, grid = ((n + 255) / 256, 1))\n    {tail}\n"
+    )
+}
+
+#[test]
+fn discarded_copy_write_warns_on_every_gpu_target() {
+    for target in ["metal", "wgpu", "cuda", "rocm"] {
+        let stderr = build_stderr(target, &format!("discarded_write_{target}"), LOST_WRITE_REPRO);
+        assert!(stderr.contains(DISCARDED_WRITE_WARNING), "[{target}] expected the warning, got:\n{stderr}");
+        assert_eq!(stderr.matches("is discarded").count(), 1, "[{target}] expected exactly one warning:\n{stderr}");
+        // Points at the offending argument, not at the kernel or the function.
+        assert!(stderr.contains("mut k = BumpKernel(a, n)"), "[{target}] {stderr}");
+    }
+}
+
+#[test]
+fn discarded_copy_write_is_a_warning_not_an_error() {
+    // Built (and the generated Rust/MSL emitted) despite the diagnostic.
+    let (msl, rs) = metal_codegen("discarded_write_still_builds", LOST_WRITE_REPRO);
+    assert!(msl.contains("BumpKernel"), "{msl}");
+    assert!(rs.contains("fn bump"), "{rs}");
+}
+
+#[test]
+fn returned_copy_field_does_not_warn() {
+    // Returned alone ...
+    let stderr = build_stderr("metal", "discarded_write_returned_alone", &bump_with_tail("[float32]'gpu'unified", "k.a"));
+    assert!(!stderr.contains("is discarded"), "{stderr}");
+    // ... and inside a returned tuple (the supported way to hand back two outputs).
+    let stderr = build_stderr(
+        "metal",
+        "discarded_write_returned_in_tuple",
+        &bump_with_tail("([float32]'gpu'unified, [float32]'gpu'unified)", "(k.a, k.out)"),
+    );
+    assert!(!stderr.contains("is discarded"), "{stderr}");
+}
+
+#[test]
+fn copy_field_consumed_by_a_later_kernel_does_not_warn() {
+    let (kernel, _) = LOST_WRITE_REPRO.split_once("pub req").unwrap();
+    let src = format!(r#"{kernel}
+kernel Consume:
+    let [float32]'global src
+    mut [float32]'unified out
+    init([float32]'global s, int nn):
+        src = s
+        out = [0.0 as float32 for ..<nn]
+    def ():
+        out[gpu.thread.x] = src[gpu.thread.x]
+
+pub req [float32]'gpu'unified bump_then_copy([float32]'global a, int n) throws:
+    mut k = BumpKernel(a, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    mut c = Consume(k.a, n)
+    kernel:
+        c(block = 256, grid = ((n + 255) / 256, 1))
+    c.out
+"#);
+    let stderr = build_stderr("metal", "discarded_write_consumed_downstream", &src);
+    assert!(!stderr.contains("is discarded"), "{stderr}");
+}
+
+#[test]
+fn read_only_copy_field_does_not_warn() {
+    let stderr = build_stderr("metal", "discarded_write_read_only", r#"
+kernel FillKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            out[i] = src[i]
+
+pub req [float32]'gpu'unified upload([float32]'global src, int n) throws:
+    mut k = FillKernel(src, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+"#);
+    assert!(!stderr.contains("is discarded"), "{stderr}");
+}
+
+#[test]
+fn fresh_allocation_field_write_does_not_warn() {
+    // `out` is built from a fresh allocation, not an argument: writing it is the
+    // whole point, and the repro's own `out[i] = ...` must never be flagged.
+    let stderr = build_stderr("metal", "discarded_write_fresh_allocation", &bump_with_tail("[float32]'gpu'unified", "k.a"));
+    assert!(!stderr.contains("`out` is discarded") && !stderr.contains("write to `out`"), "{stderr}");
+}
+
+#[test]
+fn scratch_buffer_built_at_the_call_does_not_warn() {
+    // The argument is a fresh temporary, so nobody expects to see the write.
+    let (kernel, _) = LOST_WRITE_REPRO.split_once("pub req").unwrap();
+    let src = format!(r#"{kernel}pub req [float32]'gpu'unified bump_scratch(int n) throws:
+    mut k = BumpKernel([0.0 as float32 for ..<n], n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+"#);
+    let stderr = build_stderr("metal", "discarded_write_scratch_argument", &src);
+    assert!(!stderr.contains("is discarded"), "{stderr}");
+}
+
+#[test]
+fn escaping_kernel_instance_does_not_warn() {
+    // `k` itself leaves the function (here as a plain value passed on), so the
+    // write may well be observed elsewhere -- stay quiet.
+    let (kernel, _) = LOST_WRITE_REPRO.split_once("pub req").unwrap();
+    let src = format!(r#"{kernel}
+def keep(BumpKernel k):
+    print "kept"
+
+pub req [float32]'gpu'unified bump_escape([float32]'global a, int n) throws:
+    mut k = BumpKernel(a, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    keep(k)
+    k.out
+"#);
+    let stderr = build_stderr("metal", "discarded_write_escaping_instance", &src);
+    assert!(!stderr.contains("is discarded"), "{stderr}");
+}
+
+#[test]
+fn discarded_copy_write_warns_through_self_prefix_and_labeled_argument() {
+    let src = r#"
+kernel BumpKernel:
+    mut [float32]'unified a
+    mut [float32]'unified out
+    let int n
+
+    init([float32]'unified aa, int nn):
+        a = aa
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            self.a[i] += 1.0
+            out[i] = self.a[i]
+
+pub req [float32]'gpu'unified bump([float32]'global x, int n) throws:
+    mut k = BumpKernel(nn = n, aa = x)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+"#;
+    let stderr = build_stderr("metal", "discarded_write_self_labeled", src);
+    assert!(stderr.contains(DISCARDED_WRITE_WARNING), "{stderr}");
+}

@@ -379,7 +379,7 @@ ext_member      ::= "pub"? fn_decl
 #
 # Launch form (host side):
 #   kernel(<launch_args>) expr                       # returns KernelHandle<T>
-#   kernel(<launch_args>) expr |> .wait              # launch and block until done
+#   kernel(<launch_args>) expr |> .wait()            # launch and block until done
 #
 # Launch args:
 #   block    = <int>                   — threads per block (1-D); required
@@ -673,7 +673,10 @@ try_else_expr   ::= "try" pipe_expr "else" ":"? (expr | block)  # inline try,  i
                   | "try" ":" block "else" ":"? (expr | block)   # block try,   inline or block else — `error` bound
                   | "try" "?" pipe_expr                          # shorthand: ≡ try expr else nil  (→ .ok() in Rust)
 
-pipe_expr       ::= or_expr ("|>" IDENT ("(" arg_list? ")")?)*  # left pipe: x |> f(…)
+pipe_expr       ::= or_expr ("|>" pipe_stage)*
+pipe_stage      ::= IDENT                                      # field projection: x |> field
+                  | IDENT "(" arg_list? ")"                  # inferred function/method call
+                  | "." IDENT "(" arg_list? ")"              # forced method call
 
 or_expr         ::= and_expr ("or" and_expr)*
 and_expr        ::= not_expr ("and" not_expr)*

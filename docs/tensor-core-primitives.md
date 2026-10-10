@@ -276,7 +276,17 @@ precision = "half"
 prefill only; decode and the portable GPU schedules are unaffected. Regression
 coverage compares 40 outputs on irrational-ish activations with the scalar
 schedule, with relative bounds of `1e-5` for float staging and `1e-3` for half.
-On Metal, Q4_K single-row decode (`auto`) uses a dedicated multi-row schedule instead: each SIMD
+On Metal, Q8_0 single-row decode (`auto`) uses a dedicated multi-row schedule:
+each SIMD group computes four output rows while four eight-lane partitions walk
+four 32-value blocks concurrently. A lane vector-loads four signed weights and
+one aligned `float4` activation slice; that activation is reused across all four
+rows, and one scale load per partition is broadcast before a final `simd_sum`.
+One 256-thread threadgroup therefore covers 32 rows. Explicit `scalar` keeps the
+one-thread-per-row accumulation-order reference. The resident benchmark
+`examples/tensor_q8_decode_bench.br` covers the five Qwen2.5-0.5B projection
+shapes and uses signed values plus positive and negative scales.
+
+Q4_K single-row decode (`auto`) uses a dedicated multi-row schedule too: each SIMD
 group computes two output rows, four 256-value super-blocks at a time with eight lanes per
 super-block, accumulating quantized-domain dot products and applying the per-group
 scale/minimum once; `scalar` selects the one-thread-per-row reference.
@@ -621,8 +631,9 @@ the concrete requirements more precisely than a generic tensor example:
   dequantization. These cover every packed format currently implemented by
   `boring-llm`.
 - Single-token decode (`seq == 1`) is a matrix-vector workload. Dynamic Q8_0
-  linear selects a warp-reduction path for `m == 1`, optionally broadcasts
-  packed-block scales, and keeps the scalar output-cell path for prefill.
+  linear on Metal selects the four-row/four-block vector schedule for `m == 1`;
+  portable targets retain their warp-reduction path. Explicit `scalar` remains
+  available as the output-cell oracle, while prefill uses its separate tiled path.
   A destination declared with `[..<count]` is allocated directly on the device
   on every GPU backend; WGPU resizes and rebinds the buffer without staging a
   zero vector. In the current Metal microbenchmark, the tensor path improved

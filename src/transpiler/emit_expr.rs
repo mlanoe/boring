@@ -3217,10 +3217,19 @@ impl Transpiler {
         // real "opt-in stays resident" case: don't force-materialize into it).
         let target_is_resident = matches!(&target.kind, ExprKind::Var(name)
             if self.resident_call_vars.contains_key(name.as_str()));
+        // A bare resident local on the RHS (`z = y`) is itself a `BoringGpuArg<T>`:
+        // alias it (cheap `Arc::clone`) into a resident target, materialize it by
+        // reference into any other target.
+        let rhs_resident_var = match &value.kind {
+            ExprKind::Var(v) => self.resident_call_vars.get(v.as_str()).map(|ty| (v.clone(), ty.clone())),
+            _ => None,
+        };
         let rhs_s = if target_is_resident {
             self.try_emit_gpu_resident_return(value)
+                .or_else(|| rhs_resident_var.as_ref().map(|(v, _)| format!("{v}.clone()")))
         } else {
             self.try_materialize_resident_call(value)
+                .or_else(|| rhs_resident_var.as_ref().map(|(v, ty)| self.materialize_resident_var(v, ty)))
         }.unwrap_or_else(|| self.emit_expr_owned(value));
         // When assigning an actor (Arc<Mutex<T>>) variable into a struct field, auto-clone
         // so the original binding remains usable after the assignment. Arc::clone is cheap.

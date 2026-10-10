@@ -255,12 +255,12 @@ fn dynamic_tensor_linear_decodes_q8_0_weights_on_all_gpu_targets() {
 
     let metal_root = root.join("tensor_dynamic_q8_0_metal");
     let shader = fs::read_to_string(metal_root.join("kernels/main.metal")).unwrap();
-    assert!(shader.contains("simd_shuffle_xor"), "Q8_0 decode must synthesize a warp reduction");
-    assert!(shader.contains("simd_shuffle(bp_scale, 0)"), "automatic native Q8_0 decode must broadcast each packed-block scale");
-    assert!(shader.contains("bp_block + 2 + bp_lane"), "32-lane targets must index Q8_0 values directly by lane");
-    assert!(shader.contains("bp_col < (uint)n"), "the uniform Q8_0 output bound must guard the whole warp schedule");
+    assert!(shader.contains("simd_sum(bp_sumf[bp_r])"), "Q8_0 decode must reduce its multi-row accumulators");
+    assert!(shader.contains("simd_shuffle(bp_scale, bp_slot * 8)"), "automatic native Q8_0 decode must broadcast one scale per eight-lane block partition");
+    assert!(shader.contains("const packed_char4 bp_q4"), "Q8_0 decode must vector-load four signed values per lane");
+    assert!(shader.contains("bp_row0 + bp_r < (ulong)n"), "the Q8_0 output store must mask partial multi-row blocks");
     let host = fs::read_to_string(metal_root.join("src/main.rs")).unwrap();
-    assert!(host.contains("_blocks = if (1 == 1) { ((1 + 7) / 8)"), "Metal Q8_0 dispatch must use its eight 32-lane warps per block");
+    assert!(host.contains("Some((((1 + 31) / 32) as u32, 1, 1))"), "Metal Q8_0 dispatch must cover 32 rows per threadgroup: {host}");
     assert!(!host.contains("input_c"), "dynamic linear must allocate its overwritten destination directly on the GPU");
     let rocm_host = fs::read_to_string(root.join("tensor_dynamic_q8_0_rocm/src/main.rs")).unwrap();
     assert!(rocm_host.contains("_blocks = if (1 == 1) { ((1 + 3) / 4)"), "ROCm Q8_0 dispatch must use its four 64-lane warps per block");

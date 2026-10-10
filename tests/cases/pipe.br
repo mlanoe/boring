@@ -2,6 +2,9 @@ int double(int n): n * 2
 int inc(int n): n + 1
 [int] keep_positive([int] arr): arr.filter(n: n > 0)
 
+struct PipeResult:
+    int output
+
 # single-line pipe chain
 let x = 5 |> double() |> inc() |> inc()
 print x
@@ -23,3 +26,11 @@ let nums = [-1, 2, -3, 4]
     |> keep_positive()
     |> map(n: n * 2)
 print nums
+
+# parenthesis-free pipe stage projects a field
+let output = PipeResult(42) |> output
+print output
+
+# a leading dot explicitly forces method dispatch
+let forced = "forced" |> .upper()
+print forced

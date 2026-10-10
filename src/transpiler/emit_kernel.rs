@@ -174,6 +174,57 @@ impl Transpiler {
         true
     }
 
+    /// If `s` is a plain alias of an already-resident local (`let z = y` / `var z = y`
+    /// where `y` is in `resident_call_vars`), `z` is the very same `BoringGpuArg<T>`
+    /// Rust value, so it must stay resident: emit `let z = y.clone();` (an `Arc::clone`
+    /// inside, no data copy, and `y` stays usable — boring has no moves) and register
+    /// `z` in `resident_call_vars` with `y`'s type so later call arguments, `with z:`,
+    /// kernel-constructor arguments and further aliases all treat it residently.
+    /// Without this the alias fell through to the host-array `let` path, and every
+    /// later use wrapped it in `BoringGpuArg::Host(z.clone())` — a hard E0308 (and
+    /// `let z = y;` also moved `y` out from under its own later uses).
+    ///
+    /// An explicit non-resident annotation (`let [float32] z = y`) materializes once,
+    /// by reference, mirroring `try_emit_gpu_resident_call_let`'s opt-out path.
+    /// Returns `true` when handled.
+    pub(crate) fn try_emit_gpu_resident_alias_let(&mut self, s: &LetStmt) -> bool {
+        if self.resident_call_vars.is_empty() {
+            return false;
+        }
+        let Some(val) = &s.value else { return false };
+        let ExprKind::Var(src) = &val.kind else { return false };
+        let Some(src_ty) = self.resident_call_vars.get(src.as_str()).cloned() else { return false };
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        let name = escape_rust_keyword(&s.name);
+        if s.ty.is_some() && !s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some()) {
+            let materialized = self.materialize_resident_var(src, &src_ty);
+            self.line(&format!("{kw} {name} = {materialized};"));
+            self.var_types.insert(s.name.clone(), s.ty.clone().expect("checked by the outer `if`"));
+            self.known_local_vars.insert(s.name.clone());
+            return true;
+        }
+        self.line(&format!("{kw} {name} = {src}.clone();"));
+        self.resident_call_vars.insert(s.name.clone(), src_ty);
+        self.known_local_vars.insert(s.name.clone());
+        true
+    }
+
+    /// Downloads a `resident_call_vars` local (a `BoringGpuArg<T>`) to a plain host
+    /// `Vec<T>` *by reference*, leaving the variable usable afterward — the by-ref
+    /// counterpart to `materialize_resident_call`, same match the call-argument
+    /// materialization in `emit_methods.rs` builds.
+    pub(crate) fn materialize_resident_var(&self, var_name: &str, ret_ty: &Type) -> String {
+        let inner_ty = match ret_ty {
+            Type::Qualified(inner, _) => array_inner_type(inner),
+            other => array_inner_type(other),
+        };
+        let host_ty = kernel_host_element_type(&inner_ty);
+        let device_ty = kernel_host_scalar_type(&inner_ty);
+        format!(
+            "match &{var_name} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }}"
+        )
+    }
+
     /// Emits a materializing match over `call_expr` (a call to a function whose
     /// return type is `ret_ty`, itself GPU-resident) that downloads a `Resident`
     /// buffer or passes a `Host` vec straight through — the shared shape behind

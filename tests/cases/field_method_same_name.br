@@ -1,0 +1,9 @@
+struct Item:
+    pub int uid
+
+    req int uid(): self.uid
+
+def main():
+    let t = Item(uid = 4)
+    print t.uid()
+    print t.uid

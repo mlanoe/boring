@@ -974,8 +974,10 @@ pub enum ExprKind {
     // Generic call: `f<T1, T2>(args)` — type arguments resolved at emit time
     GenericCall(Box<Expr>, Vec<Type>, Vec<Arg>),
 
-    // Pipe operator: `lhs |> f(args)`
-    // Desugars at emit time: if f is in fn_sigs → f(lhs, args), else → lhs.f(args)
+    // Pipe call: `lhs |> f(args)`
+    // Desugars at emit time: if f is in fn_sigs → f(lhs, args), else → lhs.f(args).
+    // A parenthesis-free `lhs |> field` is parsed directly as `ExprKind::Field`;
+    // `.method(args)` is parsed directly as `ExprKind::MethodCall`.
     Pipe(Box<Expr>, String, Vec<Arg>),
 
     /// `new Constructor()` — placement expression, qualifier inferred excluding 'inline.
@@ -2347,5 +2349,155 @@ fn with_expr_mutates(
         ExprKind::MacroCall { args, .. } => args.iter().any(|ex| e(ex, ivp, imm)),
         ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => false,
+    }
+}
+
+// ─── Generic pre-order walker ────────────────────────────────────────────────
+
+/// One node handed to a [`walk_stmts`] callback.
+#[derive(Clone, Copy)]
+pub enum WalkNode<'a> {
+    Stmt(&'a Stmt),
+    Expr(&'a Expr),
+}
+
+/// Calls `f` on every statement and expression reachable from `stmts`, pre-order
+/// (a node before its children), descending into nested blocks, `if`/`match`/loop
+/// bodies, block-valued expressions and closures. Like the other scans in this
+/// file it never enters a nested `fn`/`struct`/`enum`/`mod` declaration: those are
+/// separate scopes with their own walks.
+pub fn walk_stmts<'a>(stmts: &'a [Stmt], f: &mut dyn FnMut(WalkNode<'a>)) {
+    for s in stmts { walk_stmt(s, f); }
+}
+
+fn walk_cond_clause<'a>(c: &'a CondClause, f: &mut dyn FnMut(WalkNode<'a>)) {
+    match c {
+        CondClause::Expr(ex) | CondClause::Let(_, ex) | CondClause::LetPat(_, ex) => walk_expr(ex, f),
+    }
+}
+
+fn walk_match<'a>(m: &'a MatchStmt, f: &mut dyn FnMut(WalkNode<'a>)) {
+    walk_expr(&m.subject, f);
+    for arm in &m.arms {
+        if let Some(g) = &arm.guard { walk_expr(g, f); }
+        match &arm.body {
+            MatchBody::Expr(ex) => walk_expr(ex, f),
+            MatchBody::Block(body) => walk_stmts(body, f),
+        }
+    }
+}
+
+fn walk_stmt<'a>(stmt: &'a Stmt, f: &mut dyn FnMut(WalkNode<'a>)) {
+    f(WalkNode::Stmt(stmt));
+    match stmt {
+        Stmt::Let(s) => { if let Some(v) = &s.value { walk_expr(v, f); } }
+        Stmt::LetDestructure(s) => walk_expr(&s.value, f),
+        Stmt::Return(r) => { if let Some(v) = &r.value { walk_expr(v, f); } }
+        Stmt::Throw(t) => { if let Some(v) = &t.value { walk_expr(v, f); } }
+        Stmt::Break(_, v) => { if let Some(v) = v { walk_expr(v, f); } }
+        Stmt::If(s) => {
+            for (c, body) in &s.branches { walk_expr(c, f); walk_stmts(body, f); }
+            if let Some(body) = &s.else_body { walk_stmts(body, f); }
+        }
+        Stmt::IfLet(s) => {
+            for c in &s.clauses { walk_cond_clause(c, f); }
+            walk_stmts(&s.then_body, f);
+            for br in &s.elif_branches {
+                for c in &br.clauses { walk_cond_clause(c, f); }
+                walk_stmts(&br.body, f);
+            }
+            if let Some(body) = &s.else_body { walk_stmts(body, f); }
+        }
+        Stmt::Match(m) => walk_match(m, f),
+        Stmt::While(s) => { walk_expr(&s.condition, f); walk_stmts(&s.body, f); }
+        Stmt::WhileLet(s) => { walk_expr(&s.value, f); walk_stmts(&s.body, f); }
+        Stmt::DoWhile(s) => { walk_stmts(&s.body, f); walk_expr(&s.condition, f); }
+        Stmt::Loop(s) => walk_stmts(&s.body, f),
+        Stmt::For(s) => { walk_expr(&s.iterable, f); walk_stmts(&s.body, f); }
+        Stmt::Guard(s) => {
+            match &s.cond {
+                GuardCond::Expr(ex) => walk_expr(ex, f),
+                GuardCond::Clauses(cs) => { for c in cs { walk_cond_clause(c, f); } }
+            }
+            walk_stmts(&s.else_body, f);
+        }
+        Stmt::Try(s) => {
+            walk_stmts(&s.body, f);
+            for c in &s.catch_clauses { walk_stmts(&c.body, f); }
+        }
+        Stmt::Defer(body) => walk_stmts(body, f),
+        Stmt::Wait(ex, _) | Stmt::Yield(ex, _) | Stmt::Expr(ex) => walk_expr(ex, f),
+        Stmt::KernelBlock(s) => walk_stmts(&s.body, f),
+        Stmt::With(s) => walk_stmts(&s.body, f),
+        Stmt::Fn(_) | Stmt::Struct(_) | Stmt::Enum(_) | Stmt::Mod(_) | Stmt::Alias(_)
+        | Stmt::Continue(_) | Stmt::Comment(_) => {}
+    }
+}
+
+fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(WalkNode<'a>)) {
+    f(WalkNode::Expr(expr));
+    match &expr.kind {
+        ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r) | ExprKind::BinOp(_, l, r)
+        | ExprKind::Index(l, r) | ExprKind::Else(l, r) | ExprKind::TryElse(l, r)
+        | ExprKind::TaskWithTimeout(l, r) => { walk_expr(l, f); walk_expr(r, f); }
+        ExprKind::UnaryOp(_, e) | ExprKind::Cast(e, _) | ExprKind::RelabelCast(e, _)
+        | ExprKind::Field(e, _) | ExprKind::OptionalField(e, _) | ExprKind::Task(e)
+        | ExprKind::ArrayAlloc { count: e } => walk_expr(e, f),
+        ExprKind::LabeledIndex(obj, args) | ExprKind::Call(obj, args)
+        | ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args)
+        | ExprKind::GenericCall(obj, _, args) | ExprKind::Pipe(obj, _, args) => {
+            walk_expr(obj, f);
+            for a in args { walk_expr(&a.value, f); }
+        }
+        ExprKind::New { ctor, arena } => {
+            walk_expr(ctor, f);
+            if let Some(a) = arena { walk_expr(a, f); }
+        }
+        ExprKind::KernelLaunch { kernel, config } => {
+            walk_expr(kernel, f);
+            if let Some(ex) = &config.block { walk_expr(ex, f); }
+            if let Some(ex) = &config.grid { walk_expr(ex, f); }
+        }
+        ExprKind::TryElseBlock(body, els) => { walk_stmts(body, f); walk_stmts(els, f); }
+        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems)
+        | ExprKind::JoinAll(elems) => { for e in elems { walk_expr(e, f); } }
+        ExprKind::MacroCall { args, .. } => { for e in args { walk_expr(e, f); } }
+        ExprKind::ArrayFill { value, count } => { walk_expr(value, f); walk_expr(count, f); }
+        ExprKind::ArrayComp { expr: e, count, .. } => { walk_expr(count, f); walk_expr(e, f); }
+        ExprKind::ArrayCompIter { expr: e, iter, .. } => { walk_expr(iter, f); walk_expr(e, f); }
+        ExprKind::LabeledArrayComp { expr: e, clauses } => {
+            for (_, count) in clauses { walk_expr(count, f); }
+            walk_expr(e, f);
+        }
+        ExprKind::TrailingArrayBlock { callee, args, body, .. } => {
+            walk_expr(callee, f);
+            for a in args { walk_expr(&a.value, f); }
+            walk_stmts(body, f);
+        }
+        ExprKind::Dict(pairs) => { for (k, v) in pairs { walk_expr(k, f); walk_expr(v, f); } }
+        ExprKind::Range { start, end, .. } => { walk_expr(start, f); walk_expr(end, f); }
+        ExprKind::SliceRange { start, end, .. } => {
+            if let Some(s) = start { walk_expr(s, f); }
+            if let Some(e) = end { walk_expr(e, f); }
+        }
+        ExprKind::StringInterp(segs) => {
+            for seg in segs {
+                if let StringSegment::Expr(e) | StringSegment::FormattedExpr(e, _) = seg { walk_expr(e, f); }
+            }
+        }
+        ExprKind::If(s) => {
+            for (c, body) in &s.branches { walk_expr(c, f); walk_stmts(body, f); }
+            if let Some(body) = &s.else_body { walk_stmts(body, f); }
+        }
+        ExprKind::Match(m) => walk_match(m, f),
+        ExprKind::Block(stmts) | ExprKind::Do(stmts) => walk_stmts(stmts, f),
+        ExprKind::Loop(s) => walk_stmts(&s.body, f),
+        ExprKind::Closure(_, _, body, _, _) => match body {
+            ClosureBody::Expr(e) => walk_expr(e, f),
+            ClosureBody::Block(stmts) => walk_stmts(stmts, f),
+        },
+        ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)
+        | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void
+        | ExprKind::DotIdent(_) => {}
     }
 }

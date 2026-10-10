@@ -511,6 +511,8 @@ impl HostEmitter {
     // ── GPU prelude ────────────────────────────────────────────────────────────
 
     fn emit_prelude(&mut self, kernel_names: &[String]) {
+        self.line("fn set_gpu_batch_limit(_limit: i64) {}");
+        self.blank();
         // `PushKernelArg` brings `LaunchArgs::arg()` into scope -- it's a trait
         // method (real cudarc 0.19.8: `cudarc::driver::safe::launch::PushKernelArg`,
         // re-exported at `cudarc::driver::PushKernelArg`), not an inherent one;
@@ -3151,7 +3153,7 @@ impl HostEmitter {
     /// Handles three patterns:
     /// - `Scale(args)` call  → var is type `Scale`
     /// - `kernel(...) k`     → var has same type as `k`
-    /// - `... |> .wait`      → var has same type as the kernel being waited on
+    /// - `... |> .wait()`    → var has same type as the kernel being waited on
     fn track_kernel_var(&mut self, name: &str, val: &Expr) {
         let ty = self.resolve_kernel_type(val);
         if let Some(t) = ty {
@@ -3213,7 +3215,7 @@ impl HostEmitter {
             ExprKind::KernelLaunch { kernel, .. } => self.resolve_kernel_type(kernel),
             // `new(g) Scale(args)` — placement; same type as the constructor
             ExprKind::New { ctor, .. } => self.resolve_kernel_type(ctor),
-            // `expr |> .wait` — unwrap handle; same type as the launch
+            // `expr |> .wait()` — unwrap handle; same type as the launch
             ExprKind::Pipe(lhs, method, _) if method == "wait" => self.resolve_kernel_type(lhs),
             // bare variable — look up in tracked map
             ExprKind::Var(n) => self.var_kernel_type.get(n.as_str()).cloned(),

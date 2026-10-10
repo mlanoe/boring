@@ -340,6 +340,101 @@ impl Checker {
             }
         }
     }
+    // ── Kernel writes to a copy of an argument ──────────────────────────────────
+    //
+    // A kernel field initialized from an `init` parameter (`a = aa`) is a COPY of
+    // the caller's argument (value semantics; for a resident array the generated
+    // wrapper copies the buffer). That is deliberate, but a kernel that writes
+    // such a field and is only ever observed through *other* fields leaves the
+    // write in the copy: the caller never sees it. Nothing else flags this --
+    // boring-llm shipped a fused residual-add + RMSNorm shaped exactly like it
+    // (`a` updated in place, only `normed` returned) that compiled, passed its
+    // unit test, and made every model generate random text.
+    //
+    // Fires once per (construction, field) when ALL of these hold:
+    //   1. the kernel body writes the field (`a[i] = ...`, `a[i] += ...` -- the
+    //      parser desugars compound assignment to `Assign` -- or `self.a[...] = ...`);
+    //   2. the field is an array in device-visible memory (`'unified`/`'global`,
+    //      atomic variants included) and the kernel's init assigns it directly
+    //      from an init parameter, i.e. it is a copy of the argument;
+    //   3. the constructor argument is named caller storage (a variable or field
+    //      read), not a fresh temporary -- a scratch buffer built in place
+    //      (`K([0.0 for ..<n])`) is written by design and nobody expects to see it;
+    //   4. in the enclosing function the instance's field is never read
+    //      (`k.a` appears nowhere, so it is neither returned directly nor inside a
+    //      returned tuple/struct, nor handed to a later kernel or `with` block) and
+    //      the instance itself never escapes (`k` is only ever dispatched or used
+    //      as the base of a field read).
+    //
+    // Deliberately conservative: any read of `k.a` counts as using the copy, so
+    // this under-reports rather than warning on a pipeline that does consume it.
+    // Not gated behind `kernel_dispatch_only`: it must fire for `boring run`,
+    // `boring build`, and every GPU target alike.
+
+    pub(super) fn check_kernel_copy_writes(&mut self, f: &FnDecl) {
+        if self.kernel_decls.is_empty() { return; }
+        // Every `let k = SomeKernel(args...)` in this function (nested blocks
+        // included) whose kernel has at least one written copy field.
+        let mut sites: Vec<(&LetStmt, KernelDecl)> = Vec::new();
+        walk_stmts(&f.body, &mut |n| {
+            if let WalkNode::Stmt(Stmt::Let(l)) = n {
+                if let Some(ExprKind::Call(callee, _)) = l.value.as_ref().map(|v| &v.kind) {
+                    if let ExprKind::Var(kn) = &callee.kind {
+                        if let Some(decl) = self.kernel_decls.get(kn.as_str()) {
+                            sites.push((l, decl.clone()));
+                        }
+                    }
+                }
+            }
+        });
+        for (l, decl) in sites {
+            let copies = kernel_written_copy_fields(&decl);
+            if copies.is_empty() { continue; }
+            let Some(ExprKind::Call(_, args)) = l.value.as_ref().map(|v| &v.kind) else { continue };
+            let Some(init) = decl.inits.first() else { continue };
+            // Uses of the instance and its fields anywhere in the function.
+            let (mut var_uses, mut base_uses, mut dispatch_uses) = (0usize, 0usize, 0usize);
+            let mut fields_read: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            walk_stmts(&f.body, &mut |n| {
+                let WalkNode::Expr(e) = n else { return };
+                match &e.kind {
+                    ExprKind::Var(v) if *v == l.name => var_uses += 1,
+                    ExprKind::Field(b, fld) if matches!(&b.kind, ExprKind::Var(v) if *v == l.name) => {
+                        base_uses += 1;
+                        fields_read.insert(fld.as_str());
+                    }
+                    ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(v) if *v == l.name) => dispatch_uses += 1,
+                    _ => {}
+                }
+            });
+            if var_uses > base_uses + dispatch_uses { continue; } // `k` escapes
+            for (field, param_idx) in copies {
+                if fields_read.contains(field.as_str()) { continue; }
+                let Some(param) = init.params.get(param_idx) else { continue };
+                // The argument bound to this init parameter: positional by index,
+                // labeled by name.
+                let arg = args.iter().enumerate().find(|(i, a)| {
+                    !a.spread && !a.default_rest
+                        && match &a.label {
+                            Some(lbl) => *lbl == param.name,
+                            None => *i == param_idx,
+                        }
+                });
+                let Some((_, arg)) = arg else { continue };
+                if !matches!(arg.value.kind, ExprKind::Var(_) | ExprKind::Field(_, _)) { continue; }
+                self.warning(
+                    format!(
+                        "write to `{field}` is discarded: `{field}` is a copy of the argument `{}`, \
+                         so the caller never sees the write and `{}.{field}` is never returned or read; \
+                         return `{}.{field}` (alone or in a tuple) or write to an output field instead",
+                        param.name, l.name, l.name,
+                    ),
+                    arg.value.line, arg.value.col,
+                );
+            }
+        }
+    }
+
     // ── `with` scoped-access blocks ─────────────────────────────────────────────
     // See docs/scoped-access-blocks.md. Two things are checked here (both target-
     // independent, so they fire under `boring run` too, not just `boring build`):
@@ -643,5 +738,66 @@ impl Checker {
             ExprKind::Index(o, _) | ExprKind::LabeledIndex(o, _) => format!("{}[..]", Self::place_text(o)),
             _ => "this argument".to_string(),
         }
+    }
+}
+
+/// Fields of `decl` that its kernel body writes while they are a copy of an `init`
+/// argument, as `(field name, init parameter index)` pairs -- see
+/// `Checker::check_kernel_copy_writes` for the full rule and its rationale.
+fn kernel_written_copy_fields(decl: &KernelDecl) -> Vec<(String, usize)> {
+    let Some(init) = decl.inits.first() else { return Vec::new() };
+    let mut written: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for m in &decl.methods {
+        walk_stmts(&m.body, &mut |n| {
+            if let WalkNode::Expr(e) = n {
+                if let ExprKind::Assign(lhs, _) = &e.kind {
+                    if let Some(name) = assign_root_name(lhs) { written.insert(name); }
+                }
+            }
+        });
+    }
+    let mut out = Vec::new();
+    for fld in &decl.fields {
+        if fld.binding == FieldBinding::Let || !written.contains(fld.name.as_str()) { continue; }
+        if !matches!(fld.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified) { continue; }
+        if !is_array_type(&fld.ty) { continue; }
+        // `field = param` (or `field = param as T`) in the init body.
+        let from_param = init.body.iter().find_map(|st| {
+            let Stmt::Expr(e) = st else { return None };
+            let ExprKind::Assign(lhs, rhs) = &e.kind else { return None };
+            if !matches!(&lhs.kind, ExprKind::Var(n) if *n == fld.name) { return None; }
+            match &rhs.kind {
+                ExprKind::Var(p) => Some(p),
+                ExprKind::Cast(inner, _) => match &inner.kind { ExprKind::Var(p) => Some(p), _ => None },
+                _ => None,
+            }
+        });
+        let Some(param) = from_param else { continue };
+        if let Some(idx) = init.params.iter().position(|p| p.name == *param) {
+            out.push((fld.name.clone(), idx));
+        }
+    }
+    out
+}
+
+/// The field a kernel-body assignment target writes into: `a`, `a[i]`, `a[i].x`,
+/// `self.a[i]`.
+fn assign_root_name(lhs: &Expr) -> Option<&str> {
+    match &lhs.kind {
+        ExprKind::Var(n) => Some(n.as_str()),
+        ExprKind::Index(b, _) | ExprKind::LabeledIndex(b, _) => assign_root_name(b),
+        ExprKind::Field(b, fld) => match &b.kind {
+            ExprKind::Var(s) if s == "self" => Some(fld.as_str()),
+            _ => assign_root_name(b),
+        },
+        _ => None,
+    }
+}
+
+fn is_array_type(ty: &Type) -> bool {
+    match ty {
+        Type::Mut(inner) | Type::Qualified(inner, _) => is_array_type(inner),
+        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => true,
+        _ => false,
     }
 }

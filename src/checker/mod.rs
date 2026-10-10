@@ -1359,6 +1359,7 @@ impl Checker {
         self.check_observed_compatibility(&f.return_ty, f.line, f.col);
         self.check_dead_code(&f.body);
         for stmt in &f.body { self.check_stmt(stmt); }
+        self.check_kernel_copy_writes(f);
         self.in_authorized_static_site = prev_static_site;
         self.pop_scope();
         self.check_missing_return(f);
