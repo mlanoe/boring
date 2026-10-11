@@ -20,7 +20,7 @@ impl KernelTranspiler {
             Item::Fn(f)     => self.emit_fn(f, None),
             Item::Struct(s) => self.emit_struct(s),
             Item::Enum(e)   => self.emit_enum(e),
-            Item::Use(_)    => { /* use declarations are not emitted for kernel targets */ }
+            Item::Use(_)    => { /* use declarations are not emitted for Linux targets */ }
             Item::Alias(a)  => {
                 let rust_ty = self.emit_type(&a.ty);
                 self.line(&format!("type {} = {};", a.name, rust_ty));
@@ -54,7 +54,7 @@ impl KernelTranspiler {
             // Trait and ext declarations are not directly emitted in kernel mode —
             // the kernel crate uses its own trait system. Skip silently.
             Item::Trait(_) | Item::Ext(_) => {}
-            // Unreachable in the normal `boring build --target kernel` CLI path: `validate_kernel`
+            // Unreachable in the normal `boring build --linux` CLI path: `validate_kernel`
             // (see `validator::kernel::KernelValidator::check_item`) rejects any `Item::Kernel`
             // as an error before this transpiler ever runs. Kept as a no-op rather than a panic
             // for callers that invoke `transpile_kernel` directly without validating first.

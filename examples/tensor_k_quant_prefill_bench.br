@@ -11,8 +11,8 @@ kernel CopyBytesKernel:
         n = nn
         out = [0 as uint8 for ..<nn]
     def ():
-        let block_idx = gpu.block.x + gpu.block.y * gpu.grid_dim.x
-        let base = (gpu.thread.x + block_idx * gpu.block_dim.x) * 16
+        let block_idx = .block.x + .block.y * .grid_dim.x
+        let base = (.thread.x + block_idx * .block_dim.x) * 16
         for j in 0..<16:
             if base + j < n:
                 out[base + j] = src[base + j]
@@ -26,13 +26,13 @@ kernel CopyFloatsKernel:
         n = nn
         out = [0.0 as float32 for ..<nn]
     def ():
-        let block_idx = gpu.block.x + gpu.block.y * gpu.grid_dim.x
-        let base = (gpu.thread.x + block_idx * gpu.block_dim.x) * 4
+        let block_idx = .block.x + .block.y * .grid_dim.x
+        let base = (.thread.x + block_idx * .block_dim.x) * 4
         for j in 0..<4:
             if base + j < n:
                 out[base + j] = src[base + j]
 
-req [uint8]'gpu'unified upload_bytes(int n, [uint8]'global src) throws:
+req [uint8]'kernel'unified upload_bytes(int n, [uint8]'global src) throws:
     let int blocks = (n + 4095) / 4096
     let int gx = if blocks > 65535: 65535 else: blocks
     let int gy = (blocks + gx - 1) / gx
@@ -41,7 +41,7 @@ req [uint8]'gpu'unified upload_bytes(int n, [uint8]'global src) throws:
         copy(block = 256, grid = (gx, gy))
     copy.out
 
-req [float32]'gpu'unified upload_floats(int n, [float32]'global src) throws:
+req [float32]'kernel'unified upload_floats(int n, [float32]'global src) throws:
     let int blocks = (n + 1023) / 1024
     let int gx = if blocks > 65535: 65535 else: blocks
     let int gy = (blocks + gx - 1) / gx
@@ -50,20 +50,20 @@ req [float32]'gpu'unified upload_floats(int n, [float32]'global src) throws:
         copy(block = 256, grid = (gx, gy))
     copy.out
 
-req [float32]'gpu'unified q8([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q8_0")
+req [float32]'kernel'unified q8([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q8_0")
     y
-req [float32]'gpu'unified q4k([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q4_k")
+req [float32]'kernel'unified q4k([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q4_k")
     y
-req [float32]'gpu'unified q6k([float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(x, w, y, m = m, n = n, k = k, format = "q6_k")
+req [float32]'kernel'unified q6k([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q6_k")
     y
 
-req [float32]'gpu'unified run(string format, [float32]'gpu'global x, [uint8]'gpu'global w, int m, int n, int k) throws:
+req [float32]'kernel'unified run(string format, [float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
     if format == "q8_0":
         q8(x, w, m, n, k)
     elif format == "q4_k":

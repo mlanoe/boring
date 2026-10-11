@@ -129,7 +129,7 @@ struct HostEmitter {
     fn_gpu_array_params: std::collections::HashMap<String, Vec<bool>>,
     /// Local variable names (current function only, reset per `emit_fn` call)
     /// bound to a call into a `fn_returns_resident` function WHOSE OWN `let`
-    /// type is itself `'gpu'unified` (`s.ty.gpu_resident_qual().is_some()`) --
+    /// type is itself `'kernel'unified` (`s.ty.gpu_resident_qual().is_some()`) --
     /// these stay `BoringGpuArg<f64>`-typed (never unwrapped to a plain
     /// `Vec`), so a later kernel-constructor call passing one of these as an
     /// argument can share the underlying `CudaSlice` through an `Arc` instead
@@ -621,7 +621,7 @@ impl HostEmitter {
         self.line("}");
         self.blank();
         // The general (std/wgpu-shared) transpiler pipeline's own pre-pass marks any
-        // function whose declared return type is `'gpu'unified`/`'gpu'global`-qualified
+        // function whose declared return type is `'kernel'unified`/`'kernel'global`-qualified
         // (e.g. math_gpu.br's `transpose_gpu`/`linear_gpu`) as "GPU-resident-returning"
         // and renders every CALLER of it (in the general-pipeline-spliced "plain" code
         // this backend embeds -- see `cuda::transpile_cuda`'s doc comment) to expect a
@@ -1986,8 +1986,8 @@ impl HostEmitter {
             }
             None => params.join(", "),
         };
-        // A `'gpu'unified`/`'gpu'global`-qualified return type (e.g. math_gpu.br's
-        // `pub req [float]'gpu'unified transpose_gpu(...)`) makes this a GPU-resident-
+        // A `'kernel'unified`/`'kernel'global`-qualified return type (e.g. math_gpu.br's
+        // `pub req [float]'kernel'unified transpose_gpu(...)`) makes this a GPU-resident-
         // returning function per the general pipeline's OWN unconditional, target-
         // agnostic convention (`transpiler::mod.rs`'s `fn_returns_resident` pre-scan —
         // triggered purely by this return-type annotation, independent of
@@ -2092,8 +2092,8 @@ impl HostEmitter {
             Stmt::Let(s) => {
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
                 // A materializing call (RHS calls a `fn_returns_resident`
-                // function) whose OWN `let` is itself explicitly `'gpu'unified`
-                // (e.g. `let [float]'gpu'unified k_t = transpose_gpu(...)`)
+                // function) whose OWN `let` is itself explicitly `'kernel'unified`
+                // (e.g. `let [float]'kernel'unified k_t = transpose_gpu(...)`)
                 // means the programmer wants this value to stay resident for
                 // a later chained kernel-touching call -- see
                 // `resident_locals`'s doc. `rust_type`'s own `Type::Qualified`
@@ -2851,7 +2851,7 @@ impl HostEmitter {
                 // `attention_heads_gpu` calling `transpose_gpu`) must materialize
                 // the result -- UNLESS the caller explicitly asked to keep it
                 // resident (`__suppress_materialize`, set by `Stmt::Let` for a
-                // `'gpu'unified`-typed binding; see `resident_locals`'s doc), in
+                // `'kernel'unified`-typed binding; see `resident_locals`'s doc), in
                 // which case the plain `call` (already typed `BoringGpuArg<T>`
                 // by `emit_fn`) is returned as-is. A real `?`-operator/E0308
                 // type mismatch otherwise, confirmed via `cargo check`.
@@ -3361,7 +3361,7 @@ impl HostEmitter {
     /// expression uses in practice: a bare `k.field` read of a local kernel-
     /// struct variable's own output array field. When matched (only called
     /// where `in_resident_return` is true, i.e. this function's return type
-    /// is itself `'gpu'unified`), skips `try_gpu_field_read`'s materializing
+    /// is itself `'kernel'unified`), skips `try_gpu_field_read`'s materializing
     /// `k.read_field()?` (a real D2H copy) entirely and instead MOVES the
     /// kernel's own output `CudaSlice` out, wrapped as `BoringGpuArg::
     /// Resident` -- `k` is never referenced again after this (its only use

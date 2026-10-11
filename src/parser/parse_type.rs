@@ -465,6 +465,48 @@ impl Parser {
             return Ok(ty);
         }
         let qual = match self.peek().clone() {
+            TokenKind::Kernel => {
+                self.advance();
+                // `kernel` is a language keyword, so after a tick it is tokenized
+                // separately from ordinary qualifier identifiers.
+                if self.eat(&TokenKind::Tick) {
+                    match self.peek().clone() {
+                        TokenKind::Ident(ref s) => match s.as_str() {
+                            "unified" => {
+                                self.advance();
+                                OwnerQual::GpuUnified
+                            }
+                            "global" => {
+                                self.advance();
+                                OwnerQual::GpuGlobal
+                            }
+                            _ => {
+                                return Err(ParseError::Generic {
+                                    msg: "expected 'unified or 'global after 'kernel".into(),
+                                    line: self.line(),
+                                    col: self.col(),
+                                    len: self.tok_len(),
+                                })
+                            }
+                        },
+                        _ => {
+                            return Err(ParseError::Generic {
+                                msg: "expected 'unified or 'global after 'kernel".into(),
+                                line: self.line(),
+                                col: self.col(),
+                                len: self.tok_len(),
+                            })
+                        }
+                    }
+                } else {
+                    return Err(ParseError::Generic {
+                        msg: "'kernel must be followed by 'unified or 'global".into(),
+                        line: self.line(),
+                        col: self.col(),
+                        len: self.tok_len(),
+                    });
+                }
+            }
             TokenKind::Ident(ref s) => match s.as_str() {
                 "shared" => { self.advance(); OwnerQual::Shared }
                 "weak"   => { self.advance(); OwnerQual::Weak }
@@ -488,33 +530,6 @@ impl Parser {
                 "global"  => { self.advance(); OwnerQual::GpuGlobal }
                 "local"   => { self.advance(); OwnerQual::GpuLocal }
                 "const"   => { self.advance(); OwnerQual::GpuConst }
-                "gpu"    => {
-                    self.advance();
-                    // `T'gpu'unified`, `T'gpu'global` — host-side GPU qualifiers.
-                    // `'const` is deliberately excluded: it has no host access (like `'local`),
-                    // so a host-context binding could never be read from or written to.
-                    if self.eat(&TokenKind::Tick) {
-                        match self.peek().clone() {
-                            TokenKind::Ident(ref s) => match s.as_str() {
-                                "unified" => { self.advance(); OwnerQual::GpuUnified }
-                                "global"  => { self.advance(); OwnerQual::GpuGlobal }
-                                _ => return Err(ParseError::Generic {
-                                    msg: "expected 'unified or 'global after 'gpu".into(),
-                                    line: self.line(), col: self.col(), len: self.tok_len(),
-                                }),
-                            },
-                            _ => return Err(ParseError::Generic {
-                                msg: "expected 'unified or 'global after 'gpu".into(),
-                                line: self.line(), col: self.col(), len: self.tok_len(),
-                            }),
-                        }
-                    } else {
-                        return Err(ParseError::Generic {
-                            msg: "'gpu must be followed by 'unified or 'global".into(),
-                            line: self.line(), col: self.col(), len: self.tok_len(),
-                        });
-                    }
-                }
                 "surface" => { self.advance(); OwnerQual::GpuSurface }
                 "actor"  => {
                     self.advance();

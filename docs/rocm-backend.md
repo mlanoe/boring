@@ -2,7 +2,7 @@
 
 `boring build --target rocm` generates a Rust + HIP C++ project that runs GPU kernels on AMD GPUs using ROCm's HIP runtime — a native alternative to `--target cuda` for AMD hardware, requiring no NVIDIA GPU or CUDA toolkit.
 
-The Boring source is identical: the same `kernel` structs, qualifiers, and `gpu.*` built-ins work unchanged across CUDA, Metal, wgpu, and ROCm targets. For the language reference, see [`gpu-module.md`](gpu-module.html). For the canonical qualifier model and dispatch-parameter reference, see [`cuda-module.md`](cuda-module.html) — this document only covers what's different about ROCm.
+The Boring source is identical: the same `kernel` structs, qualifiers, and implicit kernel built-ins work unchanged across CUDA, Metal, wgpu, and ROCm targets. For the language reference, see [`gpu-module.md`](gpu-module.html). For the canonical qualifier model and dispatch-parameter reference, see [`cuda-module.md`](cuda-module.html) — this document only covers what's different about ROCm.
 
 ---
 
@@ -18,18 +18,18 @@ HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__glob
 
 | Boring | CUDA C | HIP C++ |
 |---|---|---|
-| `gpu.thread.x` | `threadIdx.x` | `threadIdx.x` |
-| `gpu.block.x` | `blockIdx.x` | `blockIdx.x` |
-| `gpu.block_dim.x` | `blockDim.x` | `blockDim.x` |
-| `gpu.grid_dim.x` | `gridDim.x` | `gridDim.x` |
+| `.thread.x` | `threadIdx.x` | `threadIdx.x` |
+| `.block.x` | `blockIdx.x` | `blockIdx.x` |
+| `.block_dim.x` | `blockDim.x` | `blockDim.x` |
+| `.grid_dim.x` | `gridDim.x` | `gridDim.x` |
 | `sync` | `__syncthreads()` | `__syncthreads()` |
-| `gpu.warp.size` | `warpSize` | `warpSize` (device built-in variable, but a *runtime* value on HIP — 32 or 64, RDNA vs CDNA — unlike CUDA's compile-time constant) |
-| `gpu.warp.lane` | `threadIdx.x/y/z` linearized, `% warpSize` | same |
-| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` | `__syncwarp(0xffffffff)` |
-| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | same |
-| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | same |
-| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | same |
-| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | same |
+| `.warp.size` | `warpSize` | `warpSize` (device built-in variable, but a *runtime* value on HIP — 32 or 64, RDNA vs CDNA — unlike CUDA's compile-time constant) |
+| `.warp.lane` | `threadIdx.x/y/z` linearized, `% warpSize` | same |
+| `.warp.sync()` | `__syncwarp(0xffffffff)` | `__syncwarp(0xffffffff)` |
+| `.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | same |
+| `.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | same |
+| `.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | same |
+| `.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | same |
 | `'unified` field | `cudaMallocManaged` | `hipMalloc` + host-visible copy via `DeviceBuffer<T>` (see below — HIP has no single-call managed-memory equivalent used here) |
 | `'global` field | `cudaMalloc` | `hipMalloc` |
 | bare `'actor` field | `__shared__` | `__shared__` |
@@ -165,7 +165,7 @@ reallocated automatically on resize.
 | Constant-memory upload | `get_global` + `transmute_mut` + `memcpy_htod` (3 cudarc calls) | single `HipModule::upload_constant` helper — same effect, one call, since this backend controls both sides of the FFI |
 | `after =` ordering | CUDA streams + events | HIP streams + events (`hipStreamWaitEvent`) — same GPU-side, non-blocking semantics |
 | Toolchain | `nvcc` | `hipcc` |
-| Tensor-core (`gpu.tensor.*`) | not yet implemented | not yet implemented — and this project's real RDNA2 test hardware (`gfx1032`) has no matrix-core hardware at all (MFMA is CDNA-only, WMMA is RDNA3+-only — confirmed via AMD's own `rocWMMA` supported-architecture list). See [tensor-core primitives](tensor-core-primitives.html) for the full finding and a proposed design that always falls back to the existing plain kernel on this hardware. |
+| Tensor-core (`kernel.tensors.*`) | not yet implemented | not yet implemented — and this project's real RDNA2 test hardware (`gfx1032`) has no matrix-core hardware at all (MFMA is CDNA-only, WMMA is RDNA3+-only — confirmed via AMD's own `rocWMMA` supported-architecture list). See [tensor-core primitives](tensor-core-primitives.html) for the full finding and a proposed design that always falls back to the existing plain kernel on this hardware. |
 | Verified against real hardware | — | **yes**, as of 2026-08-30 — HIP SDK 7.2 on an AMD Radeon RX 6600 (`gfx1032`, RDNA2/Navi 23; runs natively, no `HSA_OVERRIDE_GFX_VERSION` needed despite the official HIP SDK Windows support matrix listing `gfx1032` as unsupported). `examples/vector_add_gpu.br`, `matrix_mul_gpu.br`, and `mandelbrot_gpu.br` all compile, run, and produce output numerically identical (byte-identical for `mandelbrot_gpu.br`'s output PPM) to `boring run`'s interpreter simulation. Found and fixed 6 real bugs in the process — see below and the `map_builtin_fn`/`Stmt::With`/`try_gpu_field_read`/`kernel_ctor_buffer_flags`/`auto_grid`/`__stream` doc comments in `rocm::device`/`rocm::host` (all six also existed identically in `cuda::device`/`cuda::host`, this backend's near-verbatim clone, and were fixed there too — still unverified on real CUDA hardware, none available in this project's dev environment). Extended as of 2026-08-31 to the `Screen`/display feature (`examples/plasma_metal.br`, `examples/game_of_life.br`) — see the "GPU display" section above — which found 2 more real bugs (#7-8 below), also mirrored into `cuda::host`. |
 
 ### Bugs found via this hardware validation (all fixed)

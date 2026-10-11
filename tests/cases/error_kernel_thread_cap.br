@@ -4,7 +4,7 @@
 # instead of overflowing/OOMing the process.
 kernel K:
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
 
 mut k = K()
 kernel:

@@ -16,8 +16,8 @@ kernel MatrixMul:
         # c is zero-initialized automatically — no assignment needed.
 
     def ():
-        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
-        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        let col = .block.x * .block_dim.x + .thread.x
         if row < a.height and col < a.width:
             var float32 sum = 0.0
             for i in 0..<a.width:
@@ -41,7 +41,7 @@ kernel:
 # `k.c[...]` alone would read the whole result buffer back from the GPU on every
 # one of these 100 accesses. Binding it through an alias and reading it inside a
 # `with` block materializes it exactly once instead — see
-# docs/scoped-access-blocks.md. The `'gpu'unified` qualifier is inferred here
+# docs/scoped-access-blocks.md. The `'kernel'unified` qualifier is inferred here
 # from `k.c` itself being declared `'unified` above; no annotation needed.
 # `.flatten()` drops back to a plain `[float32]` first: labeled (`c[width = ...,
 # height = ...]`) indexing straight on a *fixed-shape* kernel-field alias inside

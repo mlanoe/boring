@@ -31,15 +31,15 @@ transpiler to handle.
 
 GPU qualifiers appear in two contexts with different syntax:
 
-- **Host context** — allocations and bindings outside a `kernel` struct. Full `'gpu'..` prefix is mandatory.
+- **Host context** — allocations and bindings outside a `kernel` struct. Full `'kernel'..` prefix is mandatory.
 - **Kernel context** — fields inside a `kernel` struct. The `'gpu` prefix is dropped; short forms `'unified`, `'global`, bare `'actor`, `'local`, `'const` are used.
 
 ### Host-context qualifiers
 
 | Qualifier | Location | CUDA |
 |---|---|---|
-| `'gpu'unified` | unified host + device DRAM | `cudaMallocManaged` |
-| `'gpu'global` | device-only DRAM | device pointer |
+| `'kernel'unified` | unified host + device DRAM | `cudaMallocManaged` |
+| `'kernel'global` | device-only DRAM | device pointer |
 
 `'const` has no host-context form — it has no host access at all (see below), so a
 host-side binding could never be read from or written to. It's only meaningful as a
@@ -85,18 +85,18 @@ kernel-struct field qualifier.
 
 | Boring | CUDA C |
 |---|---|
-| `gpu.thread.x` | `threadIdx.x` |
-| `gpu.block.x` | `blockIdx.x` |
-| `gpu.block_dim.x` | `blockDim.x` |
-| `gpu.grid_dim.x` | `gridDim.x` |
+| `.thread.x` | `threadIdx.x` |
+| `.block.x` | `blockIdx.x` |
+| `.block_dim.x` | `blockDim.x` |
+| `.grid_dim.x` | `gridDim.x` |
 | `sync` | `__syncthreads()` |
-| `gpu.warp.size` | `warpSize` |
-| `gpu.warp.lane` | `threadIdx.x/y/z` linearized, `% warpSize` |
-| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` |
-| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` |
-| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` |
-| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` |
-| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` |
+| `.warp.size` | `warpSize` |
+| `.warp.lane` | `threadIdx.x/y/z` linearized, `% warpSize` |
+| `.warp.sync()` | `__syncwarp(0xffffffff)` |
+| `.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` |
+| `.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` |
+| `.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` |
+| `.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` |
 | `'unified` field | `cudaMallocManaged` |
 | `'global` field | `cudaMalloc` |
 | bare `'actor` field | `__shared__` |
@@ -109,9 +109,9 @@ kernel-struct field qualifier.
 | `[i].cas(expected, new)` on `'actor'global`/`'actor'unified` | `atomicCAS(&x, expected, new)` |
 | `print` in kernel | `printf` |
 
-`gpu.warp.*`'s `_sync` intrinsics always pass the full `0xffffffff` active-lane
+`.warp.*`'s `_sync` intrinsics always pass the full `0xffffffff` active-lane
 mask — Boring doesn't expose a mask parameter in source. This means
-`gpu.warp.*` inside a divergent branch (an `if` not every lane in the warp
+`.warp.*` inside a divergent branch (an `if` not every lane in the warp
 takes) is only as safe as passing a full mask to CUDA's `_sync` intrinsics
 actually is: correct for reconverged/uniform control flow, undefined behavior
 otherwise. See [warp-level primitives](warp-level-primitives.html).
@@ -126,7 +126,7 @@ kernel Lookup:
     mut [float]'unified output
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         output[i] = lut[i % 4]
 ```
 
@@ -237,8 +237,8 @@ kernel Reduce:
         output = [..<n / 256]
 
     def ():
-        let tid = gpu.thread.x
-        tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
+        let tid = .thread.x
+        tile[tid] = input[.block.x * .block_dim.x + tid]
         sync
         ...
 
@@ -262,8 +262,8 @@ kernel Reduce:
         output = [..<n / 256]
 
     def ():
-        let tid = gpu.thread.x
-        tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
+        let tid = .thread.x
+        tile[tid] = input[.block.x * .block_dim.x + tid]
         sync
         ...
 
@@ -317,7 +317,7 @@ kernel Histogram:
     mut [int]'actor'global bins
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < len(input):
             let bucket = int(input[i] * 10.0)
             bins[bucket] += 1              # → atomicAdd
@@ -359,7 +359,7 @@ kernel Scale:
 | `'local` (register) | local variable |
 | `'const` (kernel) | `let` binding |
 | kernel launch | sequential loop over all threads |
-| `gpu.thread.x/y/z`, `gpu.block.x/y/z`… | loop variables |
+| `.thread.x/y/z`, `.block.x/y/z`… | loop variables |
 | `sync` | no-op |
 | `'actor'global`/`'actor'unified` fields | plain arithmetic (no contention) |
 | `kernel:` block dispatch | no-op — single-threaded sequential |
@@ -528,4 +528,4 @@ The following features are not yet implemented:
 
 - `'actor'shared` — parse error; only `'actor'global`/`'actor'unified` (or bare `'actor` for block-shared memory) are accepted
 - Omitting `grid` when no 1D array field, `Image`, or `Volume` field is present silently defaults to `(1, 1, 1)` — see the grid-inference rules above for what fields DO get 2D/3D inference
-- **No tensor-core (`wmma`) support** — no fragment types, no `mma.sync` lowering, nothing. See [tensor-core primitives](tensor-core-primitives.html) for a proposed `gpu.tensor.*` design (not implemented).
+- **No tensor-core (`wmma`) support** — no fragment types, no `mma.sync` lowering, nothing. See [tensor-core primitives](tensor-core-primitives.html) for a proposed `kernel.tensors.*` design (not implemented).

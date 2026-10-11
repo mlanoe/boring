@@ -896,7 +896,7 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     }
 }
 
-/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — unlike
+/// `.warp.sync()` / `.warp.shuffle_down/up/xor/shuffle(...)` — unlike
 /// the comment this replaces claimed, HIP does NOT mirror CUDA's `_sync`
 /// shuffle intrinsic names or their mask argument: confirmed against a real
 /// ROCm 6.2 install's own header
@@ -905,7 +905,7 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
 /// just `(var, lane, width = warpSize)` -- no mask. The CUDA-shaped
 /// `__shfl_xor_sync`/`__shfl_sync` names this used to emit don't exist in
 /// HIP at all, confirmed via a real `hipcc` compile against
-/// `gpu.tensor.linear`'s q8_0 warp-broadcast decode
+/// `kernel.tensors.linear`'s q8_0 warp-broadcast decode
 /// (`error: use of undeclared identifier '__shfl_sync'`) -- silently
 /// invisible to `rocm_codegen.rs`'s own tests, which only assert on the
 /// generated text and never invoke a real HIP compiler.

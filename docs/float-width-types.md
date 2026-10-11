@@ -60,7 +60,7 @@ types with a real identity, not a new problem being bundled in:
   32-bit precision on-device today, with nothing telling the author. Once
   `float64` is a real, checked type, this stops being representable at all —
   see [Metal below](#metal-mslfloat64-device-side-is-a-compile-error-not-a-silent-narrowing).
-- **The generic `'gpu'unified` residency path already narrows `float` to
+- **The generic `'kernel'unified` residency path already narrows `float` to
   32-bit on the device side, on purpose — `float32`/`float64` make that
   explicit instead of implicit.** `kernel_host_scalar_type` (device-facing)
   maps `Type::Float` to `"f32"` while `kernel_host_element_type`
@@ -217,9 +217,9 @@ should get the same cast infrastructure those already have, and today's
 `f32`/`f64` spellings were never wired into it despite already existing as
 type-annotation spellings.
 
-### 5. `--target kernel` (Rust-for-Linux, no_std): both forbidden, same reason as today's `float`
+### 5. `--linux` (Rust-for-Linux, no_std): both forbidden, same reason as today's `float`
 
-The kernel target already forbids `float` outright (`src/validator/kernel.rs`:
+The Linux target already forbids `float` outright (`src/validator/kernel.rs`:
 *"float is not allowed in kernel context — FPU is disabled"*) because kernel
 code runs with the FPU unavailable. `float32` and `float64` are both banned
 for the identical reason — narrower storage doesn't change whether the FPU
@@ -280,7 +280,7 @@ shader compilation, and DX12 has had outright compilation failures with
 unresolved — so the hard compile error above stays the right call, not a
 gap to close, until that changes.
 
-#### Host/device buffer narrowing in the generic `'gpu'unified` residency path — not a bug after all
+#### Host/device buffer narrowing in the generic `'kernel'unified` residency path — not a bug after all
 
 **An earlier revision of this section claimed `kernel_host_scalar_type`
 (device-facing, narrows to `"f32"`) vs. `kernel_host_element_type`
@@ -288,7 +288,7 @@ gap to close, until that changes.
 disagreeing for a `float`/`float64` buffer was a bug this document would fix
 "by construction." Investigated further and reverted: it isn't a bug.**
 These two functions are specifically the generic, backend-agnostic
-`'gpu'unified` residency path (interprocedural resident values, the feature
+`'kernel'unified` residency path (interprocedural resident values, the feature
 `with`/dual-typed-parameter tests exercise) — `kernel_host_scalar_type`'s own
 doc comment says so directly: *"GPU buffers always use 32-bit elements"*,
 modeled on `wgpu::host::host_scalar_type` because wgpu is this path's primary

@@ -21,8 +21,8 @@ kernel Mandelbrot:
         image = [0.0 for width = w, height = h]
 
     def ():
-        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
         if col < image.width and row < image.height:
             let x0 = x_min + float32(col) * (x_max - x_min) / float32(image.width)
             let y0 = y_min + float32(row) * (y_max - y_min) / float32(image.height)

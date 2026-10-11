@@ -102,7 +102,7 @@ impl Interpreter {
                 // A labeled-array *parameter*'s explicit type never reached
                 // `declared_types` the way a `let`/`mut` local's does (`Stmt::Let`
                 // handling, exec.rs) — only this task-safe check read `param.ty` at
-                // all. `gpu.tensor.matmul`/`mma`/`linear`'s fixed-shape host dispatch
+                // all. `kernel.tensors.matmul`/`mma`/`linear`'s fixed-shape host dispatch
                 // (eval_gpu.rs's `get_declared_type` lookup) silently saw `None` for
                 // any such parameter and failed with "host tensor operands require
                 // explicit labeled-array types" even though the parameter plainly

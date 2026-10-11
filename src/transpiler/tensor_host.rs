@@ -117,7 +117,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
             let mut function = function.clone();
             if !function.throws && function.body.iter().any(stmt_uses_host_tensor) {
                 errors.push(super::TranspileError::at_line(
-                    "functions containing gpu.tensor host dispatch must declare throws",
+                    "functions containing kernel.tensors host dispatch must declare throws",
                     function.line,
                 ));
                 items.push(Item::Fn(function));
@@ -168,7 +168,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
         let Item::Stmt(Stmt::Expr(call)) = item else {
             if item_uses_host_tensor(item) {
                 errors.push(super::TranspileError::at_line(
-                    "gpu.tensor host calls in GPU builds are currently supported only as top-level statements",
+                    "kernel.tensors host calls in GPU builds are currently supported only as top-level statements",
                     item_line(item),
                 ));
             }
@@ -181,7 +181,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
         };
         let Some(spec) = resolve_spec(method, names, &types) else {
             errors.push(super::TranspileError::at_line(
-                "unable to synthesize gpu.tensor host dispatch from the declared operand types",
+                "unable to synthesize kernel.tensors host dispatch from the declared operand types",
                 call.line,
             ));
             items.push(item.clone());
@@ -251,7 +251,7 @@ fn lower_function_body(
         let Stmt::Expr(call) = stmt else {
             if stmt_uses_host_tensor(stmt) {
                 errors.push(super::TranspileError::at_line(
-                    "gpu.tensor host calls in GPU builds must be direct function-body statements, outside control flow",
+                    "kernel.tensors host calls in GPU builds must be direct function-body statements, outside control flow",
                     stmt_line(stmt),
                 ));
             }
@@ -262,7 +262,7 @@ fn lower_function_body(
         if let Some(dynamic) = dynamic_linear_call(call) {
             let Some(quals) = resolve_dynamic_quals(dynamic.operands, types) else {
                 errors.push(super::TranspileError::at_line(
-                    "unable to synthesize dynamic gpu.tensor.linear from the declared operand types",
+                    "unable to synthesize dynamic kernel.tensors.linear from the declared operand types",
                     call.line,
                 ));
                 out.push(stmt.clone());
@@ -337,7 +337,7 @@ fn lower_function_body(
         };
         let Some(spec) = resolve_spec(method, names, types) else {
             errors.push(super::TranspileError::at_line(
-                "unable to synthesize gpu.tensor host dispatch from the declared operand types",
+                "unable to synthesize kernel.tensors host dispatch from the declared operand types",
                 call.line,
             ));
             out.push(stmt.clone());
@@ -623,7 +623,7 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str, config: &TensorLinearConf
         format!("n = {}, k = {}", spec.n, spec.k)
     };
     let source = format!(
-        "kernel {name}:\n    let [float32, k = {k}, m = {m}]'{qa} a\n    let [float32, {b_axes}]'{qb} b\n    mut [float32, n = {n}, m = {m}]'{qc} c\n    init([float32, k = {k}, m = {m}]'{qa} input_a, [float32, {b_axes}]'{qb} input_b, [float32, n = {n}, m = {m}]'{qc} input_c):\n        a = input_a\n        b = input_b\n        c = input_c\n    def ():\n        let row = gpu.block.y * {tile_rows}\n        let col = gpu.block.x * {tile_cols}\n        gpu.tensor.{tile_method}(a, b, c, row = row, col = col, rows = {tile_rows}, cols = {tile_cols})\n",
+        "kernel {name}:\n    let [float32, k = {k}, m = {m}]'{qa} a\n    let [float32, {b_axes}]'{qb} b\n    mut [float32, n = {n}, m = {m}]'{qc} c\n    init([float32, k = {k}, m = {m}]'{qa} input_a, [float32, {b_axes}]'{qb} input_b, [float32, n = {n}, m = {m}]'{qc} input_c):\n        a = input_a\n        b = input_b\n        c = input_c\n    def ():\n        let row = .block.y * {tile_rows}\n        let col = .block.x * {tile_cols}\n        kernel.tensors.{tile_method}(a, b, c, row = row, col = col, rows = {tile_rows}, cols = {tile_cols})\n",
         k = spec.k, m = spec.m, n = spec.n,
         qa = qual_source(&spec.quals[0]), qb = qual_source(&spec.quals[1]), qc = qual_source(&spec.quals[2]),
     );
@@ -719,7 +719,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     };
     let mut body = if let Some((broadcast_block_bytes, broadcast_value_decode)) = scale_broadcast {
         format!(
-            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpLen = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpLen\n            let warpsPerBlock = gpu.blockDim.x / warpLen\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * {broadcast_block_bytes}\n                    var float32 scale = 0.0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                    scale = gpu.warp.shuffle(scale, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += gpu.warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * {broadcast_block_bytes}\n                    var float32 scale = 0.0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                    scale = .warp.shuffle(scale, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += .warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
             initial = initial,
             product = nested_scalar_product,
@@ -729,7 +729,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
         )
     } else if quantized_format == Some("q5_0") && matches!(q5_decode_algorithm, "auto" | "warp" | "warp-broadcast") {
         format!(
-            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpLen = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpLen\n            let warpsPerBlock = gpu.blockDim.x / warpLen\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 22\n                    var float32 scale = 0.0\n                    var int qh = 0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                        qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                    scale = gpu.warp.shuffle(scale, scaleLane)\n                    qh = gpu.warp.shuffle(qh, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += gpu.warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 22\n                    var float32 scale = 0.0\n                    var int qh = 0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                        qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                    scale = .warp.shuffle(scale, scaleLane)\n                    qh = .warp.shuffle(qh, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += .warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
             initial = initial,
             product = nested_scalar_product,
@@ -739,21 +739,21 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
         )
     } else if warp_decode {
         format!(
-            "        if m == 1:\n            let lane = gpu.warp.lane\n            let warpLen = gpu.warp.size\n            let warpInBlock = gpu.thread.x / warpLen\n            let warpsPerBlock = gpu.blockDim.x / warpLen\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            let row = 0\n            let col = cell\n            var float32 sum = 0.0\n            var int inner = lane\n            while inner < k:\n                if cell < n:\n{product}                inner += warpLen\n            var int offset = warpLen / 2\n            while offset > 0:\n                sum += gpu.warp.shuffleXor(sum, offset)\n                offset /= 2\n            if cell < n:\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            let row = 0\n            let col = cell\n            var float32 sum = 0.0\n            var int inner = lane\n            while inner < k:\n                if cell < n:\n{product}                inner += warpLen\n            var int offset = warpLen / 2\n            while offset > 0:\n                sum += .warp.shuffleXor(sum, offset)\n                offset /= 2\n            if cell < n:\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             product = warp_product,
             bias = if has_bias { "bias[col]" } else { "0.0" },
             initial = initial,
         )
     } else {
         format!(
-            "        let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n        let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n        if cell < m * n:\n            let row = cell / n\n            let col = cell % n\n            var float32 sum = {initial}\n            for inner in 0..<k:\n{product}            c[row * n + col] = sum\n",
+            "        let blockIndex = .block.x + .block.y * .gridDim.x\n        let cell = .thread.x + blockIndex * .blockDim.x\n        if cell < m * n:\n            let row = cell / n\n            let col = cell % n\n            var float32 sum = {initial}\n            for inner in 0..<k:\n{product}            c[row * n + col] = sum\n",
             initial = initial,
             product = product,
         )
     };
     if portable_tiled_quantized {
         let scalar_prefill = format!(
-            "        else:\n            let blockIndex = gpu.block.x + gpu.block.y * gpu.gridDim.x\n            let cell = gpu.thread.x + blockIndex * gpu.blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             initial = initial,
             product = nested_scalar_product,
         );
@@ -769,7 +769,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
                 "                    bTile[width = tx, height = ty] = ",
             );
         let tiled_prefill = format!(
-            "        else:\n            let tx = gpu.thread.x % 16\n            let ty = gpu.thread.x / 16\n            let row = gpu.block.y * 16 + ty\n            let col = gpu.block.x * 16 + tx\n            var float32 sum = 0.0\n            let tileCount = (k + 15) / 16\n            for tile in 0..<tileCount:\n                let aCol = tile * 16 + tx\n                let bRow = tile * 16 + ty\n                if row < m and aCol < k:\n                    aTile[width = tx, height = ty] = a[row * k + aCol]\n                else:\n                    aTile[width = tx, height = ty] = 0.0\n                if col < n and bRow < k:\n                    let inner = bRow\n{tiled_dequant}                else:\n                    bTile[width = tx, height = ty] = 0.0\n                sync\n                for inner in 0..<16:\n                    sum += aTile[width = inner, height = ty] * bTile[width = tx, height = inner]\n                sync\n            if row < m and col < n:\n                c[row * n + col] = sum + {bias}\n",
+            "        else:\n            let tx = .thread.x % 16\n            let ty = .thread.x / 16\n            let row = .block.y * 16 + ty\n            let col = .block.x * 16 + tx\n            var float32 sum = 0.0\n            let tileCount = (k + 15) / 16\n            for tile in 0..<tileCount:\n                let aCol = tile * 16 + tx\n                let bRow = tile * 16 + ty\n                if row < m and aCol < k:\n                    aTile[width = tx, height = ty] = a[row * k + aCol]\n                else:\n                    aTile[width = tx, height = ty] = 0.0\n                if col < n and bRow < k:\n                    let inner = bRow\n{tiled_dequant}                else:\n                    bTile[width = tx, height = ty] = 0.0\n                sync\n                for inner in 0..<16:\n                    sum += aTile[width = inner, height = ty] * bTile[width = tx, height = inner]\n                sync\n            if row < m and col < n:\n                c[row * n + col] = sum + {bias}\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
         );
         body = body.replacen(&scalar_prefill, &tiled_prefill, 1);
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn lowers_top_level_calls_to_private_kernels_and_dispatches() {
-        let program = parse("let [float32, k = 17, m = 33]'gpu'global a = [0.0 for ..<561]\nlet [float32, n = 35, k = 17]'gpu'unified b = [0.0 for ..<595]\nmut [float32, n = 35, m = 33]'gpu'unified c = [0.0 for ..<1155]\ngpu.tensor.matmul(a, b, c)\ngpu.tensor.mma(a, b, c)\n");
+        let program = parse("let [float32, k = 17, m = 33]'kernel'global a = [0.0 for ..<561]\nlet [float32, n = 35, k = 17]'kernel'unified b = [0.0 for ..<595]\nmut [float32, n = 35, m = 33]'kernel'unified c = [0.0 for ..<1155]\nkernel.tensors.matmul(a, b, c)\nkernel.tensors.mma(a, b, c)\n");
         let lowered = lower(&program);
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         let kernels: Vec<_> = lowered.program.items.iter().filter_map(|item| match item {
@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn lowers_linear_with_native_row_major_weights() {
-        let program = parse("let [float32, k = 5, m = 3]'gpu'global x = [0.0 for ..<15]\nlet [float32, k = 5, n = 7]'gpu'global w = [0.0 for ..<35]\nmut [float32, n = 7, m = 3]'gpu'unified y = [0.0 for ..<21]\ngpu.tensor.linear(x, w, y)\n");
+        let program = parse("let [float32, k = 5, m = 3]'kernel'global x = [0.0 for ..<15]\nlet [float32, k = 5, n = 7]'kernel'global w = [0.0 for ..<35]\nmut [float32, n = 7, m = 3]'kernel'unified y = [0.0 for ..<21]\nkernel.tensors.linear(x, w, y)\n");
         let lowered = lower(&program);
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         let kernel = lowered.program.items.iter().find_map(|item| match item {
@@ -995,7 +995,7 @@ mod tests {
 
     #[test]
     fn lowers_host_scheduling_inside_control_flow() {
-        let lowered = lower(&parse("def work() throws:\n    let [float32, k = 2, m = 2]'gpu'global a = [0.0 for ..<4]\n    let [float32, n = 2, k = 2]'gpu'global b = [0.0 for ..<4]\n    mut [float32, n = 2, m = 2]'gpu'unified c = [0.0 for ..<4]\n    if true:\n        gpu.tensor.matmul(a, b, c)\n"));
+        let lowered = lower(&parse("def work() throws:\n    let [float32, k = 2, m = 2]'kernel'global a = [0.0 for ..<4]\n    let [float32, n = 2, k = 2]'kernel'global b = [0.0 for ..<4]\n    mut [float32, n = 2, m = 2]'kernel'unified c = [0.0 for ..<4]\n    if true:\n        kernel.tensors.matmul(a, b, c)\n"));
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         let function = lowered.program.items.iter().find_map(|item| match item {
             Item::Fn(function) if function.name == "work" => Some(function),
@@ -1007,7 +1007,7 @@ mod tests {
 
     #[test]
     fn lowers_direct_calls_inside_req_functions() {
-        let lowered = lower(&parse("req [float32]'gpu'unified compute([float32, k = 3, m = 2]'gpu'global x, [float32, k = 3, n = 2]'gpu'global w) throws:\n    mut [float32, n = 2, m = 2]'gpu'unified y = [0.0 for ..<4]\n    gpu.tensor.linear(x, w, y)\n    y\n"));
+        let lowered = lower(&parse("req [float32]'kernel'unified compute([float32, k = 3, m = 2]'kernel'global x, [float32, k = 3, n = 2]'kernel'global w) throws:\n    mut [float32, n = 2, m = 2]'kernel'unified y = [0.0 for ..<4]\n    kernel.tensors.linear(x, w, y)\n    y\n"));
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         assert!(lowered.program.items.iter().any(|item| matches!(item, Item::Kernel(kernel) if kernel.name == "BoringTensorHost0")));
         let function = lowered.program.items.iter().find_map(|item| match item {
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn lowers_dynamic_linear_inside_req_and_returns_resident_field() {
-        let source = "req [float32]'gpu'unified compute([float32]'gpu'global x, [float32]'gpu'global w, int m, int n, int k) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]\n    gpu.tensor.linear(x, w, y, m = m, n = n, k = k)\n    y\n";
+        let source = "req [float32]'kernel'unified compute([float32]'kernel'global x, [float32]'kernel'global w, int m, int n, int k) throws:\n    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]\n    kernel.tensors.linear(x, w, y, m = m, n = n, k = k)\n    y\n";
         let lowered = lower(&parse(source));
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         let kernel = lowered.program.items.iter().find_map(|item| match item {
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn synthesized_names_do_not_collide_with_user_names() {
-        let program = parse("kernel BoringTensorHost0:\n    def ():\n        let x = 0\nlet __boring_tensor_host_1 = 0\nlet [float32, k = 2, m = 2]'gpu'global a = [0.0 for ..<4]\nlet [float32, n = 2, k = 2]'gpu'global b = [0.0 for ..<4]\nmut [float32, n = 2, m = 2]'gpu'unified c = [0.0 for ..<4]\ngpu.tensor.matmul(a, b, c)\n");
+        let program = parse("kernel BoringTensorHost0:\n    def ():\n        let x = 0\nlet __boring_tensor_host_1 = 0\nlet [float32, k = 2, m = 2]'kernel'global a = [0.0 for ..<4]\nlet [float32, n = 2, k = 2]'kernel'global b = [0.0 for ..<4]\nmut [float32, n = 2, m = 2]'kernel'unified c = [0.0 for ..<4]\nkernel.tensors.matmul(a, b, c)\n");
         let lowered = lower(&program);
         assert!(lowered.errors.is_empty(), "{:?}", lowered.errors);
         assert!(lowered.program.items.iter().any(|item| matches!(item, Item::Kernel(kernel) if kernel.name == "BoringTensorHost2")));

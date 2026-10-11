@@ -72,7 +72,7 @@ enum KernelOutputInit {
 
 impl Transpiler {
     /// If `s` declares a name initialized directly from a bare kernel-field read
-    /// (`let py'gpu'unified = k.y`, or, with the qualifier inferred, plain
+    /// (`let py'kernel'unified = k.y`, or, with the qualifier inferred, plain
     /// `let py = k.y`), registers it as a resident alias (`gpu_resident_vars`) and
     /// emits nothing at all — no Rust binding exists for `py`; its only legal use is
     /// as the subject of a `with` block (`emit_stmt::emit_with` resolves it back to
@@ -81,15 +81,15 @@ impl Transpiler {
     /// inference, mirrored here). Returns `true` when handled so the caller skips
     /// ordinary `let` codegen.
     ///
-    /// Otherwise returns `false` — this also covers a `'gpu'unified`/`'gpu'global`
-    /// array *literal* (`examples/saxpy.br`'s `var mut [float]'gpu'unified x = [0.0 for
+    /// Otherwise returns `false` — this also covers a `'kernel'unified`/`'kernel'global`
+    /// array *literal* (`examples/saxpy.br`'s `var mut [float]'kernel'unified x = [0.0 for
     /// ..<N]`), which is just a plain host array today (freely indexed/assigned, no
     /// `with` required) and falls through to ordinary `let` codegen unchanged.
     pub(crate) fn try_emit_gpu_resident_let(&mut self, s: &LetStmt) -> bool {
         if self.kernel_decls.is_empty() {
             return false;
         }
-        // An explicit annotation of anything OTHER than 'gpu'unified/'gpu'global
+        // An explicit annotation of anything OTHER than 'kernel'unified/'kernel'global
         // means this isn't our concern (e.g. `let [float] n = k.alpha`, reading a
         // kernel field into a differently-qualified/plain binding on purpose).
         let has_explicit_qual = match &s.ty {
@@ -120,7 +120,7 @@ impl Transpiler {
 
     /// If `s` declares a name initialized directly from a call to a function whose
     /// own declared return type is GPU-resident (`self.fn_returns_resident`) — `let
-    /// fc = linear_gpu(...)`, explicit `'gpu'unified`/`'gpu'global` annotation or
+    /// fc = linear_gpu(...)`, explicit `'kernel'unified`/`'kernel'global` annotation or
     /// inferred — this is the *interprocedural* counterpart to
     /// `try_emit_gpu_resident_let` above. Unlike that same-scope alias (no Rust
     /// binding at all, since the data is just a re-readable kernel field), this call
@@ -1177,7 +1177,7 @@ impl Transpiler {
     /// `try_emit_gpu_resident_tuple_return`): is `expr` itself already resident —
     /// either a bare `k.field` read (same construction `try_emit_gpu_resident_return`
     /// builds for the single-value case), or a bare `Var` already bound to a
-    /// `BoringGpuArg<T>` Rust value (a same-scope `'gpu'unified` alias
+    /// `BoringGpuArg<T>` Rust value (a same-scope `'kernel'unified` alias
     /// (`gpu_resident_vars`), a local bound to a `fn_returns_resident` call
     /// (`resident_call_vars`), or the *enclosing* function's own
     /// transitively-qualifying parameter (`current_fn_gpu_arg_param_names`) forwarded
@@ -1269,7 +1269,7 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
         Type::Uint128 => "u128",
         // `float32` is already 32-bit, no narrowing needed. `float64` keeps this
         // function's own pre-existing narrowing to f32 -- this function models
-        // the generic/portable `'gpu'unified` residency path (its own doc line
+        // the generic/portable `'kernel'unified` residency path (its own doc line
         // above: "GPU buffers always use 32-bit elements", matching wgpu, the
         // backend this path is primarily written for), which has no per-backend
         // knowledge to do otherwise. An earlier revision of this document/comment

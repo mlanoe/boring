@@ -950,7 +950,7 @@ impl Transpiler {
         let base_ret = promoted_return_ty.as_ref()
             .map(|t| {
                 // Interprocedural GPU residency (docs/scoped-access-blocks.md): an
-                // explicit `'gpu'unified`/`'gpu'global` return type means this
+                // explicit `'kernel'unified`/`'kernel'global` return type means this
                 // function's tail expression (a bare `k.field` read — see
                 // `emit_kernel::try_emit_gpu_resident_return`, invoked from
                 // `emit_stmt.rs`'s tail-expression handling) returns
@@ -964,7 +964,7 @@ impl Transpiler {
                     let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
                     return format!("BoringGpuArg<{}>", host_ty);
                 }
-                // Tuple analogue of the above: `([float]'gpu'unified, [float], [float])`
+                // Tuple analogue of the above: `([float]'kernel'unified, [float], [float])`
                 // (`mha_step_gpu`-style) -- substitute `BoringGpuArg<T>` at whichever
                 // positions `fn_returns_resident_tuple` flagged resident, leaving the
                 // rest as their ordinary Rust type.
@@ -1087,7 +1087,7 @@ impl Transpiler {
             if is_gpu_arg_param {
                 // The param's own declared type is usually a plain, unqualified array
                 // (`[float] x`) — the exclusive-ctor-arg scan doesn't require an
-                // explicit `'gpu'unified`/`'gpu'global` annotation — but strip one off
+                // explicit `'kernel'unified`/`'kernel'global` annotation — but strip one off
                 // if present, same as the return-type case below.
                 let unqualified = p.ty.as_ref().map(|ty| match ty {
                     Type::Qualified(inner, _) => inner.as_ref().clone(),
@@ -3748,9 +3748,9 @@ impl Transpiler {
                 // concrete base first (see `Transpiler::observed_locals`) — but falls
                 // back to wrapping the bare inner type directly rather than panicking.
                 OwnerQual::Observed => format!("BoringObserved<{}>", self.emit_type(inner)),
-                // Host-context `'gpu'unified`/`'gpu'global`: emits as the plain inner
+                // Host-context `'kernel'unified`/`'kernel'global`: emits as the plain inner
                 // type. Confirmed against real usage (`examples/saxpy.br`'s
-                // `var mut [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned
+                // `var mut [float]'kernel'unified x = [0.0 for ..N]`, freely indexed/assigned
                 // as an ordinary host array with no wrapper) — the qualifier only
                 // matters at the point the value is passed into a kernel constructor
                 // (upload happens there, see `emit_kernel::emit_kernel_construction`)

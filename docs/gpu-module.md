@@ -9,7 +9,7 @@ This document covers the **language syntax and semantics** shared by all backend
 - [`metal-backend.md`](metal-backend.html) — MSL address space mapping, Metal runtime compilation
 - [`wgpu-backend.md`](wgpu-backend.html) — WGSL mapping, pipeline overrides, cross-platform GPU support
 
-A `kernel` struct requires one of the four GPU targets above. The default `boring build` (`std` target) has no GPU backend at all: it emits a warning and drops the struct — along with its device code and any `k(...)`/`kernel:` dispatch that referenced it — instead of transpiling it. `boring build --target kernel` (Rust-for-Linux) rejects it outright as an error, since that target has no host/device split either.
+A `kernel` struct requires one of the four GPU targets above. The default `boring build` (`std` target) has no GPU backend at all: it emits a warning and drops the struct — along with its device code and any `k(...)`/`kernel:` dispatch that referenced it — instead of transpiling it. `boring build --linux` (Rust-for-Linux) rejects it outright as an error, since that target has no host/device split either.
 
 ---
 
@@ -23,7 +23,7 @@ kernel Scale:
         buf = data
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         buf[i] *= 2.0
 
 mut k = Scale(data)
@@ -86,7 +86,7 @@ kernel GameOfLife<int W, int H>:
     mut [bool, W * H]'unified cells
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         cells[i] = not cells[i]
 ```
 
@@ -188,8 +188,8 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 
 | Qualifier | Location |
 |---|---|
-| `'gpu'unified` | unified host + device DRAM |
-| `'gpu'global` | device-only DRAM |
+| `'kernel'unified` | unified host + device DRAM |
+| `'kernel'global` | device-only DRAM |
 
 `'const` (like bare `'actor` and `'local`) has no host-context form — it has no host access at
 all (see the table above), so a host-side binding could never be read from or written to.
@@ -211,8 +211,8 @@ kernel Transpose:
     mut [float, width = R, height = C]'unified dst
 
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         dst[width = r, height = c] = src[width = c, height = r]
 ```
 
@@ -255,10 +255,10 @@ has no `return`: its last expression names the output buffer (or a tuple of
 output buffers).
 
 ```boring
-pub req [float32]'gpu'unified scale([float32]'gpu'global src, int n) throws:
+pub req [float32]'kernel'unified scale([float32]'kernel'global src, int n) throws:
     kernel(block = 256, grid = (n + 255) / 256):
         mut [float32]'unified dst = [0.0 for ..<n]
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             dst[i] = src[i] * 2.0
         dst
@@ -266,7 +266,7 @@ pub req [float32]'gpu'unified scale([float32]'gpu'global src, int n) throws:
 
 `block` is required. `grid`, `after`, and `priority` have the same meaning as
 on a regular dispatch. The result remains GPU-resident when the enclosing
-function declares a `'gpu'unified` or `'gpu'global` return type.
+function declares a `'kernel'unified` or `'kernel'global` return type.
 
 Inline kernels are syntax sugar for a generated private `kernel` struct, its
 constructor, a synchronous `kernel:` dispatch, and a final field read. Use a
@@ -365,20 +365,20 @@ Inside `def ()` and device helpers, `gpu` is available:
 
 | Built-in | Description |
 |---|---|
-| `gpu.thread.x/y/z` | thread index within block |
-| `gpu.block.x/y/z` | block index within grid |
-| `gpu.block_dim.x/y/z` | threads per block |
-| `gpu.grid_dim.x/y/z` | blocks per grid |
+| `.thread.x/y/z` | thread index within block |
+| `.block.x/y/z` | block index within grid |
+| `.block_dim.x/y/z` | threads per block |
+| `.grid_dim.x/y/z` | blocks per grid |
 | `sync` | explicit block-level barrier (manual mode — see bare `'actor`) |
-| `gpu.warp.size` | threads per warp/wavefront/SIMD-group/subgroup |
-| `gpu.warp.lane` | this thread's index within its warp, `0..gpu.warp.size` |
-| `gpu.warp.sync()` | warp-local barrier — cheaper than `sync` (block-wide) |
-| `gpu.warp.shuffle_down(v, delta)` | read `v` from the lane `delta` above this one |
-| `gpu.warp.shuffle_up(v, delta)` | read `v` from the lane `delta` below this one |
-| `gpu.warp.shuffle_xor(v, mask)` | read `v` from lane `this_lane XOR mask` (butterfly pattern — reductions) |
-| `gpu.warp.shuffle(v, src_lane)` | broadcast/read `v` from an arbitrary lane |
+| `.warp.size` | threads per warp/wavefront/SIMD-group/subgroup |
+| `.warp.lane` | this thread's index within its warp, `0...warp.size` |
+| `.warp.sync()` | warp-local barrier — cheaper than `sync` (block-wide) |
+| `.warp.shuffle_down(v, delta)` | read `v` from the lane `delta` above this one |
+| `.warp.shuffle_up(v, delta)` | read `v` from the lane `delta` below this one |
+| `.warp.shuffle_xor(v, mask)` | read `v` from lane `this_lane XOR mask` (butterfly pattern — reductions) |
+| `.warp.shuffle(v, src_lane)` | broadcast/read `v` from an arbitrary lane |
 
-`gpu.warp.*` is device-side, current-thread state — not to be confused with
+`.warp.*` is device-side, current-thread state — not to be confused with
 the host-side `GPU(0).warpSize()` below, which queries a device by index from
 ordinary (non-kernel) code. Same hardware concept, unrelated call sites.
 
@@ -386,7 +386,7 @@ See [warp-level primitives](warp-level-primitives.html) for the full design
 (per-backend mapping, the wgpu real-subgroup/emulated-fallback split, and the
 divergent-branch caveat).
 
-Matrix/tensor-core acceleration (`gpu.tensor.*`) is a **proposed, not yet
+Matrix/tensor-core acceleration (`kernel.tensors.*`) is a **proposed, not yet
 implemented** extension of this same nested-namespace pattern — see
 [tensor-core primitives](tensor-core-primitives.html) for the full design,
 per-backend feasibility (including a definitive finding that RDNA1/RDNA2 AMD
@@ -439,7 +439,7 @@ kernel Saxpy:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 
 let n = 1024
@@ -462,7 +462,7 @@ This is not a Boring limitation — it mirrors real GPU host/device memory separ
 
 #### Warning: writing to a copy that nobody reads
 
-The same rule bites inside a `req` that wraps a kernel. A `mut` field initialized from an `init` parameter is a copy of the argument, so writing it from the kernel body updates the copy only. That is invisible to whoever passed the argument, even when the argument is itself a resident `'gpu'unified`/`'gpu'global` value (the generated wrapper copies the buffer, e.g. `__boring_metal_buffer_copy` on Metal):
+The same rule bites inside a `req` that wraps a kernel. A `mut` field initialized from an `init` parameter is a copy of the argument, so writing it from the kernel body updates the copy only. That is invisible to whoever passed the argument, even when the argument is itself a resident `'kernel'unified`/`'kernel'global` value (the generated wrapper copies the buffer, e.g. `__boring_metal_buffer_copy` on Metal):
 
 ```boring
 kernel BumpKernel:
@@ -476,12 +476,12 @@ kernel BumpKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             a[i] = a[i] + 1.0    # lands in the copy: the caller's buffer is untouched
             out[i] = a[i]
 
-pub req [float32]'gpu'unified bump([float32]'global a, int n) throws:
+pub req [float32]'kernel'unified bump([float32]'global a, int n) throws:
     mut k = BumpKernel(a, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -529,8 +529,8 @@ kernel Reduce:
         input = data
 
     def ():
-        let tid = gpu.thread.x
-        tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
+        let tid = .thread.x
+        tile[tid] = input[.block.x * .block_dim.x + tid]
         # barrier inserted automatically before the loop
         if tid == 0:
             var float sum = 0.0
@@ -556,8 +556,8 @@ kernel Reduce:
         tile  = [..<block_size]   # allocate without initialization
 
     def ():
-        let tid = gpu.thread.x
-        tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
+        let tid = .thread.x
+        tile[tid] = input[.block.x * .block_dim.x + tid]
         if tid == 0:
             var float sum = 0.0
             for v in tile:
@@ -608,9 +608,9 @@ kernel BlockStats:
     mut [float]'unified   result
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         acc[tid] = Stats(sum = data[tid], count = 1)
-        var stride = gpu.block_dim.x / 2
+        var stride = .block_dim.x / 2
         while stride > 0:
             if tid < stride:
                 acc[tid] = Stats(
@@ -619,7 +619,7 @@ kernel BlockStats:
                 )
             stride = stride / 2
         if tid == 0:
-            result[gpu.block.x] = acc[0].sum / acc[0].count as float
+            result[.block.x] = acc[0].sum / acc[0].count as float
 ```
 
 ---

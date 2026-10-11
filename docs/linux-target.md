@@ -1,12 +1,12 @@
 # Rust-for-Linux target
 
-`boring build --target kernel` compiles Boring source to **Rust-for-Linux** — the `no_std` Rust dialect used to write Linux kernel modules, drivers, and subsystems.
+`boring build --linux` compiles Boring source to **Rust-for-Linux** — the `no_std` Rust dialect used to write Linux kernel modules, drivers, and subsystems.
 
 The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath.
 
 ```sh
-boring build --target kernel main.br
-# → generates main_kernel/ with src/lib.rs + Cargo.toml
+boring build --linux main.br
+# → generates main_linux/ with src/lib.rs + Cargo.toml
 # Build with: make -C /path/to/linux M=$PWD
 ```
 
@@ -339,11 +339,11 @@ src/
     kernel.rs          # validation pass: rejects forbidden constructs
   transpiler/
     kernel/
-      mod.rs           # entry point, selected by --target kernel
+      mod.rs           # entry point, selected by --linux
       emit_top.rs      # struct/impl/fn declarations, Work item generation
       emit_stmt.rs     # statements, task expr, channel, yield
       emit_expr.rs     # expressions, string literal → c_str!, method calls
       helpers.rs       # KernelFuture<T>, KernelChan<T> runtime types
 ```
 
-The `--target kernel` flag activates the kernel validator then the kernel emitter. The standard backend (`--target rust`, default) is not modified.
+The `--linux` flag activates the kernel validator then the kernel emitter. The standard backend (`--target rust`, default) is not modified.

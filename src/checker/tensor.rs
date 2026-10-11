@@ -20,7 +20,7 @@ impl super::Checker {
         let ExprKind::MethodCall(_, method, args) = &call.kind else { return };
         if !matches!(method.as_str(), "matmul" | "mma" | "linear") {
             self.error(
-                "host gpu.tensor calls must use matmul, mma, or linear; tile operations require a kernel entry point",
+                "host kernel.tensors calls must use matmul, mma, or linear; tile operations require a kernel entry point",
                 call.line,
                 call.col,
             );
@@ -37,7 +37,7 @@ impl super::Checker {
             let mut labels = std::collections::HashSet::new();
             if labeled.iter().any(|arg| !labels.insert(arg.label.as_deref().unwrap()))
                 || ["m", "n", "k"].iter().any(|label| !labels.contains(label)) {
-                self.error("dynamic gpu.tensor.linear requires distinct m, n, and k arguments (and at most one format)", call.line, call.col);
+                self.error("dynamic kernel.tensors.linear requires distinct m, n, and k arguments (and at most one format)", call.line, call.col);
                 return;
             }
             let format = labeled.iter().find(|arg| arg.label.as_deref() == Some("format"));
@@ -109,7 +109,7 @@ impl super::Checker {
         }
         if args.len() != 3 || args.iter().any(|arg| arg.label.is_some() || arg.spread || arg.default_rest) {
             self.error(
-                "gpu.tensor.matmul and mma require three positional operands; linear accepts three positional operands, or three/four operands followed by m, n, and k",
+                "kernel.tensors.matmul and mma require three positional operands; linear accepts three positional operands, or three/four operands followed by m, n, and k",
                 call.line,
                 call.col,
             );
@@ -161,7 +161,7 @@ pub(crate) fn resolve_host_types(
         "matmul" => (false, false),
         "mma" => (true, false),
         "linear" => (false, true),
-        _ => return Err(error("expected gpu.tensor.matmul, gpu.tensor.mma, or gpu.tensor.linear")),
+        _ => return Err(error("expected kernel.tensors.matmul, kernel.tensors.mma, or kernel.tensors.linear")),
     };
     if !operands[2].2 {
         return Err(error("tensor destination must be mutable"));
@@ -275,7 +275,7 @@ fn validate_kernel(kernel: &KernelDecl) -> Vec<SourceError> {
                 let checked = resolve(call, kernel).and_then(|op| {
                     let error = |msg| SourceError::new(msg, call.line, call.col, call.len);
                     if shadowed.contains("gpu") || op.operands.iter().any(|n| shadowed.contains(n)) {
-                        return Err(error("tensor operands and gpu namespace must not be shadowed"));
+                        return Err(error("tensor operands and the implicit kernel namespace must not be shadowed"));
                     }
                     if !safe_prefix {
                         return Err(error("tensor participation cannot be proven after control flow or side effects"));
@@ -363,12 +363,12 @@ pub(crate) fn resolve_fields(
 ) -> Result<TileOperation, SourceError> {
     let error = |message: &str| SourceError::new(message, call.line, call.col, call.len);
     let ExprKind::MethodCall(receiver, method, args) = &call.kind else {
-        return Err(error("expected a gpu.tensor tile operation"));
+        return Err(error("expected a kernel.tensors tile operation"));
     };
     if !matches!(&receiver.kind, ExprKind::Field(gpu, name)
         if name == "tensor" && matches!(&gpu.kind, ExprKind::Var(n) if n == "gpu"))
     {
-        return Err(error("expected the explicit gpu.tensor namespace"));
+        return Err(error("expected the explicit kernel.tensors namespace"));
     }
     let (accumulate, transpose_b) = match method.as_str() {
         "matmulTile" => (false, false),
@@ -498,7 +498,7 @@ fn positive_codegen_literal(expr: &Expr) -> Option<usize> {
 mod tests {
     use super::*;
     fn resolve_source(changes: &[(&str, &str)]) -> Result<TileOperation, SourceError> {
-        let mut src = "kernel Matrix:\n    let [float32, inner = 5, height = 3]'global a\n    let [float32, width = 7, inner = 5]'unified b\n    mut [float32, width = 7, height = 3]'global c\n    def ():\n        gpu.tensor.matmulTile(a, b, c, row = 0, col = 0, rows = 4, cols = 8)\n".to_string();
+        let mut src = "kernel Matrix:\n    let [float32, inner = 5, height = 3]'global a\n    let [float32, width = 7, inner = 5]'unified b\n    mut [float32, width = 7, height = 3]'global c\n    def ():\n        .tensors.matmulTile(a, b, c, row = 0, col = 0, rows = 4, cols = 8)\n".to_string();
         for (from, to) in changes {
             src = src.replace(from, to);
         }
@@ -531,7 +531,7 @@ mod tests {
     }
     #[test]
     fn tensor_rejects_host_helpers_and_constructors() {
-        let call = "gpu.tensor.matmulTile(a, b, c, row = 0, col = 0, rows = 4, cols = 8)";
+        let call = ".tensors.matmulTile(a, b, c, row = 0, col = 0, rows = 4, cols = 8)";
         for (source, expected) in [
             (format!("{call}\n"), "tile operations require a kernel"),
             (format!("kernel K:\n    def helper():\n        {call}\n    def ():\n        let x = 0\n"), "not a helper method"),
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn host_tensor_contract_is_checked() {
-        let source = "let [float32, k = 5, m = 3]'gpu'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'gpu'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified c = [0.0 for ..<21]\ngpu.tensor.matmul(a, b, c)\n";
+        let source = "let [float32, k = 5, m = 3]'kernel'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'kernel'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'kernel'unified c = [0.0 for ..<21]\nkernel.tensors.matmul(a, b, c)\n";
         let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
         let result = super::super::check(&program);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -584,8 +584,8 @@ mod tests {
         assert!(build_result.errors.is_empty(), "{:?}", build_result.errors);
 
         let linear = source
-            .replace("[float32, n = 7, k = 5]'gpu'unified b", "[float32, k = 5, n = 7]'gpu'unified b")
-            .replace("gpu.tensor.matmul", "gpu.tensor.linear");
+            .replace("[float32, n = 7, k = 5]'kernel'unified b", "[float32, k = 5, n = 7]'kernel'unified b")
+            .replace("kernel.tensors.matmul", "kernel.tensors.linear");
         let result = super::super::check(
             &crate::parser::parse(crate::lexer::lex(&linear).unwrap()).unwrap(),
         );
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn dynamic_linear_accepts_flat_gpu_arrays_and_named_dimensions() {
-        let source = "req [float32]'gpu'unified compute([float32]'gpu'global x, [float32]'gpu'global w, int m, int n, int k) throws:\n    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]\n    gpu.tensor.linear(x, w, y, m = m, n = n, k = k)\n    y\n";
+        let source = "req [float32]'kernel'unified compute([float32]'kernel'global x, [float32]'kernel'global w, int m, int n, int k) throws:\n    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]\n    kernel.tensors.linear(x, w, y, m = m, n = n, k = k)\n    y\n";
         let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
         let result = super::super::check(&program);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -605,14 +605,14 @@ mod tests {
         );
         assert!(result.errors.iter().any(|error| error.message.contains("distinct m, n, and k")));
 
-        let immutable = source.replace("mut [float32]'gpu'unified y", "let [float32]'gpu'unified y");
+        let immutable = source.replace("mut [float32]'kernel'unified y", "let [float32]'kernel'unified y");
         let result = super::super::check(
             &crate::parser::parse(crate::lexer::lex(&immutable).unwrap()).unwrap(),
         );
         assert!(result.errors.iter().any(|error| error.message.contains("destination must be mutable")));
 
         let biased = source
-            .replace("int m", "[float32]'gpu'global bias, int m")
+            .replace("int m", "[float32]'kernel'global bias, int m")
             .replace("linear(x, w, y,", "linear(x, w, bias, y,");
         let result = super::super::check(
             &crate::parser::parse(crate::lexer::lex(&biased).unwrap()).unwrap(),

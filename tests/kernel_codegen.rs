@@ -3,10 +3,10 @@
 //
 // Kernel (Rust-for-Linux, no_std) codegen snapshot tests.
 //
-// These tests verify the text emitted by `boring build --target kernel`
+// These tests verify the text emitted by `boring build --linux`
 // without requiring the real Linux kernel build system. Each test:
 //   1. Writes a Boring source snippet to a temp file.
-//   2. Invokes `boring build --target kernel <file>`.
+//   2. Invokes `boring build --linux <file>`.
 //   3. Reads the generated src/lib.rs.
 //   4. Asserts that the generated text contains the expected patterns.
 //
@@ -17,10 +17,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Invoke `boring build --target kernel <file>` and return the generated
+/// Invoke `boring build --linux <file>` and return the generated
 /// src/lib.rs text.
 ///
-/// boring names the output directory `<stem>_kernel` next to the source
+/// boring names the output directory `<stem>_linux` next to the source
 /// file, so we place the source in a dedicated temp dir and read from there.
 fn kernel_codegen(test_name: &str, src: &str) -> String {
     let bin = env!("CARGO_BIN_EXE_boring");
@@ -29,30 +29,56 @@ fn kernel_codegen(test_name: &str, src: &str) -> String {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
 
-    // Source file named "test.br" → boring creates "test_kernel/" next to it.
+    // Source file named "test.br" → boring creates "test_linux/" next to it.
     let br_file    = tmp.join("test.br");
-    let kernel_dir = tmp.join("test_kernel");
+    let kernel_dir = tmp.join("test_linux");
     fs::write(&br_file, src).unwrap();
 
     let result = Command::new(bin)
-        .args(["build", "--target", "kernel"])
+        .args(["build", "--linux"])
         .arg(&br_file)
         .output()
         .unwrap_or_else(|e| panic!("[{test_name}] failed to invoke boring: {e}"));
 
     assert!(
         result.status.success(),
-        "[{test_name}] boring build --target kernel failed:\n{}",
+        "[{test_name}] boring build --linux failed:\n{}",
         String::from_utf8_lossy(&result.stderr)
     );
 
     fs::read_to_string(kernel_dir.join("src/lib.rs")).unwrap_or_default()
 }
 
+#[test]
+fn linux_backend_is_a_standalone_flag_not_a_compute_target() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+
+    for obsolete_target in ["kernel", "linux"] {
+        let result = Command::new(bin)
+            .args(["build", "--target", obsolete_target])
+            .output()
+            .unwrap_or_else(|e| panic!("failed to invoke boring: {e}"));
+
+        assert!(
+            !result.status.success(),
+            "--target {obsolete_target} must not remain accepted"
+        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains(&format!("unknown target '{obsolete_target}'")),
+            "expected an unknown-target diagnostic for --target {obsolete_target}; got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("use --linux for Rust-for-Linux"),
+            "expected the diagnostic to point to --linux; got:\n{stderr}"
+        );
+    }
+}
+
 // ─── while-let self-shorthand loop ──────────────────────────────────────────
 //
 // Regression for the gap found while porting ecb2690/3a42aa1 (the
-// standard-target `while let v:` self-shorthand fix) to the kernel target:
+// standard-target `while let v:` self-shorthand fix) to the Linux target:
 // the kernel transpiler's `Stmt::WhileLet` arm had none of the standard
 // transpiler's self-shorthand handling, so it would naively emit
 // `while let Some(v) = v { ...; v = next; }` — shadow-colliding the outer

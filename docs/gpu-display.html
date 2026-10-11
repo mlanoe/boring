@@ -143,8 +143,8 @@ li { margin-bottom: 0.3rem; }
         t      = <span class="nb">0.0</span>
 
     <span class="kw">def</span> ():
-        <span class="kw">let</span> col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        <span class="kw">let</span> row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        <span class="kw">let</span> col = .block.x * .block_dim.x + .thread.x
+        <span class="kw">let</span> row = .block.y * .block_dim.y + .thread.y
         <span class="kw">if</span> col &lt; dim.width <span class="kw">and</span> row &lt; dim.height:
             <span class="kw">let</span> x = <span class="kt">float</span>(col) / <span class="kt">float</span>(dim.width)
             <span class="kw">let</span> y = <span class="kt">float</span>(row) / <span class="kt">float</span>(dim.height)

@@ -13,7 +13,7 @@ source.
 **`MODE=validate`** (default):
 
 1. `naga shaders/main.wgsl` (and `shaders/main_emulated.wgsl` when the
-   `gpu.warp.*` emulated-fallback module is present) — parses and
+   `.warp.*` emulated-fallback module is present) — parses and
    type-checks the WGSL, exactly what `wgpu` does internally before it ever
    touches a device. No Vulkan, no GPU, no device involved.
 
@@ -33,7 +33,7 @@ source.
   errors are exercised, only WGSL syntax/type validity.
 - **`MODE=run`** still isn't a real GPU: lavapipe is a software
   rasterizer/compute path, so timing/performance numbers from it are
-  meaningless and some vendor-specific behavior (subgroup/`gpu.warp.*`
+  meaningless and some vendor-specific behavior (subgroup/`.warp.*`
   support, real memory bandwidth) can't be exercised — check
   `wgpu::Features::SUBGROUP` support separately on real hardware for that.
 - First `cargo run --release` in `MODE=run` needs network access

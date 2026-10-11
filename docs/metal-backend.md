@@ -2,7 +2,7 @@
 
 `boring build --target metal` generates a Rust + MSL project that runs GPU kernels on macOS using Apple's Metal framework — a native alternative to `--target cuda` that requires no NVIDIA GPU or CUDA toolkit.
 
-The Boring source is identical: the same `kernel` structs, qualifiers, and `gpu.*` built-ins work unchanged across CUDA and Metal targets.
+The Boring source is identical: the same `kernel` structs, qualifiers, and implicit kernel built-ins work unchanged across CUDA and Metal targets.
 
 ---
 
@@ -32,18 +32,18 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 
 | Boring | CUDA C | MSL |
 |---|---|---|
-| `gpu.thread.x/y/z` | `threadIdx.x/y/z` | `thread_position_in_threadgroup.x/y/z` |
-| `gpu.block.x/y/z` | `blockIdx.x/y/z` | `threadgroup_position_in_grid.x/y/z` |
-| `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` |
-| `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` |
+| `.thread.x/y/z` | `threadIdx.x/y/z` | `thread_position_in_threadgroup.x/y/z` |
+| `.block.x/y/z` | `blockIdx.x/y/z` | `threadgroup_position_in_grid.x/y/z` |
+| `.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` |
+| `.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` |
 | `sync` (manual) | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` |
-| `gpu.warp.size` | `warpSize` | `threads_per_simdgroup` |
-| `gpu.warp.lane` | linearized `threadIdx`, `% warpSize` | `thread_index_in_simdgroup` |
-| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` | `simdgroup_barrier(mem_flags::mem_none)` |
-| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | `simd_shuffle_down(v, delta)` |
-| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | `simd_shuffle_up(v, delta)` |
-| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | `simd_shuffle_xor(v, mask)` |
-| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | `simd_shuffle(v, lane)` |
+| `.warp.size` | `warpSize` | `threads_per_simdgroup` |
+| `.warp.lane` | linearized `threadIdx`, `% warpSize` | `thread_index_in_simdgroup` |
+| `.warp.sync()` | `__syncwarp(0xffffffff)` | `simdgroup_barrier(mem_flags::mem_none)` |
+| `.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | `simd_shuffle_down(v, delta)` |
+| `.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | `simd_shuffle_up(v, delta)` |
+| `.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | `simd_shuffle_xor(v, mask)` |
+| `.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | `simd_shuffle(v, lane)` |
 | bare-`'actor` auto-barrier | inserted before first loop + at top of each loop iteration accessing bare-`'actor` fields | idem |
 | atomics (`'actor'global`/`'actor'unified`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` etc. |
 | `[i].min/max/swap(v)` | `atomicMin`/`atomicMax`/`atomicExch` | `atomic_fetch_min_explicit`/`atomic_fetch_max_explicit`/`atomic_exchange_explicit` |
@@ -61,7 +61,7 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 
 **Without `'actor'global`/`'actor'unified`**, `.min`/`.max`/`.swap`/`.cas` still work — matching `+= -= &= |= ^=`'s existing degrade-to-plain-arithmetic behavior off a non-actor field — bridged via the same GNU/Clang statement-expression, just without the atomic cast or memory order: `({ auto __old = x; x = min(x, (v)); __old; })`.
 
-`gpu.warp.size`/`.lane` are emitted as new `[[thread_index_in_simdgroup]]`/
+`.warp.size`/`.lane` are emitted as new `[[thread_index_in_simdgroup]]`/
 `[[threads_per_simdgroup]]` kernel parameters, unconditionally alongside the
 existing position parameters below — MSL SIMD-group builtins need no
 capability/enable step, unlike wgpu's subgroup builtins (see
@@ -164,7 +164,7 @@ A `mut` kernel field initialized from a constructor argument always takes the in
 | Warp intrinsics | full support | SIMD-group operations (different API) |
 | `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
 | Windows / Linux | yes | macOS only |
-| Tensor-core (`gpu.tensor.*`) | not yet implemented on either backend | not yet implemented — see [tensor-core primitives](tensor-core-primitives.html) for a proposed design (`simdgroup_matrix`, 8×8 fp16/fp32 only, Apple7+/A14+) |
+| Tensor-core (`kernel.tensors.*`) | not yet implemented on either backend | not yet implemented — see [tensor-core primitives](tensor-core-primitives.html) for a proposed design (`simdgroup_matrix`, 8×8 fp16/fp32 only, Apple7+/A14+) |
 
 ---
 

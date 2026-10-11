@@ -126,10 +126,10 @@ li { margin-bottom: 0.3rem; }
 </aside>
 <main class="main" id="content">
 <h1 id="rust-for-linux-target">Rust-for-Linux target</h1>
-<p><code>boring build --target kernel</code> compiles Boring source to <strong>Rust-for-Linux</strong> — the <code>no_std</code> Rust dialect used to write Linux kernel modules, drivers, and subsystems.</p>
+<p><code>boring build --linux</code> compiles Boring source to <strong>Rust-for-Linux</strong> — the <code>no_std</code> Rust dialect used to write Linux kernel modules, drivers, and subsystems.</p>
 <p>The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath.</p>
-<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target kernel main.br
-<span class="co"># → generates main_kernel/ with src/lib.rs + Cargo.toml</span>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --linux main.br
+<span class="co"># → generates main_linux/ with src/lib.rs + Cargo.toml</span>
 <span class="co"># Build with: make -C /path/to/linux M=$PWD</span></code></pre></div>
 <p>The kernel backend runs a <strong>validation pass</strong> before emission. It rejects incompatible constructs with explicit error messages and warns on constructs that need attention.</p>
 <hr>
@@ -292,12 +292,12 @@ tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&
     kernel.rs          # validation pass: rejects forbidden constructs
   transpiler/
     kernel/
-      mod.rs           # entry point, selected by --target kernel
+      mod.rs           # entry point, selected by --linux
       emit_top.rs      # struct/impl/fn declarations, Work item generation
       emit_stmt.rs     # statements, task expr, channel, yield
       emit_expr.rs     # expressions, string literal → c_str!, method calls
       helpers.rs       # KernelFuture&lt;T&gt;, KernelChan&lt;T&gt; runtime types</code></pre></div>
-<p>The <code>--target kernel</code> flag activates the kernel validator then the kernel emitter. The standard backend (<code>--target rust</code>, default) is not modified.</p>
+<p>The <code>--linux</code> flag activates the kernel validator then the kernel emitter. The standard backend (<code>--target rust</code>, default) is not modified.</p>
 </main>
 <script>
 // Build TOC from headings

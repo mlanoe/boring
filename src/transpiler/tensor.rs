@@ -232,7 +232,7 @@ fn scalar_source(
 mod tests {
     use super::*;
     fn operation() -> TileOperation {
-        let source = "kernel Matrix:\n    let [float32, k = 5, m = 3]'global a\n    let [float32, n = 7, k = 5]'global b\n    mut [float32, n = 7, m = 3]'unified c\n    def ():\n        gpu.tensor.matmulTile(a, b, c, row = 0, col = 0, rows = 2, cols = 4)\n";
+        let source = "kernel Matrix:\n    let [float32, k = 5, m = 3]'global a\n    let [float32, n = 7, k = 5]'global b\n    mut [float32, n = 7, m = 3]'unified c\n    def ():\n        .tensors.matmulTile(a, b, c, row = 0, col = 0, rows = 2, cols = 4)\n";
         let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
         let Item::Kernel(kernel) = &program.items[0] else {
             panic!()
@@ -351,5 +351,5 @@ int main() {{
 
 #[cfg(test)]
 pub(crate) fn test_program() -> Program {
-    crate::parser::parse(crate::lexer::lex("kernel Matrix:\n    let [Float32, k = 5, m = 3]'global a\n    let [Float32, n = 7, k = 5]'global b\n    mut [Float32, n = 7, m = 3]'unified c\n    def ():\n        gpu.tensor.matmulTile(a, b, c, row = gpu.block.y * 2, col = gpu.block.x * 4, rows = 2, cols = 4)\n").unwrap()).unwrap()
+    crate::parser::parse(crate::lexer::lex("kernel Matrix:\n    let [Float32, k = 5, m = 3]'global a\n    let [Float32, n = 7, k = 5]'global b\n    mut [Float32, n = 7, m = 3]'unified c\n    def ():\n        .tensors.matmulTile(a, b, c, row = .block.y * 2, col = .block.x * 4, rows = 2, cols = 4)\n").unwrap()).unwrap()
 }

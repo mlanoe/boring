@@ -129,7 +129,7 @@ li { margin-bottom: 0.3rem; }
 <p>Two orthogonal flags control how the transpiler handles memory management and concurrency:</p>
 <div class="code-block"><pre><code>boring build --mode strict|managed     # memory management (default: strict)
 boring build --threading single|multi  # concurrency model (default: multi)</code></pre></div>
-<p>The flags are independent — any combination is valid. <code>--threading</code> is not available with <code>--target kernel</code>, which has its own concurrency model.</p>
+<p>The flags are independent — any combination is valid. <code>--threading</code> is not available with <code>--linux</code>, which has its own concurrency model.</p>
 <hr>
 <h2 id="qualifier-vocabulary">Qualifier vocabulary</h2>
 <p>Explicit qualifiers are <strong>contracts</strong> — neither <code>--mode</code> nor <code>--threading</code> affects them.</p>

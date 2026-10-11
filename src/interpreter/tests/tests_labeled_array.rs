@@ -141,7 +141,7 @@ kernel Tile:
         out   = [0.0, 0.0, 0.0, 0.0]
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = tile[width = tid, height = 0] + input[tid]
 
 let data = [1.0, 2.0, 3.0, 4.0]
@@ -174,7 +174,7 @@ kernel Grid:
         out = [0.0 for ..<(w * h)]
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let w = src.width
         let row = tid / w
         let col = tid % w
@@ -223,7 +223,7 @@ kernel Grid:
 
     def ():
         let w = src.width
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid < w:
             pass
 "#).expect("write module file");
@@ -249,10 +249,10 @@ fn inline_kernel_in_a_use_imported_module_works() {
     ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     std::fs::write(dir.join("inline_kernel.br"), r#"
-pub req [float]'gpu'unified double_gpu([float]'gpu'global src, int n) throws:
+pub req [float]'kernel'unified double_gpu([float]'kernel'global src, int n) throws:
     kernel(block = n):
         mut [float]'unified out = [0.0 for ..<n]
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = src[i] * 2.0
         out

@@ -27,7 +27,7 @@ use crate::ast::{GpuQual, TraitDecl, EnumDecl, FnDecl, Stmt, Type};
 pub(crate) type SyncFieldsMap = HashMap<String, Arc<Mutex<Vec<ThreadValue>>>>;
 type SyncCtx<'a> = (&'a SyncFieldsMap, &'a Arc<Barrier>);
 // Per-thread warp coordination context: this thread's count of active lanes,
-// plus the barrier/scratch shared across the warp for `gpu.warp.*` primitives.
+// plus the barrier/scratch shared across the warp for `.warp.*` primitives.
 type WarpCtx<'a> = (usize, &'a Arc<Barrier>, &'a Arc<Mutex<Vec<ThreadValue>>>);
 
 // Fixed warp/wavefront/SIMD-group/subgroup size for the CPU simulation. Real
@@ -38,19 +38,19 @@ type WarpCtx<'a> = (usize, &'a Arc<Barrier>, &'a Arc<Mutex<Vec<ThreadValue>>>);
 pub(crate) const WARP_SIZE: usize = 32;
 
 // One warp-group's coordination state within a block: the barrier every
-// participating lane waits on, and the shared scratch slots `gpu.warp.shuffle_*`
+// participating lane waits on, and the shared scratch slots `.warp.shuffle_*`
 // reads/writes through (always `WARP_SIZE` slots regardless of how many lanes
 // actually participate — a block smaller than `WARP_SIZE` just leaves the
 // unused tail unused, same as real hardware's inactive lanes in a partial warp).
 pub(crate) type WarpGroup = (Arc<Barrier>, Arc<Mutex<Vec<ThreadValue>>>);
 
-/// Does this expression contain a `gpu.warp.*` field access or method call
+/// Does this expression contain a `.warp.*` field access or method call
 /// anywhere in its tree? Used to decide whether a kernel dispatch needs the
 /// real-OS-thread, barrier-synchronized execution path (see
 /// `run_kernel_parallel`) even when the kernel declares no `'actor` field —
-/// `gpu.warp.sync()`/`shuffle_*()` need genuine cross-thread coordination
+/// `.warp.sync()`/`shuffle_*()` need genuine cross-thread coordination
 /// just like a `'actor` field's barrier does, so a kernel that only uses
-/// `gpu.warp.*` (no `'actor` fields at all) must still take that path rather
+/// `.warp.*` (no `'actor` fields at all) must still take that path rather
 /// than the independent-threads fast path.
 fn is_gpu_warp_receiver(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Field(inner, name) if name == "warp"
@@ -163,7 +163,7 @@ fn cond_clauses_use_gpu_warp(clauses: &[CondClause]) -> bool {
     })
 }
 
-/// Does any statement in `stmts` contain a `gpu.warp.*` field access or method
+/// Does any statement in `stmts` contain a `.warp.*` field access or method
 /// call anywhere in its tree? Shared with the wgpu transpiler backend (see
 /// `crate::transpiler::wgpu::kernel_uses_gpu_warp`), which needs the same
 /// detection to decide whether to emit the `enable subgroups;` WGSL directive
@@ -675,7 +675,7 @@ fn run_kernel_parallel(
         Arc::new(entry.body.clone())
     };
 
-    // `gpu.warp.sync()`/`gpu.warp.shuffle_*()` need genuine cross-thread
+    // `.warp.sync()`/`.warp.shuffle_*()` need genuine cross-thread
     // coordination within a block, exactly like a `'actor` field's barrier —
     // so a kernel using them must take the real-OS-thread path below even
     // when it declares no `'actor` field at all.
@@ -715,7 +715,7 @@ fn run_kernel_parallel(
         }
         // This thread's lane within its warp — always computed (cheap, pure
         // arithmetic), regardless of whether the kernel actually uses
-        // `gpu.warp.*` (see `WARP_SIZE`'s doc comment for the linearization
+        // `.warp.*` (see `WARP_SIZE`'s doc comment for the linearization
         // formula, matching the one CUDA/ROCm codegen emits device-side).
         let flat_thread_for_lane = thread_in_x + thread_in_y * block_x + thread_in_z * block_x * block_y;
         ti.kernel_thread_flat = flat_thread_for_lane;
@@ -1421,7 +1421,7 @@ impl Interpreter {
             return Ok(Value::Void);
         }
         if args.len() != 3 {
-            return Err(err("gpu.tensor.matmul, mma, and linear expect three operands", line));
+            return Err(err("kernel.tensors.matmul, mma, and linear expect three operands", line));
         }
         let mut names = Vec::with_capacity(3);
         let mut types = Vec::with_capacity(3);
@@ -1495,9 +1495,9 @@ impl Interpreter {
         Ok(Value::Void)
     }
 
-    /// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — intercepted
+    /// `.warp.sync()` / `.warp.shuffle_down/up/xor/shuffle(...)` — intercepted
     /// syntactically in `eval_expr_method_call` before generic method dispatch (the
-    /// receiver `gpu.warp` is never a real bound value, only `gpu.warp.size`/`.lane`
+    /// receiver `.warp` is never a real bound value, only `.warp.size`/`.lane`
     /// are, via the `GpuWarp` object `run_one_kernel_thread` injects).
     pub(crate) fn eval_gpu_warp_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
         match method {
@@ -1509,7 +1509,7 @@ impl Interpreter {
             }
             "shuffle_down" | "shuffleDown" | "shuffle_up" | "shuffleUp" | "shuffle_xor" | "shuffleXor" | "shuffle" => {
                 if args.len() != 2 {
-                    return Err(err(format!("gpu.warp.{} expects 2 arguments", method), line));
+                    return Err(err(format!(".warp.{} expects 2 arguments", method), line));
                 }
                 let v = self.eval_expr(&args[0].value, Rc::clone(&env))?;
                 let other = self.eval_expr(&args[1].value, Rc::clone(&env))?;
@@ -1517,7 +1517,7 @@ impl Interpreter {
                     Value::Int(n) => n,
                     Value::Uint(n) => n as i64,
                     _ => return Err(err(
-                        format!("gpu.warp.{}'s second argument must be an integer", method), line,
+                        format!(".warp.{}'s second argument must be an integer", method), line,
                     )),
                 };
                 let lane = self.warp_lane as i64;
@@ -1537,7 +1537,7 @@ impl Interpreter {
                     _ => return Ok(v),
                 };
                 let tv = to_thread_value(&v).ok_or_else(|| err(
-                    format!("gpu.warp.{}'s value argument isn't a shareable kernel type", method), line,
+                    format!(".warp.{}'s value argument isn't a shareable kernel type", method), line,
                 ))?;
                 {
                     let mut slots = scratch.lock().unwrap();
@@ -1558,7 +1558,7 @@ impl Interpreter {
                 barrier.wait();
                 Ok(from_thread_value(result_tv, &env))
             }
-            other => Err(err(format!("gpu.warp has no method '{}'", other), line)),
+            other => Err(err(format!(".warp has no method '{}'", other), line)),
         }
     }
 

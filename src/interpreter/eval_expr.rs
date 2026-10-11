@@ -655,8 +655,8 @@ impl Interpreter {
                 return self.eval_gpu_tensor_method(method, args, env, line);
             }
         }
-        // `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — matched
-        // purely on the receiver's AST shape (`gpu.warp` is never evaluated as a
+        // `.warp.sync()` / `.warp.shuffle_down/up/xor/shuffle(...)` — matched
+        // purely on the receiver's AST shape (`.warp` is never evaluated as a
         // real value; only `.size`/`.lane` field access goes through the `GpuWarp`
         // object `run_one_kernel_thread` injects), same style as the `fs` namespace
         // check just below.

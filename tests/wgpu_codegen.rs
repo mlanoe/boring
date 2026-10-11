@@ -31,10 +31,10 @@ kernel SizedOut:
         total = nn + extra
         out = [0.0 for ..<(nn + extra)]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = a[i]
-pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
+pub req [float32]'kernel'unified build([float32]'global x, int n) throws:
     mut k = SizedOut(x, n, 2)
     kernel:
         k(block = 256, grid = 1)
@@ -156,13 +156,13 @@ kernel Touch:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        out[gpu.thread.x] = 1.0
+        out[.thread.x] = 1.0
 
 static var bool flag = false
 def set_flag(bool v):
     flag = v
 
-pub req [float32]'gpu'unified run(int n) throws:
+pub req [float32]'kernel'unified run(int n) throws:
     mut k = Touch(n)
     kernel:
         k(block = 1, grid = n)
@@ -214,7 +214,7 @@ kernel VecAdd:
     let int n
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         if i < n:
             c[i] = a[i] + b[i]
 "#;
@@ -266,11 +266,11 @@ kernel WarpLike:
         y = [0.0 for ..<4]
 
     def ():
-        let warp_in_block = gpu.thread.y
+        let warp_in_block = .thread.y
         if warp_in_block < warps_per_block:
             y[warp_in_block] = x[warp_in_block]
 
-pub req [float]'gpu'unified warp_call([float]'global x) throws:
+pub req [float]'kernel'unified warp_call([float]'global x) throws:
     let int warps_per_block = 8
     mut k = WarpLike(x, warps_per_block)
     kernel:
@@ -303,7 +303,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -333,7 +333,7 @@ kernel Scale:
     let float32 alpha
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         data[i] = data[i] * alpha
 "#;
     let (wgsl, rs) = wgpu_codegen("scalar_uniform", src);
@@ -360,7 +360,7 @@ kernel Pow:
     let float32 alpha
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         data[i] = data[i].powf(alpha)
 "#;
     let (wgsl, _rs) = wgpu_codegen("powf_builtin", src);
@@ -383,7 +383,7 @@ kernel Log:
     let float32 base
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         data[i] = base.ln()
 "#;
     let (wgsl, _rs) = wgpu_codegen("ln_builtin", src);
@@ -400,7 +400,7 @@ kernel Signum:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         data[i] = data[i].signum()
 "#;
     let (wgsl, _rs) = wgpu_codegen("signum_builtin", src);
@@ -419,7 +419,7 @@ kernel Cbrt:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         data[i] = data[i].cbrt()
 "#;
     let (wgsl, _rs) = wgpu_codegen("cbrt_expand", src);
@@ -438,7 +438,7 @@ kernel Log10:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         data[i] = data[i].log10()
 "#;
     let (wgsl, _rs) = wgpu_codegen("log10_expand", src);
@@ -547,10 +547,10 @@ kernel Tile:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        tile[gpu.thread.x] = data[i]
+        let i = .block.x * .block_dim.x + .thread.x
+        tile[.thread.x] = data[i]
         sync
-        data[i] = tile[gpu.thread.x]
+        data[i] = tile[.thread.x]
 "#;
     let (wgsl, _rs) = wgpu_codegen("sync_barrier", src);
 
@@ -584,7 +584,7 @@ kernel Reduce:
     let [int, 4]'actor shared
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid == 0:
             shared[0] = 0
         if true:
@@ -606,7 +606,7 @@ kernel Histogram:
     mut [int]'unified data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         counts[data[i]] += 1
 "#;
     let (wgsl, rs) = wgpu_codegen("actor_global", src);
@@ -624,7 +624,7 @@ kernel Histogram:
     mut [int]'unified       data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let i = .block.x * .block_dim.x + .thread.x
         counts[data[i]] += 1
 "#;
     let (wgsl, rs) = wgpu_codegen("actor_unified", src);
@@ -655,18 +655,18 @@ kernel Builtins:
     mut [int]'unified out
 
     def ():
-        let tx = gpu.thread.x
-        let bx = gpu.block.x
-        let bdx = gpu.block_dim.x
-        let gdx = gpu.grid_dim.x
+        let tx = .thread.x
+        let bx = .block.x
+        let bdx = .block_dim.x
+        let gdx = .grid_dim.x
         out[0] = tx + bx + bdx + gdx
 "#;
     let (wgsl, _rs) = wgpu_codegen("builtins", src);
 
-    assert!(wgsl.contains("local_invocation_id"), "gpu.thread.x → local_invocation_id");
-    assert!(wgsl.contains("workgroup_id"), "gpu.block.x → workgroup_id");
-    assert!(wgsl.contains("let bp_bdim = vec3<u32>("), "gpu.block_dim.x → derived from block sizes");
-    assert!(wgsl.contains("num_workgroups"), "gpu.grid_dim.x → num_workgroups");
+    assert!(wgsl.contains("local_invocation_id"), ".thread.x → local_invocation_id");
+    assert!(wgsl.contains("workgroup_id"), ".block.x → workgroup_id");
+    assert!(wgsl.contains("let bp_bdim = vec3<u32>("), ".block_dim.x → derived from block sizes");
+    assert!(wgsl.contains("num_workgroups"), ".grid_dim.x → num_workgroups");
 }
 
 #[test]
@@ -676,14 +676,14 @@ kernel WarpBuiltins:
     mut [float]'unified buf
 
     def ():
-        let tid = gpu.thread.x
-        let lane = gpu.warp.lane
-        let size = gpu.warp.size
-        gpu.warp.sync()
-        let a = gpu.warp.shuffle_down(buf[tid], 1)
-        let b = gpu.warp.shuffle_up(buf[tid], 1)
-        let c = gpu.warp.shuffle_xor(buf[tid], 1)
-        let d = gpu.warp.shuffle(buf[tid], 0)
+        let tid = .thread.x
+        let lane = .warp.lane
+        let size = .warp.size
+        .warp.sync()
+        let a = .warp.shuffle_down(buf[tid], 1)
+        let b = .warp.shuffle_up(buf[tid], 1)
+        let c = .warp.shuffle_xor(buf[tid], 1)
+        let d = .warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + f32(lane) + f32(size)
 "#;
     let (wgsl, emulated, _rs, _toml) = run_wgpu("warp_builtins_real", src);
@@ -698,7 +698,7 @@ kernel WarpBuiltins:
     assert!(wgsl.contains("subgroupShuffle("), "expected subgroupShuffle;\ngot:\n{wgsl}");
 
     // The emulated fallback module must exist alongside the real one whenever
-    // `gpu.warp.*` is used, and never uses the subgroup extension.
+    // `.warp.*` is used, and never uses the subgroup extension.
     assert!(!emulated.is_empty(), "expected shaders/main_emulated.wgsl to be written");
     assert!(!emulated.contains("enable subgroups;"), "emulated module must not enable subgroups;\ngot:\n{emulated}");
 }
@@ -710,9 +710,9 @@ kernel WarpEmulated:
     mut [float32]'unified buf
 
     def ():
-        let tid = gpu.thread.x
-        gpu.warp.sync()
-        let shuffled = gpu.warp.shuffle_down(buf[tid], 1)
+        let tid = .thread.x
+        .warp.sync()
+        let shuffled = .warp.shuffle_down(buf[tid], 1)
         buf[tid] = shuffled
 "#;
     let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated", src);
@@ -747,11 +747,11 @@ kernel ShuffleIntKernel:
         out = [0.0 for i in 0..<32]
 
     def ():
-        let lane = gpu.warp.lane
+        let lane = .warp.lane
         var int v = 0
         if lane == 0:
             v = 42
-        v = gpu.warp.shuffle(v, 0)
+        v = .warp.shuffle(v, 0)
         out[lane] = v as float32
 "#;
     let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated_local_var", src);
@@ -776,12 +776,12 @@ fn test_gpu_warp_not_used_leaves_output_unchanged() {
 kernel Plain:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#;
     let (wgsl, emulated, _rs, _toml) = run_wgpu("warp_not_used", src);
-    assert!(!wgsl.contains("enable subgroups;"), "no gpu.warp.* usage should never enable subgroups;\ngot:\n{wgsl}");
-    assert!(emulated.is_empty(), "no gpu.warp.* usage should not emit an emulated shader file");
+    assert!(!wgsl.contains("enable subgroups;"), "no .warp.* usage should never enable subgroups;\ngot:\n{wgsl}");
+    assert!(emulated.is_empty(), "no .warp.* usage should not emit an emulated shader file");
 }
 
 #[test]
@@ -894,7 +894,7 @@ kernel ShiftKernel:
         out = [0.0 for i in 0..<32]
 
     def ():
-        let lane = gpu.warp.lane
+        let lane = .warp.lane
         let v = 0xA5
         let shift_amount = lane % 8
         let result = (v >> shift_amount) & 1
@@ -1109,7 +1109,7 @@ kernel:
 
 // ── `with` GPU-residency materialization (docs/scoped-access-blocks.md) ────────
 //
-// `let py'gpu'unified = k.y` followed by `with py:` should read the kernel field
+// `let py'kernel'unified = k.y` followed by `with py:` should read the kernel field
 // back exactly once (`k.copy_y_to_host()`), regardless of how many times the
 // block's body indexes `py` — the actual bug this exists to fix, confirmed against
 // `examples/vector_add_gpu.br`'s `for i in 0..<n: print k.result[i]`, which today
@@ -1129,7 +1129,7 @@ kernel Saxpy:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 
 var [float] hx = [0.0, 1.0]
@@ -1138,7 +1138,7 @@ mut k = Saxpy(2.0, hx, hy)
 kernel:
     k(block = 2)
 
-let [float]'gpu'unified py = k.y
+let [float]'kernel'unified py = k.y
 with py:
     for i in 0..<2:
         print "{py[i]}"
@@ -1173,7 +1173,7 @@ kernel Saxpy:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 
 var [float] hx = [0.0, 1.0]
@@ -1182,7 +1182,7 @@ mut k = Saxpy(2.0, hx, hy)
 kernel:
     k(block = 2)
 
-let [float]'gpu'unified py = k.y
+let [float]'kernel'unified py = k.y
 with py:
     py[0] = 0.0
 "#;
@@ -1198,7 +1198,7 @@ with py:
 #[test]
 fn test_with_gpu_resident_infers_qualifier_without_annotation() {
     // Same as test_with_gpu_resident_read_only_single_readback, but `py` has no
-    // explicit 'gpu'unified annotation at all — the qualifier is inferred from `k.y`
+    // explicit 'kernel'unified annotation at all — the qualifier is inferred from `k.y`
     // being a 'unified array field on a tracked kernel instance.
     let src = r#"
 kernel Saxpy:
@@ -1212,7 +1212,7 @@ kernel Saxpy:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 
 var [float] hx = [0.0, 1.0]
@@ -1237,7 +1237,7 @@ with py:
 //
 // The intra-procedural tests above cover a kernel instance and its field read living
 // in the *same* scope. These tests cover the actual motivating case
-// (docs/scoped-access-blocks.md): a free function returning a `'gpu'unified`-typed
+// (docs/scoped-access-blocks.md): a free function returning a `'kernel'unified`-typed
 // value, chained into a second call, with only the *final* consumer paying a host
 // round-trip — the shape of whisper-boring's `linear_gpu` -> `gelu_gpu` -> `linear_gpu`.
 
@@ -1253,19 +1253,19 @@ kernel Saxpy:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 "#;
 
 #[test]
 fn test_with_gpu_resident_call_chain_no_intermediate_roundtrip() {
     // `scale_gpu` wraps kernel construction+dispatch+field-read behind a function
-    // boundary with an explicit `'gpu'unified` return type — exactly the shape a
+    // boundary with an explicit `'kernel'unified` return type — exactly the shape a
     // real kernel-launcher wrapper (`linear_gpu`, etc.) uses. Called twice in a
     // chain: the second call's argument is the first call's still-resident return
     // value, and only the final `with` pays a real device->host transfer.
     let src = format!(r#"{SCALE_GPU_KERNEL}
-req [float]'gpu'unified scale_gpu([float] xv, float factor):
+req [float]'kernel'unified scale_gpu([float] xv, float factor):
     var [float] zero = [0.0, 0.0]
     mut k = Saxpy(factor, xv, zero)
     kernel:
@@ -1273,8 +1273,8 @@ req [float]'gpu'unified scale_gpu([float] xv, float factor):
     k.y
 
 var [float] ha = [1.0, 2.0]
-let [float]'gpu'unified fc = scale_gpu(ha, 2.0)
-let [float]'gpu'unified fc2 = scale_gpu(fc, 3.0)
+let [float]'kernel'unified fc = scale_gpu(ha, 2.0)
+let [float]'kernel'unified fc2 = scale_gpu(fc, 3.0)
 with fc2:
     print "{{fc2[0]}}"
 "#);
@@ -1325,11 +1325,11 @@ kernel CopyBytes:
         n = nn
         out = [0 as uint8 for ..<nn]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = (i + 1) as uint8
 
-req [uint8]'gpu'unified make_bytes(int n):
+req [uint8]'kernel'unified make_bytes(int n):
     mut k = CopyBytes(n)
     kernel:
         k(block = 4, grid = (n + 3) / 4)
@@ -1345,10 +1345,10 @@ req [uint8]'gpu'unified make_bytes(int n):
 #[test]
 fn test_with_gpu_resident_call_infers_qualifier_without_annotation() {
     // Same shape as the chain test above, but neither `fc` nor `fc2` has an explicit
-    // `'gpu'unified` annotation -- inferred from `scale_gpu`'s own declared return
+    // `'kernel'unified` annotation -- inferred from `scale_gpu`'s own declared return
     // type, mirroring the same-scope `let py = k.y` inference precedent.
     let src = format!(r#"{SCALE_GPU_KERNEL}
-req [float]'gpu'unified scale_gpu([float] xv, float factor):
+req [float]'kernel'unified scale_gpu([float] xv, float factor):
     var [float] zero = [0.0, 0.0]
     mut k = Saxpy(factor, xv, zero)
     kernel:
@@ -1391,7 +1391,7 @@ kernel Scale:
         y = [0.0 for ..<xs.length]
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         y[i] = x[i] * factor
 "#;
 
@@ -1402,7 +1402,7 @@ fn test_with_gpu_resident_call_param_used_for_dispatch_size() {
     // the exclusive-ctor-arg scan (`ast::scan_var_call_arg_uses`), since a dual-typed
     // `BoringGpuArg<T>` can answer `.length` without ever materializing.
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
-req [float]'gpu'unified scale_gpu([float] x, float factor):
+req [float]'kernel'unified scale_gpu([float] x, float factor):
     mut k = Scale(factor, x)
     kernel:
         k(block = x.length)
@@ -1439,9 +1439,9 @@ kernel Mutate:
     init([float]'unified input):
         x = input
     def ():
-        x[gpu.thread.x] += 1.0
+        x[.thread.x] += 1.0
 
-req [float]'gpu'unified mutate_gpu([float] x) throws:
+req [float]'kernel'unified mutate_gpu([float] x) throws:
     mut k = Mutate(x)
     kernel:
         k(block = x.length)
@@ -1456,12 +1456,12 @@ req [float]'gpu'unified mutate_gpu([float] x) throws:
 
 #[test]
 fn test_with_gpu_resident_call_param_explicit_annotation_used_for_dispatch_size() {
-    // Same shape as above, but `x` carries an explicit `'gpu'unified` annotation --
+    // Same shape as above, but `x` carries an explicit `'kernel'unified` annotation --
     // the annotation must not survive into the emitted parameter type (it should
     // still collapse to the same dual-typed `BoringGpuArg<T>` signature, matching the
     // return-type case), and the same `x.length` use must not disqualify it either.
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
-req [float]'gpu'unified scale_gpu([float]'gpu'unified x, float factor):
+req [float]'kernel'unified scale_gpu([float]'kernel'unified x, float factor):
     mut k = Scale(factor, x)
     kernel:
         k(block = x.length)
@@ -1478,7 +1478,7 @@ def main() throws:
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_annotated_dispatch_size", &src);
 
     assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
-        "an explicit 'gpu'unified annotation on the param should collapse to BoringGpuArg<T>, not a plain Vec:\n{rs}");
+        "an explicit 'kernel'unified annotation on the param should collapse to BoringGpuArg<T>, not a plain Vec:\n{rs}");
     assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
     assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
 }
@@ -1554,19 +1554,19 @@ fn test_fn_gpu_arg_param_transitive_two_hop_wrapper() {
     // `BoringGpuArg::Host(xv.clone())` passed where `scale_gpu` expects
     // `BoringGpuArg<f64>` directly).
     let src = format!(r#"{SCALE_GPU_KERNEL}
-req [float]'gpu'unified scale_gpu([float] xv, float factor):
+req [float]'kernel'unified scale_gpu([float] xv, float factor):
     var [float] zero = [0.0, 0.0]
     mut k = Saxpy(factor, xv, zero)
     kernel:
         k(block = 2)
     k.y
 
-req [float]'gpu'unified wrap_scale_gpu([float] xv, float factor):
+req [float]'kernel'unified wrap_scale_gpu([float] xv, float factor):
     scale_gpu(xv, factor)
 
 var [float] ha = [1.0, 2.0]
-let [float]'gpu'unified fc = scale_gpu(ha, 2.0)
-let [float]'gpu'unified fc2 = wrap_scale_gpu(fc, 3.0)
+let [float]'kernel'unified fc = scale_gpu(ha, 2.0)
+let [float]'kernel'unified fc2 = wrap_scale_gpu(fc, 3.0)
 with fc2:
     print "{{fc2[0]}}"
 "#);
@@ -1595,7 +1595,7 @@ fn test_fn_gpu_arg_param_disqualified_when_any_use_is_not_qualifying() {
     // disqualifies the whole parameter, even though another use of the same
     // parameter would, on its own, have qualified.
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
-req [float]'gpu'unified scale_gpu([float] x, float factor):
+req [float]'kernel'unified scale_gpu([float] x, float factor):
     mut k = Scale(factor, x)
     kernel:
         k(block = x.length)
@@ -1604,7 +1604,7 @@ req [float]'gpu'unified scale_gpu([float] x, float factor):
 def plain_use([float] x, float factor):
     print "{{x[0]}}"
 
-req [float]'gpu'unified mixed_use([float] x, float factor):
+req [float]'kernel'unified mixed_use([float] x, float factor):
     plain_use(x, factor)
     scale_gpu(x, factor)
 
@@ -1621,7 +1621,7 @@ def main() throws:
 }
 
 // ── Tuple-return residency chaining (`mha_step_gpu`-style: a function returning
-// `([float]'gpu'unified, [float], ...)`, chaining whichever tail-tuple elements are
+// `([float]'kernel'unified, [float], ...)`, chaining whichever tail-tuple elements are
 // themselves resident while leaving genuinely host-side elements alone) ──────────
 
 #[test]
@@ -1630,25 +1630,25 @@ fn test_gpu_resident_tuple_return_chains_with_explicit_opt_in() {
     // from a kernel-wrapper call) and whose second element is a genuinely host-side
     // array. The tail expression is a bare tuple literal `(doubled, side)` — the case
     // `try_emit_gpu_resident_tuple_return` (emit_kernel.rs) exists for. At the call
-    // site, the destructured binding `r` carries an *explicit* `'gpu'unified` opt-in
+    // site, the destructured binding `r` carries an *explicit* `'kernel'unified` opt-in
     // annotation -- unlike the single-value interprocedural case, a resident tuple
     // position stays resident only when asked to (see `emit_resident_tuple_destructure`'s
     // doc for why the default has to run the other way for tuples).
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
-req [float]'gpu'unified scale_gpu([float] x, float factor):
+req [float]'kernel'unified scale_gpu([float] x, float factor):
     mut k = Scale(factor, x)
     kernel:
         k(block = x.length)
     k.y
 
-req ([float]'gpu'unified, [float]) tuple_fn([float] x, float factor):
-    let [float]'gpu'unified doubled = scale_gpu(x, factor)
+req ([float]'kernel'unified, [float]) tuple_fn([float] x, float factor):
+    let [float]'kernel'unified doubled = scale_gpu(x, factor)
     let [float] side = [1.0, 2.0]
     (doubled, side)
 
 def main() throws:
     var [float] a = [1.0, 2.0, 3.0]
-    let ([float]'gpu'unified r, [float] s) = tuple_fn(a, 2.0)
+    let ([float]'kernel'unified r, [float] s) = tuple_fn(a, 2.0)
     with r:
         print "{{r[0]}}"
     print "{{s.length}}"
@@ -1681,14 +1681,14 @@ fn test_gpu_resident_tuple_return_destructure_materializes_by_default() {
     // Materializes right at the destructure through a temp binding, since the call
     // must run exactly once (no re-invoking `tuple_fn` to materialize a second time).
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
-req [float]'gpu'unified scale_gpu([float] x, float factor):
+req [float]'kernel'unified scale_gpu([float] x, float factor):
     mut k = Scale(factor, x)
     kernel:
         k(block = x.length)
     k.y
 
-req ([float]'gpu'unified, [float]) tuple_fn([float] x, float factor):
-    let [float]'gpu'unified doubled = scale_gpu(x, factor)
+req ([float]'kernel'unified, [float]) tuple_fn([float] x, float factor):
+    let [float]'kernel'unified doubled = scale_gpu(x, factor)
     let [float] side = [1.0, 2.0]
     (doubled, side)
 
@@ -1783,7 +1783,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);"),
@@ -1811,7 +1811,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 def run() throws:
@@ -1855,7 +1855,7 @@ kernel PlainInit:
         out  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = vals[tid] * 2.0
 
 let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
@@ -1903,7 +1903,7 @@ kernel Probe:
         dst = [0.0 for i in 0..<4]
 
     def ():
-        let cell = gpu.thread.x
+        let cell = .thread.x
         if cell < a * b:
             dst[cell] = src[cell]
 
@@ -1928,7 +1928,7 @@ with result:
 fn test_kernel_output_field_array_comp_inside_host_wrapper_fn() {
     // Same fix as `test_kernel_output_field_array_comp_with_loop_var_sized_correctly`,
     // but with the kernel constructed+dispatched *inside a separate `pub req ...
-    // throws` host wrapper function* returning a `'gpu'unified` value — the
+    // throws` host wrapper function* returning a `'kernel'unified` value — the
     // idiomatic pattern every kernel wrapper in boring-llm's `math_gpu.br` uses
     // (`linear_gpu`, `rope_apply_gpu`, `transpose_gpu`, ...), as opposed to inline
     // construction directly in `main()`/`boring_main()`. `emit_kernel_construction`
@@ -1950,11 +1950,11 @@ kernel Probe:
         dst = [0.0 for i in 0..<4]
 
     def ():
-        let cell = gpu.thread.x
+        let cell = .thread.x
         if cell < a * b:
             dst[cell] = src[cell]
 
-pub req [float32]'gpu'unified probe_gpu([float32]'global src, int a, int b) throws:
+pub req [float32]'kernel'unified probe_gpu([float32]'global src, int a, int b) throws:
     mut k = Probe(src, a, b)
     kernel:
         k(block = 256, grid = 1)
@@ -1998,7 +1998,7 @@ kernel Histogram:
     init([int]'actor'global data):
         counts = data
     def ():
-        let bucket = gpu.thread.x
+        let bucket = .thread.x
         counts[bucket] += 1
 "#);
     assert!(wgsl.contains("atomicAdd(&histogram_counts[u32(bucket)], 1);"),
@@ -2024,7 +2024,7 @@ kernel Histogram:
     init([int]'actor'global data):
         counts = data
     def ():
-        let bucket = gpu.thread.x
+        let bucket = .thread.x
         counts[bucket].min(5)
         counts[bucket].max(5)
         let old_swap = counts[bucket].swap(0)
@@ -2051,7 +2051,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("device.on_uncaptured_error(Box::new(|e| eprintln!(\"boring: uncaptured GPU error: {}\", e)));"),
@@ -2071,8 +2071,8 @@ kernel Img:
     init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(wgsl.contains("img_img[u32(c + r * 4)]"),
@@ -2087,8 +2087,8 @@ kernel Img:
     init([float, width = 4, height = 8]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         if c < img.width and r < img.height:
             img[width = c, height = r] = 0.0
 "#);
@@ -2104,8 +2104,8 @@ kernel Img:
     init([float32, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = 0.0
 "#);
     assert!(wgsl.contains("var<storage, read_write> img_img: array<f32>;"),
@@ -2120,8 +2120,8 @@ kernel Img:
     init([float, width = 16, height = 32]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 
 let data = [0.0]
@@ -2142,8 +2142,8 @@ kernel Img:
     init([float]'unified data, uint w, uint h):
         img = data.reshape(width = w, height = h)
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 
 let data = [0.0]
@@ -2163,8 +2163,8 @@ kernel Tile:
     mut [float32]'unified out
     let [float32, width = 4, height = 4]'actor tile
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         out[0] = tile[width = c, height = r]
 "#);
     assert!(wgsl.contains("var<workgroup> tile_tile: array<f32, 16>;"),
@@ -2188,7 +2188,7 @@ kernel Scale:
     init([int]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let m = buf[tid].min(5)
         let x = buf[tid].max(5)
         let s = buf[tid].swap(0)
@@ -2224,7 +2224,7 @@ kernel Scale:
     init([int]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         _ = buf[tid].min(9)
 "#);
     assert!(!wgsl.contains("_ ="), "must never assign to or read back WGSL's phony `_` target;\ngot:\n{wgsl}");
@@ -2250,7 +2250,7 @@ kernel Scale:
     init([int]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let x = buf[tid].min(5) + 1
 "#);
     assert!(wgsl.contains("/* unsupported here:") && wgsl.contains(".min(...) needs 'actor'global/'actor'unified"),
@@ -2276,8 +2276,8 @@ kernel Img:
         a = input_a
 
     def ():
-        let col = gpu.thread.x
-        let row = gpu.thread.y
+        let col = .thread.x
+        let row = .thread.y
         c[width = col, height = row] = a[width = col, height = row] * 2.0
 
 var [float32] data = [float32(i) for i in 0..<16]
@@ -2306,7 +2306,7 @@ kernel Dummy:
     init([int]'unified data):
         out = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = out[tid] * 2
 
 var [int] host = [i for i in 0..<8]
@@ -2340,7 +2340,7 @@ kernel Filler:
         out = [0 for ..<n]
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = a[i]
 
@@ -2706,7 +2706,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<W * H:
             let idx = i + k
@@ -2795,7 +2795,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<W * H:
             let idx = i + k
@@ -2882,7 +2882,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<W * H:
             let idx = i + k
@@ -2965,7 +2965,7 @@ kernel:
 ///
 /// Note: this test's kernel body deliberately drops the `if idx < input.len(): ...`
 /// guard the sibling test above uses -- `input.len()` lowers to WGSL's `arrayLength`,
-/// which returns `u32`, while `idx` is `i32` (derived from `gpu.thread.x`/`gpu.block.x`),
+/// which returns `u32`, while `idx` is `i32` (derived from `.thread.x`/`.block.x`),
 /// and WGSL's `<` operator rejects mixed-signedness operands ("Operation Less can't
 /// work with ..."). That's a real, separate bug (a plain `Type::Named("Dimension")`-
 /// style comparison-type-promotion gap, unrelated to buffer address spaces) that this
@@ -2985,7 +2985,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<W * H:
             acc = acc + weights[k] * input[i + k]
@@ -3044,7 +3044,7 @@ print "done"
 /// Regression test for the separate bug named in the sibling test's doc comment above
 /// (left as follow-up there so that test stayed focused on the uniform-alignment bug):
 /// `input.len()` lowers to WGSL's `arrayLength(&buf)` builtin, which returns `u32`, but
-/// every kernel-body index/loop expression (`gpu.thread.x`/`gpu.block.x` arithmetic,
+/// every kernel-body index/loop expression (`.thread.x`/`.block.x` arithmetic,
 /// `for`-loop variables) is emitted as `i32`. WGSL requires identical operand types for
 /// comparison operators -- no implicit signed/unsigned promotion like C/Rust -- so
 /// `idx < input.len()` lowered to `idx < arrayLength(&input)` (`i32 < u32`), which
@@ -3076,7 +3076,7 @@ kernel Sum2:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<2:
             let idx = i + k
@@ -3157,7 +3157,7 @@ kernel AddOneF32:
         x + 1.0
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = self.helper(data[i])
 "#);
     assert!(
@@ -3191,7 +3191,7 @@ kernel AddOneF32:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = addOne(data[i])
 "#);
     assert!(
@@ -3231,7 +3231,7 @@ kernel AddOneF32:
         x + 1.0
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = self.helper(data[i])
 
 mut k = AddOneF32([1.0, 2.0, 3.0])
@@ -3292,7 +3292,7 @@ kernel Dequant:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = dequant_at(w_packed, tid)
 "#);
     assert!(
@@ -3351,7 +3351,7 @@ kernel Dequant:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = dequant_at(w_packed, tid)
 
 mut k = Dequant([1, 2, 3, 4], [0.0, 0.0, 0.0, 0.0])
@@ -3406,7 +3406,7 @@ kernel S:
     mut [float32]'unified out
     let [float32]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#;
     let stderr = run_wgpu_expect_failure("dynamic_sync_field_rejected", src);
@@ -3440,7 +3440,7 @@ kernel Q:
     mut [float32]'unified out
     {decl}
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = w_packed[tid] as float32
 "#
         );
@@ -3465,7 +3465,7 @@ kernel Q:
     mut [float32]'unified out
     mut [uint8]'actor'global counters
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = counters[tid] as float32
 "#;
     let stderr = run_wgpu_expect_failure("atomic_packed_byte_buffer_field_rejected", src);
@@ -3508,7 +3508,7 @@ kernel PackedRecords:
         out_header = oh
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out_bytes[tid] = bytes[tid] as float32
         out_sbytes[tid] = sbytes[tid] as float32
         if tid < 2:
@@ -3607,7 +3607,7 @@ kernel LargeBuffer:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid < 4:
             out[tid] = (tid as float32) + 1.0
 
@@ -3698,7 +3698,7 @@ kernel Dequant:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = dequant_at(w_packed, tid)
 
 kernel Dequant2:
@@ -3710,7 +3710,7 @@ kernel Dequant2:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = dequant_at(other_packed, tid)
 "#;
     let stderr = run_wgpu_expect_failure("gpu_array_param_binding_conflict", src);
@@ -3750,7 +3750,7 @@ kernel ConstKernel:
     let float32 const
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = data[i] * const
 "#);
     // Declaration and every use must agree on the same mangled name -- a bare,
@@ -3778,7 +3778,7 @@ kernel LocalConst:
 
     def ():
         let const = n / 2
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid < const:
             out[tid] = 1.0
 "#);
@@ -3822,7 +3822,7 @@ kernel ParamConst:
         const + 1.0
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         out[i] = self.helper(out[i])
 "#);
     assert!(!wgsl.contains("fn ParamConst_helper(const: f32)"),
@@ -3865,10 +3865,10 @@ kernel Tile:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        array[gpu.thread.x] = data[i]
+        let i = .block.x * .block_dim.x + .thread.x
+        array[.thread.x] = data[i]
         sync
-        data[i] = array[gpu.thread.x]
+        data[i] = array[.thread.x]
 "#);
     assert!(!wgsl.contains("var<workgroup> array: array<f32, 256>;"),
         "a workgroup array field literally named `array` must not be emitted \
@@ -3893,7 +3893,7 @@ kernel LabeledTile:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = array[width = 0, height = 0]
 "#);
     assert!(!wgsl.contains("var<workgroup> array: array<f32, 16>;"),
@@ -3984,8 +3984,8 @@ kernel Reshaped2D:
         other = o.reshape(col = cols, row = rows)
         dst = [0.0 for col = cols, row = rows]
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         if c < 3 and r < 2:
             dst[col = c, row = r] = src[col = c, row = r] + other[col = c, row = r]
 
@@ -4264,7 +4264,7 @@ kernel Derived:
         out = [0.0 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < half_n:
             out[i] = x[i]
 
@@ -4334,14 +4334,14 @@ kernel WarpBuiltins:
     mut [float]'unified buf
 
     def ():
-        let tid = gpu.thread.x
-        let lane = gpu.warp.lane
-        let size = gpu.warp.size
-        gpu.warp.sync()
-        let a = gpu.warp.shuffleDown(buf[tid], 1)
-        let b = gpu.warp.shuffleUp(buf[tid], 1)
-        let c = gpu.warp.shuffleXor(buf[tid], 1)
-        let d = gpu.warp.shuffle(buf[tid], 0)
+        let tid = .thread.x
+        let lane = .warp.lane
+        let size = .warp.size
+        .warp.sync()
+        let a = .warp.shuffleDown(buf[tid], 1)
+        let b = .warp.shuffleUp(buf[tid], 1)
+        let c = .warp.shuffleXor(buf[tid], 1)
+        let d = .warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + f32(lane) + f32(size)
 "#;
     let (wgsl, emulated, _rs, _toml) = run_wgpu("warp_builtins_real_camel_case", src);
@@ -4356,7 +4356,7 @@ kernel WarpBuiltins:
     assert!(wgsl.contains("subgroupShuffle("), "expected subgroupShuffle;\ngot:\n{wgsl}");
 
     // The emulated fallback module must exist alongside the real one whenever
-    // `gpu.warp.*` is used, and never uses the subgroup extension.
+    // `.warp.*` is used, and never uses the subgroup extension.
     assert!(!emulated.is_empty(), "expected shaders/main_emulated.wgsl to be written");
     assert!(!emulated.contains("enable subgroups;"), "emulated module must not enable subgroups;\ngot:\n{emulated}");
 }
@@ -4368,9 +4368,9 @@ kernel WarpEmulated:
     mut [float32]'unified buf
 
     def ():
-        let tid = gpu.thread.x
-        gpu.warp.sync()
-        let shuffled = gpu.warp.shuffleDown(buf[tid], 1)
+        let tid = .thread.x
+        .warp.sync()
+        let shuffled = .warp.shuffleDown(buf[tid], 1)
         buf[tid] = shuffled
 "#;
     let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated_camel_case", src);
@@ -4384,7 +4384,7 @@ kernel WarpEmulated:
     assert!(emulated.contains("select("), "expected a select() for the warp-boundary clamp;\ngot:\n{emulated}");
 }
 
-/// A plain, non-resident `int`/`float` local inside a `pub req [T]'gpu'unified`
+/// A plain, non-resident `int`/`float` local inside a `pub req [T]'kernel'unified`
 /// function — used only to compute a grid/block dispatch dimension before a
 /// `kernel:` call, never itself GPU-resident and never returned — used to get
 /// wrongly wrapped in `BoringGpuArg::Host(...)` by the wgpu host-codegen path,
@@ -4413,11 +4413,11 @@ kernel AddKernel:
         y = [0.0 for i in 0..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             y[i] = x[i] + 1.0
 
-pub req [float32]'gpu'unified add_gpu([float32]'global x, int n) throws:
+pub req [float32]'kernel'unified add_gpu([float32]'global x, int n) throws:
     let int blocks = (n + 31) / 32
     let int gx = if blocks > 65535: 65535 else: blocks
     mut k = AddKernel(x, n)
@@ -4472,7 +4472,7 @@ def main() throws:
     assert!(
         run.status.success(),
         "expected the generated wgpu project to build AND run to completion against a real \
-         GPU (a `'gpu'unified`-returning function with a plain-scalar dispatch-dimension \
+         GPU (a `'kernel'unified`-returning function with a plain-scalar dispatch-dimension \
          local computed via an if-expression), but it failed:\n\
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );

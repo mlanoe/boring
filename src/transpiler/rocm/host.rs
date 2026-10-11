@@ -725,7 +725,7 @@ struct HostEmitter {
     fn_gpu_array_params: std::collections::HashMap<String, Vec<bool>>,
     /// Local variable names (current function only, reset per `emit_fn` call)
     /// bound to a call into a `fn_returns_resident` function WHOSE OWN `let`
-    /// type is itself `'gpu'unified` (`s.ty.gpu_resident_qual().is_some()`) --
+    /// type is itself `'kernel'unified` (`s.ty.gpu_resident_qual().is_some()`) --
     /// these stay `BoringGpuArg<f64>`-typed (never unwrapped to a plain
     /// `Vec`), so a later kernel-constructor call passing one of these as an
     /// argument can share the underlying `DeviceBuffer` through an `Arc`

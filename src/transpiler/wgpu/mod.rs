@@ -32,13 +32,13 @@ pub struct WgpuOutput {
     /// Rust host source (src/main.rs).
     pub host_rs: String,
     /// WGSL device source (shaders/main.wgsl). Uses the real-subgroup
-    /// `gpu.warp.*` mapping when any kernel uses it (see `device::WarpMode`);
+    /// `.warp.*` mapping when any kernel uses it (see `device::WarpMode`);
     /// identical to any prior single-module output otherwise.
     pub device_wgsl: String,
     /// Second WGSL module (shaders/main_emulated.wgsl) using the
-    /// shared-memory-emulated `gpu.warp.*` mapping, for adapters lacking
+    /// shared-memory-emulated `.warp.*` mapping, for adapters lacking
     /// `wgpu::Features::SUBGROUP`. `Some(..)` only when some kernel uses
-    /// `gpu.warp.*`; `None` otherwise (no second file is written).
+    /// `.warp.*`; `None` otherwise (no second file is written).
     pub device_wgsl_emulated: Option<String>,
     /// Names of all `kernel` struct declarations found in the program.
     pub kernel_names: Vec<String>,
@@ -130,7 +130,7 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors }
 }
 
-/// Does this kernel's body use `gpu.warp.*` anywhere? WGSL subgroup builtins
+/// Does this kernel's body use `.warp.*` anywhere? WGSL subgroup builtins
 /// need an explicit `enable subgroups;` module directive and are only valid
 /// when the adapter has `wgpu::Features::SUBGROUP` — unlike CUDA/Metal, that
 /// makes their kernel-parameter/directive emission conditional rather than

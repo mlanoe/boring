@@ -249,7 +249,7 @@ fn stmt_use_name(stmt: &Stmt, name: &str, escapes: &mut bool, bad_op: &mut bool)
         // capture into a nested `fn`, so nothing further to check here.
         Stmt::Fn(_) | Stmt::Struct(_) | Stmt::Enum(_) | Stmt::Mod(_) | Stmt::Alias(_) => {}
         // GPU kernel blocks are a wholly separate codegen path with their own
-        // qualifier space ('gpu'unified/'gpu'global/...) — out of scope for
+        // qualifier space ('kernel'unified/'kernel'global/...) — out of scope for
         // `'atomic` entirely (Part 1's checker never allows a kernel-context
         // qualifier to combine with `'atomic`). Conservatively treated as opaque:
         // not recursed into, so a real reference to `name` inside one would be a

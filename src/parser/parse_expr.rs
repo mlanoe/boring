@@ -758,6 +758,37 @@ impl Parser {
                     } else {
                         self.expect_ident_or_keyword()?
                     };
+                    if matches!(&expr.kind, ExprKind::Var(name) if name == "gpu")
+                        && matches!(
+                            field.as_str(),
+                            "thread" | "block" | "block_dim" | "blockDim" | "grid_dim"
+                                | "gridDim" | "warp" | "tensor"
+                        )
+                    {
+                        return Err(ParseError::Generic {
+                            msg: "the `gpu.*` kernel namespace was removed; use `.thread`, `.block`, `.warp`, or `.tensors` in device code, and `kernel.tensors` on the host".into(),
+                            line,
+                            col,
+                            len: self.span_len(line, col),
+                        });
+                    }
+                    // Public, target-neutral spelling for host tensor operations.
+                    // `gpu.tensor` remains only an internal AST convention shared
+                    // by the existing interpreter and code generators.
+                    if matches!(&expr.kind, ExprKind::Var(name) if name == "kernel")
+                        && field == "tensors"
+                    {
+                        expr = Expr {
+                            kind: ExprKind::Field(
+                                Box::new(Expr { kind: ExprKind::Var("gpu".into()), line, col, len: 3 }),
+                                "tensor".into(),
+                            ),
+                            line,
+                            col,
+                            len: self.span_len(line, col),
+                        };
+                        continue;
+                    }
                     // Generic method call: `obj.method<T1, T2>(args)`.
                     // Same disambiguation heuristic as the bare-identifier generic-call
                     // case in `parse_primary` — reused as-is so `obj.method < x` (a real
@@ -1539,6 +1570,19 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         match self.peek().clone() {
+            // Target-neutral host namespace: `kernel.tensors.*`. The postfix
+            // parser normalizes it to the existing internal `gpu.tensor` AST.
+            TokenKind::Kernel
+                if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Dot)) =>
+            {
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Var("kernel".into()),
+                    line,
+                    col,
+                    len: self.span_len(line, col),
+                })
+            }
             TokenKind::Kernel if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) => {
                 self.advance(); // `kernel`
                 let args = self.parse_call_args()?;
@@ -1767,10 +1811,24 @@ impl Parser {
                 Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Dot => {
-                // Dot-prefix enum shorthand: `.Red`
+                // Dot-prefix enum shorthand (`.Red`) and implicit compute-kernel
+                // namespaces (`.thread`, `.block`, `.warp`, `.tensors`).
                 self.advance();
                 let name = self.expect_ident()?;
-                Ok(Expr { kind: ExprKind::DotIdent(name), line, col, len: self.span_len(line, col)})
+                let kind = match name.as_str() {
+                    "thread" | "block" | "block_dim" | "blockDim" | "grid_dim" | "gridDim" | "warp" => {
+                        ExprKind::Field(
+                            Box::new(Expr { kind: ExprKind::Var("gpu".into()), line, col, len: 3 }),
+                            name,
+                        )
+                    }
+                    "tensors" => ExprKind::Field(
+                        Box::new(Expr { kind: ExprKind::Var("gpu".into()), line, col, len: 3 }),
+                        "tensor".into(),
+                    ),
+                    _ => ExprKind::DotIdent(name),
+                };
+                Ok(Expr { kind, line, col, len: self.span_len(line, col)})
             }
             TokenKind::LParen => {
                 self.advance();

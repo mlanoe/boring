@@ -158,8 +158,8 @@ li { margin-bottom: 0.3rem; }
 <hr>
 <h2 id="targets">Targets</h2>
 <p>Boring compiles the same source to several distinct Rust targets — from userspace CLIs down to GPU kernels and Linux kernel modules:</p>
-<table><thead><tr><th>Command</th><th>Target</th><th>Use case</th></tr></thead><tbody><tr><td><code>boring build</code></td><td>Rust std + tokio</td><td>servers, CLIs, desktop apps</td></tr><tr><td><code>boring build --target cuda</code></td><td>Rust + CUDA C (NVIDIA)</td><td>GPU compute</td></tr><tr><td><code>boring build --target rocm</code></td><td>Rust + HIP C++ (AMD)</td><td>GPU compute</td></tr><tr><td><code>boring build --target metal</code></td><td>Rust + MSL (Apple Silicon/macOS)</td><td>GPU compute</td></tr><tr><td><code>boring build --target wgpu</code></td><td>Rust + WGSL (any DX12/Vulkan/Metal GPU)</td><td>GPU compute, cross-platform</td></tr><tr><td><code>boring build --mode managed</code></td><td>Rust std + tokio</td><td>managed memory (unqualified <code>T</code> → <code>Arc&lt;Mutex&lt;T&gt;&gt;</code>)</td></tr><tr><td><code>boring build --threading single</code></td><td>Rust std + tokio</td><td>single-thread (<code>Arc</code> → <code>Rc</code>, <code>spawn</code> → <code>spawn_local</code>)</td></tr><tr><td><code>boring build --target kernel</code></td><td>Rust-for-Linux (<code>no_std</code>)</td><td>Linux drivers, subsystems, kernel modules</td></tr></tbody></table>
-<p>The GPU targets are the most fully developed: the same <code>kernel</code> struct, ownership qualifiers, and <code>gpu.*</code> built-ins transpile unchanged to CUDA C, HIP C++, Metal Shading Language, or WGSL depending on the flag — see <a href="#gpu-computing">GPU computing</a> below. The kernel target is a smaller, more experimental backend: it maps the same language (structs, enums, traits, ownership qualifiers, <code>throws</code>, <code>task</code>) onto Rust-for-Linux equivalents (<code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code>, <code>system_wq</code> work items, ring-buffer channels, errno-based errors) and validates kernel-incompatible constructs (<code>float</code>, <code>panic</code>) at build time — see <a href="docs/kernel-target.html">`docs/kernel-target.md`</a>.</p>
+<table><thead><tr><th>Command</th><th>Target</th><th>Use case</th></tr></thead><tbody><tr><td><code>boring build</code></td><td>Rust std + tokio</td><td>servers, CLIs, desktop apps</td></tr><tr><td><code>boring build --target cuda</code></td><td>Rust + CUDA C (NVIDIA)</td><td>GPU compute</td></tr><tr><td><code>boring build --target rocm</code></td><td>Rust + HIP C++ (AMD)</td><td>GPU compute</td></tr><tr><td><code>boring build --target metal</code></td><td>Rust + MSL (Apple Silicon/macOS)</td><td>GPU compute</td></tr><tr><td><code>boring build --target wgpu</code></td><td>Rust + WGSL (any DX12/Vulkan/Metal GPU)</td><td>GPU compute, cross-platform</td></tr><tr><td><code>boring build --mode managed</code></td><td>Rust std + tokio</td><td>managed memory (unqualified <code>T</code> → <code>Arc&lt;Mutex&lt;T&gt;&gt;</code>)</td></tr><tr><td><code>boring build --threading single</code></td><td>Rust std + tokio</td><td>single-thread (<code>Arc</code> → <code>Rc</code>, <code>spawn</code> → <code>spawn_local</code>)</td></tr><tr><td><code>boring build --linux</code></td><td>Rust-for-Linux (<code>no_std</code>)</td><td>Linux drivers, subsystems, kernel modules</td></tr></tbody></table>
+<p>The compute targets are the most fully developed: the same <code>kernel</code> struct, ownership qualifiers, and implicit <code>.thread</code>/<code>.block</code>/<code>.warp</code>/<code>.tensors</code> built-ins transpile unchanged to CUDA C, HIP C++, Metal Shading Language, or WGSL depending on the flag — see <a href="#gpu-computing">GPU computing</a> below. The Linux target is a smaller, more experimental backend: it maps the same language (structs, enums, traits, ownership qualifiers, <code>throws</code>, <code>task</code>) onto Rust-for-Linux equivalents (<code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code>, <code>system_wq</code> work items, ring-buffer channels, errno-based errors) and validates kernel-incompatible constructs (<code>float</code>, <code>panic</code>) at build time — see <a href="docs/linux-target.html">`docs/linux-target.md`</a>.</p>
 <hr>
 <h2 id="gpu-computing">GPU computing</h2>
 <p>GPU code is ordinary Boring: a <code>kernel</code> struct groups device memory fields, an <code>init</code> allocator, and an entry point, dispatched from regular host code with <code>kernel:</code> — no separate device-language file, no manual memory-transfer boilerplate.</p>
@@ -170,7 +170,7 @@ li { margin-bottom: 0.3rem; }
         buf = data
 
     <span class="kw">def</span> ():
-        <span class="kw">let</span> i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        <span class="kw">let</span> i = .thread.x + .block.x * .block_dim.x
         buf[i] *= <span class="nb">2.0</span>
 
 <span class="kw">mut</span> k = <span class="fn">Scale</span>(data)
@@ -340,7 +340,7 @@ somelib = { git = &quot;https://github.com/user/somelib&quot; }      # ...or by 
 │   ├── gpu-module.md        # GPU computing language reference
 │   ├── cuda-module.md / rocm-backend.md / metal-backend.md / wgpu-backend.md  # Per-backend codegen
 │   ├── cross-project-code-sharing-gap.md  # Dependency system design + known limitations
-│   └── kernel-target.md     # Boring → Rust-for-Linux mapping
+│   └── linux-target.md     # Boring → Rust-for-Linux mapping
 ├── spec/
 │   └── grammar.bnf          # Formal BNF grammar
 ├── examples/

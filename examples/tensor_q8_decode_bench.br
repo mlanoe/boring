@@ -24,14 +24,14 @@ kernel CopyQ8BytesKernel:
         out = [0 as uint8 for ..<count]
 
     def ():
-        let i = (gpu.thread.x + (gpu.block.x + gpu.block.y * gpu.grid_dim.x) * gpu.block_dim.x) * 16
+        let i = (.thread.x + (.block.x + .block.y * .grid_dim.x) * .block_dim.x) * 16
         var int j = 0
         while j < 16:
             if i + j < n:
                 out[i + j] = src[i + j]
             j += 1
 
-req [uint8]'gpu'unified upload_q8(int n, [uint8]'global src) throws:
+req [uint8]'kernel'unified upload_q8(int n, [uint8]'global src) throws:
     let blocks = (n + 4095) / 4096
     let gx = if blocks > 65535: 65535 else: blocks
     let gy = (blocks + gx - 1) / gx
@@ -40,9 +40,9 @@ req [uint8]'gpu'unified upload_q8(int n, [uint8]'global src) throws:
         copy(block = 256, grid = (gx, gy))
     copy.out
 
-req [float32]'gpu'unified q8([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
-    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q8_0")
+req [float32]'kernel'unified q8([float32]'kernel'global x, [uint8]'kernel'global w, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<n]
+    kernel.tensors.linear(x, w, y, m = 1, n = n, k = k, format = "q8_0")
     y
 
 def benchmark(int n, int k, int calls) throws:

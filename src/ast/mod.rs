@@ -285,7 +285,7 @@ pub struct FieldDecl {
 ///   `'local`   — per-thread registers / local mem
 ///   `'const`   — read-only constant memory
 ///
-/// Host-side GPU fields (rare) use the `'gpu'*` prefixed forms.
+/// Host-side GPU fields (rare) use the `'kernel'*` prefixed forms.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GpuQual {
     Unified,
@@ -588,7 +588,7 @@ pub enum Stmt {
     KernelBlock(KernelBlockStmt),
     /// `with <name> [, <name> ...]:` — scoped access block.
     /// Grants extended, multi-statement host access to a value normally touched
-    /// one operation at a time (`'gpu'unified`/`'gpu'global` residency, `'actor`/`'guard` locks).
+    /// one operation at a time (`'kernel'unified`/`'kernel'global` residency, `'actor`/`'guard` locks).
     /// The qualifier and read/write access level are NOT resolved here — the checker
     /// looks each name's binding and qualifier up in scope, exactly like `def`/`req`
     /// method-call legality already is.
@@ -1279,7 +1279,7 @@ pub enum OwnerQual {
     /// the transpiler emits `&mut T`.
     BorrowMut,
     /// GPU memory qualifiers.
-    /// Host-side: `T'gpu'unified`, `T'gpu'global`. `'const` has no host-side form — it has
+    /// Host-side: `T'kernel'unified`, `T'kernel'global`. `'const` has no host-side form — it has
     /// no host access (like `'local`), so it can only appear inside a `kernel` struct.
     /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'local`, `T'const`.
     /// Block-shared memory (formerly `T'sync`) is now bare `T'actor` in kernel-struct field
@@ -1380,7 +1380,7 @@ impl PartialEq for ConstExpr {
 ///
 /// Per axis order is significant and permanent for the type: `axes[0]` is axis 1
 /// (the fastest-varying index in row-major storage, and — for kernel fields —
-/// the axis mapped to `gpu.thread.x`), `axes[1]` is axis 2 (`gpu.thread.y`), etc.
+/// the axis mapped to `.thread.x`), `axes[1]` is axis 2 (`.thread.y`), etc.
 /// `[T, width, height]` and `[T, height, width]` are different (transposed) types.
 /// See docs/array-multidim-proposal.md, "Axis order is fixed at declaration".
 ///
@@ -1776,9 +1776,9 @@ impl Type {
         }
     }
 
-    /// The host-context GPU-residency qualifier (`'gpu'unified` / `'gpu'global`) at the
+    /// The host-context GPU-residency qualifier (`'kernel'unified` / `'kernel'global`) at the
     /// outermost qualifier layer, if any. Qualifiers are always the outermost wrapper
-    /// around a declared type (`[T]'gpu'unified` parses as `Qualified(Array(T), GpuUnified)`),
+    /// around a declared type (`[T]'kernel'unified` parses as `Qualified(Array(T), GpuUnified)`),
     /// so no recursion is needed. See docs/scoped-access-blocks.md, "The qualifier".
     pub fn gpu_resident_qual(&self) -> Option<&OwnerQual> {
         match self {

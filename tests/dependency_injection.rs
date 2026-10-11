@@ -89,8 +89,7 @@ fn emit_rust_kernel(src: &str) -> std::process::Output {
 
     Command::new(bin)
         .arg("build")
-        .arg("--target")
-        .arg("kernel")
+        .arg("--linux")
         .arg(&br_file)
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e))
@@ -1495,7 +1494,7 @@ pub Logger'shared fileLoggerProvider():
     );
 }
 
-// ── `--target kernel` rejection ──────────────────────────────────────────────────
+// ── `--linux` rejection ──────────────────────────────────────────────────
 
 #[test]
 fn singleton_is_rejected_under_kernel_target() {
@@ -1508,10 +1507,10 @@ def main():
     print \"ok\"
 ";
     let out = emit_rust_kernel(src);
-    assert!(!out.status.success(), "expected @singleton to be rejected under --target kernel");
+    assert!(!out.status.success(), "expected @singleton to be rejected under --linux");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("`@singleton` is not supported on the Rust-for-Linux kernel target"),
+        stderr.contains("`@singleton` is not supported on the Rust-for-Linux Linux target"),
         "expected the kernel-target rejection, got:\n{}", stderr
     );
 }
@@ -1540,10 +1539,10 @@ def main():
     print \"ok\"
 ";
     let out = emit_rust_kernel(src);
-    assert!(!out.status.success(), "expected @inject to be rejected under --target kernel");
+    assert!(!out.status.success(), "expected @inject to be rejected under --linux");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("`@inject` is not supported on the Rust-for-Linux kernel target"),
+        stderr.contains("`@inject` is not supported on the Rust-for-Linux Linux target"),
         "expected the kernel-target rejection, got:\n{}", stderr
     );
 }

@@ -120,7 +120,7 @@ struct HostEmitter {
     /// but the general pass's host convention is fixed at f64).
     fn_float_array_params: std::collections::HashMap<String, Vec<bool>>,
     /// Free function name -> per-parameter `Some(host element type)` for each
-    /// `'gpu'global`/`'gpu'unified` array parameter (`None` for any other
+    /// `'kernel'global`/`'kernel'unified` array parameter (`None` for any other
     /// parameter). The element type is `general_host_elem_type` of the param,
     /// i.e. the `T` in the callee's own `BoringGpuArg<T>` signature, so a
     /// host value wrapped at a call site converts to exactly that width
@@ -138,7 +138,7 @@ struct HostEmitter {
     /// Local variable names (current function only, reset per `emit_fn` call,
     /// same scoping as `f64_array_locals`) bound to a call into a
     /// `fn_returns_resident` function WHOSE OWN `let` type is itself
-    /// `'gpu'unified` (`s.ty.gpu_resident_qual().is_some()`) -- these stay
+    /// `'kernel'unified` (`s.ty.gpu_resident_qual().is_some()`) -- these stay
     /// `BoringGpuArg<f64>`-typed (never unwrapped to a plain `Vec` at the
     /// binding), so a later kernel-constructor call passing one of these as
     /// an argument can hand the underlying `Buffer` straight through instead
@@ -876,7 +876,7 @@ impl HostEmitter {
         self.line(crate::transpiler::helpers::DIMENSION_STRUCT_RUST);
         self.blank();
         // The general (std/wgpu-shared) transpiler pipeline's own pre-pass marks any
-        // function whose declared return type is `'gpu'unified`/`'gpu'global`-qualified
+        // function whose declared return type is `'kernel'unified`/`'kernel'global`-qualified
         // as "GPU-resident-returning" and renders every CALLER of it (in the general-
         // pipeline-spliced "plain" code this backend embeds -- see `metal::mod`'s doc
         // comment) to expect a `BoringGpuArg<T>` value back, unconditionally.
@@ -2168,7 +2168,7 @@ impl HostEmitter {
                 let is_materializing_call = matches!(&s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Call(callee, _))
                     if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n.as_str())));
                 // A materializing call whose OWN `let` is itself explicitly
-                // `'gpu'unified` (e.g. `let [float]'gpu'unified k_t =
+                // `'kernel'unified` (e.g. `let [float]'kernel'unified k_t =
                 // transpose_gpu(...)`) means the programmer wants this value
                 // to stay resident for a later chained kernel-touching call --
                 // see `resident_locals`'s doc. Keep it `BoringGpuArg<f64>`-
@@ -2887,7 +2887,7 @@ impl HostEmitter {
                 // function to another that returns `BoringGpuArg<T>` must
                 // materialize the result -- UNLESS the caller explicitly asked
                 // to keep it resident (`__suppress_materialize`, set by
-                // `Stmt::Let` for a `'gpu'unified`-typed binding; see
+                // `Stmt::Let` for a `'kernel'unified`-typed binding; see
                 // `resident_locals`'s doc), in which case the plain `call`
                 // (already typed `BoringGpuArg<T>` by `emit_fn`) is returned
                 // as-is. See `cuda::host`'s identical case for the unconditional
@@ -3454,7 +3454,7 @@ impl HostEmitter {
     /// expression uses in practice: a bare `k.field` read of a local kernel-
     /// struct variable's own output array field. When matched (only ever
     /// called where `in_resident_return` is `Some`, i.e. this function's
-    /// return type is itself `'gpu'unified`), skips `try_gpu_field_read`'s
+    /// return type is itself `'kernel'unified`), skips `try_gpu_field_read`'s
     /// materializing `k.read_field()` entirely and instead hands back the
     /// kernel's own output `Buffer` wrapped as `BoringGpuArg::Resident` --
     /// letting a chained GPU caller consume it without a host round trip.
@@ -3537,7 +3537,7 @@ fn elem_rust_type(ty: &Type) -> String {
 }
 
 /// The general (backend-agnostic) transpiler pipeline's own host-side element
-/// type convention for a `'gpu'unified` array (mirrors `emit_kernel.rs`'s
+/// type convention for a `'kernel'unified` array (mirrors `emit_kernel.rs`'s
 /// `kernel_host_element_type`) — always `f64` for a float array, UNLIKE this
 /// backend's own `elem_rust_type`/`rust_type` (`f32`, Metal's device-native
 /// float width, used for the kernel struct's own buffer/field types). Every

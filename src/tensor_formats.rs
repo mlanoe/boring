@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /// Storage geometry for a packed weight format accepted by
-/// `gpu.tensor.linear`. Keeping this table shared prevents the checker,
+/// `kernel.tensors.linear`. Keeping this table shared prevents the checker,
 /// interpreter, and generated host guards from disagreeing about a format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct QuantizedLinearGeometry {

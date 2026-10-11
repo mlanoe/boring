@@ -2814,7 +2814,7 @@ impl Transpiler {
     /// Destructure of a call to a `fn_returns_resident_tuple` function (see
     /// `emit_let_destructure`'s dispatch to this). A binding at a resident tuple
     /// position stays chained (registered in `resident_call_vars`) only with an
-    /// *explicit* `'gpu'unified`/`'gpu'global` opt-in annotation on that one binding
+    /// *explicit* `'kernel'unified`/`'kernel'global` opt-in annotation on that one binding
     /// — the opposite default from the single-value interprocedural case (which
     /// stays resident with *no* annotation). Tuple destructuring predates this
     /// residency feature everywhere in real code, so the default has to be

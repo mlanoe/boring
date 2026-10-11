@@ -252,7 +252,7 @@ impl Parser {
             //   kernel k(block=N)    ← single-line without colon
             // `kernel Foo:` is a struct declaration — skip it here.
             // `kernel k(`, `kernel:`, `kernel <newline>` → kernel block.
-            TokenKind::Kernel if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) && !matches!(
+            TokenKind::Kernel if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen | TokenKind::Dot)) && !matches!(
                 (self.tokens.get(self.pos + 1).map(|t| &t.kind),
                  self.tokens.get(self.pos + 2).map(|t| &t.kind)),
                 (Some(TokenKind::Ident(_)), Some(TokenKind::Colon))

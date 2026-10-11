@@ -168,7 +168,7 @@ impl Transpiler {
                     // practice declares `throws` (kernel dispatch can fail), so this branch —
                     // not the non-throws one below — is the one that actually needs the
                     // `try_emit_gpu_resident_return` check. Missing it here meant a `throws`
-                    // function with a `'gpu'unified`/`'gpu'global` return type and a bare
+                    // function with a `'kernel'unified`/`'kernel'global` return type and a bare
                     // `k.field` tail expression still got an eager `Ok(k.copy_y_to_host()...)`
                     // download wrapped in `Ok(...)`, which doesn't even type-check against the
                     // function's own `Result<BoringGpuArg<T>, _>` return type — confirmed via a
@@ -217,7 +217,7 @@ impl Transpiler {
                     self.line(&s);
                 } else if is_last && !self.fn_returns_void {
                     // Interprocedural GPU residency (docs/scoped-access-blocks.md): this
-                    // function's declared return type is `'gpu'unified`/`'gpu'global` and
+                    // function's declared return type is `'kernel'unified`/`'kernel'global` and
                     // the tail expression is a bare `k.field` read — emit
                     // `BoringGpuArg::Resident(...)` instead of the unconditional
                     // `copy_field_to_host()` download the normal expression emitter would
@@ -388,8 +388,8 @@ impl Transpiler {
     /// duration of this block, then restored, rather than teaching every call site in
     /// emit_methods.rs/emit_expr.rs a new "suppressed" case.
     ///
-    /// For a `'gpu'unified`/`'gpu'global` name registered in `gpu_resident_vars`
-    /// (`let py'gpu'unified = k.y` — see `emit_kernel::try_emit_gpu_resident_let`):
+    /// For a `'kernel'unified`/`'kernel'global` name registered in `gpu_resident_vars`
+    /// (`let py'kernel'unified = k.y` — see `emit_kernel::try_emit_gpu_resident_let`):
     /// materializes it to a plain host `Vec` exactly once via `k.copy_y_to_host()`
     /// (the same conversion `emit_kernel::try_emit_kernel_field_read` already does
     /// for a bare `k.y`), regardless of how many times the block's body indexes it —

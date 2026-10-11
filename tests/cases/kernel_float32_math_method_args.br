@@ -17,7 +17,7 @@ kernel PowKernel:
         data = d
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = (2.0 as float32).powf(data[i])
 
 kernel MathArgsKernel:
@@ -27,7 +27,7 @@ kernel MathArgsKernel:
         data = d
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = data[i].atan2(1.0 as float32) + data[i].log(2.0 as float32) + data[i].clamp(0.0 as float32, 100.0 as float32)
 
 def main() throws:

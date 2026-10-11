@@ -551,7 +551,7 @@ impl Transpiler {
                 // initializer, a nested sub-expression, ...), not the enclosing
                 // function's own tail position — reset GPU-residency tail-wrapping
                 // state so branch tails aren't wrongly treated as the function's
-                // `'gpu'unified`/`'gpu'global` return (see wgpu-host-residency-let-bug).
+                // `'kernel'unified`/`'kernel'global` return (see wgpu-host-residency-let-bug).
                 sub.current_fn_returns_resident = None;
                 sub.current_fn_returns_resident_tuple = None;
                 let emit_branch = |sub: &mut Self, body: &[crate::ast::Stmt]| {

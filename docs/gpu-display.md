@@ -34,8 +34,8 @@ kernel Plasma:
         t      = 0.0
 
     def ():
-        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
         if col < dim.width and row < dim.height:
             let x = float(col) / float(dim.width)
             let y = float(row) / float(dim.height)

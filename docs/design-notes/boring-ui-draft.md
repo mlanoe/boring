@@ -16,7 +16,7 @@ copied wholesale from Swift.
 
 ## Non-goals / explicit scope exclusions
 
-- **No `--target kernel` support.** A `no_std` Rust-for-Linux kernel module has no windowing
+- **No `--linux` support.** A `no_std` Rust-for-Linux kernel module has no windowing
   system and no concept of a mounted view tree — `view` (below) is meaningless there, the same way
   GPU kernel functions are meaningless in a plain CPU build. `boring-ui` is a std-target-only
   concern; the kernel backend's own qualifiers (`'unified`/`'sync`/`'global`) and this feature's

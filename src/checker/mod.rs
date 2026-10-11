@@ -92,14 +92,14 @@ struct Binding {
     /// subject of a `with` block that needs qualifier-specific codegen, only the
     /// no-op-everywhere-else path.
     ty: Option<Type>,
-    /// `true` only for a `'gpu'unified`/`'gpu'global` binding initialized directly
-    /// from a bare kernel-field read (`let py'gpu'unified = k.y`). This is the only
+    /// `true` only for a `'kernel'unified`/`'kernel'global` binding initialized directly
+    /// from a bare kernel-field read (`let py'kernel'unified = k.y`). This is the only
     /// case that is actually GPU-resident and opaque outside a `with` block.
     ///
-    /// A `'gpu'unified`/`'gpu'global`-qualified variable initialized from anything
+    /// A `'kernel'unified`/`'kernel'global`-qualified variable initialized from anything
     /// else (an array literal/comprehension, a plain function call, ...) is just an
     /// ordinary host array up until it's passed into a kernel constructor — see
-    /// `examples/saxpy.br`'s `var mut [float]'gpu'unified x = [0.0 for ..<N]`, freely
+    /// `examples/saxpy.br`'s `var mut [float]'kernel'unified x = [0.0 for ..<N]`, freely
     /// indexed and assigned on the host with no `with` wrapper anywhere. Gating
     /// opacity on the initializer's shape, rather than on the qualifier alone,
     /// is what keeps that existing, working pattern legal.
@@ -107,7 +107,7 @@ struct Binding {
     /// For `let k = SomeKernel(...)` — the kernel declaration's name, when the
     /// initializer is a call to a known `kernel Name:` type. Lets a *later*,
     /// unannotated `let result = k.y` still infer GPU residency (see
-    /// `Checker::infer_gpu_resident`) without requiring `'gpu'unified`/`'gpu'global`
+    /// `Checker::infer_gpu_resident`) without requiring `'kernel'unified`/`'kernel'global`
     /// to be written out by hand.
     kernel_type: Option<String>,
     /// For an unannotated `let h = SomeStruct(...)` — the struct's name, so a later
@@ -154,7 +154,7 @@ struct Checker {
     /// Stack of scopes; each scope maps a name to its binding info.
     scopes:   Vec<HashMap<String, Binding>>,
     /// Names currently open in an enclosing `with` block — used to enforce that a
-    /// `'gpu'unified`/`'gpu'global` value is opaque (no indexing/`.length`/iteration/
+    /// `'kernel'unified`/`'kernel'global` value is opaque (no indexing/`.length`/iteration/
     /// interpolation) outside its own `with` wrapper. See docs/scoped-access-blocks.md.
     open_with_names: std::collections::HashSet<String>,
     /// Free function name -> which positional params are declared `var` (out-parameter).
@@ -168,7 +168,7 @@ struct Checker {
     /// GPU-resident by checking `k`'s kernel type's own field declarations.
     kernel_decls: HashMap<String, KernelDecl>,
     /// Free function name -> its declared return type, for functions whose return
-    /// type is `'gpu'unified`/`'gpu'global`-qualified. Lets `let fc = some_fn(...)`
+    /// type is `'kernel'unified`/`'kernel'global`-qualified. Lets `let fc = some_fn(...)`
     /// be recognized as GPU-resident (opaque outside `with`) the same way a bare
     /// `k.field` read already is — see `define_let`/`infer_gpu_resident` and
     /// docs/scoped-access-blocks.md's interprocedural case.
@@ -181,7 +181,7 @@ struct Checker {
     /// a GPU-resident value into such a call without a `with` block first.
     fn_gpu_arg_params: HashMap<String, Vec<bool>>,
     /// Free function name -> per-position flags, for a function whose return type is
-    /// a `Type::Tuple` with at least one `'gpu'unified`/`'gpu'global`-qualified
+    /// a `Type::Tuple` with at least one `'kernel'unified`/`'kernel'global`-qualified
     /// element — the tuple analogue of `fn_returns_resident`. Lets `let (sa, k, v) =
     /// mha_step_gpu(...)` infer per-binding residency from the corresponding tuple
     /// position, the same way a plain `let fc = linear_gpu(...)` infers it from the
@@ -400,7 +400,7 @@ impl Checker {
         } else { None };
 
         let (resident_from_field, ty) = if ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false) {
-            // Explicit `'gpu'unified`/`'gpu'global` annotation — resident if sourced
+            // Explicit `'kernel'unified`/`'kernel'global` annotation — resident if sourced
             // from a bare kernel-field read (same-scope case) or a call to a function
             // whose own return type is resident (interprocedural case, `let fc =
             // linear_gpu(...)` — docs/scoped-access-blocks.md).
@@ -428,7 +428,7 @@ impl Checker {
     /// If `value` is `k.field` where `k` is bound to a known kernel type and that
     /// kernel's `field` is declared `'unified`/`'global` (`GpuQual`), returns the
     /// equivalent host-context `Type::Qualified(_, OwnerQual::GpuUnified|GpuGlobal)` —
-    /// the same type an explicit `'gpu'unified`/`'gpu'global` annotation would give.
+    /// the same type an explicit `'kernel'unified`/`'kernel'global` annotation would give.
     /// Also recognizes a call to a function whose own declared return type is
     /// already resident (`let fc = linear_gpu(...)`, no annotation) — the
     /// interprocedural counterpart to the same-scope field-read case, same rationale.
@@ -457,7 +457,7 @@ impl Checker {
     /// Is `expr` a call to a function whose declared return type is already
     /// GPU-resident (`self.fn_returns_resident`)? See `infer_gpu_resident`'s doc for
     /// why this and `is_kernel_field_read` are the two initializer shapes that make a
-    /// `'gpu'unified`/`'gpu'global`-annotated `let` actually opaque outside `with`.
+    /// `'kernel'unified`/`'kernel'global`-annotated `let` actually opaque outside `with`.
     fn is_resident_call(&self, expr: &Expr) -> bool {
         matches!(&expr.kind, ExprKind::Call(callee, _)
             if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n)))
@@ -1638,8 +1638,8 @@ impl Checker {
     /// Tuple analogue of `define_let`'s interprocedural case: if `s.value` is a call
     /// to a `fn_returns_resident_tuple` function, a destructured binding at a
     /// resident tuple position stays resident only with an *explicit*
-    /// `'gpu'unified`/`'gpu'global` opt-in annotation (e.g. `let
-    /// ([float]'gpu'unified sa, ...) = mha_step_gpu(...)`) — the opposite default
+    /// `'kernel'unified`/`'kernel'global` opt-in annotation (e.g. `let
+    /// ([float]'kernel'unified sa, ...) = mha_step_gpu(...)`) — the opposite default
     /// from the single-value interprocedural case (`let fc = linear_gpu(...)`
     /// stays resident with *no* annotation at all). Tuple destructuring predates
     /// this residency feature everywhere in real code, so every existing
@@ -2794,7 +2794,7 @@ mod with_stmt_tests {
     fn with_block_grants_indexing_of_gpu_resident_value() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'unified fc = k.y
+let [float]'kernel'unified fc = k.y
 with fc:
     print "{fc[0]}"
 "#;
@@ -2806,7 +2806,7 @@ with fc:
     fn indexing_gpu_resident_value_outside_with_is_an_error() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'unified fc = k.y
+let [float]'kernel'unified fc = k.y
 print "{fc[0]}"
 "#;
         let errs = errors_for(src);
@@ -2817,7 +2817,7 @@ print "{fc[0]}"
     fn length_of_gpu_resident_value_outside_with_is_an_error() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'global tok_emb = k.embeddings
+let [float]'kernel'global tok_emb = k.embeddings
 let int n = tok_emb.length
 "#;
         let errs = errors_for(src);
@@ -2828,7 +2828,7 @@ let int n = tok_emb.length
     fn iterating_gpu_resident_value_outside_with_is_an_error() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'unified fc = k.y
+let [float]'kernel'unified fc = k.y
 for x in fc:
     print "{x}"
 "#;
@@ -2840,7 +2840,7 @@ for x in fc:
     fn string_interpolation_of_gpu_resident_value_outside_with_is_an_error() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'unified fc = k.y
+let [float]'kernel'unified fc = k.y
 print "value: {fc}"
 "#;
         let errs = errors_for(src);
@@ -2851,7 +2851,7 @@ print "value: {fc}"
     fn nested_with_on_same_name_is_double_acquire_error() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'unified fc = k.y
+let [float]'kernel'unified fc = k.y
 with fc:
     with fc:
         print "{fc[0]}"
@@ -2864,8 +2864,8 @@ with fc:
     fn nested_with_on_different_names_is_fine() {
         let src = r#"
 let k = Kernel()
-let [float]'gpu'unified fc = k.y
-let [float]'gpu'unified act = k.z
+let [float]'kernel'unified fc = k.y
+let [float]'kernel'unified act = k.z
 with fc:
     with act:
         print "{fc[0]} {act[0]}"
@@ -2876,11 +2876,11 @@ with fc:
 
     #[test]
     fn plain_gpu_qualified_array_literal_is_unrestricted() {
-        // examples/saxpy.br's real pattern: a 'gpu'unified array literal, not sourced
+        // examples/saxpy.br's real pattern: a 'kernel'unified array literal, not sourced
         // from a kernel field, is just a plain host array — freely indexed/assigned
         // with no `with` wrapper required anywhere.
         let src = r#"
-var mut [float]'gpu'unified x = [0.0, 0.0, 0.0]
+var mut [float]'kernel'unified x = [0.0, 0.0, 0.0]
 x[0] = 1.0
 print "{x[0]}"
 for v in x:
@@ -2890,7 +2890,7 @@ for v in x:
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 
-    // ── Inferred GPU residency (no explicit 'gpu'unified/'gpu'global annotation) ──
+    // ── Inferred GPU residency (no explicit 'kernel'unified/'kernel'global annotation) ──
 
     const KERNEL_DECL: &str = r#"
 kernel Saxpy:

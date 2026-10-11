@@ -70,7 +70,7 @@ kernel Identity:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 1.0
 
 let data = [10.0, 20.0]
@@ -167,7 +167,7 @@ kernel Identity:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] + 1.0
 
 let data = [10.0, 20.0]
@@ -217,7 +217,7 @@ kernel Scale:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0, 3.0, 4.0]
@@ -251,7 +251,7 @@ kernel Scale3:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 3.0
 
 let data = [2.0, 4.0, 6.0]
@@ -273,7 +273,7 @@ let _result = k.buf
     );
 }
 
-// ─── gpu.thread.x builtin ────────────────────────────────────────────────────
+// ─── .thread.x builtin ────────────────────────────────────────────────────
 
 #[test]
 fn test_gpu_thread_x_builtin() {
@@ -285,7 +285,7 @@ kernel RecordTid:
         tids = [0, 0, 0]
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         tids[tid] = tid
 
 mut k = RecordTid(3)
@@ -303,7 +303,7 @@ let _result = k.tids
     );
 }
 
-// ─── gpu.warp.* builtins ─────────────────────────────────────────────────────
+// ─── .warp.* builtins ─────────────────────────────────────────────────────
 
 #[test]
 fn test_gpu_warp_size_lane() {
@@ -313,9 +313,9 @@ kernel WarpIds:
     mut [int, 64] lanes
 
     def ():
-        let i = gpu.thread.x
-        sizes[i] = gpu.warp.size
-        lanes[i] = gpu.warp.lane
+        let i = .thread.x
+        sizes[i] = .warp.size
+        lanes[i] = .warp.lane
 
 mut k = WarpIds()
 kernel:
@@ -330,10 +330,10 @@ let _lanes = k.lanes
     if let (Value::Array(sizes), Value::Array(lanes)) = (sizes, lanes) {
         assert_eq!(sizes.len(), 64);
         for s in sizes.iter() {
-            assert_eq!(*s, Value::Int(32), "gpu.warp.size should be the fixed 32-lane simulation constant");
+            assert_eq!(*s, Value::Int(32), ".warp.size should be the fixed 32-lane simulation constant");
         }
         for (i, l) in lanes.iter().enumerate() {
-            assert_eq!(*l, Value::Int((i % 32) as i64), "gpu.warp.lane should be thread index mod warp size");
+            assert_eq!(*l, Value::Int((i % 32) as i64), ".warp.lane should be thread index mod warp size");
         }
     } else {
         panic!("expected arrays");
@@ -342,7 +342,7 @@ let _lanes = k.lanes
 
 #[test]
 fn test_gpu_warp_sync_barrier() {
-    // A kernel using only `gpu.warp.sync()` (no `'actor` field at all) must still
+    // A kernel using only `.warp.sync()` (no `'actor` field at all) must still
     // take the real-OS-thread barrier path — this would deadlock or panic if the
     // interpreter incorrectly ran it on the independent-threads fast path.
     let src = r#"
@@ -350,8 +350,8 @@ kernel WarpSyncOnly:
     mut [int, 32] out
 
     def ():
-        let i = gpu.thread.x
-        gpu.warp.sync()
+        let i = .thread.x
+        .warp.sync()
         out[i] = i
 
 mut k = WarpSyncOnly()
@@ -373,9 +373,9 @@ kernel ShuffleDown:
     mut [int, 32] out
 
     def ():
-        let i = gpu.thread.x
-        let lane = gpu.warp.lane
-        out[i] = gpu.warp.shuffle_down(lane, 1)
+        let i = .thread.x
+        let lane = .warp.lane
+        out[i] = .warp.shuffle_down(lane, 1)
 
 mut k = ShuffleDown()
 kernel:
@@ -400,9 +400,9 @@ kernel ShuffleXor:
     mut [int, 8] out
 
     def ():
-        let i = gpu.thread.x
-        let lane = gpu.warp.lane
-        out[i] = gpu.warp.shuffle_xor(lane, 1)
+        let i = .thread.x
+        let lane = .warp.lane
+        out[i] = .warp.shuffle_xor(lane, 1)
 
 mut k = ShuffleXor()
 kernel:
@@ -424,8 +424,8 @@ fn test_gpu_camel_case_names() {
 kernel Names:
     mut [int, 4] out
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.blockDim.x
-        out[i] = gpu.gridDim.x + gpu.warp.shuffleXor(gpu.warp.lane, 1)
+        let i = .thread.x + .block.x * .blockDim.x
+        out[i] = .gridDim.x + .warp.shuffleXor(.warp.lane, 1)
 mut k = Names()
 kernel:
     k(block = 2, grid = 2)
@@ -449,10 +449,10 @@ kernel TensorTiles:
         a = input_a
         b = input_b
     def ():
-        let row = gpu.block.y * 2
-        let col = gpu.block.x * 4
-        gpu.tensor.matmulTile(a, b, c, row = row, col = col, rows = 2, cols = 4)
-        gpu.tensor.mmaTile(a, b, c, row = row, col = col, rows = 2, cols = 4)
+        let row = .block.y * 2
+        let col = .block.x * 4
+        .tensors.matmulTile(a, b, c, row = row, col = col, rows = 2, cols = 4)
+        .tensors.mmaTile(a, b, c, row = row, col = col, rows = 2, cols = 4)
 let a = [float32(i % 7 - 3) for i in 0..<15]
 let b = [float32(i % 5 - 2) for i in 0..<35]
 mut kernel_value = TensorTiles(a, b)
@@ -475,11 +475,11 @@ let actual = kernel_value.c
 #[test]
 fn test_host_tensor_matmul_and_mma() {
     let src = r#"
-let [float32, k = 5, m = 3]'gpu'global a = [float32(i % 7 - 3) for i in 0..<15]
-let [float32, n = 7, k = 5]'gpu'unified b = [float32(i % 5 - 2) for i in 0..<35]
-mut [float32, n = 7, m = 3]'gpu'unified c = [float32(0) for ..<21]
-gpu.tensor.matmul(a, b, c)
-gpu.tensor.mma(a, b, c)
+let [float32, k = 5, m = 3]'kernel'global a = [float32(i % 7 - 3) for i in 0..<15]
+let [float32, n = 7, k = 5]'kernel'unified b = [float32(i % 5 - 2) for i in 0..<35]
+mut [float32, n = 7, m = 3]'kernel'unified c = [float32(0) for ..<21]
+kernel.tensors.matmul(a, b, c)
+kernel.tensors.mma(a, b, c)
 let actual = c
 "#;
     let (interp, result) = run(src);
@@ -497,10 +497,10 @@ let actual = c
 #[test]
 fn test_tensor_linear_uses_row_major_weights() {
     let src = r#"
-let [float32, k = 3, m = 2]'gpu'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
-let [float32, k = 3, n = 2]'gpu'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
-mut [float32, n = 2, m = 2]'gpu'unified y = [0.0 as float32 for ..<4]
-gpu.tensor.linear(x, w, y)
+let [float32, k = 3, m = 2]'kernel'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
+let [float32, k = 3, n = 2]'kernel'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+mut [float32, n = 2, m = 2]'kernel'unified y = [0.0 as float32 for ..<4]
+kernel.tensors.linear(x, w, y)
 let actual = y
 "#;
     let (interp, result) = run(src);
@@ -518,10 +518,10 @@ fn test_dynamic_tensor_linear_uses_runtime_dimensions() {
 let m = 2
 let n = 2
 let k = 3
-let [float32]'gpu'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
-let [float32]'gpu'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
-mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-gpu.tensor.linear(x, w, y, m = m, n = n, k = k)
+let [float32]'kernel'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
+let [float32]'kernel'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+kernel.tensors.linear(x, w, y, m = m, n = n, k = k)
 let actual = y
 "#;
     let (interp, result) = run(src);
@@ -547,7 +547,7 @@ kernel AddOne:
         arr = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid < n:
             arr[tid] = arr[tid] + 1.0
 
@@ -581,7 +581,7 @@ kernel WithHelper:
         buf[i] = buf[i] * 10.0
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         apply(tid)
 
 let data = [1.0, 2.0]
@@ -638,7 +638,7 @@ kernel AddOneF32:
         x + 1.0
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = self.helper(data[i])
 
 let d = [1.0, 2.0, 3.0]
@@ -678,7 +678,7 @@ kernel Tile:
         out   = [0.0, 0.0, 0.0, 0.0]
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = tile[tid] + input[tid]
 
 let data = [1.0, 2.0, 3.0, 4.0]
@@ -715,7 +715,7 @@ kernel WithSync:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] + 1.0
         sync
         buf[tid] = buf[tid] * 2.0
@@ -753,7 +753,7 @@ kernel Broadcast:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         tile[tid] = float(tid) + 1.0
         sync
         out[tid] = tile[0]
@@ -800,18 +800,18 @@ kernel TileSum:
         result = result
 
     def ():
-        let i    = gpu.thread.x + gpu.block.x * gpu.block_dim.x
-        let tid  = gpu.thread.x
+        let i    = .thread.x + .block.x * .block_dim.x
+        let tid  = .thread.x
         tile[tid] = data[i]
 
-        var stride = gpu.block_dim.x / 2
+        var stride = .block_dim.x / 2
         while stride > 0:
             if tid < stride:
                 tile[tid] = tile[tid] + tile[tid + stride]
             stride = stride / 2
 
         if tid == 0:
-            result[gpu.block.x] = tile[0]
+            result[.block.x] = tile[0]
 
 let data    = [i as float for i in ..<1024]
 mut partial = [0.0 for ..<4]
@@ -860,7 +860,7 @@ kernel MarkThreads:
         marks = m
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         marks[i] = 1.0
 
 var [float] big = []
@@ -886,7 +886,7 @@ let _mark_1023 = k.marks[1023]
     assert_eq!(get_var(&interp, "_mark_1023"), Value::Float64(0.0));
 }
 
-// ─── 3D block/grid dispatch: gpu.thread.z / gpu.block.z are real ───────────
+// ─── 3D block/grid dispatch: .thread.z / .block.z are real ───────────
 
 #[test]
 fn test_3d_block_and_grid_dispatch() {
@@ -898,7 +898,7 @@ kernel Sum3D:
         out = o
 
     def ():
-        let idx = gpu.thread.z + gpu.block.z * gpu.block_dim.z
+        let idx = .thread.z + .block.z * .block_dim.z
         out[idx] = float(idx) * 10.0
 
 var [float] data = []
@@ -936,7 +936,7 @@ kernel Multiply:
         out = [0.0, 0.0, 0.0, 0.0]
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = a[tid] * b[tid]
 
 let xs = [1.0, 2.0, 3.0, 4.0]
@@ -970,7 +970,7 @@ kernel Scale:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 kernel Shift:
@@ -980,7 +980,7 @@ kernel Shift:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] + 10.0
 
 let data = [1.0, 2.0, 3.0]
@@ -1016,7 +1016,7 @@ kernel GlobalScale:
         buf = data
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 3.0
 
 let data = [1.0, 2.0, 3.0]
@@ -1045,7 +1045,7 @@ kernel SharedWeight:
         weights = w
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = out[tid] * weights[0]
 
 let data    = [1.0, 2.0, 4.0]
@@ -1075,7 +1075,7 @@ kernel LocalScratch:
         scratch = 0.0
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         scratch = float(tid) * 10.0
         out[tid] = scratch
 
@@ -1104,7 +1104,7 @@ kernel ConstScale:
         factor = f
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * factor
 
 let data = [2.0, 4.0, 8.0]
@@ -1218,8 +1218,8 @@ kernel Fill:
         dim = d
 
     def ():
-        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
         if col < dim.width and row < dim.height:
             pixels[row * dim.width + col] = 0xFF0000FF
 
@@ -1252,8 +1252,8 @@ kernel Counter:
         dim = d
 
     def ():
-        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
         if col < dim.width and row < dim.height:
             pixels[row * dim.width + col] = 42
 
@@ -1377,7 +1377,7 @@ kernel MatMul:
         inner = inner
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let row = tid / cols
         let col = tid % cols
         if row < rows and col < cols:
@@ -1436,7 +1436,7 @@ kernel MatMul:
         inner = inner
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let row = tid / cols
         let col = tid % cols
         if row < rows and col < cols:
@@ -1500,7 +1500,7 @@ kernel Softmax:
         sum_exp = sum_exp
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = exp(x[i] - max_val) / sum_exp
 
@@ -1555,7 +1555,7 @@ kernel Softmax:
         sum_exp = sum_exp
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = exp(x[i] - max_val) / sum_exp
 
@@ -1622,7 +1622,7 @@ kernel ScaledQKt:
         scale   = scale
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let row = tid / seq_len
         let col = tid % seq_len
         if row < seq_len and col < seq_len:
@@ -1646,7 +1646,7 @@ kernel RowSoftmax:
         seq_len  = seq_len
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let row = tid / seq_len
         let col = tid % seq_len
         if row < seq_len and col < seq_len:
@@ -1669,7 +1669,7 @@ kernel MatMul:
         inner = inner
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let row = tid / cols
         let col = tid % cols
         if row < rows and col < cols:
@@ -1758,7 +1758,7 @@ kernel LayerNorm:
         eps      = eps
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             let norm = (x[i] - mean) / sqrt(variance + eps)
             out[i] = weight[i] * norm + bias[i]
@@ -1824,7 +1824,7 @@ kernel LayerNorm:
         eps      = eps
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             let norm = (x[i] - mean) / sqrt(variance + eps)
             out[i] = weight[i] * norm + bias[i]
@@ -1886,7 +1886,7 @@ kernel GeluKernel:
         n   = n
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = gelu(x[i])
 
@@ -1963,7 +1963,7 @@ kernel LinearBias:
         inner = inner
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let row = tid / cols
         let col = tid % cols
         if row < rows and col < cols:
@@ -1983,7 +1983,7 @@ kernel GeluActivation:
         n   = n
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = gelu(x[i])
 
@@ -2071,7 +2071,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<W * H:
             let idx = i + k
@@ -2124,7 +2124,7 @@ kernel Tile<int N>:
         output  = out
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         var acc = 0.0
         for k in 0..<N:
             acc = acc + weights[k]

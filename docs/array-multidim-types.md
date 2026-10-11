@@ -68,8 +68,8 @@ Order is fixed in the *type declaration* itself:
   - **Storage layout** — the natural generalization of `Image`'s row-major
     layout (`.at(c, r)` addresses `c + r * width`): axis 1 is the
     fastest-varying index.
-  - **GPU dispatch axis mapping** — axis 1 ↔ `gpu.thread.x`, axis 2 ↔
-    `gpu.thread.y`, axis 3 ↔ `gpu.thread.z`, independent of the label names
+  - **GPU dispatch axis mapping** — axis 1 ↔ `.thread.x`, axis 2 ↔
+    `.thread.y`, axis 3 ↔ `.thread.z`, independent of the label names
     chosen. This is what lets automatic grid-size inference at kernel
     dispatch keep working the same way it did for `Image`/`Volume`.
 

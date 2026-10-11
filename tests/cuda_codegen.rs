@@ -29,8 +29,8 @@ kernel SizedOut:
         total = nn + extra
         out = [0.0 for ..<(nn + extra)]
     def ():
-        out[gpu.thread.x] = a[gpu.thread.x]
-pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
+        out[.thread.x] = a[.thread.x]
+pub req [float32]'kernel'unified build([float32]'global x, int n) throws:
     mut k = SizedOut(x, n, 2)
     k.out
 "#);
@@ -122,10 +122,10 @@ fn run_cuda(test_name: &str, src: &str) -> (String, String, String, String) {
 #[test]
 fn fixed_float32_matmul_uses_native_cublas_sgemm() {
     let (cu, host) = cuda_codegen("native_tensor_matmul", r#"
-let [float32, k = 64, m = 64]'gpu'global a = [1.0 as float32 for ..<4096]
-let [float32, n = 64, k = 64]'gpu'global b = [1.0 as float32 for ..<4096]
-mut [float32, n = 64, m = 64]'gpu'unified c = [0.0 as float32 for ..<4096]
-gpu.tensor.matmul(a, b, c)
+let [float32, k = 64, m = 64]'kernel'global a = [1.0 as float32 for ..<4096]
+let [float32, n = 64, k = 64]'kernel'global b = [1.0 as float32 for ..<4096]
+mut [float32, n = 64, m = 64]'kernel'unified c = [0.0 as float32 for ..<4096]
+kernel.tensors.matmul(a, b, c)
 "#);
     assert!(cu.contains("BoringTensorHostNative0_kernel"), "{cu}");
     assert!(host.contains("CudaBlas::new"), "{host}");
@@ -150,13 +150,13 @@ kernel Touch:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        out[gpu.thread.x] = 1.0
+        out[.thread.x] = 1.0
 
 static var bool flag = false
 def set_flag(bool v):
     flag = v
 
-pub req [float32]'gpu'unified run(int n) throws:
+pub req [float32]'kernel'unified run(int n) throws:
     mut k = Touch(n)
     kernel:
         k(block = 1, grid = n)
@@ -166,19 +166,19 @@ pub req [float32]'gpu'unified run(int n) throws:
 #[test]
 fn native_cublas_preserves_linear_transpose_and_mma_accumulation() {
     let (_, linear) = cuda_codegen("native_tensor_linear", r#"
-let [float32, k = 16, m = 8]'gpu'global x = [1.0 as float32 for ..<128]
-let [float32, k = 16, n = 24]'gpu'global w = [1.0 as float32 for ..<384]
-mut [float32, n = 24, m = 8]'gpu'unified y = [0.0 as float32 for ..<192]
-gpu.tensor.linear(x, w, y)
+let [float32, k = 16, m = 8]'kernel'global x = [1.0 as float32 for ..<128]
+let [float32, k = 16, n = 24]'kernel'global w = [1.0 as float32 for ..<384]
+mut [float32, n = 24, m = 8]'kernel'unified y = [0.0 as float32 for ..<192]
+kernel.tensors.linear(x, w, y)
 "#);
     assert!(linear.contains("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T"), "{linear}");
     assert!(linear.contains("alpha: 1.0f32, lda: 16i32, ldb: 16i32, beta: 0.0f32, ldc: 24i32"), "{linear}");
 
     let (_, mma) = cuda_codegen("native_tensor_mma", r#"
-let [float32, k = 16, m = 8]'gpu'global a = [1.0 as float32 for ..<128]
-let [float32, n = 24, k = 16]'gpu'global b = [1.0 as float32 for ..<384]
-mut [float32, n = 24, m = 8]'gpu'unified c = [1.0 as float32 for ..<192]
-gpu.tensor.mma(a, b, c)
+let [float32, k = 16, m = 8]'kernel'global a = [1.0 as float32 for ..<128]
+let [float32, n = 24, k = 16]'kernel'global b = [1.0 as float32 for ..<384]
+mut [float32, n = 24, m = 8]'kernel'unified c = [1.0 as float32 for ..<192]
+kernel.tensors.mma(a, b, c)
 "#);
     assert!(mma.contains("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N"), "{mma}");
     assert!(mma.contains("beta: 1.0f32"), "{mma}");
@@ -187,10 +187,10 @@ gpu.tensor.mma(a, b, c)
 #[test]
 fn unaligned_float32_matmul_keeps_scalar_cuda_kernel() {
     let (cu, host) = cuda_codegen("scalar_tensor_matmul", r#"
-let [float32, k = 5, m = 3]'gpu'global a = [1.0 as float32 for ..<15]
-let [float32, n = 7, k = 5]'gpu'global b = [1.0 as float32 for ..<35]
-mut [float32, n = 7, m = 3]'gpu'unified c = [0.0 as float32 for ..<21]
-gpu.tensor.matmul(a, b, c)
+let [float32, k = 5, m = 3]'kernel'global a = [1.0 as float32 for ..<15]
+let [float32, n = 7, k = 5]'kernel'global b = [1.0 as float32 for ..<35]
+mut [float32, n = 7, m = 3]'kernel'unified c = [0.0 as float32 for ..<21]
+kernel.tensors.matmul(a, b, c)
 "#);
     assert!(cu.contains("BoringTensorHost0_kernel"), "{cu}");
     assert!(host.contains("load_function(\"BoringTensorHost0_kernel\")"), "{host}");
@@ -205,7 +205,7 @@ fn device_unified_field_becomes_pointer_param() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(cu.contains("__global__ void Scale_kernel(double* buf)"),
@@ -218,7 +218,7 @@ fn device_global_field_becomes_pointer_param() {
 kernel G:
     mut [float]'global buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] + 1.0
 "#);
     assert!(cu.contains("__global__ void G_kernel(double* buf)"),
@@ -232,7 +232,7 @@ kernel C:
     mut [float]'unified buf
     let float'const     factor
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * factor
 "#);
     assert!(cu.contains("const double factor"),
@@ -248,7 +248,7 @@ kernel S:
     mut [float]'unified out
     let [float]'actor scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[tid]
 "#);
     assert!(cu.contains("__shared__") || cu.contains("extern __shared__"),
@@ -264,7 +264,7 @@ kernel D:
     mut [float]'unified out
     let [float]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#);
     assert!(cu.contains("extern __shared__"),
@@ -279,7 +279,7 @@ fn device_gpu_builtins_map_correctly() {
 kernel B:
     mut [float]'unified buf
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         buf[i] = buf[i] * 2.0
 "#);
     assert!(cu.contains("threadIdx.x"), "expected threadIdx.x;\ngot:\n{cu}");
@@ -293,14 +293,14 @@ fn device_gpu_warp_builtins_map_correctly() {
 kernel W:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
-        let lane = gpu.warp.lane
-        let size = gpu.warp.size
-        gpu.warp.sync()
-        let a = gpu.warp.shuffle_down(buf[tid], 1)
-        let b = gpu.warp.shuffle_up(buf[tid], 1)
-        let c = gpu.warp.shuffle_xor(buf[tid], 1)
-        let d = gpu.warp.shuffle(buf[tid], 0)
+        let tid = .thread.x
+        let lane = .warp.lane
+        let size = .warp.size
+        .warp.sync()
+        let a = .warp.shuffle_down(buf[tid], 1)
+        let b = .warp.shuffle_up(buf[tid], 1)
+        let c = .warp.shuffle_xor(buf[tid], 1)
+        let d = .warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + lane + size
 "#);
     assert!(cu.contains("warpSize"), "expected warpSize;\ngot:\n{cu}");
@@ -322,7 +322,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("buf: CudaSlice<f64>"),
@@ -346,7 +346,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -364,7 +364,7 @@ kernel Z:
     init(int n):
         buf = [0.0, 0.0, 0.0, 0.0]
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = 0.0
 "#);
     assert!(rs.contains("clone_htod"),
@@ -392,7 +392,7 @@ kernel VectorAdd:
         result = [0 for ..<n]
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         result[i] = a[i]
 
 var host_a = [i for i in 0..<n]
@@ -414,7 +414,7 @@ kernel S:
     mut [float]'unified out
     let [float]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#);
     assert!(!rs.contains("scratch: CudaSlice"),
@@ -431,7 +431,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     // grid_dim is Option here because Scale's first field is a 'unified array (auto grid sizing).
@@ -447,7 +447,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("let smem_bytes: u32 = 0u32"),
@@ -461,7 +461,7 @@ kernel D:
     mut [float]'unified out
     let [float]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#);
     assert!(rs.contains("block_dim.0 as usize * 8"),
@@ -476,7 +476,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("(&mut self.buf)"),
@@ -490,7 +490,7 @@ kernel C:
     mut [float]'unified buf
     let float'const     factor
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * factor
 "#);
     assert!(rs.contains("(&self.factor)"),
@@ -509,7 +509,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -530,7 +530,7 @@ fn build_rs_invokes_nvcc_and_sets_ptx_path() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(build.contains("nvcc"), "build.rs must invoke nvcc;\ngot:\n{build}");
@@ -544,7 +544,7 @@ fn cargo_toml_depends_on_cudarc() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(toml.contains("cudarc"),
@@ -568,7 +568,7 @@ kernel Grid2D:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -588,7 +588,7 @@ kernel Grid3D:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -610,7 +610,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -636,7 +636,7 @@ kernel L:
     mut [float]'unified out
     let [float, 8]'local tmp
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = tmp[0]
 "#);
     assert!(cu.contains("double tmp[8];"),
@@ -651,7 +651,7 @@ fn device_actor_global_uses_atomic_add() {
 kernel A:
     mut [int]'actor'global counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(cu.contains("atomicAdd(&counts[0]"),
@@ -668,7 +668,7 @@ fn device_actor_unified_uses_atomic_add() {
 kernel A:
     mut [int]'actor'unified counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(cu.contains("atomicAdd(&counts[0]"),
@@ -706,7 +706,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g = GPU(0)
@@ -721,7 +721,7 @@ fn item10_gpu_all_emits_device_iterator() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let devs = GPU.all()
@@ -740,7 +740,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g0 = GPU(0)
@@ -774,7 +774,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -802,7 +802,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -830,7 +830,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -863,7 +863,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g0 = GPU(0)
@@ -903,7 +903,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -928,7 +928,7 @@ fn host_gpu_name_property() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g = GPU(0)
@@ -944,7 +944,7 @@ fn host_gpu_total_mem_property() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g = GPU(0)
@@ -960,7 +960,7 @@ fn host_gpu_compute_capability_property() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g = GPU(0)
@@ -1014,7 +1014,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(
@@ -1041,7 +1041,7 @@ kernel Scale2D:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0, 3.0, 4.0]
@@ -1076,7 +1076,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("fn __boring_cuda_classify_error(e: cudarc::driver::DriverError)"),
@@ -1109,7 +1109,7 @@ kernel Histogram:
     init([int]'actor'global data):
         counts = data
     def ():
-        let bucket = gpu.thread.x
+        let bucket = .thread.x
         counts[bucket].min(5)
         counts[bucket].max(5)
         let old_swap = counts[bucket].swap(0)
@@ -1131,8 +1131,8 @@ kernel Img:
     init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(cu.contains("img[c + r * 4]"),
@@ -1147,8 +1147,8 @@ kernel Img:
     init([float, width = 4, height = 8]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         if c < img.width and r < img.height:
             img[width = c, height = r] = 0.0
 "#);
@@ -1164,8 +1164,8 @@ kernel Img:
     init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = 0.0
 "#);
     assert!(cu.contains("__global__ void Img_kernel(double* img)"),
@@ -1180,9 +1180,9 @@ kernel Vol:
     init([float, x = 4, y = 4, z = 4]'unified data):
         vol = data
     def ():
-        let tx = gpu.thread.x
-        let ty = gpu.thread.y
-        let tz = gpu.thread.z
+        let tx = .thread.x
+        let ty = .thread.y
+        let tz = .thread.z
         vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
     assert!(cu.contains("vol[tx + ty * 4 + tz * 16]"),
@@ -1196,8 +1196,8 @@ kernel Tile:
     mut [float]'unified out
     let [float, width = 4, height = 4]'actor tile
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         out[0] = tile[width = c, height = r]
 "#);
     assert!(cu.contains("__shared__ double tile[16];"),
@@ -1212,8 +1212,8 @@ kernel Hist:
     init([int, width = 4, height = 4]'actor'global data):
         hist = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         hist[width = c, height = r] = hist[width = c, height = r] + 1
 "#);
     assert!(cu.contains("hist"), "expected a LabeledArray'actor'global field to compile through codegen;\ngot:\n{cu}");
@@ -1227,8 +1227,8 @@ kernel Img:
     init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(cu.contains("__global__ void Img_kernel(double* img)"),
@@ -1245,8 +1245,8 @@ kernel Img:
     init([float, width = 16, height = 32]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
@@ -1263,9 +1263,9 @@ kernel Vol:
     init([float, x = 8, y = 16, z = 32]'unified data):
         vol = data
     def ():
-        let tx = gpu.thread.x
-        let ty = gpu.thread.y
-        let tz = gpu.thread.z
+        let tx = .thread.x
+        let ty = .thread.y
+        let tz = .thread.z
         vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
     assert!(rs.contains("((8 + block_dim.0 - 1) / block_dim.0)"), "expected grid.x from x=8;\ngot:\n{rs}");
@@ -1283,8 +1283,8 @@ kernel Img:
     init([float]'unified data, uint w, uint h):
         img = data.reshape(width = w, height = h)
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("self.__img_axis0"), "expected grid.x inferred from the __img_axis0 shadow field;\ngot:\n{rs}");
@@ -1300,9 +1300,9 @@ kernel Vol:
     init([float]'unified data, uint xn, uint yn, uint zn):
         vol = data.reshape(x = xn, y = yn, z = zn)
     def ():
-        let tx = gpu.thread.x
-        let ty = gpu.thread.y
-        let tz = gpu.thread.z
+        let tx = .thread.x
+        let ty = .thread.y
+        let tz = .thread.z
         vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
     assert!(rs.contains("self.__vol_axis0"), "expected grid.x from the __vol_axis0 shadow field;\ngot:\n{rs}");
@@ -1327,7 +1327,7 @@ kernel Scale:
     init([int]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let m = buf[tid].min(5)
         let x = buf[tid].max(5)
         let s = buf[tid].swap(0)
@@ -1464,7 +1464,7 @@ kernel Reduce:
     let [int, 4]'actor shared
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid == 0:
             shared[0] = 0
         if true:
@@ -1500,7 +1500,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 struct Runner:
@@ -1556,7 +1556,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         output[i] = weights[0] * input[i]
 
 let w = [0.5]
@@ -1607,7 +1607,7 @@ kernel AddOneF32:
         x + 1.0
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = self.helper(data[i])
 "#);
     assert!(
@@ -1641,7 +1641,7 @@ kernel AddOneF32:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = addOne(data[i])
 "#);
     assert!(
@@ -1673,7 +1673,7 @@ kernel HalfKernel:
     let int'const       half
 
     def ():
-        let cell = gpu.thread.x
+        let cell = .thread.x
         if cell < half:
             out[cell] = 1.0
 "#);
@@ -1696,7 +1696,7 @@ kernel LocalHalf:
 
     def ():
         let half = 4
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid < half:
             out[tid] = 1.0
 "#);
@@ -1790,14 +1790,14 @@ fn device_gpu_warp_builtins_map_correctly_camel_case() {
 kernel W:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
-        let lane = gpu.warp.lane
-        let size = gpu.warp.size
-        gpu.warp.sync()
-        let a = gpu.warp.shuffleDown(buf[tid], 1)
-        let b = gpu.warp.shuffleUp(buf[tid], 1)
-        let c = gpu.warp.shuffleXor(buf[tid], 1)
-        let d = gpu.warp.shuffle(buf[tid], 0)
+        let tid = .thread.x
+        let lane = .warp.lane
+        let size = .warp.size
+        .warp.sync()
+        let a = .warp.shuffleDown(buf[tid], 1)
+        let b = .warp.shuffleUp(buf[tid], 1)
+        let c = .warp.shuffleXor(buf[tid], 1)
+        let d = .warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + lane + size
 "#);
     assert!(cu.contains("warpSize"), "expected warpSize;\ngot:\n{cu}");

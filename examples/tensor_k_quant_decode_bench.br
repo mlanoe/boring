@@ -1,6 +1,6 @@
 # Ad-hoc Metal decode benchmark for the four 256-value GGUF K-quants.
 #
-# The packed weights are uploaded ONCE (a host array passed as a `'gpu'global`
+# The packed weights are uploaded ONCE (a host array passed as a `'kernel'global`
 # argument is re-uploaded at every kernel use, which would make this a benchmark
 # of host-to-device copies) and every timed call reads the resident buffer. One
 # warm-up call, then 20 queued calls with a single synchronization at the final
@@ -32,8 +32,8 @@ kernel CopyBytesKernel:
         out = [0 as uint8 for ..<nn]
 
     def ():
-        let block_idx = gpu.block.x + gpu.block.y * gpu.grid_dim.x
-        let i = gpu.thread.x + block_idx * gpu.block_dim.x
+        let block_idx = .block.x + .block.y * .grid_dim.x
+        let i = .thread.x + block_idx * .block_dim.x
         let base = i * 16
         var int j = 0
         while j < 16:
@@ -41,7 +41,7 @@ kernel CopyBytesKernel:
                 out[base + j] = src[base + j]
             j += 1
 
-req [uint8]'gpu'unified upload(int n, [uint8]'global src) throws:
+req [uint8]'kernel'unified upload(int n, [uint8]'global src) throws:
     let int blocks = (n + 4095) / 4096
     let int gx = if blocks > 65535: 65535 else: blocks
     let int gy = (blocks + gx - 1) / gx
@@ -50,27 +50,27 @@ req [uint8]'gpu'unified upload(int n, [uint8]'global src) throws:
         c(block = 256, grid = (gx, gy))
     c.out
 
-req [float32]'gpu'unified q4k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
-    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q4_k")
+req [float32]'kernel'unified q4k([float32]'kernel'global x, [uint8]'kernel'global w, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<n]
+    kernel.tensors.linear(x, w, y, m = 1, n = n, k = k, format = "q4_k")
     y
 
-req [float32]'gpu'unified q6k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
-    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q6_k")
+req [float32]'kernel'unified q6k([float32]'kernel'global x, [uint8]'kernel'global w, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<n]
+    kernel.tensors.linear(x, w, y, m = 1, n = n, k = k, format = "q6_k")
     y
 
-req [float32]'gpu'unified q3k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
-    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q3_k")
+req [float32]'kernel'unified q3k([float32]'kernel'global x, [uint8]'kernel'global w, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<n]
+    kernel.tensors.linear(x, w, y, m = 1, n = n, k = k, format = "q3_k")
     y
 
-req [float32]'gpu'unified q2k([float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<n]
-    gpu.tensor.linear(x, w, y, m = 1, n = n, k = k, format = "q2_k")
+req [float32]'kernel'unified q2k([float32]'kernel'global x, [uint8]'kernel'global w, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<n]
+    kernel.tensors.linear(x, w, y, m = 1, n = n, k = k, format = "q2_k")
     y
 
-req [float32]'gpu'unified run(string format, [float32]'gpu'global x, [uint8]'gpu'global w, int n, int k) throws:
+req [float32]'kernel'unified run(string format, [float32]'kernel'global x, [uint8]'kernel'global w, int n, int k) throws:
     if format == "q4_k":
         q4k(x, w, n, k)
     elif format == "q6_k":

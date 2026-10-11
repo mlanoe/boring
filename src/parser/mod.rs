@@ -1085,6 +1085,18 @@ impl Parser {
                     // `'static` — no chained sub-qualifier (no `'static'task`/
                     // `'static'weak`), just skip past it like `'new`.
                     TokenKind::Static => { i += 1; }
+                    // Host-side compute storage: `T'kernel'unified` /
+                    // `T'kernel'global`. `kernel` is a reserved token.
+                    TokenKind::Kernel => {
+                        i += 1;
+                        if i < self.tokens.len()
+                            && matches!(self.tokens[i].kind, TokenKind::Tick)
+                            && matches!(self.tokens.get(i + 1).map(|t| &t.kind),
+                                Some(TokenKind::Ident(q)) if q == "unified" || q == "global")
+                        {
+                            i += 2;
+                        }
+                    }
                     // `'mut` / `'req` — named qualifier groups (parameters only,
                     // see docs/qualifiers.md). Both `mut` and `req` are reserved
                     // keywords, not `Ident`s, so they need their own arms here —

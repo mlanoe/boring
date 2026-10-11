@@ -7,7 +7,7 @@ boring build --mode strict|managed     # memory management (default: strict)
 boring build --threading single|multi  # concurrency model (default: multi)
 ```
 
-The flags are independent — any combination is valid. `--threading` is not available with `--target kernel`, which has its own concurrency model.
+The flags are independent — any combination is valid. `--threading` is not available with `--linux`, which has its own concurrency model.
 
 ---
 

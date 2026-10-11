@@ -20,10 +20,10 @@ use std::process::Command;
 #[test]
 fn inline_kernel_lowers_to_anonymous_device_kernel_and_resident_result() {
     let (msl, rs) = metal_codegen("inline_kernel", r#"
-pub req [float32]'gpu'unified scale([float32]'gpu'global src, int n) throws:
+pub req [float32]'kernel'unified scale([float32]'kernel'global src, int n) throws:
     kernel(block = 64, grid = (n + 63) / 64):
         mut [float32]'unified dst = [0.0 for ..<n]
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             dst[i] = src[i] * 2.0
         dst
@@ -46,8 +46,8 @@ kernel SizedOut:
         total = nn + extra
         out = [0.0 for ..<(nn + extra)]
     def ():
-        out[gpu.thread.x] = a[gpu.thread.x]
-pub req [float32]'gpu'unified build([float32]'global x, int n) throws:
+        out[.thread.x] = a[.thread.x]
+pub req [float32]'kernel'unified build([float32]'global x, int n) throws:
     mut k = SizedOut(x, n, 2)
     k.out
 "#);
@@ -67,8 +67,8 @@ kernel AddRmsNorm:
         sum = [0.0 for ..<xi.length]
         normed = [0.0 for ..<xi.length]
     def ():
-        sum[gpu.thread.x] = x[gpu.thread.x]
-        normed[gpu.thread.x] = x[gpu.thread.x]
+        sum[.thread.x] = x[.thread.x]
+        normed[.thread.x] = x[.thread.x]
 
 kernel Consume:
     let [float32]'global sum
@@ -79,9 +79,9 @@ kernel Consume:
         normed = ni
         out = [0.0 for ..<si.length]
     def ():
-        out[gpu.thread.x] = sum[gpu.thread.x] + normed[gpu.thread.x]
+        out[.thread.x] = sum[.thread.x] + normed[.thread.x]
 
-req ([float32]'gpu'unified, [float32]'gpu'unified) add_rms_norm_gpu([float32] x) throws:
+req ([float32]'kernel'unified, [float32]'kernel'unified) add_rms_norm_gpu([float32] x) throws:
     mut k = AddRmsNorm(x)
     kernel:
         k(block = x.length)
@@ -89,7 +89,7 @@ req ([float32]'gpu'unified, [float32]'gpu'unified) add_rms_norm_gpu([float32] x)
 
 def main() throws:
     let [float32] x = [1.0, 2.0]
-    let ([float32]'gpu'unified sum, [float32]'gpu'unified normed) = add_rms_norm_gpu(x)
+    let ([float32]'kernel'unified sum, [float32]'kernel'unified normed) = add_rms_norm_gpu(x)
     mut c = Consume(sum, normed)
     kernel:
         c(block = x.length)
@@ -131,12 +131,12 @@ kernel PairKernel:
         diff = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             sum[i] = a[i] + b[i]
             diff[i] = a[i] - b[i]
 
-pub req ([float32]'gpu'unified, [float32]'gpu'unified) pair([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+pub req ([float32]'kernel'unified, [float32]'kernel'unified) pair([float32]'kernel'global a, [float32]'kernel'global b, int n) throws:
     mut k = PairKernel(a, b, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -153,22 +153,22 @@ kernel AddOneKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = src[i] + 1.0
 
-pub req [float32]'gpu'unified fill([float32]'global src, int n) throws:
+pub req [float32]'kernel'unified fill([float32]'global src, int n) throws:
     mut k = AddOneKernel(src, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
     k.out
 
-pub req ([float32]'gpu'unified, [float32]'gpu'unified) twice([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+pub req ([float32]'kernel'unified, [float32]'kernel'unified) twice([float32]'kernel'global a, [float32]'kernel'global b, int n) throws:
     let (s, d) = pair(a, b, n)
     let (s2, d2) = pair(s, d, n)
     (s2, d2)
 
-pub req [float32]'gpu'unified pipeline([float32]'gpu'global x, [float32]'gpu'global y, int n) throws:
+pub req [float32]'kernel'unified pipeline([float32]'kernel'global x, [float32]'kernel'global y, int n) throws:
     let (s, d) = twice(x, y, n)
     let (p, q) = twice(d, s, n)
     fill(q, n)
@@ -259,11 +259,11 @@ kernel AddOneKernel:
         n = nn
         out = [0.0 as float32 for ..<nn]
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = src[i] + 1.0
 
-pub req [float32]'gpu'unified fill([float32]'global src, int n) throws:
+pub req [float32]'kernel'unified fill([float32]'global src, int n) throws:
     mut k = AddOneKernel(src, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -282,7 +282,7 @@ def main() throws:
 fn host_array_passed_to_float32_gpu_param_is_wrapped_as_f32() {
     let (_, rs) = metal_codegen("float32_host_arg_codegen", FLOAT32_HOST_ARG_TO_GPU_REQ);
     assert!(rs.contains("BoringGpuArg::Host((") && rs.contains(".iter().map(|&x| x as f32).collect::<Vec<f32>>())"),
-        "a host array at a `[float32]'gpu'global` position must be wrapped as Vec<f32>:\n{rs}");
+        "a host array at a `[float32]'kernel'global` position must be wrapped as Vec<f32>:\n{rs}");
     assert!(!rs.contains("x as f64).collect::<Vec<f64>>())"),
         "no f64 wrap may remain for a float32 callee parameter:\n{rs}");
 }
@@ -400,7 +400,7 @@ fn msl_header_includes_metal_stdlib() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(msl.contains("#include <metal_stdlib>"),
@@ -424,14 +424,14 @@ kernel Touch:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        out[gpu.thread.x] = 1.0
+        out[.thread.x] = 1.0
 
 static var bool flag = false
 
 def set_flag(bool v):
     flag = v
 
-pub req [float32]'gpu'unified run(int n) throws:
+pub req [float32]'kernel'unified run(int n) throws:
     mut k = Touch(n)
     kernel:
         k(block = 1, grid = n)
@@ -441,10 +441,10 @@ pub req [float32]'gpu'unified run(int n) throws:
 #[test]
 fn fixed_tensor_matmul_uses_native_simdgroup_matrices() {
     let (msl, host) = metal_codegen("native_tensor_matmul", r#"
-let [float32, k = 64, m = 64]'gpu'unified a = [1.0 as float32 for ..<4096]
-let [float32, n = 64, k = 64]'gpu'unified b = [1.0 as float32 for ..<4096]
-mut [float32, n = 64, m = 64]'gpu'unified c = [0.0 as float32 for ..<4096]
-gpu.tensor.matmul(a, b, c)
+let [float32, k = 64, m = 64]'kernel'unified a = [1.0 as float32 for ..<4096]
+let [float32, n = 64, k = 64]'kernel'unified b = [1.0 as float32 for ..<4096]
+mut [float32, n = 64, m = 64]'kernel'unified c = [0.0 as float32 for ..<4096]
+kernel.tensors.matmul(a, b, c)
 "#);
     assert!(msl.contains("#include <metal_simdgroup_matrix>"), "{msl}");
     assert!(msl.contains("simdgroup_float8x8"), "{msl}");
@@ -455,9 +455,9 @@ gpu.tensor.matmul(a, b, c)
 #[test]
 fn dynamic_float_linear_selects_native_or_scalar_geometry_at_runtime() {
     let (msl, host) = metal_codegen("dynamic_native_tensor_linear", r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [float32]'gpu'global weights, [float32]'gpu'global bias, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, bias, y, m = m, n = n, k = k)
+req [float32]'kernel'unified compute([float32]'kernel'global a, [float32]'kernel'global weights, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k)
     y
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicFloatNative0"), "{msl}");
@@ -470,9 +470,9 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [float32]'gpu'global w
 #[test]
 fn dynamic_q8_linear_uses_warp_decode_and_native_tiled_prefill() {
     let (msl, host) = metal_codegen("dynamic_native_q8_tensor_linear", r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, [float32]'gpu'global bias, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, bias, y, m = m, n = n, k = k, format = "q8_0")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k, format = "q8_0")
     y
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
@@ -501,9 +501,9 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 #[test]
 fn dynamic_q8_native_prefill_bounds_partial_row_and_column_tiles() {
     let (msl, host) = metal_codegen("dynamic_native_q8_partial_tiles", r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
     y
 "#);
     assert!(msl.contains("bp_row + bp_r < (uint)m"), "{msl}");
@@ -561,9 +561,9 @@ fn q8_four_block_partition_math_matches_scalar_for_signed_values_and_scales() {
 #[test]
 fn dynamic_quantized_prefill_half_precision_is_explicit_opt_in() {
     let source = r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
     y
 "#;
     let (msl, host, _) = run_metal_with_config(
@@ -584,9 +584,9 @@ fn dynamic_k_quant_linear_uses_native_tiled_prefill() {
         ("q6_k", "BoringTensorDynamicQ6KNative0", "* 210"),
     ] {
         let source = format!(r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, [float32]'gpu'global bias, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, bias, y, m = m, n = n, k = k, format = "{format}")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k, format = "{format}")
     y
 "#);
         let (msl, host) = metal_codegen(&format!("dynamic_native_{format}_tensor_linear"), &source);
@@ -614,9 +614,9 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 fn dynamic_k_quant_decode_uses_warp_reduction_schedules() {
     for format in ["q4_k", "q6_k", "q3_k", "q2_k"] {
         let source = format!(r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
     y
 "#);
         let (msl, host) = metal_codegen(&format!("dynamic_{format}_warp_decode"), &source);
@@ -643,9 +643,9 @@ req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global wei
 fn dynamic_quantized_half_bits_are_narrowed_before_metal_bitcast() {
     for format in ["q8_0", "q4_k", "q6_k"] {
         let source = format!(r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
     y
 "#);
         let (msl, _) = metal_codegen(&format!("dynamic_{format}_half_bitcast_width"), &source);
@@ -672,9 +672,9 @@ fn real_metal_compiles_native_q4_k_and_q6_k_prefill_and_decode_msl() {
     for (format, block_bytes) in [("q4_k", 144), ("q6_k", 210)] {
         let test_name = format!("real_compile_{format}_prefill_decode");
         let source = format!(r#"
-req [float32]'gpu'unified compute([float32]'gpu'global a, [uint8]'gpu'global weights, int m, int n, int k) throws:
-    mut [float32]'gpu'unified y = [0.0 as float32 for ..<m * n]
-    gpu.tensor.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
     y
 
 let [float32] x = [0.0 as float32 for ..<256]
@@ -714,7 +714,7 @@ fn device_unified_field_becomes_device_ptr_buffer() {
 kernel Scale:
     mut [float32]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(msl.contains("device float* buf [[buffer(0)]]"),
@@ -727,7 +727,7 @@ fn device_global_field_becomes_device_ptr_buffer() {
 kernel G:
     mut [float32]'global buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] + 1.0
 "#);
     assert!(msl.contains("device float* buf [[buffer(0)]]"),
@@ -740,7 +740,7 @@ fn device_entry_point_has_kernel_attribute() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(msl.contains("kernel void Scale_kernel("),
@@ -754,7 +754,7 @@ kernel C:
     mut [float32]'unified buf
     let float32'const     factor
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * factor
 "#);
     assert!(msl.contains("constant float* __factor [[buffer("),
@@ -770,7 +770,7 @@ kernel S:
     mut [float32]'unified out
     let [float32]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#);
     assert!(msl.contains("threadgroup float* scratch [[threadgroup(0)]]"),
@@ -787,7 +787,7 @@ kernel S:
     mut [float32]'unified out
     let [float32, 32]'actor tile
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = tile[0]
 "#);
     assert!(msl.contains("threadgroup float tile[32];"),
@@ -804,7 +804,7 @@ kernel L:
     mut [float32]'unified out
     let [float32, 8]'local tmp
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = tmp[0]
 "#);
     assert!(msl.contains("float tmp[8];"),
@@ -819,7 +819,7 @@ fn device_builtin_position_params_present() {
 kernel B:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(msl.contains("[[thread_position_in_threadgroup]]"),
@@ -838,14 +838,14 @@ fn device_gpu_warp_builtins_map_correctly() {
 kernel W:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
-        let lane = gpu.warp.lane
-        let size = gpu.warp.size
-        gpu.warp.sync()
-        let a = gpu.warp.shuffle_down(buf[tid], 1)
-        let b = gpu.warp.shuffle_up(buf[tid], 1)
-        let c = gpu.warp.shuffle_xor(buf[tid], 1)
-        let d = gpu.warp.shuffle(buf[tid], 0)
+        let tid = .thread.x
+        let lane = .warp.lane
+        let size = .warp.size
+        .warp.sync()
+        let a = .warp.shuffle_down(buf[tid], 1)
+        let b = .warp.shuffle_up(buf[tid], 1)
+        let c = .warp.shuffle_xor(buf[tid], 1)
+        let d = .warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + lane + size
 "#);
     assert!(msl.contains("[[thread_index_in_simdgroup]]"),
@@ -868,7 +868,7 @@ kernel W:
 /// Regression test for a real bug found via `perso/boring-llm`: Metal's
 /// `simd_shuffle*` template family rejects 64-bit integers
 /// (`__is_valid_simdgroup_type<long>` is false), but Boring's default `int`
-/// maps to MSL `int64_t` — so `gpu.warp.shuffle` on an `int` local compiled
+/// maps to MSL `int64_t` — so `.warp.shuffle` on an `int` local compiled
 /// fine through `boring build` but panicked at first kernel dispatch with
 /// "no matching function for call to 'simd_shuffle'" (confirmed on real
 /// Apple Silicon hardware). Fixed by shuffling through a narrower
@@ -879,11 +879,11 @@ fn device_gpu_warp_shuffle_int_operand_gets_int32_roundtrip() {
 kernel W:
     mut [float]'unified out
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         var int v = 0
-        v = gpu.warp.shuffle(v, 0)
+        v = .warp.shuffle(v, 0)
         var int w = 0
-        w = gpu.warp.shuffle_down(w, 1)
+        w = .warp.shuffle_down(w, 1)
         out[tid] = v as float32 + w as float32
 "#);
     assert!(
@@ -903,13 +903,13 @@ fn device_gpu_thread_x_maps_to_thread_pos() {
 kernel B:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(msl.contains("__thread_pos"),
-        "expected __thread_pos for gpu.thread;\ngot:\n{msl}");
+        "expected __thread_pos for .thread;\ngot:\n{msl}");
     assert!(msl.contains("__thread_pos.x"),
-        "expected __thread_pos.x for gpu.thread.x;\ngot:\n{msl}");
+        "expected __thread_pos.x for .thread.x;\ngot:\n{msl}");
 }
 
 #[test]
@@ -918,13 +918,13 @@ fn device_gpu_block_dim_maps_correctly() {
 kernel B:
     mut [float]'unified buf
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         buf[i] = buf[i] * 2.0
 "#);
     assert!(msl.contains("__block_pos.x"),
-        "expected __block_pos.x for gpu.block.x;\ngot:\n{msl}");
+        "expected __block_pos.x for .block.x;\ngot:\n{msl}");
     assert!(msl.contains("__block_dim.x"),
-        "expected __block_dim.x for gpu.block_dim.x;\ngot:\n{msl}");
+        "expected __block_dim.x for .block_dim.x;\ngot:\n{msl}");
 }
 
 // ─── device — 'actor'global atomics ──────────────────────────────────────────
@@ -935,7 +935,7 @@ fn device_actor_global_compound_assign_uses_atomic_fetch_add() {
 kernel A:
     mut [int]'actor'global counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(msl.contains("atomic_fetch_add_explicit"),
@@ -959,7 +959,7 @@ fn device_actor_global_int32_atomic_uses_32bit_intrinsic_not_atomic_long() {
 kernel A:
     mut [int32]'actor'global counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(msl.contains("(device atomic_int*)&counts[0]"),
@@ -977,7 +977,7 @@ fn device_actor_global_uint32_atomic_uses_32bit_intrinsic_not_atomic_long() {
 kernel A:
     mut [uint32]'actor'global counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(msl.contains("(device atomic_uint*)&counts[0]"),
@@ -993,7 +993,7 @@ fn device_actor_global_field_has_device_ptr_param() {
 kernel A:
     mut [int]'actor'global counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(msl.contains("device int64_t* counts [[buffer(0)]]"),
@@ -1008,7 +1008,7 @@ fn device_actor_unified_compound_assign_uses_atomic_fetch_add() {
 kernel A:
     mut [int]'actor'unified counts
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(msl.contains("atomic_fetch_add_explicit"),
@@ -1029,7 +1029,7 @@ fn device_sync_emits_threadgroup_barrier() {
 kernel S:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = 1.0
         sync
         buf[tid] = buf[tid] + 1.0
@@ -1048,7 +1048,7 @@ fn host_prelude_includes_metal_crate() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("use metal::*;"),
@@ -1063,7 +1063,7 @@ fn host_pipeline_init_compiles_msl_and_gets_function() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("new_library_with_source(BORING_MSL"),
@@ -1080,7 +1080,7 @@ fn host_caches_default_and_indexed_metal_devices() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("static __BORING_METAL_DEVICE: std::cell::RefCell<Option<Device>>"),
@@ -1103,7 +1103,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("buf: Buffer,"),
@@ -1117,7 +1117,7 @@ kernel S:
     mut [float]'unified out
     let [float]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#);
     assert!(!rs.contains("scratch: Buffer"),
@@ -1138,7 +1138,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -1169,7 +1169,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let g0 = GPU(0)
@@ -1184,7 +1184,7 @@ let k = new(g0) Scale(data)
 
 #[test]
 fn host_fn_float32_param_passed_directly_to_kernel_ctor_is_vec_f32_not_f64() {
-    // Regression test: a `pub req [T]'gpu'unified` host function whose
+    // Regression test: a `pub req [T]'kernel'unified` host function whose
     // `[float32]` parameter is passed DIRECTLY to a kernel struct's own
     // constructor call (`AddKernel(a, n)`) used to have that parameter's
     // Rust element type wrongly forced to `f64` (`is_float_array_param`
@@ -1209,11 +1209,11 @@ kernel AddKernel:
         out = [0.0 for i in 0..<ni]
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = a[i] + 1.0
 
-pub req [float32]'gpu'unified add_gpu([float32] a, int n) throws:
+pub req [float32]'kernel'unified add_gpu([float32] a, int n) throws:
     mut k = AddKernel(a, n)
     kernel:
         k(block = n)
@@ -1227,7 +1227,7 @@ pub req [float32]'gpu'unified add_gpu([float32] a, int n) throws:
 
 #[test]
 fn host_fn_chained_resident_call_arg_no_stray_ref() {
-    // Regression test: chaining the result of one `pub req [T]'gpu'unified`
+    // Regression test: chaining the result of one `pub req [T]'kernel'unified`
     // host function directly into another such function's non-first `[T]`
     // argument, via a single intermediate `let` binding (`let stage1 =
     // add_one_gpu(a, 4); let stage2 = add_one_gpu(stage1, 4)`), used to emit
@@ -1254,11 +1254,11 @@ kernel AddOneKernel:
         out = [0.0 for i in 0..<ni]
 
     def ():
-        let cell = gpu.thread.x
+        let cell = .thread.x
         if cell < n:
             out[cell] = x[cell] + 1.0
 
-pub req [float32]'gpu'unified add_one_gpu([float32]'global x, int n) throws:
+pub req [float32]'kernel'unified add_one_gpu([float32]'global x, int n) throws:
     mut k = AddOneKernel(x, n)
     kernel:
         k(block = 256, grid = 1)
@@ -1283,7 +1283,7 @@ def main() throws:
 #[test]
 fn host_fn_alias_of_resident_local_stays_resident() {
     // Regression test: a plain alias of a resident GPU local (`let z = y`, where
-    // `y` is bound to a `'gpu'unified`-returning call) used to fall through to
+    // `y` is bound to a `'kernel'unified`-returning call) used to fall through to
     // the host-array `let` path, so `z` was never registered as resident and
     // `add2(y, z, n)` wrapped it as `BoringGpuArg::Host(z.clone())` -- a hard
     // E0308 (`expected Vec<f32>, found BoringGpuArg<f32>`) -- and `let z = y;`
@@ -1303,11 +1303,11 @@ kernel AddKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = a[i] + b[i]
 
-pub req [float32]'gpu'unified add2([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+pub req [float32]'kernel'unified add2([float32]'kernel'global a, [float32]'kernel'global b, int n) throws:
     mut k = AddKernel(a, b, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -1352,7 +1352,7 @@ kernel Bytes:
     init(int n):
         out = [0 as uint8 for ..<n]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         out[i] = (i + 1) as uint8
 
 kernel Ints:
@@ -1360,7 +1360,7 @@ kernel Ints:
     init(int n):
         out = [0 as int32 for ..<n]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         out[i] = (i + 10) as int32
 
 kernel Doubles:
@@ -1368,22 +1368,22 @@ kernel Doubles:
     init(int n):
         out = [0.0 for ..<n]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         out[i] = (i + 20) as float64
 
-pub req [uint8]'gpu'unified bytes_gpu(int n) throws:
+pub req [uint8]'kernel'unified bytes_gpu(int n) throws:
     mut k = Bytes(n)
     kernel:
         k(block = n)
     k.out
 
-pub req [int32]'gpu'unified ints_gpu(int n) throws:
+pub req [int32]'kernel'unified ints_gpu(int n) throws:
     mut k = Ints(n)
     kernel:
         k(block = n)
     k.out
 
-pub req [float64]'gpu'unified doubles_gpu(int n) throws:
+pub req [float64]'kernel'unified doubles_gpu(int n) throws:
     mut k = Doubles(n)
     kernel:
         k(block = n)
@@ -1413,7 +1413,7 @@ kernel CopyU8:
         n = nn
         out = [0 as uint8 for ..<nn]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = src[i]
 
@@ -1426,7 +1426,7 @@ kernel CopyI32:
         n = nn
         out = [0 as int32 for ..<nn]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = src[i]
 
@@ -1439,7 +1439,7 @@ kernel CopyF64:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = src[i]
 
@@ -1452,7 +1452,7 @@ kernel LengthU8:
         n = nn
         out = [0 as int32 for ..<1]
     def ():
-        if gpu.thread.x == 0:
+        if .thread.x == 0:
             out[0] = n as int32
 
 kernel LengthI32:
@@ -1464,7 +1464,7 @@ kernel LengthI32:
         n = nn
         out = [0 as int32 for ..<1]
     def ():
-        if gpu.thread.x == 0:
+        if .thread.x == 0:
             out[0] = n as int32
 
 kernel LengthF64:
@@ -1476,40 +1476,40 @@ kernel LengthF64:
         n = nn
         out = [0 as int32 for ..<1]
     def ():
-        if gpu.thread.x == 0:
+        if .thread.x == 0:
             out[0] = n as int32
 
-pub req [uint8]'gpu'unified upload_u8([uint8]'global src) throws:
+pub req [uint8]'kernel'unified upload_u8([uint8]'global src) throws:
     let n = src.length
     mut k = CopyU8(src, n)
     kernel:
         k(block = n)
     k.out
-pub req [int32]'gpu'unified upload_i32([int32]'global src) throws:
+pub req [int32]'kernel'unified upload_i32([int32]'global src) throws:
     let n = src.length
     mut k = CopyI32(src, n)
     kernel:
         k(block = n)
     k.out
-pub req [float64]'gpu'unified upload_f64([float64]'global src) throws:
+pub req [float64]'kernel'unified upload_f64([float64]'global src) throws:
     let n = src.length
     mut k = CopyF64(src, n)
     kernel:
         k(block = n)
     k.out
-pub req [int32]'gpu'unified length_u8([uint8]'global src) throws:
+pub req [int32]'kernel'unified length_u8([uint8]'global src) throws:
     let n = src.length
     mut k = LengthU8(src, n)
     kernel:
         k(block = 1)
     k.out
-pub req [int32]'gpu'unified length_i32([int32]'global src) throws:
+pub req [int32]'kernel'unified length_i32([int32]'global src) throws:
     let n = src.length
     mut k = LengthI32(src, n)
     kernel:
         k(block = 1)
     k.out
-pub req [int32]'gpu'unified length_f64([float64]'global src) throws:
+pub req [int32]'kernel'unified length_f64([float64]'global src) throws:
     let n = src.length
     mut k = LengthF64(src, n)
     kernel:
@@ -1561,7 +1561,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("fn __boring_launch(&mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>"),
@@ -1574,7 +1574,7 @@ fn host_boring_launch_dispatches_thread_groups() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("dispatch_thread_groups("),
@@ -1589,7 +1589,7 @@ fn host_boring_launch_waits_for_completion() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("wait_until_completed()"),
@@ -1604,7 +1604,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("(n + block_dim.0 - 1) / block_dim.0"),
@@ -1620,7 +1620,7 @@ kernel D:
     mut [float]'unified out
     let [float]'actor  scratch
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = scratch[0]
 "#);
     assert!(rs.contains("set_threadgroup_memory_length("),
@@ -1633,7 +1633,7 @@ fn host_encoder_sets_buffer_for_unified_field() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("set_buffer(0, Some(&self.buf)"),
@@ -1647,7 +1647,7 @@ kernel C:
     mut [float]'unified buf
     let float'const     factor
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * factor
 "#);
     assert!(rs.contains("set_bytes("),
@@ -1664,7 +1664,7 @@ fn host_read_accessor_generated_for_unified_array() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("fn read_buf("),
@@ -1687,7 +1687,7 @@ fn host_gpu_failure_surfaces_as_a_real_error_not_silent_wrong_behavior() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -1725,7 +1725,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0, 2.0]
@@ -1760,11 +1760,11 @@ kernel AddOne:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         if i < n:
             out[i] = a[i] + 1.0
 
-pub req [float32]'gpu'unified chained([float32]'global x, int n) throws:
+pub req [float32]'kernel'unified chained([float32]'global x, int n) throws:
     mut k1 = AddOne(x, n)
     kernel:
         k1(block = 256, grid = 1)
@@ -1787,14 +1787,14 @@ kernel Produce:
     init([float]'unified initial):
         out = initial
     def ():
-        out[gpu.thread.x] = 1.0
+        out[.thread.x] = 1.0
 
 kernel Consume:
     let [float]'global input
     init([float]'global value):
         input = value
     def ():
-        let x = input[gpu.thread.x]
+        let x = input[.thread.x]
 
 def run() throws:
     mut k1 = Produce([0.0, 0.0])
@@ -1817,7 +1817,7 @@ kernel Produce:
     init([float]'unified initial):
         out = initial
     def ():
-        out[gpu.thread.x] = 1.0
+        out[.thread.x] = 1.0
 
 kernel Consume:
     let [float]'global input
@@ -1826,16 +1826,16 @@ kernel Consume:
         input = value
         out = result
     def ():
-        out[gpu.thread.x] = input[gpu.thread.x]
+        out[.thread.x] = input[.thread.x]
 
-req [float]'gpu'unified produce() throws:
+req [float]'kernel'unified produce() throws:
     mut p = Produce([0.0, 0.0])
     kernel:
         p(block = 2)
     p.out
 
 def main() throws:
-    let [float]'gpu'unified value = produce()
+    let [float]'kernel'unified value = produce()
     mut c = Consume(value, [0.0, 0.0])
     kernel:
         c(block = 2)
@@ -1875,7 +1875,7 @@ kernel Noop:
     init():
         pixels = [0 for ..<width * height]
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         pixels[tid] = 0
 
 var k = Noop()
@@ -1914,7 +1914,7 @@ kernel Noop:
     init():
         pixels = [0 for ..<width * height]
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         pixels[tid] = 0
 
 var k = Noop()
@@ -1942,7 +1942,7 @@ fn cargo_toml_depends_on_metal_crate() {
 kernel Scale:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(toml.contains("metal"),
@@ -1980,7 +1980,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(
@@ -2013,7 +2013,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
     assert!(rs.contains("#[macro_use] extern crate objc;"),
@@ -2045,7 +2045,7 @@ kernel Histogram:
     init([int]'actor'global data):
         counts = data
     def ():
-        let bucket = gpu.thread.x
+        let bucket = .thread.x
         counts[bucket].min(5)
         counts[bucket].max(5)
         let old_swap = counts[bucket].swap(0)
@@ -2071,8 +2071,8 @@ kernel Img:
     init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(msl.contains("img[c + r * 4]"),
@@ -2087,8 +2087,8 @@ kernel Img:
     init([float32, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = 0.0
 "#);
     assert!(msl.contains("device float* img [[buffer(0)]]"),
@@ -2103,8 +2103,8 @@ kernel Img:
     init([float, width = 16, height = 32]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
@@ -2121,8 +2121,8 @@ kernel Img:
     init([float]'unified data, uint w, uint h):
         img = data.reshape(width = w, height = h)
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("self.__img_axis0"), "expected grid.x inferred from the __img_axis0 shadow field;\ngot:\n{rs}");
@@ -2139,8 +2139,8 @@ kernel Img:
     init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("img: Buffer,"),
@@ -2160,7 +2160,7 @@ kernel CopyKernel:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = src[i]
 
@@ -2175,24 +2175,24 @@ kernel MulKernel:
         n = nn
         out = [0.0 for ..<nn]
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = w[i] * x[i]
 
-pub req [float32]'gpu'unified upload_gpu([float32]'global src, int n) throws:
+pub req [float32]'kernel'unified upload_gpu([float32]'global src, int n) throws:
     mut k = CopyKernel(src, n)
     kernel:
         k(block = 256, grid = (n + 255) / 256)
     k.out
 
-pub req [float32]'gpu'unified mul_gpu([float32]'global w, [float32]'global x, int n) throws:
+pub req [float32]'kernel'unified mul_gpu([float32]'global w, [float32]'global x, int n) throws:
     mut k = MulKernel(w, x, n)
     kernel:
         k(block = 256, grid = (n + 255) / 256)
     k.out
 
 struct Layer:
-    [float32]'gpu'unified w
+    [float32]'kernel'unified w
     [float32] host_metadata
 
 struct Model:
@@ -2281,9 +2281,9 @@ kernel Vol:
     init([float, x = 4, y = 4, z = 4]'unified data):
         vol = data
     def ():
-        let tx = gpu.thread.x
-        let ty = gpu.thread.y
-        let tz = gpu.thread.z
+        let tx = .thread.x
+        let ty = .thread.y
+        let tz = .thread.z
         vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
     assert!(msl.contains("vol[tx + ty * 4 + tz * 16]"),
@@ -2297,8 +2297,8 @@ kernel Tile:
     mut [float32]'unified out
     let [float32, width = 4, height = 4]'actor tile
     def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
+        let c = .thread.x
+        let r = .thread.y
         out[0] = tile[width = c, height = r]
 "#);
     assert!(msl.contains("threadgroup float tile[16];"),
@@ -2319,7 +2319,7 @@ kernel Scale:
     init([int]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         let m = buf[tid].min(5)
         let x = buf[tid].max(5)
         let s = buf[tid].swap(0)
@@ -2348,7 +2348,7 @@ kernel Reduce:
     let [int, 4]'actor shared
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid == 0:
             shared[0] = 0
         if true:
@@ -2384,7 +2384,7 @@ kernel Scale:
     init([float]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 struct Runner:
@@ -2449,7 +2449,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         output[i] = weights[0] * input[i]
 
 let w = [0.5]
@@ -2500,7 +2500,7 @@ kernel AddOneF32:
         x + 1.0
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = self.helper(data[i])
 "#);
     assert!(
@@ -2534,7 +2534,7 @@ kernel AddOneF32:
     mut [float32]'unified data
 
     def ():
-        let i = gpu.thread.x
+        let i = .thread.x
         data[i] = addOne(data[i])
 "#);
     assert!(
@@ -2585,7 +2585,7 @@ kernel HalfKernel:
         out  = [0.0 for ..<8]
 
     def ():
-        let cell = gpu.thread.x
+        let cell = .thread.x
         if cell < half:
             out[cell] = x[cell]
 "#);
@@ -2612,7 +2612,7 @@ kernel LocalHalf:
 
     def ():
         let half = n / 2
-        let tid = gpu.thread.x
+        let tid = .thread.x
         if tid < half:
             out[tid] = 1.0
 "#);
@@ -2694,7 +2694,7 @@ kernel Dequant:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = dequant_at(w_packed, tid)
 "#);
     assert!(
@@ -2736,7 +2736,7 @@ kernel Dequant:
         out = o
 
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         out[tid] = dequant_at(w_packed, tid)
 
 let w = [1, 2, 3, 4]
@@ -3006,7 +3006,7 @@ kernel FourWay:
         n = nn
 
     def ():
-        let idx = gpu.thread.x
+        let idx = .thread.x
         if idx < n:
             let v = inp[idx]
             let r = if v == 0:
@@ -3052,7 +3052,7 @@ kernel FourWay:
         out = [0 for ..<nn]
 
     def ():
-        let idx = gpu.thread.x
+        let idx = .thread.x
         if idx < n:
             let v = inp[idx]
             let r = if v == 0:
@@ -3106,14 +3106,14 @@ fn device_gpu_warp_builtins_map_correctly_camel_case() {
 kernel W:
     mut [float]'unified buf
     def ():
-        let tid = gpu.thread.x
-        let lane = gpu.warp.lane
-        let size = gpu.warp.size
-        gpu.warp.sync()
-        let a = gpu.warp.shuffleDown(buf[tid], 1)
-        let b = gpu.warp.shuffleUp(buf[tid], 1)
-        let c = gpu.warp.shuffleXor(buf[tid], 1)
-        let d = gpu.warp.shuffle(buf[tid], 0)
+        let tid = .thread.x
+        let lane = .warp.lane
+        let size = .warp.size
+        .warp.sync()
+        let a = .warp.shuffleDown(buf[tid], 1)
+        let b = .warp.shuffleUp(buf[tid], 1)
+        let c = .warp.shuffleXor(buf[tid], 1)
+        let d = .warp.shuffle(buf[tid], 0)
         buf[tid] = a + b + c + d + lane + size
 "#);
     assert!(msl.contains("[[thread_index_in_simdgroup]]"),
@@ -3136,13 +3136,13 @@ fn device_gpu_block_dim_maps_correctly_camel_case() {
 kernel B:
     mut [float]'unified buf
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.blockDim.x
+        let i = .thread.x + .block.x * .blockDim.x
         buf[i] = buf[i] * 2.0
 "#);
     assert!(msl.contains("__block_pos.x"),
-        "expected __block_pos.x for gpu.block.x;\ngot:\n{msl}");
+        "expected __block_pos.x for .block.x;\ngot:\n{msl}");
     assert!(msl.contains("__block_dim.x"),
-        "expected __block_dim.x for gpu.blockDim.x;\ngot:\n{msl}");
+        "expected __block_dim.x for .blockDim.x;\ngot:\n{msl}");
 }
 
 // ─── device — 'actor'global atomics ──────────────────────────────────────────
@@ -3167,7 +3167,7 @@ kernel AddOneKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = src[i] + 1.0
 
@@ -3184,23 +3184,23 @@ kernel SumKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = a[i] + b[i]
 
-pub req [float32]'gpu'unified add_one([float32]'gpu'global x, int n) throws:
+pub req [float32]'kernel'unified add_one([float32]'kernel'global x, int n) throws:
     mut k = AddOneKernel(x, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
     k.out
 
-pub req [float32]'gpu'unified add2([float32]'gpu'global x, [float32]'gpu'global y, int n) throws:
+pub req [float32]'kernel'unified add2([float32]'kernel'global x, [float32]'kernel'global y, int n) throws:
     mut k = SumKernel(x, y, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
     k.out
 
-pub req [float32]'gpu'unified fill([float32]'global src) throws:
+pub req [float32]'kernel'unified fill([float32]'global src) throws:
     let n = src.length
     mut k = AddOneKernel(src, n)
     kernel:
@@ -3294,7 +3294,7 @@ kernel Scale:
     init([float32]'unified data):
         buf = data
     def ():
-        let tid = gpu.thread.x
+        let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
 let data = [1.0 as float32, 2.0 as float32]
@@ -3350,11 +3350,11 @@ kernel AddKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = a[i] + b[i]
 
-pub req [float32]'gpu'unified add2([float32]'gpu'global a, [float32]'gpu'global b, int n) throws:
+pub req [float32]'kernel'unified add2([float32]'kernel'global a, [float32]'kernel'global b, int n) throws:
     mut k = AddKernel(a, b, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -3439,12 +3439,12 @@ kernel BumpKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             a[i] = a[i] + 1.0
             out[i] = a[i]
 
-pub req [float32]'gpu'unified bump([float32]'global a, int n) throws:
+pub req [float32]'kernel'unified bump([float32]'global a, int n) throws:
     mut k = BumpKernel(a, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -3482,13 +3482,13 @@ fn discarded_copy_write_is_a_warning_not_an_error() {
 #[test]
 fn returned_copy_field_does_not_warn() {
     // Returned alone ...
-    let stderr = build_stderr("metal", "discarded_write_returned_alone", &bump_with_tail("[float32]'gpu'unified", "k.a"));
+    let stderr = build_stderr("metal", "discarded_write_returned_alone", &bump_with_tail("[float32]'kernel'unified", "k.a"));
     assert!(!stderr.contains("is discarded"), "{stderr}");
     // ... and inside a returned tuple (the supported way to hand back two outputs).
     let stderr = build_stderr(
         "metal",
         "discarded_write_returned_in_tuple",
-        &bump_with_tail("([float32]'gpu'unified, [float32]'gpu'unified)", "(k.a, k.out)"),
+        &bump_with_tail("([float32]'kernel'unified, [float32]'kernel'unified)", "(k.a, k.out)"),
     );
     assert!(!stderr.contains("is discarded"), "{stderr}");
 }
@@ -3504,9 +3504,9 @@ kernel Consume:
         src = s
         out = [0.0 as float32 for ..<nn]
     def ():
-        out[gpu.thread.x] = src[gpu.thread.x]
+        out[.thread.x] = src[.thread.x]
 
-pub req [float32]'gpu'unified bump_then_copy([float32]'global a, int n) throws:
+pub req [float32]'kernel'unified bump_then_copy([float32]'global a, int n) throws:
     mut k = BumpKernel(a, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -3533,11 +3533,11 @@ kernel FillKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             out[i] = src[i]
 
-pub req [float32]'gpu'unified upload([float32]'global src, int n) throws:
+pub req [float32]'kernel'unified upload([float32]'global src, int n) throws:
     mut k = FillKernel(src, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -3550,7 +3550,7 @@ pub req [float32]'gpu'unified upload([float32]'global src, int n) throws:
 fn fresh_allocation_field_write_does_not_warn() {
     // `out` is built from a fresh allocation, not an argument: writing it is the
     // whole point, and the repro's own `out[i] = ...` must never be flagged.
-    let stderr = build_stderr("metal", "discarded_write_fresh_allocation", &bump_with_tail("[float32]'gpu'unified", "k.a"));
+    let stderr = build_stderr("metal", "discarded_write_fresh_allocation", &bump_with_tail("[float32]'kernel'unified", "k.a"));
     assert!(!stderr.contains("`out` is discarded") && !stderr.contains("write to `out`"), "{stderr}");
 }
 
@@ -3558,7 +3558,7 @@ fn fresh_allocation_field_write_does_not_warn() {
 fn scratch_buffer_built_at_the_call_does_not_warn() {
     // The argument is a fresh temporary, so nobody expects to see the write.
     let (kernel, _) = LOST_WRITE_REPRO.split_once("pub req").unwrap();
-    let src = format!(r#"{kernel}pub req [float32]'gpu'unified bump_scratch(int n) throws:
+    let src = format!(r#"{kernel}pub req [float32]'kernel'unified bump_scratch(int n) throws:
     mut k = BumpKernel([0.0 as float32 for ..<n], n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -3577,7 +3577,7 @@ fn escaping_kernel_instance_does_not_warn() {
 def keep(BumpKernel k):
     print "kept"
 
-pub req [float32]'gpu'unified bump_escape([float32]'global a, int n) throws:
+pub req [float32]'kernel'unified bump_escape([float32]'global a, int n) throws:
     mut k = BumpKernel(a, n)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))
@@ -3602,12 +3602,12 @@ kernel BumpKernel:
         out = [0.0 as float32 for ..<nn]
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             self.a[i] += 1.0
             out[i] = self.a[i]
 
-pub req [float32]'gpu'unified bump([float32]'global x, int n) throws:
+pub req [float32]'kernel'unified bump([float32]'global x, int n) throws:
     mut k = BumpKernel(nn = n, aa = x)
     kernel:
         k(block = 256, grid = ((n + 255) / 256, 1))

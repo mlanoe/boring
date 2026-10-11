@@ -121,7 +121,7 @@ struct DeviceEmitter {
     /// Declared Boring types of the current function/method body's local `let`/`var`/`mut`
     /// bindings, populated by `Stmt::Let` and cleared at the start of each device
     /// function/method/entry-point body. Best-effort only -- just accurate enough for
-    /// `infer_shuffle_operand_type` to tell whether a `gpu.warp.shuffle_*` operand is
+    /// `infer_shuffle_operand_type` to tell whether a `.warp.shuffle_*` operand is
     /// Boring's default `int`/`uint` (MSL `int64_t`/`uint64_t`), which needs the
     /// int32-round-trip cast `gpu_warp_shuffle_msl` applies (see its doc comment).
     locals: std::collections::HashMap<String, Type>,
@@ -376,7 +376,7 @@ impl DeviceEmitter {
         // Unconditional, same as the other built-in position params: MSL
         // SIMD-group builtins need no capability/enable step, so there's no
         // cost to always accepting them even on kernels that don't use
-        // `gpu.warp.*`.
+        // `.warp.*`.
         params.push("uint __simd_lane_id [[thread_index_in_simdgroup]]".into());
         params.push("uint __simd_size [[threads_per_simdgroup]]".into());
 
@@ -1321,7 +1321,7 @@ impl DeviceEmitter {
                 let kw = if mutable { "" } else { "const " };
                 // Track this binding's Boring type (explicit, or a best-effort guess from
                 // its initializer) so `infer_shuffle_operand_type` can later tell whether a
-                // `gpu.warp.shuffle_*` call on it needs the int32-round-trip cast.
+                // `.warp.shuffle_*` call on it needs the int32-round-trip cast.
                 let inferred_ty = s.ty.clone().or_else(|| match s.value.as_ref().map(|v| &v.kind) {
                     Some(ExprKind::Int(_)) => Some(Type::Int),
                     Some(ExprKind::Float(_)) => Some(Type::Float64),
@@ -1630,7 +1630,7 @@ impl DeviceEmitter {
     }
 
     /// Best-effort Boring type of `expr`, just accurate enough for
-    /// `gpu_warp_method_call` to decide whether a `gpu.warp.shuffle_*` operand needs
+    /// `gpu_warp_method_call` to decide whether a `.warp.shuffle_*` operand needs
     /// the int32-round-trip cast Metal's `simd_shuffle*` requires for a 64-bit int
     /// (see that function's doc comment). Resolves a local/`self.field` variable via
     /// `local_or_field_type`, an explicit cast's target type, or a literal; anything
@@ -2025,7 +2025,7 @@ fn unaryop_msl(op: &UnaryOp) -> &'static str {
 }
 
 fn map_gpu_field(obj: &str, field: &str) -> String {
-    // gpu.thread / gpu.block etc. map to the kernel built-in parameters.
+    // .thread / .block etc. map to the kernel built-in parameters.
     match (obj, field) {
         ("gpu", "thread")    => "__thread_pos".into(),
         ("gpu", "block")     => "__block_pos".into(),
@@ -2051,7 +2051,7 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     }
 }
 
-/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — MSL
+/// `.warp.sync()` / `.warp.shuffle_down/up/xor/shuffle(...)` — MSL
 /// SIMD-group intrinsics need no capability/mask handling (unlike CUDA's
 /// `_sync` mask), so these map straight across.
 ///

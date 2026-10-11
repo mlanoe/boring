@@ -1227,9 +1227,9 @@ struct Transpiler {
     /// Populated by `emit_let`; consumed by kernel-construction, `kernel:` dispatch, and
     /// kernel 'unified-field-read codegen (GPU targets only -- see `kernel_decls`).
     pub(crate) kernel_vars: std::collections::HashMap<String, String>,
-    /// Local variable name -> (kernel variable name, field name), for a `'gpu'unified`/
-    /// `'gpu'global`-qualified `let`/`var` initialized directly from a bare kernel-field
-    /// read (`let py'gpu'unified = k.y`) — see `emit_kernel::try_emit_gpu_resident_let`.
+    /// Local variable name -> (kernel variable name, field name), for a `'kernel'unified`/
+    /// `'kernel'global`-qualified `let`/`var` initialized directly from a bare kernel-field
+    /// read (`let py'kernel'unified = k.y`) — see `emit_kernel::try_emit_gpu_resident_let`.
     /// Such a binding is a pure compile-time alias: no Rust variable is ever emitted for
     /// it, so its only legal use is as the subject of a `with` block, which resolves it
     /// back to `copy_{field}_to_host`/`copy_{field}_to_device` on the kernel variable
@@ -1237,7 +1237,7 @@ struct Transpiler {
     /// (`Binding::resident_from_field`). GPU targets only, same gate as `kernel_vars`.
     pub(crate) gpu_resident_vars: std::collections::HashMap<String, (String, String)>,
     /// Free function name -> its declared return type, for functions whose return
-    /// type is `'gpu'unified`/`'gpu'global`-qualified — mirrors the checker's own
+    /// type is `'kernel'unified`/`'kernel'global`-qualified — mirrors the checker's own
     /// `fn_returns_resident` (checker/mod.rs). Populated once up front (`pre_scan`).
     /// Drives: (1) `emit_top.rs`'s return-type emission (`BoringGpuArg<T>` instead of
     /// `Vec<T>`), (2) `emit_kernel::try_emit_gpu_resident_call_let` recognizing
@@ -1254,9 +1254,9 @@ struct Transpiler {
     /// always uploading (`emit_kernel::emit_kernel_construction`).
     pub(crate) fn_gpu_arg_params: std::collections::HashMap<String, Vec<bool>>,
     /// Free function name -> per-position flags, for a function whose return type is
-    /// a `Type::Tuple` with at least one `'gpu'unified`/`'gpu'global`-qualified
+    /// a `Type::Tuple` with at least one `'kernel'unified`/`'kernel'global`-qualified
     /// element (mirrors the checker's own `fn_returns_resident_tuple`). The tuple
-    /// analogue of `fn_returns_resident`: `mha_step_gpu`-style `([float]'gpu'unified,
+    /// analogue of `fn_returns_resident`: `mha_step_gpu`-style `([float]'kernel'unified,
     /// [float], [float])` returns, chaining the tail tuple literal's resident
     /// elements instead of eagerly downloading them. See
     /// `emit_kernel::try_emit_gpu_resident_tuple_return`.
@@ -5870,7 +5870,7 @@ def int by_index(Outer& o, int i):
 
     #[test]
     fn host_tensor_calls_lower_to_portable_rust_loops() {
-        let src = "let [float32, k = 5, m = 3]'gpu'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'gpu'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified c = [float32(0) for ..<21]\ngpu.tensor.matmul(a, b, c)\ngpu.tensor.mma(a, b, c)\n";
+        let src = "let [float32, k = 5, m = 3]'kernel'global a = [float32(i) for i in 0..<15]\nlet [float32, n = 7, k = 5]'kernel'unified b = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'kernel'unified c = [float32(0) for ..<21]\nkernel.tensors.matmul(a, b, c)\nkernel.tensors.mma(a, b, c)\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert_eq!(code.matches("for __boring_tensor_row in 0usize..3usize").count(), 2);
         assert!(code.contains("for __boring_tensor_col in 0usize..7usize"));
@@ -5882,7 +5882,7 @@ def int by_index(Outer& o, int i):
 
     #[test]
     fn host_tensor_linear_uses_row_major_weights() {
-        let src = "let [float32, k = 5, m = 3]'gpu'global x = [float32(i) for i in 0..<15]\nlet [float32, k = 5, n = 7]'gpu'global w = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'gpu'unified y = [float32(0) for ..<21]\ngpu.tensor.linear(x, w, y)\n";
+        let src = "let [float32, k = 5, m = 3]'kernel'global x = [float32(i) for i in 0..<15]\nlet [float32, k = 5, n = 7]'kernel'global w = [float32(i) for i in 0..<35]\nmut [float32, n = 7, m = 3]'kernel'unified y = [float32(0) for ..<21]\nkernel.tensors.linear(x, w, y)\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(code.contains("w[__boring_tensor_col * 5 + __boring_tensor_k]"), "{code}");
     }

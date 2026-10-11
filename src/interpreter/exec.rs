@@ -410,7 +410,7 @@ impl Interpreter {
             // a single-threaded tree-walk simulation has no host/device split to model,
             // so every kernel-context qualifier already behaves as a plain value here.
             // The same precedent extends to the host-context qualifiers this statement
-            // exists for (`'gpu'unified`/`'gpu'global` residency, `'actor`/`'guard`
+            // exists for (`'kernel'unified`/`'kernel'global` residency, `'actor`/`'guard`
             // per-block locking) — there is nothing to acquire or write back; the body
             // just runs directly. See docs/scoped-access-blocks.md, "Cross-target behavior".
             Stmt::With(s) => {
@@ -1059,9 +1059,9 @@ impl Interpreter {
     /// — an array-comprehension literal like `[0.0 for ..<N]` evaluates its elements with no
     /// knowledge of the binding's declared element type, so it always produces untyped
     /// `Int`/`Float64` elements (`eval_expr` has no target-type hint to thread through a
-    /// comprehension). Without this, `let [float32]'gpu'unified x = [0.0 for ..<N]` left every
+    /// comprehension). Without this, `let [float32]'kernel'unified x = [0.0 for ..<N]` left every
     /// element a `Float64`, which `value_matches_type`'s per-element check then rejected
-    /// outright (`cannot assign Array to 'x': expected [float32]'gpu'unified`) since neither
+    /// outright (`cannot assign Array to 'x': expected [float32]'kernel'unified`) since neither
     /// this function's scalar-only `base()` dispatch below nor `cast_value` (also scalar-only)
     /// ever looked inside the array to narrow its elements — confirmed via examples/saxpy.br.
     pub(crate) fn coerce_to_type(val: Value, ty: &Type) -> Value {
@@ -1372,13 +1372,13 @@ impl Interpreter {
                     OwnerQual::BorrowWeak   => "&weak".to_string(),
                     OwnerQual::Borrow       => "&".to_string(),
                     OwnerQual::BorrowMut    => "var &".to_string(),
-                    OwnerQual::GpuUnified   => "'gpu'unified".to_string(),
-                    OwnerQual::GpuGlobal    => "'gpu'global".to_string(),
+                    OwnerQual::GpuUnified   => "'kernel'unified".to_string(),
+                    OwnerQual::GpuGlobal    => "'kernel'global".to_string(),
                     OwnerQual::GpuSurface   => "surface".to_string(),
                     OwnerQual::GpuActorGlobal => "'actor'global".to_string(),
                     OwnerQual::GpuActorUnified => "'actor'unified".to_string(),
                     OwnerQual::GpuLocal     => "'local".to_string(),
-                    OwnerQual::GpuConst     => "'gpu'const".to_string(),
+                    OwnerQual::GpuConst     => "'kernel'const".to_string(),
                     OwnerQual::Observed     => "'observed".to_string(),
                     // `'new` (candidate-set qualifier, replaces the old bare tick) is
                     // represented as this exact Union shape — display it as `'new`

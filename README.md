@@ -69,9 +69,9 @@ Boring compiles the same source to several distinct Rust targets — from usersp
 | `boring build --target wgpu` | Rust + WGSL (any DX12/Vulkan/Metal GPU) | GPU compute, cross-platform |
 | `boring build --mode managed` | Rust std + tokio | managed memory (unqualified `T` → `Arc<Mutex<T>>`) |
 | `boring build --threading single` | Rust std + tokio | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
-| `boring build --target kernel` | Rust-for-Linux (`no_std`) | Linux drivers, subsystems, kernel modules |
+| `boring build --linux` | Rust-for-Linux (`no_std`) | Linux drivers, subsystems, kernel modules |
 
-The GPU targets are the most fully developed: the same `kernel` struct, ownership qualifiers, and `gpu.*` built-ins transpile unchanged to CUDA C, HIP C++, Metal Shading Language, or WGSL depending on the flag — see [GPU computing](#gpu-computing) below. The kernel target is a smaller, more experimental backend: it maps the same language (structs, enums, traits, ownership qualifiers, `throws`, `task`) onto Rust-for-Linux equivalents (`Arc<kernel::sync::Mutex<T>>`, `system_wq` work items, ring-buffer channels, errno-based errors) and validates kernel-incompatible constructs (`float`, `panic`) at build time — see [`docs/kernel-target.md`](docs/kernel-target.md).
+The compute targets are the most fully developed: the same `kernel` struct, ownership qualifiers, and implicit `.thread`/`.block`/`.warp`/`.tensors` built-ins transpile unchanged to CUDA C, HIP C++, Metal Shading Language, or WGSL depending on the flag — see [GPU computing](#gpu-computing) below. The Linux target is a smaller, more experimental backend: it maps the same language (structs, enums, traits, ownership qualifiers, `throws`, `task`) onto Rust-for-Linux equivalents (`Arc<kernel::sync::Mutex<T>>`, `system_wq` work items, ring-buffer channels, errno-based errors) and validates kernel-incompatible constructs (`float`, `panic`) at build time — see [`docs/linux-target.md`](docs/linux-target.md).
 
 ---
 
@@ -87,7 +87,7 @@ kernel Scale:
         buf = data
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         buf[i] *= 2.0
 
 mut k = Scale(data)
@@ -377,7 +377,7 @@ boring/
 │   ├── gpu-module.md        # GPU computing language reference
 │   ├── cuda-module.md / rocm-backend.md / metal-backend.md / wgpu-backend.md  # Per-backend codegen
 │   ├── cross-project-code-sharing-gap.md  # Dependency system design + known limitations
-│   └── kernel-target.md     # Boring → Rust-for-Linux mapping
+│   └── linux-target.md     # Boring → Rust-for-Linux mapping
 ├── spec/
 │   └── grammar.bnf          # Formal BNF grammar
 ├── examples/

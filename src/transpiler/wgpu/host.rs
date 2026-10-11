@@ -52,7 +52,7 @@ struct HostEmitter<'a> {
     boring_main_throws: bool,
     /// Whether a second, shared-memory-emulated WGSL module was emitted
     /// alongside the real-subgroup one (`shaders/main_emulated.wgsl`) — only
-    /// true when some kernel uses `gpu.warp.*` (see `device::WarpMode`). Gates
+    /// true when some kernel uses `.warp.*` (see `device::WarpMode`). Gates
     /// the `wgpu::Features::SUBGROUP` runtime detection and dual-shader-module
     /// dispatch in `emit_pipeline_init`/wherever the shader module is created.
     has_emulated_shader: bool,
@@ -1133,7 +1133,7 @@ impl<'a> HostEmitter<'a> {
             self.line("    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
             self.line("    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.expect(\"No GPU adapter found\");");
             if self.has_emulated_shader {
-                // `gpu.warp.*` is used somewhere in this program — opportunistically
+                // `.warp.*` is used somewhere in this program — opportunistically
                 // request `Features::SUBGROUP` (only if the adapter actually supports
                 // it; `request_device` hard-fails if you require an unsupported
                 // feature) so `device.features()` at shader-creation time can pick

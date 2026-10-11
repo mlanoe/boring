@@ -1738,8 +1738,8 @@ fn print_help() {
                                             Example: --rust-options \"--release\"");
     eprintln!("    boring build --locked      Fail instead of creating/updating a boring.lock entry");
     eprintln!("    boring build --offline     Never touch the network for a git [deps] dependency");
-    eprintln!("    boring build --target kernel             Emit a kernel Cargo project from boring.toml");
-    eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
+    eprintln!("    boring build --linux                     Emit a Linux kernel Cargo project from boring.toml");
+    eprintln!("    boring build --linux <file.br>           Emit a Linux kernel Cargo project from a single file");
     eprintln!("    boring build --target cuda               Emit a CUDA Cargo project from boring.toml");
     eprintln!("    boring build --target cuda <file.br>     Emit a CUDA Cargo project from a single file");
     eprintln!("    boring build --target rocm               Emit a ROCm/HIP Cargo project from boring.toml (AMD GPUs)");
@@ -1821,7 +1821,7 @@ fn build_project_with_config(config: transpiler::TranspileConfig) {
     emit_rust_with_version_and_config(&toml.main, &toml.version, config, &toml.dependencies);
 }
 
-/// `boring build --target kernel` â€” emit a kernel Cargo project from `boring.toml`.
+/// `boring build --linux` — emit a Linux kernel Cargo project from `boring.toml`.
 fn build_project_kernel() {
     let (toml, _) = load_project_toml();
     emit_kernel_with_version(&toml.main, &toml.version);
@@ -1853,23 +1853,23 @@ fn parse_build_command(build_args: &[String]) {
             "--target" => {
                 i += 1;
                 match build_args.get(i).map(|s| s.as_str()) {
-                    Some("kernel") => target_kernel = true,
                     Some("cuda")   => target_cuda   = true,
                     Some("rocm")   => target_rocm   = true,
                     Some("metal")  => target_metal  = true,
                     Some("wgpu")   => target_wgpu   = true,
                     Some(t) => {
                         eprintln!("error: unknown target '{}'", t);
-                        eprintln!("hint:  supported targets: kernel, cuda, rocm, metal, wgpu");
+                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu (use --linux for Rust-for-Linux)");
                         process::exit(1);
                     }
                     None => {
                         eprintln!("error: --target requires a value");
-                        eprintln!("hint:  supported targets: kernel, cuda, rocm, metal, wgpu");
+                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu (use --linux for Rust-for-Linux)");
                         process::exit(1);
                     }
                 }
             }
+            "--linux" => target_kernel = true,
             "--mode" => {
                 i += 1;
                 match build_args.get(i).map(|s| s.as_str()) {
@@ -1978,7 +1978,7 @@ fn parse_build_command(build_args: &[String]) {
     }
 
     if target_kernel && threading != ThreadingMode::Multi {
-        eprintln!("error: --threading is not available for the kernel target");
+        eprintln!("error: --threading is not available for the linux target");
         process::exit(1);
     }
 
@@ -3160,7 +3160,7 @@ fn emit_wgpu(path: &str, version: &str) {
         process::exit(1);
     }
 
-    // shaders/main_emulated.wgsl — only emitted when some kernel uses `gpu.warp.*`;
+    // shaders/main_emulated.wgsl — only emitted when some kernel uses `.warp.*`;
     // the host chooses between this and main.wgsl at runtime based on whether the
     // adapter has `wgpu::Features::SUBGROUP` (see transpiler::wgpu::device::WarpMode).
     if let Some(emulated) = &wgpu_out.device_wgsl_emulated {
@@ -3218,7 +3218,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     let program = desugar_inline_kernel::desugar_inline_kernels(program);
     let program = desugar_labeled_array::desugar_labeled_array(program);
     let program = desugar_array_block_or_exit(&path, &source, program);
-    // No [deps] resolution for the kernel target (no_std, no Cargo dependency
+    // No [deps] resolution for the Linux target (no_std, no Cargo dependency
     // management) — an empty map simply means a dep-qualified `use <name>.xxx` never
     // matches here, same as before this parameter existed.
     let program = desugar_inject_or_exit(&path, &source, program, &std::collections::HashMap::new());
@@ -3247,7 +3247,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
     let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let project_dir = base_dir.join(format!("{}_kernel", stem));
+    let project_dir = base_dir.join(format!("{}_linux", stem));
 
     // Create directory layout.
     let src_dir = project_dir.join("src");
@@ -3284,6 +3284,6 @@ path = "src/lib.rs"
         process::exit(1);
     }
 
-    eprintln!("Generated kernel Cargo project at '{}'", project_dir.display());
+    eprintln!("Generated Linux kernel Cargo project at '{}'", project_dir.display());
     eprintln!("  Build with the Linux kernel build system (make -C /path/to/linux M=$PWD)");
 }

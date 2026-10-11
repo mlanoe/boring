@@ -394,27 +394,27 @@ ext_member      ::= "pub"? fn_decl
 #   after    = kernel_var | [k1, k2]  — GPU-side ordering (CUDA: stream sync; Metal: no-op)
 #   priority = "high" | "normal" | "low"  — stream scheduling priority (CUDA only; ignored elsewhere)
 #
-# GPU built-ins (device side only, no `use` needed):
-#   gpu.thread.x / .y / .z      — thread index within block
-#   gpu.block.x  / .y / .z      — block index within grid
-#   gpu.block_dim.x / .y / .z   — block dimensions
-#   gpu.grid_dim.x  / .y / .z   — grid dimensions
+# Implicit kernel built-ins (device side only, no `use` needed):
+#   .thread.x / .y / .z      — thread index within block
+#   .block.x  / .y / .z      — block index within grid
+#   .block_dim.x / .y / .z   — block dimensions
+#   .grid_dim.x  / .y / .z   — grid dimensions
 #   sync                         — explicit barrier (manual mode): wait for all threads in the block.
 #                                  If `sync` appears in a `def`, auto-insertion is disabled for that
 #                                  `def` and the developer owns all barrier placement.
-#   gpu.warp.size               — threads per warp/wavefront/SIMD-group/subgroup
-#   gpu.warp.lane               — this thread's index within its warp, 0..gpu.warp.size
-#   gpu.warp.sync()             — warp-local barrier, cheaper than `sync` (block-wide)
-#   gpu.warp.shuffle_down(v, delta) — read `v` from the lane `delta` above this one
-#   gpu.warp.shuffle_up(v, delta)   — read `v` from the lane `delta` below this one
-#   gpu.warp.shuffle_xor(v, mask)   — read `v` from lane `this_lane XOR mask`
-#   gpu.warp.shuffle(v, src_lane)   — broadcast/read `v` from an arbitrary lane
+#   .warp.size               — threads per warp/wavefront/SIMD-group/subgroup
+#   .warp.lane               — this thread's index within its warp, 0...warp.size
+#   .warp.sync()             — warp-local barrier, cheaper than `sync` (block-wide)
+#   .warp.shuffle_down(v, delta) — read `v` from the lane `delta` above this one
+#   .warp.shuffle_up(v, delta)   — read `v` from the lane `delta` below this one
+#   .warp.shuffle_xor(v, mask)   — read `v` from lane `this_lane XOR mask`
+#   .warp.shuffle(v, src_lane)   — broadcast/read `v` from an arbitrary lane
 #
 # GPU memory qualifiers (kernel-context only — replace standard ownership qualifiers):
 #
 #   'unified  — unified DRAM (host + device); host can read/write directly.
 #               On Apple Silicon (Metal), zero-copy. On CUDA x86: cudaMallocManaged.
-#   'global   — device-only DRAM; host accesses via gpu.copy(). CUDA: __global__.
+#   'global   — device-only DRAM; host access is emitted by the selected backend.
 #   'actor    — block SRAM shared by all threads in a block (formerly spelled 'sync — the
 #               qualifier was renamed; the `sync` *statement* inside a kernel `def` body,
 #               used for manual barriers, is unrelated and keeps its name).
@@ -637,7 +637,7 @@ catch_type      ::= IDENT ("." IDENT)?   # type name, optionally dotted for enum
 guard_stmt      ::= "guard" guard_cond "else" ":"? (stmt | block)
 
 # Scoped access block — grants extended, multi-statement host access to a value
-# normally touched one operation at a time: `'gpu'unified`/`'gpu'global` residency
+# normally touched one operation at a time: `'kernel'unified`/`'kernel'global` residency
 # (map-for-read/write, write-back on close) and `'actor`/`'guard` locks (held across
 # the whole block instead of once per call). Each `name` must already be bound in
 # scope; its qualifier and read/write access level are resolved by the checker, not
@@ -1419,8 +1419,8 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # passes are shared; only the emitter changes.
 #
 #   boring build <file.br>                 — standard Rust + tokio (default)
-#   boring build --target kernel <file.br> — Rust-for-Linux (no_std + kernel crates)
-#   boring build --target kernel           — kernel project from boring.toml
+#   boring build --linux <file.br> — Rust-for-Linux (no_std + kernel crates)
+#   boring build --linux           — kernel project from boring.toml
 #   boring build --target cuda <file.br>   — CUDA GPU backend (cudarc + PTX via nvcc)
 #   boring build --target cuda             — CUDA project from boring.toml
 #   boring build --target metal <file.br>  — Metal GPU backend (macOS, MSL compiled at runtime)
@@ -1452,7 +1452,7 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   assert_neq(a, b)      → assert_ne!(a,b) inequality assertion
 #   panic(msg)            → panic!("{:?}",…) unconditional panic
 #
-# Kernel target mappings (see docs/kernel-transpiler-mapping.md for full table):
+# Linux target mappings (see docs/kernel-transpiler-mapping.md for full table):
 #
 #   Boring              Rust std                 Rust-for-Linux
 #   ──────────────────  ───────────────────────  ──────────────────────────────
@@ -1472,10 +1472,10 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   print!              println!                 pr_info!
 #   assert_eq!          assert_eq!               kernel::build_assert! / WARN_ON
 #
-# Forbidden in kernel target (validation rejects with an explicit error):
+# Forbidden in Linux target (validation rejects with an explicit error):
 #   float, math builtins (FPU disabled), panic, T& / T&mut on task def
 #
-# Kernel error type binding (required for typed catch in kernel target):
+# Kernel error type binding (required for typed catch in Linux target):
 #   type NetworkError as kernel.error.Error(ENETDOWN)
 #   type TimeoutError as kernel.error.Error(ETIMEDOUT)
 

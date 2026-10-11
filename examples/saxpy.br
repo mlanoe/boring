@@ -19,8 +19,8 @@ print "Device : {g.name()}"
 print "Memory : {g.totalMem() / 1_073_741_824} GB"
 
 # Input vectors: x = [0..N-1], y = [1.0 * N]
-mut [float32]'gpu'unified x = [0.0 for ..<N]
-var [float32]'gpu'unified y = [1.0 for ..<N]
+mut [float32]'kernel'unified x = [0.0 for ..<N]
+var [float32]'kernel'unified y = [1.0 for ..<N]
 for i in 0..<N:
     x[i] = float32(i)
 
@@ -35,7 +35,7 @@ kernel Saxpy:
         y    = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 
 mut k = Saxpy(alpha, x, y)

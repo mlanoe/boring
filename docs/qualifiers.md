@@ -196,7 +196,7 @@ not make the global itself mutable.
 `kernel struct` qualifiers (`'const`, `'local`, `'global`, `'unified`,
 etc. — see the GPU module docs) — those describe device memory hierarchy,
 a completely different axis, and none of them are ever backed by a Rust
-`static`. `--target kernel` (the unrelated `no_std` Rust-for-Linux driver
+`static`. `--linux` (the unrelated `no_std` Rust-for-Linux driver
 target) does support `'static`, since plain Rust `static` items work
 fine there.
 

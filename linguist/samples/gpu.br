@@ -16,7 +16,7 @@ kernel Saxpy:
         y = ys
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         y[i] = alpha * x[i] + y[i]
 
 let n = 1024
@@ -32,10 +32,10 @@ print "y[1] = {k.y[1]}"    # 3.0
 
 # ── Inline kernel expression ──────────────────────────────────────────────────
 
-pub req [float32]'gpu'unified scaleInline([float32]'gpu'global src, int count) throws:
+pub req [float32]'kernel'unified scaleInline([float32]'kernel'global src, int count) throws:
     kernel(block = 256, grid = (count + 255) / 256):
         mut [float32]'unified dst = [0.0 for ..<count]
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < count:
             dst[i] = src[i] * 2.0
         dst
@@ -58,7 +58,7 @@ kernel Blur<int W, int H>:
         output  = out
 
     def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         var acc = 0.0
         for k in 0..<W * H:                  # tap offsets — clamp at the array edge
             let idx = i + k
@@ -86,18 +86,18 @@ kernel TileSum:
         result = result
 
     def ():
-        let i    = gpu.thread.x + gpu.block.x * gpu.block_dim.x
-        let tid  = gpu.thread.x
+        let i    = .thread.x + .block.x * .block_dim.x
+        let tid  = .thread.x
         tile[tid] = data[i]
 
-        var stride = gpu.block_dim.x / 2
+        var stride = .block_dim.x / 2
         while stride > 0:
             if tid < stride:
                 tile[tid] = tile[tid] + tile[tid + stride]
             stride = stride / 2
 
         if tid == 0:
-            result[gpu.block.x] = tile[0]
+            result[.block.x] = tile[0]
 
 let data    = [i as float for i in ..<1024]
 mut partial = [0.0 for ..<4]

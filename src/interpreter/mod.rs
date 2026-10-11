@@ -2321,21 +2321,21 @@ pub struct Interpreter {
     /// Fields of the kernel currently being simulated, used to resolve fixed
     /// tensor shapes.
     pub(crate) current_kernel_fields: Vec<KernelFieldDecl>,
-    /// This thread's index within its warp (`gpu.warp.lane`) — always set to
+    /// This thread's index within its warp (`.warp.lane`) — always set to
     /// a real value inside a kernel thread (see `eval_gpu::run_one_kernel_thread`),
     /// `0` outside kernel execution.
     pub(crate) warp_lane: usize,
     /// Number of lanes actually participating in this thread's warp-group
     /// (`<= eval_gpu::WARP_SIZE`; less than `WARP_SIZE` only for a block whose
     /// thread count isn't a multiple of `WARP_SIZE`). Used to bound
-    /// `gpu.warp.shuffle_*`'s target-lane reads to real participants.
+    /// `.warp.shuffle_*`'s target-lane reads to real participants.
     pub(crate) warp_active_lanes: usize,
     /// Barrier shared by every thread in this thread's warp-group.
-    /// `gpu.warp.sync()` waits on this; `None` outside a kernel dispatch that
-    /// actually uses `gpu.warp.*` (see `eval_gpu::stmts_use_gpu_warp`).
+    /// `.warp.sync()` waits on this; `None` outside a kernel dispatch that
+    /// actually uses `.warp.*` (see `eval_gpu::stmts_use_gpu_warp`).
     pub(crate) warp_barrier: Option<std::sync::Arc<std::sync::Barrier>>,
     /// Shared scratch slots (one per lane, `WARP_SIZE` of them) this thread's
-    /// warp-group shuffles values through — `gpu.warp.shuffle_*` writes this
+    /// warp-group shuffles values through — `.warp.shuffle_*` writes this
     /// thread's value to `scratch[warp_lane]`, waits on `warp_barrier`, then
     /// reads `scratch[target_lane]`. `None` alongside `warp_barrier`.
     pub(crate) warp_scratch: Option<std::sync::Arc<std::sync::Mutex<Vec<eval_gpu::ThreadValue>>>>,

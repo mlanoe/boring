@@ -891,7 +891,7 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
     }
 }
 
-/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — CUDA's
+/// `.warp.sync()` / `.warp.shuffle_down/up/xor/shuffle(...)` — CUDA's
 /// `_sync` intrinsics (post-Volta) require an explicit active-lane mask;
 /// Boring always passes the full mask (`0xffffffff`) rather than exposing one
 /// in source, so these are only as safe as that mask is under thread

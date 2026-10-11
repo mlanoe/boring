@@ -5489,7 +5489,7 @@ let int tx, rx = channel(32)
 let tx, rx = channel<int, 32>
 ```
 
-All three forms are fully interchangeable. The transpiler extracts the capacity from whichever position it appears — second type argument or first call argument — and forwards it to the backend. On the **tokio backend** it becomes the argument to `tokio::sync::mpsc::channel(N)`. On the **kernel backend** it sets the size of the pre-allocated ring buffer; see [Rust-for-Linux target](kernel-target.html).
+All three forms are fully interchangeable. The transpiler extracts the capacity from whichever position it appears — second type argument or first call argument — and forwards it to the backend. On the **tokio backend** it becomes the argument to `tokio::sync::mpsc::channel(N)`. On the **kernel backend** it sets the size of the pre-allocated ring buffer; see [Rust-for-Linux target](linux-target.html).
 
 #### Capacity in single-thread mode
 
@@ -6602,7 +6602,7 @@ boring build --mode strict|managed     # memory management (default: strict)
 boring build --threading single|multi  # concurrency model (default: multi)
 ```
 
-`--threading` is not available for the `--target kernel` target.
+`--threading` is not available for the `--linux` target.
 
 ### Binding × qualifier combinations
 
@@ -9447,14 +9447,14 @@ allocated before dispatch, and the last expression is its result. Like a
 closure, an inline kernel does not use `return`.
 
 ```boring
-pub req [float32]'gpu'unified scale_gpu(
-    [float32]'gpu'global src,
+pub req [float32]'kernel'unified scale_gpu(
+    [float32]'kernel'global src,
     int n,
 ) throws:
     kernel(block = 256, grid = (n + 255) / 256):
         mut [float32]'unified dst = [0.0 for ..<n]
 
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let i = .thread.x + .block.x * .block_dim.x
         if i < n:
             dst[i] = src[i] * 2.0
 
@@ -9463,7 +9463,7 @@ pub req [float32]'gpu'unified scale_gpu(
 
 The final expression must be a GPU buffer declared in the block, or a tuple
 of such buffers. The result stays resident when the enclosing function has a
-`'gpu'unified` or `'gpu'global` return type. `block` is required; `grid`,
+`'kernel'unified` or `'kernel'global` return type. `block` is required; `grid`,
 `after`, and `priority` have the same semantics as a named-kernel dispatch.
 
 The compiler lowers this form to a private anonymous `kernel` struct, its
@@ -9471,16 +9471,16 @@ constructor, a synchronous launch, and a final field read. Named
 `kernel Name:` structs remain the appropriate form for reusable kernels,
 generic kernels, helpers, or persistent state.
 
-### `with` for GPU kernel fields — `'gpu'unified`, `'gpu'global`
+### `with` for GPU kernel fields — `'kernel'unified`, `'kernel'global`
 
-A `kernel Name:` struct's `'unified`/`'global` field is read back from the GPU **on every single access** — `k.result[i]` inside a loop re-reads the *entire* buffer back from the GPU on every iteration. Binding the field through a `'gpu'unified`/`'gpu'global`-qualified alias and reading it inside a `with` block (see [chapter 21, Scoped access blocks — `with`](#scoped-access-blocks--with)) materializes it exactly once instead, however many times the block's body indexes it:
+A `kernel Name:` struct's `'unified`/`'global` field is read back from the GPU **on every single access** — `k.result[i]` inside a loop re-reads the *entire* buffer back from the GPU on every iteration. Binding the field through a `'kernel'unified`/`'kernel'global`-qualified alias and reading it inside a `with` block (see [chapter 21, Scoped access blocks — `with`](#scoped-access-blocks--with)) materializes it exactly once instead, however many times the block's body indexes it:
 
 ```boring
 var k = VectorAdd(host_a, host_b)
 kernel:
     k(block = 256)
 
-let [int]'gpu'unified result = k.result   # compile-time alias — no transfer yet
+let [int]'kernel'unified result = k.result   # compile-time alias — no transfer yet
 with result:                              # `result` is `let`-bound -> read-only
     for i in 0..<n:
         print "c[{i}] = {result[i]}"      # readback happens once, here
@@ -9488,7 +9488,7 @@ with result:                              # `result` is `let`-bound -> read-only
 
 This is purely additive — `k.result[i]` without an alias still works exactly as before, and is the right choice for a single access. The alias only pays off when the same field is read (or written) more than once in the same scope. A `mut`/`var`-bound alias follows the same read/write scan as `'actor`/`'guard`: mutating it inside the block (`result[i] = v`) writes the whole array back to the GPU once, at block close; a read-only block never does.
 
-The `'gpu'unified`/`'gpu'global` annotation itself is optional here — it's inferred whenever the initializer is a bare `k.field` read on a tracked kernel instance whose field is actually declared `'unified`/`'global`, so `let result = k.result` behaves identically to the explicit form above:
+The `'kernel'unified`/`'kernel'global` annotation itself is optional here — it's inferred whenever the initializer is a bare `k.field` read on a tracked kernel instance whose field is actually declared `'unified`/`'global`, so `let result = k.result` behaves identically to the explicit form above:
 
 ```boring
 let result = k.result   # qualifier inferred from k.result's own 'unified declaration
@@ -9497,20 +9497,20 @@ with result:
         print "c[{i}] = {result[i]}"
 ```
 
-A `'gpu'unified`/`'gpu'global`-qualified variable that is **not** initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no `with` wrapper required anywhere; the qualifier only matters once it's passed into a kernel constructor, which uploads it.
+A `'kernel'unified`/`'kernel'global`-qualified variable that is **not** initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no `with` wrapper required anywhere; the qualifier only matters once it's passed into a kernel constructor, which uploads it.
 
 ### Residency across a function boundary
 
-Everything above works when the kernel is constructed and read back in the same scope. Residency also survives a **function-call boundary**: a function declared with a `'gpu'unified`/`'gpu'global` return type hands its result straight to the next call as a still-resident value, with no host round-trip in between — only the final consumer's `with` pays a real transfer:
+Everything above works when the kernel is constructed and read back in the same scope. Residency also survives a **function-call boundary**: a function declared with a `'kernel'unified`/`'kernel'global` return type hands its result straight to the next call as a still-resident value, with no host round-trip in between — only the final consumer's `with` pays a real transfer:
 
 ```boring
-req [float]'gpu'unified linear_gpu([float] x, [float] w, [float] b, int seq, int d_in, int d_out):
+req [float]'kernel'unified linear_gpu([float] x, [float] w, [float] b, int seq, int d_in, int d_out):
     mut k = Linear(x, w, b, seq, d_in, d_out)
     kernel:
         k(block = seq * d_out)
     k.y
 
-req [float]'gpu'unified gelu_gpu([float] x, int n):
+req [float]'kernel'unified gelu_gpu([float] x, int n):
     mut k = Gelu(x)
     kernel:
         k(block = n)
@@ -9522,16 +9522,16 @@ with act:
     print "act[0] = {act[0]}"                 # the only real device->host transfer in the chain
 ```
 
-A parameter is only ever eligible for this zero-copy handoff when it's used *exclusively* as a kernel-constructor argument in the function's body — `x` above, in both functions; the block size instead comes from an ordinary `int` parameter (`n`, `d * 4`), which is why `gelu_gpu` doesn't read `x.length`. A parameter used more richly than that (indexed, measured, passed elsewhere) keeps the ordinary host-array behavior for that one parameter — no speedup, but no error either. The `'gpu'unified`/`'gpu'global` annotation on `let fc`/`let act` is optional here too, inferred the same way as the same-scope case.
+A parameter is only ever eligible for this zero-copy handoff when it's used *exclusively* as a kernel-constructor argument in the function's body — `x` above, in both functions; the block size instead comes from an ordinary `int` parameter (`n`, `d * 4`), which is why `gelu_gpu` doesn't read `x.length`. A parameter used more richly than that (indexed, measured, passed elsewhere) keeps the ordinary host-array behavior for that one parameter — no speedup, but no error either. The `'kernel'unified`/`'kernel'global` annotation on `let fc`/`let act` is optional here too, inferred the same way as the same-scope case.
 
 A resident value can also be retained in a struct field. Declare the field as
-`[T]'gpu'unified` or `[T]'gpu'global`; constructing it from a resident return preserves the
+`[T]'kernel'unified` or `[T]'kernel'global`; constructing it from a resident return preserves the
 device buffer, while constructing it from a plain `[T]` stores a host value that is uploaded
 on first GPU use. Reading the field for another GPU call clones only the device-buffer handle:
 
 ```boring
 struct Layer:
-    [float32]'gpu'unified weights
+    [float32]'kernel'unified weights
 
 let layer = Layer(upload_gpu(host_weights, n))
 let y = linear_gpu(layer.weights, x, n)  # no weight download or re-upload
@@ -9565,7 +9565,7 @@ Cross-platform GPU target (`boring build --target wgpu`): runs on DirectX 12 (Wi
 Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, and `kernel: loop:` render loop. Metal implemented; CUDA and simulation pending.
 
 **[Warp-level primitives](warp-level-primitives.html)**
-`gpu.warp.*` — warp/wavefront/SIMD-group/subgroup built-ins (`size`, `lane`, `sync()`, `shuffle_down/up/xor/shuffle`) for intra-warp reductions that skip the shared-memory round-trip and block barrier a full `sync` costs. Per-backend mapping, the wgpu real-subgroup/shared-memory-emulated fallback split, and the divergent-branch mask caveat.
+`.warp.*` — warp/wavefront/SIMD-group/subgroup built-ins (`size`, `lane`, `sync()`, `shuffle_down/up/xor/shuffle`) for intra-warp reductions that skip the shared-memory round-trip and block barrier a full `sync` costs. Per-backend mapping, the wgpu real-subgroup/shared-memory-emulated fallback split, and the divergent-branch mask caveat.
 
 ---
 
@@ -9641,7 +9641,7 @@ def string expensiveGreeting():
 
 It memoizes the function's result behind a compiler-synthesized `LazyLock`: the body runs *at most once*, the first time the function is called from anywhere — an `@inject` site resolving it, or ordinary code calling it directly by name — and every subsequent call, from anywhere, gets a clone/reference to that same instance. Construction is lazy (first-use), never eager (at startup): this avoids constructing a provider a given run never actually touches, and it sidesteps provider-to-provider ordering entirely (a provider whose body needs another `@singleton` value just triggers that one's own on-demand construction, the same mechanism that already resolves ordinary function-call dependencies) rather than requiring a topological sort before startup. Genuine cycles are still caught at compile time (§7) regardless.
 
-`@singleton` requires its function's return type to be a qualifier that supports more than one reader — `'shared`/`'actor`/`'guard`/`'observed` (or, redundantly, `'static`) — never `'owned`, which is exclusive by definition. Rejected outright under `--target kernel` (too low-level for the dynamic dispatch this assumes) and under `--threading single` when the return type resolves to a non-`Sync` form.
+`@singleton` requires its function's return type to be a qualifier that supports more than one reader — `'shared`/`'actor`/`'guard`/`'observed` (or, redundantly, `'static`) — never `'owned`, which is exclusive by definition. Rejected outright under `--linux` (too low-level for the dynamic dispatch this assumes) and under `--threading single` when the return type resolves to a non-`Sync` form.
 
 Transient dependencies (a per-request DTO, a fresh per-screen view model) are simply `@provide`-attributed functions without `@singleton`, using `'owned` (or a non-singleton `'shared`/`'actor`/`'guard`/`'observed`, for Arc-style cheap cloning without cross-consumer sharing) — no special casing needed.
 
@@ -9778,8 +9778,8 @@ Full design and implementation notes for `with` — see [chapter 21](#scoped-acc
 
 ### Compilation targets
 
-**[Rust-for-Linux target](kernel-target.html)**
-`boring build --target kernel`: type mapping in `no_std`, errno-based error handling, `task def` as workqueue work items, const-generic and heap-allocated channels, sequential and async streams, and the kernel emission backend architecture.
+**[Rust-for-Linux target](linux-target.html)**
+`boring build --linux`: type mapping in `no_std`, errno-based error handling, `task def` as workqueue work items, const-generic and heap-allocated channels, sequential and async streams, and the kernel emission backend architecture.
 
 **[Transpilation Modes](transpilation-modes.html)**
 The two orthogonal flags (`--threading` and `--mode`) that control memory management and concurrency in the standard Rust backend: `single` vs `multi`, `managed` vs `strict`.

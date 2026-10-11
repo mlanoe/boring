@@ -439,7 +439,7 @@ impl Checker {
     // See docs/scoped-access-blocks.md. Two things are checked here (both target-
     // independent, so they fire under `boring run` too, not just `boring build`):
     //   - nesting a `with` block on the same name inside itself (double-acquire);
-    //   - using a `'gpu'unified`/`'gpu'global` value's host-materializing operations
+    //   - using a `'kernel'unified`/`'kernel'global` value's host-materializing operations
     //     (indexing, `.length`, iteration, string interpolation) outside a `with`
     //     wrapper that opens it.
     // The two-step read/write access scan itself (`with_block_mutates` in ast::mod)
@@ -486,11 +486,11 @@ impl Checker {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Atomic))
     }
 
-    /// If `name` is a `'gpu'unified`/`'gpu'global` binding sourced from a bare
+    /// If `name` is a `'kernel'unified`/`'kernel'global` binding sourced from a bare
     /// kernel-field read (`resident_from_field` — see `Binding`) and isn't currently
     /// open in an enclosing `with` block, records a compile error: any use at all
     /// (indexing, `.length`, iteration, string interpolation, passed as an argument,
-    /// ...) requires a `with` wrapper first. A `'gpu'unified`/`'gpu'global` binding
+    /// ...) requires a `with` wrapper first. A `'kernel'unified`/`'kernel'global` binding
     /// that is just a plain array (not sourced from a kernel field) is unrestricted —
     /// see `examples/saxpy.br`.
     pub(super) fn check_gpu_opacity(&mut self, name: &str, line: usize, col: usize) {

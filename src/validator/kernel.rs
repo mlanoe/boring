@@ -153,10 +153,10 @@ impl KernelValidator {
             // `labeled_array_shape_error` (see its doc comment in
             // `ast/mod.rs`) instead of hand-rolling the check here — the
             // checker's `check_kernel_decl` covers every other target, but
-            // this pass still needs its own call so `--target kernel` keeps
+            // this pass still needs its own call so `--linux` keeps
             // rejecting malformed labeled-array fields too. No 3-axis cap
             // here: that restriction is GPU-`kernel`-struct-specific
-            // (thread.x/y/z), not applicable to this pass (`--target kernel`
+            // (thread.x/y/z), not applicable to this pass (`--linux`
             // = Rust-for-Linux no_std, an entirely different "kernel" from a
             // GPU `kernel Name:`).
             Type::LabeledArray(elem, _) => {
@@ -452,7 +452,7 @@ impl KernelValidator {
             }
 
             ExprKind::KernelLaunch { config, kernel } => {
-                // The kernel-target (`--target kernel`, Rust-for-Linux, no_std)
+                // The kernel-target (`--linux`, Rust-for-Linux, no_std)
                 // transpiler backend has no GPU access at all — it lowers this to a
                 // bare `/* unsupported: gpu kernel launch in kernel module */`
                 // comment unconditionally (see `transpiler::kernel::emit_expr`),
@@ -757,13 +757,13 @@ impl KernelValidator {
         // `@inject`/`@provide`/`@singleton` (docs/book.md §33) assume a
         // full std runtime — dynamic dispatch (`Box<dyn Trait>`/`Arc<dyn Trait>`) and a
         // composition-root-style provider graph — that a `no_std` Rust-for-Linux kernel
-        // module never has, the same reason `boring-ui` itself excludes `--target kernel`.
+        // module never has, the same reason `boring-ui` itself excludes `--linux`.
         for attr in &fn_decl.attrs {
             if matches!(attr.name.as_str(), "inject" | "provide" | "singleton") {
                 self.error(
                     line,
                     format!(
-                        "`@{}` is not supported on the Rust-for-Linux kernel target — \
+                        "`@{}` is not supported on the Rust-for-Linux Linux target — \
                          dependency injection assumes a full std runtime this target never has",
                         attr.name
                     ),
@@ -865,7 +865,7 @@ impl KernelValidator {
             if field.attrs.iter().any(|a| a.name == "inject") {
                 self.error(
                     field.line,
-                    "`@inject` is not supported on the Rust-for-Linux kernel target — \
+                    "`@inject` is not supported on the Rust-for-Linux Linux target — \
                      dependency injection assumes a full std runtime this target never has",
                 );
             }
@@ -1018,7 +1018,7 @@ impl KernelValidator {
                 // dispatch that referenced it -- surfacing only as a broken Rust reference,
                 // if at all, once the generated crate is compiled.
                 self.error(k.line, format!(
-                    "GPU kernel '{}' is not supported on the Rust-for-Linux kernel target -- \
+                    "GPU kernel '{}' is not supported on the Rust-for-Linux Linux target -- \
                      GPU kernels require `boring build --target cuda`, `--target metal`, \
                      `--target wgpu`, or `--target rocm`",
                     k.name

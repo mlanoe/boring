@@ -2,7 +2,7 @@
 
 `boring build --target wgpu` generates a Rust + WGSL project that runs GPU kernels via the [wgpu](https://wgpu.rs) crate — a cross-platform GPU abstraction that runs on DirectX 12 (Windows), Vulkan (Windows / Linux), and Metal (macOS).
 
-The Boring source is identical: the same `kernel` structs, qualifiers, and `gpu.*` built-ins work unchanged across CUDA, Metal, and wgpu targets.
+The Boring source is identical: the same `kernel` structs, qualifiers, and implicit kernel built-ins work unchanged across CUDA, Metal, and wgpu targets.
 
 ---
 
@@ -40,18 +40,18 @@ On Windows, wgpu uses DirectX 12 by default and falls back to Vulkan if DX12 is 
 
 | Boring | CUDA C | MSL | **WGSL** |
 |---|---|---|---|
-| `gpu.thread.x/y/z` | `threadIdx.x/y/z` | `thread_position_in_threadgroup.x/y/z` | `@builtin(local_invocation_id).x/y/z` |
-| `gpu.block.x/y/z` | `blockIdx.x/y/z` | `threadgroup_position_in_grid.x/y/z` | `@builtin(workgroup_id).x/y/z` |
-| `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` | `@builtin(local_invocation_size).x/y/z` |
-| `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` | `@builtin(num_workgroups).x/y/z` |
+| `.thread.x/y/z` | `threadIdx.x/y/z` | `thread_position_in_threadgroup.x/y/z` | `@builtin(local_invocation_id).x/y/z` |
+| `.block.x/y/z` | `blockIdx.x/y/z` | `threadgroup_position_in_grid.x/y/z` | `@builtin(workgroup_id).x/y/z` |
+| `.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` | `@builtin(local_invocation_size).x/y/z` |
+| `.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` | `@builtin(num_workgroups).x/y/z` |
 | `sync` (manual) | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` | `workgroupBarrier()` |
-| `gpu.warp.size` | `warpSize` | `threads_per_simdgroup` | `@builtin(subgroup_size)` (real) / fixed `32u` (emulated) |
-| `gpu.warp.lane` | linearized `threadIdx`, `% warpSize` | `thread_index_in_simdgroup` | `@builtin(subgroup_invocation_id)` (real) / `local_invocation_index % 32u` (emulated) |
-| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` | `simdgroup_barrier(mem_flags::mem_none)` | `subgroupBarrier()` (real) / `workgroupBarrier()` (emulated) |
-| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | `simd_shuffle_down(v, delta)` | `subgroupShuffleDown(v, delta)` (real) / workgroup-scratch emulation (see below) |
-| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | `simd_shuffle_up(v, delta)` | `subgroupShuffleUp(v, delta)` (real) / emulated |
-| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | `simd_shuffle_xor(v, mask)` | `subgroupShuffleXor(v, mask)` (real) / emulated |
-| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | `simd_shuffle(v, lane)` | `subgroupShuffle(v, lane)` (real) / emulated |
+| `.warp.size` | `warpSize` | `threads_per_simdgroup` | `@builtin(subgroup_size)` (real) / fixed `32u` (emulated) |
+| `.warp.lane` | linearized `threadIdx`, `% warpSize` | `thread_index_in_simdgroup` | `@builtin(subgroup_invocation_id)` (real) / `local_invocation_index % 32u` (emulated) |
+| `.warp.sync()` | `__syncwarp(0xffffffff)` | `simdgroup_barrier(mem_flags::mem_none)` | `subgroupBarrier()` (real) / `workgroupBarrier()` (emulated) |
+| `.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | `simd_shuffle_down(v, delta)` | `subgroupShuffleDown(v, delta)` (real) / workgroup-scratch emulation (see below) |
+| `.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | `simd_shuffle_up(v, delta)` | `subgroupShuffleUp(v, delta)` (real) / emulated |
+| `.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | `simd_shuffle_xor(v, mask)` | `subgroupShuffleXor(v, mask)` (real) / emulated |
+| `.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | `simd_shuffle(v, lane)` | `subgroupShuffle(v, lane)` (real) / emulated |
 | bare-`'actor` auto-barrier | inserted before first loop + at top of each loop iteration | idem | idem |
 | atomics (`'actor'global`/`'actor'unified`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` | `atomicAdd` / `atomicSub` / `atomicOr` / `atomicAnd` / `atomicXor` |
 | `[i].min/max/swap(v)` | `atomicMin`/`atomicMax`/`atomicExch` | `atomic_fetch_min/max_explicit` / `atomic_exchange_explicit` | `atomicMin` / `atomicMax` / `atomicExchange` |
@@ -79,7 +79,7 @@ Two more real bugs found and fixed while verifying the discard case (`_ = buf[i]
 
 Fixed by declaring a fresh `bp_discard_N` `let` (matching the existing shuffle-hoist temp-naming convention, single underscore) instead of touching `_` at all.
 
-### `gpu.warp.*` — real subgroup support vs. shared-memory emulation
+### `.warp.*` — real subgroup support vs. shared-memory emulation
 
 WGSL subgroup builtins (`subgroup_size`, `subgroup_invocation_id`,
 `subgroupShuffle*`, `subgroupBarrier`) need an explicit `enable subgroups;`
@@ -88,7 +88,7 @@ module directive and are only valid when the adapter has
 universally available** (gated behind an adapter feature, not guaranteed
 present on every backend/GPU combination).
 
-Whenever a program uses `gpu.warp.*`, `boring build --target wgpu` emits
+Whenever a program uses `.warp.*`, `boring build --target wgpu` emits
 **two** WGSL modules:
 
 - `shaders/main.wgsl` — the real-subgroup mapping (table above), gated by
@@ -116,13 +116,13 @@ catching exactly this HAL-vs-shader-frontend gap at runtime instead of
 crashing. Both paths give correct results — the emulated path just costs a
 real shared-memory round trip and full barrier per shuffle instead of a
 near-free register-to-register exchange, so the performance case for
-`gpu.warp.*` over bare `'actor` disappears (but correctness doesn't) when the
+`.warp.*` over bare `'actor` disappears (but correctness doesn't) when the
 real path isn't usable.
 
-The emulated path only supports `gpu.warp.shuffle_*` inside the value of a
+The emulated path only supports `.warp.shuffle_*` inside the value of a
 `let` statement or the right-hand side of an assignment (`let x =
-gpu.warp.shuffle_down(v, n)`, or the more common reduction idiom `v = v +
-gpu.warp.shuffle_xor(v, mask)`) — reachable through arithmetic/index/cast/call
+.warp.shuffle_down(v, n)`, or the more common reduction idiom `v = v +
+.warp.shuffle_xor(v, mask)`) — reachable through arithmetic/index/cast/call
 nesting. Each shuffle call found is hoisted into its own preceding
 write/barrier/read/barrier sequence assigning a fresh temp variable, which is
 then substituted back into the original expression — WGSL has no
@@ -222,7 +222,7 @@ This deliberately excludes naga's separate `BUILTIN_IDENTIFIERS` table (`array`,
 
 A narrower, separate collision exists within that same `BUILTIN_IDENTIFIERS` set, though: a `'actor` fixed-size workgroup array field whose Boring name is literally `array` (e.g. `let [float32, 256]'actor array`) would transpile to `var<workgroup> array: array<f32, 256>;` — and naga rejects that *specific* shape outright with `declaration of \`array\` is recursive`, even though `array` is not itself a reserved word. This is not a general "`array`/`atomic` are secretly reserved" rule — the identical name with a *different* declared type (`var<workgroup> array: i32;`) or the identical name as a *struct field* of any type both compile fine; the rejection fires only when a declaration's own name textually equals the type-constructor keyword used to spell its own type. `wgsl_workgroup_array_ident` (`src/transpiler/wgpu/device.rs`) guards specifically against this, renaming such a field the same way (`array` → `array_`), consistently at its declaration and every later reference — though see below, this fallback is no longer actually reachable from valid Boring source now that every workgroup declaration is kernel-prefixed.
 
-**Every `'sync`/`'actor` fixed-size workgroup array field, and every `gpu.warp.shuffle_*` emulated-fallback scratch buffer, is kernel-prefixed** (`{kernel}_{field}` for a field, `bp_warp_scratch_{kernel}_{elem_ty}` for a scratch buffer — both lowercased, matching the storage-buffer field convention below), the same way a storage-buffer field's name is always `{kernel}_{field}`-prefixed via `current_buffer_renames` before it's declared. Both are module-scope `var<workgroup>` declarations, so without this, two independently-written kernels that happen to name their tile field (or share a shuffled element type) the same thing — an entirely ordinary choice for two kernels doing a similar tiled operation, e.g. `tile_x` in two GEMM-shaped kernels — would combine into one shader module with two declarations sharing one module-scope identifier, rejected by naga with `redefinition of '...'`. As a side effect, a field literally named `array` is now disambiguated to `{kernel}_array` by this same prefixing before `wgsl_workgroup_array_ident`'s own self-recursion fallback ever gets a chance to matter — that fallback is kept for defense in depth but is effectively dead code today, since a real kernel name is never empty.
+**Every `'sync`/`'actor` fixed-size workgroup array field, and every `.warp.shuffle_*` emulated-fallback scratch buffer, is kernel-prefixed** (`{kernel}_{field}` for a field, `bp_warp_scratch_{kernel}_{elem_ty}` for a scratch buffer — both lowercased, matching the storage-buffer field convention below), the same way a storage-buffer field's name is always `{kernel}_{field}`-prefixed via `current_buffer_renames` before it's declared. Both are module-scope `var<workgroup>` declarations, so without this, two independently-written kernels that happen to name their tile field (or share a shuffled element type) the same thing — an entirely ordinary choice for two kernels doing a similar tiled operation, e.g. `tile_x` in two GEMM-shaped kernels — would combine into one shader module with two declarations sharing one module-scope identifier, rejected by naga with `redefinition of '...'`. As a side effect, a field literally named `array` is now disambiguated to `{kernel}_array` by this same prefixing before `wgsl_workgroup_array_ident`'s own self-recursion fallback ever gets a chance to matter — that fallback is kept for defense in depth but is effectively dead code today, since a real kernel name is never empty.
 
 Without any of this, the failure would be especially confusing: `boring build --target wgpu` transpiles successfully with no warning, since this backend never parses the WGSL it emits — the collision only surfaces later, at pipeline-creation time, as an opaque naga validation error (e.g. `name "const" is a reserved keyword`, or `redefinition of 'tile_x'`) nowhere near the Boring source that caused it.
 
@@ -477,7 +477,7 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 | `computeCapability()` | CUDA SM version | always `[0, 0]` — not applicable |
 | Multi-device (`GPU(1)`, `new(g1) K`) | full support — distinct `CudaContext` per index | `GPU(n)`/`.name()`/`.maxThreads()`/etc. resolve to real, distinct physical adapters when more than one is present (see "`GPU` type on wgpu" above) — introspection only. `new(g1) K` (actually placing a kernel's *dispatch* on a specific device) is still not implemented; every kernel dispatches on the single global `device`/`queue` regardless of which `GPU(n)` it was constructed with |
 | Windows / Linux / macOS | Windows + Linux | yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu) |
-| Tensor-core (`gpu.tensor.*`) | not yet implemented | not yet implemented — WGSL has no cooperative-matrix primitive at this project's pinned wgpu version (~v22); real upstream work exists (`Features::EXPERIMENTAL_COOPERATIVE_MATRIX`, merged wgpu ~28.x) but postdates the pin. See [tensor-core primitives](tensor-core-primitives.html) for the proposed design and revisit trigger. |
+| Tensor-core (`kernel.tensors.*`) | not yet implemented | not yet implemented — WGSL has no cooperative-matrix primitive at this project's pinned wgpu version (~v22); real upstream work exists (`Features::EXPERIMENTAL_COOPERATIVE_MATRIX`, merged wgpu ~28.x) but postdates the pin. See [tensor-core primitives](tensor-core-primitives.html) for the proposed design and revisit trigger. |
 
 ### Will these gaps close?
 

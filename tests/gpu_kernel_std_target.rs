@@ -29,7 +29,7 @@ kernel Scale:
     let float factor = 2.0
 
     def ():
-        data[thread.x] = data[thread.x] * factor
+        data[.thread.x] = data[.thread.x] * factor
 
 def main():
     mut k = Scale(data=[1.0, 2.0, 3.0], factor=2.0)
