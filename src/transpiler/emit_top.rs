@@ -582,10 +582,7 @@ impl Transpiler {
                 .filter(|p| p.mutable)
                 .map(|p| p.name.clone())
                 .collect();
-            sub.fn_current_params_lent = f.params.iter()
-                .filter(|p| is_lent_collection_param(p))
-                .map(|p| p.name.clone())
-                .collect();
+            sub.fn_current_params_lent = sub.fn_lent_param_names(f, false);
             sub.fn_return_ty = f.return_ty.clone();
             sub.in_struct_method = false;
 
@@ -1604,10 +1601,7 @@ impl Transpiler {
             let prev_param_cols = std::mem::take(&mut self.fn_current_param_cols);
             let prev_mut = std::mem::take(&mut self.fn_current_params_mut);
             let prev_lent = std::mem::take(&mut self.fn_current_params_lent);
-            self.fn_current_params_lent = f.params.iter()
-                .filter(|p| self.is_lent_param(p, self_ty.is_some()))
-                .map(|p| p.name.clone())
-                .collect();
+            self.fn_current_params_lent = self.fn_lent_param_names(f, self_ty.is_some());
             self.fn_current_params = f.params.iter()
                 .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
                 .collect();
@@ -1805,10 +1799,7 @@ impl Transpiler {
             .map(|p| (p.name.clone(), p.col))
             .collect();
         let prev_fn_current_params_lent = std::mem::take(&mut self.fn_current_params_lent);
-        self.fn_current_params_lent = f.params.iter()
-            .filter(|p| self.is_lent_param(p, self_ty.is_some()))
-            .map(|p| p.name.clone())
-            .collect();
+        self.fn_current_params_lent = self.fn_lent_param_names(f, self_ty.is_some());
         let prev_fn_current_params_mut = std::mem::take(&mut self.fn_current_params_mut);
         self.fn_current_params_mut = f.params.iter()
             .filter(|p| p.mutable)
@@ -2186,6 +2177,45 @@ impl Transpiler {
         in_method && is_mut_user_type_param_shape(p).is_some_and(|n| {
             self.all_struct_types.contains(n) || self.all_enum_types.contains(n)
         })
+    }
+
+    fn fn_lent_param_names(&self, f: &FnDecl, in_method: bool) -> std::collections::HashSet<String> {
+        let mut names = f.params.iter()
+            .filter(|p| self.is_lent_param(p, in_method))
+            .map(|p| p.name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        if in_method { return names; }
+
+        let mut candidates = f.params.iter().filter_map(|p| {
+            let type_name = is_mut_user_type_param_shape(p)?;
+            if self.qualified_struct_types.contains(type_name) { return None; }
+            let fields = self.struct_fields.get(type_name)?;
+            let mutable_collections = fields.iter().filter_map(|(name, ty)| match ty {
+                Type::Mut(inner) if matches!(inner.as_ref(), Type::Array(_) | Type::Dict(_, _) | Type::Set(_)) => Some(name.clone()),
+                Type::Mut(inner) if matches!(inner.as_ref(), Type::Named(value) if value == "string" || value == "String") => Some(name.clone()),
+                _ => None,
+            }).collect::<std::collections::HashSet<_>>();
+            (!mutable_collections.is_empty()).then(|| (p.name.clone(), mutable_collections))
+        }).collect::<std::collections::HashMap<_, _>>();
+        if candidates.is_empty() { return names; }
+
+        const MUTATING_METHODS: &[&str] = &[
+            "append", "clear", "insert", "move", "pop", "push", "remove", "removeAt",
+            "remove_at", "removeAll", "remove_all", "removeIndices", "remove_indices",
+            "reverse", "sort", "sortBy", "sort_by",
+        ];
+        crate::ast::walk_stmts(&f.body, &mut |node| {
+            let crate::ast::WalkNode::Expr(expr) = node else { return };
+            let ExprKind::MethodCall(receiver, method, _) = &expr.kind else { return };
+            if !MUTATING_METHODS.contains(&method.as_str()) { return; }
+            let ExprKind::Field(base, field) = &receiver.kind else { return };
+            let ExprKind::Var(param) = &base.kind else { return };
+            if candidates.get(param).is_some_and(|fields| fields.contains(field)) {
+                names.insert(param.clone());
+                candidates.remove(param);
+            }
+        });
+        names
     }
 
     pub(crate) fn emit_param(&self, p: &Param, in_method: bool) -> String {

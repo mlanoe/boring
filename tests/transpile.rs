@@ -1399,4 +1399,7 @@ transpile_test!(self_sibling_method_call);
 // bare `var` collection is rebindable-only) still transpile to Rust that compiles and runs.
 transpile_test!(var_mut_collection_ok);
 transpile_test!(field_mut_content_mutation);
+// A `mut` struct param whose struct has a dynamic field (`mut [string] log`) is lent as `&mut` too
+// (it is outside universal borrow inference): was by value, the caller never saw `push`.
+transpile_test!(field_mut_param_content_mutation);
 transpile_test!(string_methods_after_index);
