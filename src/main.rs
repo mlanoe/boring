@@ -21,6 +21,8 @@ pub mod desugar_inline_kernel;
 pub mod desugar_array_block;
 pub mod desugar_inject;
 pub mod view_perm;
+pub mod ast_walk;
+pub mod lower_view;
 pub mod interpreter;
 pub mod checker;
 mod git_deps;
@@ -113,6 +115,7 @@ fn desugar_inject_or_exit(
 ) -> ast::Program {
     match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), deps)
         .and_then(view_perm::resolve_view_permissions)
+        .and_then(lower_view::lower_views)
     {
         Ok(p) => p,
         Err(e) => {
@@ -2716,6 +2719,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     };
     match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), &deps)
         .and_then(view_perm::resolve_view_permissions)
+        .and_then(lower_view::lower_views)
     {
         Ok(p) => p,
         Err(e) => {

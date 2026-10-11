@@ -3200,7 +3200,14 @@ impl Transpiler {
                 {
                     format!("self.{}[{}]", field_name, idx_s)
                 }
-                _ => self.emit_expr(target),
+                // `other.field[i] = v` (a `mut` param / local binding owning the
+                // field): a place expression, so no read-side `.clone()`.
+                _ => {
+                    let old = self.in_lhs_assign.replace(true);
+                    let s = self.emit_expr(target);
+                    self.in_lhs_assign.set(old);
+                    s
+                }
             }
         } else {
             self.in_lhs_assign.set(true);

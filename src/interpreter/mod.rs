@@ -2271,6 +2271,10 @@ pub struct Interpreter {
     /// True while executing an `init` body. Bypasses the field immutability check so that
     /// constructors can assign to `let` fields (which are immutable after construction).
     pub(crate) in_init_body: bool,
+    /// Set while `assign_content` writes a mutated collection/object back to its
+    /// place: a field write that is really *content* mutation (`s.log.push(x)`,
+    /// `s.log[i] = x`), permitted by a `mut`-typed field without `var`.
+    pub(crate) in_content_writeback: bool,
     /// Runtime store for `type var` values: "StructName::var_name" → Value.
     /// `type let` values are stored here too (immutability enforced by the interpreter).
     pub(crate) type_var_store: HashMap<String, Value>,
@@ -2453,6 +2457,7 @@ impl Interpreter {
             return_ty_stack: Vec::new(),
             current_method_mutating: true,  // default to mutating for top-level code
             in_init_body: false,
+            in_content_writeback: false,
             type_var_store: HashMap::new(),
             in_type_setter: false,
             in_instance_setter: None,
@@ -2499,6 +2504,7 @@ impl Interpreter {
             return_ty_stack: Vec::new(),
             current_method_mutating: true,
             in_init_body: false,
+            in_content_writeback: false,
             type_var_store: HashMap::new(),
             in_type_setter: false,
             in_instance_setter: None,

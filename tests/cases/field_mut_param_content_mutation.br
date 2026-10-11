@@ -1,0 +1,10 @@
+struct S:
+    mut [string] log = []
+
+def add(mut S s):
+    s.log.push("x")
+
+def main():
+    mut s = S()
+    add(s)
+    print s.log.length

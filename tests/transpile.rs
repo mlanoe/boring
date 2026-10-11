@@ -410,6 +410,7 @@ transpile_test!(modules);
 // with tests/run.rs's registration above for the `boring run` side.
 transpile_test!(boring_stdlib_collections);
 transpile_test!(boring_stdlib_identity);
+transpile_test!(view_state_lowering);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
 // tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its
@@ -1397,4 +1398,5 @@ transpile_test!(self_sibling_method_call);
 // `var mut`/`mut` collection locals and parameters (the permitted forms of content mutation once a
 // bare `var` collection is rebindable-only) still transpile to Rust that compiles and runs.
 transpile_test!(var_mut_collection_ok);
+transpile_test!(field_mut_content_mutation);
 transpile_test!(string_methods_after_index);

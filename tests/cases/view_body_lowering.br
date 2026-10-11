@@ -1,0 +1,23 @@
+# `body()` is lowered like any method (`body(mut Badge__State __st)`, state reads rewritten).
+# It is not called: no `View` implementation exists until the UI stdlib lands, so this only
+# proves the lowered program parses and type-checks.
+struct Label:
+    string text
+
+view Badge:
+    string title
+    state int count = 0
+
+    req string describe():
+        "{title}:{count}"
+
+    # Lowered like any method (`body(mut Badge__State __st)`); it is not called below because no
+    # `View` implementation exists until the UI stdlib lands.
+    body():
+        Label(self.describe())
+
+def main():
+    let badge = Badge(title = "B")
+    mut st = Badge__State()
+    st.count = 4
+    print badge.describe(st)

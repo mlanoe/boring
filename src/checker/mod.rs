@@ -57,6 +57,24 @@ pub fn check(program: &Program) -> CheckResult {
     CheckResult { errors: checker.errors, warnings: checker.warnings }
 }
 
+/// Runs ONLY the declarative `view` rules (`check_view_decl`). `lower_view` consumes the
+/// `state`/`bind`/`env` markers the rules are written against, so it validates with this first —
+/// the full `check()` afterwards only ever sees the lowered, ordinary structs.
+pub fn check_view_declarations(program: &Program) -> Vec<CheckError> {
+    fn walk(c: &mut Checker, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Struct(s) if s.is_view => c.check_view_decl(s),
+                Item::Mod(m) => walk(c, &m.items),
+                _ => {}
+            }
+        }
+    }
+    let mut checker = Checker::new();
+    walk(&mut checker, &program.items);
+    checker.errors
+}
+
 /// Runs ONLY the kernel-dispatch-qualifier check (`check_kernel_dispatch_qualifier`)
 /// -- every other check (`mut 'shared`, immutability, `lazy` misuse, GPU-resident
 /// opacity) is walked but silenced. Used by the four GPU `emit_*` targets

@@ -620,7 +620,7 @@ impl Interpreter {
                 env.borrow_mut().force_set(caller_name, new_val);
             }
             ExprKind::Field(..) => {
-                let _ = self.assign(arg, new_val, Rc::clone(env), line);
+                let _ = self.assign_content(arg, new_val, Rc::clone(env), line);
             }
             _ => {}
         }
@@ -1029,12 +1029,12 @@ impl Interpreter {
                             if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
                                 let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
                                 let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
-                                let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
+                                let _ = self.assign_content(&field_expr, new_obj, Rc::clone(&env), line);
                             }
                         }
                     }
                 }
-                _ => { let _ = self.assign(obj_expr, new_obj, Rc::clone(&env), line); }
+                _ => { let _ = self.assign_content(obj_expr, new_obj, Rc::clone(&env), line); }
             }
         }
         // Collect owned-param source names before any borrow of global

@@ -1,0 +1,36 @@
+# `view` lowering (docs/design-notes/boring-ui-draft.md, "State slots and binding handles"):
+# a view with inputs + `state` fields becomes `Badge` (inputs) + `Badge__State` (mounted state);
+# `body()` and every method take the state as an explicit `__st` parameter.
+
+struct Profile:
+    var string name = ""
+
+    def rename(string n):
+        name = n
+
+view Badge:
+    string title
+    state int count = 0
+    state let string token = "tok"
+    state Profile profile = Profile()
+    state [string] log = []
+
+    def bump():
+        count += 1
+        log.push("bump {count}")
+        self.touch()
+
+    def touch():
+        self.profile.rename("{title}#{self.count}")
+
+    req string describe():
+        "{title}:{count}:{token}:{profile.name}:{log.length}"
+
+def main():
+    let badge = Badge(title = "B")
+    mut st = Badge__State()
+    print badge.describe(st)
+    badge.bump(st)
+    badge.bump(st)
+    print badge.describe(st)
+    print st.log[1]

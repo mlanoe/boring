@@ -1,0 +1,7 @@
+struct S:
+    mut [string] log = []
+
+def main():
+    mut s = S()
+    s.log.push("x")
+    s.log = []

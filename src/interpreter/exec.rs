@@ -306,10 +306,10 @@ impl Interpreter {
                             //  (b) pop/remove/removeAt → result is the extracted element;
                             //      call_method sets out_self to the shortened collection
                             if matches!(result, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
-                                self.assign(obj_expr, result, Rc::clone(&env), line)?;
+                                self.assign_content(obj_expr, result, Rc::clone(&env), line)?;
                             } else if let Some(new_coll) = out_self {
                                 if matches!(new_coll, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
-                                    self.assign(obj_expr, new_coll, Rc::clone(&env), line)?;
+                                    self.assign_content(obj_expr, new_coll, Rc::clone(&env), line)?;
                                 }
                             }
 

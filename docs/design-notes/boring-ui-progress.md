@@ -16,7 +16,7 @@ acceptance app) have not.
 | `array.move(from, to)` / `removeIndices(idxs)` | **done** (`a11b94c6`) | Interpreter (`src/interpreter/methods.rs`), transpiler prelude (`BoringArrayIndex::move_item`/`remove_indices`, `src/transpiler/mod.rs`), checker mutability gate. Case: `tests/cases/array_move_remove_indices.br`. |
 | `for x in xs with <key>:` | **done, syntax + lowering** (`a11b94c6`) | `ForStmt.key`; in a collect block each iteration lowers to `KeyedGroup(key, [items])` (a library symbol the caller must have in scope — **my design choice, not in the draft; revisit if the runtime wants another contract**). Checker rejects it outside a collect block. Cases: `array_block_keyed_for*`. |
 | `IdentityKey` / `Identifiable` | **done** (`a11b94c6`) | `use boring.identity.*` (`stdlib/identity.br`). Transpiler emits a blanket impl and emits trait-bound assoc types by name; interpreter checks `type ID as IdentityKey` (rejects floats/dicts/sets/fn). Cases: `boring_stdlib_identity*`. |
-| `view` / `state` / `bind` / `env` / `body()` | **parse + checker + default permissions done** | Declarations only; no lowering. Default-permission resolution: `src/view_perm.rs` (see below). |
+| `view` / `state` / `bind` / `env` / `body()` | **parse + checker + default permissions + state lowering (slice 1) done** | `src/view_perm.rs`, `src/lower_view.rs` (see below). `bind`/`env`/native views not lowered. |
 
 ### `view` parse + checker (commit `e0f4173d`)
 
@@ -66,11 +66,39 @@ option of those, or `'actor`/`'guard`/`'observed` is a hard error ("not an `Iden
 `f(x)` or a field of an un-annotated local is not checked. `Identifiable` conformance via `ext`
 is not seen. Closing those needs real type inference in the checker.
 
+### View lowering, slice 1: `state` (2026-10-11, `src/lower_view.rs` + `src/ast_walk.rs`)
+
+**Decision (user, 2026-10-11):** lower to ordinary Boring structs with an explicit context
+parameter, *not* wait for the layer-2 Rust runtime. Runs after `view_perm`, before the checker
+(first validating the declarative view rules via `checker::check_view_declarations`, since the
+lowered program no longer carries `state`/`bind`/`env` markers).
+
+`view Badge` with inputs + `state` fields becomes `struct Badge__State` (the mounted-state layout,
+`state` fields in order, `state let` → immutable field) and `struct Badge` (inputs only, the
+ephemeral description). Every method and `body()` gains a trailing `mut Badge__State __st`
+parameter and becomes `req`; bare reads/writes of a state field and `self.<state>` become
+`__st.<state>`; `self.method(..)` forwards `__st`. The default seed is `Badge__State()`. Validation:
+a `state` needs an initializer; a local/param/loop var/closure param may not shadow a state name.
+`src/ast_walk.rs` is a new generic mutable AST walker (pre-order, expr+stmt callbacks) — the repo had
+none; reusable for later passes. Cases: `view_state_lowering` (interp + all 4 transpile configs),
+`view_body_lowering`, `view_state_shadow`, `view_state_no_initializer`.
+
+Known limits of slice 1:
+- `body()` lowers and type-checks but **cannot be called or transpiled** yet: its return type is
+  `impl View` and no `View` trait exists (needs the UI stdlib). `view_state_lowering` therefore has no
+  `body`; `view_body_lowering` (interpreter only) never calls it.
+- No write-site invalidation: the runtime must treat any callback that received `__st` as a possible
+  writer (conservative).
+- Content-mutable state slots (`state mut [T] f`) lower to a plain `mut` field of `<View>__State`: the
+  interpreter now honours in-place mutation (`f.push(..)`, `f[i] = ..`) through a `mut`-only field while
+  still rejecting whole-field replacement, so the draft's "`mut` default forbids replacement" holds.
+- `bind`/`env`/native views stay `view` declarations; `boring build` still errors for them.
+
 ### Not done in layer 1
 
-1. **View lowering**: typed state-slot layout, seed closures (lazy, evaluated once at mount),
-   `bind` slot handles with generation checks, `env` lookup, callback `self` as mounted-view
-   context, invalidation call at write sites. `boring build` currently errors for any `view`.
+1. **View lowering, remaining parts**: `bind` slot handles with generation checks, `env` lookup,
+   parent-supplied seeds (`Counter(count = expensive())`), precise write-site invalidation, native
+   views (`body(): native`), and the `View` trait / `<View>` body type (see slice 1 below).
 2. Runtime duplicate-key validation (belongs to layer 2).
 3. Native-body (`body(): native`) facade → runtime adapter linkage (layer 2/4).
 

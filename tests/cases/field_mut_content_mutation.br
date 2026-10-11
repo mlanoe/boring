@@ -1,0 +1,19 @@
+struct S:
+    mut [string] log = []
+    mut {string = int} counts = {=}
+
+struct V:
+    int a
+    req int f(mut S st):
+        st.log.push("x")
+        st.log.length
+
+def main():
+    mut s = S()
+    print s.log.length
+    print V(a = 1).f(s)
+    s.log[0] = "y"
+    s.counts["k"] = 3
+    print s.log[0]
+    print s.counts["k"]
+    print s.log.length

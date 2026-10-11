@@ -1,0 +1,10 @@
+# A local that reuses a `state` name would be silently rewritten to `__st.count`: rejected.
+view V:
+    state int count = 0
+
+    def f():
+        let count = 5
+        print count
+
+def main():
+    print "unreachable"

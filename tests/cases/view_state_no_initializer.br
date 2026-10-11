@@ -1,0 +1,5 @@
+view V:
+    state int count
+
+def main():
+    print "unreachable"

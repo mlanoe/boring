@@ -2372,7 +2372,19 @@ impl Interpreter {
         }
     }
 
+    /// `assign` for writing a content-mutated value (`s.log.push(x)`, `s.log[i] = x`,
+    /// a `mut` param's final value) back to its place: unlike a user-written
+    /// `s.log = ...`, this is permitted on a `mut`-typed field that isn't `var`.
+    pub(crate) fn assign_content(&mut self, target: &Expr, val: Value, env: EnvRef, line: usize) -> Result<(), Signal> {
+        let prev = std::mem::replace(&mut self.in_content_writeback, true);
+        let r = self.assign(target, val, env, line);
+        self.in_content_writeback = prev;
+        r
+    }
+
     pub(crate) fn assign(&mut self, target: &Expr, val: Value, env: EnvRef, line: usize) -> Result<(), Signal> {
+        // Consumed here so it can't leak into setter bodies / nested evaluation.
+        let content_wb = std::mem::take(&mut self.in_content_writeback);
         match &target.kind {
             ExprKind::Var(name) => {
                 // `_` is the explicit discard sink — evaluate for side effects, store nothing.
@@ -2543,7 +2555,9 @@ impl Interpreter {
                             let struct_val = self.global.borrow().get(&type_name);
                             if let Some(Value::Struct { decl, .. }) = struct_val {
                                 if let Some(fd) = decl.fields.iter().find(|f| f.name == *field) {
-                                    if !fd.mutable && !self.in_init_body {
+                                    if !fd.mutable && !self.in_init_body
+                                        && !(content_wb && fd.ty.grants_mut())
+                                    {
                                         return Err(err(format!("cannot assign to immutable field '{}'", field), line));
                                     }
                                     // In a req (non-mutating) method, only transient fields may be written
@@ -2673,7 +2687,7 @@ impl Interpreter {
                         if pos < arr.len() {
                             arr[pos] = Self::coerce_array_elem_literal(val, &arr[pos]);
                         }
-                        self.assign(obj_expr, Value::Array(arr.into()), env, line)?;
+                        self.assign_content(obj_expr, Value::Array(arr.into()), env, line)?;
                     }
                     Value::ByteArray(arr_rc) => {
                         if let Value::Uint8(b) = val {
@@ -2690,7 +2704,7 @@ impl Interpreter {
                                 }
                             };
                             if pos < arr.len() { arr[pos] = b; }
-                            self.assign(obj_expr, Value::ByteArray(arr.into()), env, line)?;
+                            self.assign_content(obj_expr, Value::ByteArray(arr.into()), env, line)?;
                         } else {
                             // Non-byte value: degrade to a plain Array (mirrors `push`'s fallback).
                             let mut arr = match Value::inflate_byte_array(&arr_rc) {
@@ -2709,7 +2723,7 @@ impl Interpreter {
                                 }
                             };
                             if pos < arr.len() { arr[pos] = val; }
-                            self.assign(obj_expr, Value::Array(arr.into()), env, line)?;
+                            self.assign_content(obj_expr, Value::Array(arr.into()), env, line)?;
                         }
                     }
                     Value::Dict(mut pairs) => {
@@ -2722,7 +2736,7 @@ impl Interpreter {
                             if k == &key { *v = val.clone(); found = true; break; }
                         }
                         if !found { pairs.push((key, val)); }
-                        self.assign(obj_expr, Value::Dict(pairs), env, line)?;
+                        self.assign_content(obj_expr, Value::Dict(pairs), env, line)?;
                     }
                     Value::Set(_) => {
                         return Err(err(
