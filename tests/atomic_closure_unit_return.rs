@@ -51,7 +51,9 @@ fn emit_rust(src: &str, dir: &Path) -> String {
     std::fs::write(&br_file, src).expect("failed to write fixture .br file");
 
     let emit = Command::new(bin)
-        .arg("build").arg(&br_file).arg("--emit-rust")
+        .arg("build")
+        .arg(&br_file)
+        .arg("--emit-rust")
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke boring: {}", e));
     assert!(
@@ -69,14 +71,15 @@ fn emit_rust(src: &str, dir: &Path) -> String {
 /// wrong occurrence count for `f();` — this test must know exactly which
 /// call it's replacing, not silently replace zero or several.
 fn compile_through_fn_mut_bound(generated: &str, dir: &Path) {
-    let occurrences = generated.matches("f();").count();
+    let invocation = "\n    f();\n";
+    let occurrences = generated.matches(invocation).count();
     assert_eq!(
         occurrences, 1,
         "expected exactly one `f();` call to splice into an `impl FnMut()` \
          call site, found {}:\n{}",
         occurrences, generated
     );
-    let spliced = generated.replacen("f();", "takes_fn_mut(f);", 1);
+    let spliced = generated.replacen(invocation, "\n    takes_fn_mut(f);\n", 1);
     let spliced = format!(
         "{}\nfn takes_fn_mut(mut cb: impl FnMut()) {{ cb(); }}\n",
         spliced
@@ -88,9 +91,11 @@ fn compile_through_fn_mut_bound(generated: &str, dir: &Path) {
     let bin_path = dir.join("gen_bin");
 
     let rustc = Command::new("rustc")
-        .arg("--edition").arg("2021")
+        .arg("--edition")
+        .arg("2021")
         .arg(&rs_path)
-        .arg("-o").arg(&bin_path)
+        .arg("-o")
+        .arg(&bin_path)
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke rustc: {}", e));
     assert!(
@@ -104,9 +109,16 @@ fn compile_through_fn_mut_bound(generated: &str, dir: &Path) {
     let run = Command::new(&bin_path)
         .output()
         .unwrap_or_else(|e| panic!("failed to run compiled binary: {}", e));
-    assert!(run.status.success(), "expected the compiled binary to run successfully");
+    assert!(
+        run.status.success(),
+        "expected the compiled binary to run successfully"
+    );
     let stdout = String::from_utf8_lossy(&run.stdout).trim_end().to_string();
-    assert_eq!(stdout, "1", "expected the counter to have been incremented exactly once, got: {}", stdout);
+    assert_eq!(
+        stdout, "1",
+        "expected the counter to have been incremented exactly once, got: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -121,7 +133,8 @@ fn atomic_closure_trailing_compound_assign_is_unit_returning() {
     assert!(
         generated.contains("fetch_add(1, std::sync::atomic::Ordering::SeqCst); }"),
         "expected the closure's trailing 'atomic compound-assign to end in `;` \
-         (forcing the block to `()`), got:\n{}", generated
+         (forcing the block to `()`), got:\n{}",
+        generated
     );
 
     // End-to-end: the exact same emitted closure must satisfy a real
@@ -140,7 +153,11 @@ fn actor_closure_trailing_compound_assign_is_already_unit_returning() {
     let dir = Path::new("target/atomic_closure_unit_return_test_scratch/actor");
     let generated = emit_rust(src, dir);
 
-    assert!(generated.contains("Mutex<"), "expected the Mutex representation for an 'actor capture, got:\n{}", generated);
+    assert!(
+        generated.contains("Mutex<"),
+        "expected the Mutex representation for an 'actor capture, got:\n{}",
+        generated
+    );
 
     compile_through_fn_mut_bound(&generated, dir);
 
