@@ -2,7 +2,7 @@
 
 Companion to [`boring-ui-draft.md`](boring-ui-draft.md) (the design). This file tracks **what is
 implemented, what is decided, and what to do next**, so work can resume on another machine.
-Last updated: 2026-10-10 (all work below is committed on `main`).
+Last updated: 2026-10-11.
 
 The draft's "Implementation sequence" has 6 layers. Only **layer 1 (language prerequisites)** has
 been started; layers 2–6 (headless reactive core, layout/scene, desktop host, controls, Todo
@@ -16,7 +16,7 @@ acceptance app) have not.
 | `array.move(from, to)` / `removeIndices(idxs)` | **done** (`a11b94c6`) | Interpreter (`src/interpreter/methods.rs`), transpiler prelude (`BoringArrayIndex::move_item`/`remove_indices`, `src/transpiler/mod.rs`), checker mutability gate. Case: `tests/cases/array_move_remove_indices.br`. |
 | `for x in xs with <key>:` | **done, syntax + lowering** (`a11b94c6`) | `ForStmt.key`; in a collect block each iteration lowers to `KeyedGroup(key, [items])` (a library symbol the caller must have in scope — **my design choice, not in the draft; revisit if the runtime wants another contract**). Checker rejects it outside a collect block. Cases: `array_block_keyed_for*`. |
 | `IdentityKey` / `Identifiable` | **done** (`a11b94c6`) | `use boring.identity.*` (`stdlib/identity.br`). Transpiler emits a blanket impl and emits trait-bound assoc types by name; interpreter checks `type ID as IdentityKey` (rejects floats/dicts/sets/fn). Cases: `boring_stdlib_identity*`. |
-| `view` / `state` / `bind` / `env` / `body()` | **parse + checker done** (`e0f4173d`) | Declarations only; no lowering. |
+| `view` / `state` / `bind` / `env` / `body()` | **parse + checker + default permissions done** | Declarations only; no lowering. Default-permission resolution: `src/view_perm.rs` (see below). |
 
 ### `view` parse + checker (commit `e0f4173d`)
 
@@ -38,24 +38,45 @@ initializer on `bind`/`env`; `env var`/`env mut` rejected (`env let` accepted as
 trait-object/opaque `state`/`bind` needs an explicit permission; `body()` takes no parameters and
 appears at most once; `struct X as View` rejected.
 
+### Default-permission resolution (`src/view_perm.rs`, 2026-10-11)
+
+`resolve_view_permissions` runs on the merged `Program` right after `desugar_inject` (inside
+`desugar_inject_or_exit` and the `boring build` loader). For each `state`/`bind` field written
+without `let`/`var`/`mut` it rewrites the field into the encoding the explicit spelling would
+produce — `mutable = true` for the `var` category, `Type::Mut` for the `mut` category — and leaves
+`explicit_perm = false`. Classification is the draft's closed table: primitives/strings/enums/
+newtypes/tuples/fn values/optionals → `var`; structs/arrays/dicts/sets → `mut`; trait objects,
+generic parameters and unknown/external names → hard error asking for an explicit permission.
+`'observed` fields and `env` fields are left untouched. The parser records primitives as
+`Type::Named("int")`, so the pass matches primitive names explicitly. Unit tests: `view_perm::tests`.
+Not done: a generic parameter whose `where` constraint proves one category (currently always an
+error — conservative).
+
+### `IdentityKey` bound check + omitted `with` (`src/desugar_array_block.rs`, 2026-10-11)
+
+Done in the array-block desugar (it consumes the key before the checker runs, and the checker has
+no type inference). `Signatures` now carries a struct table (`defs`: fields, conformances,
+zero-arg method return types) and a flat per-body `locals` environment (params, enclosing struct
+fields, annotated `let`s, keyed-loop variables). `resolve_identity_keys` runs on each collect
+block: an explicit key whose type is *statically known* to be a float, dict, set, fn value, tuple/
+option of those, or `'actor`/`'guard`/`'observed` is a hard error ("not an `IdentityKey`"); an omitted
+`with` over `[T]` where `T` declares `as Identifiable` lowers to `with item.id()`. Cases:
+`array_block_keyed_for_float_key`, `array_block_keyed_for_identifiable`.
+**Best-effort by design:** an unknown type never errors (no false positives), so a key like
+`f(x)` or a field of an un-annotated local is not checked. `Identifiable` conformance via `ext`
+is not seen. Closing those needs real type inference in the checker.
+
 ### Not done in layer 1
 
-1. **Default-permission resolution** for `state`/`bind` without `let`/`var`/`mut` (draft, "Implicit and
-   explicit binding permissions"): `var` for primitives/strings/enums/options/tuples/newtypes/fn
-   values, `mut` for structs/arrays/dicts/sets. The parser only records `explicit_perm`; the
-   resolution needs type classification (struct vs enum) → do it in the checker/lowering with the
-   program's declaration table.
-2. **View lowering**: typed state-slot layout, seed closures (lazy, evaluated once at mount),
+1. **View lowering**: typed state-slot layout, seed closures (lazy, evaluated once at mount),
    `bind` slot handles with generation checks, `env` lookup, callback `self` as mounted-view
    context, invalidation call at write sites. `boring build` currently errors for any `view`.
-3. **`IdentityKey` bound check** on the `with` key expression (needs expression type info), and
-   **omitting `with` for an `Identifiable` element** (lower to `item.id()`).
-4. Runtime duplicate-key validation (belongs to layer 2).
-5. Native-body (`body(): native`) facade → runtime adapter linkage (layer 2/4).
+2. Runtime duplicate-key validation (belongs to layer 2).
+3. Native-body (`body(): native`) facade → runtime adapter linkage (layer 2/4).
 
 ## Next steps (suggested order)
 
-1. Layer 1 remainder: items 1–3 above.
+1. Layer 1 remainder: view lowering (item 1 above).
 2. Layer 2: headless reactive core as a Rust crate/module (mounted tree, typed slots, reconciliation,
    event transactions, lifecycle, 64-pass loop guard) — independent of the language work, so it can
    proceed in parallel.

@@ -1,0 +1,27 @@
+# An explicit `with` key whose type is statically a float is rejected: not an `IdentityKey`.
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct KeyedGroup as Widget:
+    float key
+    [Widget] children
+    req string label(): "k"
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "c"
+
+struct Item:
+    pub float score
+
+Column rows([Item] items):
+    Column:
+        for it in items with it.score:
+            Text("x")
+
+def main():
+    print "unreachable"

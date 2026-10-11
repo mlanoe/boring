@@ -1,0 +1,41 @@
+# `for x in xs:` inside a trailing array-block with NO `with`: when the element type is
+# `Identifiable` the key is `item.id()` (docs/design-notes/boring-ui-draft.md, "Identity &
+# lifecycle"). A non-Identifiable element stays a plain, unkeyed loop. `KeyedGroup` is an
+# ordinary fixture symbol.
+use boring.identity.*
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct KeyedGroup as Widget:
+    int key
+    [Widget] children
+    req string label(): "#{self.key}({self.children.length})"
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+struct Todo as Identifiable:
+    pub int num
+    type ID = int
+    req int id(): num
+
+Column rows([Todo] todos, [int] plain):
+    Column:
+        for t in todos:
+            Text("a{t.num}")
+            Text("b{t.num}")
+        for n in plain:
+            Text("p{n}")
+
+def main():
+    let c = rows([Todo(7), Todo(3)], [1, 2])
+    print c.label()
+    print c.children[0].label()
+    print c.children[1].label()
+    print c.children[2].label()

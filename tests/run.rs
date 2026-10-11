@@ -694,6 +694,8 @@ interp_test!(array_block_nested);
 interp_test!(array_block_if);
 interp_test!(array_block_for);
 interp_test!(array_block_keyed_for);
+interp_test!(array_block_keyed_for_identifiable);
+error_test!(array_block_keyed_for_float_key);
 interp_test!(view_decl_parse);
 error_test!(array_block_keyed_for_imperative);
 interp_test!(array_block_labeled_args);

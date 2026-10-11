@@ -132,6 +132,20 @@ struct Signatures {
     /// plain struct/enum or a concrete element type — see the decision
     /// table's "any other last param type" row).
     traits: HashSet<String>,
+    /// Struct/view name -> what key inference needs: field types, declared
+    /// conformances, and zero-argument method return types.
+    defs: HashMap<String, StructInfo>,
+    /// Best-effort local type environment for the function/method body currently being
+    /// desugared: parameters, the enclosing struct's fields, annotated `let`s and keyed-loop
+    /// variables. Flat per body (no block scoping) — it only feeds `for … with` key checks.
+    locals: std::cell::RefCell<HashMap<String, Type>>,
+}
+
+#[derive(Default, Clone)]
+struct StructInfo {
+    fields: HashMap<String, Type>,
+    protocols: Vec<String>,
+    methods: HashMap<String, Type>,
 }
 
 impl Signatures {
@@ -179,6 +193,14 @@ impl Signatures {
                 Item::Struct(s) | Item::Stmt(Stmt::Struct(s)) => {
                     if accept(&s.name, s.is_pub) {
                         self.structs.insert(s.name.clone(), s.fields.iter().map(|f| f.ty.clone()).collect());
+                        self.defs.insert(s.name.clone(), StructInfo {
+                            fields: s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                            protocols: s.protocols.clone(),
+                            methods: s.methods.iter()
+                                .filter(|m| m.params.is_empty())
+                                .filter_map(|m| Some((m.name.clone(), m.return_ty.clone()?)))
+                                .collect(),
+                        });
                     }
                 }
                 // Trait names are always recorded: an imported signature's own
@@ -202,6 +224,134 @@ impl Signatures {
     fn is_trait(&self, name: &str) -> bool {
         self.traits.contains(name)
     }
+
+    /// Best-effort static type of `e` from the local environment and struct table.
+    /// `None` means "unknown" — callers must never reject on it.
+    fn infer(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Int(_) => Some(Type::Int),
+            ExprKind::Float(_) => Some(Type::Float64),
+            ExprKind::Var(n) => self.locals.borrow().get(n).cloned(),
+            ExprKind::Field(obj, f) => {
+                if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
+                    return self.locals.borrow().get(f).cloned();
+                }
+                let Type::Named(sn) = strip_perm(&self.infer(obj)?) else { return None };
+                self.defs.get(&sn)?.fields.get(f).cloned()
+            }
+            ExprKind::MethodCall(obj, m, args) if args.is_empty() => {
+                let Type::Named(sn) = strip_perm(&self.infer(obj)?) else { return None };
+                self.defs.get(&sn)?.methods.get(m).cloned()
+            }
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(n) if self.defs.contains_key(n) => Some(Type::Named(n.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Element type of an iterable whose type is a known array.
+    fn element_type(&self, iterable: &Expr) -> Option<Type> {
+        match strip_perm(&self.infer(iterable)?) {
+            Type::Array(t) | Type::ArrayN(t, _) => Some(strip_perm(&t)),
+            _ => None,
+        }
+    }
+
+    /// Records parameter types (and, inside a struct/view, its fields) for a body.
+    fn enter_body(&self, params: &[Param], owner: Option<&StructDecl>) -> HashMap<String, Type> {
+        let mut env = HashMap::new();
+        if let Some(sd) = owner {
+            for f in &sd.fields { env.insert(f.name.clone(), f.ty.clone()); }
+        }
+        for p in params {
+            if let Some(t) = &p.ty { env.insert(p.name.clone(), t.clone()); }
+        }
+        std::mem::replace(&mut *self.locals.borrow_mut(), env)
+    }
+
+    fn leave_body(&self, saved: HashMap<String, Type>) {
+        *self.locals.borrow_mut() = saved;
+    }
+}
+
+/// Drops `mut`/qualifier wrappers that don't change which type something is.
+fn strip_perm(ty: &Type) -> Type {
+    match ty {
+        Type::Mut(inner) => strip_perm(inner),
+        Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::Inline
+            | OwnerQual::Owned | OwnerQual::Shared) => strip_perm(inner),
+        other => other.clone(),
+    }
+}
+
+/// Why `ty` can't be an `IdentityKey` (docs/design-notes/boring-ui-draft.md, "`IdentityKey` and
+/// `Identifiable`"): floats have no total equality; dictionaries, sets and function values are
+/// not `Hash`; a mutable-shared qualifier isn't an owned snapshot.
+fn non_key_reason(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Float32 | Type::Float64 => Some("floating-point values have no total equality (NaN)"),
+        Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64") =>
+            Some("floating-point values have no total equality (NaN)"),
+        Type::Dict(..) | Type::Set(_) => Some("dictionaries and sets are not hashable"),
+        Type::Fn(..) => Some("function values are not hashable"),
+        Type::Mut(inner) => non_key_reason(inner),
+        Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Observed) =>
+            Some("mutable shared qualifiers are not owned key snapshots"),
+        Type::Qualified(inner, _) | Type::Optional(inner) => non_key_reason(inner),
+        Type::Tuple(ts) => ts.iter().find_map(non_key_reason),
+        _ => None,
+    }
+}
+
+/// Validates explicit `for … with <key>` expressions and resolves an omitted `with` for an
+/// `Identifiable` element (`item.id()`), recursively through a collect block's elements.
+fn resolve_identity_keys(elems: &mut [ArrayBlockElem], sigs: &Signatures) -> Result<(), ParseError> {
+    for elem in elems {
+        match elem {
+            ArrayBlockElem::Item(_) => {}
+            ArrayBlockElem::If { branches, else_body } => {
+                for (_, b) in branches.iter_mut() { resolve_identity_keys(b, sigs)?; }
+                if let Some(b) = else_body { resolve_identity_keys(b, sigs)?; }
+            }
+            ArrayBlockElem::For { vars, iterable, key, body } => {
+                let elem_ty = sigs.element_type(iterable);
+                if let (Some(t), [v]) = (&elem_ty, vars.as_slice()) {
+                    sigs.locals.borrow_mut().insert(v.clone(), t.clone());
+                }
+                match key {
+                    Some(k) => {
+                        if let Some(reason) = sigs.infer(k).as_ref().and_then(non_key_reason) {
+                            return Err(ParseError::Generic {
+                                line: k.line, col: k.col, len: k.len.max(1),
+                                msg: format!(
+                                    "`for … with` key is not an `IdentityKey`: {reason} — \
+                                     key on an integer, string, enum, newtype or other owned `Clone + Eq + Hash` value"
+                                ),
+                            });
+                        }
+                    }
+                    None => {
+                        if let (Some(Type::Named(sn)), [v]) = (&elem_ty, vars.as_slice()) {
+                            let identifiable = sigs.defs.get(sn)
+                                .is_some_and(|d| d.protocols.iter().any(|p| p == "Identifiable"));
+                            if identifiable {
+                                let (line, col, len) = (iterable.line, iterable.col, iterable.len);
+                                let var = Expr { kind: ExprKind::Var(v.clone()), line, col, len };
+                                *key = Some(Expr {
+                                    kind: ExprKind::MethodCall(Box::new(var), "id".to_string(), vec![]),
+                                    line, col, len,
+                                });
+                            }
+                        }
+                    }
+                }
+                resolve_identity_keys(body, sigs)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A short, human-readable rendering of `ty` for error messages — deliberately
@@ -480,11 +630,20 @@ fn desugar_items(items: Vec<Item>, sigs: &Signatures) -> Result<Vec<Item>, Parse
 
 fn desugar_item(item: Item, sigs: &Signatures) -> Result<Item, ParseError> {
     Ok(match item {
-        Item::Fn(mut f) => { f.body = desugar_body(f.body, sigs)?; Item::Fn(f) }
+        Item::Fn(mut f) => {
+            let saved = sigs.enter_body(&f.params, None);
+            let r = desugar_body(std::mem::take(&mut f.body), sigs);
+            sigs.leave_body(saved);
+            f.body = r?;
+            Item::Fn(f)
+        }
         Item::Struct(mut s) => {
+            let owner = s.clone();
             for m in s.methods.iter_mut() {
-                let body = std::mem::take(&mut m.body);
-                m.body = desugar_body(body, sigs)?;
+                let saved = sigs.enter_body(&m.params, Some(&owner));
+                let r = desugar_body(std::mem::take(&mut m.body), sigs);
+                sigs.leave_body(saved);
+                m.body = r?;
             }
             for i in s.inits.iter_mut() {
                 let body = std::mem::take(&mut i.body);
@@ -536,6 +695,7 @@ fn desugar_stmt(stmt: Stmt, sigs: &Signatures) -> Result<Stmt, ParseError> {
     Ok(match stmt {
         Stmt::Let(mut s) => {
             if let Some(v) = s.value.take() { s.value = Some(desugar_expr(v, sigs)?); }
+            if let Some(t) = &s.ty { sigs.locals.borrow_mut().insert(s.name.clone(), t.clone()); }
             Stmt::Let(s)
         }
         Stmt::LetDestructure(mut s) => { s.value = desugar_expr(s.value, sigs)?; Stmt::LetDestructure(s) }
@@ -789,7 +949,8 @@ fn desugar_trailing_array_block(
 
     match interp {
         Interp::Collect(trait_name) => {
-            let elems = stmts_to_array_block_elems(body, line, col, len)?;
+            let mut elems = stmts_to_array_block_elems(body, line, col, len)?;
+            resolve_identity_keys(&mut elems, sigs)?;
             if !elems_have_control_flow(&elems) {
                 // Flat case: plain array-literal trailing argument.
                 let mut flat = Vec::with_capacity(elems.len());

@@ -109,8 +109,8 @@ This language extension is a prerequisite for implementing the toolkit as a reus
 `for`-generated dynamic children have an optional keyed form, designed below under Identity &
 lifecycle: `for item in items with item.id:`. **Shipped 2026-10-10 (syntax + lowering only):** it parses,
 is rejected outside a collect block, and lowers each iteration to `KeyedGroup(key, [items])` (a library
-symbol, see book.md). Not yet done: the `IdentityKey` bound check on the key expression, omitting `with`
-for an `Identifiable` element, and the runtime duplicate-key validation.
+symbol, see book.md). Done best-effort (statically known types only): the `IdentityKey` bound check on the key expression and omitting `with`
+for an `Identifiable` element. Not yet done: the runtime duplicate-key validation.
 
 ### 2. `view` — a declaration kind distinct from `struct`
 
