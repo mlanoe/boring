@@ -1,6 +1,26 @@
 use crate::ast;
 
 #[test]
+fn inline_kernel_is_a_launch_expression_with_a_block_value() {
+    let src = "req f(int n):\n    kernel(block = 64, grid = n):\n        mut [int]'unified out = [0 for ..<n]\n        out\n";
+    let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+    let ast::Item::Fn(function) = &program.items[0] else { panic!("expected function") };
+    let ast::Stmt::Expr(ast::Expr { kind: ast::ExprKind::KernelLaunch { config, kernel }, .. }) = &function.body[0] else {
+        panic!("expected inline kernel expression")
+    };
+    assert!(config.block.is_some());
+    assert!(config.grid.is_some());
+    assert!(matches!(kernel.kind, ast::ExprKind::Block(_)));
+}
+
+#[test]
+fn inline_kernel_rejects_return_like_a_closure() {
+    let src = "req f():\n    kernel(block = 1):\n        return 1\n";
+    let error = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect_err("return must be rejected");
+    assert!(error.msg().contains("no 'return' allowed in inline kernel"), "{}", error.msg());
+}
+
+#[test]
 fn test_pipe_bare_name_projects_field() {
     let tokens = crate::lexer::lex("let result = value |> output").expect("lex");
     let program = crate::parser::parse(tokens).expect("parse");

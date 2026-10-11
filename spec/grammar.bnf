@@ -377,9 +377,14 @@ ext_member      ::= "pub"? fn_decl
 # wgpu: const generics are monomorphised — each unique instantiation produces a
 # distinct WGSL shader with concrete sizes. No WGSL const-generic support needed.
 #
-# Launch form (host side):
-#   kernel(<launch_args>) expr                       # returns KernelHandle<T>
-#   kernel(<launch_args>) expr |> .wait()            # launch and block until done
+# Inline form (inside an ordinary function):
+#   kernel(<launch_args>):
+#       <device statements>
+#       <output buffer expression>                   # last expression, no `return`
+#
+# Free variables are captured from the enclosing function. The last expression
+# must name a GPU buffer declared in the block, or a tuple of such buffers. The
+# compiler lowers the expression to a private kernel struct + synchronous launch.
 #
 # Launch args:
 #   block    = <int>                   — threads per block (1-D); required
@@ -448,6 +453,14 @@ kernel_member   ::= kernel_field_decl
 # Array/buffer fields ('unified, 'global, 'actor) must NOT have a default — the parser rejects them.
 kernel_field_decl ::= ("let" | "mut" | "var") type IDENT ("=" expr)? NEWLINE
 
+inline_kernel_expr ::= "kernel" "(" launch_arg ("," launch_arg)* ")" ":"
+                         NEWLINE INDENT stmt* expr NEWLINE DEDENT
+
+launch_arg      ::= "block" "=" expr
+                  | "grid" "=" expr
+                  | "after" "=" expr
+                  | "priority" "=" ("high" | "normal" | "low" | STRING)
+
 # Module grouping — flat scoping at runtime; structure preserved for the transpiler.
 mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
                       item+
@@ -476,12 +489,18 @@ stmt            ::= let_stmt
                   | guard_stmt
                   | with_stmt
                   | wait_stmt
+                  | kernel_block_stmt
                   | fn_decl
                   | struct_decl    # local struct — invisible outside the enclosing function
                   | enum_decl      # local enum  — invisible outside the enclosing function
                   | mod_decl       # local module — flat scoping, same as top-level mod
                   | alias_stmt     # local type alias
                   | expr NEWLINE
+
+# Host-side orchestration of one or more named/generated kernel dispatches.
+# Distinct from `inline_kernel_expr`: bare `kernel:` contains host statements,
+# while `kernel(...):` contains the device body and evaluates to its last buffer.
+kernel_block_stmt ::= "kernel" ":" block
 
 break_stmt      ::= "break" expr? NEWLINE       # optional value when used in `loop:` as expression
 continue_stmt   ::= "continue" NEWLINE
@@ -808,6 +827,7 @@ stmt_block            ::= INDENT stmt+ DEDENT   # the same block grammar every
                                                  # closure/function body already uses
 
 primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
+                  | inline_kernel_expr
                   | ambiguous_colon_block  # checked before the plain IDENT/call alternatives below
                   | IDENT
                   | "." IDENT "(" arg_list? ")"   # leading-dot static method: .fromSecs(5) — type inferred

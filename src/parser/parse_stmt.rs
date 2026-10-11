@@ -252,7 +252,7 @@ impl Parser {
             //   kernel k(block=N)    ← single-line without colon
             // `kernel Foo:` is a struct declaration — skip it here.
             // `kernel k(`, `kernel:`, `kernel <newline>` → kernel block.
-            TokenKind::Kernel if !matches!(
+            TokenKind::Kernel if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) && !matches!(
                 (self.tokens.get(self.pos + 1).map(|t| &t.kind),
                  self.tokens.get(self.pos + 2).map(|t| &t.kind)),
                 (Some(TokenKind::Ident(_)), Some(TokenKind::Colon))
@@ -372,6 +372,7 @@ impl Parser {
                 // here is often already a `Dedent`, not a `Newline`. Every other
                 // expression shape keeps the strict check unchanged.
                 if matches!(&expr.kind, ExprKind::TrailingArrayBlock { .. })
+                    || matches!(&expr.kind, ExprKind::KernelLaunch { kernel, .. } if matches!(kernel.kind, ExprKind::Block(_)))
                     || ends_with_multiline_trailing_closure(&expr)
                 {
                     self.expect_newline_soft();

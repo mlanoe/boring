@@ -2228,6 +2228,13 @@ impl Checker {
             ExprKind::TaskWithTimeout(dur, e) => { self.check_expr(dur); self.check_expr(e); }
             ExprKind::JoinAll(exprs) => { for e in exprs { self.check_expr(e); } }
             ExprKind::KernelLaunch { kernel, config } => {
+                if matches!(kernel.kind, ExprKind::Block(_)) {
+                    self.error(
+                        "inline kernel must end with a GPU buffer variable or a tuple of GPU buffer variables",
+                        expr.line,
+                        expr.col,
+                    );
+                }
                 self.check_expr(kernel);
                 self.check_kernel_dispatch_qualifier(kernel, expr.line, expr.col);
                 if let Some(b) = &config.block { self.check_expr(b); }

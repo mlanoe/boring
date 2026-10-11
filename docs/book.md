@@ -9438,6 +9438,39 @@ Each GPU backend's own numeric type system limits which widths a `kernel` struct
 
 WGSL has no native integer type below or above 32 bits, and no 64-bit float type at all; MSL has no native 64/128-bit integer and no native `double` (Apple GPUs historically lack native 64-bit ALU ops, for both integers and floats). ROCm's HIP C++ mirrors CUDA C's numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support, floats included. Using an unsupported width — or `float64`/`float` on Metal or wgpu — on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data; use `float32` there instead.
 
+### Inline kernels
+
+For a one-off operation, an ordinary function can contain the GPU code
+directly. `kernel(...)` is an expression block: values from the enclosing
+function are captured automatically, GPU buffers declared inside it are
+allocated before dispatch, and the last expression is its result. Like a
+closure, an inline kernel does not use `return`.
+
+```boring
+pub req [float32]'gpu'unified scale_gpu(
+    [float32]'gpu'global src,
+    int n,
+) throws:
+    kernel(block = 256, grid = (n + 255) / 256):
+        mut [float32]'unified dst = [0.0 for ..<n]
+
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+
+        dst
+```
+
+The final expression must be a GPU buffer declared in the block, or a tuple
+of such buffers. The result stays resident when the enclosing function has a
+`'gpu'unified` or `'gpu'global` return type. `block` is required; `grid`,
+`after`, and `priority` have the same semantics as a named-kernel dispatch.
+
+The compiler lowers this form to a private anonymous `kernel` struct, its
+constructor, a synchronous launch, and a final field read. Named
+`kernel Name:` structs remain the appropriate form for reusable kernels,
+generic kernels, helpers, or persistent state.
+
 ### `with` for GPU kernel fields — `'gpu'unified`, `'gpu'global`
 
 A `kernel Name:` struct's `'unified`/`'global` field is read back from the GPU **on every single access** — `k.result[i]` inside a loop re-reads the *entire* buffer back from the GPU on every iteration. Binding the field through a `'gpu'unified`/`'gpu'global`-qualified alias and reading it inside a `with` block (see [chapter 21, Scoped access blocks — `with`](#scoped-access-blocks--with)) materializes it exactly once instead, however many times the block's body indexes it:

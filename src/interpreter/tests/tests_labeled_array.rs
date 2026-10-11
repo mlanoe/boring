@@ -239,3 +239,43 @@ kernel Grid:
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn inline_kernel_in_a_use_imported_module_works() {
+    let dir = std::env::temp_dir().join(format!(
+        "boring_inline_kernel_import_test_{}_{}",
+        std::process::id(),
+        line!(),
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(dir.join("inline_kernel.br"), r#"
+pub req [float]'gpu'unified double_gpu([float]'gpu'global src, int n) throws:
+    kernel(block = n):
+        mut [float]'unified out = [0.0 for ..<n]
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = src[i] * 2.0
+        out
+"#).expect("write module file");
+
+    let entry_src = r#"
+use inline_kernel
+let _result = double_gpu([1.0, 2.0, 3.0], 3)
+"#;
+    let tokens = crate::lexer::lex(entry_src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+    let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
+    let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+
+    let mut interp = Interpreter::new();
+    interp.add_search_path(dir.clone());
+    interp.exec_program(&program).expect("runtime error");
+    assert_eq!(
+        get_var(&interp, "_result"),
+        Value::Array(vec![
+            Value::Float64(2.0), Value::Float64(4.0), Value::Float64(6.0),
+        ].into()),
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -18,6 +18,23 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
+fn inline_kernel_lowers_to_anonymous_device_kernel_and_resident_result() {
+    let (msl, rs) = metal_codegen("inline_kernel", r#"
+pub req [float32]'gpu'unified scale([float32]'gpu'global src, int n) throws:
+    kernel(block = 64, grid = (n + 63) / 64):
+        mut [float32]'unified dst = [0.0 for ..<n]
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+        dst
+"#);
+    assert!(msl.contains("kernel void __InlineKernel_3_1_kernel"), "{msl}");
+    assert!(rs.contains("__InlineKernel_3_1::new"), "{rs}");
+    assert!(rs.contains("__inline_kernel_3_1.__boring_launch"), "{rs}");
+    assert!(rs.contains("BoringGpuArg::Resident(__inline_kernel_3_1.dst.clone()"), "{rs}");
+}
+
+#[test]
 fn init_parameter_used_only_in_host_expressions_is_preserved() {
     let (_, rs) = metal_codegen("init_expression_only_param", r#"
 kernel SizedOut:

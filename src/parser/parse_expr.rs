@@ -1539,6 +1539,60 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         match self.peek().clone() {
+            TokenKind::Kernel if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) => {
+                self.advance(); // `kernel`
+                let args = self.parse_call_args()?;
+                let mut config = crate::ast::KernelConfig {
+                    block: None, grid: None, after: None, priority: None, line, col,
+                };
+                for arg in args {
+                    let Some(label) = arg.label.as_deref() else {
+                        return Err(ParseError::Generic {
+                            msg: "inline kernel configuration arguments must be labeled".into(),
+                            line: arg.value.line, col: arg.value.col, len: arg.value.len,
+                        });
+                    };
+                    match label {
+                        "block" if config.block.is_none() => config.block = Some(arg.value),
+                        "grid" if config.grid.is_none() => config.grid = Some(arg.value),
+                        "after" if config.after.is_none() => config.after = Some(arg.value),
+                        "priority" if config.priority.is_none() => {
+                            config.priority = match arg.value.kind {
+                                ExprKind::Var(value) | ExprKind::Str(value) => Some(value),
+                                _ => return Err(ParseError::Generic {
+                                    msg: "inline kernel priority must be high, normal, or low".into(),
+                                    line: arg.value.line, col: arg.value.col, len: arg.value.len,
+                                }),
+                            };
+                        }
+                        "block" | "grid" | "after" | "priority" => return Err(ParseError::Generic {
+                            msg: format!("inline kernel configuration argument '{label}' is specified twice"),
+                            line: arg.value.line, col: arg.value.col, len: arg.value.len,
+                        }),
+                        _ => return Err(ParseError::Generic {
+                            msg: format!("unknown inline kernel configuration argument '{label}'"),
+                            line: arg.value.line, col: arg.value.col, len: arg.value.len,
+                        }),
+                    }
+                }
+                if config.block.is_none() {
+                    return Err(ParseError::Generic {
+                        msg: "inline kernel requires a block = configuration argument".into(),
+                        line, col, len: self.span_len(line, col),
+                    });
+                }
+                self.expect(&TokenKind::Colon)?;
+                self.expect_newline()?;
+                let body = self.parse_block()?;
+                check_no_return(&body, "inline kernel")?;
+                let block = Expr {
+                    kind: ExprKind::Block(body), line, col, len: self.span_len(line, col),
+                };
+                Ok(Expr {
+                    kind: ExprKind::KernelLaunch { config: Box::new(config), kernel: Box::new(block) },
+                    line, col, len: self.span_len(line, col),
+                })
+            }
             TokenKind::Int(n) => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Int(n), line, col, len: self.span_len(line, col)})

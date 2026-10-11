@@ -9,6 +9,7 @@
     { "include": "#string" },
     { "include": "#number" },
     { "include": "#attribute" },
+    { "include": "#kernel-definition" },
     { "include": "#function-definition" },
     { "include": "#type-definition" },
     { "include": "#constants" },
@@ -115,6 +116,15 @@
       "captures": {
         "1": { "name": "punctuation.definition.attribute.boring" },
         "2": { "name": "entity.other.attribute-name.boring" }
+      }
+    },
+
+    "kernel-definition": {
+      "comment": "Named GPU kernel struct declaration; kernel(...): remains an expression keyword",
+      "match": "\\b(kernel)\\s+([A-Z][A-Za-z0-9_]*)\\s*(?:<[^>]*>)?\\s*(?=:)",
+      "captures": {
+        "1": { "name": "keyword.other.declaration.boring" },
+        "2": { "name": "entity.name.type.boring" }
       }
     },
 

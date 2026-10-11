@@ -246,6 +246,35 @@ cross-label safety rule: [`array-multidim-types.md`](array-multidim-types.html).
 
 ---
 
+## Inline kernels
+
+An ordinary function can define and launch a one-off kernel inline. Values
+read from the enclosing function are captured automatically; GPU buffers
+declared in the block are allocated before dispatch. Like a closure, the block
+has no `return`: its last expression names the output buffer (or a tuple of
+output buffers).
+
+```boring
+pub req [float32]'gpu'unified scale([float32]'gpu'global src, int n) throws:
+    kernel(block = 256, grid = (n + 255) / 256):
+        mut [float32]'unified dst = [0.0 for ..<n]
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+        dst
+```
+
+`block` is required. `grid`, `after`, and `priority` have the same meaning as
+on a regular dispatch. The result remains GPU-resident when the enclosing
+function declares a `'gpu'unified` or `'gpu'global` return type.
+
+Inline kernels are syntax sugar for a generated private `kernel` struct, its
+constructor, a synchronous `kernel:` dispatch, and a final field read. Use a
+named kernel struct when the kernel needs helpers, generic parameters, several
+entry configurations, or reuse at multiple call sites.
+
+---
+
 ## `kernel:` block
 
 GPU kernels are dispatched inside a `kernel:` block. The block is **synchronous**
