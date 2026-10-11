@@ -3316,6 +3316,17 @@ impl Transpiler {
         } else {
             format!("__boring_tensor_k * {n} + __boring_tensor_col")
         };
+        if self.config.is_simd_target {
+            let chunk_initial = if method == "mma" {
+                format!("__boring_tensor_chunk[__boring_tensor_local_row * {n} + __boring_tensor_col]")
+            } else {
+                "0.0f32".to_string()
+            };
+            return Some(format!(
+                "{{\nif {m}usize > 0 && {n}usize > 0 {{\nlet __boring_tensor_workers = __boring_simd_threads().min({m}usize);\nlet __boring_tensor_rows_per_worker = {m}usize.div_ceil(__boring_tensor_workers);\nstd::thread::scope(|__boring_tensor_scope| {{\n    for (__boring_tensor_chunk_index, __boring_tensor_chunk) in {c}.chunks_mut(__boring_tensor_rows_per_worker * {n}).enumerate() {{\n        let __boring_tensor_a = &{a};\n        let __boring_tensor_b = &{b};\n        __boring_tensor_scope.spawn(move || {{\n            let __boring_tensor_row_base = __boring_tensor_chunk_index * __boring_tensor_rows_per_worker;\n            for __boring_tensor_local_row in 0usize..(__boring_tensor_chunk.len() / {n}) {{\n                let __boring_tensor_row = __boring_tensor_row_base + __boring_tensor_local_row;\n                for __boring_tensor_col in 0usize..{n}usize {{\n                    let mut __boring_tensor_sum: f32 = {chunk_initial};\n                    for __boring_tensor_k in 0usize..{k}usize {{\n                        __boring_tensor_sum = __boring_tensor_a[__boring_tensor_row * {k} + __boring_tensor_k].mul_add(__boring_tensor_b[{right_index}], __boring_tensor_sum);\n                    }}\n                    __boring_tensor_chunk[__boring_tensor_local_row * {n} + __boring_tensor_col] = __boring_tensor_sum;\n                }}\n            }}\n        }});\n    }}\n}});\n}}\n}}",
+                a = names[0], b = names[1], c = names[2],
+            ));
+        }
         Some(format!(
             "{{\nfor __boring_tensor_row in 0usize..{m}usize {{\n    for __boring_tensor_col in 0usize..{n}usize {{\n        let mut __boring_tensor_sum: f32 = {initial};\n        for __boring_tensor_k in 0usize..{k}usize {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * {k} + __boring_tensor_k].mul_add({b}[{right_index}], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * {n} + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
             a = names[0], b = names[1], c = names[2],

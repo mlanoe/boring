@@ -40,6 +40,9 @@ fn simd_project_builds_and_preserves_block_coordinates() {
     assert!(generated.contains("is_aarch64_feature_detected!(\"neon\")"));
     assert!(generated.contains("target_feature(enable=\"avx2\")"));
     assert!(generated.contains("BORING_SIMD_SCALAR"));
+    assert!(generated.contains("for __x in 0..dx as usize"));
+    assert!(!generated.contains("let __end ="));
+    assert!(!generated.contains("__lanes"));
     assert!(generated.contains("dispatch((2) as u32, (1) as u32, (1) as u32, (4) as u32"));
     let check = Command::new("cargo")
         .args(["check", "--quiet", "--manifest-path"])
@@ -84,14 +87,14 @@ fn multi_target_syntax_is_not_accepted_yet() {
 }
 
 #[test]
-fn warp_collectives_fail_during_codegen() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_error");
+fn warp_lane_and_size_run_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_properties");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("warp.br");
     fs::write(
         &input,
-        "kernel W:\n    def ():\n        let lane = .warp.lane\n",
+        "mut [int]'kernel'unified lanes = [0 for ..<8]\nmut [int]'kernel'unified sizes = [0 for ..<8]\nkernel W:\n    mut [int]'unified lanes\n    mut [int]'unified sizes\n    init(mut [int]'unified l, mut [int]'unified s):\n        lanes = l\n        sizes = s\n    def ():\n        lanes[.thread.x] = .warp.lane\n        sizes[.thread.x] = .warp.size\nmut w = W(lanes, sizes)\nkernel:\n    w(block = 8)\nprint w.lanes[7]\nprint w.sizes[7]\n",
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
@@ -99,9 +102,45 @@ fn warp_collectives_fail_during_codegen() {
         .arg(&input)
         .output()
         .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let generated = fs::read_to_string(root.join("warp_simd/src/main.rs")).unwrap();
+    assert!(generated.contains("rem_euclid(__boring_simd_lanes() as i32)"));
+    for scalar in [false, true] {
+        let mut command = Command::new("cargo");
+        command
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(root.join("warp_simd/Cargo.toml"));
+        if scalar {
+            command.env("BORING_SIMD_SCALAR", "1");
+        }
+        let run = command.output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let values = String::from_utf8_lossy(&run.stdout)
+            .lines()
+            .map(|value| value.parse::<i32>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], 7 % values[1]);
+        assert!(matches!(values[1], 1 | 4 | 8 | 16));
+        if scalar {
+            assert_eq!(values[1], 1);
+        }
+    }
+}
+
+#[test]
+fn warp_collectives_fail_during_codegen() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_error");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("warp.br");
+    fs::write(&input, "kernel W:\n    def ():\n        let value = .warp.shuffle(.thread.x, 0)\n").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr)
-        .contains("`.warp` collectives are not yet supported"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("`.warp` collectives are not yet supported"));
 }
 
 #[test]
@@ -131,9 +170,16 @@ fn fixed_float_tensor_matmul_runs_on_cpu() {
         r#"
 let [float32, k = 5, m = 3]'kernel'global a = [1.0 as float32 for ..<15]
 let [float32, n = 7, k = 5]'kernel'global b = [1.0 as float32 for ..<35]
+let [float32, k = 5, n = 7]'kernel'global w = [1.0 as float32 for ..<35]
 mut [float32, n = 7, m = 3]'kernel'unified c = [0.0 as float32 for ..<21]
+mut [float32, n = 7, m = 3]'kernel'unified accum = [1.0 as float32 for ..<21]
+mut [float32, n = 7, m = 3]'kernel'unified linear = [0.0 as float32 for ..<21]
 kernel.tensors.matmul(a, b, c)
+kernel.tensors.mma(a, b, accum)
+kernel.tensors.linear(a, w, linear)
 print c[0]
+print accum[0]
+print linear[0]
 "#,
     )
     .unwrap();
@@ -149,6 +195,10 @@ print c[0]
     );
     let source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
     assert!(source.contains("for __boring_tensor_k in 0usize..5usize"));
+    assert!(source.contains("fn __boring_simd_threads()"));
+    assert!(source.contains("__boring_simd_threads().min(3usize)"));
+    assert!(source.contains(".chunks_mut(__boring_tensor_rows_per_worker * 7)"));
+    assert!(source.contains("__boring_tensor_scope.spawn(move ||"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(root.join("tensor_simd/Cargo.toml"))
@@ -159,7 +209,7 @@ print c[0]
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5\n6\n5");
 }
 
 #[test]

@@ -1,0 +1,48 @@
+# Reproducible CPU SIMD benchmark.
+#
+# Build once, then compare the native feature-selected path with the exact same
+# release binary forced onto its scalar fallback:
+#
+#   boring build --target simd examples/simd_saxpy_bench.br
+#   cd examples/simd_saxpy_bench_simd
+#   cargo run --release
+#   BORING_SIMD_SCALAR=1 cargo run --release
+
+use std.time.Instant
+
+let n = 1048576
+let calls = 200
+let float32 alpha = 1.0001
+let [float32] host_x = [float32((i % 251) + 1) / 251.0 for i in 0..<n]
+let [float32] host_y = [1.0 as float32 for ..<n]
+
+kernel SaxpyBench:
+    let float32 alpha
+    let [float32]'global x
+    mut [float32]'unified y
+
+    init(float32 a, [float32]'global xs, [float32]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = .block.x * .block_dim.x + .thread.x
+        if i < n:
+            y[i] = alpha * x[i] + y[i]
+
+mut bench = SaxpyBench(alpha, host_x, host_y)
+kernel:
+    bench(block = 256, grid = (n + 255) / 256)
+
+let started = Instant.now()
+for _iteration in 0..<calls:
+    kernel:
+        bench(block = 256, grid = (n + 255) / 256)
+
+let elapsed_us = started.elapsed().asMicros()
+let elements = n * calls
+let ns_per_element = (elapsed_us as float64) * 1000.0 / (elements as float64)
+let output = bench.y
+with output:
+    print "{ns_per_element:.3f} ns/element; sink={output[n - 1]}"

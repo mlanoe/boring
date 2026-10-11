@@ -1,0 +1,24 @@
+# Fixed-shape float32 tensor benchmark for the CPU SIMD backend.
+#
+#   boring build --target simd examples/simd_matmul_bench.br
+#   cd examples/simd_matmul_bench_simd
+#   cargo run --release
+#   BORING_SIMD_THREADS=1 cargo run --release
+
+use std.time.Instant
+
+let calls = 8
+let [float32, k = 512, m = 512]'kernel'global a = [float32((i % 31) - 15) / 31.0 for i in 0..<262144]
+let [float32, n = 512, k = 512]'kernel'global b = [float32((i % 29) - 14) / 29.0 for i in 0..<262144]
+mut [float32, n = 512, m = 512]'kernel'unified c = [0.0 as float32 for ..<262144]
+
+kernel.tensors.matmul(a, b, c)
+let started = Instant.now()
+for _iteration in 0..<calls:
+    kernel.tensors.matmul(a, b, c)
+
+let elapsed_us = started.elapsed().asMicros()
+let per_call_us = (elapsed_us as float64) / (calls as float64)
+let gflops = (2.0 * 512.0 * 512.0 * 512.0) / per_call_us / 1000.0
+with c:
+    print "{per_call_us:.1f} us/call; {gflops:.1f} GFLOP/s; sink={c[0]}"
