@@ -187,21 +187,19 @@ impl Signatures {
         };
         for item in items {
             match item {
-                Item::Fn(f) | Item::Stmt(Stmt::Fn(f)) => {
-                    if accept(&f.name, f.is_pub) { self.fns.insert(f.name.clone(), fn_tys(f)); }
+                Item::Fn(f) | Item::Stmt(Stmt::Fn(f)) if accept(&f.name, f.is_pub) => {
+                    self.fns.insert(f.name.clone(), fn_tys(f));
                 }
-                Item::Struct(s) | Item::Stmt(Stmt::Struct(s)) => {
-                    if accept(&s.name, s.is_pub) {
-                        self.structs.insert(s.name.clone(), s.fields.iter().map(|f| f.ty.clone()).collect());
-                        self.defs.insert(s.name.clone(), StructInfo {
-                            fields: s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
-                            protocols: s.protocols.clone(),
-                            methods: s.methods.iter()
-                                .filter(|m| m.params.is_empty())
-                                .filter_map(|m| Some((m.name.clone(), m.return_ty.clone()?)))
-                                .collect(),
-                        });
-                    }
+                Item::Struct(s) | Item::Stmt(Stmt::Struct(s)) if accept(&s.name, s.is_pub) => {
+                    self.structs.insert(s.name.clone(), s.fields.iter().map(|f| f.ty.clone()).collect());
+                    self.defs.insert(s.name.clone(), StructInfo {
+                        fields: s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                        protocols: s.protocols.clone(),
+                        methods: s.methods.iter()
+                            .filter(|m| m.params.is_empty())
+                            .filter_map(|m| Some((m.name.clone(), m.return_ty.clone()?)))
+                            .collect(),
+                    });
                 }
                 // Trait names are always recorded: an imported signature's own
                 // `[dyn View]` parameter must classify as "collect" even when

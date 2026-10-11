@@ -84,9 +84,7 @@ impl Decls {
                 _ => self.classify(inner, depth + 1),
             },
             Type::Named(n) | Type::Generic(n, _) => {
-                if is_primitive_name(n) {
-                    Value
-                } else if self.enums.contains(n) {
+                if is_primitive_name(n) || self.enums.contains(n) {
                     Value
                 } else if self.structs.contains(n) {
                     Mutable

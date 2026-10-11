@@ -196,7 +196,7 @@ impl Transpiler {
         let Some(src_ty) = self.resident_call_vars.get(src.as_str()).cloned() else { return false };
         let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
         let name = escape_rust_keyword(&s.name);
-        if s.ty.is_some() && !s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some()) {
+        if s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_none()) {
             let materialized = self.materialize_resident_var(src, &src_ty);
             self.line(&format!("{kw} {name} = {materialized};"));
             self.var_types.insert(s.name.clone(), s.ty.clone().expect("checked by the outer `if`"));

@@ -1482,7 +1482,7 @@ impl Interpreter {
                 }
                 let mut next_drop = drop.iter().peekable();
                 let kept: Vec<Value> = Value::rc_vec_into_owned(arr).into_iter().enumerate()
-                    .filter(|(i, _)| if next_drop.peek() == Some(&&*i) { next_drop.next(); false } else { true })
+                    .filter(|(i, _)| if next_drop.peek() == Some(&i) { next_drop.next(); false } else { true })
                     .map(|(_, v)| v)
                     .collect();
                 Ok(Some(Value::Array(kept.into())))
