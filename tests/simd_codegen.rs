@@ -318,3 +318,45 @@ print bits.out[0]
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "6");
 }
+
+#[test]
+fn examples_with_top_level_scalar_constants_build_and_run() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for (example, expected_stdout) in [
+        ("vector_add_gpu.br", "c[999] = 2997"),
+        ("mandelbrot_gpu.br", "Image saved as 'mandelbrot.ppm'"),
+    ] {
+        let stem = example.trim_end_matches(".br");
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("simd_{stem}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join(example);
+        fs::copy(manifest_dir.join("examples").join(example), &input).unwrap();
+        let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", "simd"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{example}: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let run = Command::new("cargo")
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(root.join(format!("{stem}_simd/Cargo.toml")))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{example}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&run.stdout).contains(expected_stdout),
+            "{example}: {}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
+}

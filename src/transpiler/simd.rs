@@ -32,6 +32,16 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
             _ => None,
         })
         .collect::<Vec<_>>();
+    let global_consts = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Let(value) => {
+                simd_top_level_const_type(value).map(|const_ty| (value.name.clone(), const_ty))
+            }
+            _ => None,
+        })
+        .collect();
     let renamed = crate::transpiler::rename_top_level_main(program, "boring_main");
     let config = crate::transpiler::TranspileConfig {
         gpu_kernels: kernels.clone(),
@@ -88,6 +98,9 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         errors: initial_errors,
         fields: std::collections::HashSet::new(),
         field_axes: std::collections::HashMap::new(),
+        global_consts,
+        locals: std::collections::HashSet::new(),
+        value_types: std::collections::HashMap::new(),
     };
     e.raw(PRELUDE);
     for kernel in &kernels {
@@ -153,6 +166,9 @@ struct Emitter {
     errors: Vec<crate::transpiler::TranspileError>,
     fields: std::collections::HashSet<String>,
     field_axes: std::collections::HashMap<String, Vec<LabeledAxis>>,
+    global_consts: std::collections::HashMap<String, String>,
+    locals: std::collections::HashSet<String>,
+    value_types: std::collections::HashMap<String, String>,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -173,6 +189,26 @@ impl Emitter {
                     .map(|(_, axes)| (f.name.clone(), axes.to_vec()))
             })
             .collect();
+        self.locals.clear();
+        self.value_types.clear();
+        for field in &k.fields {
+            let field_ty = if is_array(&field.ty) {
+                elem_ty(&field.ty)
+            } else {
+                ty(&field.ty)
+            };
+            self.value_types.insert(field.name.clone(), field_ty);
+        }
+        if let Some(method) = k.methods.first() {
+            self.locals
+                .extend(method.params.iter().map(|param| param.name.clone()));
+            for param in &method.params {
+                if let Some(param_ty) = &param.ty {
+                    self.value_types.insert(param.name.clone(), ty(param_ty));
+                }
+            }
+            crate::transpiler::helpers::collect_local_decl_names(&method.body, &mut self.locals);
+        }
         self.line(0, &format!("#[derive(Debug)] struct {} {{", k.name));
         for f in &k.fields {
             self.line(1, &format!("{}: {},", f.name, ty(&f.ty)));
@@ -257,6 +293,10 @@ impl Emitter {
     fn stmt(&mut self, s: &Stmt, n: usize) {
         match s {
             Stmt::Let(v) => {
+                let inferred_ty =
+                    v.ty.as_ref()
+                        .map(ty)
+                        .or_else(|| v.value.as_ref().and_then(|value| self.expr_type(value)));
                 let value = v
                     .value
                     .as_ref()
@@ -278,6 +318,9 @@ impl Emitter {
                         value
                     ),
                 );
+                if let Some(inferred_ty) = inferred_ty {
+                    self.value_types.insert(v.name.clone(), inferred_ty);
+                }
             }
             Stmt::Expr(x) => {
                 let x = self.expr(x);
@@ -360,6 +403,12 @@ impl Emitter {
                     "__warp".into()
                 } else if self.fields.contains(v) {
                     format!("self.{v}")
+                } else if let Some(const_ty) = self
+                    .global_consts
+                    .get(v)
+                    .filter(|_| !self.locals.contains(v))
+                {
+                    format!("({} as {const_ty})", v.to_uppercase())
                 } else {
                     v.clone()
                 }
@@ -402,8 +451,10 @@ impl Emitter {
             ExprKind::LabeledIndex(a, args) => self.labeled_index(a, args),
             ExprKind::Assign(a, b) => format!("{} = {}", self.lvalue(a), self.expr(b)),
             ExprKind::BinOp(op, a, b) => {
-                let left = self.expr(a);
-                let right = self.expr(b);
+                let left_ty = self.expr_type(a);
+                let right_ty = self.expr_type(b);
+                let left = self.expr_as(a, right_ty.as_deref());
+                let right = self.expr_as(b, left_ty.as_deref());
                 match binop(op) {
                     Some(op) => format!("({left} {op} {right})"),
                     None => {
@@ -435,14 +486,23 @@ impl Emitter {
                 if *inclusive { "=" } else { "" },
                 self.expr(end)
             ),
-            ExprKind::Call(c, args) => format!(
-                "{}({})",
-                self.expr(c),
-                args.iter()
-                    .map(|a| self.expr(&a.value))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            ExprKind::Call(c, args) => {
+                if let ExprKind::Var(name) = &c.kind {
+                    if let Some(cast_ty) = primitive_cast_type(name) {
+                        if args.len() == 1 {
+                            return format!("({} as {cast_ty})", self.expr(&args[0].value));
+                        }
+                    }
+                }
+                format!(
+                    "{}({})",
+                    self.expr(c),
+                    args.iter()
+                        .map(|a| self.expr(&a.value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
             ExprKind::MethodCall(o, m, args) => format!(
                 "{}.{}({})",
                 self.expr(o),
@@ -453,6 +513,19 @@ impl Emitter {
                     .join(", ")
             ),
             ExprKind::If(i) => {
+                let result_types = i
+                    .branches
+                    .iter()
+                    .filter_map(|(_, body)| self.body_type(body))
+                    .chain(i.else_body.iter().filter_map(|body| self.body_type(body)))
+                    .collect::<Vec<_>>();
+                let result_ty = if result_types.iter().any(|kind| kind == "f32") {
+                    Some("f32")
+                } else if result_types.iter().any(|kind| kind == "f64") {
+                    Some("f64")
+                } else {
+                    None
+                };
                 let mut out = String::new();
                 for (index, (condition, body)) in i.branches.iter().enumerate() {
                     if index > 0 {
@@ -461,11 +534,14 @@ impl Emitter {
                     out.push_str(&format!(
                         "if {} {{ {} }}",
                         self.expr(condition),
-                        self.expr_body(body)
+                        self.expr_body_as(body, result_ty)
                     ));
                 }
                 if let Some(body) = &i.else_body {
-                    out.push_str(&format!(" else {{ {} }}", self.expr_body(body)));
+                    out.push_str(&format!(
+                        " else {{ {} }}",
+                        self.expr_body_as(body, result_ty)
+                    ));
                 } else {
                     out.push_str(" else { Default::default() }");
                 }
@@ -481,10 +557,11 @@ impl Emitter {
             }
         }
     }
-    fn expr_body(&mut self, body: &[Stmt]) -> String {
+    fn expr_body_as(&mut self, body: &[Stmt], expected: Option<&str>) -> String {
         let mut parts = Vec::new();
-        for stmt in body {
+        for (index, stmt) in body.iter().enumerate() {
             match stmt {
+                Stmt::Expr(e) if index + 1 == body.len() => parts.push(self.expr_as(e, expected)),
                 Stmt::Expr(e) => parts.push(self.expr(e)),
                 Stmt::Let(v) => {
                     let value = v
@@ -518,6 +595,90 @@ impl Emitter {
             }
         }
         parts.join("; ")
+    }
+    fn expr_as(&mut self, expr: &Expr, expected: Option<&str>) -> String {
+        match (&expr.kind, expected) {
+            (ExprKind::Int(value), Some("f32")) => format!("{value}.0f32"),
+            (ExprKind::Int(value), Some("f64")) => format!("{value}.0f64"),
+            (ExprKind::Float(value), Some("f32")) => format!("{value}f32"),
+            _ => self.expr(expr),
+        }
+    }
+    fn body_type(&self, body: &[Stmt]) -> Option<String> {
+        match body.last() {
+            Some(Stmt::Expr(expr)) => self.expr_type(expr),
+            _ => None,
+        }
+    }
+    fn expr_type(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Int(_) => Some("i32".into()),
+            ExprKind::UInt64(_) => Some("u64".into()),
+            ExprKind::Float(_) => Some("f64".into()),
+            ExprKind::Bool(_) => Some("bool".into()),
+            ExprKind::Var(name) => self
+                .value_types
+                .get(name)
+                .or_else(|| self.global_consts.get(name))
+                .cloned(),
+            ExprKind::Index(object, _) | ExprKind::LabeledIndex(object, _) => {
+                if let ExprKind::Var(name) = &object.kind {
+                    self.value_types.get(name).cloned()
+                } else {
+                    None
+                }
+            }
+            ExprKind::Cast(_, value_ty) => Some(ty(value_ty)),
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(name) => primitive_cast_type(name).map(str::to_string),
+                _ => None,
+            },
+            ExprKind::UnaryOp(_, value) => self.expr_type(value),
+            ExprKind::BinOp(op, left, right) => {
+                if matches!(
+                    op,
+                    BinOp::Eq
+                        | BinOp::NotEq
+                        | BinOp::RefEq
+                        | BinOp::Lt
+                        | BinOp::LtEq
+                        | BinOp::Gt
+                        | BinOp::GtEq
+                        | BinOp::And
+                        | BinOp::Or
+                        | BinOp::Is
+                        | BinOp::IsNot
+                ) {
+                    Some("bool".into())
+                } else {
+                    let left = self.expr_type(left);
+                    let right = self.expr_type(right);
+                    if left.as_deref() == Some("f32") || right.as_deref() == Some("f32") {
+                        Some("f32".into())
+                    } else {
+                        left.or(right)
+                    }
+                }
+            }
+            ExprKind::If(value) => value
+                .branches
+                .iter()
+                .filter_map(|(_, body)| self.body_type(body))
+                .chain(
+                    value
+                        .else_body
+                        .iter()
+                        .filter_map(|body| self.body_type(body)),
+                )
+                .fold(None, |found, kind| {
+                    match (found.as_deref(), kind.as_str()) {
+                        (_, "f32") => Some("f32".into()),
+                        (None, "f64") => Some("f64".into()),
+                        _ => found,
+                    }
+                }),
+            _ => None,
+        }
     }
     fn lvalue(&mut self, e: &Expr) -> String {
         match &e.kind {
@@ -581,6 +742,80 @@ impl Emitter {
         }
         format!("self.{field}[{}]", terms.join(" + "))
     }
+}
+
+fn simd_top_level_const_type(value: &LetStmt) -> Option<String> {
+    if value.binding.is_mutable() {
+        return None;
+    }
+    fn scalar_type(value_ty: &Type) -> Option<String> {
+        let supported = match value_ty {
+            Type::Int
+            | Type::Uint
+            | Type::Uint8
+            | Type::Float32
+            | Type::Float64
+            | Type::Bool
+            | Type::Int8
+            | Type::Int16
+            | Type::Int32
+            | Type::Int64
+            | Type::Int128
+            | Type::Uint16
+            | Type::Uint32
+            | Type::Uint64
+            | Type::Uint128 => true,
+            Type::Named(name) => matches!(
+                name.as_str(),
+                "int"
+                    | "uint"
+                    | "uint8"
+                    | "float"
+                    | "float32"
+                    | "float64"
+                    | "bool"
+                    | "int8"
+                    | "int16"
+                    | "int32"
+                    | "int64"
+                    | "int128"
+                    | "uint16"
+                    | "uint32"
+                    | "uint64"
+                    | "uint128"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+            ),
+            Type::Qualified(inner, _) | Type::Mut(inner) => return scalar_type(inner),
+            _ => false,
+        };
+        supported.then(|| ty(value_ty))
+    }
+    fn scalar_literal(expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Int(_) => Some("i32".into()),
+            ExprKind::UInt64(_) => Some("u64".into()),
+            ExprKind::Float(_) => Some("f64".into()),
+            ExprKind::Bool(_) => Some("bool".into()),
+            ExprKind::UnaryOp(_, inner) => scalar_literal(inner),
+            _ => None,
+        }
+    }
+    value
+        .ty
+        .as_ref()
+        .and_then(scalar_type)
+        .or_else(|| value.value.as_ref().and_then(scalar_literal))
 }
 
 fn stmt_position(stmt: &Stmt) -> (usize, usize) {
@@ -673,6 +908,21 @@ fn default_value(t: &Type) -> String {
         }
     } else {
         "Default::default()".into()
+    }
+}
+fn primitive_cast_type(name: &str) -> Option<&'static str> {
+    match name {
+        "float32" => Some("f32"),
+        "float" | "float64" => Some("f64"),
+        "int" | "int32" => Some("i32"),
+        "int8" => Some("i8"),
+        "int16" => Some("i16"),
+        "int64" => Some("i64"),
+        "uint" | "uint32" => Some("u32"),
+        "uint8" => Some("u8"),
+        "uint16" => Some("u16"),
+        "uint64" => Some("u64"),
+        _ => None,
     }
 }
 fn binop(op: &BinOp) -> Option<&'static str> {

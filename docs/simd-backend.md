@@ -15,6 +15,9 @@ contiguous work-items.
 Fixed-shape labeled arrays retain their row-major layout and support labeled
 kernel indexing. Fixed arrays and fixed-shape kernel outputs are allocated to
 their declared size even when `init` does not assign them explicitly.
+Kernel references to immutable top-level scalar constants preserve their device
+numeric type, including mixed integer/`float32` expressions and explicit scalar
+constructors such as `float32(value)`.
 
 At runtime the generated crate selects AVX-512, AVX2, SSE2, or AArch64 NEON.
 Unknown CPUs use width one, which is the correctness-preserving scalar fallback.
