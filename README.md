@@ -67,6 +67,7 @@ Boring compiles the same source to several distinct Rust targets — from usersp
 | `boring build --target rocm` | Rust + HIP C++ (AMD) | GPU compute |
 | `boring build --target metal` | Rust + MSL (Apple Silicon/macOS) | GPU compute |
 | `boring build --target wgpu` | Rust + WGSL (any DX12/Vulkan/Metal GPU) | GPU compute, cross-platform |
+| `boring build --target simd` | Rust + native CPU SIMD | CPU compute, no GPU required |
 | `boring build --mode managed` | Rust std + tokio | managed memory (unqualified `T` → `Arc<Mutex<T>>`) |
 | `boring build --threading single` | Rust std + tokio | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
 | `boring build --linux` | Rust-for-Linux (`no_std`) | Linux drivers, subsystems, kernel modules |
@@ -113,7 +114,7 @@ boring build --target metal main.br    # → Rust + MSL project
 cd main_rust && cargo run
 ```
 
-See [`docs/gpu-module.md`](docs/gpu-module.md) for the full language reference (kernel structs, generics, qualifier inference), and [`docs/cuda-module.md`](docs/cuda-module.md), [`docs/rocm-backend.md`](docs/rocm-backend.md), [`docs/metal-backend.md`](docs/metal-backend.md), [`docs/wgpu-backend.md`](docs/wgpu-backend.md) for backend-specific codegen.
+See [`docs/gpu-module.md`](docs/gpu-module.md) for the full language reference (kernel structs, generics, qualifier inference), and [`docs/cuda-module.md`](docs/cuda-module.md), [`docs/rocm-backend.md`](docs/rocm-backend.md), [`docs/metal-backend.md`](docs/metal-backend.md), [`docs/wgpu-backend.md`](docs/wgpu-backend.md), and [`docs/simd-backend.md`](docs/simd-backend.md) for backend-specific codegen.
 
 ---
 

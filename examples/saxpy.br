@@ -6,6 +6,7 @@
 #   boring run saxpy.br                          # interpreted simulation
 #   boring build --target cuda saxpy.br          # CUDA (simulation on macOS without nvidia)
 #   boring build --target metal saxpy.br         # Metal (macOS native)
+#   boring build --target simd saxpy.br          # CPU SIMD (no GPU required)
 #
 # Uses float32 throughout (not the bare `float`/`float64` alias) — MSL has no
 # native `double`, so a `--target metal` build requires float32 buffers.

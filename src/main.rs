@@ -1748,6 +1748,8 @@ fn print_help() {
     eprintln!("    boring build --target metal <file.br>    Emit a Metal Cargo project from a single file");
     eprintln!("    boring build --target wgpu               Emit a wgpu Cargo project from boring.toml (Windows/Linux/macOS)");
     eprintln!("    boring build --target wgpu <file.br>     Emit a wgpu Cargo project from a single file");
+    eprintln!("    boring build --target simd               Emit a CPU SIMD Cargo project from boring.toml");
+    eprintln!("    boring build --target simd <file.br>     Emit a CPU SIMD Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
     eprintln!("    boring update              Refresh every git [deps] dependency and re-pin boring.lock");
     eprintln!("    boring update <name>       Refresh just that one git dependency");
@@ -1836,6 +1838,7 @@ fn parse_build_command(build_args: &[String]) {
     let mut target_rocm   = false;
     let mut target_metal  = false;
     let mut target_wgpu   = false;
+    let mut target_simd   = false;
     let mut mode = TranspileMode::Strict;
     let mut threading = ThreadingMode::Multi;
     let mut inline_auto_bytes: usize = 256;
@@ -1857,14 +1860,15 @@ fn parse_build_command(build_args: &[String]) {
                     Some("rocm")   => target_rocm   = true,
                     Some("metal")  => target_metal  = true,
                     Some("wgpu")   => target_wgpu   = true,
+                    Some("simd")   => target_simd   = true,
                     Some(t) => {
                         eprintln!("error: unknown target '{}'", t);
-                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu (use --linux for Rust-for-Linux)");
+                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu, simd (use --linux for Rust-for-Linux)");
                         process::exit(1);
                     }
                     None => {
                         eprintln!("error: --target requires a value");
-                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu (use --linux for Rust-for-Linux)");
+                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu, simd (use --linux for Rust-for-Linux)");
                         process::exit(1);
                     }
                 }
@@ -1977,6 +1981,14 @@ fn parse_build_command(build_args: &[String]) {
         i += 1;
     }
 
+    let target_count = [target_kernel, target_cuda, target_rocm, target_metal, target_wgpu, target_simd]
+        .into_iter().filter(|selected| *selected).count();
+    if target_count > 1 {
+        eprintln!("error: select exactly one build target; multi-target builds are not implemented yet");
+        eprintln!("hint:  run one build per target (for example, --target wgpu and --target simd)");
+        process::exit(1);
+    }
+
     if target_kernel && threading != ThreadingMode::Multi {
         eprintln!("error: --threading is not available for the linux target");
         process::exit(1);
@@ -1997,6 +2009,10 @@ fn parse_build_command(build_args: &[String]) {
 
     if target_wgpu && threading != ThreadingMode::Multi {
         eprintln!("error: --threading is not available for the wgpu target");
+        process::exit(1);
+    }
+    if target_simd && threading != ThreadingMode::Multi {
+        eprintln!("error: --threading is not available for the simd target");
         process::exit(1);
     }
 
@@ -2048,7 +2064,18 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
+    if target_simd {
+        match file {
+            Some(path) => { emit_simd(path, "0.1.0"); return; }
+            None => {
+                let (toml, _) = load_project_toml();
+                emit_simd(&toml.main, &toml.version);
+                return;
+            }
+        }
+    }
+
+    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, is_simd_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
 
     if emit_rust {
         match file {
@@ -3185,6 +3212,26 @@ fn emit_wgpu(path: &str, version: &str) {
         eprintln!("  Kernels: {}", wgpu_out.kernel_names.join(", "));
     }
 }
+fn emit_simd(path: &str, version: &str) {
+    let program = parse_and_merge_program(path);
+    let path = PathBuf::from(path);
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    if report_check_result(&path, &source, checker::check_kernel_dispatch_only(&program)) { process::exit(1); }
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "output".into());
+    let base = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let project_dir = base.join(format!("{}_simd", stem));
+    let out = transpiler::simd::transpile_simd(&program, &stem, version);
+    if !out.errors.is_empty() { report_transpile_errors(&path, &source, &out.errors); process::exit(1); }
+    let src = project_dir.join("src");
+    if let Err(e) = std::fs::create_dir_all(&src) { eprintln!("error: cannot create '{}': {}", src.display(), e); process::exit(1); }
+    if let Err(e) = std::fs::write(src.join("main.rs"), out.host_rs) { eprintln!("error: cannot write SIMD source: {}", e); process::exit(1); }
+    if let Err(e) = std::fs::write(project_dir.join("Cargo.toml"), out.cargo_toml) { eprintln!("error: cannot write SIMD manifest: {}", e); process::exit(1); }
+    eprintln!("Generated CPU SIMD project at '{}'", project_dir.display());
+    eprintln!("  Runtime dispatch: AVX-512 / AVX2 / SSE2 / NEON, with scalar fallback.");
+    eprintln!("  cd {} && cargo build --release", project_dir.display());
+    if !out.kernel_names.is_empty() { eprintln!("  Kernels: {}", out.kernel_names.join(", ")); }
+}
+
 fn emit_kernel(path: &str) {
     emit_kernel_with_version(path, "0.1.0");
 }

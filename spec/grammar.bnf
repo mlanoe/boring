@@ -1427,6 +1427,8 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   boring build --target metal            — Metal project from boring.toml
 #   boring build --target wgpu <file.br>   — wgpu GPU backend (Windows/Linux/macOS; DirectX 12 / Vulkan / Metal)
 #   boring build --target wgpu             — wgpu project from boring.toml
+#   boring build --target simd <file.br>   — native CPU SIMD backend (no GPU runtime)
+#   boring build --target simd             — CPU SIMD project from boring.toml
 #   boring build --emit-rust <file.br>     — print generated Rust to stdout, no project created
 #
 # Debugging and profiling flags (orthogonal, composable, stable unless noted):

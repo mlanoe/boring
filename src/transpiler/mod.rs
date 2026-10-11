@@ -37,6 +37,7 @@ pub mod cuda;
 pub mod metal;
 pub mod wgpu;
 pub mod rocm;
+pub mod simd;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 
@@ -107,6 +108,8 @@ pub struct TranspileConfig {
     /// target provides its own entry point either way. Empty `gpu_kernels` must NOT
     /// imply "not a GPU target" — this flag is the direct signal for that instead.
     pub is_gpu_target: bool,
+    /// CPU/SIMD host backend: preserves block dimensions in dispatch calls.
+    pub is_simd_target: bool,
     /// True when the GPU target's own host backend already owns top-level kernel/Screen
     /// construction, dispatch, and read-back entirely by itself (wgpu's `emit_screen_main`,
     /// for a `Screen`-using program: kernel instances become `__App` struct fields and the
@@ -182,6 +185,7 @@ impl Default for TranspileConfig {
             gpu_kernels: Vec::new(),
             gpu_kernel_generic_names: std::collections::HashMap::new(),
             is_gpu_target: false,
+            is_simd_target: false,
             gpu_top_level_handled_by_host: false,
             external_tuple_structs: Vec::new(),
             external_const_fns: Vec::new(),

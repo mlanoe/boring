@@ -1068,7 +1068,20 @@ impl Transpiler {
             ));
             ("1".to_string(), "1".to_string(), "1".to_string())
         };
-        Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
+        if self.config.is_simd_target {
+            let (bx, by, bz) = if let Some(b) = args.iter().find(|a| a.label.as_deref() == Some("block")) {
+                match &b.value.kind {
+                    ExprKind::Tuple(es) => {
+                        let get = |i: usize, this: &Self| es.get(i).map(|e| this.emit_expr(e)).unwrap_or_else(|| "1".into());
+                        (get(0,self), get(1,self), get(2,self))
+                    }
+                    _ => (self.emit_expr(&b.value), "1".into(), "1".into()),
+                }
+            } else { ("1".into(), "1".into(), "1".into()) };
+            Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32, ({bx}) as u32, ({by}) as u32, ({bz}) as u32)?;"))
+        } else {
+            Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
+        }
     }
 
     /// If `var_name` is a tracked kernel variable whose type has a
