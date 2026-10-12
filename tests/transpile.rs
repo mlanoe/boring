@@ -380,6 +380,7 @@ transpile_test!(trait_param_return);
 transpile_test!(trait_method_return);
 transpile_test!(trait_borrow_param);
 transpile_test!(trait_borrow_infer);
+transpile_test!(trait_borrow_method_infer);
 transpile_test!(trait_borrow_method_param);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);

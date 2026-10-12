@@ -3874,6 +3874,14 @@ impl Transpiler {
             struct_method_param_types = chosen_decl
                 .map(|decl| decl.params.iter().map(|p| p.ty.clone()).collect())
                 .unwrap_or_default();
+            // Bare-trait params inferred borrowed (`infer_trait_borrow.rs`) read as `Trait&`.
+            if let Some(t) = &struct_type_opt {
+                for (i, slot) in struct_method_param_types.iter_mut().enumerate() {
+                    if let Some(ty) = self.inferred_method_param_type(t, method, i) {
+                        *slot = Some(ty.clone());
+                    }
+                }
+            }
             struct_method_param_rebindable = chosen_decl
                 .map(|decl| decl.params.iter().map(|p| p.rebindable).collect())
                 .unwrap_or_default();
@@ -4047,6 +4055,26 @@ impl Transpiler {
                         if self.trait_method_names.contains_key(n.as_str()) {
                             if let Some(slot) = args_s.get_mut(i) {
                                 *slot = self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A receiver whose type is unknown here: a method inferred to borrow bare-trait params
+        // is identified by its program-wide unique name (`infer_trait_borrow.rs`).
+        if !is_user_struct_receiver && external_arg_borrows.is_none()
+            && self.resolve_expr_type(obj).is_none()
+            && self.resolve_expr_struct_type(obj).is_none()
+            && !MUTATING_COLLECTION_METHODS.contains(&method)
+            && !Self::ELEMENT_CLOSURE_METHODS.contains(&method)
+        {
+            if let Some(tys) = self.inferred_method_param_types_by_name(method) {
+                for (i, a) in args.iter().enumerate() {
+                    if let Some(Some(Type::Qualified(inner, _))) = tys.get(i) {
+                        if let Type::Named(n) = inner.as_ref() {
+                            if let Some(slot) = args_s.get_mut(i) {
+                                *slot = self.emit_trait_borrow_arg(n, false, &a.value);
                             }
                         }
                     }
@@ -5043,9 +5071,24 @@ impl Transpiler {
     /// `emit_expr_owned` those dispatchers always used.
     fn emit_user_method_args(&self, struct_name: Option<&str>, method: &str, args: &[Arg]) -> Vec<String> {
         let flags = struct_name.and_then(|t| self.lent_param_flags(t, method)).unwrap_or_default();
+        // `Trait&` parameters, explicit or inferred (`infer_trait_borrow.rs`).
+        let decl_params = struct_name.and_then(|t| {
+            let key = format!("{}::{}", t, method);
+            if self.overloaded_method_keys.contains(&key) { return None; }
+            self.struct_method_overload_decls.get(&key)?.first().map(|d| d.params.clone())
+        });
         args.iter().enumerate().map(|(i, a)| {
-            if flags.get(i).copied().unwrap_or(false) { self.emit_lent_arg(&a.value) }
-            else { self.emit_expr_owned(&a.value) }
+            if flags.get(i).copied().unwrap_or(false) { return self.emit_lent_arg(&a.value); }
+            let ty = struct_name.and_then(|t| self.inferred_method_param_type(t, method, i))
+                .or_else(|| decl_params.as_ref().and_then(|ps| ps.get(i)).and_then(|p| p.ty.as_ref()));
+            if let Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut))) = ty {
+                if let Type::Named(n) = inner.as_ref() {
+                    if self.trait_method_names.contains_key(n.as_str()) {
+                        return self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
+                    }
+                }
+            }
+            self.emit_expr_owned(&a.value)
         }).collect()
     }
 
@@ -5782,6 +5825,8 @@ impl Transpiler {
             overloaded_fn_names: self.overloaded_fn_names.clone(),
             trait_borrow_facts: Default::default(),
             trait_borrowed_fns: self.trait_borrowed_fns.clone(),
+            trait_borrowed_methods: self.trait_borrowed_methods.clone(),
+            trait_borrowed_method_by_name: self.trait_borrowed_method_by_name.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
             arc_qualified_types: self.arc_qualified_types.clone(),

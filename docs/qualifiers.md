@@ -761,9 +761,9 @@ def Value eval_expr(Interpreter interp, Expr e):
     …
 ```
 
-### Design: borrow inference for bare-trait parameters (phases 1–2 implemented)
+### Design: borrow inference for bare-trait parameters (phases 1–3 implemented)
 
-**Status: phases 1–2 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions); phases 3–4 are design only.** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is
+**Status: phases 1–3 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions and struct methods); phase 4 is design only.** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is
 emitted `b: Box<dyn Builder>` — by value — while structs/enums/collections are borrowed by inference
 (`auto_ref_param_vars`, free functions only). A trait-typed argument is therefore *moved*: passing
 the same local twice (`b.endEvent(first)` twice, boring-ui `tests/core_lifecycle_test.br:69,72`) is a
@@ -905,9 +905,23 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    call (`f(make())` would need `&*`). Residual risk: a borrowed local whose static type the
    transpiler does not track is emitted `&x` and fails loudly in rustc (never wrong output);
    callers/address-takers in a file outside the graph that defines the function are not seen.
-3. **Struct methods** (gated as in (3)), then validate on `boring-ui/src/core.br`
+3. **(Done.)** **Struct methods** (gated as in (3)), then validate on `boring-ui/src/core.br`
    `flush`/`endEvent` (expect `&dyn Builder`; `start` builds `b.build(self)` only ⇒ borrowed too) and
    `core_lifecycle_test.br` with `endEvent(first)` twice.
+   Landed in the same `infer_trait_borrow.rs` (`tests/cases/trait_borrow_method_infer.br`), keyed
+   `Type::method`. A method is a candidate only when its *name* identifies it program-wide —
+   declared by exactly one method of any kind, by no trait, and not also a free function, a field
+   or a piped/bare-value name — and its struct is not generic. The registered declarations are
+   left as written (re-registration of a re-scanned file recognises them by signature); call
+   sites read a replacement-type table instead (`inferred_method_param_type`): by receiver type
+   in the struct-method path and in the `'actor`/`'guard`/`'observed` dispatchers
+   (`emit_user_method_args`), by unique name when the receiver type is unknown (untyped closure
+   parameter). Trait implementers are never inferred (their name is a trait method name).
+   Explicit `Trait&` on methods landed separately (commit c8c14a3f). Validated on
+   `boring-ui/src/core.br`: `start`/`endEvent`/`flush` become `&dyn Builder` and
+   `b.endEvent(&first)` can be called twice. Still open and independent of traits: an explicit
+   `T&` on a method for a plain struct has no call-site support, and `mut`/`var` trait params
+   stay by value.
 4. (Optional, breaking) trait-method contracts default to borrowed.
 
 Gates per phase: `cargo test` (cases snapshot suites), `interpreter_build` then

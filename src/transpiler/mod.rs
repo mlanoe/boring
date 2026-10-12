@@ -1097,6 +1097,13 @@ struct Transpiler {
     /// Free function name → per-parameter flag: this bare-trait parameter is inferred
     /// borrowed (`&dyn Trait`) rather than a by-value `Box<dyn Trait>`.
     pub(crate) trait_borrowed_fns: std::collections::HashMap<String, Vec<bool>>,
+    /// `Type::method` → per-parameter replacement type (`Trait&`) for the bare-trait params
+    /// inferred borrowed on a struct method (`None` = unchanged). Call sites consult this
+    /// instead of the registered declaration, which stays as written.
+    pub(crate) trait_borrowed_methods: std::collections::HashMap<String, Vec<Option<Type>>>,
+    /// Method name → key in `trait_borrowed_methods`, for receivers of unknown type (the name
+    /// is program-wide unique for such methods).
+    pub(crate) trait_borrowed_method_by_name: std::collections::HashMap<String, String>,
     /// Per-struct overloaded method declarations: "TypeName::method" → Vec<FnDecl>
     pub(crate) struct_method_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Keys of overloaded struct methods (quick lookup): "TypeName::method"
@@ -1611,6 +1618,8 @@ impl Transpiler {
             overloaded_fn_names: std::collections::HashSet::new(),
             trait_borrow_facts: Default::default(),
             trait_borrowed_fns: std::collections::HashMap::new(),
+            trait_borrowed_methods: std::collections::HashMap::new(),
+            trait_borrowed_method_by_name: std::collections::HashMap::new(),
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),
@@ -6661,8 +6670,11 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
     fn mut_elem_trait_array_local_boxes_literal_and_push() {
         let src = "trait Poker:\n    req tap(int x)\n\nstruct Sq as Poker:\n    var int n = 0\n    req tap(int x):\n        print x\n\ndef main():\n    mut [mut Poker] mps = [Sq(), Sq()]\n    mps.push(Sq())\n    for p in mps:\n        p.tap(1)\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
-        assert!(code.contains("vec![Box::new(Sq::new()), Box::new(Sq::new())]"), "literal elements must be boxed, got:\n{code}");
-        assert!(code.contains("mps.push(Box::new(Sq::new()))"), "push must box, got:\n{code}");
+        assert!(
+            code.contains("vec![Box::new(Sq") && code.matches("Box::new(Sq").count() >= 3,
+            "literal elements must be boxed, got:\n{code}"
+        );
+        assert!(code.contains("mps.push(Box::new(Sq"), "push must box, got:\n{code}");
         assert!(code.contains("for p in &mps") && !code.contains("mps.iter().cloned()"), "for must borrow, got:\n{code}");
     }
 

@@ -1473,10 +1473,8 @@ impl Transpiler {
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
         // Bare-trait params inferred borrowed (`infer_trait_borrow.rs`) are emitted exactly as
         // if the author had written `Trait& p`.
-        if self_ty.is_none() {
-            if let Some(patched) = self.with_inferred_trait_borrows(f) {
-                return self.emit_fn(&patched, self_ty);
-            }
+        if let Some(patched) = self.with_inferred_trait_borrows(f, self_ty) {
+            return self.emit_fn(&patched, self_ty);
         }
         // Register param types for ALL top-level functions — including native stdlib ones
         // (wait, timeout, …) — so that DotIdent type hints can be resolved at call sites:

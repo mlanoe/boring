@@ -1,0 +1,58 @@
+# Bare-trait params of struct methods are inferred borrowed (`&dyn Trait`) unless the body
+# consumes them; the caller keeps ownership, whatever the receiver (typed local, self, field,
+# untyped closure parameter).
+trait Builder:
+    req int build(int x)
+
+struct Four as Builder:
+    req int build(int x): x + 4
+
+struct Two as Builder:
+    req int build(int x): x + 2
+
+int helper(Builder b, int n):
+    b.build(n)
+
+struct Holder:
+    Builder b
+
+struct Runner:
+    var int n = 0
+    # receiver-only -> borrowed
+    def int flush(Builder b):
+        n += 1
+        b.build(n)
+    # forwards to a borrowed method param -> borrowed
+    def int endEvent(Builder b):
+        self.flush(b)
+    # forwards to a borrowed free-function param -> borrowed
+    def int viaFree(Builder b):
+        helper(b, 10)
+    # consumed: moved into a struct -> stays by value
+    def int keep(Builder b):
+        let h = Holder(b)
+        h.b.build(1)
+    # read-only, reached below through an untyped closure parameter
+    req int probe(Builder b):
+        b.build(100)
+
+struct Wrapper:
+    var mut Runner inner = Runner()
+    def int drive(Builder b):
+        inner.flush(b)
+
+def main():
+    mut r = Runner()
+    let Builder first = Four()
+    print r.endEvent(first)
+    print r.endEvent(first)
+    print r.flush(Two())
+    print r.viaFree(first)
+    print r.keep(Two())
+    var mut w = Wrapper()
+    print w.drive(first)
+    print w.drive(first)
+    let runners = [Runner()]
+    let results = runners.map((x): x.probe(first))
+    print results[0]
+    print results[0]
