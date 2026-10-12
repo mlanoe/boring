@@ -93,7 +93,9 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         locals: std::collections::HashSet::new(),
         value_types: std::collections::HashMap::new(),
         replayable_locals: std::collections::HashMap::new(),
+        replayed_assignments: std::collections::HashMap::new(),
         thread_override: None,
+        control_flow_depth: 0,
     };
     e.raw(PRELUDE);
     for kernel in &kernels {
@@ -195,7 +197,9 @@ struct Emitter {
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
     replayable_locals: std::collections::HashMap<String, Expr>,
+    replayed_assignments: std::collections::HashMap<String, String>,
     thread_override: Option<String>,
+    control_flow_depth: usize,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -219,6 +223,7 @@ impl Emitter {
         self.locals.clear();
         self.value_types.clear();
         self.replayable_locals.clear();
+        self.replayed_assignments.clear();
         for field in &k.fields {
             let field_ty = if is_array(&field.ty) {
                 elem_ty(&field.ty)
@@ -352,20 +357,18 @@ impl Emitter {
                 if let Some(inferred_ty) = inferred_ty {
                     self.value_types.insert(v.name.clone(), inferred_ty);
                 }
-                if matches!(v.binding, BindingKind::Let) {
-                    if let Some(initializer) =
-                        v.value.as_ref().filter(|e| self.warp_replayable(e))
-                    {
-                        self.replayable_locals
-                            .insert(v.name.clone(), initializer.clone());
-                    }
+                if let Some(initializer) = v.value.as_ref().filter(|e| self.warp_replayable(e)) {
+                    self.replayable_locals
+                        .insert(v.name.clone(), initializer.clone());
                 }
+                self.replayed_assignments.remove(&v.name);
             }
             Stmt::Expr(x) => {
                 let x = self.expr(x);
                 self.line(n, &format!("{};", x));
             }
             Stmt::If(i) => {
+                self.control_flow_depth += 1;
                 for (j, (condition, body)) in i.branches.iter().enumerate() {
                     let condition = self.expr(condition);
                     self.line(
@@ -384,13 +387,16 @@ impl Emitter {
                     }
                     self.line(n, "}");
                 }
+                self.control_flow_depth -= 1;
             }
             Stmt::For(f) => {
                 let iterable = self.expr(&f.iterable);
                 self.line(n, &format!("for {} in {} {{", f.vars.join(", "), iterable));
+                self.control_flow_depth += 1;
                 for s in &f.body {
                     self.stmt(s, n + 1);
                 }
+                self.control_flow_depth -= 1;
                 self.line(n, "}");
             }
             Stmt::Comment(c) if c == "sync" => {
@@ -404,16 +410,20 @@ impl Emitter {
             Stmt::While(w) => {
                 let condition = self.expr(&w.condition);
                 self.line(n, &format!("while {} {{", condition));
+                self.control_flow_depth += 1;
                 for s in &w.body {
                     self.stmt(s, n + 1);
                 }
+                self.control_flow_depth -= 1;
                 self.line(n, "}");
             }
             Stmt::Loop(l) => {
                 self.line(n, "loop {");
+                self.control_flow_depth += 1;
                 for s in &l.body {
                     self.stmt(s, n + 1);
                 }
+                self.control_flow_depth -= 1;
                 self.line(n, "}");
             }
             Stmt::Break(_, _) => self.line(n, "break;"),
@@ -437,6 +447,9 @@ impl Emitter {
             ExprKind::Bool(v) => v.to_string(),
             ExprKind::Var(v) => {
                 if self.thread_override.is_some() {
+                    if let Some(replayed) = self.replayed_assignments.get(v) {
+                        return replayed.clone();
+                    }
                     if let Some(initializer) = self.replayable_locals.get(v).cloned() {
                         return self.expr(&initializer);
                     }
@@ -511,7 +524,26 @@ impl Emitter {
             }
             ExprKind::Index(a, b) => format!("{}[({}) as usize]", self.expr(a), self.expr(b)),
             ExprKind::LabeledIndex(a, args) => self.labeled_index(a, args),
-            ExprKind::Assign(a, b) => format!("{} = {}", self.lvalue(a), self.expr(b)),
+            ExprKind::Assign(a, b) => {
+                let replayed = if self.control_flow_depth == 0 && self.warp_replayable(b) {
+                    self.thread_override = Some("__boring_warp_source_thread".into());
+                    let replayed = self.expr(b);
+                    self.thread_override = None;
+                    Some(replayed)
+                } else {
+                    None
+                };
+                let assignment = format!("{} = {}", self.lvalue(a), self.expr(b));
+                if let ExprKind::Var(name) = &a.kind {
+                    self.replayable_locals.remove(name);
+                    if let Some(replayed) = replayed {
+                        self.replayed_assignments.insert(name.clone(), replayed);
+                    } else {
+                        self.replayed_assignments.remove(name);
+                    }
+                }
+                assignment
+            }
             ExprKind::BinOp(op, a, b) => {
                 let left_ty = self.expr_type(a);
                 let right_ty = self.expr_type(b);
@@ -663,6 +695,7 @@ impl Emitter {
                     || self.fields.contains(name)
                     || self.global_consts.contains_key(name)
                     || self.replayable_locals.contains_key(name)
+                    || self.replayed_assignments.contains_key(name)
             }
             ExprKind::DotIdent(name) => {
                 matches!(name.as_str(), "thread" | "block" | "block_dim")

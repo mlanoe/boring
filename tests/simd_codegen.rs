@@ -210,14 +210,86 @@ print w.sizes[0]
 }
 
 #[test]
-fn mutable_local_warp_shuffle_fails_during_codegen() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_mutable_error");
+fn unchanged_mutable_local_warp_shuffle_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_mutable_local");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("warp.br");
     fs::write(
         &input,
-        "kernel W:\n    def ():\n        var int lane = .thread.x\n        let value = .warp.shuffle(lane, 0)\n",
+        "mut [int]'kernel'unified values = [0 for ..<8]\nkernel W:\n    mut [int]'unified values\n    init(mut [int]'unified v):\n        values = v\n    def ():\n        var int lane = .thread.x\n        values[lane] = .warp.shuffle(lane, 0)\nmut w = W(values)\nkernel:\n    w(block = 8)\nprint w.values[7]\n",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    for scalar in [false, true] {
+        let mut command = Command::new("cargo");
+        command
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(root.join("warp_simd/Cargo.toml"));
+        if scalar {
+            command.env("BORING_SIMD_SCALAR", "1");
+        }
+        let run = command.output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let value = String::from_utf8_lossy(&run.stdout).trim().parse::<i32>().unwrap();
+        if scalar {
+            assert_eq!(value, 7);
+        } else {
+            assert!(matches!(value, 0 | 4 | 7));
+        }
+    }
+}
+
+#[test]
+fn straight_line_mutable_local_warp_shuffle_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_changed_mutable");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("warp.br");
+    fs::write(
+        &input,
+        "mut [int]'kernel'unified values = [0 for ..<8]\nkernel W:\n    mut [int]'unified values\n    init(mut [int]'unified v):\n        values = v\n    def ():\n        var int lane = .thread.x\n        lane = lane + 1\n        lane = lane + 1\n        values[.thread.x] = .warp.shuffle(lane, 0)\nmut w = W(values)\nkernel:\n    w(block = 8)\nprint w.values[7]\n",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    for scalar in [false, true] {
+        let mut command = Command::new("cargo");
+        command
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(root.join("warp_simd/Cargo.toml"));
+        if scalar {
+            command.env("BORING_SIMD_SCALAR", "1");
+        }
+        let run = command.output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let value = String::from_utf8_lossy(&run.stdout).trim().parse::<i32>().unwrap();
+        if scalar {
+            assert_eq!(value, 9);
+        } else {
+            assert!(matches!(value, 2 | 6 | 9));
+        }
+    }
+}
+
+#[test]
+fn branched_mutable_local_warp_shuffle_fails_during_codegen() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_branched_mutable_error");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("warp.br");
+    fs::write(
+        &input,
+        "kernel W:\n    def ():\n        var int lane = .thread.x\n        if lane >= 0:\n            lane = lane + 1\n        let value = .warp.shuffle(lane, 0)\n",
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
