@@ -404,6 +404,13 @@ impl Checker {
                 ExprKind::Var(n) if self.kernel_decls.contains_key(n.as_str()) => Some(n.clone()),
                 _ => None,
             },
+            ExprKind::New { arena: Some(_), ctor } => match &ctor.kind {
+                ExprKind::Call(callee, _) => match &callee.kind {
+                    ExprKind::Var(n) if self.kernel_decls.contains_key(n.as_str()) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
             _ => None,
         });
 
@@ -2164,6 +2171,17 @@ impl Checker {
                 for a in args { self.check_expr(&a.value); }
             }
             ExprKind::New { ctor, arena } => {
+                if arena.is_some() {
+                    let is_kernel_ctor = matches!(&ctor.kind,
+                        ExprKind::Call(callee, _) if matches!(&callee.kind,
+                            ExprKind::Var(name) if self.kernel_decls.contains_key(name.as_str())));
+                    if !is_kernel_ctor {
+                        self.errors.push(CheckError::at(
+                            "kernel placement requires a declared `kernel` constructor",
+                            expr.line, expr.col,
+                        ));
+                    }
+                }
                 self.check_expr(ctor);
                 if let Some(a) = arena { self.check_expr(a); }
             }

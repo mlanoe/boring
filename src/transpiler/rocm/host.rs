@@ -2685,8 +2685,17 @@ impl HostEmitter {
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
                 // `GPU(n)` → `boring_gpu_ctx_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
-                    if name == "GPU" {
-                        let idx = args.first().map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
+                    if name == "Device" {
+                        if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
+                            if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
+                                if value.to_ascii_uppercase() != "ROCM" {
+                                    return format!("compile_error!(\"Device target {} is not available in a ROCm build\")", value);
+                                }
+                            }
+                        }
+                        let idx = args.iter().find(|a| a.label.as_deref() == Some("index"))
+                            .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten())
+                            .map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
                         return format!("boring_gpu_ctx_n({} as usize)?", idx);
                     }
                 }
@@ -2827,7 +2836,7 @@ impl HostEmitter {
                 }
                 // `GPU.all()` → iterator over all HIP devices.
                 if let ExprKind::Var(name) = &obj.kind {
-                    if name == "GPU" && method == "all" {
+                    if name == "Device" && method == "all" {
                         return "(0..HipContext::device_count()? as usize).map(|i| boring_gpu_ctx_n(i).unwrap())".into();
                     }
                     if self.gpu_vars.contains(name.as_str()) {

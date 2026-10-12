@@ -94,7 +94,7 @@ impl Transpiler {
                 let is_gpu_all = self.is_gpu_target && s.vars.len() == 1 && matches!(
                     &s.iterable.kind,
                     ExprKind::MethodCall(obj, method, _)
-                        if method == "all" && matches!(&obj.kind, ExprKind::Var(v) if v == "GPU")
+                        if method == "all" && matches!(&obj.kind, ExprKind::Var(v) if v == "Device")
                 );
                 // A `break` inside this `for` loop's body must never be
                 // mistaken for exiting an enclosing while-let-shorthand loop —

@@ -559,25 +559,22 @@ impl Parser {
                 // Named qualifier groups — sugar for qualifier unions.
                 "one"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned]) }
                 "many" => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]) }
+                // Backwards-compatible type qualifier. `new` is no longer an
+                // expression-level construction/placement keyword.
+                "new" => { self.advance(); OwnerQual::Union(OwnerQual::NEW_MEMBERS.to_vec()) }
                 // `'mut` and `'req` are handled below as `TokenKind::Mut` /
                 // `TokenKind::Req` — `mut` and `req` are both reserved keywords,
                 // never lexed as `Ident`, so a string arm here would be dead code.
                 // Bare tick with no recognized qualifier word after it is no longer
                 // supported — `T'` used to silently default to `'owned` (don't consume
                 // the following ident, e.g. the variable name in `let BigData' backup`).
-                // Write the qualifier explicitly; `'new` covers what bare tick used to mean
-                // ("any indirection, inferred" — see OwnerQual::Union's doc comment).
+                // Write the qualifier explicitly; use `'owned` when heap placement is
+                // required.
                 _ => return Err(ParseError::Generic {
-                    msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'atomic, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
+                    msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'atomic, 'inline, 'weak, 'copy, 'const) — bare tick is not supported".into(),
                     line: self.line(), col: self.col(), len: self.tok_len(),
                 }),
             },
-            // `T'new` — `new` is a keyword, not an ident: candidate-set pseudo-qualifier,
-            // "any indirection, inferred" ('inline excluded from the candidate set) —
-            // replaces the old bare-tick `T'` spelling. NOT a caller-facing acceptance
-            // group like 'one/'many/'mut/'req (see OwnerQual::Union's doc comment) —
-            // it must keep narrowing by usage on local variables too, not just parameters.
-            TokenKind::New => { self.advance(); OwnerQual::Union(OwnerQual::NEW_MEMBERS.to_vec()) }
             // `T'mut` — `mut` is a reserved keyword, not an ident: qualifier-group
             // sugar for "any qualifier with interior mutability" (see
             // docs/qualifiers.md's qualifier-groups table).

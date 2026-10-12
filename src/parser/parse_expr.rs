@@ -673,19 +673,6 @@ impl Parser {
                 self.depth -= 1;
                 Ok(Expr { kind: ExprKind::UnaryOp(op, Box::new(expr?)), line, col, len: self.span_len(line, col)})
             }
-            TokenKind::New => {
-                self.advance();
-                let arena = if matches!(self.peek(), TokenKind::LParen) {
-                    self.advance(); // consume '('
-                    let expr = self.parse_expr()?;
-                    self.expect(&TokenKind::RParen)?;
-                    Some(Box::new(expr))
-                } else {
-                    None
-                };
-                let ctor = self.parse_postfix_top_level()?;
-                Ok(Expr { kind: ExprKind::New { arena, ctor: Box::new(ctor) }, line, col, len: self.span_len(line, col)})
-            }
             _ => self.parse_postfix_top_level(),
         }
     }
@@ -1587,16 +1574,41 @@ impl Parser {
                 self.advance(); // `kernel`
                 let args = self.parse_call_args()?;
                 let mut config = crate::ast::KernelConfig {
-                    block: None, grid: None, after: None, priority: None, line, col,
+                    device: None, target: None, block: None, grid: None, after: None,
+                    priority: None, line, col,
                 };
+                // A positional value is a previously resolved `Device`.  A labeled
+                // `target =` / `device =` is a selector, so lower it to the
+                // ordinary `Device(...)` constructor before backend emission.
+                let mut has_labeled_selector = false;
                 for arg in args {
                     let Some(label) = arg.label.as_deref() else {
-                        return Err(ParseError::Generic {
-                            msg: "inline kernel configuration arguments must be labeled".into(),
-                            line: arg.value.line, col: arg.value.col, len: arg.value.len,
-                        });
+                        if config.device.is_some() {
+                            return Err(ParseError::Generic {
+                                msg: "kernel accepts at most one positional Device".into(),
+                                line: arg.value.line, col: arg.value.col, len: arg.value.len,
+                            });
+                        }
+                        config.device = Some(arg.value);
+                        continue;
                     };
                     match label {
+                        "device" if config.device.is_none() => {
+                            has_labeled_selector = true;
+                            config.device = Some(arg.value);
+                        }
+                        "target" if config.target.is_none() => {
+                            has_labeled_selector = true;
+                            config.target = match arg.value.kind {
+                                ExprKind::DotIdent(value) | ExprKind::Var(value) | ExprKind::Str(value) => {
+                                    Some(value.to_ascii_uppercase())
+                                }
+                                _ => return Err(ParseError::Generic {
+                                    msg: "kernel target must be .CUDA, .ROCM, .METAL, .WGPU, or .SIMD".into(),
+                                    line: arg.value.line, col: arg.value.col, len: arg.value.len,
+                                }),
+                            };
+                        }
                         "block" if config.block.is_none() => config.block = Some(arg.value),
                         "grid" if config.grid.is_none() => config.grid = Some(arg.value),
                         "after" if config.after.is_none() => config.after = Some(arg.value),
@@ -1609,15 +1621,49 @@ impl Parser {
                                 }),
                             };
                         }
-                        "block" | "grid" | "after" | "priority" => return Err(ParseError::Generic {
-                            msg: format!("inline kernel configuration argument '{label}' is specified twice"),
+                        "device" | "target" | "block" | "grid" | "after" | "priority" => return Err(ParseError::Generic {
+                            msg: format!("kernel configuration argument '{label}' is specified twice"),
                             line: arg.value.line, col: arg.value.col, len: arg.value.len,
                         }),
                         _ => return Err(ParseError::Generic {
-                            msg: format!("unknown inline kernel configuration argument '{label}'"),
+                            msg: format!("unknown kernel configuration argument '{label}'"),
                             line: arg.value.line, col: arg.value.col, len: arg.value.len,
                         }),
                     }
+                }
+                if has_labeled_selector {
+                    let mut device_args = Vec::new();
+                    if let Some(target) = &config.target {
+                        device_args.push(Arg {
+                            label: Some("target".into()),
+                            value: Expr { kind: ExprKind::Str(target.clone()), line, col, len: 0 },
+                            spread: false, default_rest: false,
+                        });
+                    }
+                    if let Some(selector) = config.device.take() {
+                        let label = if matches!(selector.kind, ExprKind::Str(_)) { "name" } else { "index" };
+                        device_args.push(Arg { label: Some(label.into()), value: selector, spread: false, default_rest: false });
+                    }
+                    config.device = Some(Expr {
+                        kind: ExprKind::Call(
+                            Box::new(Expr { kind: ExprKind::Var("Device".into()), line, col, len: 0 }),
+                            device_args,
+                        ),
+                        line, col, len: 0,
+                    });
+                }
+                if !self.check(&TokenKind::Colon) {
+                    if config.block.is_some() || config.grid.is_some() || config.after.is_some() || config.priority.is_some() {
+                        return Err(ParseError::Generic {
+                            msg: "block, grid, after, and priority configure a launch, not kernel placement".into(),
+                            line, col, len: self.span_len(line, col),
+                        });
+                    }
+                    let ctor = self.parse_postfix_top_level()?;
+                    return Ok(Expr {
+                        kind: ExprKind::New { arena: config.device.take().map(Box::new), ctor: Box::new(ctor) },
+                        line, col, len: self.span_len(line, col),
+                    });
                 }
                 if config.block.is_none() {
                     return Err(ParseError::Generic {

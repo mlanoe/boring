@@ -605,7 +605,7 @@ impl Transpiler {
             // (`instance.enumerate_adapters` in `wgpu::host::emit_gpu_adapter_enumeration`),
             // not a fake single-element array — see docs/wgpu-backend.md's "`GPU` type
             // on wgpu" (2026-09-01: real per-adapter introspection).
-            if v == "GPU" && method == "all" && self.is_gpu_target {
+            if v == "Device" && method == "all" && self.is_gpu_target {
                 return Some("__boring_gpu_all()".to_string());
             }
         }

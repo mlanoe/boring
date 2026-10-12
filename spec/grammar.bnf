@@ -387,6 +387,9 @@ ext_member      ::= "pub"? fn_decl
 # compiler lowers the expression to a private kernel struct + synchronous launch.
 #
 # Launch args:
+#   target   = .CUDA | .ROCM | .METAL | .WGPU | .SIMD — optional backend selector
+#   device   = <int> | <string> — optional device selector (index or stable name/address)
+#   kernel(<Device>) Name(args)  — create a named kernel instance on a reusable Device
 #   block    = <int>                   — threads per block (1-D); required
 #   grid     = <int>                   — blocks per grid (1-D); optional, auto-inferred from data size
 #   block    = (<int>, <int>, <int>)   — 3-D block dimensions
@@ -456,7 +459,12 @@ kernel_field_decl ::= ("let" | "mut" | "var") type IDENT ("=" expr)? NEWLINE
 inline_kernel_expr ::= "kernel" "(" launch_arg ("," launch_arg)* ")" ":"
                          NEWLINE INDENT stmt* expr NEWLINE DEDENT
 
-launch_arg      ::= "block" "=" expr
+kernel_placement ::= "kernel" "(" (expr | "target" "=" expr | "device" "=" expr) ("," (expr | "target" "=" expr | "device" "=" expr))* ")" expr
+
+launch_arg      ::= expr                         # reusable Device positional argument
+                  | "target" "=" expr
+                  | "device" "=" expr
+                  | "block" "=" expr
                   | "grid" "=" expr
                   | "after" "=" expr
                   | "priority" "=" ("high" | "normal" | "low" | STRING)

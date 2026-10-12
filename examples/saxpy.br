@@ -15,7 +15,7 @@ let N = 16        # small enough to print in full
 let float32 alpha = 2.0
 
 # Print device info
-let g = GPU(0)
+let g = Device(index = 0)
 print "Device : {g.name()}"
 print "Memory : {g.totalMem() / 1_073_741_824} GB"
 

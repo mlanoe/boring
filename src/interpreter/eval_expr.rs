@@ -470,9 +470,11 @@ impl Interpreter {
                     created_at: std::time::Instant::now(),
                 });
             }
-            // GPU(n) — built-in GPU device handle (simulation mode).
-            if name.as_str() == "GPU" {
-                let idx = match args.first() {
+            // Device(index = n) — built-in execution-device handle (simulation mode).
+            if name.as_str() == "Device" {
+                let index_arg = args.iter().find(|a| a.label.as_deref() == Some("index"))
+                    .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten());
+                let idx = match index_arg {
                     Some(a) => match self.eval_expr(&a.value, Rc::clone(&env))? {
                         Value::Int(n) => n as usize,
                         Value::Uint(n) => n as usize,
@@ -538,6 +540,7 @@ impl Interpreter {
                 let block_expr = args.iter().find(|a| a.label.as_deref() == Some("block")).map(|a| a.value.clone());
                 let grid_expr  = args.iter().find(|a| a.label.as_deref() == Some("grid")).map(|a| a.value.clone());
                 let config = crate::ast::KernelConfig {
+                    device: None, target: None,
                     block: block_expr, grid: grid_expr, after: None, priority: None, line, col: 0,
                 };
                 return self.eval_kernel_launch(&config, callee_expr, env);
@@ -554,6 +557,7 @@ impl Interpreter {
                     .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
                 let _after_val = after_arg.and_then(|r| r.ok());
                 let config = crate::ast::KernelConfig {
+                    device: None, target: None,
                     block: Some(Expr { kind: crate::ast::ExprKind::Nil, line, col: 0, len: 0 }),
                     grid: None, after: None, priority: None, line, col: 0,
                 };
@@ -692,8 +696,8 @@ impl Interpreter {
                 let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                 return self.call_fs_method(method, arg_vals, line);
             }
-            // GPU.all() — iterate all GPU devices (simulation: a single device).
-            if v == "GPU" && method == "all" {
+            // Device.all() — iterate all devices (simulation: a single device).
+            if v == "Device" && method == "all" {
                 return Ok(Value::Array(vec![Value::GpuDevice(0)].into()));
             }
         }

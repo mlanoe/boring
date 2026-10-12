@@ -205,6 +205,16 @@ fn lower_expr(
             }).collect(),
         ), line: expr.line, col: expr.col, len: expr.len,
     };
+    // An inline kernel has no user-visible constructor, so its placement is
+    // transferred to the generated private kernel instance before launch.
+    let ctor = if let Some(device) = &config.device {
+        Expr {
+            kind: ExprKind::New { arena: Some(Box::new(device.clone())), ctor: Box::new(ctor) },
+            line: expr.line, col: expr.col, len: expr.len,
+        }
+    } else {
+        ctor
+    };
     let instance = LetStmt {
         binding: BindingKind::Mut, is_pub: false, is_static: false,
         name: instance_name.clone(), ty: None, var_mut: false, value: Some(ctor),

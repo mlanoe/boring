@@ -3438,7 +3438,7 @@ impl Introspect for Point {
 ```
 Each `Field`/`Method` carries a plain Rust `fn` pointer, wrapped in `Option` (`None` when `isCallable`/a setter isn't available — no closures either way, nothing to capture, one named free function per field/method) that downcasts the `&dyn Introspect`/`&mut dyn Introspect` it's given back to the concrete type via `std::any::Any` before touching the real field/method — this is what lets a `Field`/`Method` resolved from one instance be called against any other instance of the same type.
 
-> **`introspect()` is computed once per type, not per call.** The `IntrospectInfo` returned isn't rebuilt on every `.introspect()` — it's backed by a per-type `static` (`OnceLock`, one entry for a struct; a `OnceLock<Vec<IntrospectInfo>>` indexed by `variantIndex()` for an enum, since fields vary by variant but nothing about *how* to compute them depends on which instance is asking). This is transparent to Boring source — `let info = w.introspect(); info.fields` behaves identically whether the underlying Rust value is owned or `&'static` — Boring already treats every struct-typed value as reference-like (see the parameter-passing rules). (Same pattern the transpiler already uses for `GPU(n)`'s real adapter enumeration — see `src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration` — a static computed once, not a language-level feature.)
+> **`introspect()` is computed once per type, not per call.** The `IntrospectInfo` returned isn't rebuilt on every `.introspect()` — it's backed by a per-type `static` (`OnceLock`, one entry for a struct; a `OnceLock<Vec<IntrospectInfo>>` indexed by `variantIndex()` for an enum, since fields vary by variant but nothing about *how* to compute them depends on which instance is asking). This is transparent to Boring source — `let info = w.introspect(); info.fields` behaves identically whether the underlying Rust value is owned or `&'static` — Boring already treats every struct-typed value as reference-like (see the parameter-passing rules). (The same pattern backs `Device(index = n)` adapter enumeration in the wgpu host emitter — a static computed once, not a language-level feature.)
 
 #### Mutation — `set`/`modify`
 
@@ -8849,36 +8849,56 @@ let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 
 ---
 
-### Advanced — `new` placement operator and `'new` qualifier
+### Advanced — kernel placement and the `'new` qualifier
 
-`new` is a placement operator that signals non-inline allocation without naming a qualifier. The transpiler infers the qualifier from usage (excluding `'inline`):
+Ordinary construction has no placement operator: write `Counter()` and use an
+explicit ownership qualifier such as `'owned`, `'shared`, or `'actor` when a
+particular storage representation is required. Ownership transfer between
+bindings is implicit — see ["Move semantics"](#move-semantics) above; there is
+no explicit move-marker syntax.
+
+GPU/SIMD placement is specific to declared `kernel` constructors. A kernel
+without an explicit placement uses the selected target's default device:
 
 ```boring
-let v = Counter()       # inferred — 'inline included in candidates
-let v = new Counter()   # inferred — 'inline excluded from candidates
-let v'actor = Counter() # explicit qualifier
+mut scale = Scale(n)
+scale(block = 256, grid = 64)
 ```
 
-`new` also accepts a GPU arena as first argument (see the CUDA section):
+Use a reusable `Device` when several kernel instances share the same resolved
+backend and physical device:
 
 ```boring
-new(g0) Counter()   # GPU device g0
+let device = Device(target = .WGPU, index = 0)
+mut scale = kernel(device) Scale(n)
+mut reduce = kernel(device) Reduce(n)
 ```
 
-Ownership transfer between bindings is implicit — see ["Move semantics"](#move-semantics) above; there is no explicit move-marker syntax.
+For one-off placement, selectors can be written directly. `target` and
+`device` are independently optional; `device` accepts an index or a
+backend-specific name/address:
 
-`'new` is the delayed-initialisation counterpart, for a variable declared without an initial value:
+```boring
+mut scale = kernel(target = .WGPU, device = 0) Scale(n)
+mut other = kernel(device = "pci:0000:03:00.0") Scale(n)
+```
+
+`kernel(...)` is rejected for ordinary `struct` constructors. It is not an
+allocation operator; it binds a kernel instance to an execution context.
+
+`'new` remains a compatibility qualifier for delayed initialisation. It is not
+related to device placement:
 
 ```boring
 let Counter v           # delayed init — 'inline included
-let Counter'new v       # delayed init — 'inline excluded
+let Counter'new v       # delayed init — 'inline excluded (legacy spelling)
 let Counter'actor v     # delayed init — explicit qualifier
 ```
 
 `'new` is a **candidate-set qualifier**, not a caller-facing acceptance group (contrast with the qualifier groups below): it seeds the same candidate-elimination inference used for a bare `T`, just with `'inline` excluded from the starting set. That is why, unlike those four groups, `'new` keeps narrowing by usage on **local variables** too, not only on parameters:
 
 ```boring
-let v = new Counter()
+let v'new = Counter()
 spawn_actor(v)   # demands 'actor → v narrows all the way to 'actor, not just "some indirection"
 ```
 
@@ -9466,6 +9486,18 @@ of such buffers. The result stays resident when the enclosing function has a
 `'kernel'unified` or `'kernel'global` return type. `block` is required; `grid`,
 `after`, and `priority` have the same semantics as a named-kernel dispatch.
 
+An inline kernel can use the same reusable execution context as a named
+kernel. The positional first argument is a `Device`; the remaining arguments
+are launch configuration:
+
+```boring
+let device = Device(target = .WGPU, index = 0)
+
+kernel(device, block = 256, grid = 64):
+    mut [float32]'unified out = [0.0 for ..<16]
+    out
+```
+
 The compiler lowers this form to a private anonymous `kernel` struct, its
 constructor, a synchronous launch, and a final field read. Named
 `kernel Name:` structs remain the appropriate form for reusable kernels,
@@ -9547,7 +9579,7 @@ A `mut` kernel field initialized from an `init` parameter is a **copy** of the a
 ### Further reading
 
 **[GPU computing — language reference](gpu-module.html)**
-Complete GPU language reference: `kernel` struct syntax, const generic kernel declarations (`kernel Blur<int N>:`), memory qualifiers and inference rules, dispatch, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, and simulation mode and profiles.
+Complete GPU language reference: `kernel` struct syntax, const generic kernel declarations (`kernel Blur<int N>:`), memory qualifiers and inference rules, dispatch, the `Device` type, atomics, multi-device dispatch, `after =` ordering, and simulation mode and profiles.
 
 **[CUDA backend](cuda-module.html)**
 CUDA codegen internals: generated file layout, `cudarc` host API, PTX compilation via `build.rs`, Boring construct to CUDA C mapping, and known limitations.
@@ -9770,8 +9802,8 @@ All ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`, `'
 **[Binding and mutability](binding-mutability.html)**
 Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.
 
-**[`new` placement operator](new-placement.html)**
-Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
+**[Kernel placement](new-placement.html)**
+`Device(...)`, `kernel(device) Name(...)`, and inline-kernel placement syntax. Covers reusable execution contexts and backend/device selection.
 
 **[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
 Full design and implementation notes for `with` — see [chapter 21](#scoped-access-blocks--with) above for the `'actor`/`'guard` per-block locking language reference, and [chapter 32, GPU Computing](#32-gpu-computing) for GPU materialization, function-boundary residency, and resident struct fields. These features are implemented on the GPU host targets; the design document records the generated Rust and current backend limitations.

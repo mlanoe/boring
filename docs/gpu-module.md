@@ -379,7 +379,7 @@ Inside `def ()` and device helpers, `gpu` is available:
 | `.warp.shuffle(v, src_lane)` | broadcast/read `v` from an arbitrary lane |
 
 `.warp.*` is device-side, current-thread state — not to be confused with
-the host-side `GPU(0).warpSize()` below, which queries a device by index from
+the host-side `Device(index = 0).warpSize()` below, which queries a device by index from
 ordinary (non-kernel) code. Same hardware concept, unrelated call sites.
 
 See [warp-level primitives](warp-level-primitives.html) for the full design
@@ -394,17 +394,53 @@ GPUs have no matrix-core hardware at all), and phased implementation plan.
 
 ---
 
-## `GPU` type
+## `Device` type
 
-`GPU` is a built-in type for device selection and property queries:
+`Device` is a built-in type for device selection and property queries. It is a
+reusable, resolved execution context: creating it once avoids resolving the
+same backend and physical device for every kernel instance.
 
 ```boring
-let g = GPU(0)
+let g = Device(index = 0)
 print "Device: {g.name()} — {g.totalMem() / 1_073_741_824} GB"
 
-for g in GPU.all():
+for g in Device.all():
     print "[{g.index()}] {g.name()} — {g.freeMem()} bytes free"
 ```
+
+`target` and the selector are optional. A selector can be an integer index or
+a stable backend-specific name/address:
+
+```boring
+let automatic = Device()
+let metal = Device(target = .METAL)
+let second = Device(target = .WGPU, index = 1)
+let named = Device(target = .CUDA, name = "pci:0000:03:00.0")
+```
+
+Place a named kernel on a resolved device with `kernel(device)`. The ordinary
+constructor keeps automatic placement, while inline kernels take the same
+device as their first configuration argument:
+
+```boring
+let device = Device(target = .WGPU, index = 0)
+mut scale = kernel(device) Scale(n)
+scale(block = 256, grid = 64)
+
+kernel(device, block = 256, grid = 64):
+    # device code
+    out
+```
+
+For one-off placement, the selector may appear directly in `kernel(...)`:
+
+```boring
+mut scale = kernel(target = .WGPU, device = 0) Scale(n)
+```
+
+`new` is not a placement operator. Kernel placement is deliberately restricted
+to declared `kernel` constructors; applying `kernel(...)` to an ordinary
+`struct` is an error.
 
 | Method | Returns | Notes |
 |---|---|---|

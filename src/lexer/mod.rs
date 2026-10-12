@@ -1139,7 +1139,6 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "mut"      => TokenKind::Mut,
         "var"      => TokenKind::Var,
         "lazy"     => TokenKind::Lazy,
-        "new"      => TokenKind::New,
         "def"      => TokenKind::Def,
         "return"   => TokenKind::Return,
         "if"       => TokenKind::If,

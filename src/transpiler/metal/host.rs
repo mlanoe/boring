@@ -2743,8 +2743,17 @@ impl HostEmitter {
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
                 // `GPU(n)` → `boring_metal_device_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
-                    if name == "GPU" {
-                        let idx = args.first().map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
+                    if name == "Device" {
+                        if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
+                            if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
+                                if value.to_ascii_uppercase() != "METAL" {
+                                    return format!("compile_error!(\"Device target {} is not available in a Metal build\")", value);
+                                }
+                            }
+                        }
+                        let idx = args.iter().find(|a| a.label.as_deref() == Some("index"))
+                            .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten())
+                            .map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
                         return format!("boring_metal_device_n({} as usize)?", idx);
                     }
                 }
@@ -2946,7 +2955,7 @@ impl HostEmitter {
                 }
                 // `GPU.all()` → Device::all()
                 if let ExprKind::Var(name) = &obj.kind {
-                    if name == "GPU" && method == "all" {
+                    if name == "Device" && method == "all" {
                         return "Device::all().into_iter().enumerate().map(|(i, d)| (i, d)).collect::<Vec<_>>()".into();
                     }
                     if self.gpu_vars.contains(name.as_str()) {

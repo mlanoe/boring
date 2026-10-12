@@ -1285,7 +1285,7 @@ mod tests {
     fn kernel_launch_is_rejected_in_kernel_target_context() {
         use crate::ast::{Expr, ExprKind, KernelConfig};
         let kernel = Expr { kind: ExprKind::Var("k".to_string()), line: 1, col: 1, len: 1 };
-        let config = KernelConfig { block: None, grid: None, after: None, priority: None, line: 1, col: 1 };
+        let config = KernelConfig { device: None, target: None, block: None, grid: None, after: None, priority: None, line: 1, col: 1 };
         let launch = Expr {
             kind: ExprKind::KernelLaunch { config: Box::new(config), kernel: Box::new(kernel) },
             line: 1, col: 1, len: 1,

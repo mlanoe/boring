@@ -505,11 +505,11 @@ back into on every call; an `Option`'s `.take()`/`Some(..)` reassignment can.
 ## Multi-device
 
 ```boring
-let g0 = GPU(0)
-let g1 = GPU(1)
+let g0 = Device(index = 0)
+let g1 = Device(index = 1)
 
-mut ka = new(g0) Scale(n)
-mut kb = new(g1) Scale(n)
+mut ka = kernel(g0) Scale(n)
+mut kb = kernel(g1) Scale(n)
 
 kernel:
     ka(block = 256)
@@ -518,7 +518,7 @@ kernel:
 
 `after =` for cross-device ordering uses the same syntax as single-device — same-device ordering is implemented via CUDA events (`stream.join`, i.e. `cuStreamWaitEvent`), which also works cross-device, but only once peer access is enabled between the two GPUs involved.
 
-There is no `--peer-access` flag to opt into this — every GPU context created via `GPU(n)`/`new(g) ...` automatically attempts bidirectional peer access with every other context the program has already created, checking real hardware capability first (`cuDeviceCanAccessPeer`) and silently skipping any pair the topology doesn't support (no NVLink/shared PCIe root, etc.) — that pair's own `after =` then surfaces its own real `DriverError` at the `cuStreamWaitEvent` call site instead of silently doing the wrong thing. This is cheap to always attempt: a single-GPU program only ever registers one context, so the check loop never runs.
+There is no `--peer-access` flag to opt into this — every GPU context created via `Device(...)`/`kernel(device) ...` automatically attempts bidirectional peer access with every other context the program has already created, checking real hardware capability first (`cuDeviceCanAccessPeer`) and silently skipping any pair the topology doesn't support (no NVLink/shared PCIe root, etc.) — that pair's own `after =` then surfaces its own real `DriverError` at the `cuStreamWaitEvent` call site instead of silently doing the wrong thing. This is cheap to always attempt: a single-GPU program only ever registers one context, so the check loop never runs.
 
 ---
 

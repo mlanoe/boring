@@ -355,6 +355,10 @@ pub struct KernelDecl {
 /// Launch configuration passed to the `kernel(...)` expression.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
+    /// Reusable execution device (`kernel(device, ...)`).
+    pub device: Option<Expr>,
+    /// Optional backend selector (`target = .CUDA`, `.ROCM`, `.METAL`, `.WGPU`, `.SIMD`).
+    pub target: Option<String>,
     /// Threads per block: int or tuple.
     pub block: Option<Expr>,
     /// Blocks per grid: int or tuple (inferred if None).
@@ -980,10 +984,9 @@ pub enum ExprKind {
     // `.method(args)` is parsed directly as `ExprKind::MethodCall`.
     Pipe(Box<Expr>, String, Vec<Arg>),
 
-    /// `new Constructor()` — placement expression, qualifier inferred excluding 'inline.
-    /// `new(arena) Constructor()` — GPU arena placement; arena expression stored but not yet emitted.
-    /// `ctor` is the constructor call expression (e.g. `Counter()`).
-    /// `arena` is the expression inside `new(...)` if present.
+    /// Internal kernel-placement node. User syntax is
+    /// `kernel(device) Scale(...)` or `kernel(target = .WGPU, device = 0) Scale(...)`.
+    /// The historical `new` spelling is no longer accepted by the lexer/parser.
     New { arena: Option<Box<Expr>>, ctor: Box<Expr> },
 
     /// `kernel(block = N, ...) expr` — GPU kernel launch expression.
