@@ -243,6 +243,17 @@ impl Transpiler {
                 }
                 self.fn_return_types.get(name.as_str()).cloned()
             }
+            // `<T?-typed expr>.unwrap_or(x)` (and the other unwrap-style adapters) is the
+            // optional's inner `T`.
+            ExprKind::MethodCall(recv, method, _)
+                if matches!(method.as_str(), "unwrap_or" | "unwrap" | "expect" | "unwrap_or_default")
+                    && matches!(self.resolve_expr_type(recv), Some(Type::Optional(_))) =>
+            {
+                match self.resolve_expr_type(recv)? {
+                    Type::Optional(inner) => Some(*inner),
+                    _ => None,
+                }
+            }
             ExprKind::MethodCall(recv, method, _) => {
                 let owner = self.resolve_expr_struct_type(recv)?;
                 self.struct_method_return_types.get(&format!("{}::{}", owner, method)).cloned()

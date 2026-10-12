@@ -947,6 +947,24 @@ impl Transpiler {
                 }
             }
         }
+        // `let x = <T?-returning call>.unwrap_or(d)` (also `unwrap`/`expect`/`unwrap_or_default`):
+        // `x` is a plain `T`. Record it so a by-value non-Copy read is cloned at call sites.
+        if s.ty.is_none() {
+            if let ExprKind::MethodCall(_, method, _) = &s_value.kind {
+                if matches!(method.as_str(), "unwrap_or" | "unwrap" | "expect" | "unwrap_or_default") {
+                    match self.resolve_expr_type(s_value) {
+                        Some(Type::Named(n)) if self.is_known_user_type(n.as_str()) => {
+                            self.var_struct_types.insert(s.name.clone(), n.clone());
+                            self.var_types.insert(s.name.clone(), Type::Named(n));
+                        }
+                        Some(t @ (Type::Array(_) | Type::Dict(..) | Type::Set(_))) => {
+                            self.var_types.insert(s.name.clone(), t);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         // Track the collection type for an unannotated expression. Besides
         // constructor arrays, this covers numeric cast literals such as
         // `[1.5 as float32, ...]` and if-expressions selecting between two
