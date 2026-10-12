@@ -28,16 +28,40 @@ impl super::Checker {
         }
         let operand_count = args.iter().position(|arg| arg.label.is_some()).unwrap_or(args.len());
         let labeled = &args[operand_count..];
-        let dynamic_linear = method == "linear"
-            && matches!(operand_count, 3 | 4)
-            && args[..operand_count].iter().all(|arg| arg.label.is_none())
-            && matches!(labeled.len(), 3 | 4)
-            && labeled.iter().all(|arg| arg.label.as_deref().is_some_and(|label| matches!(label, "m" | "n" | "k" | "format")));
-        if dynamic_linear {
+        let dynamic_call = args[..operand_count].iter().all(|arg| arg.label.is_none())
+            && match method.as_str() {
+                "linear" => {
+                    matches!(operand_count, 3 | 4)
+                        && matches!(labeled.len(), 3 | 4)
+                        && labeled.iter().all(|arg| {
+                            arg.label.as_deref().is_some_and(|label| {
+                                matches!(label, "m" | "n" | "k" | "format")
+                            })
+                        })
+                }
+                "matmul" | "mma" => {
+                    operand_count == 3
+                        && labeled.len() == 3
+                        && labeled.iter().all(|arg| {
+                            arg.label
+                                .as_deref()
+                                .is_some_and(|label| matches!(label, "m" | "n" | "k"))
+                        })
+                }
+                _ => false,
+            };
+        if dynamic_call {
             let mut labels = std::collections::HashSet::new();
             if labeled.iter().any(|arg| !labels.insert(arg.label.as_deref().unwrap()))
                 || ["m", "n", "k"].iter().any(|label| !labels.contains(label)) {
-                self.error("dynamic kernel.tensors.linear requires distinct m, n, and k arguments (and at most one format)", call.line, call.col);
+                self.error(
+                    format!(
+                        "dynamic kernel.tensors.{method} requires distinct m, n, and k arguments{}",
+                        if method == "linear" { " (and at most one format)" } else { "" }
+                    ),
+                    call.line,
+                    call.col,
+                );
                 return;
             }
             let format = labeled.iter().find(|arg| arg.label.as_deref() == Some("format"));
@@ -109,7 +133,7 @@ impl super::Checker {
         }
         if args.len() != 3 || args.iter().any(|arg| arg.label.is_some() || arg.spread || arg.default_rest) {
             self.error(
-                "kernel.tensors.matmul and mma require three positional operands; linear accepts three positional operands, or three/four operands followed by m, n, and k",
+                "kernel.tensors.matmul and mma accept three positional operands, optionally followed by m, n, and k; linear accepts three/four operands with the same dimensions and an optional format",
                 call.line,
                 call.col,
             );

@@ -92,6 +92,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         global_consts,
         locals: std::collections::HashSet::new(),
         value_types: std::collections::HashMap::new(),
+        replayable_locals: std::collections::HashMap::new(),
         thread_override: None,
     };
     e.raw(PRELUDE);
@@ -181,6 +182,7 @@ struct Emitter {
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
+    replayable_locals: std::collections::HashMap<String, Expr>,
     thread_override: Option<String>,
 }
 impl Emitter {
@@ -204,6 +206,7 @@ impl Emitter {
             .collect();
         self.locals.clear();
         self.value_types.clear();
+        self.replayable_locals.clear();
         for field in &k.fields {
             let field_ty = if is_array(&field.ty) {
                 elem_ty(&field.ty)
@@ -337,6 +340,14 @@ impl Emitter {
                 if let Some(inferred_ty) = inferred_ty {
                     self.value_types.insert(v.name.clone(), inferred_ty);
                 }
+                if matches!(v.binding, BindingKind::Let) {
+                    if let Some(initializer) =
+                        v.value.as_ref().filter(|e| self.warp_replayable(e))
+                    {
+                        self.replayable_locals
+                            .insert(v.name.clone(), initializer.clone());
+                    }
+                }
             }
             Stmt::Expr(x) => {
                 let x = self.expr(x);
@@ -413,6 +424,11 @@ impl Emitter {
             ExprKind::Float(v) => format!("{v}"),
             ExprKind::Bool(v) => v.to_string(),
             ExprKind::Var(v) => {
+                if self.thread_override.is_some() {
+                    if let Some(initializer) = self.replayable_locals.get(v).cloned() {
+                        return self.expr(&initializer);
+                    }
+                }
                 if v == "thread" {
                     self.thread_override
                         .clone()
@@ -634,6 +650,7 @@ impl Emitter {
                 matches!(name.as_str(), "thread" | "block" | "block_dim" | "gpu")
                     || self.fields.contains(name)
                     || self.global_consts.contains_key(name)
+                    || self.replayable_locals.contains_key(name)
             }
             ExprKind::DotIdent(name) => {
                 matches!(name.as_str(), "thread" | "block" | "block_dim")

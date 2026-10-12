@@ -161,10 +161,11 @@ kernel W:
         sizes = s
     def ():
         let i = .thread.x
-        direct[i] = .warp.shuffle(values[.thread.x], 0)
-        down[i] = .warp.shuffle_down(values[.thread.x], 1)
-        up[i] = .warp.shuffleUp(values[.thread.x], 1)
-        xor[i] = .warp.shuffleXor(values[.thread.x], 1)
+        let value = values[i]
+        direct[i] = .warp.shuffle(value, 0)
+        down[i] = .warp.shuffle_down(value, 1)
+        up[i] = .warp.shuffleUp(value, 1)
+        xor[i] = .warp.shuffleXor(value, 1)
         sizes[i] = .warp.size
 mut w = W(values, direct, down, up, xor, sizes)
 kernel:
@@ -209,14 +210,14 @@ print w.sizes[0]
 }
 
 #[test]
-fn local_value_warp_shuffle_fails_during_codegen() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_local_error");
+fn mutable_local_warp_shuffle_fails_during_codegen() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_mutable_error");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("warp.br");
     fs::write(
         &input,
-        "kernel W:\n    def ():\n        let lane = .thread.x\n        let value = .warp.shuffle(lane, 0)\n",
+        "kernel W:\n    def ():\n        var int lane = .thread.x\n        let value = .warp.shuffle(lane, 0)\n",
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
@@ -310,8 +311,8 @@ print linear[20]
 }
 
 #[test]
-fn dynamic_float_tensor_linear_runs_on_cpu() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_tensor_linear");
+fn dynamic_float_tensor_operations_run_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_tensor_ops");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("tensor.br");
@@ -323,11 +324,16 @@ let int n = 2
 let int k = 3
 let [float32]'kernel'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
 let [float32]'kernel'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+let [float32]'kernel'global b = [1.0 as float32, 2.0 as float32, 0.0 as float32, 3.0 as float32, -1.0 as float32, 4.0 as float32]
 let [float32]'kernel'global bias = [10.0 as float32, 20.0 as float32]
 mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
 mut [float32]'kernel'unified y_no_bias = [0.0 as float32 for ..<m * n]
+mut [float32]'kernel'unified product = [0.0 as float32 for ..<m * n]
+mut [float32]'kernel'unified accumulated = [float32(i + 1) for i in 0..<m * n]
 kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k)
 kernel.tensors.linear(x, w, y_no_bias, m = m, n = n, k = k)
+kernel.tensors.matmul(x, b, product, m = m, n = n, k = k)
+kernel.tensors.mma(x, b, accumulated, m = m, n = n, k = k)
 print y[0]
 print y[1]
 print y[2]
@@ -336,6 +342,14 @@ print y_no_bias[0]
 print y_no_bias[1]
 print y_no_bias[2]
 print y_no_bias[3]
+print product[0]
+print product[1]
+print product[2]
+print product[3]
+print accumulated[0]
+print accumulated[1]
+print accumulated[2]
+print accumulated[3]
 "#,
     )
     .unwrap();
@@ -367,7 +381,7 @@ print y_no_bias[3]
     );
     assert_eq!(
         String::from_utf8_lossy(&run.stdout).trim(),
-        "8\n40\n8\n67\n-2\n20\n-2\n47"
+        "8\n40\n8\n67\n-2\n20\n-2\n47\n-2\n20\n-2\n47\n-1\n22\n1\n51"
     );
 }
 
