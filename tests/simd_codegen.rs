@@ -302,19 +302,33 @@ fn branched_mutable_local_warp_shuffle_fails_during_codegen() {
 }
 
 #[test]
-fn block_shared_storage_fails_during_codegen() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_actor_error");
+fn block_shared_storage_and_top_level_sync_run_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_actor_sync");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("actor.br");
-    fs::write(&input, "kernel Shared:\n    mut [float32, 4]'actor tile\n    def ():\n        tile[.thread.x] = 1.0\n").unwrap();
+    fs::write(
+        &input,
+        "mut [int]'kernel'unified output = [0 for ..<4]\nkernel Shared:\n    mut [int, 4]'actor tile\n    mut [int]'unified output\n    init(mut [int]'unified o):\n        output = o\n    def ():\n        let i = .thread.x\n        var int carried = i * 10\n        carried = carried + 1\n        tile[i] = i + 1\n        sync\n        carried = carried + tile[3 - i]\n        sync\n        output[i] = carried\nmut shared = Shared(output)\nkernel:\n    shared(block = 4)\nprint \"{shared.output[0]} {shared.output[1]} {shared.output[2]} {shared.output[3]}\"\n",
+    )
+    .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["build", "--target", "simd"])
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("storage, which is not yet supported"));
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let generated = fs::read_to_string(root.join("actor_simd/src/main.rs")).unwrap();
+    assert!(generated.matches("for tz in 0..dz as usize").count() >= 3);
+    assert!(generated.matches("let i = __thread.x").count() >= 3);
+    assert!(generated.contains("__boring_barrier_carried"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("actor_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5 14 23 32");
 }
 
 #[test]
@@ -858,14 +872,14 @@ print y_no_bias[0]
 }
 
 #[test]
-fn gpu_resident_function_return_is_rejected() {
+fn gpu_resident_function_return_materializes_on_cpu() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_resident_return");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("resident.br");
     fs::write(
         &input,
-        "req [float32]'kernel'unified values() throws:\n    [1.0 as float32]\n",
+        "kernel Values:\n    mut [float32]'unified out\n    init():\n        out = [0.0 as float32]\n    def ():\n        out[0] = 42.0 as float32\n\nreq [float32]'kernel'unified values() throws:\n    mut kernel_values = Values()\n    kernel:\n        kernel_values(block = 1)\n    kernel_values.out\n\nlet result = values()\nwith result:\n    print result[0]\n",
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
@@ -873,9 +887,14 @@ fn gpu_resident_function_return_is_rejected() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr)
-        .contains("GPU-resident returns are not yet supported"));
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("resident_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
 }
 
 #[test]

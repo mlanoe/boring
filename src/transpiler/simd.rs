@@ -53,29 +53,11 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
     let (has_main, main_throws) = crate::transpiler::detect_boring_main(&renamed, &general);
 
     let mut initial_errors = general.errors;
-    for item in &program.items {
-        if let Item::Fn(function) = item {
-            if function
-                .return_ty
-                .as_ref()
-                .is_some_and(|ty| ty.gpu_resident_qual().is_some())
-            {
-                initial_errors.push(crate::errors::SourceError::at(
-                    format!("function '{}': GPU-resident returns are not yet supported by --target simd; materialize and return a plain array", function.name),
-                    function.line, function.col,
-                ));
-            }
-        }
-    }
     for k in &kernels {
         for field in &k.fields {
             if matches!(
                 field.qual,
-                GpuQual::Actor
-                    | GpuQual::ActorGlobal
-                    | GpuQual::ActorUnified
-                    | GpuQual::Local
-                    | GpuQual::Surface
+                GpuQual::Local | GpuQual::Surface
             ) {
                 initial_errors.push(crate::errors::SourceError::at(
                     format!("kernel '{}': field '{}' uses {:?} storage, which is not yet supported by --target simd", k.name, field.name, field.qual),
@@ -307,21 +289,115 @@ impl Emitter {
         {
             self.line(2, "let __simd_lanes = __boring_simd_lanes() as i32;");
         }
-        self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
-        self.line(
-            4,
-            "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };",
-        );
-        self.line(
-            4,
-            "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };",
-        );
         if let Some(m) = k.methods.first() {
-            for s in &m.body {
-                self.stmt(s, 4);
+            let has_top_level_sync = m
+                .body
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Comment(comment) if comment == "sync"));
+            if has_top_level_sync {
+                self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
+                self.line(3, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                let phases = m
+                    .body
+                    .split(|stmt| matches!(stmt, Stmt::Comment(comment) if comment == "sync"))
+                    .collect::<Vec<_>>();
+                let mut carried_mutable_locals = Vec::new();
+                for (declaration_phase, phase) in phases.iter().enumerate() {
+                    for stmt in *phase {
+                        if let Stmt::Let(local) = stmt {
+                            if local.binding.is_mutable() {
+                                if let Some(local_ty) = local
+                                    .ty
+                                    .as_ref()
+                                    .map(ty)
+                                    .or_else(|| {
+                                        local.value.as_ref().and_then(|value| self.expr_type(value))
+                                    })
+                                {
+                                    self.line(
+                                        3,
+                                        &format!(
+                                            "let mut __boring_barrier_{}: Vec<{}> = vec![Default::default(); (dx * dy * dz) as usize];",
+                                            local.name, local_ty
+                                        ),
+                                    );
+                                    carried_mutable_locals.push((
+                                        local.name.clone(),
+                                        local_ty,
+                                        declaration_phase,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut replayed_phase_locals = Vec::new();
+                let mut replayed_phase_local_names = std::collections::HashSet::new();
+                for (phase_index, phase) in phases.into_iter().enumerate() {
+                    self.line(3, "for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
+                    self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
+                    self.line(4, "let __boring_barrier_thread = __x + dx as usize * (ty + dy as usize * tz);");
+                    if phase_index > 0 {
+                        for local in &replayed_phase_locals {
+                            self.stmt(local, 4);
+                        }
+                    }
+                    for (name, local_ty, declaration_phase) in &carried_mutable_locals {
+                        if *declaration_phase < phase_index {
+                            self.line(
+                                4,
+                                &format!(
+                                    "let mut {name}: {local_ty} = __boring_barrier_{name}[__boring_barrier_thread].clone();"
+                                ),
+                            );
+                        }
+                    }
+                    for stmt in phase {
+                        self.stmt(stmt, 4);
+                    }
+                    for (name, _, declaration_phase) in &carried_mutable_locals {
+                        if *declaration_phase <= phase_index {
+                            self.line(
+                                4,
+                                &format!(
+                                    "__boring_barrier_{name}[__boring_barrier_thread] = {name}.clone();"
+                                ),
+                            );
+                        }
+                    }
+                    for stmt in phase {
+                        if let Stmt::Let(local) = stmt {
+                            if matches!(local.binding, BindingKind::Let)
+                                && local.value.as_ref().is_some_and(|value| {
+                                    self.barrier_replayable(
+                                        value,
+                                        &replayed_phase_local_names,
+                                    )
+                                })
+                            {
+                                replayed_phase_local_names.insert(local.name.clone());
+                                replayed_phase_locals.push(stmt.clone());
+                            }
+                        }
+                    }
+                    self.line(3, "} } }");
+                }
+                self.line(2, "} } }");
+            } else {
+                self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
+                self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
+                self.line(4, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                for stmt in &m.body {
+                    self.stmt(stmt, 4);
+                }
+                self.line(2, "} } } } } }");
             }
+        } else {
+            self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
+            self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
+            self.line(4, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+            self.line(2, "} } } } } }");
         }
-        self.line(2, "} } } } } }");
         self.line(2, "Ok(())");
         self.line(1, "}");
         self.line(0, "}");
@@ -716,6 +792,41 @@ impl Emitter {
             ExprKind::Call(callee, args) => {
                 matches!(&callee.kind, ExprKind::Var(name) if primitive_cast_type(name).is_some())
                     && args.iter().all(|arg| self.warp_replayable(&arg.value))
+            }
+            _ => false,
+        }
+    }
+    fn barrier_replayable(
+        &self,
+        expr: &Expr,
+        locals: &std::collections::HashSet<String>,
+    ) -> bool {
+        match &expr.kind {
+            ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Var(name) => {
+                matches!(name.as_str(), "thread" | "block" | "block_dim" | "gpu")
+                    || self.global_consts.contains_key(name)
+                    || locals.contains(name)
+            }
+            ExprKind::DotIdent(name) => {
+                matches!(name.as_str(), "thread" | "block" | "block_dim")
+            }
+            ExprKind::Field(object, _) | ExprKind::UnaryOp(_, object) | ExprKind::Cast(object, _) => {
+                self.barrier_replayable(object, locals)
+            }
+            ExprKind::Index(object, index) => {
+                self.barrier_replayable(object, locals)
+                    && self.barrier_replayable(index, locals)
+            }
+            ExprKind::BinOp(_, left, right) => {
+                self.barrier_replayable(left, locals)
+                    && self.barrier_replayable(right, locals)
+            }
+            ExprKind::Call(callee, args) => {
+                matches!(&callee.kind, ExprKind::Var(name) if primitive_cast_type(name).is_some())
+                    && args
+                        .iter()
+                        .all(|arg| self.barrier_replayable(&arg.value, locals))
             }
             _ => false,
         }

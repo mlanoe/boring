@@ -446,6 +446,21 @@ impl Transpiler {
                 let mut is_mutating_method = |_: &str, _: &str| false;
                 let is_write = crate::ast::with_block_mutates(&s.body, name, &mut is_var_param, &mut is_mutating_method);
 
+                if self.config.is_simd_target {
+                    self.line(&format!(
+                        "let {}{name} = match &{name} {{ BoringGpuArg::Host(v) => v.clone() }};",
+                        if is_write { "mut " } else { "" },
+                    ));
+                    self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));
+                    self.known_local_vars.insert(name.clone());
+                    self.with_open_names.insert(name.clone());
+                    resident_call_opened.push(ResidentCallOpened {
+                        name: name.clone(),
+                        is_write: false,
+                        device_ty,
+                    });
+                    continue;
+                }
                 if is_write {
                     self.line(&format!(
                         "let __{name}_buf = match &{name} {{ BoringGpuArg::Resident(buf, _) => Some(std::sync::Arc::clone(buf)), BoringGpuArg::Host(_) => None }};"

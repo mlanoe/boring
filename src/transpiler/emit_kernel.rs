@@ -214,6 +214,11 @@ impl Transpiler {
     /// counterpart to `materialize_resident_call`, same match the call-argument
     /// materialization in `emit_methods.rs` builds.
     pub(crate) fn materialize_resident_var(&self, var_name: &str, ret_ty: &Type) -> String {
+        if self.config.is_simd_target {
+            return format!(
+                "match &{var_name} {{ BoringGpuArg::Host(v) => v.clone() }}"
+            );
+        }
         let inner_ty = match ret_ty {
             Type::Qualified(inner, _) => array_inner_type(inner),
             other => array_inner_type(other),
@@ -237,6 +242,9 @@ impl Transpiler {
     /// the enum value outright here.
     pub(crate) fn materialize_resident_call(&self, call_expr: &Expr, ret_ty: &Type) -> String {
         let call_rust = self.emit_expr(call_expr);
+        if self.config.is_simd_target {
+            return format!("match {call_rust} {{ BoringGpuArg::Host(v) => v }}");
+        }
         let inner_ty = match ret_ty {
             Type::Qualified(inner, _) => array_inner_type(inner),
             other => array_inner_type(other),
@@ -1172,6 +1180,11 @@ impl Transpiler {
             || !is_gpu_buffer_ty(&field_decl.ty)
         {
             return None;
+        }
+        if self.config.is_simd_target {
+            return Some(format!(
+                "BoringGpuArg::Host({var_name}.copy_{field}_to_host())"
+            ));
         }
         let inner_ty = array_inner_type(&field_decl.ty);
         let len_expr = if crate::transpiler::wgpu::uses_packed_buffer_elements(&inner_ty) {
