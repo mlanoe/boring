@@ -104,14 +104,14 @@ The generated runtime caches Metal's default device, indexed-device enumeration,
 command queue, compiled MSL library, and compute pipeline state objects for the
 life of the calling thread. Subsequent dispatches clone the cached Objective-C
 handles (a cheap retain) instead of rediscovering the device through WindowServer,
-recompiling the shader source, or rebuilding the pipeline. `GPU(n)` keeps its
+recompiling the shader source, or rebuilding the pipeline. `Device(index = n)` keeps its
 existing indexed-device behavior; its `MTLCopyAllDevices` result is cached too.
 
 The generated project has no `build.rs`. Compilation happens once at app startup. An AOT path (`boring build --target metal --aot`) may be added in a later iteration for workloads where startup latency matters.
 
 ---
 
-## `GPU` type on Metal
+## `Device` type on Metal
 
 | Boring method | Metal API |
 |---|---|
@@ -122,10 +122,10 @@ The generated project has no `build.rs`. Compilation happens once at app startup
 | `warpSize()` | 32 (conservative default — matches Apple Silicon SIMD group size) |
 | `maxThreads()` | 1024 (conservative default — per pipeline, not device-global) |
 | `maxSharedMem()` | `device.maxThreadgroupMemoryLength()` |
-| `index()` | index passed to `GPU(i)` |
+| `index()` | index passed to `Device(index = i)` |
 
-`GPU(0)` → `MTLCreateSystemDefaultDevice()`.
-`GPU.all()` → `MTLCopyAllDevices()`, sorted by index.
+`Device(index = 0)` → `MTLCreateSystemDefaultDevice()`.
+`Device.all()` → `MTLCopyAllDevices()`, sorted by index.
 
 ---
 

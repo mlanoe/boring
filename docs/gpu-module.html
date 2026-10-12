@@ -294,17 +294,33 @@ print k.buf[<span class="nb">0</span>]    <span class="co"># safe: kernel: block
 <h2 id="execution-context-built-ins">Execution context built-ins</h2>
 <p>Inside <code>def ()</code> and device helpers, <code>gpu</code> is available:</p>
 <table><thead><tr><th>Built-in</th><th>Description</th></tr></thead><tbody><tr><td><code>.thread.x/y/z</code></td><td>thread index within block</td></tr><tr><td><code>.block.x/y/z</code></td><td>block index within grid</td></tr><tr><td><code>.block_dim.x/y/z</code></td><td>threads per block</td></tr><tr><td><code>.grid_dim.x/y/z</code></td><td>blocks per grid</td></tr><tr><td><code>sync</code></td><td>explicit block-level barrier (manual mode — see bare <code>&#x27;actor</code>)</td></tr><tr><td><code>.warp.size</code></td><td>threads per warp/wavefront/SIMD-group/subgroup</td></tr><tr><td><code>.warp.lane</code></td><td>this thread&#x27;s index within its warp, <code>0...warp.size</code></td></tr><tr><td><code>.warp.sync()</code></td><td>warp-local barrier — cheaper than <code>sync</code> (block-wide)</td></tr><tr><td><code>.warp.shuffle_down(v, delta)</code></td><td>read <code>v</code> from the lane <code>delta</code> above this one</td></tr><tr><td><code>.warp.shuffle_up(v, delta)</code></td><td>read <code>v</code> from the lane <code>delta</code> below this one</td></tr><tr><td><code>.warp.shuffle_xor(v, mask)</code></td><td>read <code>v</code> from lane <code>this_lane XOR mask</code> (butterfly pattern — reductions)</td></tr><tr><td><code>.warp.shuffle(v, src_lane)</code></td><td>broadcast/read <code>v</code> from an arbitrary lane</td></tr></tbody></table>
-<p><code>.warp.*</code> is device-side, current-thread state — not to be confused with the host-side <code>GPU(0).warpSize()</code> below, which queries a device by index from ordinary (non-kernel) code. Same hardware concept, unrelated call sites.</p>
+<p><code>.warp.*</code> is device-side, current-thread state — not to be confused with the host-side <code>Device(index = 0).warpSize()</code> below, which queries a device by index from ordinary (non-kernel) code. Same hardware concept, unrelated call sites.</p>
 <p>See <a href="warp-level-primitives.html">warp-level primitives</a> for the full design (per-backend mapping, the wgpu real-subgroup/emulated-fallback split, and the divergent-branch caveat).</p>
 <p>Matrix/tensor-core acceleration (<code>kernel.tensors.*</code>) is a <strong>proposed, not yet implemented</strong> extension of this same nested-namespace pattern — see <a href="tensor-core-primitives.html">tensor-core primitives</a> for the full design, per-backend feasibility (including a definitive finding that RDNA1/RDNA2 AMD GPUs have no matrix-core hardware at all), and phased implementation plan.</p>
 <hr>
-<h2 id="gpu-type"><code>GPU</code> type</h2>
-<p><code>GPU</code> is a built-in type for device selection and property queries:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g = <span class="fn">GPU</span>(<span class="nb">0</span>)
+<h2 id="device-type"><code>Device</code> type</h2>
+<p><code>Device</code> is a built-in type for device selection and property queries. It is a reusable, resolved execution context: creating it once avoids resolving the same backend and physical device for every kernel instance.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g = <span class="fn">Device</span>(index = <span class="nb">0</span>)
 print <span class="s">"Device: <span class="si">{g.name()}</span> — <span class="si">{g.totalMem() / 1_073_741_824}</span> GB"</span>
 
-<span class="kw">for</span> g <span class="kw">in</span> GPU.<span class="fn">all</span>():
+<span class="kw">for</span> g <span class="kw">in</span> Device.<span class="fn">all</span>():
     print <span class="s">"[<span class="si">{g.index()}</span>] <span class="si">{g.name()}</span> — <span class="si">{g.freeMem()}</span> bytes free"</span></code></pre></div>
+<p><code>target</code> and the selector are optional. A selector can be an integer index or a stable backend-specific name/address:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> automatic = <span class="fn">Device</span>()
+<span class="kw">let</span> metal = <span class="fn">Device</span>(target = .METAL)
+<span class="kw">let</span> second = <span class="fn">Device</span>(target = .WGPU, index = <span class="nb">1</span>)
+<span class="kw">let</span> named = <span class="fn">Device</span>(target = .CUDA, name = <span class="s">"pci:0000:03:00.0"</span>)</code></pre></div>
+<p>Place a named kernel on a resolved device with <code>kernel(device)</code>. The ordinary constructor keeps automatic placement, while inline kernels take the same device as their first configuration argument:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> device = <span class="fn">Device</span>(target = .WGPU, index = <span class="nb">0</span>)
+<span class="kw">mut</span> scale = <span class="kw">kernel</span>(device) <span class="fn">Scale</span>(n)
+<span class="fn">scale</span>(block = <span class="nb">256</span>, grid = <span class="nb">64</span>)
+
+<span class="kw">kernel</span>(device, block = <span class="nb">256</span>, grid = <span class="nb">64</span>):
+    <span class="co"># device code</span>
+    out</code></pre></div>
+<p>For one-off placement, the selector may appear directly in <code>kernel(...)</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> scale = <span class="kw">kernel</span>(target = .WGPU, device = <span class="nb">0</span>) <span class="fn">Scale</span>(n)</code></pre></div>
+<p><code>new</code> is not a placement operator. Kernel placement is deliberately restricted to declared <code>kernel</code> constructors; applying <code>kernel(...)</code> to an ordinary <code>struct</code> is an error.</p>
 <table><thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead><tbody><tr><td><code>name()</code></td><td>device model name</td><td></td></tr><tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td><td>may be 0 on unified-memory GPUs on wgpu</td></tr><tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td><td>always 0 on wgpu — not exposed by the API</td></tr><tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td><td>CUDA SM version; <code>[0, 0]</code> on wgpu and Metal</td></tr><tr><td><code>warpSize()</code></td><td>threads per warp</td><td>conservative default (32) on wgpu</td></tr><tr><td><code>maxThreads()</code></td><td>max threads per block</td><td></td></tr><tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td><td></td></tr><tr><td><code>index()</code></td><td>device index</td><td></td></tr></tbody></table>
 <hr>
 <h2 id="memory-safety-model">Memory safety model</h2>

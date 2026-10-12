@@ -334,17 +334,17 @@ __global__ void lookup(float* output) {
 <p>  the <code>&#x27;surface</code> buffer itself is not reallocated automatically — same   documented limitation as every other backend (see <code>gpu-display.md</code>).</p>
 <hr>
 <h2 id="multi-device">Multi-device</h2>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g0 = <span class="fn">GPU</span>(<span class="nb">0</span>)
-<span class="kw">let</span> g1 = <span class="fn">GPU</span>(<span class="nb">1</span>)
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g0 = <span class="fn">Device</span>(index = <span class="nb">0</span>)
+<span class="kw">let</span> g1 = <span class="fn">Device</span>(index = <span class="nb">1</span>)
 
-<span class="kw">mut</span> ka = <span class="kw">new</span>(g0) <span class="fn">Scale</span>(n)
-<span class="kw">mut</span> kb = <span class="kw">new</span>(g1) <span class="fn">Scale</span>(n)
+<span class="kw">mut</span> ka = <span class="kw">kernel</span>(g0) <span class="fn">Scale</span>(n)
+<span class="kw">mut</span> kb = <span class="kw">kernel</span>(g1) <span class="fn">Scale</span>(n)
 
 <span class="kw">kernel</span>:
     <span class="fn">ka</span>(block = <span class="nb">256</span>)
     <span class="fn">kb</span>(block = <span class="nb">256</span>)</code></pre></div>
 <p><code>after =</code> for cross-device ordering uses the same syntax as single-device — same-device ordering is implemented via CUDA events (<code>stream.join</code>, i.e. <code>cuStreamWaitEvent</code>), which also works cross-device, but only once peer access is enabled between the two GPUs involved.</p>
-<p>There is no <code>--peer-access</code> flag to opt into this — every GPU context created via <code>GPU(n)</code>/<code>new(g) ...</code> automatically attempts bidirectional peer access with every other context the program has already created, checking real hardware capability first (<code>cuDeviceCanAccessPeer</code>) and silently skipping any pair the topology doesn&#x27;t support (no NVLink/shared PCIe root, etc.) — that pair&#x27;s own <code>after =</code> then surfaces its own real <code>DriverError</code> at the <code>cuStreamWaitEvent</code> call site instead of silently doing the wrong thing. This is cheap to always attempt: a single-GPU program only ever registers one context, so the check loop never runs.</p>
+<p>There is no <code>--peer-access</code> flag to opt into this — every GPU context created via <code>Device(...)</code>/<code>kernel(device) ...</code> automatically attempts bidirectional peer access with every other context the program has already created, checking real hardware capability first (<code>cuDeviceCanAccessPeer</code>) and silently skipping any pair the topology doesn&#x27;t support (no NVLink/shared PCIe root, etc.) — that pair&#x27;s own <code>after =</code> then surfaces its own real <code>DriverError</code> at the <code>cuStreamWaitEvent</code> call site instead of silently doing the wrong thing. This is cheap to always attempt: a single-GPU program only ever registers one context, so the check loop never runs.</p>
 <hr>
 <h2 id="known-limitations-1">Known limitations</h2>
 <p>The following features are not yet implemented:</p>
