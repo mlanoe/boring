@@ -362,6 +362,7 @@ struct ThrowStmt:
 struct ForStmt:
     [string] vars
     Expr iterable
+    Expr? key
     [Stmt] body
     int line
 

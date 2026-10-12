@@ -1552,6 +1552,10 @@ def Item parse_item(mut Parser p) throws:
                 Item.Fn(parse_fn_decl_auto(p, true, true))
             elif parser_check(p, "Req"):
                 Item.Fn(parse_fn_decl_auto(p, true, false))
+            elif parser_check(p, "Trait"):
+                # TraitDecl does not carry visibility in the self-hosted AST;
+                # parsing the declaration normally is sufficient for imports.
+                parse_item(p)
             elif parser_is_fn_shorthand(p):
                 let decl = parse_fn_shorthand(p)
                 Item.Fn(FnDecl(name= decl.name, qualifier= decl.qualifier, params= decl.params, return_ty= decl.return_ty, body= decl.body, is_pub= true, can_throw= decl.can_throw, is_task= decl.is_task, is_stream= decl.is_stream, stream_capacity= decl.stream_capacity, mutating= decl.mutating, is_native= decl.is_native, throws_ty= decl.throws_ty, type_params= decl.type_params, where_clause= decl.where_clause, attrs= decl.attrs, line= decl.line))
@@ -1928,8 +1932,8 @@ def IfStmt make_if_stmt([IfBranch] branches, [Stmt]? else_body, int line):
 def WhileStmt make_while_stmt(Expr condition, [Stmt] body, int line):
     WhileStmt(condition= condition, body= body, line= line)
 
-def ForStmt make_for_stmt([string] vars, Expr iterable, [Stmt] body, int line):
-    ForStmt(vars= vars, iterable= iterable, body= body, line= line)
+def ForStmt make_for_stmt([string] vars, Expr iterable, Expr? key, [Stmt] body, int line):
+    ForStmt(vars= vars, iterable= iterable, key= key, body= body, line= line)
 
 def WithStmt make_with_stmt([string] names, [Stmt] body, int line):
     WithStmt(names= names, body= body, line= line)

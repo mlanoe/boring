@@ -177,12 +177,19 @@ def Expr parse_pipe(mut Parser p) throws:
             break
         let line = parser_line(p)
         parser_advance(p)
+        let forced_method = parser_eat(p, "Dot")
         let name = parser_expect_ident(p)
-        let args = if parser_check(p, "LParen"):
+        let has_parens = parser_check(p, "LParen")
+        let args = if has_parens:
             parse_call_args(p)
         else:
             []
-        lhs = make_pipe(lhs, name, args, line)
+        lhs = if forced_method:
+            make_method_call(lhs, name, args, line)
+        elif not has_parens:
+            make_field_expr(lhs, name, line)
+        else:
+            make_pipe(lhs, name, args, line)
     if indent_depth > 0:
         let saved = parser_pos(p)
         parser_skip_newlines(p)
@@ -1670,6 +1677,12 @@ def ForStmt parse_for_stmt(mut Parser p) throws:
         (["_"], iterable)
     parser_set_allow_noparen_closure(p, saved)
     parser_set_allow_trailing_closure(p, true)
+    var Expr? key = nil
+    if parser_eat(p, "With"):
+        let saved_key = parser_get_allow_noparen_closure(p)
+        parser_set_allow_noparen_closure(p, false)
+        key = parse_expr(p)
+        parser_set_allow_noparen_closure(p, saved_key)
     parser_expect(p, "Colon")
     let body = if not parser_is_newline(p) and not parser_check(p, "Eof"):
         let stmts = parse_inline_stmts(p)
@@ -1678,7 +1691,7 @@ def ForStmt parse_for_stmt(mut Parser p) throws:
     else:
         parser_expect_newline(p)
         parse_block(p)
-    make_for_stmt(vars_iterable.0, vars_iterable.1, body, line)
+    make_for_stmt(vars_iterable.0, vars_iterable.1, key, body, line)
 
 # `with <name> [, <name> ...]:` — scoped access block. Each name must already be
 # bound in scope; qualifier and read/write access level are resolved elsewhere,

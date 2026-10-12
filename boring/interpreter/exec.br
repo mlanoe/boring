@@ -1146,8 +1146,16 @@ def [Value] collect_array_block_stmts(mut Interpreter interp, [Stmt] stmts):
                             if for_stmt.vars.length > 0:
                                 env_define(interp, for_stmt.vars[0], item, false)
                             let nested = collect_array_block_stmts(interp, for_stmt.body)
-                            for value in nested:
-                                out.push(value)
+                            if let key_expr = for_stmt.key:
+                                let key = eval_expr(interp, key_expr)
+                                let keyed_decl_opt = interp.get_struct_decl("KeyedGroup")
+                                if let keyed_decl = keyed_decl_opt:
+                                    out.push(instantiate_struct(interp, keyed_decl, [key, Value.Array(nested)]))
+                                else:
+                                    throw "keyed array block requires a KeyedGroup struct"
+                            else:
+                                for value in nested:
+                                    out.push(value)
                             pop_scope(interp)
                     Value.Range(start, end, inclusive, _):
                         let limit = if inclusive: end + 1 else: end
@@ -1157,8 +1165,16 @@ def [Value] collect_array_block_stmts(mut Interpreter interp, [Stmt] stmts):
                             if for_stmt.vars.length > 0:
                                 env_define(interp, for_stmt.vars[0], Value.Int(n), false)
                             let nested = collect_array_block_stmts(interp, for_stmt.body)
-                            for value in nested:
-                                out.push(value)
+                            if let key_expr = for_stmt.key:
+                                let key = eval_expr(interp, key_expr)
+                                let keyed_decl_opt = interp.get_struct_decl("KeyedGroup")
+                                if let keyed_decl = keyed_decl_opt:
+                                    out.push(instantiate_struct(interp, keyed_decl, [key, Value.Array(nested)]))
+                                else:
+                                    throw "keyed array block requires a KeyedGroup struct"
+                            else:
+                                for value in nested:
+                                    out.push(value)
                             pop_scope(interp)
                             n += 1
                     _: throw "array block for-loop requires an iterable"
