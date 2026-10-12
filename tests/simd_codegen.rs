@@ -171,9 +171,9 @@ fn fixed_float_tensor_matmul_runs_on_cpu() {
     fs::write(
         &input,
         r#"
-let [float32, k = 5, m = 3]'kernel'global a = [1.0 as float32 for ..<15]
-let [float32, n = 7, k = 5]'kernel'global b = [1.0 as float32 for ..<35]
-let [float32, k = 5, n = 7]'kernel'global w = [1.0 as float32 for ..<35]
+let [float32, k = 5, m = 3]'kernel'global a = [float32(i + 1) for i in 0..<15]
+let [float32, n = 7, k = 5]'kernel'global b = [float32(i + 1) for i in 0..<35]
+let [float32, k = 5, n = 7]'kernel'global w = [float32(i + 1) for i in 0..<35]
 mut [float32, n = 7, m = 3]'kernel'unified c = [0.0 as float32 for ..<21]
 mut [float32, n = 7, m = 3]'kernel'unified accum = [1.0 as float32 for ..<21]
 mut [float32, n = 7, m = 3]'kernel'unified linear = [0.0 as float32 for ..<21]
@@ -181,8 +181,14 @@ kernel.tensors.matmul(a, b, c)
 kernel.tensors.mma(a, b, accum)
 kernel.tensors.linear(a, w, linear)
 print c[0]
+print c[6]
+print c[20]
 print accum[0]
+print accum[6]
+print accum[20]
 print linear[0]
+print linear[6]
+print linear[20]
 "#,
     )
     .unwrap();
@@ -215,7 +221,10 @@ print linear[0]
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5\n6\n5");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "295\n385\n1435\n296\n386\n1436\n55\n505\n2155"
+    );
 }
 
 #[test]
