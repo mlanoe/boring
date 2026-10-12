@@ -3340,7 +3340,7 @@ impl Transpiler {
                     .iter()
                     .find(|arg| arg.label.as_deref() == Some("format"))
             });
-            if matches!(format.map(|arg| &arg.value.kind), Some(ExprKind::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0")) {
+            if matches!(format.map(|arg| &arg.value.kind), Some(ExprKind::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl")) {
                 let format_name = match format.map(|arg| &arg.value.kind) {
                     Some(ExprKind::Str(value)) => value.as_str(),
                     _ => unreachable!(),
@@ -3357,6 +3357,10 @@ impl Transpiler {
                     "q5_0" => (
                         22usize,
                         "let __boring_tensor_position = __boring_tensor_flat % 32;\n                        let __boring_tensor_packed = __boring_tensor_b[__boring_tensor_block + 6 + (__boring_tensor_position % 16)];\n                        let __boring_tensor_nibble = if __boring_tensor_position < 16 { __boring_tensor_packed & 0x0f } else { __boring_tensor_packed >> 4 };\n                        let __boring_tensor_high_bits = u32::from_le_bytes([__boring_tensor_b[__boring_tensor_block + 2], __boring_tensor_b[__boring_tensor_block + 3], __boring_tensor_b[__boring_tensor_block + 4], __boring_tensor_b[__boring_tensor_block + 5]]);\n                        let __boring_tensor_high = (__boring_tensor_high_bits >> __boring_tensor_position) & 1;\n                        let __boring_tensor_quantized = (__boring_tensor_nibble as u32 | (__boring_tensor_high << 4)) as i32 - 16;\n                        let __boring_tensor_weight = __boring_f16_to_f32(__boring_tensor_scale_bits) * (__boring_tensor_quantized as f32);",
+                    ),
+                    "iq4_nl" => (
+                        18usize,
+                        "let __boring_tensor_position = __boring_tensor_flat % 32;\n                        let __boring_tensor_packed = __boring_tensor_b[__boring_tensor_block + 2 + (__boring_tensor_position % 16)];\n                        let __boring_tensor_nibble = if __boring_tensor_position < 16 { __boring_tensor_packed & 0x0f } else { __boring_tensor_packed >> 4 };\n                        let __boring_tensor_quantized = [-127i32, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113][__boring_tensor_nibble as usize];\n                        let __boring_tensor_weight = __boring_f16_to_f32(__boring_tensor_scale_bits) * (__boring_tensor_quantized as f32);",
                     ),
                     _ => unreachable!(),
                 };
