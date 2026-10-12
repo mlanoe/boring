@@ -1417,3 +1417,4 @@ transpile_test!(field_mut_content_mutation);
 transpile_test!(field_mut_param_content_mutation);
 transpile_test!(string_methods_after_index);
 transpile_test!(cast_float_lit_to_int);
+transpile_test!(zero_arg_ctor_defaults_with_optional);

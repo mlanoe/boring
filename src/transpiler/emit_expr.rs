@@ -4165,6 +4165,8 @@ impl Transpiler {
                                 Some(format!("{}: {}", fname, init))
                             } else if let Some(Some(def)) = init_defaults.get(i) {
                                 Some(format!("{}: {}", fname, def))
+                            } else if let Some(def) = self.struct_field_defaults.get(&key).cloned() {
+                                Some(format!("{}: {}", fname, self.emit_struct_field_value(Some(fty), &def)))
                             } else if matches!(fty, Type::Optional(_)) {
                                 Some(format!("{}: None", fname))
                             } else {
@@ -4172,7 +4174,9 @@ impl Transpiler {
                             }
                         })
                         .collect();
-                    if lit_fields.len() == fields.len() || !lit_fields.is_empty() {
+                    // Only a complete literal is valid (a partial one is rustc E0063);
+                    // otherwise fall through to `Name::new()`.
+                    if lit_fields.len() == fields.len() {
                         return format!("{} {{ {} }}", name, lit_fields.join(", "));
                     }
                 }
