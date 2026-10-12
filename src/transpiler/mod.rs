@@ -342,6 +342,8 @@ struct Transpiler {
     /// True while emitting the LHS of an assignment — suppresses `.clone()` on Arc fields.
     /// Uses Cell<bool> because emit_expr takes &self.
     pub(crate) in_lhs_assign: std::cell::Cell<bool>,
+    /// Declared type-parameter names of each generic struct (`struct Slot<T>` → `["T"]`), in order.
+    pub(crate) struct_type_param_names: std::collections::HashMap<String, Vec<String>>,
     /// True while emitting an expression that will flow directly into an Optional-typed
     /// function return or `let T?` binding — set only around the exact outer expression
     /// (return tail / return stmt / let-value), not while recursing into unrelated
@@ -1365,6 +1367,7 @@ impl Transpiler {
             indent: 0,
             in_throws: false,
             in_lhs_assign: std::cell::Cell::new(false),
+            struct_type_param_names: std::collections::HashMap::new(),
             want_raw_option_pop: std::cell::Cell::new(false),
             want_raw_dict_get: std::cell::Cell::new(false),
             in_req_fn: false,
@@ -3417,7 +3420,10 @@ impl Transpiler {
         }
         let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
         if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
-        if !s.type_params.is_empty() { self.generic_struct_names.insert(s.name.clone()); }
+        if !s.type_params.is_empty() {
+            self.generic_struct_names.insert(s.name.clone());
+            self.struct_type_param_names.insert(s.name.clone(), s.type_params.clone());
+        }
         self.struct_fields.insert(s.name.clone(), fields);
         for f in &s.fields {
             if let Some(def) = &f.default {

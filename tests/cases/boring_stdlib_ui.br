@@ -14,12 +14,10 @@ view Greeting:
         taps
 
     body():
-        # Every field is passed: the transpiler drops omitted *defaulted* fields when a struct is
-        # built with labeled arguments (filed separately), so `Column(spacing = 8.0):` alone fails.
-        Column(alignment = .Center, spacing = 8.0):
+        Column(spacing = 8.0):
             Text("Hello")
             Text(name)
-            Row(alignment = .Leading, spacing = nil):
+            Row:
                 Text("a")
                 Text("b")
 

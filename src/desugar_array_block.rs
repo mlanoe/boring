@@ -196,6 +196,9 @@ impl Signatures {
                 }
                 Item::Struct(s) | Item::Stmt(Stmt::Struct(s)) if accept(&s.name, s.is_pub) => {
                     self.structs.insert(s.name.clone(), s.fields.iter().map(|f| f.ty.clone()).collect());
+                    if let Some(f) = s.fields.last() {
+                        self.last_field.insert(s.name.clone(), f.name.clone());
+                    }
                     self.defs.insert(s.name.clone(), StructInfo {
                         fields: s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
                         protocols: s.protocols.clone(),
@@ -1031,9 +1034,10 @@ fn desugar_trailing_array_block(
 }
 
 /// Label for the synthesized trailing array argument: the last field's name when `name` is a
-/// struct constructor and the call already has labeled arguments, else positional.
+/// struct constructor and the call has no arguments yet (bare `Row:`) or already has labeled
+/// arguments, else positional.
 fn trailing_label(sigs: &Signatures, name: &str, args: &[Arg]) -> Option<String> {
-    if args.iter().any(|a| a.label.is_some()) && !sigs.fns.contains_key(name) {
+    if (args.is_empty() || args.iter().any(|a| a.label.is_some())) && !sigs.fns.contains_key(name) {
         sigs.last_field.get(name).cloned()
     } else {
         None

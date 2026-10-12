@@ -92,7 +92,7 @@ Known limits of slice 1:
 - Content-mutable state slots (`state mut [T] f`) lower to a plain `mut` field of `<View>__State`: the
   interpreter now honours in-place mutation (`f.push(..)`, `f[i] = ..`) through a `mut`-only field while
   still rejecting whole-field replacement, so the draft's "`mut` default forbids replacement" holds.
-- `bind`/`env` views stay `view` declarations; `boring build` still errors for them.
+- `bind`/`env` views stay `view` declarations (they now also build under `boring build`, see "Known gaps of `bind`").
 
 ### `boring.ui` stdlib: the `View` trait and native facades (2026-10-12, `stdlib/ui.br`)
 
@@ -115,10 +115,10 @@ Supporting changes made along the way:
   synthesized trailing array is passed labeled with the struct's last field name (a positional arg after
   labeled ones was matched by position — `Column(spacing = 8.0):` put the spacing into `alignment`).
 
-Known gap: the transpiler drops *omitted defaulted fields* when a struct is built with some labeled
-arguments (`C(kids = [..])` with `int n = 3` → "missing field `n`"), so the facade's defaults
-(`alignment`, `spacing`) are unusable from `boring build`; the test passes every field explicitly.
-Filed as a task. Not done: `TextField` and other `bind`-carrying components, `Button`, modifiers, the
+Omitted defaulted fields in labeled/positional struct construction are now filled from their declared
+`= default` by the transpiler, so `Column(spacing = 8.0):` and bare `Row:` work from `boring build`. Not done: `TextField` and other `bind`-carrying components, `Button`, modifiers, the
+`AnyView`-free `[View]` boxing story beyond what the transpiler already does, book.md §15 entry.
+
 ### `bind` and `env` lowering (2026-10-13, `src/lower_view.rs`)
 
 Same explicit-context style as `state`:
@@ -139,15 +139,15 @@ Same explicit-context style as `state`:
   (shadow check, rewrite, strip `@` keep-markers that prevent re-wrapping a rewritten name).
 
 Known gaps of `bind`:
-- **Interpreter only.** `boring build` fails on any program with a `bind`: the transpiler cannot access a
-  field through `'actor` (`self.name.value` → "no field `value` on `Arc<Mutex<Slot<..>>>`"), re-wraps a value
-  that is already `'actor` when passing it as a field (`Arc::new(Mutex::new(st.name.clone()))`), and does not
-  promote a string literal inside a generic struct (`Slot(value = "a")`). Filed as a task.
+- ~~Interpreter only~~ — fixed: `view_bind_env` now also builds under `boring build` (all 4 transpile configs).
+  Three transpiler gaps were closed for it (case `actor_field_through`): a field read/written/method-called
+  *through* an `'actor`/`'guard` struct field (`bind.value`, `st.name.value`, `bind.value.rename(s)`) now locks
+  the handle (`resolve_lock_field_ref`, `emit_methods.rs`); passing an already-`'actor` field as a labeled
+  constructor argument for an `'actor` field clones the handle instead of re-wrapping it; and a string
+  literal for a generic `T` field (`Slot(value = "a")`) becomes `Rc<str>`/`Arc<str>`, not `&'static str`.
 - Permission levels are not enforced (the slot is `var mut`), no projections (`profile.name`, keyed loop
   elements), a bound `state let` is rejected, no generation checks / stale-handle diagnostics (that belongs to
   the runtime's real handles).
-
-`AnyView`-free `[View]` boxing story beyond what the transpiler already does, book.md §15 entry.
 
 ### Not done in layer 1
 

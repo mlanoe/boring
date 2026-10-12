@@ -2408,6 +2408,10 @@ impl Transpiler {
                 {
                     return self.emit_expr(expr);
                 }
+                // Field read through an `'actor`/`'guard` struct field: `emit_expr` locks and clones.
+                if self.resolve_lock_field_ref(obj).is_some() {
+                    return self.emit_expr(expr);
+                }
                 let obj_s = self.emit_expr(obj);
                 // Mutex var access (owned context): w.field → w.lock().await.field (multi) or w.borrow().field (single)
                 if let ExprKind::Var(v) = &obj.kind {
@@ -2944,6 +2948,22 @@ impl Transpiler {
             Some(inner)
         } else {
             None
+        }
+    }
+
+    /// Whether `e` is a plain field read (`st.name`, `self.slot`, implicit-self `slot`) of a struct field recorded in
+    /// `fields` (one of the `struct_{mutex,mutex_task,rwlock,rwlock_task}_fields` key sets, covering
+    /// explicit and inferred qualifiers). Such a read already yields the field's shared handle, so
+    /// passing it into another struct's same-qualified field must clone the handle, not re-wrap it.
+    pub(crate) fn expr_reads_qualified_field(&self, e: &Expr, fields: &std::collections::HashSet<String>) -> bool {
+        match &e.kind {
+            ExprKind::Field(base, field) => self.resolve_expr_struct_type(base)
+                .is_some_and(|sn| fields.contains(&format!("{}::{}", sn, field))),
+            // Implicit-self field (`name` inside a method of the declaring struct).
+            ExprKind::Var(v) => !self.known_local_vars.contains(v.as_str())
+                && self.self_type.as_deref()
+                    .is_some_and(|sn| fields.contains(&format!("{}::{}", sn, v))),
+            _ => false,
         }
     }
 

@@ -2414,6 +2414,17 @@ impl Transpiler {
                 return format!("{}.borrow().{}", v, field);
             }
         }
+        // Field read *through* an `'actor`/`'guard` struct field (`bn.value`, `st.name.value`):
+        // lock the handle, then project. A non-`Copy` result is cloned out of the guard unless the
+        // read is itself a place (assignment target / method receiver).
+        if let Some(r) = self.resolve_lock_field_ref(obj) {
+            let access = self.lock_field_read(&r);
+            let sub_ty = self.lock_subfield_type(&r, field);
+            let proj = format!("{}.{}", access, field);
+            let needs_clone = !self.in_lhs_assign.get()
+                && sub_ty.as_ref().is_some_and(|t| !t.is_copy());
+            return if needs_clone { format!("{}.clone()", proj) } else { proj };
+        }
         // Mutex struct field: self.worker.field → self.worker.lock().await.field (multi) / self.worker.borrow().field (single)
         if let ExprKind::Field(inner_obj, mutex_field) = &obj.kind {
             if let ExprKind::Var(v) = &inner_obj.kind {
@@ -2793,6 +2804,15 @@ impl Transpiler {
                         }
                     }
                 }
+            }
+        }
+        // Field write *through* an `'actor`/`'guard` struct field: `bn.value = v`, `st.name.value = v`.
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let Some(r) = self.resolve_lock_field_ref(obj) {
+                // Evaluate the RHS before taking the write guard (see the mutex branch above).
+                let val_s = self.emit_expr_owned(value);
+                let guard = self.lock_field_write(&r);
+                return format!("{{ let __v = {}; let mut __g = {}; __g.{} = __v; }}", val_s, guard, field);
             }
         }
         // Whole-field reassignment of an 'actor/'guard(/'observed)-qualified field:
@@ -4255,7 +4275,8 @@ impl Transpiler {
                     } else if self.struct_mutex_fields.contains(&mutex_key) {
                         // If the value is already an actor/rc variable, just clone the Rc pointer.
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);
                             match self.config.threading {
@@ -4279,7 +4300,8 @@ impl Transpiler {
                         }
                     } else if self.struct_mutex_task_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_task_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);
                             match self.config.threading {
@@ -4298,7 +4320,8 @@ impl Transpiler {
                         }
                     } else if self.struct_rwlock_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_rwlock_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                            if self.var_rwlock_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);
                             match self.config.threading {
@@ -4317,7 +4340,8 @@ impl Transpiler {
                         }
                     } else if self.struct_rwlock_task_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_task_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);
                             match self.config.threading {
@@ -4342,6 +4366,13 @@ impl Transpiler {
                         } else {
                             format!("Box::new({})", raw)
                         }
+                    } else if matches!(&eff_value.kind, ExprKind::Str(_))
+                        && field_ty.and_then(|t| if let Type::Named(n) | Type::TypeParam(n) = t.without_mut() { Some(n) } else { None })
+                            .is_some_and(|n| self.struct_type_param_names.get(name).is_some_and(|ps| ps.contains(n)))
+                    {
+                        // A string literal for a generic `T` field (`Slot(value = "a")`) is a
+                        // `string` — owned `Rc<str>`/`Arc<str>`, never a `&'static str`.
+                        self.emit_let_value(Some(&Type::Str), eff_value)
                     } else {
                         self.emit_struct_field_value(field_ty, eff_value)
                     };
@@ -4441,6 +4472,11 @@ impl Transpiler {
                         // Optional fields (including Optional<Qualified<...>>) default to None.
                         if matches!(fty, Type::Optional(_)) {
                             fields.push(format!("{}: None", fname));
+                        } else if let Some(def) = self.struct_field_defaults.get(&tkey).cloned() {
+                            // Omitted field with a declared `= expr` default: always take it
+                            // (not only under `_`) — otherwise rustc fails with E0063.
+                            let val = self.emit_struct_field_value(Some(fty), &def);
+                            fields.push(format!("{}: {}", fname, val));
                         } else if has_default_rest {
                             // `_` present: prefer the field's own declared `= expr` default
                             // (e.g. `float scale = 1.0`) over the blanket `Default::default()`
@@ -4613,6 +4649,8 @@ impl Transpiler {
                             } else if let Some(Some(def)) = init_defaults.get(param_idx) {
                                 // Init param had an explicit default value.
                                 Some(format!("{}: {}", fname, def))
+                            } else if let Some(def) = self.struct_field_defaults.get(&key).cloned() {
+                                Some(format!("{}: {}", fname, self.emit_struct_field_value(Some(fty), &def)))
                             } else if matches!(fty, Type::Optional(_)) {
                                 Some(format!("{}: None", fname))
                             } else {

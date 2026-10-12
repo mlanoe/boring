@@ -57,6 +57,17 @@ fn qualified_named_type_name(ty: &Type) -> Option<String> {
     if let Type::Named(n) = cur { Some(n.clone()) } else { None }
 }
 
+/// A struct field backed by a lock handle, resolved by `Transpiler::resolve_lock_field_ref`.
+pub(crate) struct LockFieldRef {
+    /// `"Struct::field"` — key into the `struct_{mutex,rwlock}[_task]_fields` sets.
+    pub key: String,
+    /// Rust place expression of the handle (`self.bn`, `st.name`).
+    pub handle: String,
+    pub rwlock: bool,
+    /// Declared field type (`mut Slot<string>'actor`).
+    pub field_ty: Type,
+}
+
 /// Like `qualified_named_type_name`, but also looks through the trait-object / `impl Trait`
 /// spellings (`Type::Dyn`/`Type::Impl`) a bare trait name in type position can parse to —
 /// (and a generic `T`'s bare name) — the receiver-resolution entry point for "which user
@@ -1710,6 +1721,26 @@ impl Transpiler {
     /// via `self.actor_field...` / `some_struct_var.actor_field...`, or on `outer: T'actor`
     /// itself for methods requiring write access to a nested field).
     fn try_emit_actor_field_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        // `lock_field.sub.method(args)` — a method on a field *held inside* an `'actor`/`'guard`
+        // struct field (`bind.value.rename(s)`): lock the handle, then call on the projected field.
+        if let ExprKind::Field(handle_obj, sub) = &obj.kind {
+            if let Some(r) = self.resolve_lock_field_ref(handle_obj) {
+                let sub_ty = self.lock_subfield_type(&r, sub);
+                let sub_struct = sub_ty.as_ref().and_then(receiver_type_name);
+                let is_known = sub_struct.as_deref().map(|n| self.is_known_user_type(n)).unwrap_or(false);
+                let (rust_method, extra_wrap) = if is_known {
+                    (method.to_string(), None)
+                } else {
+                    map_method(method, args.len(), self.want_raw_option_pop.get())
+                };
+                let mut args_s: Vec<String> = self.emit_user_method_args(sub_struct.as_deref(), method, args);
+                let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
+                let guard = self.lock_field_write(&r);
+                let call = format!("{}.{}.{}({})", guard, sub, rust_method, args_s.join(", "));
+                let call = Self::with_hoisted_args(&hoisted, call);
+                return Some(if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call });
+            }
+        }
         // Actor-typed field method call: `outer.actor_field.method(args)`.
         // When `actor_field` has type `T'actor` (Rc<RefCell<T>> in single-thread),
         // emit `outer.actor_field.borrow_mut().method(args)`.
@@ -5153,6 +5184,75 @@ impl Transpiler {
         }
     }
 
+    /// Resolves `obj` to a struct field whose declared type is `'actor`/`'actor'task`/`'guard`/
+    /// `'guard'task` (a bare implicit-self field `bn`, `self.bn`, or `some_struct_var.bn`): the lock
+    /// handle's Rust place expression plus the field's declared type. A field accessed *through* such a
+    /// handle (`bn.value`) must lock it rather than project directly — see the callers in
+    /// `emit_expr_field`, `emit_expr_assign` and `try_emit_actor_field_method`.
+    pub(crate) fn resolve_lock_field_ref(&self, obj: &Expr) -> Option<LockFieldRef> {
+        let (struct_name, field, base) = match &obj.kind {
+            ExprKind::Var(v) if v != "self"
+                && !self.known_local_vars.contains(v.as_str())
+                && self.self_type.as_deref()
+                    .and_then(|t| self.struct_fields.get(t))
+                    .is_some_and(|fs| fs.iter().any(|(n, _)| n == v)) =>
+            {
+                (self.self_type.clone()?, v.clone(), "self".to_string())
+            }
+            ExprKind::Field(inner, f) => {
+                // A receiver that is itself a lock handle is not a plain struct place.
+                if let ExprKind::Var(v) = &inner.kind {
+                    if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
+                        || self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
+                        || self.managed_mutex_vars.contains(v.as_str()) || self.managed_refcell_vars.contains(v.as_str())
+                        || self.managed_param_shadows.contains_key(v.as_str())
+                    {
+                        return None;
+                    }
+                }
+                (self.resolve_expr_struct_type(inner)?, f.clone(), self.emit_expr(inner))
+            }
+            _ => return None,
+        };
+        let key = format!("{}::{}", struct_name, field);
+        let rwlock = self.struct_rwlock_fields.contains(&key) || self.struct_rwlock_task_fields.contains(&key);
+        if !rwlock && !self.struct_mutex_fields.contains(&key) && !self.struct_mutex_task_fields.contains(&key) {
+            return None;
+        }
+        let field_ty = self.struct_fields.get(struct_name.as_str())?
+            .iter().find(|(n, _)| *n == field).map(|(_, t)| t.clone())?;
+        Some(LockFieldRef { key, handle: format!("{}.{}", base, field), rwlock, field_ty })
+    }
+
+    /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.
+    pub(crate) fn lock_field_read(&self, r: &LockFieldRef) -> String {
+        if r.rwlock { self.rwlock_field_read(&r.key, &r.handle) } else { self.mutex_field_read(&r.key, &r.handle) }
+    }
+
+    /// Write guard of a resolved lock field.
+    pub(crate) fn lock_field_write(&self, r: &LockFieldRef) -> String {
+        if r.rwlock { self.rwlock_field_write(&r.key, &r.handle) } else { self.mutex_field_write(&r.key, &r.handle) }
+    }
+
+    /// The type of `field` on the value held inside a resolved lock field (`Slot<string>'actor` →
+    /// `string` for `value`), substituting the held struct's own type arguments.
+    pub(crate) fn lock_subfield_type(&self, r: &LockFieldRef, field: &str) -> Option<Type> {
+        let mut cur = r.field_ty.without_mut();
+        while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+        let (sn, args): (&str, &[Type]) = match cur {
+            Type::Generic(n, a) => (n.as_str(), a.as_slice()),
+            Type::Named(n) => (n.as_str(), &[]),
+            _ => return None,
+        };
+        let ty = self.struct_fields.get(sn)?.iter().find(|(n, _)| n == field).map(|(_, t)| t.clone())?;
+        if let Type::Named(n) | Type::TypeParam(n) = ty.without_mut() {
+            if let Some(i) = self.struct_type_param_names.get(sn).and_then(|ps| ps.iter().position(|p| p == n)) {
+                return args.get(i).cloned();
+            }
+        }
+        Some(ty)
+    }
+
     /// Return true when `expr` yields an actor-qualified value (Rc<RefCell<T>> or Arc<Mutex<T>>).
     /// Used to detect if-let bindings that need to be tracked as managed vars.
     pub(crate) fn expr_yields_actor(&self, expr: &crate::ast::Expr) -> bool {
@@ -5437,6 +5537,7 @@ impl Transpiler {
             managed_mutex_vars: self.managed_mutex_vars.clone(),
             managed_mutex_fn_return_vars: self.managed_mutex_fn_return_vars.clone(),
             in_lhs_assign: std::cell::Cell::new(false),
+            struct_type_param_names: self.struct_type_param_names.clone(),
             want_raw_option_pop: std::cell::Cell::new(false),
             want_raw_dict_get: std::cell::Cell::new(false),
             managed_refcell_vars: self.managed_refcell_vars.clone(),

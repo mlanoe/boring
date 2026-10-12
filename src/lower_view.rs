@@ -50,8 +50,6 @@
 //! - Native views (`body(): native`, no `state`) lower to a plain struct conforming to `View`.
 //! - **`bind` projections** (`profile.name`, keyed elements), binding a `state let`, and
 //!   `bind`'s permission levels (the child can always replace and mutate: the slot is `var mut`).
-//! - `boring build`: the interpreter runs a lowered `bind` end to end, but the transpiler cannot
-//!   yet emit field access through `'actor` (see "Known gaps" in boring-ui-progress.md).
 //! - **Parent-supplied seeds** (`Counter(count = expensive())`): a `state` field is no longer a
 //!   constructor argument, so that is an ordinary "unknown field" error today.
 //! - **Invalidation**: there is no write-site invalidation call. The runtime (layer 2) treats any

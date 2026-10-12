@@ -411,9 +411,12 @@ transpile_test!(modules);
 transpile_test!(boring_stdlib_collections);
 transpile_test!(boring_stdlib_identity);
 transpile_test!(boring_stdlib_ui);
+transpile_test!(struct_default_labeled);
 transpile_test!(view_state_lowering);
-// Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
+transpile_test!(view_bind_env);
+transpile_test!(actor_field_through);
 transpile_test!(view_env_only);
+// Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
 // tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its
 // own boring.toml, not a flat tests/cases/<name>.br file) so a real `cargo run`
