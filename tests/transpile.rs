@@ -410,8 +410,10 @@ transpile_test!(modules);
 // with tests/run.rs's registration above for the `boring run` side.
 transpile_test!(boring_stdlib_collections);
 transpile_test!(boring_stdlib_identity);
+transpile_test!(boring_stdlib_ui);
 transpile_test!(view_state_lowering);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
+transpile_test!(view_env_only);
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
 // tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its
 // own boring.toml, not a flat tests/cases/<name>.br file) so a real `cargo run`

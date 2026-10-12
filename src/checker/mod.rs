@@ -65,6 +65,13 @@ pub fn check_view_declarations(program: &Program) -> Vec<CheckError> {
         for item in items {
             match item {
                 Item::Struct(s) if s.is_view => c.check_view_decl(s),
+                // Hand-written conformance is judged here, before lowering makes every view a
+                // `View`-conforming struct itself.
+                Item::Struct(s) if s.protocols.iter().any(|p| p == "View") => c.error(
+                    format!("struct '{}' cannot conform to `View` by hand: a struct has neither a `body()` nor a \
+                             native adapter — declare it with `view {}` instead", s.name, s.name),
+                    s.line, s.col,
+                ),
                 Item::Mod(m) => walk(c, &m.items),
                 _ => {}
             }
@@ -1163,12 +1170,6 @@ impl Checker {
     fn check_struct(&mut self, s: &StructDecl) {
         if s.is_view {
             self.check_view_decl(s);
-        } else if s.protocols.iter().any(|p| p == "View") {
-            self.error(
-                format!("struct '{}' cannot conform to `View` by hand: a struct has neither a `body()` nor a \
-                         native adapter — declare it with `view {}` instead", s.name, s.name),
-                s.line, s.col,
-            );
         }
         for f in &s.fields {
             self.check_scalar_mut_in_type(&f.ty, "field", f.line, f.col);
@@ -3930,7 +3931,9 @@ mod view_tests {
 
     #[test]
     fn manual_view_conformance_is_rejected() {
-        let errs = errors_for("trait View:\n    req string label()\n\nstruct Foo as View:\n    req string label(): \"x\"\n");
+        let tokens = lex("trait View:\n    req string label()\n\nstruct Foo as View:\n    req string label(): \"x\"\n").unwrap();
+        let program = parse(tokens).unwrap();
+        let errs: Vec<String> = super::check_view_declarations(&program).into_iter().map(|e| e.message).collect();
         assert!(has(&errs, "cannot conform to `View` by hand"), "{errs:?}");
     }
 

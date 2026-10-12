@@ -135,6 +135,10 @@ struct Signatures {
     /// Struct/view name -> what key inference needs: field types, declared
     /// conformances, and zero-argument method return types.
     defs: HashMap<String, StructInfo>,
+    /// Struct name -> its last field's name: lets a trailing array-block be passed as a
+    /// *labeled* argument when the call already carries labeled arguments (a positional
+    /// argument after labeled ones would be matched by position, not as "the last field").
+    last_field: HashMap<String, String>,
     /// Best-effort local type environment for the function/method body currently being
     /// desugared: parameters, the enclosing struct's fields, annotated `let`s and keyed-loop
     /// variables. Flat per body (no block scoping) — it only feeds `for … with` key checks.
@@ -961,7 +965,7 @@ fn desugar_trailing_array_block(
                 }
                 let mut new_args = args;
                 new_args.push(Arg {
-                    label: None,
+                    label: trailing_label(sigs, name, &new_args),
                     value: Expr { kind: ExprKind::Array(flat), line, col, len },
                     spread: false, default_rest: false,
                 });
@@ -986,7 +990,7 @@ fn desugar_trailing_array_block(
             stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, &trait_name, line, col));
             let mut new_args = args;
             new_args.push(Arg {
-                label: None,
+                label: trailing_label(sigs, name, &new_args),
                 value: Expr { kind: ExprKind::Var(CHILDREN_VAR.to_string()), line, col, len: 0 },
                 spread: false, default_rest: false,
             });
@@ -1023,6 +1027,16 @@ fn desugar_trailing_array_block(
                 line, col, len,
             })
         }
+    }
+}
+
+/// Label for the synthesized trailing array argument: the last field's name when `name` is a
+/// struct constructor and the call already has labeled arguments, else positional.
+fn trailing_label(sigs: &Signatures, name: &str, args: &[Arg]) -> Option<String> {
+    if args.iter().any(|a| a.label.is_some()) && !sigs.fns.contains_key(name) {
+        sigs.last_field.get(name).cloned()
+    } else {
+        None
     }
 }
 

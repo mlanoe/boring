@@ -1,0 +1,36 @@
+# `use boring.ui.*`: the `View` trait plus native facade views (`Text`, `Column`, `Row`).
+# Native views lower to plain structs conforming to `View`; an application `view`'s `body()`
+# returns them, and the trailing array-block sugar collects children into `[View]`.
+use boring.ui.*
+
+view Greeting:
+    string name
+    state int taps = 0
+
+    def tap():
+        taps += 1
+
+    req int count():
+        taps
+
+    body():
+        # Every field is passed: the transpiler drops omitted *defaulted* fields when a struct is
+        # built with labeled arguments (filed separately), so `Column(spacing = 8.0):` alone fails.
+        Column(alignment = .Center, spacing = 8.0):
+            Text("Hello")
+            Text(name)
+            Row(alignment = .Leading, spacing = nil):
+                Text("a")
+                Text("b")
+
+
+def main():
+    let g = Greeting(name = "Ada")
+    mut st = Greeting__State()
+    g.tap(st)
+    g.tap(st)
+    print g.count(st)
+    let root = g.body(st)
+    print "built"
+    let t = Text("x")
+    print t.content

@@ -1,0 +1,18 @@
+# `env` needs no runtime to lower: a read-only `<View>__Env` parameter after `__st`.
+view Badge:
+    state int n = 1
+    env string theme
+    env int scale
+
+    def bump():
+        n += 1
+
+    req string label():
+        "{theme}:{n * scale}"
+
+def main():
+    let b = Badge()
+    mut st = Badge__State()
+    let e = Badge__Env(theme = "dark", scale = 10)
+    b.bump(st, e)
+    print b.label(st, e)

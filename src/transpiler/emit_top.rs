@@ -656,6 +656,13 @@ impl Transpiler {
                 return;
             }
         };
+        let program = match crate::lower_view::lower_module(program) {
+            Ok(p) => p,
+            Err(e) => {
+                self.push_error(use_line, use_col, format!("in '{}': {}", canonical.display(), e.msg()));
+                return;
+            }
+        };
         // Derive module name from file stem (e.g. "eval.br" → "eval").
         let module_name = canonical.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -700,6 +707,13 @@ impl Transpiler {
             Ok(p) => p,
             Err(e) => {
                 self.push_error(use_line, use_col, format!("parse error in boring.{module}: {e}"));
+                return;
+            }
+        };
+        let program = match crate::lower_view::lower_module(program) {
+            Ok(p) => p,
+            Err(e) => {
+                self.push_error(use_line, use_col, format!("in boring.{module}: {}", e.msg()));
                 return;
             }
         };

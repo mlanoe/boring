@@ -32,6 +32,7 @@
 
 const STD_COLLECTIONS: &str = include_str!("../stdlib/collections.br");
 const STD_IDENTITY: &str = include_str!("../stdlib/identity.br");
+const STD_UI: &str = include_str!("../stdlib/ui.br");
 
 /// Look up the embedded source for `use boring.<module>`.
 ///
@@ -44,6 +45,7 @@ pub fn lookup(module: &str) -> Option<&'static str> {
     Some(match module {
         "collections" => STD_COLLECTIONS,
         "identity" => STD_IDENTITY,
+        "ui" => STD_UI,
         _ => return None,
     })
 }

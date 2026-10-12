@@ -191,6 +191,7 @@ interp_test!(modules);
 // with tests/transpile.rs's registration below for the `boring build` side.
 interp_test!(boring_stdlib_collections);
 interp_test!(boring_stdlib_identity);
+interp_test!(boring_stdlib_ui);
 error_test!(boring_stdlib_identity_float_key);
 
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
@@ -699,6 +700,10 @@ interp_test!(array_block_keyed_for_identifiable);
 interp_test!(view_state_lowering);
 interp_test!(view_body_lowering);
 error_test!(view_state_shadow);
+interp_test!(view_bind_env);
+interp_test!(view_env_only);
+error_test!(view_bind_literal_arg);
+error_test!(view_bind_without_ui);
 error_test!(view_state_no_initializer);
 error_test!(array_block_keyed_for_float_key);
 interp_test!(view_decl_parse);

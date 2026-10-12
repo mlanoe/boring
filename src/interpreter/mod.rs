@@ -2830,6 +2830,7 @@ impl Interpreter {
         // module_works` in `tests_labeled_array.rs`).
         let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
         let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+        let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
         for item in &program.items {
@@ -2928,6 +2929,7 @@ impl Interpreter {
         // runs the early AST desugar passes right after parsing.
         let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
         let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+        let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
         for item in &program.items {
@@ -2986,6 +2988,7 @@ impl Interpreter {
         // runs the early AST desugar passes right after parsing.
         let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
         let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+        let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
         for item in &program.items {

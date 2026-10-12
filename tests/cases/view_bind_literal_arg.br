@@ -1,0 +1,13 @@
+use boring.ui.*
+
+view Child:
+    bind string name
+    body():
+        Text(name)
+
+view Parent:
+    body():
+        Child(name = "literal")
+
+def main():
+    print "unreachable"

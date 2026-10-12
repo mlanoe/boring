@@ -1,0 +1,46 @@
+# `bind` and `env` lowering (docs/design-notes/boring-ui-draft.md, "`bind`" and "Environment"):
+# a parent `state` handed to a child's `bind` is stored in a shared `Slot`, the child writes
+# through it, and `env` values arrive in a generated read-only `<View>__Env` parameter.
+use boring.ui.*
+
+view NameEditor:
+    bind string name
+    env string theme
+
+    def shout():
+        name = "{name}!"
+
+    req string describe():
+        "{name}@{theme}"
+
+    body():
+        TextField(value = name, label = "Name")
+
+view Form:
+    state string name = "Ada"
+    state int taps = 0
+
+    def tap():
+        taps += 1
+
+    req string current():
+        "{name}/{taps}"
+
+    body():
+        NameEditor(name = name)
+
+def main():
+    let form = Form()
+    mut st = Form__State()
+    form.tap(st)
+    print form.current(st)
+
+    # The child receives the parent's slot, not a copy of the value.
+    let editor = NameEditor(name = st.name)
+    let envv = NameEditor__Env(theme = "dark")
+    print editor.describe(envv)
+    editor.shout(envv)
+    print st.name.value
+    print form.current(st)
+    let root = form.body(st)
+    print "built"

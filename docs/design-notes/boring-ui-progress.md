@@ -84,21 +84,76 @@ none; reusable for later passes. Cases: `view_state_lowering` (interp + all 4 tr
 `view_body_lowering`, `view_state_shadow`, `view_state_no_initializer`.
 
 Known limits of slice 1:
-- `body()` lowers and type-checks but **cannot be called or transpiled** yet: its return type is
-  `impl View` and no `View` trait exists (needs the UI stdlib). `view_state_lowering` therefore has no
-  `body`; `view_body_lowering` (interpreter only) never calls it.
+- `body()` needs the `View` trait: with `use boring.ui.*` it works (next section); without it the
+  `impl View` return type is unresolved. `view_state_lowering`/`view_body_lowering` predate the stdlib and
+  deliberately avoid `body()`.
 - No write-site invalidation: the runtime must treat any callback that received `__st` as a possible
   writer (conservative).
 - Content-mutable state slots (`state mut [T] f`) lower to a plain `mut` field of `<View>__State`: the
   interpreter now honours in-place mutation (`f.push(..)`, `f[i] = ..`) through a `mut`-only field while
   still rejecting whole-field replacement, so the draft's "`mut` default forbids replacement" holds.
-- `bind`/`env`/native views stay `view` declarations; `boring build` still errors for them.
+- `bind`/`env` views stay `view` declarations; `boring build` still errors for them.
+
+### `boring.ui` stdlib: the `View` trait and native facades (2026-10-12, `stdlib/ui.br`)
+
+`use boring.ui.*` provides `trait View` (an empty marker), `enum AxisAlignment`, and the facade views
+`Text(content)`, `Column`/`Row(alignment, spacing, [View] children)` declared with `body(): native`
+exactly as in the draft's "Boring facade for Rust primitives". Until the runtime exists they lower
+to plain structs `as View` (the native placeholder body is dropped; native views may not declare
+`state`). Any non-native view in a program that has the `View` trait in scope gets `as View` added, so
+`body()` composes them and returns `impl View`; trailing array-block sugar collects children into
+`[View]`. Case: `boring_stdlib_ui` (interpreter + 4 transpile configs).
+
+Supporting changes made along the way:
+- **Module loaders lower views too**: `lower_view::lower_module` (= `view_perm` + `lower_views`) is
+  applied right after parsing in the interpreter's three `use` loaders and the transpiler's sibling-file
+  and stdlib inliners (the main pipeline never sees imported source). Before this, a `view` in an
+  imported file or `boring.*` module was never lowered.
+- **Manual `struct X as View` rejection moved** from `check_struct` to `check_view_declarations`: it runs
+  before lowering, which now makes every view a `View`-conforming struct itself.
+- **Trailing array-block label**: when a call already has labeled args and the callee is a struct, the
+  synthesized trailing array is passed labeled with the struct's last field name (a positional arg after
+  labeled ones was matched by position — `Column(spacing = 8.0):` put the spacing into `alignment`).
+
+Known gap: the transpiler drops *omitted defaulted fields* when a struct is built with some labeled
+arguments (`C(kids = [..])` with `int n = 3` → "missing field `n`"), so the facade's defaults
+(`alignment`, `spacing`) are unusable from `boring build`; the test passes every field explicitly.
+Filed as a task. Not done: `TextField` and other `bind`-carrying components, `Button`, modifiers, the
+### `bind` and `env` lowering (2026-10-13, `src/lower_view.rs`)
+
+Same explicit-context style as `state`:
+- **`env T name`** → read-only field of a generated `V__Env` struct, passed as a second trailing
+  parameter `__env` (after `__st`); `self.m()` forwards both. The runtime will fill it from the nearest
+  providers. Interpreter + all 4 transpile configs (`view_env_only`).
+- **`bind T name`** → input field `name: Slot<T>'actor` (`Slot` is the new shared cell in `boring.ui`;
+  `use boring.ui.*` is required). Bare reads/writes of `name` become `name.value`. At a call
+  `Child(name = x)` whose callee field is a `bind`, the argument must be a `state`/`bind` field of the
+  enclosing view (literals, expressions, locals, projections → error "needs a `state` or `bind` field")
+  and the *slot* is passed. A `state` handed to some child's `bind` is itself stored as
+  `Slot<T>'actor` in `V__State`, parent accesses go through `.value`, so a child's write is visible to
+  the parent. Callee info comes from the program plus embedded `boring.*` modules named by a `use`
+  (sibling-file views are not seen). Native views may carry `bind` (new `TextField` facade). Cases:
+  `view_bind_env` (parent state → child bind → native `TextField`, write-through verified),
+  `view_bind_literal_arg`, `view_bind_without_ui`.
+- `lower_view.rs` was restructured around a per-view `Ctx`; field accesses are rewritten in three passes
+  (shadow check, rewrite, strip `@` keep-markers that prevent re-wrapping a rewritten name).
+
+Known gaps of `bind`:
+- **Interpreter only.** `boring build` fails on any program with a `bind`: the transpiler cannot access a
+  field through `'actor` (`self.name.value` → "no field `value` on `Arc<Mutex<Slot<..>>>`"), re-wraps a value
+  that is already `'actor` when passing it as a field (`Arc::new(Mutex::new(st.name.clone()))`), and does not
+  promote a string literal inside a generic struct (`Slot(value = "a")`). Filed as a task.
+- Permission levels are not enforced (the slot is `var mut`), no projections (`profile.name`, keyed loop
+  elements), a bound `state let` is rejected, no generation checks / stale-handle diagnostics (that belongs to
+  the runtime's real handles).
+
+`AnyView`-free `[View]` boxing story beyond what the transpiler already does, book.md §15 entry.
 
 ### Not done in layer 1
 
 1. **View lowering, remaining parts**: `bind` slot handles with generation checks, `env` lookup,
-   parent-supplied seeds (`Counter(count = expensive())`), precise write-site invalidation, native
-   views (`body(): native`), and the `View` trait / `<View>` body type (see slice 1 below).
+   parent-supplied seeds (`Counter(count = expensive())`), `bind` projections/keyed elements and
+   precise write-site invalidation.
 2. Runtime duplicate-key validation (belongs to layer 2).
 3. Native-body (`body(): native`) facade → runtime adapter linkage (layer 2/4).
 

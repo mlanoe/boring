@@ -2,6 +2,8 @@
 # the implicit `body()` parse, and `view`/`state` stay ordinary identifiers outside a view body.
 # Declaration-only: lowering/runtime are not implemented yet.
 
+use boring.ui.*
+
 struct Profile:
     var string name = ""
 

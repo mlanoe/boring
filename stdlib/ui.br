@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — boring.ui
+#
+# The public facade of boring-ui (docs/design-notes/boring-ui-draft.md, "Boring facade for Rust
+# primitives"). Components are declared as `view`s with a `native` body: the visible fields are
+# the component's real signature, and the linked UI runtime supplies the adapter. Until that
+# runtime exists they lower (src/lower_view.rs) to plain structs conforming to `View`, so
+# application views compose them in `body()` and the array-block sugar collects children.
+#
+#   use boring.ui.*
+#
+#   view Greeting:
+#       string name
+#       body():
+#           Column(spacing = 8):
+#               Text("Hello")
+#               Text(name)
+#
+# `View` is a marker: a `view` declaration conforms automatically and a hand-written
+# `struct X as View` is rejected (a struct has neither a `body()` nor a native adapter).
+
+pub trait View:
+    pass
+
+# The shared storage cell behind `bind`: a parent's `state` that is handed to a child's `bind` is
+# stored as `Slot<T>'actor`, and the child's `bind T name` field is the same slot (see
+# src/lower_view.rs). Application code never names it.
+pub struct Slot<T>:
+    pub var mut T value
+
+pub enum AxisAlignment:
+    Leading
+    Center
+    Trailing
+
+pub view Text:
+    string content
+    body(): native
+
+pub view Column:
+    AxisAlignment alignment = .Center
+    float? spacing = nil
+    [View] children
+    body(): native
+
+pub view Row:
+    AxisAlignment alignment = .Center
+    float? spacing = nil
+    [View] children
+    body(): native
+
+pub view TextField:
+    bind string value
+    string label
+    string placeholder = ""
+    body(): native
