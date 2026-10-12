@@ -415,7 +415,11 @@ impl Emitter {
                     .map(|x| self.expr(x))
                     .unwrap_or_else(|| "Default::default()".into());
                 let value = match &v.ty {
-                    Some(t) if !is_array(t) => format!("({value}) as {}", ty(t)),
+                    Some(t)
+                        if !is_array(t) && !matches!(base(t), Type::Optional(_)) =>
+                    {
+                        format!("({value}) as {}", ty(t))
+                    }
                     _ => value,
                 };
                 self.line(
@@ -521,6 +525,8 @@ impl Emitter {
             ExprKind::UInt64(v) => format!("{v}u64"),
             ExprKind::Float(v) => format!("{v}"),
             ExprKind::Bool(v) => v.to_string(),
+            ExprKind::Nil => "None".into(),
+            ExprKind::Void => "()".into(),
             ExprKind::Var(v) => {
                 if self.thread_override.is_some() {
                     if let Some(replayed) = self.replayed_assignments.get(v) {
@@ -620,6 +626,13 @@ impl Emitter {
                 }
                 assignment
             }
+            ExprKind::QuestionAssign(a, b) => {
+                let target = self.lvalue(a);
+                format!(
+                    "if {target}.is_none() {{ {target} = Some({}); }}",
+                    self.expr(b)
+                )
+            }
             ExprKind::BinOp(op, a, b) => {
                 let left_ty = self.expr_type(a);
                 let right_ty = self.expr_type(b);
@@ -691,6 +704,11 @@ impl Emitter {
                     format!("({})", values.join(", "))
                 }
             }
+            ExprKind::Else(value, fallback) => format!(
+                "{}.unwrap_or_else(|| {})",
+                self.expr(value),
+                self.expr(fallback)
+            ),
             ExprKind::Call(c, args) => {
                 if let ExprKind::Var(name) = &c.kind {
                     if let Some(cast_ty) = primitive_cast_type(name) {
@@ -879,7 +897,11 @@ impl Emitter {
                         .map(|e| self.expr(e))
                         .unwrap_or_else(|| "Default::default()".into());
                     let value = match &v.ty {
-                        Some(t) if !is_array(t) => format!("({value}) as {}", ty(t)),
+                        Some(t)
+                            if !is_array(t) && !matches!(base(t), Type::Optional(_)) =>
+                        {
+                            format!("({value}) as {}", ty(t))
+                        }
                         _ => value,
                     };
                     parts.push(format!(
@@ -1200,6 +1222,7 @@ fn ty(t: &Type) -> String {
         Type::Array(_) | Type::ArrayN(_, _) | Type::LabeledArray(_, _) => {
             format!("Vec<{}>", elem_ty(t))
         }
+        Type::Optional(inner) => format!("Option<{}>", ty(inner)),
         _ => "isize".into(),
     }
 }

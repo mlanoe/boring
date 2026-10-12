@@ -995,6 +995,51 @@ print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3
 }
 
 #[test]
+fn local_optional_expressions_run_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_optionals");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("optionals.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel Optionals:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        var int? value = nil
+        value ?= i + 10
+        output[i] = value else 0
+mut optionals = Optionals(output)
+kernel:
+    optionals(block = 4)
+print "{optionals.output[0]} {optionals.output[1]} {optionals.output[2]} {optionals.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("optionals_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
 fn labeled_matrix_kernel_builds_and_runs() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_matrix_example");
     let _ = fs::remove_dir_all(&root);
