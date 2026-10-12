@@ -4166,7 +4166,7 @@ impl Transpiler {
                             } else if let Some(Some(def)) = init_defaults.get(i) {
                                 Some(format!("{}: {}", fname, def))
                             } else if let Some(def) = self.struct_field_defaults.get(&key).cloned() {
-                                Some(format!("{}: {}", fname, self.emit_struct_field_value(Some(fty), &def)))
+                                Some(format!("{}: {}", fname, self.emit_field_default_value(name, fname, fty, &def)))
                             } else if matches!(fty, Type::Optional(_)) {
                                 Some(format!("{}: None", fname))
                             } else {

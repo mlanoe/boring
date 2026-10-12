@@ -340,49 +340,9 @@ impl Transpiler {
                 let struct_name_ref = s.name.clone();
                 let key = format!("{}::{}", struct_name_ref, f.name);
                 let is_transient = self.transient_fields.contains_key(&key);
-                // These sets cover both explicit (`T'actor`) and inferred qualifiers.
-                let is_actor = self.struct_mutex_fields.contains(&key);
-                let is_actor_task = self.struct_mutex_task_fields.contains(&key);
-                let is_guard = self.struct_rwlock_fields.contains(&key);
-                let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
-                let observed_entry = self.observed_fields.get(&key).cloned();
                 if let Some(def) = &f.default {
-                    if let Some((inner_struct_name, base)) = observed_entry {
-                        // `'observed`-qualified field default (docs/book.md's "'observed"
-                        // section) — construct the raw base-typed value from the field's
-                        // own `= expr` default, then wrap it exactly like a local
-                        // `'observed` `let` would (`wrap_observed_base`), finally wrapping
-                        // in `BoringObserved::new(...)` to also initialize a fresh, empty
-                        // subscriber list — see docs/book.md's "Construction" note.
-                        let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
-                        let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
-                        self.line(&format!("{}: BoringObserved::new({}),", f.name, wrapped));
-                    } else if is_actor || is_actor_task {
-                        // Inferred fields carry the bare inner type already; explicit
-                        // `T'actor`/`T'actor'task` fields need unwrapping via mutex_inner.
-                        let inner = Self::mutex_inner(&f.ty).unwrap_or(&f.ty);
-                        let raw = self.emit_let_value(Some(inner), def);
-                        let init = if is_actor_task { self.emit_actor_task_new(&raw) } else { self.emit_actor_new(&raw) };
-                        self.line(&format!("{}: {},", f.name, init));
-                    } else if is_guard || is_guard_task {
-                        let inner = Self::rwlock_inner(&f.ty).unwrap_or(&f.ty);
-                        let raw = self.emit_let_value(Some(inner), def);
-                        let init = if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) };
-                        self.line(&format!("{}: {},", f.name, init));
-                    } else {
-                        let val = self.emit_let_value(Some(&f.ty), def);
-                        if is_transient {
-                            let is_copy = Self::is_copy_type(&f.ty);
-                            let wrapped = if is_copy {
-                                format!("std::cell::Cell::new({})", val)
-                            } else {
-                                format!("std::cell::RefCell::new({})", val)
-                            };
-                            self.line(&format!("{}: {},", f.name, wrapped));
-                        } else {
-                            self.line(&format!("{}: {},", f.name, val));
-                        }
-                    }
+                    let val = self.emit_field_default_value(&s.name, &f.name, &f.ty, def);
+                    self.line(&format!("{}: {},", f.name, val));
                 } else if is_transient {
                     // transient fields without explicit default → Cell/RefCell::new(None)
                     let is_copy = Self::is_copy_type(&f.ty);
@@ -2660,7 +2620,13 @@ impl Transpiler {
         }
         // Default method implementations — use Some("") so &self is emitted
         for default in &t.defaults {
-            self.emit_fn(default, Some(""));
+            match self.contract_borrowed_params(&default.params) {
+                Some(params) => {
+                    let patched = FnDecl { params, ..default.clone() };
+                    self.emit_fn(&patched, Some(""));
+                }
+                None => self.emit_fn(default, Some("")),
+            }
             self.blank();
         }
         self.indent -= 1;
@@ -2677,6 +2643,14 @@ impl Transpiler {
     /// `with_self` = true for instance methods (adds `&self` / `&mut self`),
     /// false for associated functions (no self receiver).
     pub(crate) fn emit_fn_sig(&mut self, sig: &FnSignature, with_self: bool) {
+        // Trait contract (infer_trait_borrow.rs): a bare-trait param is `&dyn Trait` unless `'owned`.
+        let contract_sig;
+        let sig = if with_self {
+            match self.contract_borrowed_params(&sig.params) {
+                Some(params) => { contract_sig = FnSignature { params, ..sig.clone() }; &contract_sig }
+                None => sig,
+            }
+        } else { sig };
         let params_s: Vec<String> = sig.params.iter().map(|p| self.emit_param(p, with_self)).collect();
         let all_params = if with_self {
             let self_ref = if sig.mutating { "&mut self" } else { "&self" };
@@ -2945,4 +2919,47 @@ impl Transpiler {
 
     // ── Statements ────────────────────────────────────────────────────────────
 
+}
+
+impl Transpiler {
+    /// Owned value for a struct field's declared `= expr` default, wrapped per the
+    /// field's qualifier (`'observed`/`'actor`/`'guard`/transient). Shared by the
+    /// generated `new()` and the zero-arg struct-literal path so both agree — a bare
+    /// `emit_let_value` would yield the by-reference call-argument form (`&Arc::new(..)`).
+    pub(crate) fn emit_field_default_value(&self, struct_name: &str, fname: &str, fty: &Type, def: &Expr) -> String {
+        let key = format!("{}::{}", struct_name, fname);
+        let is_actor = self.struct_mutex_fields.contains(&key);
+        let is_actor_task = self.struct_mutex_task_fields.contains(&key);
+        let is_guard = self.struct_rwlock_fields.contains(&key);
+        let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
+        if let Some((inner_struct_name, base)) = self.observed_fields.get(&key).cloned() {
+            // `'observed`-qualified field default (docs/book.md's "'observed" section):
+            // build the raw base-typed value, wrap it like a local `'observed` `let`,
+            // then `BoringObserved::new(...)` for a fresh, empty subscriber list.
+            let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
+            let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+            format!("BoringObserved::new({})", wrapped)
+        } else if is_actor || is_actor_task {
+            // Inferred fields carry the bare inner type already; explicit
+            // `T'actor`/`T'actor'task` fields need unwrapping via mutex_inner.
+            let inner = Self::mutex_inner(fty).unwrap_or(fty);
+            let raw = self.emit_let_value(Some(inner), def);
+            if is_actor_task { self.emit_actor_task_new(&raw) } else { self.emit_actor_new(&raw) }
+        } else if is_guard || is_guard_task {
+            let inner = Self::rwlock_inner(fty).unwrap_or(fty);
+            let raw = self.emit_let_value(Some(inner), def);
+            if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) }
+        } else {
+            let val = self.emit_let_value(Some(fty), def);
+            if self.transient_fields.contains_key(&key) {
+                if Self::is_copy_type(fty) {
+                    format!("std::cell::Cell::new({})", val)
+                } else {
+                    format!("std::cell::RefCell::new({})", val)
+                }
+            } else {
+                val
+            }
+        }
+    }
 }

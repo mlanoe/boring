@@ -21,6 +21,12 @@
 //! function, field, piped or bare-value name. Call sites then resolve by receiver type when
 //! known and by name otherwise.
 //!
+//! Trait contracts (phase 4). A bare-trait parameter of a trait method signature or default
+//! method is *borrowed* by default (`&dyn Trait`) unless the author opts into by-value with
+//! `Trait'owned p`; every implementer (struct, enum, `ext`) and every call through a trait
+//! object or generic bound follows the contract, never the body. An implementer or default
+//! method whose body consumes such a parameter is a diagnostic naming the `'owned` fix.
+//!
 //! A function is left alone entirely when its signature could be observed through a path that
 //! does not go through the borrow-aware call emission: used as a value (`map(f)`), piped
 //! (`x |> f`), named like any method called anywhere, overloaded, generic, `task`/`stream`,
@@ -49,6 +55,9 @@ pub(crate) struct TraitBorrowFacts {
     fns: Vec<FnDecl>,
     /// Methods of non-generic structs: `(struct name, decl)`.
     methods: Vec<(String, FnDecl)>,
+    /// Types that may implement traits: `(type name, declared trait names, methods)` for every
+    /// struct, enum and `ext` of the graph.
+    implementers: Vec<(String, Vec<String>, Vec<FnDecl>)>,
     /// How many methods of any kind (struct, enum, ext, kernel, trait default) bear each name.
     method_name_count: HashMap<String, usize>,
     /// Names that occur as a bare value (not a call's callee) or pipe target.
@@ -139,11 +148,35 @@ impl Transpiler {
             }
         }
 
+        // Trait contracts: a bare-trait param of a trait method is borrowed unless `'owned`.
+        // A name declared by exactly one trait resolves a forwarded call to its contract.
+        let mut contract_trait_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (t, names) in &self.trait_method_names {
+            for m in names { contract_trait_of.entry(m.as_str()).or_default().push(t.as_str()); }
+        }
+        let contract_map: HashMap<String, Vec<bool>> = self.trait_method_params.iter()
+            .map(|(k, ps)| (k.clone(), ps.iter().map(|p| self.param_trait_name(p).is_some()).collect()))
+            .collect();
+        let contract_flags = |t: &str, m: &str| -> Vec<bool> {
+            contract_map.get(&format!("{}::{}", t, m)).cloned().unwrap_or_default()
+        };
+        let mut contract_keys: Vec<(String, String, Vec<bool>)> = Vec::new(); // (key, method, flags)
+        for (m, ts) in &contract_trait_of {
+            if ts.len() != 1 { continue; }
+            let flags = contract_flags(ts[0], m);
+            if !flags.iter().any(|b| *b) { continue; }
+            let key = format!("@{}::{}", ts[0], m);
+            for (i, b) in flags.iter().enumerate() { if *b { borrowed.insert((key.clone(), i)); } }
+            method_key_by_name.insert(m, key.clone());
+            contract_keys.push((key, m.to_string(), flags));
+        }
+
         // Shrinking fixpoint over the forwarding relation.
         loop {
             let mut changed = false;
             let current: Vec<(String, usize)> = borrowed.iter().cloned().collect();
             for (key, i) in current {
+                if key.starts_with('@') { continue; } // contract entries are fixed
                 let f = decls[key.as_str()];
                 if !self.param_is_borrow_only(f, i, &borrowed, &decls, &method_key_by_name) {
                     borrowed.remove(&(key, i));
@@ -184,6 +217,88 @@ impl Transpiler {
             }
             self.trait_borrowed_fns.insert(f.name.clone(), flags);
         }
+
+        // Contract call-by-name entries (trait/dyn receivers are handled from the trait's own
+        // parameter list at the call site; these serve receivers of unknown type).
+        for (key, m, flags) in &contract_keys {
+            let (_, tname_m) = key[1..].split_once("::").unwrap();
+            let t = &key[1..key.len() - tname_m.len() - 2];
+            let types: Vec<Option<Type>> = self.trait_method_params.get(&format!("{}::{}", t, m))
+                .map(|ps| ps.iter().zip(flags).map(|(p, b)| if *b {
+                    p.ty.as_ref().map(|ty| Type::Qualified(Box::new(ty.clone()), OwnerQual::Borrow))
+                } else { None }).collect())
+                .unwrap_or_default();
+            self.trait_borrowed_method_by_name.insert(m.clone(), key.clone());
+            self.trait_borrowed_methods.insert(key.clone(), types);
+        }
+
+        // Implementers follow the contract of every trait they implement, explicitly
+        // (`as Trait`) or by having all of its required methods.
+        for (ty, protos, methods) in &facts.implementers {
+            let names: HashSet<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+            let implemented: Vec<String> = self.trait_method_names.iter()
+                .filter(|(t, req)| protos.contains(t)
+                    || (!req.is_empty() && req.iter().all(|r| names.contains(r.as_str()))))
+                .map(|(t, _)| t.clone())
+                .collect();
+            for m in methods {
+                let mut flags: Option<Vec<bool>> = None;
+                let mut trait_of = String::new();
+                for t in &implemented {
+                    if !self.trait_method_names[t.as_str()].contains(&m.name) { continue; }
+                    let f = contract_flags(t, &m.name);
+                    if !f.iter().any(|b| *b) { continue; }
+                    match &flags {
+                        None => { flags = Some(f); trait_of = t.clone(); }
+                        Some(prev) if *prev == f => {}
+                        Some(_) => self.push_error(m.line, m.col, format!(
+                            "`{}.{}` implements methods of several traits whose bare-trait parameters \
+                             are borrowed differently; declare the by-value ones `Trait'owned`",
+                            ty, m.name)),
+                    }
+                }
+                let Some(flags) = flags else { continue };
+                let mut types: Vec<Option<Type>> = vec![None; m.params.len()];
+                for (i, p) in m.params.iter().enumerate() {
+                    if !flags.get(i).copied().unwrap_or(false) { continue; }
+                    match p.ty.as_ref() {
+                        Some(t @ Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()) && self.param_trait_name(p).is_some() => {
+                            if !self.trait_param_only_borrowed(m, i, &borrowed, &decls, &method_key_by_name) {
+                                self.push_error(p.line, p.col, format!(
+                                    "`{}` is consumed in `{}.{}`, but trait `{}` passes its bare-trait parameter by reference; \
+                                     declare it `{}'owned {}` in the trait and here to take ownership",
+                                    p.name, ty, m.name, trait_of, n, p.name));
+                            }
+                            types[i] = Some(Type::Qualified(Box::new(t.clone()), OwnerQual::Borrow));
+                        }
+                        _ => self.push_error(p.line, p.col, format!(
+                            "parameter `{}` of `{}.{}` must be a bare trait type to match trait `{}`, whose contract passes it by reference \
+                             (or declare it `'owned` in the trait too)",
+                            p.name, ty, m.name, trait_of)),
+                    }
+                }
+                self.trait_borrowed_methods.insert(format!("{}::{}", ty, m.name), types);
+            }
+        }
+
+        // Explicit `T&` / `mut T&` parameters of enum and `ext` methods. A struct's methods
+        // are registered with their declaration, but an enum's are not, so a call site has no
+        // parameter list to read the borrow from: record them in the same table.
+        for (ty, _, methods) in &facts.implementers {
+            for m in methods {
+                if !m.params.iter().any(|p| matches!(p.ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)))) {
+                    continue;
+                }
+                let entry = self.trait_borrowed_methods
+                    .entry(format!("{}::{}", ty, m.name))
+                    .or_insert_with(|| vec![None; m.params.len()]);
+                for (i, p) in m.params.iter().enumerate() {
+                    if let (Some(None), Some(t @ Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))) = (entry.get(i), p.ty.as_ref()) {
+                        entry[i] = Some(t.clone());
+                    }
+                }
+            }
+        }
         self.trait_borrow_facts = TraitBorrowFacts::default();
     }
 
@@ -222,7 +337,20 @@ impl Transpiler {
         self.trait_borrowed_methods.get(key)
     }
 
-    fn param_trait_name(&self, p: &Param) -> Option<String> {
+    /// `params` of a trait method (signature or default body) with every contract-borrowed
+    /// bare-trait parameter rewritten to `Trait&`; `None` when nothing changes.
+    pub(crate) fn contract_borrowed_params(&self, params: &[Param]) -> Option<Vec<Param>> {
+        if !params.iter().any(|p| self.param_trait_name(p).is_some()) { return None; }
+        Some(params.iter().map(|p| {
+            let mut q = p.clone();
+            if self.param_trait_name(p).is_some() {
+                q.ty = q.ty.take().map(|t| Type::Qualified(Box::new(t), OwnerQual::Borrow));
+            }
+            q
+        }).collect())
+    }
+
+    pub(crate) fn param_trait_name(&self, p: &Param) -> Option<String> {
         if p.mutable || p.rebindable || p.var_mut || p.owned || p.variadic || p.default.is_some() {
             return None;
         }
@@ -259,6 +387,17 @@ impl Transpiler {
         self.struct_fields.contains_key(name)
             || self.type_sizes.contains_key(name)
             || self.enum_variants.contains_key(name)
+    }
+
+    fn trait_param_only_borrowed(
+        &self,
+        f: &FnDecl,
+        idx: usize,
+        borrowed: &HashSet<(String, usize)>,
+        decls: &HashMap<String, &FnDecl>,
+        method_key_by_name: &HashMap<&str, String>,
+    ) -> bool {
+        self.param_is_borrow_only(f, idx, borrowed, decls, method_key_by_name)
     }
 
     /// True when every occurrence of `f.params[idx]` in the body is a borrow use.
@@ -337,6 +476,7 @@ fn collect_items(items: &[Item], facts: &mut TraitBorrowFacts) {
                 scan(&f.body, facts);
             }
             Item::Struct(s) => {
+                facts.implementers.push((s.name.clone(), s.protocols.clone(), s.methods.clone()));
                 count_methods(&s.methods, facts);
                 if s.type_params.is_empty() {
                     for m in &s.methods { facts.methods.push((s.name.clone(), m.clone())); }
@@ -348,6 +488,7 @@ fn collect_items(items: &[Item], facts: &mut TraitBorrowFacts) {
                 for st in &s.setters { scan(&st.body, facts); }
             }
             Item::Enum(e) => {
+                facts.implementers.push((e.name.clone(), e.protocols.clone(), e.methods.clone()));
                 count_methods(&e.methods, facts);
                 for m in &e.methods { scan(&m.body, facts); }
                 for t in &e.type_methods { scan(&t.body, facts); }
@@ -357,6 +498,7 @@ fn collect_items(items: &[Item], facts: &mut TraitBorrowFacts) {
                 for d in &t.defaults { scan(&d.body, facts); }
             }
             Item::Ext(x) => {
+                facts.implementers.push((x.type_name.clone(), x.traits.clone(), x.methods.clone()));
                 count_methods(&x.methods, facts);
                 for m in &x.methods { scan(&m.body, facts); }
             }

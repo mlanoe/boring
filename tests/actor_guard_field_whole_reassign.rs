@@ -78,7 +78,9 @@ def main():
     );
     let generated = String::from_utf8_lossy(&out.stdout);
     assert!(
-        generated.contains("self.model = Arc::new(std::sync::Mutex::new(FormModel::new()));"),
+        generated.contains(
+            "self.model = Arc::new(std::sync::Mutex::new(FormModel { name: Arc::<str>::from(\"\") }));"
+        ),
         "expected the whole-field reassignment to be wrapped in Arc::new(Mutex::new(...)), \
          got generated source:\n{}",
         generated
@@ -107,7 +109,9 @@ def main():
     );
     let generated = String::from_utf8_lossy(&out.stdout);
     assert!(
-        generated.contains("self.model = Arc::new(std::sync::RwLock::new(FormModel::new()));"),
+        generated.contains(
+            "self.model = Arc::new(std::sync::RwLock::new(FormModel { name: Arc::<str>::from(\"\") }));"
+        ),
         "expected the whole-field reassignment to be wrapped in Arc::new(RwLock::new(...)), \
          got generated source:\n{}",
         generated
@@ -139,7 +143,7 @@ def main():
     let generated = String::from_utf8_lossy(&out.stdout);
     assert!(
         generated.contains(
-            "self.model = BoringObserved::new(Arc::new(std::sync::Mutex::new(FormModel::new())));"
+            "self.model = BoringObserved::new(Arc::new(std::sync::Mutex::new(FormModel { name: Arc::<str>::from(\"\") })));"
         ),
         "expected the whole-field reassignment to be re-wrapped in a fresh \
          BoringObserved::new(Arc::new(Mutex::new(...))), got generated source:\n{}",

@@ -2035,19 +2035,32 @@ impl Transpiler {
     /// already known to produce a `Box<dyn Trait>` value: a variable whose own declared
     /// type is the same trait (already boxed by this same rule at its own `let`), or an
     /// expression that already emitted a `Box::new(...)` wrapper.
-    pub(crate) fn box_if_trait_typed(&self, value: &Expr, trait_name: &str) -> String {
-        if let ExprKind::Var(v) = &value.kind {
-            if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
-                if n.as_str() == trait_name {
-                    // `Box<dyn Trait>` is not `Clone`: forward the box itself (a move)
-                    // instead of the `.clone()` `emit_expr_owned` would add.
-                    return self.emit_expr(value);
-                }
+    /// A bare trait type, or its explicit by-value spelling `Trait'owned`: both are a
+    /// `Box<dyn Trait>` slot.
+    pub(crate) fn is_boxed_trait_type(&self, ty: &Type) -> bool {
+        match ty.without_mut() {
+            Type::Named(n) => self.trait_method_names.contains_key(n.as_str()),
+            Type::Qualified(inner, OwnerQual::Owned) => {
+                matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
             }
-            if let Some(Type::Named(n)) = self.fn_current_params.get(v.as_str()) {
-                if n.as_str() == trait_name {
-                    return self.emit_expr(value);
-                }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn box_if_trait_typed(&self, value: &Expr, trait_name: &str) -> String {
+        let same_trait = |t: &Type| match t.without_mut() {
+            Type::Named(n) => n.as_str() == trait_name,
+            Type::Qualified(inner, OwnerQual::Owned) => matches!(inner.as_ref(), Type::Named(n) if n.as_str() == trait_name),
+            _ => false,
+        };
+        if let ExprKind::Var(v) = &value.kind {
+            if self.var_types.get(v.as_str()).is_some_and(|t| same_trait(t)) {
+                // `Box<dyn Trait>` is not `Clone`: forward the box itself (a move)
+                // instead of the `.clone()` `emit_expr_owned` would add.
+                return self.emit_expr(value);
+            }
+            if self.fn_current_params.get(v.as_str()).is_some_and(|t| same_trait(t)) {
+                return self.emit_expr(value);
             }
         }
         let emitted = self.emit_expr_owned(value);
@@ -2103,6 +2116,9 @@ impl Transpiler {
     ///     doesn't duplicate).
     pub(crate) fn expr_already_owned_repr(&self, value: &Expr) -> bool {
         if let ExprKind::Var(v) = &value.kind {
+            // A bare-trait (or `Trait'owned`) variable/param is itself a `Box<dyn Trait>`.
+            let own_ty = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()));
+            if own_ty.is_some_and(|t| self.is_boxed_trait_type(t)) { return true; }
             let has_qualified_own_type = matches!(
                 self.var_types.get(v.as_str()).map(Type::without_mut),
                 Some(Type::Qualified(_, _))

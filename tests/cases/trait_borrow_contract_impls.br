@@ -1,0 +1,53 @@
+# Trait contract (docs/qualifiers.md "Design: borrow inference ..."): every kind of implementer
+# follows the trait's `&dyn Trait` parameter: explicit struct, implicit conformance, enum, `ext`,
+# and a call through a trait object.
+trait Builder:
+    req int build(int x)
+
+struct Four as Builder:
+    req int build(int x): x + 4
+
+trait Visitor:
+    req int visit(Builder b)
+
+# explicit struct implementer
+struct A as Visitor:
+    req int visit(Builder b):
+        b.build(1)
+
+# implicit conformance (no `as`)
+struct B:
+    req int visit(Builder b):
+        b.build(2)
+
+# enum implementer
+enum E as Visitor:
+    One
+    Two
+    req int visit(Builder b):
+        b.build(3)
+
+# ext implementer
+struct C:
+    int n
+ext C as Visitor:
+    req int visit(Builder b):
+        b.build(n)
+
+def main():
+    let Builder first = Four()
+    let A a = A()
+    let B bb = B()
+    let C c = C(5)
+    print a.visit(first)
+    print a.visit(first)
+    print bb.visit(first)
+    print bb.visit(first)
+    let E e = E.One
+    print e.visit(first)
+    print e.visit(first)
+    print c.visit(first)
+    print c.visit(first)
+    let Visitor v = A()
+    print v.visit(first)
+    print v.visit(first)

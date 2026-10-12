@@ -1,0 +1,20 @@
+# Error fixture: an implementer whose parameter type does not match a borrowed trait parameter.
+trait Builder:
+    req int build(int x)
+
+struct Four as Builder:
+    req int build(int x): x + 4
+
+struct Holder:
+    Builder b
+
+trait Visitor:
+    req int visit(Builder b)
+
+struct A as Visitor:
+    req int visit(Builder'owned b):
+        b.build(1)
+
+def main():
+    let A a = A()
+    print a.visit(Four())

@@ -381,6 +381,9 @@ transpile_test!(trait_method_return);
 transpile_test!(trait_borrow_param);
 transpile_test!(trait_borrow_infer);
 transpile_test!(trait_borrow_method_infer);
+transpile_test!(trait_borrow_contract);
+transpile_test!(trait_borrow_contract_impls);
+transpile_test!(struct_borrow_method_param);
 transpile_test!(trait_borrow_method_param);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);
@@ -1217,10 +1220,10 @@ transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);
 // field already was (`emit_struct.rs`'s `has_non_clone_field`/
 // `has_non_debug_trait_array_field`), so it still failed to compile
 // (E0277/E0369) even once the field carried the right, single-boxed type.
-// Managed mode hits the same pre-existing `'owned` call-site gap named in
-// `owned_call_arg_no_double_box`'s doc above (constructor call sites aren't
-// updated to emit `Arc::new(Mutex::new(...))` for a trait-typed default).
-transpile_test!(init_owned_trait_param, ignore_managed);
+// Managed mode used to wrap a `Trait'owned` type as `Arc<Mutex<Box<dyn Trait>>>`; a trait object
+// is `Box<dyn Trait>` in every mode (`emit_type`'s `OwnerQual::Owned` arm), so all four
+// configurations are exercised.
+transpile_test!(init_owned_trait_param);
 // `init_bare_trait_param`: sibling to `init_owned_trait_param` above, but for
 // a BARE (unqualified) trait-typed init param — `Greeter greeter =
 // greeterProvider()`, no `'owned` written at all. Same underlying

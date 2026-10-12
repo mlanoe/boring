@@ -3613,8 +3613,10 @@ impl Transpiler {
                 OwnerQual::Owned | OwnerQual::Inline => {
                     // Managed mode: T'owned → Arc<Mutex<T>> (multi) or RefCell<T> (single).
                     // Strict mode: Owned = Box<T>, Inline = T (default).
+                    // A trait object is `Box<dyn Trait>` in every mode (handled just below).
                     if matches!(qual, OwnerQual::Owned) && self.config.mode == crate::transpiler::TranspileMode::Managed
-                        && !matches!(inner.as_ref(), Type::Named(n) if self.unit_enums.contains(n.as_str()))
+                        && !matches!(inner.as_ref(), Type::Named(n) if self.unit_enums.contains(n.as_str())
+                            || self.trait_method_names.contains_key(n.as_str()))
                     {
                         self.emit_managed_actor(inner)
                     } else if matches!(qual, OwnerQual::Owned) {

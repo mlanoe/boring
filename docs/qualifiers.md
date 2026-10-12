@@ -761,9 +761,9 @@ def Value eval_expr(Interpreter interp, Expr e):
     …
 ```
 
-### Design: borrow inference for bare-trait parameters (phases 1–3 implemented)
+### Design: borrow inference for bare-trait parameters (phases 1–4 implemented)
 
-**Status: phases 1–3 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions and struct methods); phase 4 is design only.** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is
+**Status: phases 1–4 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions and struct methods; borrowed trait-method contracts).** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is
 emitted `b: Box<dyn Builder>` — by value — while structs/enums/collections are borrowed by inference
 (`auto_ref_param_vars`, free functions only). A trait-typed argument is therefore *moved*: passing
 the same local twice (`b.endEvent(first)` twice, boring-ui `tests/core_lifecycle_test.br:69,72`) is a
@@ -820,9 +820,9 @@ Free functions already have the delivery channel: the pre-pass writes into `fn_s
 A header-only trait method has no body to analyse, and Rust requires every implementer to match it
 exactly, so the body cannot decide. Proposal: **a bare-trait param in a trait method signature is a
 fixed contract** (same precedent as lent `mut [T]` params: "the signature a caller sees never
-depends on what the body does"). Phase 1/2 keep it **by value** (status quo, zero behavioural
-change). Phase 3 (optional, breaking) flips the contract to `&dyn` with an explicit by-value opt-in
-(`Builder'owned b`); implementers whose bodies consume it would then get a clear diagnostic instead
+depends on what the body does"). Phases 1–3 kept it **by value** (zero behavioural
+change). Phase 4 (breaking, implemented) flips the contract to `&dyn` with an explicit by-value opt-in
+(`Builder'owned b`); implementers whose bodies consume it get a clear diagnostic instead
 of inference. A struct method that implements a trait method is never inferred; one that doesn't,
 is.
 
@@ -886,9 +886,8 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    Closes task_bf57c4ee. Cases: extend `trait_param_forwarding.br` with `Trait&` called with a fresh
    value, a local used twice, a field, and a forwarded `&dyn` param; all four mode/threading builds.
    Landed as `tests/cases/trait_borrow_param.br` (type emitted in `emit_top.rs` `OwnerQual::Borrow`/
-   `BorrowMut`; call sites in `emit_trait_borrow_arg`, `emit_methods.rs`). Known limit, pre-existing and
-   shared with plain structs: an explicit `T&` param on a struct **method** has no call-site support at
-   all (`r.m(p)` passes `p` for `&Pt`) — it needs phase 3's `Type::method` declaration lookup.
+   `BorrowMut`; call sites in `emit_trait_borrow_arg`, `emit_methods.rs`). (An explicit `T&` param
+   on a **method** had no call-site support at all, for plain structs as for traits; see phase 3.)
 2. **(Done.)** **Free functions inferred** (global fixpoint + `fn_sigs` write, seed in `infer_qualifiers.rs`
    next to the struct arm, trait types allowed only for this path since the "Addable'inline →
    `impl Addable`" hazard in that comment concerns the qualifier fallback, not the borrow result).
@@ -919,10 +918,37 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    parameter). Trait implementers are never inferred (their name is a trait method name).
    Explicit `Trait&` on methods landed separately (commit c8c14a3f). Validated on
    `boring-ui/src/core.br`: `start`/`endEvent`/`flush` become `&dyn Builder` and
-   `b.endEvent(&first)` can be called twice. Still open and independent of traits: an explicit
-   `T&` on a method for a plain struct has no call-site support, and `mut`/`var` trait params
-   stay by value.
-4. (Optional, breaking) trait-method contracts default to borrowed.
+   `b.endEvent(&first)` can be called twice. `mut`/`var` trait params stay by value.
+   An explicit `T&` / `mut T&` on a method (any `T`: struct, enum, collection, trait) is passed as a
+   reference by `emit_borrow_arg_any` in every method path — struct, enum and `ext` receivers
+   (the latter two through the replacement-type table, since they have no registered
+   declaration), the `'actor`/`'guard` dispatchers, trait objects — with the same argument
+   shapes as free functions: a local or field is borrowed in place, a fresh value is borrowed,
+   an already-borrowed parameter is passed through or reborrowed, an `'owned`/`'shared` binding
+   is borrowed through its pointer, and a `let` passed to `mut T&` is a diagnostic
+   (`tests/cases/struct_borrow_method_param.br`). Lending a field of `self` to a `def` method of the
+   same object is rejected by rustc's borrow checker, as it should be.
+4. **(Done.)** **Trait-method contracts default to borrowed** (breaking: none in the repository or its
+   sibling projects declared a trait method with a bare-trait parameter). A bare-trait parameter of a
+   trait method signature or default method is `&dyn Trait`; `Trait'owned p` keeps the by-value
+   `Box<dyn Trait>`. The contract depends only on the trait's own parameter declaration, so it
+   needs no fixpoint of its own: the trait header (`emit_fn_sig`) and default methods
+   (`emit_trait`) are emitted borrowed, and every implementer — explicit `as Trait`, implicit
+   conformance, enum, `ext` — gets a `Type::method` entry in the same replacement-type table
+   phase 3 introduced, so `emit_fn` and the call sites (struct/enum/`ext` receivers, the
+   `'actor` dispatchers, trait objects and generic bounds through the trait's own parameter
+   list, a struct calling an inherited default method) all follow it. A name declared by exactly
+   one trait also resolves forwarded calls and receivers of unknown type. An implementer or
+   default body that consumes a borrowed parameter, or declares it with another type than the
+   trait, is a Boring diagnostic naming the `'owned` fix
+   (`tests/trait_borrow_contract_build_fails.rs`); a name shared by several traits with
+   different contracts is a diagnostic too. `'owned` on a bare trait parameter was only half
+   working (a fresh value was boxed, an already-boxed local or parameter was boxed again, the
+   call site cloned it): `is_boxed_trait_type` now treats it like the bare form wherever the
+   boxing decision is made. Cases: `trait_borrow_contract`, `trait_borrow_contract_impls`.
+   Still by value: `mut`/`var` trait parameters, and a trait method called through a receiver
+   whose type is unknown when several traits declare that name.
+
 
 Gates per phase: `cargo test` (cases snapshot suites), `interpreter_build` then
 `interpreter_functional`, and `boring build --compile` on boring-ui.

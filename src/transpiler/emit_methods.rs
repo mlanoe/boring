@@ -3886,7 +3886,13 @@ impl Transpiler {
                 .map(|decl| decl.params.iter().map(|p| p.ty.clone()).collect())
                 .unwrap_or_default();
             // Bare-trait params inferred borrowed (`infer_trait_borrow.rs`) read as `Trait&`.
-            if let Some(t) = &struct_type_opt {
+            let override_ty = struct_type_opt.clone()
+                .or_else(|| self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name));
+            if let Some(t) = &override_ty {
+                // An enum (or `ext`) receiver has no registered declaration: start from the table.
+                if let Some(tbl) = self.trait_borrowed_methods.get(&format!("{}::{}", t, method)) {
+                    if struct_method_param_types.len() < tbl.len() { struct_method_param_types.resize(tbl.len(), None); }
+                }
                 for (i, slot) in struct_method_param_types.iter_mut().enumerate() {
                     if let Some(ty) = self.inferred_method_param_type(t, method, i) {
                         *slot = Some(ty.clone());
@@ -4000,13 +4006,17 @@ impl Transpiler {
                         return self.emit_let_value(Some(param_ty), &a.value);
                     }
                 }
+                // `Trait'owned` (by-value opt-out of the trait contract): the same boxing.
+                if let Some(Some(param_ty)) = struct_method_param_types.get(i) {
+                    if self.is_boxed_trait_type(param_ty) {
+                        return self.emit_let_value(Some(param_ty), &a.value);
+                    }
+                }
                 // Explicit `Trait&` / `mut Trait&` (`&dyn Trait`): same call-site shapes as the
                 // free-function path in `emit_args_coerced_vec`.
                 if let Some(Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut)))) = struct_method_param_types.get(i) {
-                    if let Type::Named(n) = inner.as_ref() {
-                        if self.trait_method_names.contains_key(n.as_str()) {
-                            return self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
-                        }
+                    if let Some(s) = self.emit_borrow_arg_any(inner, matches!(q, OwnerQual::BorrowMut), &a.value) {
+                        return s;
                     }
                 }
                 self.emit_expr_owned(&a.value)
@@ -4059,28 +4069,44 @@ impl Transpiler {
                     if let Some(slot) = args_s.get_mut(i) {
                         *slot = self.emit_lent_arg(&a.value);
                     }
+                } else if trait_params.get(i).and_then(|p| p.ty.as_ref()).is_some_and(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned)) && self.is_boxed_trait_type(t)) {
+                    // `Trait'owned`: by value, boxed like a bare trait slot.
+                    if let Some(slot) = args_s.get_mut(i) {
+                        *slot = self.emit_let_value(trait_params[i].ty.as_ref(), &a.value);
+                    }
+                } else if let Some(Type::Named(n)) = trait_params.get(i)
+                    .filter(|p| self.param_trait_name(p).is_some())
+                    .and_then(|p| p.ty.as_ref())
+                {
+                    // Trait contract: a bare-trait param is borrowed unless `'owned`.
+                    if let Some(slot) = args_s.get_mut(i) {
+                        *slot = self.emit_trait_borrow_arg(n, false, &a.value);
+                    }
                 } else if let Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut))) =
                     trait_params.get(i).and_then(|p| p.ty.as_ref())
                 {
-                    if let Type::Named(n) = inner.as_ref() {
-                        if self.trait_method_names.contains_key(n.as_str()) {
-                            if let Some(slot) = args_s.get_mut(i) {
-                                *slot = self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
-                            }
-                        }
+                    if let Some(s) = self.emit_borrow_arg_any(inner, matches!(q, OwnerQual::BorrowMut), &a.value) {
+                        if let Some(slot) = args_s.get_mut(i) { *slot = s; }
                     }
                 }
             }
         }
         // A receiver whose type is unknown here: a method inferred to borrow bare-trait params
         // is identified by its program-wide unique name (`infer_trait_borrow.rs`).
+        // A receiver that is a known type outside the struct path (an enum, an `ext` type) is
+        // looked up by its own type instead.
+        let typed_table = if !is_user_struct_receiver && external_arg_borrows.is_none() {
+            self.resolve_expr_struct_type(obj)
+                .or_else(|| self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name))
+                .and_then(|tn| self.trait_borrowed_methods.get(&format!("{}::{}", tn, method)))
+        } else { None };
         if !is_user_struct_receiver && external_arg_borrows.is_none()
-            && self.resolve_expr_type(obj).is_none()
-            && self.resolve_expr_struct_type(obj).is_none()
+            && (typed_table.is_some() || (self.resolve_expr_type(obj).is_none()
+                && self.resolve_expr_struct_type(obj).is_none()))
             && !MUTATING_COLLECTION_METHODS.contains(&method)
             && !Self::ELEMENT_CLOSURE_METHODS.contains(&method)
         {
-            if let Some(tys) = self.inferred_method_param_types_by_name(method) {
+            if let Some(tys) = typed_table.or_else(|| self.inferred_method_param_types_by_name(method)) {
                 for (i, a) in args.iter().enumerate() {
                     if let Some(Some(Type::Qualified(inner, _))) = tys.get(i) {
                         if let Type::Named(n) = inner.as_ref() {
@@ -4538,7 +4564,7 @@ impl Transpiler {
                     && !emitted.starts_with("{ let __g")
                     // A trait-typed variable forwarded to a bare-trait param (`Box<dyn Trait>`
                     // isn't `Clone`): the box itself is handed over.
-                    && !matches!(param_ty, Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()))
+                    && !param_ty.is_some_and(|t| self.is_boxed_trait_type(t))
                     && !param_ty_is_copy(param_ty)
                     && !param_rebindable
                     // Borrow params take a reference — no clone needed, the Borrow branch adds `&`.
@@ -5003,6 +5029,16 @@ impl Transpiler {
         let ty_name = self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name)
             .or_else(|| self.resolve_expr_struct_type(obj))?;
         if !self.trait_method_names.contains_key(ty_name.as_str()) {
+            // A struct/enum receiver calling a trait *default* method it does not declare:
+            // the trait's own parameter list is the signature (a unique declaring trait).
+            if self.struct_fields.contains_key(ty_name.as_str())
+                && !self.struct_method_overload_decls.contains_key(&format!("{}::{}", ty_name, method))
+            {
+                let mut found = self.trait_method_names.iter()
+                    .filter(|(_, ms)| ms.contains(method))
+                    .filter_map(|(t, _)| self.trait_method_params.get(&format!("{}::{}", t, method)));
+                if let (Some(p), None) = (found.next(), found.next()) { return Some(p); }
+            }
             if !self.current_fn_type_params.contains(ty_name.as_str()) { return None; }
             return self.current_fn_type_bounds.iter()
                 .filter(|(tp, _)| *tp == ty_name)
@@ -5093,14 +5129,75 @@ impl Transpiler {
             let ty = struct_name.and_then(|t| self.inferred_method_param_type(t, method, i))
                 .or_else(|| decl_params.as_ref().and_then(|ps| ps.get(i)).and_then(|p| p.ty.as_ref()));
             if let Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut))) = ty {
-                if let Type::Named(n) = inner.as_ref() {
-                    if self.trait_method_names.contains_key(n.as_str()) {
-                        return self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
-                    }
+                if let Some(s) = self.emit_borrow_arg_any(inner, matches!(q, OwnerQual::BorrowMut), &a.value) {
+                    return s;
                 }
             }
             self.emit_expr_owned(&a.value)
         }).collect()
+    }
+
+    /// One argument for an explicit `T&` / `mut T&` parameter of a method, whatever `T` is:
+    /// a trait (`&dyn Trait`, see `emit_trait_borrow_arg`), or a struct/enum/collection
+    /// (`&T`). `None` for the shapes this does not handle (a `str` borrow, an alias to a
+    /// smart pointer, an `'actor`/`'guard` argument that needs its lock held) — the caller
+    /// then keeps its by-value emission.
+    fn emit_borrow_arg_any(&self, inner: &Type, mutable: bool, arg: &Expr) -> Option<String> {
+        match inner {
+            Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) =>
+                Some(self.emit_trait_borrow_arg(n, mutable, arg)),
+            Type::Named(n) if n == "str" || n == "String"
+                || self.non_fn_type_aliases.contains_key(n.as_str()) => None,
+            Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) =>
+                self.emit_plain_borrow_arg(mutable, arg),
+            _ => None,
+        }
+    }
+
+    /// `&place` / `&mut place` for a borrowed non-trait argument: a place is borrowed in place
+    /// (never cloned), a parameter that already is a reference is reborrowed or passed through,
+    /// and an `'owned`/`'shared` binding is borrowed through its pointer.
+    fn emit_plain_borrow_arg(&self, mutable: bool, arg: &Expr) -> Option<String> {
+        let r = if mutable { "&mut " } else { "&" };
+        let ExprKind::Var(v) = &arg.kind else {
+            return Some(format!("{}{}", r, self.emit_expr(arg)));
+        };
+        let decl = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()))
+            .map(Type::without_mut);
+        let inferred = self.inferred_qualifiers.get(v.as_str());
+        let is_ref_mut = matches!(decl, Some(Type::Qualified(_, OwnerQual::BorrowMut)))
+            || matches!(inferred, Some(OwnerQual::BorrowMut))
+            || self.var_primitive_params.contains(v.as_str());
+        let is_ref = matches!(decl, Some(Type::Qualified(_, OwnerQual::Borrow)))
+            || matches!(inferred, Some(OwnerQual::Borrow));
+        if is_ref_mut {
+            return Some(if mutable { format!("&mut *{}", v) } else { format!("&*{}", v) });
+        }
+        if is_ref {
+            if mutable {
+                self.push_error(arg.line, arg.col, format!(
+                    "cannot pass `{}` (an immutable borrow) to a `mut` borrowed parameter", v));
+            }
+            return Some(v.clone());
+        }
+        if matches!(decl, Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask
+            | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Weak | OwnerQual::Observed))) {
+            return None;
+        }
+        // An implicit-self field (`self.v` written bare inside a method).
+        let is_self_field = !self.known_local_vars.contains(v.as_str())
+            && self.self_type.as_deref()
+                .and_then(|t| self.struct_fields.get(t))
+                .is_some_and(|fs| fs.iter().any(|(f, _)| f == v));
+        if is_self_field { return Some(format!("{}self.{}", r, v)); }
+        if mutable && self.immutable_local_vars.contains(v.as_str()) {
+            self.push_error(arg.line, arg.col, format!(
+                "cannot pass `{}` to a `mut` parameter — `{}` is immutable (`let` binding). Use `var` or `mut` instead.", v, v));
+        }
+        if matches!(decl, Some(Type::Qualified(_, OwnerQual::Owned | OwnerQual::Shared))) {
+            return Some(format!("{}*{}", r, v));
+        }
+        Some(format!("{}{}", r, v))
     }
 
     /// One argument for a `Trait&` / `mut Trait&` parameter (`&dyn Trait` / `&mut dyn Trait`).

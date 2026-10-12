@@ -1,0 +1,42 @@
+# Trait contract: a bare-trait parameter of a trait method is borrowed (`&dyn Trait`) unless the
+# trait opts into by-value with `Trait'owned`; implementers and every call (struct receiver,
+# trait object, default method) follow the contract.
+trait Builder:
+    req int build(int x)
+
+struct Four as Builder:
+    req int build(int x): x + 4
+
+struct Two as Builder:
+    req int build(int x): x + 2
+
+struct Holder:
+    Builder b
+
+trait Visitor:
+    req int visit(Builder b)
+    req int take(Builder'owned b)
+    # default method: borrowed param, forwarded to the contract method
+    req int visitTwice(Builder b):
+        self.visit(b) + self.visit(b)
+
+struct Counter as Visitor:
+    req int visit(Builder b):
+        b.build(1)
+    req int take(Builder'owned b):
+        let h = Holder(b)
+        h.b.build(2)
+
+def main():
+    let Builder first = Four()
+    let Counter c = Counter()
+    print c.visit(first)
+    print c.visit(first)
+    print c.visit(Two())
+    print c.take(Two())
+    print c.visitTwice(first)
+    let Visitor v = Counter()
+    print v.visit(first)
+    print v.visit(first)
+    print v.take(Four())
+    print v.visitTwice(Two())
