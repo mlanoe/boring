@@ -5618,20 +5618,24 @@ fn expr_constructs_kernel(e: &Expr, kernel_names: &std::collections::HashSet<Str
     }
 }
 
-/// True when `e` is a `GPU(n)`/`GPU.all()` use — cuda/metal's own custom
+/// True when `e` is a `Device(...)`/`Device.all()` use — cuda/metal's own custom
 /// emitters have working GPU-device-introspection codegen (`gpu_vars`/
 /// `emit_gpu_property`), but the general pipeline ALSO has its own version of
 /// this (`emit_methods.rs`'s `.name()`/`.totalMem()`/etc mapping to
 /// `__boring_gpu_name()` etc.), gated on `is_gpu_target` alone — unconditional,
 /// same as the kernel-construction/resident-return issues this module's other
 /// helpers work around — and only wgpu actually DEFINES those `__boring_gpu_*`
-/// helpers. Used alongside `expr_constructs_kernel` so top-level `GPU(...)` use
+/// helpers. Used alongside `expr_constructs_kernel` so top-level `Device(...)` use
 /// also stays on cuda/metal's own custom emitter instead of the general splice.
 fn expr_uses_gpu_device(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if n == "GPU"),
-        // `GPU.all()`.
-        ExprKind::MethodCall(obj, _, _) => matches!(&obj.kind, ExprKind::Var(n) if n == "GPU"),
+        ExprKind::Call(callee, _) => {
+            matches!(&callee.kind, ExprKind::Var(n) if n == "Device" || n == "GPU")
+        }
+        // `Device.all()` and the legacy `GPU.all()` spelling.
+        ExprKind::MethodCall(obj, _, _) => {
+            matches!(&obj.kind, ExprKind::Var(n) if n == "Device" || n == "GPU")
+        }
         _ => false,
     }
 }

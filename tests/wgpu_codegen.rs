@@ -1715,7 +1715,7 @@ def main() throws:
 #[test]
 fn test_gpu_device_handle_and_properties() {
     let src = r#"
-let g = GPU(0)
+let g = Device(index = 0)
 print g.name()
 print g.totalMem()
 print g.freeMem()
@@ -1727,7 +1727,7 @@ print g.index()
 "#;
     let (_wgsl, rs) = wgpu_codegen("gpu_device_properties", src);
 
-    assert!(rs.contains("let g = ((0) as usize);"), "GPU(0) should emit a plain usize:\n{rs}");
+    assert!(rs.contains("let g = ((0) as usize);"), "Device(index = 0) should emit a plain usize:\n{rs}");
     assert!(rs.contains("__boring_gpu_name(g)"), "missing .name() rewrite:\n{rs}");
     assert!(rs.contains("__boring_gpu_total_mem(g)"), "missing .totalMem() rewrite:\n{rs}");
     assert!(rs.contains("__boring_gpu_free_mem(g)"), "missing .freeMem() rewrite:\n{rs}");
@@ -1747,16 +1747,16 @@ print g.index()
 #[test]
 fn test_gpu_all_enumerates_real_adapters_and_loop_var_gets_properties() {
     let src = r#"
-for g in GPU.all():
+for g in Device.all():
     print g.name()
     print g.index()
 "#;
     let (_wgsl, rs) = wgpu_codegen("gpu_all_loop", src);
 
-    // GPU.all() now reflects however many real adapters enumerate_adapters()
+    // Device.all() now reflects however many real adapters enumerate_adapters()
     // actually finds, not a hardcoded single-element vec — see
     // docs/wgpu-backend.md's "GPU type on wgpu" (2026-09-01).
-    assert!(rs.contains("for g in __boring_gpu_all().into_iter()"), "GPU.all() should enumerate the real adapter list:\n{rs}");
+    assert!(rs.contains("for g in __boring_gpu_all().into_iter()"), "Device.all() should enumerate the real adapter list:\n{rs}");
     assert!(rs.contains("fn __boring_gpu_all() -> Vec<usize>"), "missing __boring_gpu_all() helper:\n{rs}");
     assert!(rs.contains("__boring_gpu_name(g)"), "loop var should get the .name() rewrite, indexed by g:\n{rs}");
     assert!(rs.contains("(g as i64)"), "loop var should get the .index() rewrite:\n{rs}");

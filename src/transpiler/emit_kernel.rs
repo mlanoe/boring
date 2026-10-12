@@ -306,7 +306,8 @@ impl Transpiler {
         ))
     }
 
-    /// If `s`'s initializer is `GPU(n)`, registers `s.name` as a GPU-device handle
+    /// If `s`'s initializer is `Device(...)` (or legacy `GPU(n)`), registers
+    /// `s.name` as a GPU-device handle
     /// (`gpu_device_vars`) and emits it as a plain `usize` index. See
     /// `emit_call`'s own `"GPU"` special case (this function only adds the
     /// tracking `try_emit_gpu_device_let` needs on top of that shared emission —
@@ -320,8 +321,8 @@ impl Transpiler {
         let Some(val) = &s.value else { return false };
         let ExprKind::Call(callee, _) = &val.kind else { return false };
         let ExprKind::Var(name) = &callee.kind else { return false };
-        if name != "GPU" { return false; }
-        // Routes through emit_call's own "GPU" special case (emits a plain usize).
+        if name != "Device" && name != "GPU" { return false; }
+        // Routes through emit_call's device special case (emits a plain usize).
         let expr_s = self.emit_expr(val);
         self.gpu_device_vars.insert(s.name.clone());
         let kw = if s.binding.is_mutable() { "let mut" } else { "let" };

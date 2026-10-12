@@ -709,10 +709,10 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 "#);
     assert!(rs.contains("boring_gpu_ctx_n(0 as usize)?"),
-        "expected boring_gpu_ctx_n(0) for GPU(0);\ngot:\n{rs}");
+        "expected boring_gpu_ctx_n(0) for Device(index = 0);\ngot:\n{rs}");
 }
 
 #[test]
@@ -724,10 +724,10 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let devs = GPU.all()
+let devs = Device.all()
 "#);
     assert!(rs.contains("CudaContext::device_count"),
-        "expected CudaContext::device_count in GPU.all() expansion;\ngot:\n{rs}");
+        "expected CudaContext::device_count in Device.all() expansion;\ngot:\n{rs}");
 }
 
 // ─── Item 6 — Multi-GPU: new(g) Scale(data) ──────────────────────────────────
@@ -743,12 +743,12 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g0 = GPU(0)
+let g0 = Device(index = 0)
 let data = [1.0, 2.0]
-let k = new(g0) Scale(data)
+let k = kernel(g0) Scale(data)
 "#);
     assert!(rs.contains("Scale::new("),
-        "expected Scale::new( for new(g0) Scale(data);\ngot:\n{rs}");
+        "expected Scale::new( for kernel(g0) Scale(data);\ngot:\n{rs}");
     // The arena expression (g0) must appear as the first arg to Scale::new.
     assert!(rs.contains("Scale::new(g0,") || rs.contains("Scale::new(g0 ,"),
         "expected g0 as first arg to Scale::new;\ngot:\n{rs}");
