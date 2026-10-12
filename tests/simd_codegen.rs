@@ -40,6 +40,8 @@ fn simd_project_builds_and_preserves_block_coordinates() {
     assert!(generated.contains("is_aarch64_feature_detected!(\"neon\")"));
     assert!(generated.contains("target_feature(enable=\"avx2\")"));
     assert!(generated.contains("BORING_SIMD_SCALAR"));
+    assert!(generated.contains("static LANES: std::sync::OnceLock<usize>"));
+    assert!(generated.contains("match __boring_simd_lanes()"));
     assert!(generated.contains("for __x in 0..dx as usize"));
     assert!(!generated.contains("let __end ="));
     assert!(!generated.contains("__lanes"));
@@ -94,7 +96,7 @@ fn warp_lane_and_size_run_on_cpu() {
     let input = root.join("warp.br");
     fs::write(
         &input,
-        "mut [int]'kernel'unified lanes = [0 for ..<8]\nmut [int]'kernel'unified sizes = [0 for ..<8]\nkernel W:\n    mut [int]'unified lanes\n    mut [int]'unified sizes\n    init(mut [int]'unified l, mut [int]'unified s):\n        lanes = l\n        sizes = s\n    def ():\n        lanes[.thread.x] = .warp.lane\n        sizes[.thread.x] = .warp.size\nmut w = W(lanes, sizes)\nkernel:\n    w(block = 8)\nprint w.lanes[7]\nprint w.sizes[7]\n",
+        "mut [int]'kernel'unified lanes = [0 for ..<8]\nmut [int]'kernel'unified sizes = [0 for ..<8]\nkernel W:\n    mut [int]'unified lanes\n    mut [int]'unified sizes\n    init(mut [int]'unified l, mut [int]'unified s):\n        lanes = l\n        sizes = s\n    def ():\n        let i = .thread.x + .thread.y * .blockDim.x + .thread.z * .blockDim.x * .blockDim.y\n        lanes[i] = .warp.lane\n        sizes[i] = .warp.size\nmut w = W(lanes, sizes)\nkernel:\n    w(block = (2, 2, 2))\nprint w.lanes[7]\nprint w.sizes[7]\n",
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
@@ -104,7 +106,8 @@ fn warp_lane_and_size_run_on_cpu() {
         .unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     let generated = fs::read_to_string(root.join("warp_simd/src/main.rs")).unwrap();
-    assert!(generated.contains("rem_euclid(__boring_simd_lanes() as i32)"));
+    assert!(generated.contains("let __simd_lanes = __boring_simd_lanes() as i32;"));
+    assert!(generated.contains("rem_euclid(__simd_lanes)"));
     for scalar in [false, true] {
         let mut command = Command::new("cargo");
         command
@@ -196,6 +199,7 @@ print linear[0]
     let source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
     assert!(source.contains("for __boring_tensor_k in 0usize..5usize"));
     assert!(source.contains("fn __boring_simd_threads()"));
+    assert!(source.contains("static THREADS: std::sync::OnceLock<usize>"));
     assert!(source.contains("__boring_simd_threads().min(3usize)"));
     assert!(source.contains(".chunks_mut(__boring_tensor_rows_per_worker * 7)"));
     assert!(source.contains("__boring_tensor_scope.spawn(move ||"));

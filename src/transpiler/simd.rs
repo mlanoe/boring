@@ -145,23 +145,29 @@ fn __boring_gpu_compute_capability(_: usize) -> String { __boring_simd_name().in
 
 #[derive(Clone, Copy, Debug)] struct __BoringDim3 { x: i32, y: i32, z: i32 }
 fn __boring_simd_lanes() -> usize {
-    if std::env::var_os("BORING_SIMD_SCALAR").is_some() { return 1; }
-    #[cfg(any(target_arch="x86", target_arch="x86_64"))] {
-        if std::is_x86_feature_detected!("avx512f") { return 16; }
-        if std::is_x86_feature_detected!("avx2") { return 8; }
-        if std::is_x86_feature_detected!("sse2") { return 4; }
-    }
-    #[cfg(target_arch="aarch64")] { if std::arch::is_aarch64_feature_detected!("neon") { return 4; } }
-    1
+    static LANES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LANES.get_or_init(|| {
+        if std::env::var_os("BORING_SIMD_SCALAR").is_some() { return 1; }
+        #[cfg(any(target_arch="x86", target_arch="x86_64"))] {
+            if std::is_x86_feature_detected!("avx512f") { return 16; }
+            if std::is_x86_feature_detected!("avx2") { return 8; }
+            if std::is_x86_feature_detected!("sse2") { return 4; }
+        }
+        #[cfg(target_arch="aarch64")] { if std::arch::is_aarch64_feature_detected!("neon") { return 4; } }
+        1
+    })
 }
 fn __boring_simd_name() -> &'static str {
     match __boring_simd_lanes() { 16 => "AVX-512", 8 => "AVX2", 4 => { #[cfg(target_arch="aarch64")] { return "NEON"; } #[cfg(not(target_arch="aarch64"))] { "SSE2" } }, _ => "scalar" }
 }
 fn __boring_simd_threads() -> usize {
-    std::env::var("BORING_SIMD_THREADS").ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1))
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        std::env::var("BORING_SIMD_THREADS").ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1))
+    })
 }
 #[allow(dead_code)] #[derive(Clone, Debug, PartialEq)] enum BoringGpuArg<T> { Host(Vec<T>) }
 impl<T> BoringGpuArg<T> { fn len(&self) -> usize { match self { Self::Host(v) => v.len() } } }
@@ -253,13 +259,13 @@ impl Emitter {
             2,
             "#[cfg(any(target_arch=\"x86\", target_arch=\"x86_64\"))] unsafe {",
         );
-        self.line(3, "if std::env::var_os(\"BORING_SIMD_SCALAR\").is_none() {");
-        self.line(4, "if std::is_x86_feature_detected!(\"avx512f\") { return self.dispatch_avx512(gx,gy,gz,dx,dy,dz); }");
-        self.line(4, "if std::is_x86_feature_detected!(\"avx2\") { return self.dispatch_avx2(gx,gy,gz,dx,dy,dz); }");
-        self.line(4, "if std::is_x86_feature_detected!(\"sse2\") { return self.dispatch_sse2(gx,gy,gz,dx,dy,dz); }");
+        self.line(3, "match __boring_simd_lanes() {");
+        self.line(4, "16 => return self.dispatch_avx512(gx,gy,gz,dx,dy,dz),");
+        self.line(4, "8 => return self.dispatch_avx2(gx,gy,gz,dx,dy,dz),");
+        self.line(4, "4 => return self.dispatch_sse2(gx,gy,gz,dx,dy,dz),");
+        self.line(4, "_ => {},");
         self.line(3, "}");
         self.line(2, "}");
-        self.line(2, "#[cfg(target_arch=\"aarch64\")] { if std::env::var_os(\"BORING_SIMD_SCALAR\").is_none() && std::arch::is_aarch64_feature_detected!(\"neon\") { return self.dispatch_impl(gx,gy,gz,dx,dy,dz); } }");
         self.line(2, "self.dispatch_impl(gx,gy,gz,dx,dy,dz)");
         self.line(1, "}");
         self.line(1, "#[cfg(any(target_arch=\"x86\", target_arch=\"x86_64\"))] #[target_feature(enable=\"avx512f\")] unsafe fn dispatch_avx512(&mut self,gx:u32,gy:u32,gz:u32,dx:u32,dy:u32,dz:u32)->Result<(),Box<dyn std::error::Error+Send+Sync>> { self.dispatch_impl(gx,gy,gz,dx,dy,dz) }");
@@ -274,6 +280,12 @@ impl Emitter {
             2,
             "let __grid_dim = __BoringDim3 { x: gx as i32, y: gy as i32, z: gz as i32 };",
         );
+        if k.methods
+            .iter()
+            .any(|method| crate::interpreter::eval_gpu::stmts_use_gpu_warp(&method.body))
+        {
+            self.line(2, "let __simd_lanes = __boring_simd_lanes() as i32;");
+        }
         self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
         self.line(
             4,
@@ -440,8 +452,8 @@ impl Emitter {
                         };
                         if base == "warp" {
                             match b.as_str() {
-                                "size" => "(__boring_simd_lanes() as i32)".into(),
-                                "lane" => "((__thread.x + __thread.y * __block_dim.x + __thread.z * __block_dim.x * __block_dim.y).rem_euclid(__boring_simd_lanes() as i32))".into(),
+                                "size" => "__simd_lanes".into(),
+                                "lane" => "((__thread.x + __thread.y * __block_dim.x + __thread.z * __block_dim.x * __block_dim.y).rem_euclid(__simd_lanes))".into(),
                                 _ => format!("{}.{}", self.expr(a), b),
                             }
                         } else if let Some(builtin) = builtin {
