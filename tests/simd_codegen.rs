@@ -228,6 +228,68 @@ print linear[20]
 }
 
 #[test]
+fn dynamic_float_tensor_linear_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_tensor_linear");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("tensor.br");
+    fs::write(
+        &input,
+        r#"
+let int m = 2
+let int n = 2
+let int k = 3
+let [float32]'kernel'global x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32, 5.0 as float32, 6.0 as float32]
+let [float32]'kernel'global w = [1.0 as float32, 0.0 as float32, -1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+let [float32]'kernel'global bias = [10.0 as float32, 20.0 as float32]
+mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+mut [float32]'kernel'unified y_no_bias = [0.0 as float32 for ..<m * n]
+kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k)
+kernel.tensors.linear(x, w, y_no_bias, m = m, n = n, k = k)
+print y[0]
+print y[1]
+print y[2]
+print y[3]
+print y_no_bias[0]
+print y_no_bias[1]
+print y_no_bias[2]
+print y_no_bias[3]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
+    assert!(generated_source.contains("__boring_simd_threads().min(__boring_tensor_m)"));
+    assert!(generated_source
+        .contains("chunks_mut(__boring_tensor_rows_per_worker * __boring_tensor_n)"));
+    assert!(generated_source.contains("__boring_tensor_bias[__boring_tensor_col]"));
+    assert!(generated_source.contains(".mul_add("));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("tensor_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "8\n40\n8\n67\n-2\n20\n-2\n47"
+    );
+}
+
+#[test]
 fn gpu_resident_function_return_is_rejected() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_resident_return");
     let _ = fs::remove_dir_all(&root);
