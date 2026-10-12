@@ -330,7 +330,14 @@ impl Transpiler {
                         } else {
                             format!("Some({})", raw)
                         }
-                    } else if matches!(&self.fn_return_ty,
+                    } else if let Some(tn) = match &self.fn_return_ty {
+                    Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()) => Some(n.clone()),
+                    _ => None,
+                } {
+                    // Bare-trait return (`Box<dyn Trait>`): box the value, or move an
+                    // already-boxed trait-typed variable/param (never `.clone()` it).
+                    self.box_if_trait_typed(e, tn.as_str())
+                } else if matches!(&self.fn_return_ty,
                         Some(Type::Tuple(_)) | Some(Type::Array(_)) | Some(Type::Dict(_, _)))
                     {
                         // Tuple/Array/Dict return: use emit_let_value for per-element

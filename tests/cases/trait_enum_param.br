@@ -1,0 +1,41 @@
+# An enum variant satisfies a trait-typed parameter when the enum declares the trait via
+# `as` in its header, via `ext E as T`, or via a subtrait of T -- same as a struct.
+
+trait Node:
+    req string name()
+
+trait Named as Node:
+    req string label()
+
+enum Kind as Node:
+    Leaf
+    Branch(int)
+
+    req string name(): "Kind"
+
+enum Late:
+    A
+    B
+
+ext Late as Node:
+    req string name(): "Late"
+
+enum Sub as Named:
+    X
+
+    req string name(): "Sub"
+    req string label(): "sub-label"
+
+struct S as Node:
+    int x
+    req string name(): "S"
+
+def probe(Node n):
+    print n.name()
+
+def main():
+    probe(Kind.Leaf)
+    probe(Kind.Branch(3))
+    probe(Late.B)
+    probe(Sub.X)
+    probe(S(x = 1))

@@ -1112,6 +1112,9 @@ impl Transpiler {
     /// Optional-type parse, numeric/bool/string coercions, and the `'actor` wrap.
     fn emit_expr_cast(&self, e: &Expr, ty: &Type) -> String {
         let src = self.emit_expr(e);
+        if let Some(code) = self.emit_trait_downcast(e, &src, ty) {
+            return code;
+        }
         let dst = self.emit_type(ty);
         // User-defined `as Type:` conversion → call the generated `into_type()` method.
         // Use the lowercased emitted type name for primitive types (float → f64, etc.)
@@ -1337,6 +1340,12 @@ impl Transpiler {
             // anything bigger lexes as `ExprKind::UInt64` instead, handled by the
             // `src_is_big_uint_lit` branch above), so the subsequent `as` is an
             // ordinary (non-literal) cast.
+            // A *float* literal source must get an `f64` suffix instead — `3.9i64` is
+            // rejected by rustc (`invalid suffix i64 for float literal`); `3.9f64 as isize`
+            // truncates toward zero, matching the interpreter.
+            if matches!(&e.kind, ExprKind::Float(_)) {
+                return format!("({}f64 as {})", src, dst);
+            }
             return format!("({}i64 as {})", src, dst);
         }
         // numeric literal → bool: always nil (int-to-bool not meaningful in Boring)

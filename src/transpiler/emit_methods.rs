@@ -178,6 +178,11 @@ impl Transpiler {
     /// result of a call to something undeclared, ... — callers must not guess from names.
     pub(crate) fn resolve_expr_type(&self, expr: &Expr) -> Option<Type> {
         match &expr.kind {
+            // A downcast of a trait object (`n as A`) is optional: `A?`.
+            ExprKind::Cast(inner, ty) if self.trait_downcast_source(inner, ty).is_some() => {
+                let (_, _, target) = self.trait_downcast_source(inner, ty)?;
+                Some(Type::Optional(Box::new(Type::Named(target))))
+            }
             // An explicit cast determines the expression's type even when the
             // operand itself is otherwise not statically resolvable here.  In
             // particular this lets an unannotated `[1.0 as float32, ...]`
@@ -244,6 +249,49 @@ impl Transpiler {
             }
             _ => None,
         }
+    }
+
+    /// `inner as ty` is a checked downcast of a trait object when `inner`'s static type is a
+    /// bare declared trait and `ty` names a user struct/enum: `(trait, how it is held, target)`.
+    /// See `downcast.rs` and docs/book.md, "Downcasting a trait object".
+    pub(crate) fn trait_downcast_source(&self, inner: &Expr, ty: &Type)
+        -> Option<(String, crate::downcast::TraitHandle, String)>
+    {
+        let target = crate::downcast::cast_target_name(ty)?;
+        if !self.type_traits.is_concrete(target) { return None; }
+        let src_ty = self.resolve_expr_type(inner)?;
+        let (tr, handle) = crate::downcast::trait_object_source(
+            &src_ty, &|n| self.trait_method_names.contains_key(n))?;
+        Some((tr, handle, target.to_string()))
+    }
+
+    /// Rust for `src as A` on a trait object: `src.boring_as_any().downcast_ref::<A>().cloned()`
+    /// (`Option<A>`; `src` is reached through `Box`/`Arc`/`&` by auto-deref, through the lock
+    /// for an `'actor`). `None` when the cast is not a trait-object downcast. A target that does
+    /// not implement the trait, or a trait object behind an unsupported qualifier, is a
+    /// transpile error instead of invalid Rust.
+    pub(crate) fn emit_trait_downcast(&self, inner: &Expr, src: &str, ty: &Type) -> Option<String> {
+        use crate::downcast::TraitHandle;
+        let (tr, handle, target) = self.trait_downcast_source(inner, ty)?;
+        if !self.type_traits.implements(&target, &tr) {
+            self.push_error(inner.line, inner.col, format!(
+                "cannot downcast a `{tr}` to `{target}`: `{target}` does not implement `{tr}`, so the cast could never succeed"));
+            return Some("None".into());
+        }
+        let rust_target = normalize_type_name(&target, self.use_rc_str());
+        let tail = format!("boring_as_any().downcast_ref::<{rust_target}>().cloned()");
+        Some(match handle {
+            TraitHandle::Plain | TraitHandle::Shared => format!("{src}.{tail}"),
+            TraitHandle::Actor => match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => format!("{src}.borrow().{tail}"),
+                crate::transpiler::ThreadingMode::Multi => format!("{src}.lock().unwrap().{tail}"),
+            },
+            TraitHandle::Unsupported => {
+                self.push_error(inner.line, inner.col, format!(
+                    "cannot downcast a `{tr}` held behind this qualifier (only a plain, `'shared` or `'actor` trait object can be downcast)"));
+                return Some("None".into());
+            }
+        })
     }
 
     /// The declared type of a bare identifier that resolves to an implicit `self.field`
@@ -4275,6 +4323,16 @@ impl Transpiler {
                     Some(Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)) => Some(inner.as_ref()),
                     _ => None,
                 };
+                // `Trait& b` (bare trait, dynamic dispatch) is `&dyn Trait`: its own call-site
+                // shapes, none of which add a `Box` or a `.clone()`.
+                if let Some(Type::Named(tn)) = borrow_inner {
+                    if self.trait_method_names.contains_key(tn.as_str()) {
+                        let mutable = matches!(param_ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
+                        result.push(self.emit_trait_borrow_arg(tn, mutable, &a.value));
+                        i += 1;
+                        continue;
+                    }
+                }
                 // When borrow_inner is a named alias that resolves to a smart-pointer type
                 // (e.g. `ONode& n` where `ONode = OTree'shared = Rc<OTree>`), the Rust param
                 // is `&Rc<OTree>`, not `&OTree`. Detect this early and pass `&var` directly.
@@ -4316,6 +4374,9 @@ impl Transpiler {
                     // don't clone further" reasoning as the Arc::/Rc::/Vec:: cases above.
                     && !emitted.starts_with("Box::new(")
                     && !emitted.starts_with("{ let __g")
+                    // A trait-typed variable forwarded to a bare-trait param (`Box<dyn Trait>`
+                    // isn't `Clone`): the box itself is handed over.
+                    && !matches!(param_ty, Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()))
                     && !param_ty_is_copy(param_ty)
                     && !param_rebindable
                     // Borrow params take a reference — no clone needed, the Borrow branch adds `&`.
@@ -4863,6 +4924,53 @@ impl Transpiler {
             if flags.get(i).copied().unwrap_or(false) { self.emit_lent_arg(&a.value) }
             else { self.emit_expr_owned(&a.value) }
         }).collect()
+    }
+
+    /// One argument for a `Trait&` / `mut Trait&` parameter (`&dyn Trait` / `&mut dyn Trait`).
+    /// `&box` does not coerce to `&dyn Trait` (rustc unsizes the `Box` itself), so a
+    /// trait-typed place is reborrowed through its box (`&*b`); an already-borrowed param is
+    /// passed through; anything else (a fresh value, a concrete-typed local) unsizes directly.
+    fn emit_trait_borrow_arg(&self, trait_name: &str, mutable: bool, arg: &Expr) -> String {
+        let r = if mutable { "&mut " } else { "&" };
+        let is_trait = |t: &Type| matches!(t, Type::Named(n) if n == trait_name);
+        let is_dyn_ref = |t: &Type| matches!(t, Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)
+            if matches!(inner.as_ref(), Type::Named(n) if n == trait_name));
+        match &arg.kind {
+            ExprKind::Var(v) => {
+                let ty = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()));
+                match ty {
+                    Some(t) if is_dyn_ref(t) => {
+                        if mutable { format!("&mut *{}", v) } else { self.emit_expr(arg) }
+                    }
+                    Some(t) if is_trait(t) => format!("{}*{}", r, self.emit_expr(arg)),
+                    // Implicit-self field (`self.b` written as bare `b`) of trait type.
+                    None if !self.known_local_vars.contains(v.as_str()) => {
+                        let fty = self.self_type.as_deref()
+                            .and_then(|s| self.struct_fields.get(s))
+                            .and_then(|fs| fs.iter().find(|(f, _)| f == v))
+                            .map(|(_, t)| t);
+                        if fty.map(is_trait).unwrap_or(false) {
+                            format!("{}*self.{}", r, v)
+                        } else {
+                            format!("{}{}", r, self.emit_expr(arg))
+                        }
+                    }
+                    _ => format!("{}{}", r, self.emit_expr(arg)),
+                }
+            }
+            ExprKind::Field(obj, field) => {
+                let fty = self.resolve_expr_struct_type(obj)
+                    .and_then(|s| self.struct_fields.get(s.as_str()))
+                    .and_then(|fs| fs.iter().find(|(f, _)| f == field))
+                    .map(|(_, t)| t);
+                if fty.map(is_trait).unwrap_or(false) {
+                    format!("{}*{}", r, self.emit_expr(arg))
+                } else {
+                    format!("{}{}", r, self.emit_expr(arg))
+                }
+            }
+            _ => format!("{}{}", r, self.emit_expr(arg)),
+        }
     }
 
     /// One argument for a lent `mut` parameter of a user-struct method (`is_lent_param`: a
@@ -5466,6 +5574,9 @@ impl Transpiler {
             suppress_ok_wrap: false,
             trait_method_names: self.trait_method_names.clone(),
             trait_parents: self.trait_parents.clone(),
+            type_traits: self.type_traits.clone(),
+            downcast_traits: self.downcast_traits.clone(),
+            any_cast_helper_emitted: self.any_cast_helper_emitted,
             trait_type_method_names: self.trait_type_method_names.clone(),
             user_conv_targets: self.user_conv_targets.clone(),
             string_arc_vars: self.string_arc_vars.clone(),
@@ -5536,6 +5647,8 @@ impl Transpiler {
             uses_observed: std::rc::Rc::clone(&self.uses_observed),
             fn_overload_decls: self.fn_overload_decls.clone(),
             overloaded_fn_names: self.overloaded_fn_names.clone(),
+            trait_borrow_facts: Default::default(),
+            trait_borrowed_fns: self.trait_borrowed_fns.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
             arc_qualified_types: self.arc_qualified_types.clone(),

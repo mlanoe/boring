@@ -1,0 +1,59 @@
+# `as` on a trait object is a checked downcast whose result is optional (`A?`):
+# the value when the dynamic type is `A`, `nil` otherwise. See docs/book.md,
+# "Downcasting a trait object".
+
+trait Node:
+    req string name()
+
+struct A as Node:
+    int x
+    req string name(): "A"
+
+struct B as Node:
+    string s
+    req string name(): "B"
+
+struct Holder:
+    Node child
+
+def pick(Node n):
+    let a = n as A
+    if let found = a:
+        print "A {found.x}"
+    else:
+        print "not A"
+
+def pick_shared(Node'shared n):
+    let b = n as B
+    if let found = b:
+        print "shared B {found.s}"
+    else:
+        print "shared not B"
+
+def main():
+    pick(A(x = 3))
+    pick(B(s = "q"))
+
+    pick_shared(B(s = "z"))
+    pick_shared(A(x = 1))
+
+    let [Node] nodes = [A(x = 7), B(s = "w"), A(x = 9)]
+    var total = 0
+    for n in nodes:
+        if let a = n as A:
+            total += a.x
+    print "total {total}"
+
+    let h = Holder(child = B(s = "held"))
+    if let b = h.child as B:
+        print "field B {b.s}"
+    if let a = h.child as A:
+        print "field A {a.x}"
+    else:
+        print "field not A"
+
+    # Plain numeric/string casts are unchanged.
+    let f = 3.9
+    let n = f as int
+    let s = 42 as string
+    print "{n} {s}"

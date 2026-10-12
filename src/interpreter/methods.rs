@@ -2990,6 +2990,25 @@ impl Interpreter {
             },
             // `x as T?` — cast to the inner type; Nil is returned on failure.
             Type::Optional(inner) => self.cast_value(val, inner, line),
+            // `n as A` where `A` is a user struct/enum and `n` holds a struct/enum value (the
+            // dynamic type behind a trait object): a checked downcast — the value itself when
+            // its runtime type is `A`, `nil` otherwise (docs/book.md, "Downcasting a trait
+            // object"). Anything that is not a user type on both sides stays a no-op.
+            // (A single-letter struct name such as `A` parses as `TypeParam`; an unbound one
+            // reaches here unchanged, so it is treated as the named type.)
+            Type::Named(target) | Type::TypeParam(target) => {
+                let runtime = match &val {
+                    Value::Object(rc) => Some(rc.borrow().type_name.clone()),
+                    Value::EnumVariant { type_name, .. } => Some(type_name.clone()),
+                    _ => None,
+                };
+                let target_is_user_type = runtime.is_some()
+                    && matches!(self.global.borrow().get(target), Some(Value::Struct { .. } | Value::EnumNamespace { .. }));
+                match runtime {
+                    Some(rt) if target_is_user_type && rt != *target => Ok(Value::Nil),
+                    _ => Ok(val),
+                }
+            }
             _ => Ok(val),
         }
     }

@@ -762,6 +762,8 @@ let safe = "42".parse::<isize>().unwrap_or(-1);
 
 Supported cast targets: `int`, `uint`, `float`, `string`, `bool`, and any type that implements `Display` or `FromStr`.
 
+`as` on a **trait object** is a different operation — a checked downcast to a concrete struct or enum, see [Downcasting a trait object](#downcasting-a-trait-object).
+
 ### Reference identity — `===`
 
 `===` tests whether two variables point to the **exact same object in memory**, bypassing any user-defined `==`. Two objects may compare equal with `==` while being distinct instances; `===` distinguishes them.
@@ -3262,6 +3264,54 @@ shapes: Vec<Box<dyn Drawable>>,
 ```
 
 For **static dispatch** (no heap allocation, function determines the concrete type), use the `<Trait>` shorthand — see [Generics — trait shorthand](#trait-shorthand----trait).
+
+### Downcasting a trait object
+
+`as` applied to a value whose static type is a bare trait, with a struct or enum that implements the trait as the target, is a **checked downcast**. Its result is optional (`A?`): the value when the dynamic type is `A`, `nil` otherwise. There is no separate `as?` — a trait-object cast can always fail, so it always yields an optional, and the usual `if let` / `else` / `guard` forms unwrap it:
+
+```boring
+trait Node:
+    req string name()
+
+struct A as Node:
+    int x
+    req string name(): "A"
+
+struct B as Node:
+    string s
+    req string name(): "B"
+
+def pick(Node n):
+    let a = n as A
+    if let found = a:
+        print "A {found.x}"
+    else:
+        print "not A"
+
+def main():
+    pick(A(x = 3))     # A 3
+    pick(B(s = "q"))   # not A
+```
+
+**Rust equivalent**
+```rust
+pub trait BoringAnyCast { fn boring_as_any(&self) -> &dyn std::any::Any; }
+pub trait Node: BoringAnyCast { fn name(&self) -> Arc<str>; }
+impl BoringAnyCast for A { fn boring_as_any(&self) -> &dyn std::any::Any { self } }   // one per implementor
+
+fn pick(n: Box<dyn Node>) {
+    let a = n.boring_as_any().downcast_ref::<A>().cloned();   // Option<A>
+    ...
+}
+```
+
+The transpiler adds the `BoringAnyCast` supertrait only to traits that have an implementor used as an `as` target, so a program that never downcasts compiles exactly as before.
+
+- **Where it applies.** The source's static type must be known to be a trait: a parameter or local declared with the trait type, a struct field, or an array element (`nodes[i] as A`). A function whose bare-trait return type becomes `impl Trait` (see above) returns a concrete type, not a trait object, so there is nothing to downcast. `Node`, `Node'owned`, `Node'shared` and `Node'actor` are all supported (`'actor` downcasts through the lock). Any other qualifier (`'guard`, `'weak`, ...) is rejected with a clear error. The target may be a struct or an enum.
+- **Target must implement the trait.** `n as Plain` where `Plain` does not implement `Node` (directly, through `ext Plain as Node`, or through a sub-trait of `Node`) can never succeed and is a compile error rather than a silent `nil`.
+- **The result is a copy in `boring build`.** The transpiler returns `Option<A>` by cloning the value out of the trait object (structs auto-derive `Clone`; a struct holding a non-`Clone` field cannot be downcast, and `rustc` says so). `boring run` hands back the same object. Do not rely on mutating the downcast result to change the original — read it, or re-store it.
+- **Everything else is unchanged.** `as` to a numeric type, `string` or `bool`, a user-defined `as Type:` conversion, a newtype wrap, and `as` on a value that is not a trait object keep their existing meaning.
+- **Limits.** The implementor must be `'static` (no borrowed `T&` fields), and a generic trait object (`Node<T>`) is not recognised as a downcast source.
 
 ### Introspect — read-only reflection
 

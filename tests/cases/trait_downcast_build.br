@@ -1,0 +1,39 @@
+# Trait-object downcast (`n as A`) for the cases only `boring build` covers: an enum target and a
+# `'actor` trait object.
+
+trait Node:
+    req string name()
+
+struct A as Node:
+    int x
+    req string name(): "A"
+
+struct C as Node:
+    int y
+    req string name(): "C"
+
+enum Kind as Node:
+    Leaf
+    Branch(int)
+
+    req string name(): "Kind"
+
+def probe(Node n):
+    if let k = n as Kind:
+        print "Kind {k.name()}"
+    else:
+        print "not Kind"
+
+def probe_actor(Node'actor n):
+    if let a = n as A:
+        print "actor A {a.x}"
+    else:
+        print "actor not A"
+
+def main():
+    probe(A(x = 1))
+    probe(Kind.Leaf)
+    let Node'actor a1 = A(x = 5)
+    let Node'actor c1 = C(y = 1)
+    probe_actor(a1)
+    probe_actor(c1)

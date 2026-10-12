@@ -1,0 +1,39 @@
+# Methods (struct `def` methods and a trait `req` method) returning a bare trait: `Box<dyn Trait>`,
+# agreeing between the trait declaration and the impl; a trait-typed param is moved, not cloned.
+trait Builder:
+    req int build(int x)
+
+struct Four as Builder:
+    req int build(int x): x + 4
+
+struct Ten as Builder:
+    req int build(int x): x + 10
+
+trait Factory:
+    req Builder make()
+
+struct F as Factory:
+    req Builder make(): Four()
+
+struct Holder:
+    var int n = 0
+    def Builder pass(Builder b):
+        b
+    def Builder pass2(Builder b):
+        n += 1
+        return b
+    def Builder fresh():
+        Ten()
+    def Builder viaParam(Builder b, bool e):
+        if e:
+            return b
+        Four()
+
+def main():
+    mut h = Holder()
+    print h.pass(Four()).build(1)
+    print h.pass2(Four()).build(1)
+    print h.fresh().build(1)
+    print h.viaParam(Ten(), true).build(1)
+    print h.viaParam(Ten(), false).build(1)
+    print F().make().build(1)

@@ -2437,7 +2437,7 @@ fn walk_stmt<'a>(stmt: &'a Stmt, f: &mut dyn FnMut(WalkNode<'a>)) {
     }
 }
 
-fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(WalkNode<'a>)) {
+pub fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(WalkNode<'a>)) {
     f(WalkNode::Expr(expr));
     match &expr.kind {
         ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r) | ExprKind::BinOp(_, l, r)

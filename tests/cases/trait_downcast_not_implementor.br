@@ -1,0 +1,17 @@
+trait Node:
+    req string name()
+
+struct A as Node:
+    int x
+    req string name(): "A"
+
+struct Plain:
+    int z
+
+def pick(Node n):
+    let p = n as Plain
+    if let found = p:
+        print "Plain {found.z}"
+
+def main():
+    pick(A(x = 1))

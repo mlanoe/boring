@@ -374,6 +374,13 @@ transpile_test!(trait_type_level_methods);
 // against, which already worked). See tests/cases/trait_dynamic_dispatch.br's own
 // doc comment.
 transpile_test!(trait_dynamic_dispatch);
+transpile_test!(trait_param_forwarding);
+transpile_test!(trait_param_return);
+transpile_test!(trait_method_return);
+transpile_test!(trait_borrow_param);
+transpile_test!(trait_borrow_infer);
+transpile_test!(trait_downcast);
+transpile_test!(trait_downcast_build);
 
 // `do: ...` used as a value (`let x = do: ...`) whose body contains a `for`
 // loop must evaluate to its tail expression, not silently degrade to `()`
@@ -1408,3 +1415,4 @@ transpile_test!(field_mut_content_mutation);
 // (it is outside universal borrow inference): was by value, the caller never saw `push`.
 transpile_test!(field_mut_param_content_mutation);
 transpile_test!(string_methods_after_index);
+transpile_test!(cast_float_lit_to_int);

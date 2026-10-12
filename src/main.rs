@@ -22,6 +22,7 @@ pub mod desugar_array_block;
 pub mod desugar_inject;
 pub mod view_perm;
 pub mod ast_walk;
+pub mod downcast;
 pub mod lower_view;
 pub mod interpreter;
 pub mod checker;

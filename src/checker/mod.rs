@@ -244,6 +244,8 @@ struct Checker {
     /// Names of every user struct and enum — what makes a `mut T` parameter a lent `&mut T`
     /// (mirrors `Transpiler::is_lent_param`'s `all_struct_types` / `all_enum_types`).
     user_types: std::collections::HashSet<String>,
+    /// Declared traits and per-type `as` conformances — for `check_trait_downcast`.
+    type_traits: crate::downcast::TypeTraits,
     /// (struct name, method name) -> the parameter list of every overload, for
     /// `check_same_object_lend`.
     struct_methods: HashMap<(String, String), Vec<Vec<Param>>>,
@@ -337,6 +339,7 @@ impl Checker {
             current_struct_fields: std::collections::HashSet::new(),
             current_struct: None,
             user_types: std::collections::HashSet::new(),
+            type_traits: crate::downcast::TypeTraits::default(),
             struct_methods: HashMap::new(),
             struct_field_types: HashMap::new(),
             struct_ctor_owned: HashMap::new(),
@@ -495,6 +498,31 @@ impl Checker {
             if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n)))
     }
 
+    /// `n as A` where `n` is statically a trait object (a variable/parameter annotated with a
+    /// bare trait) is a checked downcast (docs/book.md, "Downcasting a trait object"): `A` must be
+    /// a struct/enum that implements the trait, otherwise the cast could never succeed. Sources
+    /// whose static type isn't recorded here (calls, fields, indexing) are left to the backends.
+    fn check_trait_downcast(&mut self, source: &Expr, target: &Type, line: usize, col: usize) {
+        use crate::downcast::{cast_target_name, trait_object_source, TraitHandle};
+        let ExprKind::Var(v) = &source.kind else { return };
+        let Some(src_ty) = self.lookup(v).and_then(|b| b.ty.clone()) else { return };
+        let tt = &self.type_traits;
+        let Some((tr, handle)) = trait_object_source(&src_ty, &|n| tt.is_trait(n)) else { return };
+        let Some(target_name) = cast_target_name(target) else { return };
+        if !tt.is_concrete(target_name) { return; }
+        if !tt.implements(target_name, &tr) {
+            self.errors.push(CheckError::at(
+                format!("cannot downcast `{v}` (a `{tr}`) to `{target_name}`: `{target_name}` does not implement `{tr}`, so the cast could never succeed"),
+                line, col,
+            ));
+        } else if handle == TraitHandle::Unsupported {
+            self.errors.push(CheckError::at(
+                format!("cannot downcast `{v}`: a `{tr}` held behind this qualifier cannot be downcast (only a plain, `'shared` or `'actor` trait object can)"),
+                line, col,
+            ));
+        }
+    }
+
     fn lookup(&self, name: &str) -> Option<&Binding> {
         for scope in self.scopes.iter().rev() {
             if let Some(b) = scope.get(name) { return Some(b); }
@@ -508,6 +536,7 @@ impl Checker {
     // the called method's body.
 
     fn collect_signatures(&mut self, program: &Program) {
+        self.type_traits = crate::downcast::TypeTraits::collect(&program.items);
         for item in &program.items { self.collect_item_signatures(item); }
     }
 
@@ -2186,7 +2215,10 @@ impl Checker {
                 self.check_expr(ctor);
                 if let Some(a) = arena { self.check_expr(a); }
             }
-            ExprKind::Cast(e, _)  => self.check_expr(e),
+            ExprKind::Cast(e, ty) => {
+                self.check_expr(e);
+                self.check_trait_downcast(e, ty, expr.line, expr.col);
+            }
             ExprKind::Else(e, d)  => { self.check_expr(e); self.check_expr(d); }
             ExprKind::TryElse(e, d) => { self.check_expr(e); self.check_expr(d); }
             ExprKind::TryElseBlock(body, els) => {

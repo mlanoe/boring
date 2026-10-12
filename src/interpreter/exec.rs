@@ -1481,7 +1481,13 @@ impl Interpreter {
                     }
                     false
                 }
-                Value::EnumVariant { type_name, .. } => type_name == name,
+                Value::EnumVariant { type_name, .. } => {
+                    if type_name == name { return true; }
+                    // An enum variant satisfies a trait its enum declares (`enum E as T`,
+                    // `ext E as T`, or via a supertrait), same as a struct instance.
+                    self.traits.contains_key(name.as_str())
+                        && self.object_conforms_to_trait(type_name, name)
+                }
                 _ => false,
             },
             Type::Array(elem_ty) => match val {
@@ -1628,7 +1634,7 @@ impl Interpreter {
         let val = self.global.borrow().get(type_name);
         match val {
             Some(Value::Struct { decl, .. }) => {
-                if decl.protocols.iter().any(|p| p == trait_name) { return true; }
+                if decl.protocols.iter().any(|p| self.trait_extends(p, trait_name)) { return true; }
                 if decl.methods.iter().any(|m| m.qualifier.as_deref() == Some(trait_name)) { return true; }
                 // Structural: all required method names present
                 if let Some(trait_decl) = self.traits.get(trait_name) {
@@ -1639,7 +1645,7 @@ impl Interpreter {
                 false
             }
             Some(Value::EnumNamespace { methods, protocols, .. }) => {
-                if protocols.iter().any(|p| p == trait_name) { return true; }
+                if protocols.iter().any(|p| self.trait_extends(p, trait_name)) { return true; }
                 if methods.iter().any(|m| m.qualifier.as_deref() == Some(trait_name)) { return true; }
                 // Structural: all required method names present
                 if let Some(trait_decl) = self.traits.get(trait_name) {
@@ -1651,6 +1657,16 @@ impl Interpreter {
             }
             _ => false,
         }
+    }
+
+    /// True if trait `sub` is `sup` or (transitively) lists it as a supertrait.
+    fn trait_extends(&self, sub: &str, sup: &str) -> bool {
+        fn go(it: &Interpreter, sub: &str, sup: &str, depth: usize) -> bool {
+            if sub == sup { return true; }
+            if depth > 32 { return false; }
+            it.traits.get(sub).map_or(false, |t| t.parents.iter().any(|p| go(it, p, sup, depth + 1)))
+        }
+        go(self, sub, sup, 0)
     }
 
     /// Apply a map of type-param name → concrete type to a type expression.

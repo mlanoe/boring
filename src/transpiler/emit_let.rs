@@ -2021,7 +2021,14 @@ impl Transpiler {
         if let ExprKind::Var(v) = &value.kind {
             if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
                 if n.as_str() == trait_name {
-                    return self.emit_expr_owned(value);
+                    // `Box<dyn Trait>` is not `Clone`: forward the box itself (a move)
+                    // instead of the `.clone()` `emit_expr_owned` would add.
+                    return self.emit_expr(value);
+                }
+            }
+            if let Some(Type::Named(n)) = self.fn_current_params.get(v.as_str()) {
+                if n.as_str() == trait_name {
+                    return self.emit_expr(value);
                 }
             }
         }

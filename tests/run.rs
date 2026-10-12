@@ -180,6 +180,14 @@ interp_test!(trait_type_level_methods);
 // registration of the same case is what actually guards the bug (a real
 // `cargo build`). See tests/cases/trait_dynamic_dispatch.br's own doc comment.
 interp_test!(trait_dynamic_dispatch);
+interp_test!(trait_param_forwarding);
+interp_test!(trait_param_return);
+interp_test!(trait_method_return);
+interp_test!(trait_borrow_param);
+interp_test!(trait_borrow_infer);
+interp_test!(trait_downcast);
+interp_test!(trait_downcast_build);
+interp_test!(trait_enum_param);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);
 interp_test!(int_width_cross_assert_eq);
@@ -716,6 +724,7 @@ interp_test!(array_block_flat_transpile);
 interp_test!(array_move_remove_indices);
 interp_test!(array_block_for_transpile);
 error_test!(array_block_wrong_type);
+error_test!(trait_downcast_not_implementor);
 
 // A multiline trailing closure/trailing body used as a bare expression-statement
 // (not a `let`/`var` RHS, not a `return` value) used to fail to parse when
@@ -801,3 +810,4 @@ interp_test!(self_sibling_method_call);
 interp_test!(var_mut_collection_ok);
 interp_test!(field_mut_content_mutation);
 interp_test!(field_mut_param_content_mutation);
+interp_test!(cast_float_lit_to_int);

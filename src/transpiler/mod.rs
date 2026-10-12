@@ -27,6 +27,7 @@ mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
 mod infer_qualifiers;
+mod infer_trait_borrow;
 mod last_use;
 mod promote_atomic;
 pub(crate) mod monomorphize;
@@ -736,6 +737,14 @@ struct Transpiler {
     /// struct field's `Box<dyn Trait>` only satisfies an auto-derived `Debug` when the
     /// trait itself — or one of its supertraits, transitively — requires `Debug`).
     pub(crate) trait_parents: std::collections::HashMap<String, Vec<String>>,
+    /// Declared traits and per-type `as` conformances across every scanned file — what the
+    /// trait-object downcast (`n as A`, see `downcast.rs`) consults to validate a target.
+    pub(crate) type_traits: crate::downcast::TypeTraits,
+    /// Traits that carry the `BoringAnyCast` supertrait because some struct/enum implementing
+    /// them is the target of an `as` cast (`downcast::traits_needing_any`).
+    pub(crate) downcast_traits: std::collections::HashSet<String>,
+    /// The `BoringAnyCast` helper trait has been emitted (once per output crate).
+    pub(crate) any_cast_helper_emitted: bool,
     /// trait_name → set of type-level (associated-function, no `self`) method names declared
     /// via `type def`/`type req` in that trait's `type_signatures`. Mirrors
     /// `trait_method_names` but for the type-level side, so a struct's matching `type_methods`
@@ -1082,6 +1091,12 @@ struct Transpiler {
     pub(crate) fn_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Names of overloaded functions (quick lookup).
     pub(crate) overloaded_fn_names: std::collections::HashSet<String>,
+    /// Free-function usage facts gathered per file by `deep_pre_scan` for bare-trait borrow
+    /// inference; consumed (and emptied) by `resolve_trait_borrow_params`.
+    pub(crate) trait_borrow_facts: infer_trait_borrow::TraitBorrowFacts,
+    /// Free function name → per-parameter flag: this bare-trait parameter is inferred
+    /// borrowed (`&dyn Trait`) rather than a by-value `Box<dyn Trait>`.
+    pub(crate) trait_borrowed_fns: std::collections::HashMap<String, Vec<bool>>,
     /// Per-struct overloaded method declarations: "TypeName::method" → Vec<FnDecl>
     pub(crate) struct_method_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Keys of overloaded struct methods (quick lookup): "TypeName::method"
@@ -1490,6 +1505,9 @@ impl Transpiler {
                 ])),
             ]),
             trait_parents: std::collections::HashMap::new(),
+            type_traits: crate::downcast::TypeTraits::default(),
+            downcast_traits: std::collections::HashSet::new(),
+            any_cast_helper_emitted: false,
             trait_type_method_names: std::collections::HashMap::new(),
             // Seeding `Introspect`'s req/def signature here, once and globally, is what
             // lets `method_is_req_or_task` (emit_top.rs) recognize `p.introspect()` as
@@ -1591,6 +1609,8 @@ impl Transpiler {
             uses_observed: std::rc::Rc::new(std::cell::Cell::new(false)),
             fn_overload_decls: std::collections::HashMap::new(),
             overloaded_fn_names: std::collections::HashSet::new(),
+            trait_borrow_facts: Default::default(),
+            trait_borrowed_fns: std::collections::HashMap::new(),
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),
@@ -1961,6 +1981,7 @@ impl Transpiler {
             let prev_dir = self.source_dir.clone();
             self.deep_pre_scan(program, &mut visited);
             self.source_dir = prev_dir;
+            self.resolve_trait_borrow_params();
             self.global_instantiations = monomorphize::build_instantiation_map(
                 &self.pending_generic_call_candidates,
                 &self.global_generic_structs,
@@ -3971,6 +3992,8 @@ impl Transpiler {
     }
 
     fn pre_scan(&mut self, program: &Program) {
+        self.type_traits.add_items(&program.items);
+        self.downcast_traits.extend(crate::downcast::traits_needing_any(&program.items));
         // Must run before any struct is emitted — `emit_struct` consults this set
         // to decide whether to add `Default` to a struct's derive list.
         helpers::collect_default_rest_targets(&program.items, &mut self.structs_needing_default);
@@ -6174,19 +6197,38 @@ def main():\n    let [Drawable] shapes = [Circle(r = 1.0), Square(s = 2.0)]\n   
         // docs/book.md "Traits as types": a bare trait name in parameter
         // position is dynamic dispatch too (`Box<dyn Trait>`), not `impl
         // Trait` (that's the distinct `<Trait>` static-dispatch shorthand).
-        // Regression for the bug where `describe(Drawable item)` transpiled
+        // Regression for the bug where `keep(Drawable item)` transpiled
         // to `item: Drawable` (invalid Rust) / `impl Drawable` (wrong
         // dispatch kind), and the call site never boxed its argument.
+        // The parameter is *consumed* (stored in a struct), so it stays by value:
+        // a receiver-only param is inferred borrowed instead (next test).
+        let src = "\
+trait Drawable:\n    req string label()\n\n\
+struct Circle as Drawable:\n    float r\n    req string label(): \"circle\"\n\n\
+struct Holder:\n    Drawable d\n\n\
+def keep(Drawable item):\n    let h = Holder(item)\n    print h.d.label()\n\n\
+def main():\n    keep(Circle(r = 1.0))\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("item: Box<dyn Drawable>"),
+            "a consumed bare trait-typed param must emit `Box<dyn Trait>`, got:\n{}", code);
+        assert!(code.contains("keep(Box::new(Circle"),
+            "a struct literal passed to a `Box<dyn Trait>` param must be boxed at the call site, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_receiver_only_trait_param_is_inferred_borrowed() {
+        // Phase 2 of docs/qualifiers.md's bare-trait borrow inference: a param only used as a
+        // trait-method receiver is `&dyn Trait`, and a fresh argument is borrowed unboxed.
         let src = "\
 trait Drawable:\n    req string label()\n\n\
 struct Circle as Drawable:\n    float r\n    req string label(): \"circle\"\n\n\
 def describe(Drawable item):\n    print item.label()\n\n\
 def main():\n    describe(Circle(r = 1.0))\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
-        assert!(code.contains("item: Box<dyn Drawable>"),
-            "bare trait-typed param must emit `Box<dyn Trait>`, got:\n{}", code);
-        assert!(code.contains("describe(Box::new(Circle"),
-            "a struct literal passed to a `Box<dyn Trait>` param must be boxed at the call site, got:\n{}", code);
+        assert!(code.contains("item: &dyn Drawable"),
+            "a receiver-only bare trait param must emit `&dyn Trait`, got:\n{}", code);
+        assert!(code.contains("describe(&Circle"),
+            "a fresh struct literal passed to a `&dyn Trait` param is borrowed, not boxed, got:\n{}", code);
     }
 
     #[test]

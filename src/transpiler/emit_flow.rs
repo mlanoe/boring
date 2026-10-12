@@ -89,6 +89,13 @@ impl Transpiler {
                     } else {
                         self.emit_let_value(self.fn_return_ty.as_ref(), e)
                     }
+                } else if let Some(tn) = match &self.fn_return_ty {
+                    Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()) => Some(n.clone()),
+                    _ => None,
+                } {
+                    // Bare-trait return (`Box<dyn Trait>`): box the value, or move an
+                    // already-boxed trait-typed variable/param (never `.clone()` it).
+                    self.box_if_trait_typed(e, tn.as_str())
                 } else if matches!(&self.fn_return_ty,
                     Some(Type::Tuple(_)) | Some(Type::Array(_)) | Some(Type::Dict(_, _)))
                 {
@@ -127,10 +134,6 @@ impl Transpiler {
                 } else {
                     self.emit_expr_owned(e)
                 };
-                // For trait return types the signature already uses `-> impl Trait`
-                // (static dispatch), so the concrete value must be returned as-is — no
-                // boxing.  Boxing would produce `Box<ConcreteType>` which does NOT
-                // automatically implement `Trait` unless there is an explicit blanket impl.
                 if self.in_throws {
                     self.line(&format!("return Ok({});", val));
                 } else {

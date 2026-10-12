@@ -1,0 +1,33 @@
+# Explicit `Trait&` (bare trait, dynamic dispatch) is `&dyn Trait`: a fresh value, a local used
+# twice, a field, and a forwarded borrowed param all pass without a Box or a move.
+trait Builder:
+    req int build(int x)
+
+struct Four as Builder:
+    req int build(int x): x + 4
+
+struct Two as Builder:
+    req int build(int x): x + 2
+
+int inner(Builder& b, int n):
+    b.build(n)
+
+int outer(Builder& b):
+    inner(b, 1) + inner(b, 2)
+
+struct Holder:
+    Builder b
+
+    req int viaField():
+        inner(b, 10)
+
+def main():
+    let Builder local = Four()
+    print inner(local, 1)
+    print inner(local, 2)
+    print inner(Two(), 3)
+    print outer(local)
+    print outer(Four())
+    let h = Holder(Two())
+    print h.viaField()
+    print inner(h.b, 20)

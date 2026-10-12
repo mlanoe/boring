@@ -761,6 +761,158 @@ def Value eval_expr(Interpreter interp, Expr e):
     …
 ```
 
+### Design: borrow inference for bare-trait parameters (phases 1–2 implemented)
+
+**Status: phases 1–2 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions); phases 3–4 are design only.** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is
+emitted `b: Box<dyn Builder>` — by value — while structs/enums/collections are borrowed by inference
+(`auto_ref_param_vars`, free functions only). A trait-typed argument is therefore *moved*: passing
+the same local twice (`b.endEvent(first)` twice, boring-ui `tests/core_lifecycle_test.br:69,72`) is a
+rustc move error. Goal: make `&dyn Trait` the inferred norm unless the body consumes the parameter.
+
+#### Rust-level facts (checked with rustc, not assumed)
+
+| Callee param | `&bx` (`bx: Box<dyn T>`) | `&*bx` | `&Four{}` (fresh) |
+|---|---|---|---|
+| `&Box<dyn T>` (today's explicit `T&`) | ok | — | **E0308** (task_bf57c4ee: needs `&Box::new(..)`) |
+| `&dyn T` | **E0277** (tries to unsize the `Box` itself) | ok | ok, no allocation |
+
+So the inferred form should be **`&dyn Trait`**, not `&Box<dyn Trait>`: it accepts fresh values
+without a `Box`, and forwarding a borrowed param is a plain copy of the reference. Cost: call sites
+must emit `&*local` (never `&local`) for trait-typed locals/fields, and `&**o` through an `&Box`.
+Callee-side `mut Builder b` → `&mut dyn Trait` (existing `fn_current_params_mut → BorrowMut` rule).
+
+#### (1) Can the decision come from the callee declaration alone? Yes, syntactically.
+
+Rule (per parameter `p` of bare trait type `Named(Trait)` with `trait_method_names.contains_key`):
+**borrow unless `p` is consumed**. `p` is consumed when it appears, anywhere in the body (including
+inside closures/`task`/`spawn` — captured ⇒ consumed), as:
+
+- a field/index assignment RHS, `let`/`var` initializer, tuple/array/struct-literal/enum-payload element,
+  `push`/`insert`/`add`/`append` argument, `return` value or tail expression;
+- an argument to a **by-value** parameter of the callee it is forwarded to;
+- an argument to a callee that cannot be resolved (external type, closure value, untyped receiver) —
+  conservative;
+- `match`/`if let` subject, `as` downcast subject, `with` target, `defer` capture.
+
+Everything else (method receiver `p.m(..)`, argument of a *borrow* position, `p == q`, interpolation)
+is a borrow use. `let q = p` makes `q` an alias (reuse `alias_of`); the group is consumed iff any
+member is.
+
+Forwarding makes it recursive: `outer(b) → inner(b)`. Model it as a monotone fixpoint over the call
+graph: start with "all trait params borrow"; mark consumed per the local rules; propagate
+`consumed(param_callee) ⇒ consumed(arg_param_caller)` until stable. The set only grows, so it
+terminates; mutual recursion resolves conservatively (a cycle with no local consumer stays
+borrowed, which is correct). Run it once per program over **all inlined files** (bare sibling `use`,
+`[deps]`) — the existing `deep_pre_scan` → `pre_infer_fn_qualifiers` loop is per file and sees
+callees in not-yet-scanned files late; the fixpoint needs one global pass after the last
+`pre_scan` (same spot, `emit_top.rs` ~414), producing
+`borrowed_trait_params: HashSet<(callee_key, param_idx)>`.
+
+Free functions already have the delivery channel: the pre-pass writes into `fn_sigs`, and
+`emit_args_coerced_vec` reads it (so callee order does not matter). **Struct methods do not**:
+`fn_sigs` deliberately omits them, and their call sites only consult signature-derived data
+(`lent_param_flags` → `trait_method_params` / `struct_method_overload_decls`, keyed
+`Type::method`) and are by-value-plus-`.clone()` otherwise. That is why the real consumer
+(`flush`/`endEvent`, both methods) is the hard case, not the easy one.
+
+#### (2) Trait `req`/`def` signatures vs implementers
+
+A header-only trait method has no body to analyse, and Rust requires every implementer to match it
+exactly, so the body cannot decide. Proposal: **a bare-trait param in a trait method signature is a
+fixed contract** (same precedent as lent `mut [T]` params: "the signature a caller sees never
+depends on what the body does"). Phase 1/2 keep it **by value** (status quo, zero behavioural
+change). Phase 3 (optional, breaking) flips the contract to `&dyn` with an explicit by-value opt-in
+(`Builder'owned b`); implementers whose bodies consume it would then get a clear diagnostic instead
+of inference. A struct method that implements a trait method is never inferred; one that doesn't,
+is.
+
+#### (3) Call-site emission (callee param inferred `&dyn Trait`)
+
+| Argument shape | Emitted | Note |
+|---|---|---|
+| fresh value `Four()` / `Four{..}` | `&Four { .. }` | no `Box`, no allocation |
+| fresh trait-returning call `mk()` | `&*mk()` | temporary lives for the call |
+| trait-typed local `b` | `&*b` | never `&b` (E0277) |
+| trait-typed field `self.b` / `o.b` | `&*self.b` | no `.clone()` (Box isn't Clone) |
+| param already `&dyn` (inferred or `Trait&`) | `b` | reference copy; `&mut dyn` → `&mut *b` |
+| `Option<Box<dyn T>>` binding `o` from `if let Some(o) = &opt` | `&**o` | |
+| callee param by-value (consumed) | unchanged: `box_if_trait_typed` | move, last use only |
+
+All of this lives next to `box_if_trait_typed` (emit_let.rs) and the `emitted_needs_clone` guard
+(emit_methods.rs): the new arm must run *before* them and bypass both (the `Box::new(` / `.clone()`
+heuristics must never see a borrow position).
+
+Methods need a receiver type at the call site to find the callee decl. `resolve_expr_struct_type`
+returns `None` for dyn-trait receivers, closure params and untyped locals. For those a by-value
+fallback is impossible (the callee may have been inferred `&dyn`). Gate: a method `S::m` is
+borrow-eligible only if (a) `m` is not declared in any trait `S` implements, (b) `m` is not
+overloaded, and (c) the method *name* `m` is declared by exactly one user type in the whole program
+(all files) and by no trait, so an unresolved receiver can be looked up by name. Anything else stays
+by value. (c) is the part that is not "clearly safe" today: external Rust types can share the name.
+
+#### (4) Interactions
+
+- **task_bf57c4ee (explicit `Trait&`, fresh arg not boxed):** disappears if explicit `Trait&` is
+  re-pointed at the same `&dyn Trait` representation (`&Four{}` unsizes). Do this first, alone: it
+  fixes a bug and is the proof of the call-site table. Risk: any user relying on `&Box<dyn T>`
+  (none in tests/cases; boring-ui uses no `Trait&`).
+- **Strict vs managed:** `Box<dyn T>` is the representation in both; `&dyn` is mode-independent.
+  `'shared`/`'actor`/`'guard` trait values are `Arc<..dyn..>`: not bare, untouched (bare only).
+- **`'shared`/`'actor` qualifiers on the trait param:** explicit qualifiers are never inferred
+  (existing rule); this feature only fires for the bare form.
+- **Threading:** `&dyn Trait` is `Send` only if the trait is `Sync`; a param captured by a
+  `task`/`spawn` is consumed, so it stays `Box<dyn Trait + Send>`-compatible. Verify the existing
+  `dyn Trait` object-bound emission for multi-thread before enabling.
+- **Self-hosted interpreter (`boring/interpreter/`):** declares no traits, so it exercises none of
+  this directly, but the changed call-site code path is shared: `interpreter_build` (4 modes) then
+  `interpreter_functional` are required gates, not optional.
+- **`interpreter-parity`/`boring run`:** the tree-walk interpreter has no borrow notion; no change.
+
+#### Risks
+
+1. Unresolved receiver ⇒ silent signature mismatch (rustc error, not a miscompile). Mitigated by the
+   gate above, residual for name collisions with external types.
+2. Consumption analysis false negative ⇒ rustc "cannot move out of `*b`" in generated code
+   (loud, never wrong output). False positive ⇒ today's by-value behaviour (safe).
+3. Public API shift: a `pub` free function/method in a `[deps]` library changes its Rust signature.
+   Boring-to-Boring is fine (single global pass); a Rust crate consuming generated code is not
+   covered — hence phase 3 is opt-in.
+4. Generated-code diffs across ~every `tests/cases/*_rust` snapshot containing a bare-trait param
+   (`init_bare_trait_param*`, `trait_param_forwarding*`, `init_owned_trait_param*`).
+
+#### Phasing and test plan
+
+1. **(Done.)** **Explicit `Trait&` → `&dyn Trait`** + call-site table (fresh, local, field, forwarded, Option).
+   Closes task_bf57c4ee. Cases: extend `trait_param_forwarding.br` with `Trait&` called with a fresh
+   value, a local used twice, a field, and a forwarded `&dyn` param; all four mode/threading builds.
+   Landed as `tests/cases/trait_borrow_param.br` (type emitted in `emit_top.rs` `OwnerQual::Borrow`/
+   `BorrowMut`; call sites in `emit_trait_borrow_arg`, `emit_methods.rs`). Known limit, pre-existing and
+   shared with plain structs: an explicit `T&` param on a struct **method** has no call-site support at
+   all (`r.m(p)` passes `p` for `&Pt`) — it needs phase 3's `Type::method` declaration lookup.
+2. **(Done.)** **Free functions inferred** (global fixpoint + `fn_sigs` write, seed in `infer_qualifiers.rs`
+   next to the struct arm, trait types allowed only for this path since the "Addable'inline →
+   `impl Addable`" hazard in that comment concerns the qualifier fallback, not the borrow result).
+   Cases: receiver-only, forwarded chain (3 deep), mutual recursion, stored in a struct/array (stays
+   `Box`), returned, captured by closure, shadowed name, cross-file via bare `use` and `[deps]`.
+   Landed as `src/transpiler/infer_trait_borrow.rs` (`tests/cases/trait_borrow_infer.br`): facts are
+   gathered per file in `deep_pre_scan`, the shrinking fixpoint runs once after the outermost scan
+   (`resolve_trait_borrow_params`), `fn_sigs` is rewritten to `Trait&`, and `emit_fn` emits the
+   function as if the author had written `Trait& p` (so phase 1's call sites apply unchanged).
+   Deliberate limits, all falling back to today's by-value `Box<dyn Trait>`: `mut`/`var` params
+   (`&mut dyn` forwarding is not done yet); a function used as a value, piped, named like any
+   called method, overloaded, generic, `task`/`stream`, attributed or called with labeled/spread
+   args; a call site whose argument for that position is not a variable, a field or a constructor
+   call (`f(make())` would need `&*`). Residual risk: a borrowed local whose static type the
+   transpiler does not track is emitted `&x` and fails loudly in rustc (never wrong output);
+   callers/address-takers in a file outside the graph that defines the function are not seen.
+3. **Struct methods** (gated as in (3)), then validate on `boring-ui/src/core.br`
+   `flush`/`endEvent` (expect `&dyn Builder`; `start` builds `b.build(self)` only ⇒ borrowed too) and
+   `core_lifecycle_test.br` with `endEvent(first)` twice.
+4. (Optional, breaking) trait-method contracts default to borrowed.
+
+Gates per phase: `cargo test` (cases snapshot suites), `interpreter_build` then
+`interpreter_functional`, and `boring build --compile` on boring-ui.
+
 ### Struct field inference
 
 The same constraint-elimination algorithm applies to struct fields. A pre-pass scans all method bodies of the struct for `self.field` access patterns:

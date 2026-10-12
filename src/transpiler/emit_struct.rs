@@ -2572,16 +2572,55 @@ impl Transpiler {
         self.self_type = prev;
     }
 
+    // ── Trait-object downcast (`n as A`) ──────────────────────────────────────
+
+    /// Emits the `BoringAnyCast` helper trait once. Every trait that can be downcast has it as
+    /// a supertrait, and every struct/enum implementing such a trait gets a one-line impl
+    /// (`emit_any_cast_impl`) — a per-implementor impl rather than a blanket `impl<T: Any>`,
+    /// because a blanket impl would also cover `Box<dyn Trait>` itself and make
+    /// `boxed.boring_as_any()` resolve to the *box* (a downcast that silently never matches).
+    pub(crate) fn emit_any_cast_helper(&mut self) {
+        if self.any_cast_helper_emitted { return; }
+        self.any_cast_helper_emitted = true;
+        self.line("pub trait BoringAnyCast {");
+        self.line("    fn boring_as_any(&self) -> &dyn std::any::Any;");
+        self.line("}");
+        self.blank();
+    }
+
+    /// `impl BoringAnyCast for S` when `S` implements a downcastable trait.
+    pub(crate) fn emit_any_cast_impl(&mut self, name: &str, type_params: &[String]) {
+        if !self.type_traits.all_traits_of(name).iter().any(|t| self.downcast_traits.contains(t)) {
+            return;
+        }
+        let (generics, args) = if type_params.is_empty() {
+            (String::new(), String::new())
+        } else {
+            let bounded: Vec<String> = type_params.iter().map(|p| format!("{p}: 'static")).collect();
+            (format!("<{}>", bounded.join(", ")), format!("<{}>", type_params.join(", ")))
+        };
+        self.blank();
+        self.line(&format!("impl{generics} BoringAnyCast for {name}{args} {{"));
+        self.line("    fn boring_as_any(&self) -> &dyn std::any::Any { self }");
+        self.line("}");
+    }
+
     // ── Traits ────────────────────────────────────────────────────────────────
 
     pub(crate) fn emit_trait(&mut self, t: &TraitDecl) {
-        let parents = if t.parents.is_empty() {
+        let mut supers: Vec<String> = t.parents.iter()
+            .map(|p| Self::qualify_supertrait_name(p).to_string())
+            .collect();
+        // A trait whose implementors can be the target of an `as` downcast exposes
+        // `boring_as_any` (see `emit_any_cast_helper`).
+        if self.downcast_traits.contains(&t.name) {
+            self.emit_any_cast_helper();
+            supers.push("BoringAnyCast".to_string());
+        }
+        let parents = if supers.is_empty() {
             String::new()
         } else {
-            let qualified: Vec<String> = t.parents.iter()
-                .map(|p| Self::qualify_supertrait_name(p).to_string())
-                .collect();
-            format!(": {}", qualified.join(" + "))
+            format!(": {}", supers.join(" + "))
         };
         let tp = type_params_str(&t.type_params);
         self.line(&format!("pub trait {}{}{} {{", t.name, tp, parents));
@@ -2650,11 +2689,11 @@ impl Transpiler {
             params_s.join(", ")
         };
         let base = sig.return_ty.as_ref().map(|t| {
-            // Bare trait name in return position → `impl TraitName` (RPITIT, Rust 1.75+).
-            // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
+            // Bare trait name in return position → `Box<dyn TraitName>` (docs/book.md
+            // "Traits as types"); must agree with `compute_fn_return_type` on the impl side.
             if let Type::Named(n) = t {
                 if self.trait_method_names.contains_key(n.as_str()) {
-                    return format!("impl {}", normalize_type_name(n, self.use_rc_str()));
+                    return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
                 }
             }
             self.emit_type(t)

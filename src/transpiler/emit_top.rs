@@ -50,8 +50,8 @@ impl Transpiler {
                     self.emit_fn(f, None);
                 }
             }
-            Item::Struct(s) => self.emit_struct(s),
-            Item::Enum(e)   => self.emit_enum(e),
+            Item::Struct(s) => { self.emit_struct(s); self.emit_any_cast_impl(&s.name, &s.type_params); }
+            Item::Enum(e)   => { self.emit_enum(e); self.emit_any_cast_impl(&e.name, &e.type_params); }
             Item::Trait(t)  => self.emit_trait(t),
             Item::Ext(e)    => self.emit_ext(e),
             Item::Mod(m)    => self.emit_mod(m),
@@ -412,6 +412,7 @@ impl Transpiler {
     pub(crate) fn deep_pre_scan(&mut self, program: &crate::ast::Program, visited: &mut std::collections::HashSet<std::path::PathBuf>) {
         self.pre_scan(program);
         self.pre_infer_fn_qualifiers(program);
+        self.collect_trait_borrow_facts(program);
         // Cross-file monomorphization (see `monomorphize.rs`'s module doc comment):
         // fold two more things into this same recursive walk over every reachable
         // file, so the whole file graph's generic decls and turbofish call sites end
@@ -997,11 +998,11 @@ impl Transpiler {
                         return format!("({})", parts.join(", "));
                     }
                 }
-                // If the return type is a known trait name, use `impl TraitName` (static dispatch).
-                // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
+                // A bare trait name as a return type means dynamic dispatch, `Box<dyn Trait>`
+                // (docs/book.md "Traits as types"); static dispatch is the `<Trait>` shorthand.
                 if let Type::Named(n) = t {
                     if self.trait_method_names.contains_key(n.as_str()) {
-                        return format!("impl {}", normalize_type_name(n, self.use_rc_str()));
+                        return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
                     }
                 }
                 self.emit_type(t)
@@ -1470,6 +1471,13 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
+        // Bare-trait params inferred borrowed (`infer_trait_borrow.rs`) are emitted exactly as
+        // if the author had written `Trait& p`.
+        if self_ty.is_none() {
+            if let Some(patched) = self.with_inferred_trait_borrows(f) {
+                return self.emit_fn(&patched, self_ty);
+            }
+        }
         // Register param types for ALL top-level functions — including native stdlib ones
         // (wait, timeout, …) — so that DotIdent type hints can be resolved at call sites:
         //   wait(.fromSecs(1))  →  wait(Duration::from_secs(1))
@@ -3714,6 +3722,15 @@ impl Transpiler {
                         // (e.g. already `Qualified(_, Owned)` from an explicit `T'owned` that's also
                         // borrowed) still goes through the ordinary `self.emit_type(inner)` path
                         // below, unaffected — that recursion resolves its own qualifier correctly.
+                        // A bare trait name is dynamic dispatch: a borrow of it is `&dyn Trait`,
+                        // not `&Box<dyn Trait>` — a fresh value (`&Four {}`) unsizes to it with
+                        // no `Box`, and a forwarded borrow is a plain reference copy
+                        // (docs/qualifiers.md "Design: borrow inference for bare-trait parameters").
+                        if let Type::Named(n) = inner.as_ref() {
+                            if self.trait_method_names.contains_key(n.as_str()) {
+                                return format!("&dyn {}", normalize_type_name(n, self.use_rc_str()));
+                            }
+                        }
                         let inner_s = match inner.as_ref() {
                             Type::Named(n) => self.emit_named_type(n, true),
                             _ => self.emit_type(inner),
@@ -3722,6 +3739,11 @@ impl Transpiler {
                     }
                 }
                 OwnerQual::BorrowMut    => {
+                    if let Type::Named(n) = inner.as_ref() {
+                        if self.trait_method_names.contains_key(n.as_str()) {
+                            return format!("&mut dyn {}", normalize_type_name(n, self.use_rc_str()));
+                        }
+                    }
                     let inner_s = match inner.as_ref() {
                         Type::Named(n) => self.emit_named_type(n, true),
                         _ => self.emit_type(inner),
