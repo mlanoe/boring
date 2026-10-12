@@ -2033,6 +2033,15 @@ impl Transpiler {
             }
         }
         let emitted = self.emit_expr_owned(value);
+        // A call to a function declared to return this same bare trait already yields a
+        // `Box<dyn Trait>` (a bare trait in return position is boxed): hand it over as is.
+        if let ExprKind::Call(callee, _) = &value.kind {
+            if let ExprKind::Var(f) = &callee.kind {
+                if matches!(self.fn_return_types.get(f.as_str()), Some(Type::Named(n)) if n.as_str() == trait_name) {
+                    return emitted;
+                }
+            }
+        }
         if emitted.starts_with("Box::new(") {
             emitted
         } else {
