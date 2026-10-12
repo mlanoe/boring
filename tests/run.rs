@@ -181,6 +181,7 @@ interp_test!(trait_type_level_methods);
 // `cargo build`). See tests/cases/trait_dynamic_dispatch.br's own doc comment.
 interp_test!(trait_dynamic_dispatch);
 interp_test!(trait_param_forwarding);
+interp_test!(self_lent_reborrow);
 interp_test!(trait_param_return);
 interp_test!(trait_method_return);
 interp_test!(trait_borrow_param);

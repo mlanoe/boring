@@ -1,0 +1,32 @@
+# Passing `self` to a `mut` param inside a `&mut self` method must reborrow (`self`),
+# not emit `&mut self`; a pattern binding later lent as `mut` must be declared `mut`.
+struct Node:
+    var int v = 0
+
+trait Builder:
+    req int build(mut Core c)
+
+struct Four as Builder:
+    req int build(mut Core c): c.n + 4
+
+struct Core:
+    var int n = 0
+    var Node? root = nil
+    def int apply(int x):
+        n += x
+        n
+    def bump(mut Node node):
+        node.v += 1
+    def start(Builder b):
+        _ = self.apply(b.build(self))
+    def touch():
+        if let current = root:
+            self.bump(current)
+            print current.v
+
+def main():
+    mut c = Core(n = 0)
+    c.start(Four())
+    print c.n
+    c.root = Node()
+    c.touch()

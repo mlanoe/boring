@@ -76,8 +76,10 @@ impl Transpiler {
         // to the end of the enclosing function and needs no cleanup at all.
         let scope = self.register_if_let_clause_bindings(&s.clauses);
         let cond_s = self.emit_cond_clauses(&s.clauses);
+        let header_at = self.out.len();
         self.line(&format!("if {} {{", cond_s));
         self.indent += 1;
+        let body_at = self.out.len();
         if use_value_body {
             self.emit_body(&s.then_body);
         } else {
@@ -85,6 +87,7 @@ impl Transpiler {
         }
         self.indent -= 1;
         self.unregister_if_let_clause_bindings(&scope);
+        self.mark_lent_if_let_bindings(&s.clauses, header_at, body_at);
         for branch in &s.elif_branches {
             let scope = self.register_if_let_clause_bindings(&branch.clauses);
             let elif_cond_s = self.emit_cond_clauses(&branch.clauses);
@@ -109,6 +112,29 @@ impl Transpiler {
             self.indent -= 1;
         }
         self.line("}");
+    }
+
+    /// An `if let x = opt:` binding the body lends as `&mut x` (to a `mut` parameter) must be
+    /// declared `Some(mut x)` on the Rust side. The body is already emitted, so patch the header
+    /// (at `header_at` in `self.out`) when `&mut x` shows up in the body text (from `body_at`).
+    fn mark_lent_if_let_bindings(&mut self, clauses: &[CondClause], header_at: usize, body_at: usize) {
+        let names: Vec<&String> = clauses.iter().filter_map(|c| match c {
+            CondClause::Let(n, _) => Some(n),
+            _ => None,
+        }).collect();
+        for name in names {
+            let lent = format!("&mut {}", name);
+            let body = &self.out[body_at..];
+            let used = body.match_indices(&lent).any(|(i, _)| {
+                body[i + lent.len()..].chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            });
+            if !used { continue; }
+            let plain = format!("let Some({}) =", name);
+            if let Some(off) = self.out[header_at..body_at].find(&plain) {
+                let at = header_at + off + "let Some(".len();
+                self.out.insert_str(at, "mut ");
+            }
+        }
     }
 
     /// Register one `if let`/`elif let` clause list's bindings as known locals ahead of

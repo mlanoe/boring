@@ -375,6 +375,7 @@ transpile_test!(trait_type_level_methods);
 // doc comment.
 transpile_test!(trait_dynamic_dispatch);
 transpile_test!(trait_param_forwarding);
+transpile_test!(self_lent_reborrow);
 transpile_test!(trait_param_return);
 transpile_test!(trait_method_return);
 transpile_test!(trait_borrow_param);

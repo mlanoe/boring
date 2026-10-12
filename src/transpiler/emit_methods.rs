@@ -4091,7 +4091,13 @@ impl Transpiler {
             args_s
         };
         let mut args_s = args_s;
-        let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
+        // `self.m(x.f(self))`: the outer `&mut *self` autoref is already reserved while the
+        // argument reborrows `self` mutably (E0499) — evaluate the arguments first.
+        let hoisted = if obj_s == "self" && args_s.iter().any(|a| Self::mentions_place(a, "self")) {
+            Self::hoist_args(&mut args_s)
+        } else {
+            Self::hoist_lent_conflicts_locked(&mut args_s)
+        };
         let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", obj_s, rust_method, args_s.join(", ")));
         let call = if let Some(wrap) = extra_wrap {
             format!("{}{}", call, wrap)
@@ -5061,6 +5067,16 @@ impl Transpiler {
                     "cannot pass `{}` to a `mut` parameter — `{}` is immutable (`let` binding). Use `var` or `mut` instead.",
                     v, v
                 ));
+            }
+            // `self` inside a `&mut self` method already is the `&mut` borrow: pass it on (an
+            // implicit reborrow), `&mut self` would borrow the binding itself and fail (E0596).
+            if v == "self" {
+                return "self".to_string();
+            }
+            // `self` inside a `&mut self` method already is the `&mut` borrow: pass it on (an
+            // implicit reborrow); `&mut self` would borrow the binding itself (E0596).
+            if v == "self" {
+                return "self".to_string();
             }
             let already_ref = self.var_primitive_params.contains(v.as_str())
                 || matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::BorrowMut));
