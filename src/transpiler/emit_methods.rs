@@ -3981,6 +3981,15 @@ impl Transpiler {
                         return self.emit_let_value(Some(param_ty), &a.value);
                     }
                 }
+                // Explicit `Trait&` / `mut Trait&` (`&dyn Trait`): same call-site shapes as the
+                // free-function path in `emit_args_coerced_vec`.
+                if let Some(Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut)))) = struct_method_param_types.get(i) {
+                    if let Type::Named(n) = inner.as_ref() {
+                        if self.trait_method_names.contains_key(n.as_str()) {
+                            return self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
+                        }
+                    }
+                }
                 self.emit_expr_owned(&a.value)
             }).collect()
         } else if (rust_method == "push" || rust_method == "extend") && {
@@ -4030,6 +4039,16 @@ impl Transpiler {
                 if trait_params.get(i).is_some_and(|p| self.is_lent_param(p, true)) {
                     if let Some(slot) = args_s.get_mut(i) {
                         *slot = self.emit_lent_arg(&a.value);
+                    }
+                } else if let Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut))) =
+                    trait_params.get(i).and_then(|p| p.ty.as_ref())
+                {
+                    if let Type::Named(n) = inner.as_ref() {
+                        if self.trait_method_names.contains_key(n.as_str()) {
+                            if let Some(slot) = args_s.get_mut(i) {
+                                *slot = self.emit_trait_borrow_arg(n, matches!(q, OwnerQual::BorrowMut), &a.value);
+                            }
+                        }
                     }
                 }
             }

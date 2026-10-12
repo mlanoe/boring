@@ -186,6 +186,7 @@ interp_test!(trait_param_return);
 interp_test!(trait_method_return);
 interp_test!(trait_borrow_param);
 interp_test!(trait_borrow_infer);
+interp_test!(trait_borrow_method_param);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);
 interp_test!(trait_enum_param);
