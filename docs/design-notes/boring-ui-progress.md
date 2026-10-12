@@ -4,9 +4,10 @@ Companion to [`boring-ui-draft.md`](boring-ui-draft.md) (the design). This file 
 implemented, what is decided, and what to do next**, so work can resume on another machine.
 Last updated: 2026-10-11.
 
-The draft's "Implementation sequence" has 6 layers. Only **layer 1 (language prerequisites)** has
-been started; layers 2–6 (headless reactive core, layout/scene, desktop host, controls, Todo
-acceptance app) have not.
+The draft's "Implementation sequence" has 6 layers. **Layer 1 (language prerequisites)** is mostly
+done (view lowering below); **layer 2 (headless reactive core)** has a first slice in the sibling
+project `../boring-ui` (see "Layer 2" below); layers 3–6 (layout/scene, desktop host, controls, Todo
+acceptance app) have not been started.
 
 ## Layer 1 — language prerequisites
 
@@ -156,6 +157,29 @@ Known gaps of `bind`:
    precise write-site invalidation.
 2. Runtime duplicate-key validation (belongs to layer 2).
 3. Native-body (`body(): native`) facade → runtime adapter linkage (layer 2/4).
+
+## Layer 2 — headless reactive core (`../boring-ui`, 2026-10-14)
+
+**Decision (user):** write the core in pure Boring as a sibling project `boring-ui/` (own git repo,
+plain `src/` consumed via `[deps] ui = "../boring-ui"`, like `boring-numlib`), not as a Rust crate.
+First slice, `src/core.br`: `Desc` (erased tree shape: kind, site, key, children), `Mounted`, `Handle`,
+`Runtime` (reconciliation, hook log, handles with recycled ids + generations, duplicate-key validation
+before mutation, event transactions, update loop with the 64-pass guard), `Builder` trait. 2 test files,
+all green under `boring run`. Details and semantics: `boring-ui/README.md`.
+
+**Blocker found:** Boring has no downcast on trait objects (`v as A` on a `Box<dyn Trait>` is a no-op in the
+interpreter and invalid Rust in `boring build`), so typed `V__State` cannot be stored through the erased
+tree; the core keeps a named-int slot map for now. Filed: make `trait_object as Struct` a checked
+downcast returning `Struct?` (the owner's intended design — no `as?` syntax). Once it lands, the
+lowering↔core adapter is: `View` gains a description method, lowering generates it, the core stores
+`V__State` per mounted node and passes it back to `V.body(st, env)`.
+
+Also filed: `flush(b)` → `b.clone()` on a `Box<dyn Builder>` blocks `boring build` of the core.
+
+Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
+created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
+the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
+`passesRun`.
 
 ## Next steps (suggested order)
 
