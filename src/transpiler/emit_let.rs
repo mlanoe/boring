@@ -2097,7 +2097,12 @@ impl Transpiler {
         if let ExprKind::Call(callee, _) = &value.kind {
             if let ExprKind::Var(fn_name) = &callee.kind {
                 if let Some(ret_ty) = self.fn_return_types.get(fn_name.as_str()) {
-                    return matches!(ret_ty.without_mut(), Type::Qualified(_, OwnerQual::Owned));
+                    // A bare trait return type is itself emitted as `Box<dyn Trait>`.
+                    return match ret_ty.without_mut() {
+                        Type::Qualified(_, OwnerQual::Owned) => true,
+                        Type::Named(n) => self.trait_method_names.contains_key(n.as_str()),
+                        _ => false,
+                    };
                 }
             }
         }
