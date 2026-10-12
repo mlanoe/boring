@@ -386,6 +386,150 @@ print accumulated[3]
 }
 
 #[test]
+fn dynamic_q8_tensor_linear_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_q8_linear");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("tensor.br");
+    fs::write(
+        &input,
+        r#"
+let [float32]'kernel'global x = [1.0 as float32 for ..<32]
+mut [uint8]'kernel'global weight = [uint8(1) for ..<34]
+weight[0] = uint8(0)
+weight[1] = uint8(60)
+weight[2] = uint8(255)
+let [float32]'kernel'global bias = [2.0 as float32]
+mut [float32]'kernel'unified y = [0.0 as float32]
+mut [float32]'kernel'unified y_no_bias = [0.0 as float32]
+kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = "q8_0")
+kernel.tensors.linear(x, weight, y_no_bias, m = 1, n = 1, k = 32, format = "q8_0")
+print y[0]
+print y_no_bias[0]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
+    assert!(generated_source.contains("fn __boring_f16_to_f32"));
+    assert!(generated_source.contains("as i8 as f32"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("tensor_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "32\n30");
+}
+
+#[test]
+fn dynamic_q4_tensor_linear_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_q4_linear");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("tensor.br");
+    fs::write(
+        &input,
+        r#"
+let [float32]'kernel'global x = [1.0 as float32 for ..<32]
+mut [uint8]'kernel'global weight = [uint8(153) for ..<18]
+weight[0] = uint8(0)
+weight[1] = uint8(60)
+weight[2] = uint8(151)
+weight[3] = uint8(121)
+let [float32]'kernel'global bias = [2.0 as float32]
+mut [float32]'kernel'unified y = [0.0 as float32]
+mut [float32]'kernel'unified y_no_bias = [0.0 as float32]
+kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = "q4_0")
+kernel.tensors.linear(x, weight, y_no_bias, m = 1, n = 1, k = 32, format = "q4_0")
+print y[0]
+print y_no_bias[0]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
+    assert!(generated_source.contains("__boring_tensor_nibble"));
+    assert!(generated_source.contains("as i32 - 8"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("tensor_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "30\n28");
+}
+
+#[test]
+fn dynamic_q5_tensor_linear_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_q5_linear");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("tensor.br");
+    fs::write(
+        &input,
+        r#"
+let [float32]'kernel'global x = [1.0 as float32 for ..<32]
+mut [uint8]'kernel'global weight = [uint8(17) for ..<22]
+weight[0] = uint8(0)
+weight[1] = uint8(60)
+weight[2] = uint8(254)
+weight[3] = uint8(255)
+weight[4] = uint8(253)
+weight[5] = uint8(255)
+weight[6] = uint8(31)
+weight[7] = uint8(241)
+let [float32]'kernel'global bias = [2.0 as float32]
+mut [float32]'kernel'unified y = [0.0 as float32]
+mut [float32]'kernel'unified y_no_bias = [0.0 as float32]
+kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = "q5_0")
+kernel.tensors.linear(x, weight, y_no_bias, m = 1, n = 1, k = 32, format = "q5_0")
+print y[0]
+print y_no_bias[0]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
+    assert!(generated_source.contains("__boring_tensor_high_bits"));
+    assert!(generated_source.contains("__boring_tensor_quantized"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("tensor_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "30\n28");
+}
+
+#[test]
 fn gpu_resident_function_return_is_rejected() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_resident_return");
     let _ = fs::remove_dir_all(&root);

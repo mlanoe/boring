@@ -170,6 +170,18 @@ fn __boring_simd_parallel_threshold() -> usize {
             .unwrap_or(268_435_456)
     })
 }
+#[allow(dead_code)] fn __boring_f16_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 == 0 { 1.0f32 } else { -1.0f32 };
+    let exponent = ((bits >> 10) & 0x1f) as i32;
+    let fraction = (bits & 0x03ff) as u32;
+    let magnitude = match exponent {
+        0 => (fraction as f32) * 2.0f32.powi(-24),
+        31 if fraction == 0 => f32::INFINITY,
+        31 => f32::NAN,
+        _ => (1.0 + fraction as f32 / 1024.0) * 2.0f32.powi(exponent - 15),
+    };
+    sign * magnitude
+}
 #[allow(dead_code)] #[derive(Clone, Debug, PartialEq)] enum BoringGpuArg<T> { Host(Vec<T>) }
 impl<T> BoringGpuArg<T> { fn len(&self) -> usize { match self { Self::Host(v) => v.len() } } }
 "#;
