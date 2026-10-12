@@ -656,6 +656,41 @@ impl Emitter {
                 if *inclusive { "=" } else { "" },
                 self.expr(end)
             ),
+            ExprKind::Array(elements) => format!(
+                "vec![{}]",
+                elements
+                    .iter()
+                    .map(|element| self.expr(element))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ExprKind::ArrayFill { value, count } => {
+                format!("vec![{}; ({}) as usize]", self.expr(value), self.expr(count))
+            }
+            ExprKind::ArrayAlloc { count } => {
+                format!("vec![Default::default(); ({}) as usize]", self.expr(count))
+            }
+            ExprKind::ArrayComp { expr, var, count } => format!(
+                "(0..(({}) as usize)).map(|__boring_i| {{ let {var} = __boring_i as i32; {} }}).collect::<Vec<_>>()",
+                self.expr(count),
+                self.expr(expr),
+            ),
+            ExprKind::ArrayCompIter { expr, var, iter } => format!(
+                "{}.iter().map(|{var}| {{ {} }}).collect::<Vec<_>>()",
+                self.expr(iter),
+                self.expr(expr),
+            ),
+            ExprKind::Tuple(elements) => {
+                let values = elements
+                    .iter()
+                    .map(|element| self.expr(element))
+                    .collect::<Vec<_>>();
+                if values.len() == 1 {
+                    format!("({},)", values[0])
+                } else {
+                    format!("({})", values.join(", "))
+                }
+            }
             ExprKind::Call(c, args) => {
                 if let ExprKind::Var(name) = &c.kind {
                     if let Some(cast_ty) = primitive_cast_type(name) {
