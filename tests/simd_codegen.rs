@@ -576,6 +576,59 @@ print y_no_bias[0]
 }
 
 #[test]
+fn dynamic_q6k_tensor_linear_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_dynamic_q6k_linear");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("tensor.br");
+    fs::write(
+        &input,
+        r#"
+let [float32]'kernel'global x = [1.0 as float32 for ..<256]
+mut [uint8]'kernel'global weight = [uint8(17) for ..<210]
+for i in 128..<192:
+    weight[i] = uint8(170)
+for i in 192..<208:
+    weight[i] = uint8(1)
+weight[0] = uint8(31)
+weight[65] = uint8(31)
+weight[128] = uint8(169)
+weight[161] = uint8(169)
+weight[208] = uint8(0)
+weight[209] = uint8(60)
+let [float32]'kernel'global bias = [2.0 as float32]
+mut [float32]'kernel'unified y = [0.0 as float32]
+mut [float32]'kernel'unified y_no_bias = [0.0 as float32]
+kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 256, format = "q6_k")
+kernel.tensors.linear(x, weight, y_no_bias, m = 1, n = 1, k = 256, format = "q6_k")
+print y[0]
+print y_no_bias[0]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
+    assert!(generated_source.contains("__boring_tensor_qh_base"));
+    assert!(generated_source.contains("__boring_tensor_scale_at = __boring_tensor_block + 208"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("tensor_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "254\n252");
+}
+
+#[test]
 fn gpu_resident_function_return_is_rejected() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_resident_return");
     let _ = fs::remove_dir_all(&root);
