@@ -169,6 +169,14 @@ fn __boring_simd_threads() -> usize {
             .unwrap_or_else(|| std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1))
     })
 }
+fn __boring_simd_parallel_threshold() -> usize {
+    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("BORING_SIMD_PARALLEL_THRESHOLD").ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(268_435_456)
+    })
+}
 #[allow(dead_code)] #[derive(Clone, Debug, PartialEq)] enum BoringGpuArg<T> { Host(Vec<T>) }
 impl<T> BoringGpuArg<T> { fn len(&self) -> usize { match self { Self::Host(v) => v.len() } } }
 "#;

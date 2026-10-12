@@ -201,8 +201,10 @@ print linear[0]
     assert!(source.contains("fn __boring_simd_threads()"));
     assert!(source.contains("static THREADS: std::sync::OnceLock<usize>"));
     assert!(source.contains("__boring_simd_threads().min(3usize)"));
+    assert!(source.contains("if __boring_tensor_work < __boring_simd_parallel_threshold()"));
     assert!(source.contains(".chunks_mut(__boring_tensor_rows_per_worker * 7)"));
-    assert!(source.contains("__boring_tensor_scope.spawn(move ||"));
+    assert!(source.contains("__boring_tensor_task();"));
+    assert!(source.contains("__boring_tensor_scope.spawn(__boring_tensor_task)"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(root.join("tensor_simd/Cargo.toml"))

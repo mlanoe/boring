@@ -52,19 +52,22 @@ later two-phase subgroup lowering because CPU work-items currently execute as a
 single contiguous loop.
 
 Fixed-shape floating-point `kernel.tensors.matmul`, `mma`, and `linear` calls use
-the existing portable CPU loop lowering. On the SIMD target, output rows are
-split into disjoint mutable chunks across the available CPU cores, while each
-worker's contiguous inner loops remain eligible for release-mode
-auto-vectorization. Dynamic quantized pipelines still
+the existing portable CPU loop lowering. Their contiguous inner loops remain
+eligible for release-mode auto-vectorization. Very large operations split output
+rows into disjoint mutable chunks across the available CPU cores; smaller ones
+run inline to avoid thread-spawn and cache-contention overhead.
+Dynamic quantized pipelines still
 depend on inter-function GPU-resident returns, which this backend rejects until
 they have a CPU representation. Backend-specific BLAS integration and quantized
 SIMD microkernels remain future work.
 
-Set `BORING_SIMD_THREADS=N` to cap fixed tensor operations to `N` workers. The
-default is the host's available parallelism; `BORING_SIMD_THREADS=1` provides a
-single-worker reference path. General kernels remain single-threaded because
-their arbitrary indexed writes cannot be parallelized safely without dependence
-analysis.
+Very large operations use the host's available parallelism. Set
+`BORING_SIMD_THREADS=N` to cap them to `N` workers; `BORING_SIMD_THREADS=1`
+provides a single-worker reference path. The default parallel threshold is
+268,435,456 multiply-adds and can be changed with
+`BORING_SIMD_PARALLEL_THRESHOLD=N` (`0` forces the multicore path). General
+kernels remain single-threaded because their arbitrary indexed writes cannot be
+parallelized safely without dependence analysis.
 
 ## Build
 
@@ -90,5 +93,6 @@ BORING_SIMD_SCALAR=1 cargo run --release
 Both commands execute the same binary and workload. The environment variable
 changes only the runtime-selected native-feature versus baseline dispatch path.
 
-`examples/simd_matmul_bench.br` similarly compares the default multicore fixed
-tensor path with `BORING_SIMD_THREADS=1` using the same generated binary.
+`examples/simd_matmul_bench.br` compares the default adaptive fixed-tensor path
+with `BORING_SIMD_PARALLEL_THRESHOLD=0`, which forces multicore execution using
+the same generated binary.

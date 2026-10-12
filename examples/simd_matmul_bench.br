@@ -3,7 +3,7 @@
 #   boring build --target simd examples/simd_matmul_bench.br
 #   cd examples/simd_matmul_bench_simd
 #   cargo run --release
-#   BORING_SIMD_THREADS=1 cargo run --release
+#   BORING_SIMD_PARALLEL_THRESHOLD=0 cargo run --release
 
 use std.time.Instant
 
