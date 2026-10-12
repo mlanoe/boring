@@ -83,15 +83,6 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
                 ));
             }
         }
-        if k.methods
-            .iter()
-            .any(|m| stmts_use_warp_collective(&m.body))
-        {
-            initial_errors.push(crate::errors::SourceError::at(
-                format!("kernel '{}': `.warp` collectives are not yet supported by --target simd; use block-level scalar code", k.name),
-                k.line, k.col,
-            ));
-        }
     }
     let mut e = Emitter {
         out: String::new(),
@@ -101,6 +92,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         global_consts,
         locals: std::collections::HashSet::new(),
         value_types: std::collections::HashMap::new(),
+        thread_override: None,
     };
     e.raw(PRELUDE);
     for kernel in &kernels {
@@ -189,6 +181,7 @@ struct Emitter {
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
+    thread_override: Option<String>,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -420,7 +413,11 @@ impl Emitter {
             ExprKind::Float(v) => format!("{v}"),
             ExprKind::Bool(v) => v.to_string(),
             ExprKind::Var(v) => {
-                if matches!(v.as_str(), "thread" | "block" | "block_dim") {
+                if v == "thread" {
+                    self.thread_override
+                        .clone()
+                        .unwrap_or_else(|| "__thread".into())
+                } else if matches!(v.as_str(), "block" | "block_dim") {
                     format!("__{v}")
                 } else if v == "warp" {
                     "__warp".into()
@@ -436,7 +433,11 @@ impl Emitter {
                     v.clone()
                 }
             }
-            ExprKind::DotIdent(v) if matches!(v.as_str(), "thread" | "block" | "block_dim") => {
+            ExprKind::DotIdent(v) if v == "thread" => self
+                .thread_override
+                .clone()
+                .unwrap_or_else(|| "__thread".into()),
+            ExprKind::DotIdent(v) if matches!(v.as_str(), "block" | "block_dim") => {
                 format!("__{v}")
             }
             ExprKind::Field(a, b) => {
@@ -451,8 +452,12 @@ impl Emitter {
                 }
                 if let ExprKind::Field(root, base) = &a.kind {
                     if matches!(&root.kind,ExprKind::Var(v) if v=="gpu") {
+                        let thread_name = self
+                            .thread_override
+                            .clone()
+                            .unwrap_or_else(|| "__thread".into());
                         let builtin = match base.as_str() {
-                            "thread" => Some("__thread"),
+                            "thread" => Some(thread_name.as_str()),
                             "block" => Some("__block"),
                             "block_dim" | "blockDim" => Some("__block_dim"),
                             "grid_dim" | "gridDim" => Some("__grid_dim"),
@@ -532,15 +537,20 @@ impl Emitter {
                         .join(", ")
                 )
             }
-            ExprKind::MethodCall(o, m, args) => format!(
-                "{}.{}({})",
-                self.expr(o),
-                m,
-                args.iter()
-                    .map(|a| self.expr(&a.value))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            ExprKind::MethodCall(o, m, args) => {
+                if is_warp_receiver(o) && is_warp_shuffle(m) {
+                    return self.warp_shuffle(e, m, args);
+                }
+                format!(
+                    "{}.{}({})",
+                    self.expr(o),
+                    m,
+                    args.iter()
+                        .map(|a| self.expr(&a.value))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
             ExprKind::If(i) => {
                 let result_types = i
                     .branches
@@ -584,6 +594,68 @@ impl Emitter {
                 ));
                 "/* rejected unsupported SIMD expression */ 0".into()
             }
+        }
+    }
+    fn warp_shuffle(&mut self, call: &Expr, method: &str, args: &[Arg]) -> String {
+        if args.len() != 2 || !self.warp_replayable(&args[0].value) {
+            self.errors.push(crate::errors::SourceError::at(
+                "SIMD warp shuffles require two arguments and a lane-replayable value (coordinates, constants, and buffer reads only)",
+                call.line,
+                call.col,
+            ));
+            return "/* rejected non-replayable SIMD warp shuffle */ 0".into();
+        }
+        let operand = self.expr(&args[1].value);
+        self.thread_override = Some("__boring_warp_source_thread".into());
+        let replayed = self.expr(&args[0].value);
+        self.thread_override = None;
+        let current = self.expr(&args[0].value);
+        let target_lane = match method {
+            "shuffle_down" | "shuffleDown" => {
+                format!("__boring_warp_lane + ({operand} as i32)")
+            }
+            "shuffle_up" | "shuffleUp" => {
+                format!("__boring_warp_lane - ({operand} as i32)")
+            }
+            "shuffle_xor" | "shuffleXor" => {
+                format!("__boring_warp_lane ^ ({operand} as i32)")
+            }
+            "shuffle" => format!("{operand} as i32"),
+            _ => unreachable!(),
+        };
+        format!(
+            "{{ let __boring_warp_linear = __thread.x + __thread.y * __block_dim.x + __thread.z * __block_dim.x * __block_dim.y; let __boring_warp_lane = __boring_warp_linear.rem_euclid(__simd_lanes); let __boring_warp_target_lane = {target_lane}; let __boring_warp_target_linear = (__boring_warp_linear - __boring_warp_lane) + __boring_warp_target_lane; if __boring_warp_target_lane >= 0 && __boring_warp_target_lane < __simd_lanes && __boring_warp_target_linear < __block_dim.x * __block_dim.y * __block_dim.z {{ let __boring_warp_source_thread = __BoringDim3 {{ x: __boring_warp_target_linear.rem_euclid(__block_dim.x), y: (__boring_warp_target_linear / __block_dim.x).rem_euclid(__block_dim.y), z: __boring_warp_target_linear / (__block_dim.x * __block_dim.y) }}; {replayed} }} else {{ {current} }} }}"
+        )
+    }
+    fn warp_replayable(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Var(name) => {
+                matches!(name.as_str(), "thread" | "block" | "block_dim" | "gpu")
+                    || self.fields.contains(name)
+                    || self.global_consts.contains_key(name)
+            }
+            ExprKind::DotIdent(name) => {
+                matches!(name.as_str(), "thread" | "block" | "block_dim")
+            }
+            ExprKind::Field(object, _) | ExprKind::UnaryOp(_, object) | ExprKind::Cast(object, _) => {
+                self.warp_replayable(object)
+            }
+            ExprKind::Index(object, index) => {
+                self.warp_replayable(object) && self.warp_replayable(index)
+            }
+            ExprKind::LabeledIndex(object, args) => {
+                self.warp_replayable(object)
+                    && args.iter().all(|arg| self.warp_replayable(&arg.value))
+            }
+            ExprKind::BinOp(_, left, right) => {
+                self.warp_replayable(left) && self.warp_replayable(right)
+            }
+            ExprKind::Call(callee, args) => {
+                matches!(&callee.kind, ExprKind::Var(name) if primitive_cast_type(name).is_some())
+                    && args.iter().all(|arg| self.warp_replayable(&arg.value))
+            }
+            _ => false,
         }
     }
     fn expr_body_as(&mut self, body: &[Stmt], expected: Option<&str>) -> String {
@@ -978,17 +1050,21 @@ fn binop(op: &BinOp) -> Option<&'static str> {
     }
 }
 
-fn stmts_use_warp_collective(stmts: &[Stmt]) -> bool {
-    let mut found = false;
-    crate::ast::walk_stmts(stmts, &mut |node| {
-        let crate::ast::WalkNode::Expr(expr) = node else { return };
-        let ExprKind::MethodCall(receiver, _, _) = &expr.kind else { return };
-        if matches!(&receiver.kind,
-            ExprKind::Field(root, name)
-                if name == "warp" && matches!(&root.kind, ExprKind::Var(value) if value == "gpu"))
-        {
-            found = true;
-        }
-    });
-    found
+fn is_warp_receiver(expr: &Expr) -> bool {
+    matches!(&expr.kind,
+        ExprKind::Field(root, name)
+            if name == "warp" && matches!(&root.kind, ExprKind::Var(value) if value == "gpu"))
+}
+
+fn is_warp_shuffle(method: &str) -> bool {
+    matches!(
+        method,
+        "shuffle_down"
+            | "shuffleDown"
+            | "shuffle_up"
+            | "shuffleUp"
+            | "shuffle_xor"
+            | "shuffleXor"
+            | "shuffle"
+    )
 }

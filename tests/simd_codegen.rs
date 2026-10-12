@@ -131,19 +131,101 @@ fn warp_lane_and_size_run_on_cpu() {
 }
 
 #[test]
-fn warp_collectives_fail_during_codegen() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_error");
+fn replayable_warp_shuffles_run_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_shuffle");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let input = root.join("warp.br");
-    fs::write(&input, "kernel W:\n    def ():\n        let value = .warp.shuffle(.thread.x, 0)\n").unwrap();
+    fs::write(
+        &input,
+        r#"
+let [int]'kernel'global values = [i for i in 0..<16]
+mut [int]'kernel'unified direct = [0 for ..<16]
+mut [int]'kernel'unified down = [0 for ..<16]
+mut [int]'kernel'unified up = [0 for ..<16]
+mut [int]'kernel'unified xor = [0 for ..<16]
+mut [int]'kernel'unified sizes = [0 for ..<16]
+kernel W:
+    let [int]'global values
+    mut [int]'unified direct
+    mut [int]'unified down
+    mut [int]'unified up
+    mut [int]'unified xor
+    mut [int]'unified sizes
+    init([int]'global v, mut [int]'unified d, mut [int]'unified dn, mut [int]'unified u, mut [int]'unified x, mut [int]'unified s):
+        values = v
+        direct = d
+        down = dn
+        up = u
+        xor = x
+        sizes = s
+    def ():
+        let i = .thread.x
+        direct[i] = .warp.shuffle(values[.thread.x], 0)
+        down[i] = .warp.shuffle_down(values[.thread.x], 1)
+        up[i] = .warp.shuffleUp(values[.thread.x], 1)
+        xor[i] = .warp.shuffleXor(values[.thread.x], 1)
+        sizes[i] = .warp.size
+mut w = W(values, direct, down, up, xor, sizes)
+kernel:
+    w(block = 16)
+print w.direct[15]
+print w.down[0]
+print w.up[1]
+print w.xor[1]
+print w.sizes[0]
+"#,
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let generated = fs::read_to_string(root.join("warp_simd/src/main.rs")).unwrap();
+    assert!(generated.contains("let __boring_warp_target_lane"));
+    assert!(generated.contains("let __boring_warp_source_thread"));
+    for scalar in [false, true] {
+        let mut command = Command::new("cargo");
+        command
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(root.join("warp_simd/Cargo.toml"));
+        if scalar {
+            command.env("BORING_SIMD_SCALAR", "1");
+        }
+        let run = command.output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let output = String::from_utf8_lossy(&run.stdout)
+            .lines()
+            .map(|value| value.parse::<i32>().unwrap())
+            .collect::<Vec<_>>();
+        let lanes = output[4];
+        assert_eq!(output[0], 15 - 15 % lanes);
+        assert_eq!(output[1], if lanes > 1 { 1 } else { 0 });
+        assert_eq!(output[2], if lanes > 1 { 0 } else { 1 });
+        assert_eq!(output[3], if lanes > 1 { 0 } else { 1 });
+    }
+}
+
+#[test]
+fn local_value_warp_shuffle_fails_during_codegen() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_local_error");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("warp.br");
+    fs::write(
+        &input,
+        "kernel W:\n    def ():\n        let lane = .thread.x\n        let value = .warp.shuffle(lane, 0)\n",
+    )
+    .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["build", "--target", "simd"])
         .arg(&input)
         .output()
         .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("`.warp` collectives are not yet supported"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("lane-replayable value"));
 }
 
 #[test]
