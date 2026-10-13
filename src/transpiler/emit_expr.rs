@@ -2615,6 +2615,22 @@ impl Transpiler {
             }
             // `var` primitive param: `n = val` → `*n = val`.
             if self.var_primitive_params.contains(var_name.as_str()) {
+                // Bare-trait (or `Trait'owned`) `var` param is `&mut Box<dyn Trait>`:
+                // box a fresh value / move an already-boxed one.
+                let trait_name = self.fn_current_params.get(var_name.as_str())
+                    .filter(|t| self.is_boxed_trait_type(t))
+                    .and_then(|t| match t.without_mut() {
+                        crate::ast::Type::Named(n) => Some(n.clone()),
+                        crate::ast::Type::Qualified(inner, _) => match inner.as_ref() {
+                            crate::ast::Type::Named(n) => Some(n.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(tn) = trait_name {
+                    let val_s = self.box_if_trait_typed(value, tn.as_str());
+                    return format!("*{} = {}", var_name, val_s);
+                }
                 let val_s = self.emit_expr(value);
                 return format!("*{} = {}", var_name, val_s);
             }

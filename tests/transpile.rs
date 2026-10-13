@@ -1239,6 +1239,8 @@ transpile_test!(init_owned_trait_param);
 // managed-mode gap here (unlike `init_owned_trait_param`'s `ignore_managed`)
 // since there's no `'owned` call-site wrapping involved.
 transpile_test!(init_bare_trait_param);
+// `var_param_bare_trait_assign`: assigning to a bare-trait `var` out-param boxes the value.
+transpile_test!(var_param_bare_trait_assign);
 
 // ── Strict-mode size-based return-type auto-boxing (docs/transpilation-modes.md
 //    "Size-based auto-boxing") ────────────────────────────────────────────────
