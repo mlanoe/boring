@@ -1,0 +1,35 @@
+# Array blocks with control flow tag each element with its static position (`Sited`), so a
+# conditional branch or a keyed `for` is identified by where it sits in the source, not by what
+# its siblings did. A flat block (no `if`/`for`) is left untouched.
+use boring.ui.*
+
+view Flat:
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Text("a")
+            Text("b")
+
+view Branchy:
+    bool on
+    [string] ids
+    body():
+        Column(alignment = .Center, spacing = nil):
+            if on:
+                Text("h")
+            Text("x")
+            for id in ids with id:
+                Text(id)
+
+def describe(View v):
+    var parts = ""
+    for c in v.viewChildren():
+        parts = "{parts}{c.viewKind()}@{c.viewSite()} "
+    print parts
+
+def main():
+    let flat = Flat()
+    describe(flat.expand(flat.newState()))
+    let on = Branchy(on = true, ids = ["p", "q"])
+    describe(on.expand(on.newState()))
+    let off = Branchy(on = false, ids = ["p"])
+    describe(off.expand(off.newState()))

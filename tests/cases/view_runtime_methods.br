@@ -1,0 +1,40 @@
+# The generated `View` methods (stdlib/ui.br): kind, native children, key/site, and a composite
+# view's state seed + `expand`, which re-enters `body(__st)` with the node's own persistent state.
+use boring.ui.*
+
+view Counter:
+    string title
+    state int taps = 0
+
+    def tap():
+        taps += 1
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Text("{title}:{taps}")
+            Text("x")
+
+def main():
+    let c = Counter(title = "c")
+    print c.viewKind()
+    print c.isComposite()
+    let st = c.newState()
+    # `tap` is lowered like any method, so drive it through the typed state.
+    mut typed = Counter__State()
+    c.tap(typed)
+    c.tap(typed)
+    print typed.taps
+
+    # `expand` builds the body from the persistent state it is given.
+    let body = c.expand(st)
+    print body.viewKind()
+    print body.viewChildren().length
+    print body.viewChildren()[0].viewKind()
+    print body.isComposite()
+
+    let g = KeyedGroup(key = "k1", children = [Text("a")])
+    print g.viewKind()
+    print g.viewKey()
+    print g.viewSite()
+    print g.viewChildren().length
+    print Text("t").viewKey().length

@@ -167,14 +167,47 @@ First slice, `src/core.br`: `Desc` (erased tree shape: kind, site, key, children
 before mutation, event transactions, update loop with the 64-pass guard), `Builder` trait. 2 test files,
 all green under `boring run`. Details and semantics: `boring-ui/README.md`.
 
-**Blocker found:** Boring has no downcast on trait objects (`v as A` on a `Box<dyn Trait>` is a no-op in the
-interpreter and invalid Rust in `boring build`), so typed `V__State` cannot be stored through the erased
-tree; the core keeps a named-int slot map for now. Filed: make `trait_object as Struct` a checked
-downcast returning `Struct?` (the owner's intended design — no `as?` syntax). Once it lands, the
-lowering↔core adapter is: `View` gains a description method, lowering generates it, the core stores
-`V__State` per mounted node and passes it back to `V.body(st, env)`.
+**Typed state is now connected (2026-10-13).** The downcast landed (`trait_object as Struct` → `Struct?`), so:
+`boring.ui`'s `View` trait gained runtime-facing methods, all with defaults (`viewKind`, `viewChildren`,
+`viewKey`/`viewSite`, `isComposite`, `newState`, `expand`), plus `StateBox`/`NoState`; `lower_view` generates
+them for every lowered view (`V__State as StateBox`; `expand` = `mut s = st as V__State else …; self.body(s)`)
+and `KeyedGroup(key, children, site)` is a native facade. The array-block lowering now passes the key as a
+string (`KeyedGroup("{key}", items)`). In `boring-ui`, `Desc` can carry a composite `View`, `Mounted` holds the
+`StateBox`, and `describe`/`ViewRoot` adapt `ViewBuilder`s. `tests/core_views_test.br` proves typed state
+persists across rebuilds/reorders and dies with its identity.
 
-Also filed: `flush(b)` → `b.clone()` on a `Box<dyn Builder>` blocks `boring build` of the core.
+**Interpreter only.** `boring build` switches the generated methods off (`lower_view::set_runtime_methods(false)`,
+called from the `build` command): the Rust output cannot express returning owned `[View]` children or an
+expanded body that borrows its mounted state. Real fix needs the draft's runtime design (shared handles /
+callback context), not more lowering. Gotchas met: a view named `Screen` collides with the interpreter's
+GPU `Screen` builtin; a top-level script variable named like a struct field (`root`) shadows the implicit
+`self.root` inside methods.
+
+**Stable sites (2026-10-13).** The array-block lowering now tags every element of a `[View]` block that has
+control flow as `Sited(site = n, children = [e])` (static preorder position in the source; only when
+`boring.ui`'s `Sited` is in scope, so ordinary trait-object blocks are untouched; unkeyed `for` items stay
+positional). `Sited` is a native facade in `stdlib/ui.br`; `describe` in `boring-ui` flattens it. Cases:
+`view_sited_blocks` (boring), `core_sites_test.br` (boring-ui, with a negative control: without sites the
+test fails with duplicate keys / remounted counters).
+
+**Layer 3 started (2026-10-13).** `boring-ui/src/layout.br`: size negotiation + placement (Text with fixture
+font, Padding, Frame, Priority, Spacer, Row, Column; deterministic stack allocation, modifier order) over the
+mounted tree, returning a `Placed` tree; tests `layout_test.br` (draft examples) and `layout_views_test.br`
+(composites, keyed groups, unspecified proposals). Needed in `boring`: native views expose their scalar fields
+through a generated `viewProps()` (`View` trait method), `Padding`/`Frame`/`Priority`/`Spacer` facades in
+`boring.ui` (case `view_props`). Still missing for layer 3: fill/Layer/clip/Scroll, baselines, display list,
+hit-test data, accessibility nodes (see `boring-ui/README.md`).
+
+**Scene slice (2026-10-13).** `boring-ui/src/scene.br`: display list (`FillRect`/`DrawText`/`PushClip`/`PopClip`) and hit
+testing (path root→target; layout bounds ∩ ancestor clips; front-to-back) over `Placed`; `Background`/`Clip`
+wrapper facades in `boring.ui`; `Placed` now carries the node's props. Test `scene_test.br`.
+
+**Accessibility slice (2026-10-13).** `boring-ui/src/semantics.br`: semantic tree over `Placed` (roles staticText/
+heading/textField/group; name/value/hint/level/bounds/actions; transparent layout wrappers; ordered modifiers;
+hidden subtrees; validation errors). `boring.ui` gained the `Accessibility{Label,Hint,Heading,Hidden,Group}`
+wrappers, and `viewProps()` now exposes a `bind` field's *current value* (a lowered `Slot`) so a `TextField`'s
+value is readable. Test `semantics_test.br`. With layout, scene and semantics, the headless part of layer 3 has a
+first slice; remaining: the primitives/modifiers listed in `boring-ui/README.md`.
 
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just

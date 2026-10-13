@@ -64,6 +64,18 @@ use crate::ast::*;
 use crate::ast_walk::Walker;
 use crate::parser::ParseError;
 
+static RUNTIME_METHODS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether lowered views get the generated runtime-facing `View` methods (kind, children, state
+/// seed, `expand`). On by default (`boring run`); `boring build` turns it off, because the
+/// transpiled Rust cannot express them yet: returning a native view's owned `[View]` children
+/// needs a by-reference/`clone_box` story for `Box<dyn View>`, and an expanded body that borrows
+/// its mounted state cannot outlive the call. The `View` trait's methods all have defaults, so
+/// views without the generated impls still compile.
+pub fn set_runtime_methods(on: bool) {
+    RUNTIME_METHODS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 const ST: &str = "__st";
 const ENV: &str = "__env";
 
@@ -232,7 +244,8 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
     }
     // A native view's adapter is supplied by the UI runtime: it keeps its inputs, loses the
     // placeholder `body(): native`, and may not own application `state`.
-    if s.methods.iter().any(|m| m.is_native) {
+    let native = s.methods.iter().any(|m| m.is_native);
+    if native {
         if let Some(f) = s.fields.iter().find(|f| f.view_kind == Some(ViewFieldKind::State)) {
             return Err(err(
                 format!("native view '{}' cannot declare `state {}`: persistent implementation details \
@@ -293,7 +306,9 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
             }
             f
         }).collect();
-        generated.push(plain_struct(state_name.clone(), s.is_pub, fields, s.line, s.col));
+        let mut state = plain_struct(state_name.clone(), s.is_pub, fields, s.line, s.col);
+        if env.view_trait { state.protocols.push("StateBox".to_string()); }
+        generated.push(state);
     }
     if !env_fields.is_empty() {
         let fields = env_fields.iter().map(|f| {
@@ -351,8 +366,76 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         }
         if let Some(e) = failure { return Err(e); }
     }
+    if env.view_trait && RUNTIME_METHODS.load(std::sync::atomic::Ordering::Relaxed) {
+        s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name));
+    }
     generated.push(s);
     Ok(generated)
+}
+
+/// The `View` trait's methods for a lowered view (see `stdlib/ui.br`): kind, structural children
+/// of a native container, a native `KeyedGroup`'s key/site, and — for a composite view — the
+/// state seed and `expand`, which re-enters the lowered `body(__st)` with the node's own state.
+/// Parsed from source text so the generated methods are exactly what the parser would produce.
+fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, state_name: &str) -> Vec<FnDecl> {
+    let field_ty = |name: &str| s.fields.iter().find(|f| f.name == name).map(|f| strip_mut(&f.ty).clone());
+    let mut src = format!("struct G:\n    req string viewKind(): \"{}\"\n", s.name);
+    if native {
+        if matches!(field_ty("children"), Some(Type::Array(t)) if matches!(*t, Type::Named(ref n) if n == "View")) {
+            src.push_str("    req [View] viewChildren(): children\n");
+        }
+        // Scalar fields, stringified, are the props a layout/paint pass reads.
+        let mut props = String::new();
+        for f in s.fields.iter().filter(|f| f.name != "key" && f.name != "site") {
+            let ty = strip_mut(&f.ty).clone();
+            match &ty {
+                Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Fn(..) | Type::Tuple(_) => {}
+                Type::Optional(inner) if !matches!(**inner, Type::Array(_)) => {
+                    props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
+                }
+                Type::Named(n) if n == "View" => {}
+                // A lowered `bind` field is a shared `Slot`: its prop is the current value.
+                Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot") => {
+                    props.push_str(&format!("        p[\"{name}\"] = \"{{{name}.value}}\"\n", name = f.name));
+                }
+                _ => props.push_str(&format!("        p[\"{name}\"] = \"{{{name}}}\"\n", name = f.name)),
+            }
+        }
+        if !props.is_empty() {
+            src.push_str(&format!("    req {{string=string}} viewProps():\n        mut {{string=string}} p = {{=}}\n{props}        p\n"));
+        }
+        if field_ty("key").is_some_and(|t| is_named(&t, "string")) {
+            src.push_str("    req string viewKey(): key\n");
+        }
+        if field_ty("site").is_some_and(|t| is_named(&t, "int")) {
+            src.push_str("    req int viewSite(): site\n");
+        }
+    } else if s.methods.iter().any(|m| m.name == "body") && !has_env {
+        // (A view with `env` is not expandable yet: the runtime has no environment to give it.)
+        src.push_str("    req bool isComposite(): true\n");
+        if has_state {
+            src.push_str(&format!("    req StateBox'shared newState(): {state_name}()\n"));
+            src.push_str(&format!(
+                "    req View expand(StateBox'shared st):\n        mut s = st as {state_name} else ({state_name}())\n        self.body(s)\n"
+            ));
+        } else {
+            src.push_str("    req View expand(StateBox'shared st):\n        self.body()\n");
+        }
+    }
+    let tokens = crate::lexer::lex(&src).expect("generated View methods lex");
+    let program = crate::parser::parse(tokens).expect("generated View methods parse");
+    for item in program.items {
+        if let Item::Struct(g) = item { return g.methods; }
+    }
+    vec![]
+}
+
+fn is_named(t: &Type, name: &str) -> bool {
+    matches!(t, Type::Named(n) if n == name)
+}
+
+fn strip_mut(t: &Type) -> &Type {
+    match t { Type::Mut(inner) => strip_mut(inner), other => other }
 }
 
 struct Ctx<'a> {

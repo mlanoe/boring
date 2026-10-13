@@ -1,0 +1,20 @@
+# `viewProps()` of native views: scalar fields stringified, `T?` fields absent while nil.
+use boring.ui.*
+
+def show(View v):
+    mut keys = []
+    for k in v.viewProps().keys():
+        keys.push(k)
+    keys.sort()
+    var out = ""
+    for k in keys:
+        let val = v.viewProps()[k] else ("?")
+        out = "{out}{k}={val} "
+    print out
+
+def main():
+    show(Text("hi"))
+    show(Padding(insets = 10.0, children = [Text("x")]))
+    show(Frame(width = 80.0, minHeight = 5.0, children = [Text("x")]))
+    show(Column(alignment = .Leading, spacing = nil, children = []))
+    show(Spacer())

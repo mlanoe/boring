@@ -12,7 +12,7 @@ struct Text as Widget:
     req string label(): text
 
 struct KeyedGroup as Widget:
-    int key
+    string key
     [Widget] children
     req string label(): "#{self.key}({self.children.length})"
 

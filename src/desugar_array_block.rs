@@ -990,7 +990,12 @@ fn desugar_trailing_array_block(
                 is_lazy: false,
                 line, col,
             }));
-            stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, &trait_name, line, col));
+            // With `boring.ui`'s `Sited` in scope, a `[View]` block with control flow tags every
+            // pushed element with its static position in the block, so a conditional branch or
+            // a keyed `for` keeps the same structural identity whatever its siblings did.
+            let counter = SiteCounter::default();
+            let sites = (trait_name == "View" && sigs.structs.contains_key("Sited")).then_some(&counter);
+            stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, &trait_name, line, col, sites));
             let mut new_args = args;
             new_args.push(Arg {
                 label: trailing_label(sigs, name, &new_args),
@@ -1033,6 +1038,33 @@ fn desugar_trailing_array_block(
     }
 }
 
+/// Hands out static site numbers in preorder over one block.
+#[derive(Default)]
+struct SiteCounter(std::cell::Cell<usize>);
+
+impl SiteCounter {
+    fn take(&self) -> usize {
+        let n = self.0.get();
+        self.0.set(n + 1);
+        n
+    }
+}
+
+/// `Sited(site = n, children = [e])` — the transparent static-position tag (`boring.ui`).
+fn wrap_sited(e: Expr, site: usize, line: usize, col: usize) -> Expr {
+    let lit = |kind| Expr { kind, line, col, len: 0 };
+    Expr {
+        kind: ExprKind::Call(
+            Box::new(lit(ExprKind::Var("Sited".to_string()))),
+            vec![
+                Arg { label: Some("site".to_string()), value: lit(ExprKind::Int(site as i64)), spread: false, default_rest: false },
+                Arg { label: Some("children".to_string()), value: lit(ExprKind::Array(vec![e])), spread: false, default_rest: false },
+            ],
+        ),
+        line, col, len: 0,
+    }
+}
+
 /// Label for the synthesized trailing array argument: the last field's name when `name` is a
 /// struct constructor and the call has no arguments yet (bare `Row:`) or already has labeled
 /// arguments, else positional.
@@ -1047,10 +1079,14 @@ fn trailing_label(sigs: &Signatures, name: &str, args: &[Arg]) -> Option<String>
 /// Builds the imperative push-statement list for the control-flow collect
 /// case: `ArrayBlockElem::Item(e)` -> `__children.push(e)`; `If`/`For` -> the
 /// matching `Stmt::If`/`Stmt::For`, recursing into their own bodies.
-fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name: &str, line: usize, col: usize) -> Vec<Stmt> {
+fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name: &str, line: usize, col: usize, sites: Option<&SiteCounter>) -> Vec<Stmt> {
     elems.iter().map(|elem| match elem {
         ArrayBlockElem::Item(e) => {
-            let push_arg = Arg { label: None, value: e.clone(), spread: false, default_rest: false };
+            let value = match sites {
+                Some(c) => wrap_sited(e.clone(), c.take(), line, col),
+                None => e.clone(),
+            };
+            let push_arg = Arg { label: None, value, spread: false, default_rest: false };
             let recv = Expr { kind: ExprKind::Var(children_var.to_string()), line, col, len: 0 };
             Stmt::Expr(Expr {
                 kind: ExprKind::MethodCall(Box::new(recv), "push".to_string(), vec![push_arg]),
@@ -1059,9 +1095,9 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
         }
         ArrayBlockElem::If { branches, else_body } => {
             let branches = branches.iter()
-                .map(|(c, b)| (c.clone(), elems_to_push_stmts(b, children_var, trait_name, line, col)))
+                .map(|(c, b)| (c.clone(), elems_to_push_stmts(b, children_var, trait_name, line, col, sites)))
                 .collect();
-            let else_body = else_body.as_ref().map(|b| elems_to_push_stmts(b, children_var, trait_name, line, col));
+            let else_body = else_body.as_ref().map(|b| elems_to_push_stmts(b, children_var, trait_name, line, col, sites));
             Stmt::If(IfStmt { branches, else_body, line, col })
         }
         ArrayBlockElem::For { vars, iterable, key: None, body } => {
@@ -1069,7 +1105,8 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
                 vars: vars.clone(),
                 iterable: iterable.clone(),
                 key: None,
-                body: elems_to_push_stmts(body, children_var, trait_name, line, col),
+                // An unkeyed loop keeps positional (index) identity for its items.
+                body: elems_to_push_stmts(body, children_var, trait_name, line, col, None),
                 line, col,
             })
         }
@@ -1092,17 +1129,29 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
                 is_lazy: false,
                 line, col,
             })];
-            inner.extend(elems_to_push_stmts(body, &iter_var, trait_name, line, col));
+            // Inside the group the iteration's own items get a fresh numbering.
+            let inner_counter = SiteCounter::default();
+            inner.extend(elems_to_push_stmts(body, &iter_var, trait_name, line, col, sites.map(|_| &inner_counter)));
             let group = Expr {
                 kind: ExprKind::Call(Box::new(var("KeyedGroup")), vec![
-                    Arg { label: None, value: key.clone(), spread: false, default_rest: false },
+                    // The group's key is always a string (`"{key}"`): the runtime compares keys by
+                    // value and a lowered `for … with key` can't know the key's type here.
+                    Arg {
+                        label: None,
+                        value: Expr { kind: ExprKind::StringInterp(vec![StringSegment::Expr(Box::new(key.clone()))]), line, col, len: 0 },
+                        spread: false, default_rest: false,
+                    },
                     Arg { label: None, value: var(&iter_var), spread: false, default_rest: false },
                 ]),
                 line, col, len: 0,
             };
             inner.push(Stmt::Expr(Expr {
                 kind: ExprKind::MethodCall(Box::new(var(children_var)), "push".to_string(),
-                    vec![Arg { label: None, value: group, spread: false, default_rest: false }]),
+                    vec![Arg {
+                        label: None,
+                        value: match sites { Some(c) => wrap_sited(group, c.take(), line, col), None => group },
+                        spread: false, default_rest: false,
+                    }]),
                 line, col, len: 0,
             }));
             Stmt::For(ForStmt { vars: vars.clone(), iterable: iterable.clone(), key: None, body: inner, line, col })
