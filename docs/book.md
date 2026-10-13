@@ -9144,6 +9144,8 @@ Callers can pass any qualifier. The transpiler acquires the lock at the call sit
 
 A **storage signal** (field assignment, task capture, return with ownership qualifier, or field-destructuring pattern such as `guard let Some(x) = n.field` / `if let Some(x) = n.field` / `let x = n.field`) or a **qualifier demand signal** (passed to a function expecting a specific qualifier) causes the inference to fall back to the normal constraint-elimination path instead.
 
+This applies to every user struct/enum in a **free function** parameter, including structs with dynamic fields (arrays, dicts, sets) of unknown size — a by-value parameter there would force a deep `.clone()` at every call site. Two exceptions stay by value: struct-method parameters, and types that some function returns as `T'actor`/`T'guard` (bare `T` params of those default to `'actor` propagation). Write `T&` explicitly if you need the borrow regardless.
+
 | Parameter | Signals | Emitted form |
 |---|---|---|
 | `Counter c` | none | `&Counter` |

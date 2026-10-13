@@ -6706,7 +6706,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
     fn lent_collection_local_also_read_by_value_hoists_other_args() {
         let src = "struct Holder:\n    pub [int] xs\n\nstruct Bag:\n    pub int n\n\n    def int grow_with(mut [int] a, Holder h):\n        a.push(9)\n        a.length + h.xs.length\n\ndef int grow_with(mut [int] a, Holder h):\n    a.push(9)\n    a.length + h.xs.length\n\ndef int other(mut [int] a, [int] b):\n    a.push(1)\n    b.length\n\ndef main():\n    mut [int] v = [1, 2, 3]\n    mut [int] w = [4]\n    mut Bag b = Bag(1)\n    print grow_with(v, Holder(v))\n    print b.grow_with(w, Holder(w))\n    print other(v, w)\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
-        assert!(code.contains("({ let __arg1 = Holder { xs: v.clone() }; grow_with(&mut v, __arg1) })"),
+        assert!(code.contains("({ let __arg1 = &Holder { xs: v.clone() }; grow_with(&mut v, __arg1) })"),
             "free-function call must hoist the by-value argument, got:\n{code}");
         assert!(code.contains("({ let __arg1 = Holder { xs: w.clone() }; b.grow_with(&mut w, __arg1) })"),
             "method call must hoist the by-value argument, got:\n{code}");
@@ -6830,7 +6830,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(code.contains("Wrapper::List(h.xs.clone())"), "collection field must be cloned, got:\n{code}");
         assert!(code.contains("Wrapper::Boxed(wr.inner.clone())"), "struct field must be cloned, got:\n{code}");
-        assert!(code.contains("len_of(wr.inner.clone())"), "by-value call arg must clone the field, got:\n{code}");
+        assert!(code.contains("len_of(&wr.inner)"), "bare struct param is auto-borrowed (no clone), got:\n{code}");
         assert!(code.contains("Wrapper::Num(h.n)"), "Copy scalar field must stay a plain read, got:\n{code}");
     }
 
@@ -6839,7 +6839,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         // `opt` has no annotation: its `Decl?` type comes from `find`'s declared return type.
         let src = "struct Decl:\n    pub var [int] ps\n\nstruct Reg:\n    pub var int n\n\n    req Decl? find(int k):\n        nil\n\ndef int run_body(Decl d):\n    d.ps.length\n\ndef int f(Reg r):\n    let opt = r.find(1)\n    if let d = opt:\n        let a = run_body(d)\n        return a + d.ps.length\n    0\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
-        assert!(code.contains("run_body(d.clone())"), "if-let binding passed by value and read again must be cloned, got:\n{code}");
+        assert!(code.contains("run_body(&d)"), "if-let binding passed to an auto-borrowed param needs no clone, got:\n{code}");
     }
 
     #[test]

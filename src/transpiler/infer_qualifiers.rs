@@ -91,9 +91,16 @@ impl Transpiler {
                     // Track the struct/enum type name so resolve_fallback knows it's a user struct type.
                     var_struct_types.insert(name.clone(), n.clone());
                     // Eligible for auto-ref inference — free functions only, known-size types only.
-                    // Types with dynamic fields (in all_struct_types but not type_sizes) are excluded:
-                    // they do not benefit from borrow inference and may be actor-source types.
-                    if !self.in_struct_method && self.type_sizes.contains_key(n.as_str()) {
+                    // Structs with dynamic fields (arrays/dicts/sets: in all_struct_types but not
+                    // type_sizes) are eligible too — they benefit most, since a by-value param
+                    // would be cloned at every call site. Actor-source types (some function
+                    // returns `T'actor`/`T'guard`) stay excluded: bare `T` params of those
+                    // default to 'actor propagation instead.
+                    if !self.in_struct_method
+                        && (self.type_sizes.contains_key(n.as_str())
+                            || (self.all_struct_types.contains(n.as_str())
+                                && !self.actor_source_types.contains(n.as_str())))
+                    {
                         auto_ref_param_vars.insert(name.clone());
                     }
                 }

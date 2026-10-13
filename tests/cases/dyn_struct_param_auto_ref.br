@@ -1,0 +1,27 @@
+# A bare struct param whose struct has dynamic fields (arrays/dicts/sets) must be
+# auto-borrowed (`&Dyn`) just like a fixed-size struct — no by-value param, no
+# `.clone()` at the call site. See tests/dyn_struct_param_auto_ref.rs.
+
+struct Small:
+    int n
+    float x
+
+struct Dyn:
+    int n
+    [float] w
+
+int small_n(Small s):
+    s.n
+
+int dyn_n(Dyn s):
+    s.n
+
+int dyn_len(Dyn s):
+    dyn_n(s) + s.w.len()
+
+def main():
+    print small_n(Small(1, 2.0))
+    let d = Dyn(3, [1.0, 2.0])
+    print dyn_n(d)
+    print dyn_len(d)
+    print dyn_n(d)

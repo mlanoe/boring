@@ -94,11 +94,13 @@ fn owned_trait_init_param_is_single_boxed_and_default_is_wrapped() {
         generated
     );
 
-    // ── Bug 2: the omitted-arg call site must wrap the default expression in
-    // `Box::new(...)` to match that param type. ─────────────────────────────
+    // ── Bug 2: the omitted-arg call site must produce a single `Box<dyn Greeter>`.
+    // `freshGreeter()` is declared to return a bare trait, so it already yields
+    // one and is passed as-is (re-wrapping would be `Box<Box<dyn Greeter>>`). ──
     assert!(
-        generated.contains("Greeting::new(Box::new(freshGreeter()))"),
-        "expected the default-arg call site to box `freshGreeter()`'s result — generated source:\n{}",
+        generated.contains("Greeting::new(freshGreeter())")
+            && !generated.contains("Box::new(freshGreeter())"),
+        "expected the default-arg call site to pass `freshGreeter()`'s already-boxed result as-is — generated source:\n{}",
         generated
     );
 }

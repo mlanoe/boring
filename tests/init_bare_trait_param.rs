@@ -96,11 +96,12 @@ fn bare_trait_init_param_default_is_wrapped() {
         generated
     );
 
-    // The omitted-arg call site must wrap the default expression in
-    // `Box::new(...)` to match that param type.
+    // `greeterProvider()` is declared to return a bare trait, so it already
+    // yields `Box<dyn Greeter>`: the call site passes it as-is (no re-boxing).
     assert!(
-        generated.contains("Greeting::new(Box::new(greeterProvider()))"),
-        "expected the default-arg call site to box `greeterProvider()`'s result — generated source:\n{}",
+        generated.contains("Greeting::new(greeterProvider())")
+            && !generated.contains("Box::new(greeterProvider())"),
+        "expected the default-arg call site to pass `greeterProvider()`'s already-boxed result as-is — generated source:\n{}",
         generated
     );
 }

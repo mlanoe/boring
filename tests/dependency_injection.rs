@@ -574,9 +574,11 @@ def main():
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Box::new(networkClient())"),
-        "expected the omitted @inject argument to be boxed to match the bare trait field's \
-         `Box<dyn NetworkClient>` representation, got:\n{}", stdout
+        stdout.contains("UserRepository::new(networkClient())")
+            && !stdout.contains("Box::new(networkClient())"),
+        "expected the omitted @inject argument to be passed as-is: a bare-trait-returning \
+         provider already yields `Box<dyn NetworkClient>`, so re-boxing would double-box, \
+         got:\n{}", stdout
     );
 }
 
