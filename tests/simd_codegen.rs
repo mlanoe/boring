@@ -210,6 +210,54 @@ print w.sizes[0]
 }
 
 #[test]
+fn top_level_warp_sync_runs_as_a_collective_simd_phase() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_sync");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("warp_sync.br");
+    fs::write(
+        &input,
+        r#"
+kernel WarpSync:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        tile[i] = i + 1
+        .warp.sync()
+        output[i] = tile[3 - i]
+mut warp_sync = WarpSync()
+kernel:
+    warp_sync(block = 4)
+print "{warp_sync.output[0]} {warp_sync.output[1]} {warp_sync.output[2]} {warp_sync.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("warp_sync_simd/src/main.rs")).unwrap();
+    assert!(!source.contains("__warp.sync"));
+    assert!(source.matches("'__boring_work_item: for __x").count() >= 2);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("warp_sync_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "4 3 2 1");
+}
+
+#[test]
 fn unchanged_mutable_local_warp_shuffle_runs_on_cpu() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_mutable_local");
     let _ = fs::remove_dir_all(&root);
@@ -329,6 +377,173 @@ fn block_shared_storage_and_top_level_sync_run_on_cpu() {
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5 14 23 32");
+}
+
+#[test]
+fn block_shared_storage_is_reset_for_each_simd_block() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_actor_block_scope");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("actor_block_scope.br");
+    fs::write(
+        &input,
+        r#"
+kernel Shared:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        if .block.x == 0:
+            tile[i] = 7
+        sync
+        output[i + .block.x * .block_dim.x] = tile[i]
+mut shared = Shared()
+kernel:
+    shared(block = 4, grid = 2)
+print "{shared.output[0]} {shared.output[3]} {shared.output[4]} {shared.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("actor_block_scope_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let mut tile: Vec<i32> = vec![Default::default(); 4]"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("actor_block_scope_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "7 7 0 0");
+}
+
+#[test]
+fn top_level_for_loop_with_sync_runs_in_collective_simd_phases() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_for_loop");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_for_loop.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectiveLoop:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        for round in 0..<2:
+            let i = .thread.x
+            tile[i] = i + round * 10
+            sync
+            output[i] = tile[3 - i]
+            sync
+mut collective = CollectiveLoop()
+kernel:
+    collective(block = 4)
+print "{collective.output[0]} {collective.output[1]} {collective.output[2]} {collective.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_for_loop_simd/src/main.rs")).unwrap();
+    assert!(source.contains("for round in 0..2"));
+    assert!(source.matches("'__boring_work_item: for __x").count() >= 3);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_for_loop_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "13 12 11 10");
+}
+
+#[test]
+fn block_uniform_if_with_sync_runs_in_collective_simd_phases() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_if.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectiveIf:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        if .block.x == 0:
+            let i = .thread.x
+            tile[i] = i + 1
+            sync
+            output[i] = tile[3 - i]
+mut collective = CollectiveIf()
+kernel:
+    collective(block = 4, grid = 2)
+print "{collective.output[0]} {collective.output[3]} {collective.output[4]} {collective.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_if_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "4 1 0 0");
+}
+
+#[test]
+fn thread_divergent_if_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_if.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        if .thread.x == 0:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(
+        String::from_utf8_lossy(&generated.stderr)
+            .contains("`sync` is not yet supported inside a --target simd kernel")
+    );
 }
 
 #[test]
@@ -1849,6 +2064,148 @@ print "{labeled.output[0]} {labeled.output[1]} {labeled.output[2]} {labeled.outp
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "0 1 10 11");
+}
+
+#[test]
+fn thread_local_fields_are_private_and_survive_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_thread_local_fields");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("thread_local_fields.br");
+    fs::write(
+        &input,
+        r#"
+kernel ThreadLocal:
+    var int register
+    mut [int, 2] scratch
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        register = i + 10
+        scratch[0] = i
+        scratch[1] = i * 100
+        sync
+        output[i] = register + scratch[0] + scratch[1]
+mut local = ThreadLocal()
+kernel:
+    local(block = 4)
+print "{local.output[0]} {local.output[1]} {local.output[2]} {local.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("thread_local_fields_simd/src/main.rs")).unwrap();
+    assert!(source.contains("__boring_local_scratch"));
+    assert!(source.contains("__boring_local_register"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("thread_local_fields_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 112 214 316");
+}
+
+#[test]
+fn expression_sized_thread_local_arrays_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_expr_sized_local");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("expr_sized_local.br");
+    fs::write(
+        &input,
+        r#"
+kernel ExprSizedLocal:
+    mut [int, 2 * 2] scratch
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        scratch[i] = i + 5
+        output[i] = scratch[i]
+mut sized = ExprSizedLocal()
+kernel:
+    sized(block = 4)
+print "{sized.output[0]} {sized.output[1]} {sized.output[2]} {sized.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("expr_sized_local_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let mut scratch: Vec<i32>"));
+    assert!(source.contains("vec![Default::default(); ((2 * 2)) as usize]"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("expr_sized_local_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5 6 7 8");
+}
+
+#[test]
+fn surface_buffers_run_on_simd_as_cpu_pixel_vectors() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_surface_buffer");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("surface_buffer.br");
+    fs::write(
+        &input,
+        r#"
+kernel Paint:
+    mut [uint]'surface pixels
+    init():
+        pixels = [uint(0) for ..<4]
+    def ():
+        let i = .thread.x
+        pixels[i] = uint(i * 3 + 1)
+mut paint = Paint()
+kernel:
+    paint(block = 4)
+print "{paint.pixels[0]} {paint.pixels[1]} {paint.pixels[2]} {paint.pixels[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("surface_buffer_simd/src/main.rs")).unwrap();
+    assert!(source.contains("pixels: Vec<u32>"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("surface_buffer_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1 4 7 10");
 }
 
 #[test]

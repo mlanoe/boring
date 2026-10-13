@@ -52,23 +52,9 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
     let general = crate::transpiler::transpile_with_config(&renamed, config);
     let (has_main, main_throws) = crate::transpiler::detect_boring_main(&renamed, &general);
 
-    let mut initial_errors = general.errors;
-    for k in &kernels {
-        for field in &k.fields {
-            if matches!(
-                field.qual,
-                GpuQual::Local | GpuQual::Surface
-            ) {
-                initial_errors.push(crate::errors::SourceError::at(
-                    format!("kernel '{}': field '{}' uses {:?} storage, which is not yet supported by --target simd", k.name, field.name, field.qual),
-                    field.line, field.col,
-                ));
-            }
-        }
-    }
     let mut e = Emitter {
         out: String::new(),
-        errors: initial_errors,
+        errors: general.errors,
         fields: std::collections::HashSet::new(),
         field_axes: std::collections::HashMap::new(),
         local_axes: std::collections::HashMap::new(),
@@ -205,7 +191,12 @@ impl Emitter {
         self.out.push('\n');
     }
     fn kernel(&mut self, k: &KernelDecl) {
-        self.fields = k.fields.iter().map(|f| f.name.clone()).collect();
+        self.fields = k
+            .fields
+            .iter()
+            .filter(|f| !matches!(f.qual, GpuQual::Local | GpuQual::Actor))
+            .map(|f| f.name.clone())
+            .collect();
         self.arrays = k
             .fields
             .iter()
@@ -248,6 +239,11 @@ impl Emitter {
         }
         self.line(0, &format!("#[derive(Debug)] struct {} {{", k.name));
         for f in &k.fields {
+            if matches!(f.qual, GpuQual::Actor)
+                || (matches!(f.qual, GpuQual::Local) && is_array(&f.ty))
+            {
+                continue;
+            }
             self.line(1, &format!("{}: {},", f.name, ty(&f.ty)));
         }
         self.line(0, "}");
@@ -255,12 +251,17 @@ impl Emitter {
         self.line(1, "fn new(_: __BoringCpu, _: __BoringCpu) -> Self {");
         self.line(2, "Self {");
         for f in &k.fields {
+            if matches!(f.qual, GpuQual::Actor)
+                || (matches!(f.qual, GpuQual::Local) && is_array(&f.ty))
+            {
+                continue;
+            }
             self.line(3, &format!("{}: {},", f.name, default_value(&f.ty)));
         }
         self.line(2, "}");
         self.line(1, "}");
         for f in &k.fields {
-            if is_array(&f.ty) {
+            if is_array(&f.ty) && !matches!(f.qual, GpuQual::Local | GpuQual::Actor) {
                 let t = elem_ty(&f.ty);
                 self.line(
                     1,
@@ -315,14 +316,77 @@ impl Emitter {
             let has_top_level_sync = m
                 .body
                 .iter()
-                .any(|stmt| matches!(stmt, Stmt::Comment(comment) if comment == "sync"));
-            if has_top_level_sync {
+                .any(is_simd_barrier_stmt);
+            let barrier_for = if m.body.len() == 1 {
+                match &m.body[0] {
+                    Stmt::For(for_stmt)
+                        if for_stmt.body.iter().any(is_simd_barrier_stmt) => Some(for_stmt),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let barrier_if = if m.body.len() == 1 {
+                match &m.body[0] {
+                    Stmt::If(if_stmt)
+                        if if_stmt.branches.len() == 1
+                            && if_stmt.else_body.is_none()
+                            && simd_block_uniform_expr(&if_stmt.branches[0].0)
+                            && if_stmt.branches[0].1.iter().any(is_simd_barrier_stmt) => {
+                        Some((&if_stmt.branches[0].0, if_stmt.branches[0].1.as_slice()))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if has_top_level_sync || barrier_for.is_some() || barrier_if.is_some() {
                 self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
                 self.line(3, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Actor)) {
+                    self.line(
+                        3,
+                        &format!(
+                            "let mut {}: {} = {};",
+                            field.name,
+                            ty(&field.ty),
+                            default_value(&field.ty)
+                        ),
+                    );
+                }
                 self.line(3, "let mut __boring_barrier_active = vec![true; (dx * dy * dz) as usize];");
-                let phases = m
-                    .body
-                    .split(|stmt| matches!(stmt, Stmt::Comment(comment) if comment == "sync"))
+                for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
+                    let initial = if is_array(&field.ty) {
+                        default_value(&field.ty)
+                    } else {
+                        format!("self.{}.clone()", field.name)
+                    };
+                    self.line(
+                        3,
+                        &format!(
+                            "let mut __boring_local_{}: Vec<{}> = vec![{}; (dx * dy * dz) as usize];",
+                            field.name,
+                            ty(&field.ty),
+                            initial
+                        ),
+                    );
+                }
+                let (phase_body, phase_indent) = if let Some(for_stmt) = barrier_for {
+                    let iterable = self.expr(&for_stmt.iterable);
+                    self.line(
+                        3,
+                        &format!("for {} in {} {{", for_stmt.vars.join(", "), iterable),
+                    );
+                    (for_stmt.body.as_slice(), 4)
+                } else if let Some((condition, body)) = barrier_if {
+                    let condition = self.expr(condition);
+                    self.line(3, &format!("if {condition} {{"));
+                    (body, 4)
+                } else {
+                    (m.body.as_slice(), 3)
+                };
+                let phases = phase_body
+                    .split(|stmt| is_simd_barrier_stmt(stmt))
                     .collect::<Vec<_>>();
                 let mut carried_mutable_locals = Vec::new();
                 for (declaration_phase, phase) in phases.iter().enumerate() {
@@ -338,7 +402,7 @@ impl Emitter {
                                     })
                                 {
                                     self.line(
-                                        3,
+                                        phase_indent,
                                         &format!(
                                             "let mut __boring_barrier_{}: Vec<{}> = vec![Default::default(); (dx * dy * dz) as usize];",
                                             local.name, local_ty
@@ -357,20 +421,31 @@ impl Emitter {
                 let mut replayed_phase_locals = Vec::new();
                 let mut replayed_phase_local_names = std::collections::HashSet::new();
                 for (phase_index, phase) in phases.into_iter().enumerate() {
-                    self.line(3, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
-                    self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
-                    self.line(4, "let __boring_barrier_thread = __x + dx as usize * (ty + dy as usize * tz);");
-                    self.line(4, "if !__boring_barrier_active[__boring_barrier_thread] { continue '__boring_work_item; }");
+                    self.line(phase_indent, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
+                    self.line(phase_indent + 1, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
+                    self.line(phase_indent + 1, "let __boring_barrier_thread = __x + dx as usize * (ty + dy as usize * tz);");
+                    self.line(phase_indent + 1, "if !__boring_barrier_active[__boring_barrier_thread] { continue '__boring_work_item; }");
+                    for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
+                        self.line(
+                            phase_indent + 1,
+                            &format!(
+                                "let mut {}: {} = __boring_local_{}[__boring_barrier_thread].clone();",
+                                field.name,
+                                ty(&field.ty),
+                                field.name
+                            ),
+                        );
+                    }
                     self.work_item_return_uses_active_mask = Some(true);
                     if phase_index > 0 {
                         for local in &replayed_phase_locals {
-                            self.stmt(local, 4);
+                            self.stmt(local, phase_indent + 1);
                         }
                     }
                     for (name, local_ty, declaration_phase) in &carried_mutable_locals {
                         if *declaration_phase < phase_index {
                             self.line(
-                                4,
+                                phase_indent + 1,
                                 &format!(
                                     "let mut {name}: {local_ty} = __boring_barrier_{name}[__boring_barrier_thread].clone();"
                                 ),
@@ -378,13 +453,22 @@ impl Emitter {
                         }
                     }
                     for stmt in phase {
-                        self.stmt(stmt, 4);
+                        self.stmt(stmt, phase_indent + 1);
                     }
                     self.work_item_return_uses_active_mask = None;
+                    for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
+                        self.line(
+                            phase_indent + 1,
+                            &format!(
+                                "__boring_local_{}[__boring_barrier_thread] = {}.clone();",
+                                field.name, field.name
+                            ),
+                        );
+                    }
                     for (name, _, declaration_phase) in &carried_mutable_locals {
                         if *declaration_phase <= phase_index {
                             self.line(
-                                4,
+                                phase_indent + 1,
                                 &format!(
                                     "__boring_barrier_{name}[__boring_barrier_thread] = {name}.clone();"
                                 ),
@@ -406,19 +490,46 @@ impl Emitter {
                             }
                         }
                     }
-                    self.line(3, "} } }");
+                    self.line(phase_indent, "} } }");
+                }
+                if barrier_for.is_some() || barrier_if.is_some() {
+                    self.line(3, "}");
                 }
                 self.line(2, "} } }");
             } else {
-                self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
+                self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
+                self.line(3, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Actor)) {
+                    self.line(
+                        3,
+                        &format!(
+                            "let mut {}: {} = {};",
+                            field.name,
+                            ty(&field.ty),
+                            default_value(&field.ty)
+                        ),
+                    );
+                }
+                self.line(3, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
                 self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
-                self.line(4, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
+                    let initial = if is_array(&field.ty) {
+                        default_value(&field.ty)
+                    } else {
+                        format!("self.{}.clone()", field.name)
+                    };
+                    self.line(
+                        4,
+                        &format!("let mut {}: {} = {};", field.name, ty(&field.ty), initial),
+                    );
+                }
                 self.work_item_return_uses_active_mask = Some(false);
                 for stmt in &m.body {
                     self.stmt(stmt, 4);
                 }
                 self.work_item_return_uses_active_mask = None;
-                self.line(2, "} } } } } }");
+                self.line(3, "} } }");
+                self.line(2, "} } }");
             }
         } else {
             self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
@@ -1768,6 +1879,43 @@ fn simd_pattern(pattern: &Pattern) -> String {
     }
 }
 
+fn simd_block_uniform_expr(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::UInt64(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_) => true,
+        ExprKind::Var(name) => matches!(name.as_str(), "block" | "block_dim" | "grid_dim"),
+        ExprKind::DotIdent(name) => matches!(name.as_str(), "block" | "block_dim"),
+        ExprKind::Field(object, _)
+            if matches!(
+                &object.kind,
+                ExprKind::Field(root, base)
+                    if matches!(&root.kind, ExprKind::Var(name) if name == "gpu")
+                        && matches!(base.as_str(), "block" | "block_dim" | "blockDim" | "grid_dim" | "gridDim")
+            ) => true,
+        ExprKind::Field(object, _) | ExprKind::UnaryOp(_, object) | ExprKind::Cast(object, _) => {
+            simd_block_uniform_expr(object)
+        }
+        ExprKind::BinOp(_, left, right) => {
+            simd_block_uniform_expr(left) && simd_block_uniform_expr(right)
+        }
+        _ => false,
+    }
+}
+
+fn is_simd_barrier_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Comment(comment) => comment == "sync",
+        Stmt::Expr(expr) => matches!(
+            &expr.kind,
+            ExprKind::MethodCall(receiver, method, args)
+                if is_warp_receiver(receiver) && method == "sync" && args.is_empty()
+        ),
+        _ => false,
+    }
+}
+
 fn stmt_position(stmt: &Stmt) -> (usize, usize) {
     match stmt {
         Stmt::Let(s) => (s.line, s.col),
@@ -1805,12 +1953,12 @@ fn base(t: &Type) -> &Type {
 fn is_array(t: &Type) -> bool {
     matches!(
         base(t),
-        Type::Array(_) | Type::ArrayN(_, _) | Type::LabeledArray(_, _)
+        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)
     )
 }
 fn elem_ty(t: &Type) -> String {
     match base(t) {
-        Type::Array(x) | Type::ArrayN(x, _) => ty(x),
+        Type::Array(x) | Type::ArrayN(x, _) | Type::ArrayNExpr(x, _) => ty(x),
         Type::LabeledArray(x, _) => ty(x),
         _ => "f64".into(),
     }
@@ -1838,7 +1986,7 @@ fn ty(t: &Type) -> String {
             "bool" => "bool".into(),
             _ => "isize".into(),
         },
-        Type::Array(_) | Type::ArrayN(_, _) | Type::LabeledArray(_, _) => {
+        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => {
             format!("Vec<{}>", elem_ty(t))
         }
         Type::Optional(inner) => format!("Option<{}>", ty(inner)),
@@ -1847,15 +1995,16 @@ fn ty(t: &Type) -> String {
 }
 fn default_value(t: &Type) -> String {
     if is_array(t) {
-        let len = match base(t) {
-            Type::ArrayN(_, n) => Some(*n),
-            other => other
-                .labeled_array_len()
-                .and_then(|n| usize::try_from(n).ok()),
-        };
-        match len {
-            Some(n) => format!("vec![Default::default(); {n}]"),
-            None => "Vec::new()".into(),
+        match base(t) {
+            Type::ArrayN(_, n) => format!("vec![Default::default(); {n}]"),
+            Type::ArrayNExpr(_, size) => format!(
+                "vec![Default::default(); ({}) as usize]",
+                crate::transpiler::helpers::const_expr_to_c_like(&size.0)
+            ),
+            other => match other.labeled_array_len() {
+                Some(n) => format!("vec![Default::default(); {n}]"),
+                None => "Vec::new()".into(),
+            },
         }
     } else {
         "Default::default()".into()
