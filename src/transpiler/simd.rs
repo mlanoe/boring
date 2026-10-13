@@ -71,6 +71,8 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         errors: initial_errors,
         fields: std::collections::HashSet::new(),
         field_axes: std::collections::HashMap::new(),
+        local_axes: std::collections::HashMap::new(),
+        arrays: std::collections::HashSet::new(),
         global_consts,
         locals: std::collections::HashSet::new(),
         value_types: std::collections::HashMap::new(),
@@ -81,6 +83,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         value_loop_depth: 0,
         thread_override: None,
         control_flow_depth: 0,
+        work_item_return_uses_active_mask: None,
     };
     e.raw(PRELUDE);
     for kernel in &kernels {
@@ -178,6 +181,8 @@ struct Emitter {
     errors: Vec<crate::transpiler::TranspileError>,
     fields: std::collections::HashSet<String>,
     field_axes: std::collections::HashMap<String, Vec<LabeledAxis>>,
+    local_axes: std::collections::HashMap<String, Vec<LabeledAxis>>,
+    arrays: std::collections::HashSet<String>,
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
@@ -188,6 +193,7 @@ struct Emitter {
     value_loop_depth: usize,
     thread_override: Option<String>,
     control_flow_depth: usize,
+    work_item_return_uses_active_mask: Option<bool>,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -200,6 +206,12 @@ impl Emitter {
     }
     fn kernel(&mut self, k: &KernelDecl) {
         self.fields = k.fields.iter().map(|f| f.name.clone()).collect();
+        self.arrays = k
+            .fields
+            .iter()
+            .filter(|field| is_array(&field.ty))
+            .map(|field| field.name.clone())
+            .collect();
         self.field_axes = k
             .fields
             .iter()
@@ -209,11 +221,13 @@ impl Emitter {
             })
             .collect();
         self.locals.clear();
+        self.local_axes.clear();
         self.value_types.clear();
         self.replayable_locals.clear();
         self.replayed_assignments.clear();
         self.while_let_redirect.clear();
         self.while_let_break_sync = None;
+        self.work_item_return_uses_active_mask = None;
         for field in &k.fields {
             let field_ty = if is_array(&field.ty) {
                 elem_ty(&field.ty)
@@ -305,6 +319,7 @@ impl Emitter {
             if has_top_level_sync {
                 self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
                 self.line(3, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                self.line(3, "let mut __boring_barrier_active = vec![true; (dx * dy * dz) as usize];");
                 let phases = m
                     .body
                     .split(|stmt| matches!(stmt, Stmt::Comment(comment) if comment == "sync"))
@@ -342,9 +357,11 @@ impl Emitter {
                 let mut replayed_phase_locals = Vec::new();
                 let mut replayed_phase_local_names = std::collections::HashSet::new();
                 for (phase_index, phase) in phases.into_iter().enumerate() {
-                    self.line(3, "for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
+                    self.line(3, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
                     self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
                     self.line(4, "let __boring_barrier_thread = __x + dx as usize * (ty + dy as usize * tz);");
+                    self.line(4, "if !__boring_barrier_active[__boring_barrier_thread] { continue '__boring_work_item; }");
+                    self.work_item_return_uses_active_mask = Some(true);
                     if phase_index > 0 {
                         for local in &replayed_phase_locals {
                             self.stmt(local, 4);
@@ -363,6 +380,7 @@ impl Emitter {
                     for stmt in phase {
                         self.stmt(stmt, 4);
                     }
+                    self.work_item_return_uses_active_mask = None;
                     for (name, _, declaration_phase) in &carried_mutable_locals {
                         if *declaration_phase <= phase_index {
                             self.line(
@@ -392,12 +410,14 @@ impl Emitter {
                 }
                 self.line(2, "} } }");
             } else {
-                self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { for __x in 0..dx as usize {");
+                self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize { for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
                 self.line(4, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
                 self.line(4, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
+                self.work_item_return_uses_active_mask = Some(false);
                 for stmt in &m.body {
                     self.stmt(stmt, 4);
                 }
+                self.work_item_return_uses_active_mask = None;
                 self.line(2, "} } } } } }");
             }
         } else {
@@ -444,6 +464,27 @@ impl Emitter {
                 );
                 if let Some(inferred_ty) = inferred_ty {
                     self.value_types.insert(v.name.clone(), inferred_ty);
+                }
+                if let Some((_, axes)) = v.ty.as_ref().and_then(Type::as_labeled_array) {
+                    self.local_axes.insert(v.name.clone(), axes.to_vec());
+                }
+                let collection_initializer = v.value.as_ref().is_some_and(|value| {
+                    matches!(
+                        &value.kind,
+                        ExprKind::Array(_)
+                            | ExprKind::ArrayFill { .. }
+                            | ExprKind::ArrayAlloc { .. }
+                            | ExprKind::ArrayComp { .. }
+                            | ExprKind::ArrayCompIter { .. }
+                            | ExprKind::LabeledArrayComp { .. }
+                    ) || matches!(
+                        &value.kind,
+                        ExprKind::MethodCall(_, method, _)
+                            if matches!(method.as_str(), "map" | "filter")
+                    )
+                });
+                if v.ty.as_ref().is_some_and(is_array) || collection_initializer {
+                    self.arrays.insert(v.name.clone());
                 }
                 if let Some(initializer) = v.value.as_ref().filter(|e| self.warp_replayable(e)) {
                     self.replayable_locals
@@ -726,6 +767,22 @@ impl Emitter {
                 }
                 self.line(n, "continue;");
             }
+            Stmt::Return(r) => {
+                if r.value.is_some() {
+                    self.errors.push(crate::errors::SourceError::at(
+                        "a SIMD kernel cannot return a value",
+                        r.line,
+                        r.col,
+                    ));
+                }
+                if self.work_item_return_uses_active_mask == Some(true) {
+                    self.line(
+                        n,
+                        "__boring_barrier_active[__boring_barrier_thread] = false;",
+                    );
+                }
+                self.line(n, "continue '__boring_work_item;");
+            }
             other => {
                 let (line, col) = stmt_position(other);
                 self.errors.push(crate::errors::SourceError::at(
@@ -835,8 +892,22 @@ impl Emitter {
                 format!("__{v}")
             }
             ExprKind::Field(a, b) => {
+                if let ExprKind::Var(name) = &a.kind {
+                    if self.arrays.contains(name) {
+                        let array = self.expr(a);
+                        match b.as_str() {
+                            "length" | "count" => return format!("({array}.len() as i32)"),
+                            "isEmpty" => return format!("{array}.is_empty()"),
+                            _ => {}
+                        }
+                    }
+                }
                 if let ExprKind::Var(field) = &a.kind {
-                    if let Some(axes) = self.field_axes.get(field) {
+                    if let Some(axes) = self
+                        .field_axes
+                        .get(field)
+                        .or_else(|| self.local_axes.get(field))
+                    {
                         if let Some(axis) = axes.iter().find(|axis| axis.label == *b) {
                             if let Some(size) = &axis.size {
                                 return crate::transpiler::helpers::const_expr_to_c_like(&size.0);
@@ -975,6 +1046,7 @@ impl Emitter {
                 self.expr(a)
             ),
             ExprKind::Cast(a, t) => format!("({} as {})", self.expr(a), ty(t)),
+            ExprKind::RelabelCast(value, _) => self.expr(value),
             ExprKind::Range {
                 start,
                 end,
@@ -1009,6 +1081,26 @@ impl Emitter {
                 self.expr(iter),
                 self.expr(expr),
             ),
+            ExprKind::LabeledArrayComp { expr, clauses } => {
+                let counts = clauses
+                    .iter()
+                    .map(|(_, count)| self.expr(count))
+                    .collect::<Vec<_>>();
+                let value = self.expr(expr);
+                let mut generated = String::from("{ let mut __boring_labeled_array = Vec::new(); ");
+                for (index, (name, _)) in clauses.iter().enumerate().rev() {
+                    generated.push_str(&format!(
+                        "for __boring_axis_{index} in 0..(({}) as usize) {{ let {name} = __boring_axis_{index} as i32; ",
+                        counts[index]
+                    ));
+                }
+                generated.push_str(&format!("__boring_labeled_array.push({value}); "));
+                for _ in clauses {
+                    generated.push_str("} ");
+                }
+                generated.push_str("__boring_labeled_array }");
+                generated
+            }
             ExprKind::Tuple(elements) => {
                 let values = elements
                     .iter()
@@ -1064,6 +1156,58 @@ impl Emitter {
                     .join(", ")
             ),
             ExprKind::MethodCall(o, m, args) => {
+                if m == "sum" && args.is_empty() {
+                    let sum_ty = self.expr_type(o).unwrap_or_else(|| "i32".into());
+                    return format!("{}.iter().cloned().sum::<{sum_ty}>()", self.expr(o));
+                }
+                if matches!(m.as_str(), "min" | "max") && args.is_empty() {
+                    return format!(
+                        "{}.iter().cloned().{}().expect(\"empty SIMD collection reduction\")",
+                        self.expr(o),
+                        m
+                    );
+                }
+                if matches!(m.as_str(), "any" | "all") && args.len() == 1 {
+                    return format!(
+                        "{}.iter().cloned().{}({})",
+                        self.expr(o),
+                        m,
+                        self.expr(&args[0].value)
+                    );
+                }
+                if m == "map" && args.len() == 1 {
+                    return format!(
+                        "{}.iter().cloned().map({}).collect::<Vec<_>>()",
+                        self.expr(o),
+                        self.expr(&args[0].value)
+                    );
+                }
+                if m == "filter" && args.len() == 1 {
+                    if let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind {
+                        if let Some(param) = params.first() {
+                            let body = match body {
+                                ClosureBody::Expr(value) => self.expr(value),
+                                ClosureBody::Block(statements) => {
+                                    format!("{{ {} }}", self.expr_body_as(statements, None))
+                                }
+                            };
+                            return format!(
+                                "{}.iter().cloned().filter(|__boring_item| {{ let {} = __boring_item.clone(); {} }}).collect::<Vec<_>>()",
+                                self.expr(o),
+                                param.name,
+                                body
+                            );
+                        }
+                    }
+                }
+                if m == "reduce" && args.len() == 2 {
+                    return format!(
+                        "{}.iter().cloned().fold({}, {})",
+                        self.expr(o),
+                        self.expr(&args[0].value),
+                        self.expr(&args[1].value)
+                    );
+                }
                 if is_warp_receiver(o) && is_warp_shuffle(m) {
                     return self.warp_shuffle(e, m, args);
                 }
@@ -1164,6 +1308,30 @@ impl Emitter {
                 self.while_let_break_sync = previous_break_sync;
                 let expression = std::mem::replace(&mut self.out, outer_output);
                 expression.trim().to_string()
+            }
+            ExprKind::Closure(params, return_ty, body, _, _) => {
+                let params = params
+                    .iter()
+                    .map(|param| {
+                        param
+                            .ty
+                            .as_ref()
+                            .map(|param_ty| format!("{}: {}", param.name, ty(param_ty)))
+                            .unwrap_or_else(|| param.name.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let return_ty = return_ty
+                    .as_ref()
+                    .map(|return_ty| format!(" -> {}", ty(return_ty)))
+                    .unwrap_or_default();
+                let body = match body {
+                    ClosureBody::Expr(value) => self.expr(value),
+                    ClosureBody::Block(statements) => {
+                        format!("{{ {} }}", self.expr_body_as(statements, None))
+                    }
+                };
+                format!("|{params}|{return_ty} {body}")
             }
             ExprKind::Block(statements) | ExprKind::Do(statements) => {
                 format!("{{ {} }}", self.expr_body_as(statements, None))
@@ -1340,6 +1508,7 @@ impl Emitter {
             ExprKind::UInt64(_) => Some("u64".into()),
             ExprKind::Float(_) => Some("f64".into()),
             ExprKind::Bool(_) => Some("bool".into()),
+            ExprKind::Array(values) => values.first().and_then(|value| self.expr_type(value)),
             ExprKind::Var(name) => self
                 .value_types
                 .get(name)
@@ -1357,6 +1526,15 @@ impl Emitter {
                 ExprKind::Var(name) => primitive_cast_type(name).map(str::to_string),
                 _ => None,
             },
+            ExprKind::MethodCall(object, method, _) if method == "filter" => self.expr_type(object),
+            ExprKind::MethodCall(_, method, args) if method == "map" => args
+                .first()
+                .and_then(|arg| match &arg.value.kind {
+                    ExprKind::Closure(_, _, ClosureBody::Expr(value), _, _) => {
+                        self.expr_type(value)
+                    }
+                    _ => None,
+                }),
             ExprKind::UnaryOp(_, value) => self.expr_type(value),
             ExprKind::BinOp(op, left, right) => {
                 if matches!(
@@ -1432,9 +1610,14 @@ impl Emitter {
             ));
             return "/* rejected labeled index */ 0".into();
         };
-        let Some(axes) = self.field_axes.get(field).cloned() else {
+        let axes = self
+            .field_axes
+            .get(field)
+            .or_else(|| self.local_axes.get(field))
+            .cloned();
+        let Some(axes) = axes else {
             self.errors.push(crate::errors::SourceError::at(
-                format!("kernel field '{}' has no labeled dimensions", field),
+                format!("array '{}' has no labeled dimensions", field),
                 object.line,
                 object.col,
             ));
@@ -1466,7 +1649,12 @@ impl Emitter {
                 );
             }
         }
-        format!("self.{field}[{}]", terms.join(" + "))
+        let object = if self.fields.contains(field) {
+            format!("self.{field}")
+        } else {
+            field.clone()
+        };
+        format!("{object}[{}]", terms.join(" + "))
     }
 }
 

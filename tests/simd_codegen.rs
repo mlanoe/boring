@@ -1531,6 +1531,106 @@ print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3
 }
 
 #[test]
+fn local_labeled_array_relabel_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_labeled_local");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("labeled_local.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel LabeledLocal:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let [int, width = 2, height = 2] original = [10, 20, 30, 40]
+        var [int, w = 2, h = 2] renamed = original as [w = width, h = height]
+        renamed[w = 1, h = 0] = 25
+        output[i] = renamed[w = i % 2, h = i / 2] + renamed.w + renamed.h
+mut values = LabeledLocal(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("labeled_local_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "14 29 34 44");
+}
+
+#[test]
+fn local_array_closure_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_array_closure");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("array_closure.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel ArrayClosure:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3, 4].filter((value): value % 2 == 0).map((value): value + i)
+        let int total = values.sum()
+        let minimum = values.min()
+        let maximum = values.max()
+        let reduced = values.reduce(0, (sum, value): sum + value)
+        output[i] = reduced + total + minimum + maximum + values.length
+        if values.isEmpty:
+            output[i] = -1
+        if output.length != 4:
+            output[i] = -2
+        if values.any((value): value > 5):
+            output[i] = output[i] + 1
+mut values = ArrayClosure(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("array_closure_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "20 26 33 39");
+}
+
+#[test]
 fn labeled_matrix_kernel_builds_and_runs() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_matrix_example");
     let _ = fs::remove_dir_all(&root);
@@ -1613,6 +1713,142 @@ print bits.out[0]
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "6");
+}
+
+#[test]
+fn early_return_stops_only_the_current_work_item() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_early_return");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("early_return.br");
+    fs::write(
+        &input,
+        r#"
+kernel EarlyReturn:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        if i % 2 == 0:
+            return
+        output[i] = i + 10
+mut early = EarlyReturn()
+kernel:
+    early(block = 4)
+print "{early.output[0]} {early.output[1]} {early.output[2]} {early.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("early_return_simd/src/main.rs")).unwrap();
+    assert!(source.contains("continue '__boring_work_item;"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("early_return_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "0 11 0 13");
+}
+
+#[test]
+fn early_return_remains_inactive_after_a_simd_sync_phase() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_early_return");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_early_return.br");
+    fs::write(
+        &input,
+        r#"
+kernel EarlyReturn:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        if i == 1:
+            return
+        sync
+        output[i] = i + 10
+mut early = EarlyReturn()
+kernel:
+    early(block = 4)
+print "{early.output[0]} {early.output[1]} {early.output[2]} {early.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_early_return_simd/src/main.rs")).unwrap();
+    assert!(source.contains("__boring_barrier_active[__boring_barrier_thread] = false;"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_early_return_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 0 12 13");
+}
+
+#[test]
+fn labeled_array_comprehensions_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_labeled_comprehension");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("labeled_comprehension.br");
+    fs::write(
+        &input,
+        r#"
+kernel LabeledComprehension:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let [int, width = 2, height = 2] values = [width + height * 10 for width in ..<2 for height in ..<2]
+        let i = .thread.x
+        output[i] = values[width = i % 2, height = i / 2]
+mut labeled = LabeledComprehension()
+kernel:
+    labeled(block = 4)
+print "{labeled.output[0]} {labeled.output[1]} {labeled.output[2]} {labeled.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("labeled_comprehension_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "0 1 10 11");
 }
 
 #[test]
