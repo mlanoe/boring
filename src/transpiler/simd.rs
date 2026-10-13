@@ -78,6 +78,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         replayed_assignments: std::collections::HashMap::new(),
         while_let_redirect: std::collections::HashMap::new(),
         while_let_break_sync: None,
+        value_loop_depth: 0,
         thread_override: None,
         control_flow_depth: 0,
     };
@@ -184,6 +185,7 @@ struct Emitter {
     replayed_assignments: std::collections::HashMap<String, String>,
     while_let_redirect: std::collections::HashMap<String, String>,
     while_let_break_sync: Option<(String, String)>,
+    value_loop_depth: usize,
     thread_override: Option<String>,
     control_flow_depth: usize,
 }
@@ -703,11 +705,20 @@ impl Emitter {
                 self.while_let_break_sync = previous_break_sync;
                 self.line(n, "}");
             }
-            Stmt::Break(_, _) => {
+            Stmt::Break(_, value) => {
                 if let Some((name, outer)) = self.while_let_break_sync.clone() {
                     self.line(n, &format!("{outer} = Some({name});"));
                 }
-                self.line(n, "break;");
+                if self.value_loop_depth > 0 {
+                    if let Some(value) = value {
+                        let value = self.expr(value);
+                        self.line(n, &format!("break {value};"));
+                    } else {
+                        self.line(n, "break;");
+                    }
+                } else {
+                    self.line(n, "break;");
+                }
             }
             Stmt::Continue(_) => {
                 if let Some((name, outer)) = self.while_let_break_sync.clone() {
@@ -1034,6 +1045,24 @@ impl Emitter {
                         .join(", ")
                 )
             }
+            ExprKind::GenericCall(callee, type_args, args) => format!(
+                "{}::<{}>({})",
+                self.expr(callee),
+                type_args.iter().map(ty).collect::<Vec<_>>().join(", "),
+                args.iter()
+                    .map(|arg| self.expr(&arg.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ExprKind::Pipe(value, method, args) => format!(
+                "{}.{}({})",
+                self.expr(value),
+                method,
+                args.iter()
+                    .map(|arg| self.expr(&arg.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             ExprKind::MethodCall(o, m, args) => {
                 if is_warp_receiver(o) && is_warp_shuffle(m) {
                     return self.warp_shuffle(e, m, args);
@@ -1121,6 +1150,20 @@ impl Emitter {
                 }
                 out.push('}');
                 out
+            }
+            ExprKind::Loop(loop_stmt) => {
+                let outer_output = std::mem::take(&mut self.out);
+                let previous_break_sync = self.while_let_break_sync.take();
+                self.value_loop_depth += 1;
+                self.line(0, "loop {");
+                for stmt in &loop_stmt.body {
+                    self.stmt(stmt, 1);
+                }
+                self.line(0, "}");
+                self.value_loop_depth -= 1;
+                self.while_let_break_sync = previous_break_sync;
+                let expression = std::mem::replace(&mut self.out, outer_output);
+                expression.trim().to_string()
             }
             ExprKind::Block(statements) | ExprKind::Do(statements) => {
                 format!("{{ {} }}", self.expr_body_as(statements, None))

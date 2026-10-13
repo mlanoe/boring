@@ -1393,6 +1393,144 @@ print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3
 }
 
 #[test]
+fn local_loop_expression_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_loop_expression");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("loop_expression.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel LoopExpression:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let selected = loop:
+            if i < 2:
+                break i + 5
+            break 9
+        output[i] = selected
+mut values = LoopExpression(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("loop_expression_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5 6 9 9");
+}
+
+#[test]
+fn local_pipeline_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_pipeline");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("pipeline.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel Pipeline:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let value = (-i - 1) |> abs() |> clamp(2, 3)
+        output[i] = value
+mut values = Pipeline(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("pipeline_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "2 2 3 3");
+}
+
+#[test]
+fn local_generic_call_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_generic_call");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("generic_call.br");
+    fs::write(
+        &input,
+        r#"
+def T identity<T>(T value): value
+
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel GenericCall:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        output[i] = identity<int>(i + 4)
+mut values = GenericCall(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("generic_call_simd/src/main.rs")).unwrap();
+    assert!(source.contains("identity::<i32>"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("generic_call_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "4 5 6 7");
+}
+
+#[test]
 fn labeled_matrix_kernel_builds_and_runs() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_matrix_example");
     let _ = fs::remove_dir_all(&root);
