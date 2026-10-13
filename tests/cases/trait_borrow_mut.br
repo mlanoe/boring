@@ -1,0 +1,68 @@
+# `mut` bare-trait parameters are lent (`&mut dyn Trait`), like `mut` struct parameters: the
+# callee's `def` calls are visible to the caller, and the argument stays usable afterwards.
+trait Counter:
+    req int peek()
+    def int bump()
+
+struct Cell as Counter:
+    var int n = 0
+    req int peek(): n
+    def int bump():
+        n += 1
+        n
+
+struct Step as Counter:
+    var int n = 100
+    req int peek(): n
+    def int bump():
+        n += 10
+        n
+
+# free function: `mut` -> lent
+int twice(mut Counter c):
+    _ = c.bump()
+    c.bump()
+
+# forwarded to another `mut` param, and to a read-only borrowed one
+int viaTwice(mut Counter c):
+    twice(c) + look(c)
+
+int look(Counter c):
+    c.peek()
+
+Counter make():
+    Cell()
+
+# trait contract: `mut` stays `mut` (a `def` call on the argument is allowed)
+trait Driver:
+    req int drive(mut Counter c)
+
+struct Runner as Driver:
+    var int calls = 0
+    req int drive(mut Counter c):
+        c.bump()
+
+struct Host:
+    var int n = 0
+    def int use(mut Counter c):
+        n += 1
+        c.bump()
+
+def main():
+    var mut Counter first = Cell()
+    print twice(first)
+    print twice(first)
+    print first.peek()
+    print viaTwice(first)
+    print twice(Step())
+    print twice(make())
+    var mut Host h = Host()
+    print h.use(first)
+    print h.use(Step())
+    let Runner r = Runner()
+    print r.drive(first)
+    let Driver d = Runner()
+    print d.drive(first)
+    var mut Host'actor a = Host()
+    print a.use(first)
+    print first.peek()

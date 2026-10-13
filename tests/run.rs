@@ -190,6 +190,7 @@ interp_test!(trait_borrow_method_infer);
 interp_test!(trait_borrow_contract);
 interp_test!(trait_borrow_contract_impls);
 interp_test!(struct_borrow_method_param);
+interp_test!(trait_borrow_mut);
 interp_test!(trait_borrow_method_param);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);

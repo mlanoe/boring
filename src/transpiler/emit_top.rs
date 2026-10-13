@@ -2252,7 +2252,10 @@ impl Transpiler {
         // A lent `mut [T]` param is itself an `&mut Vec<T>` (see `is_lent_collection_param`):
         // the binding is never reassigned, so no `mut` on the name.
         let lent = self.is_lent_param(p, in_method);
-        let name = if (p.mutable && !lent) || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
+        // A `mut T&` parameter is already an `&mut` reference: a `mut` binding would only be an
+        // unused-mut warning, and is a hard error in a trait method signature without a body.
+        let is_mut_borrow = matches!(&p.ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
+        let name = if (p.mutable && !lent && !is_mut_borrow) || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
         match &p.ty {
             Some(ty) if p.variadic => format!("{}: Vec<{}>", name, self.emit_type(ty)),
             Some(ty) => {

@@ -4080,7 +4080,8 @@ impl Transpiler {
                 {
                     // Trait contract: a bare-trait param is borrowed unless `'owned`.
                     if let Some(slot) = args_s.get_mut(i) {
-                        *slot = self.emit_trait_borrow_arg(n, false, &a.value);
+                        *slot = self.emit_borrow_arg_any(&Type::Named(n.clone()), trait_params[i].mutable, &a.value)
+                            .unwrap_or_else(|| slot.clone());
                     }
                 } else if let Some(Type::Qualified(inner, q @ (OwnerQual::Borrow | OwnerQual::BorrowMut))) =
                     trait_params.get(i).and_then(|p| p.ty.as_ref())
@@ -4108,10 +4109,10 @@ impl Transpiler {
         {
             if let Some(tys) = typed_table.or_else(|| self.inferred_method_param_types_by_name(method)) {
                 for (i, a) in args.iter().enumerate() {
-                    if let Some(Some(Type::Qualified(inner, _))) = tys.get(i) {
-                        if let Type::Named(n) = inner.as_ref() {
-                            if let Some(slot) = args_s.get_mut(i) {
-                                *slot = self.emit_trait_borrow_arg(n, false, &a.value);
+                    if let Some(Some(Type::Qualified(inner, q))) = tys.get(i) {
+                        if let Some(slot) = args_s.get_mut(i) {
+                            if let Some(s) = self.emit_borrow_arg_any(inner, matches!(q, OwnerQual::BorrowMut), &a.value) {
+                                *slot = s;
                             }
                         }
                     }
@@ -5144,8 +5145,17 @@ impl Transpiler {
     /// then keeps its by-value emission.
     fn emit_borrow_arg_any(&self, inner: &Type, mutable: bool, arg: &Expr) -> Option<String> {
         match inner {
-            Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) =>
-                Some(self.emit_trait_borrow_arg(n, mutable, arg)),
+            Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => {
+                if mutable {
+                    if let ExprKind::Var(v) = &arg.kind {
+                        if self.immutable_local_vars.contains(v.as_str()) {
+                            self.push_error(arg.line, arg.col, format!(
+                                "cannot pass `{}` to a `mut` parameter — `{}` is immutable (`let` binding). Use `var` or `mut` instead.", v, v));
+                        }
+                    }
+                }
+                Some(self.emit_trait_borrow_arg(n, mutable, arg))
+            }
             Type::Named(n) if n == "str" || n == "String"
                 || self.non_fn_type_aliases.contains_key(n.as_str()) => None,
             Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) =>
@@ -5206,8 +5216,8 @@ impl Transpiler {
     /// passed through; anything else (a fresh value, a concrete-typed local) unsizes directly.
     fn emit_trait_borrow_arg(&self, trait_name: &str, mutable: bool, arg: &Expr) -> String {
         let r = if mutable { "&mut " } else { "&" };
-        let is_trait = |t: &Type| matches!(t, Type::Named(n) if n == trait_name);
-        let is_dyn_ref = |t: &Type| matches!(t, Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)
+        let is_trait = |t: &Type| matches!(t.without_mut(), Type::Named(n) if n == trait_name);
+        let is_dyn_ref = |t: &Type| matches!(t.without_mut(), Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)
             if matches!(inner.as_ref(), Type::Named(n) if n == trait_name));
         match &arg.kind {
             ExprKind::Var(v) => {
@@ -5232,6 +5242,10 @@ impl Transpiler {
                     _ => format!("{}{}", r, self.emit_expr(arg)),
                 }
             }
+            // A call to a function declared to return this trait yields a `Box<dyn Trait>`.
+            ExprKind::Call(callee, _) if matches!(&callee.kind, ExprKind::Var(f)
+                if self.fn_return_types.get(f.as_str()).is_some_and(|t| is_trait(t))) =>
+                format!("{}*{}", r, self.emit_expr(arg)),
             ExprKind::Field(obj, field) => {
                 let fty = self.resolve_expr_struct_type(obj)
                     .and_then(|s| self.struct_fields.get(s.as_str()))

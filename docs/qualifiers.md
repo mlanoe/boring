@@ -946,8 +946,16 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    working (a fresh value was boxed, an already-boxed local or parameter was boxed again, the
    call site cloned it): `is_boxed_trait_type` now treats it like the bare form wherever the
    boxing decision is made. Cases: `trait_borrow_contract`, `trait_borrow_contract_impls`.
-   Still by value: `mut`/`var` trait parameters, and a trait method called through a receiver
-   whose type is unknown when several traits declare that name.
+   A `mut` bare-trait parameter is lent (`&mut dyn Trait`) unconditionally, in free functions,
+   methods and trait contracts alike, like a `mut` struct parameter: the callee's `def` calls are
+   visible to the caller, so the signature never depends on the body, and a body that consumes it is
+   a diagnostic (`Trait'owned` opts out); a `let` passed to it is the usual hierarchy error. No lock
+   is involved: a bare trait value is a plain `Box<dyn Trait>`, and an `'actor` receiver is locked
+   by the call site as before. A `var` parameter was already an out-parameter
+   (`&mut Box<dyn Trait>`). `emit_param` no longer adds a `mut` binding to a `mut T&` parameter
+   (a hard error in a bodiless trait signature). Cases: `trait_borrow_mut`. Still by value: a
+   trait method called through a receiver whose type is unknown when several traits declare that
+   name.
 
 
 Gates per phase: `cargo test` (cases snapshot suites), `interpreter_build` then

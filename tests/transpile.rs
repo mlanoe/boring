@@ -384,6 +384,7 @@ transpile_test!(trait_borrow_method_infer);
 transpile_test!(trait_borrow_contract);
 transpile_test!(trait_borrow_contract_impls);
 transpile_test!(struct_borrow_method_param);
+transpile_test!(trait_borrow_mut);
 transpile_test!(trait_borrow_method_param);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);

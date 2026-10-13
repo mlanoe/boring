@@ -27,6 +27,11 @@
 //! object or generic bound follows the contract, never the body. An implementer or default
 //! method whose body consumes such a parameter is a diagnostic naming the `'owned` fix.
 //!
+//! A `mut` bare-trait parameter is lent (`&mut dyn Trait`) unconditionally, like a `mut`
+//! struct parameter (docs/book.md "`mut` vs `var` on a struct parameter"): the callee mutates
+//! the caller's value, so the signature never depends on the body, and a body that consumes it
+//! is a diagnostic. A `var` parameter is already an out-parameter (`&mut Box<dyn Trait>`).
+//!
 //! A function is left alone entirely when its signature could be observed through a path that
 //! does not go through the borrow-aware call emission: used as a value (`map(f)`), piped
 //! (`x |> f`), named like any method called anywhere, overloaded, generic, `task`/`stream`,
@@ -70,6 +75,12 @@ pub(crate) struct TraitBorrowFacts {
     call_sites: Vec<(String, Vec<ArgShape>, bool)>,
     /// Same for every `x.m(..)` call, keyed by method name.
     method_call_sites: Vec<(String, Vec<ArgShape>, bool)>,
+}
+
+/// `ty` borrowed the way parameter `p` is: `&dyn Trait`, or `&mut dyn Trait` for a `mut` one.
+fn borrowed_ty(p: &Param, ty: &Type) -> Type {
+    let q = if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
+    Type::Qualified(Box::new(ty.clone()), q)
 }
 
 impl Transpiler {
@@ -136,7 +147,8 @@ impl Transpiler {
                     Some(ArgShape::Ctor(n)) => !self.is_known_value_ctor(n),
                     _ => false,
                 };
-                if bad { borrowed.remove(&(key.to_string(), i)); }
+                // A `mut` parameter is lent whatever its call sites look like.
+                if bad && !f.params[i].mutable { borrowed.remove(&(key.to_string(), i)); }
             }
         };
         for (callee, shapes, labeled) in &facts.call_sites {
@@ -178,12 +190,27 @@ impl Transpiler {
             for (key, i) in current {
                 if key.starts_with('@') { continue; } // contract entries are fixed
                 let f = decls[key.as_str()];
+                if f.params[i].mutable { continue; } // lent unconditionally, checked below
                 if !self.param_is_borrow_only(f, i, &borrowed, &decls, &method_key_by_name) {
                     borrowed.remove(&(key, i));
                     changed = true;
                 }
             }
             if !changed { break; }
+        }
+
+        // A lent `mut` parameter whose body consumes it has no valid signature.
+        for (key, i) in &borrowed {
+            if key.starts_with('@') { continue; }
+            let f = decls[key.as_str()];
+            let p = &f.params[*i];
+            if p.mutable && !self.param_is_borrow_only(f, *i, &borrowed, &decls, &method_key_by_name) {
+                self.push_error(p.line, p.col, format!(
+                    "`{}` is a `mut` trait parameter, which is lent (`&mut dyn {}`), but `{}` consumes it \
+                     (stores, returns, captures or passes it by value); declare it `{}'owned` to take ownership",
+                    p.name, self.param_trait_name(p).unwrap_or_default(), f.name,
+                    self.param_trait_name(p).unwrap_or_default()));
+            }
         }
 
         // Publish.
@@ -196,7 +223,7 @@ impl Transpiler {
                 // re-scanned file still recognises them).
                 let types: Vec<Option<Type>> = f.params.iter().zip(&flags)
                     .map(|(p, b)| if *b {
-                        p.ty.as_ref().map(|t| Type::Qualified(Box::new(t.clone()), OwnerQual::Borrow))
+                        p.ty.as_ref().map(|t| borrowed_ty(p, t))
                     } else { None })
                     .collect();
                 self.trait_borrowed_method_by_name.insert(f.name.clone(), key.clone());
@@ -211,7 +238,7 @@ impl Transpiler {
                     // `fn_sigs` skips untyped params, so the index is among the typed ones.
                     let sig_idx = f.params[..i].iter().filter(|q| q.ty.is_some()).count();
                     if let (Some(slot), Some(ty)) = (sig.get_mut(sig_idx), p.ty.as_ref()) {
-                        *slot = Type::Qualified(Box::new(ty.clone()), OwnerQual::Borrow);
+                        *slot = borrowed_ty(p, ty);
                     }
                 }
             }
@@ -225,7 +252,7 @@ impl Transpiler {
             let t = &key[1..key.len() - tname_m.len() - 2];
             let types: Vec<Option<Type>> = self.trait_method_params.get(&format!("{}::{}", t, m))
                 .map(|ps| ps.iter().zip(flags).map(|(p, b)| if *b {
-                    p.ty.as_ref().map(|ty| Type::Qualified(Box::new(ty.clone()), OwnerQual::Borrow))
+                    p.ty.as_ref().map(|ty| borrowed_ty(p, ty))
                 } else { None }).collect())
                 .unwrap_or_default();
             self.trait_borrowed_method_by_name.insert(m.clone(), key.clone());
@@ -261,6 +288,14 @@ impl Transpiler {
                 let mut types: Vec<Option<Type>> = vec![None; m.params.len()];
                 for (i, p) in m.params.iter().enumerate() {
                     if !flags.get(i).copied().unwrap_or(false) { continue; }
+                    let trait_mut = self.trait_method_params.get(&format!("{}::{}", trait_of, m.name))
+                        .and_then(|ps| ps.get(i)).map(|tp| tp.mutable);
+                    if trait_mut.is_some_and(|tm| tm != p.mutable) {
+                        self.push_error(p.line, p.col, format!(
+                            "parameter `{}` of `{}.{}` must be {}`mut` like trait `{}`'s parameter",
+                            p.name, ty, m.name, if p.mutable { "not " } else { "" }, trait_of));
+                        continue;
+                    }
                     match p.ty.as_ref() {
                         Some(t @ Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()) && self.param_trait_name(p).is_some() => {
                             if !self.trait_param_only_borrowed(m, i, &borrowed, &decls, &method_key_by_name) {
@@ -269,7 +304,7 @@ impl Transpiler {
                                      declare it `{}'owned {}` in the trait and here to take ownership",
                                     p.name, ty, m.name, trait_of, n, p.name));
                             }
-                            types[i] = Some(Type::Qualified(Box::new(t.clone()), OwnerQual::Borrow));
+                            types[i] = Some(borrowed_ty(p, t));
                         }
                         _ => self.push_error(p.line, p.col, format!(
                             "parameter `{}` of `{}.{}` must be a bare trait type to match trait `{}`, whose contract passes it by reference \
@@ -316,7 +351,8 @@ impl Transpiler {
         for (p, borrowed) in out.params.iter_mut().zip(&flags) {
             if let (true, Some(Type::Named(n))) = (*borrowed, p.ty.as_ref()) {
                 if self.trait_method_names.contains_key(n.as_str()) {
-                    p.ty = p.ty.take().map(|t| Type::Qualified(Box::new(t), OwnerQual::Borrow));
+                    let q = if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
+                    p.ty = p.ty.take().map(|t| Type::Qualified(Box::new(t), q));
                     any = true;
                 }
             }
@@ -344,14 +380,14 @@ impl Transpiler {
         Some(params.iter().map(|p| {
             let mut q = p.clone();
             if self.param_trait_name(p).is_some() {
-                q.ty = q.ty.take().map(|t| Type::Qualified(Box::new(t), OwnerQual::Borrow));
+                q.ty = q.ty.take().map(|t| borrowed_ty(p, &t));
             }
             q
         }).collect())
     }
 
     pub(crate) fn param_trait_name(&self, p: &Param) -> Option<String> {
-        if p.mutable || p.rebindable || p.var_mut || p.owned || p.variadic || p.default.is_some() {
+        if p.rebindable || p.var_mut || p.owned || p.variadic || p.default.is_some() {
             return None;
         }
         match p.ty.as_ref()? {
@@ -460,7 +496,7 @@ fn callee_param_borrowed(
     if borrowed.contains(&(key.to_string(), i)) { return true; }
     matches!(
         decls.get(key).and_then(|d| d.params.get(i)).and_then(|p| p.ty.as_ref()),
-        Some(Type::Qualified(_, OwnerQual::Borrow))
+        Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
     )
 }
 

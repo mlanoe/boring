@@ -1,0 +1,26 @@
+# Error fixture: a `let` binding passed to a `mut` bare-trait parameter.
+trait Counter:
+    req int peek()
+    def int bump()
+
+struct Cell as Counter:
+    var int n = 0
+    req int peek(): n
+    def int bump():
+        n += 1
+        n
+
+int twice(mut Counter c):
+    _ = c.bump()
+    c.bump()
+
+struct Host:
+    var int n = 0
+    def int use(mut Counter c):
+        c.bump()
+
+def main():
+    let Counter first = Cell()
+    print twice(first)
+    var mut Host h = Host()
+    print h.use(first)

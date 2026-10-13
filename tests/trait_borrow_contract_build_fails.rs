@@ -45,3 +45,21 @@ fn implementer_param_not_matching_the_trait_contract_is_diagnosed() {
         "expected the contract-mismatch diagnostic, got:\n{}", stderr
     );
 }
+
+#[test]
+fn immutable_binding_passed_to_a_mut_trait_param_is_diagnosed() {
+    let stderr = build_error("tests/cases/error_trait_mut_immutable_arg.br");
+    assert!(
+        stderr.contains("cannot pass `first` to a `mut` parameter"),
+        "expected the `let` -> `mut` diagnostic, got:\n{}", stderr
+    );
+}
+
+#[test]
+fn mut_trait_param_consumed_by_its_body_is_diagnosed() {
+    let stderr = build_error("tests/cases/error_trait_mut_consumed.br");
+    assert!(
+        stderr.contains("is a `mut` trait parameter, which is lent") && stderr.contains("Counter'owned"),
+        "expected the consumed `mut` parameter diagnostic, got:\n{}", stderr
+    );
+}
