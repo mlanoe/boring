@@ -1241,6 +1241,10 @@ transpile_test!(init_owned_trait_param);
 transpile_test!(init_bare_trait_param);
 // `var_param_bare_trait_assign`: assigning to a bare-trait `var` out-param boxes the value.
 transpile_test!(var_param_bare_trait_assign);
+// `var_rebind_alias_independent`: `var c2 = c1` then rebinding either is independent, for bare/'owned/'shared/'actor/'guard/trait-typed locals.
+transpile_test!(var_rebind_alias_independent);
+// Managed mode can't call a method on a `'owned` local at all today (separate gap), so strict-only.
+transpile_test!(var_rebind_owned, ignore_managed);
 
 // ── Strict-mode size-based return-type auto-boxing (docs/transpilation-modes.md
 //    "Size-based auto-boxing") ────────────────────────────────────────────────

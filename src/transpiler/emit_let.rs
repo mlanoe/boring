@@ -140,6 +140,20 @@ impl Transpiler {
         self.line(&format!("{} {}: {} = {};", kw, name, rust_ty, init));
     }
 
+    /// `value` is a bare local already declared with the same lock qualifier
+    /// (`'actor`/`'guard`, `task` variant matching): the handle itself is the value, so
+    /// share it (`Arc::clone`) instead of wrapping it in a second lock.
+    pub(crate) fn existing_lock_handle(&self, value: &Expr, is_task: bool, guard: bool) -> Option<String> {
+        let ExprKind::Var(v) = &value.kind else { return None };
+        let known = match (guard, is_task) {
+            (false, false) => self.var_mutex_types.contains(v.as_str()),
+            (false, true) => self.var_mutex_task_types.contains(v.as_str()),
+            (true, false) => self.var_rwlock_types.contains(v.as_str()),
+            (true, true) => self.var_rwlock_task_types.contains(v.as_str()),
+        };
+        known.then(|| format!("Arc::clone(&{})", escape_rust_keyword(v)))
+    }
+
     fn try_emit_qualified_let(&mut self, s: &LetStmt, ty: &Type, s_value: &Expr) -> bool {
         // Automatic `'actor`/`'guard` → `'atomic` promotion (Part 2 — see
         // `promote_atomic.rs`): `scan_atomic_promotions` has already proven this exact
@@ -163,8 +177,13 @@ impl Transpiler {
             if let Some(inner) = Self::mutex_inner(ty) {
                 let is_task = Self::is_mutex_task_binding(s.binding.is_mutable(), ty);
                 let mutex_ty = if is_task { self.emit_actor_task_type(inner) } else { self.emit_actor_type(inner) };
-                let raw_val = self.emit_let_value(Some(inner), s_value);
-                let init = if is_task { self.emit_actor_task_new(&raw_val) } else { self.emit_actor_new(&raw_val) };
+                // `var c2 = c1` where `c1` is itself already this actor: share the handle.
+                let init = if let Some(h) = self.existing_lock_handle(s_value, is_task, false) {
+                    h
+                } else {
+                    let raw_val = self.emit_let_value(Some(inner), s_value);
+                    if is_task { self.emit_actor_task_new(&raw_val) } else { self.emit_actor_new(&raw_val) }
+                };
                 if is_task {
                     self.var_mutex_task_types.insert(s.name.clone());
                 } else {
@@ -210,11 +229,15 @@ impl Transpiler {
             if let Some(inner) = Self::rwlock_inner(ty) {
                 let is_task = Self::is_rwlock_task_binding(s.binding.is_mutable(), ty);
                 let rwlock_ty = if is_task { self.emit_guard_task_type(inner) } else { self.emit_guard_type(inner) };
-                let raw_val = self.emit_let_value(Some(inner), s_value);
-                let init = if is_task {
-                    self.emit_guard_task_new(&raw_val)
+                let init = if let Some(h) = self.existing_lock_handle(s_value, is_task, true) {
+                    h
                 } else {
-                    self.emit_guard_new(&raw_val)
+                    let raw_val = self.emit_let_value(Some(inner), s_value);
+                    if is_task {
+                        self.emit_guard_task_new(&raw_val)
+                    } else {
+                        self.emit_guard_new(&raw_val)
+                    }
                 };
                 if is_task {
                     self.var_rwlock_task_types.insert(s.name.clone());

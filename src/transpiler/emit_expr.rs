@@ -3295,7 +3295,42 @@ impl Transpiler {
         } else {
             self.try_materialize_resident_call(value)
                 .or_else(|| rhs_resident_var.as_ref().map(|(v, ty)| self.materialize_resident_var(v, ty)))
-        }.unwrap_or_else(|| self.emit_expr_owned(value));
+        }.unwrap_or_else(|| {
+            // Reassigning a local declared with an ownership-qualified / bare-trait type
+            // (`Box`, `Arc`, `Arc<Mutex>`, `Box<dyn Trait>`): coerce the value the same way
+            // the declaring `let` did, so `c = Counter(5)` wraps and `c = other` clones/moves.
+            if let ExprKind::Var(name) = &target.kind {
+                // Whole-binding rebind of a non-scalar `'actor`/`'guard` local
+                // (`c = Counter(5)` / `c = other_actor`): replace the handle, not the contents.
+                if !self.with_open_names.contains(name.as_str()) {
+                    for (guard, is_task, set) in [
+                        (false, false, &self.var_mutex_types), (false, true, &self.var_mutex_task_types),
+                        (true, false, &self.var_rwlock_types), (true, true, &self.var_rwlock_task_types),
+                    ] {
+                        if set.contains(name.as_str()) {
+                            if let Some(h) = self.existing_lock_handle(value, is_task, guard) {
+                                return h;
+                            }
+                            let raw = self.emit_expr_owned(value);
+                            return match (guard, is_task) {
+                                (false, false) => self.emit_actor_new(&raw),
+                                (false, true) => self.emit_actor_task_new(&raw),
+                                (true, false) => self.emit_guard_new(&raw),
+                                (true, true) => self.emit_guard_task_new(&raw),
+                            };
+                        }
+                    }
+                }
+                if self.known_local_vars.contains(name.as_str()) {
+                    if let Some(ty) = self.var_types.get(name.as_str()) {
+                        if matches!(ty.without_mut(), Type::Qualified(..)) || self.is_boxed_trait_type(ty) {
+                            return self.emit_let_value(Some(ty), value);
+                        }
+                    }
+                }
+            }
+            self.emit_expr_owned(value)
+        });
         // When assigning an actor (Arc<Mutex<T>>) variable into a struct field, auto-clone
         // so the original binding remains usable after the assignment. Arc::clone is cheap.
         let rhs_s = if matches!(&target.kind, ExprKind::Field(..))

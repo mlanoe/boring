@@ -1,0 +1,51 @@
+trait Tally:
+    req int peek()
+
+struct Cell as Tally:
+    var int n = 0
+    req int peek(): n
+
+struct Counter:
+    var int n = 0
+    req int peek(): n
+
+def main():
+    var c1 = Counter()
+    var c2 = c1
+    c1 = Counter(5)
+    c2 = Counter(7)
+    print c1.peek()
+    print c2.peek()
+
+    var Counter'shared s1 = Counter(1)
+    var Counter'shared s2 = s1
+    s1 = Counter(8)
+    print s1.peek()
+    print s2.peek()
+    s2 = s1
+    print s2.peek()
+
+    var mut Counter'actor a1 = Counter(1)
+    var mut Counter'actor a2 = a1
+    a1 = Counter(9)
+    print a1.peek()
+    print a2.peek()
+    a2 = a1
+    print a2.peek()
+
+    var mut Counter'guard g1 = Counter(1)
+    var mut Counter'guard g2 = g1
+    g1 = Counter(10)
+    print g1.peek()
+    print g2.peek()
+    g2 = g1
+    print g2.peek()
+
+    var Tally t1 = Cell(1)
+    var Tally t2 = Cell(2)
+    t1 = Cell(3)
+    t2 = Cell(4)
+    print t1.peek()
+    print t2.peek()
+    t1 = t2
+    print t1.peek()

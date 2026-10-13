@@ -1,0 +1,13 @@
+struct Counter:
+    var int n = 0
+    req int peek(): n
+
+def main():
+    var mut Counter'owned o1 = Counter(1)
+    var mut Counter'owned o2 = Counter(2)
+    o1 = Counter(3)
+    o2 = Counter(4)
+    print o1.peek()
+    print o2.peek()
+    o1 = o2
+    print o1.peek()
