@@ -443,6 +443,37 @@ impl Emitter {
                 }
                 self.replayed_assignments.remove(&v.name);
             }
+            Stmt::LetDestructure(v) => {
+                let bindings = v
+                    .bindings
+                    .iter()
+                    .map(|binding| {
+                        if binding.name == "_" {
+                            "_".into()
+                        } else {
+                            format!(
+                                "{}{}",
+                                if v.binding.is_mutable() { "mut " } else { "" },
+                                binding.name
+                            )
+                        }
+                    })
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                let value = self.expr(&v.value);
+                self.line(n, &format!("let ({bindings}) = {value};"));
+                for binding in &v.bindings {
+                    if binding.name == "_" {
+                        continue;
+                    }
+                    if let Some(binding_ty) = &binding.ty {
+                        self.value_types
+                            .insert(binding.name.clone(), ty(binding_ty));
+                    }
+                    self.replayable_locals.remove(&binding.name);
+                    self.replayed_assignments.remove(&binding.name);
+                }
+            }
             Stmt::Expr(x) => {
                 let x = self.expr(x);
                 self.line(n, &format!("{};", x));
@@ -467,6 +498,18 @@ impl Emitter {
                     }
                     self.line(n, "}");
                 }
+                self.control_flow_depth -= 1;
+            }
+            Stmt::IfLet(i) => {
+                self.control_flow_depth += 1;
+                self.emit_if_let_branch(
+                    &i.clauses,
+                    0,
+                    &i.then_body,
+                    &i.elif_branches,
+                    i.else_body.as_deref(),
+                    n,
+                );
                 self.control_flow_depth -= 1;
             }
             Stmt::For(f) => {
@@ -516,6 +559,59 @@ impl Emitter {
                     col,
                 ));
                 self.line(n, "/* rejected unsupported SIMD kernel statement */");
+            }
+        }
+    }
+    fn emit_if_let_branch(
+        &mut self,
+        clauses: &[CondClause],
+        clause_index: usize,
+        body: &[Stmt],
+        remaining: &[IfLetBranch],
+        else_body: Option<&[Stmt]>,
+        n: usize,
+    ) {
+        let Some(clause) = clauses.get(clause_index) else {
+            for stmt in body {
+                self.stmt(stmt, n);
+            }
+            return;
+        };
+        let condition = match clause {
+            CondClause::Let(name, value) => {
+                let value = self.expr(value);
+                format!("let Some({name}) = {value}")
+            }
+            CondClause::LetPat(pattern, value) => {
+                let value = self.expr(value);
+                format!("let {} = {value}", simd_pattern(pattern))
+            }
+            CondClause::Expr(value) => self.expr(value),
+        };
+        self.line(n, &format!("if {condition} {{"));
+        self.emit_if_let_branch(
+            clauses,
+            clause_index + 1,
+            body,
+            remaining,
+            else_body,
+            n + 1,
+        );
+        self.line(n, "} else {");
+        self.emit_if_let_fallback(remaining, else_body, n + 1);
+        self.line(n, "}");
+    }
+    fn emit_if_let_fallback(
+        &mut self,
+        remaining: &[IfLetBranch],
+        else_body: Option<&[Stmt]>,
+        n: usize,
+    ) {
+        if let Some((branch, tail)) = remaining.split_first() {
+            self.emit_if_let_branch(&branch.clauses, 0, &branch.body, tail, else_body, n);
+        } else if let Some(body) = else_body {
+            for stmt in body {
+                self.stmt(stmt, n);
             }
         }
     }
@@ -604,7 +700,32 @@ impl Emitter {
                     format!("{}.{}", self.expr(a), b)
                 }
             }
-            ExprKind::Index(a, b) => format!("{}[({}) as usize]", self.expr(a), self.expr(b)),
+            ExprKind::Index(a, b) => {
+                if let ExprKind::SliceRange {
+                    start,
+                    end,
+                    inclusive,
+                } = &b.kind
+                {
+                    let start = start
+                        .as_deref()
+                        .map(|value| format!("({}) as usize", self.expr(value)));
+                    let end = end
+                        .as_deref()
+                        .map(|value| format!("({}) as usize", self.expr(value)));
+                    let range = match (start, end, inclusive) {
+                        (Some(start), Some(end), true) => format!("{start}..={end}"),
+                        (Some(start), Some(end), false) => format!("{start}..{end}"),
+                        (Some(start), None, _) => format!("{start}.."),
+                        (None, Some(end), true) => format!("..={end}"),
+                        (None, Some(end), false) => format!("..{end}"),
+                        (None, None, _) => "..".into(),
+                    };
+                    format!("{}[{range}].to_vec()", self.expr(a))
+                } else {
+                    format!("{}[({}) as usize]", self.expr(a), self.expr(b))
+                }
+            }
             ExprKind::LabeledIndex(a, args) => self.labeled_index(a, args),
             ExprKind::Assign(a, b) => {
                 let replayed = if self.control_flow_depth == 0 && self.warp_replayable(b) {
@@ -634,6 +755,26 @@ impl Emitter {
                 )
             }
             ExprKind::BinOp(op, a, b) => {
+                if matches!(op, BinOp::Is | BinOp::IsNot) {
+                    let optional = if matches!(&a.kind, ExprKind::Nil) {
+                        Some(b.as_ref())
+                    } else if matches!(&b.kind, ExprKind::Nil) {
+                        Some(a.as_ref())
+                    } else {
+                        None
+                    };
+                    if let Some(optional) = optional {
+                        return format!(
+                            "{}.{}()",
+                            self.expr(optional),
+                            if matches!(op, BinOp::Is) {
+                                "is_none"
+                            } else {
+                                "is_some"
+                            }
+                        );
+                    }
+                }
                 let left_ty = self.expr_type(a);
                 let right_ty = self.expr_type(b);
                 let left = self.expr_as(a, right_ty.as_deref());
@@ -711,6 +852,9 @@ impl Emitter {
             ),
             ExprKind::Call(c, args) => {
                 if let ExprKind::Var(name) = &c.kind {
+                    if name == "some" && args.len() == 1 {
+                        return format!("Some({})", self.expr(&args[0].value));
+                    }
                     if let Some(cast_ty) = primitive_cast_type(name) {
                         if args.len() == 1 {
                             return format!("({} as {cast_ty})", self.expr(&args[0].value));
@@ -740,6 +884,19 @@ impl Emitter {
                         .join(", ")
                 )
             }
+            ExprKind::OptionalField(object, field) => format!(
+                "{}.as_ref().map(|__boring_optional| __boring_optional.{field}.clone())",
+                self.expr(object)
+            ),
+            ExprKind::OptionalMethodCall(object, method, args) => format!(
+                "{}.as_ref().map(|__boring_optional| __boring_optional.{}({}))",
+                self.expr(object),
+                method,
+                args.iter()
+                    .map(|arg| self.expr(&arg.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             ExprKind::If(i) => {
                 let result_types = i
                     .branches
@@ -774,6 +931,9 @@ impl Emitter {
                     out.push_str(" else { Default::default() }");
                 }
                 out
+            }
+            ExprKind::Block(statements) | ExprKind::Do(statements) => {
+                format!("{{ {} }}", self.expr_body_as(statements, None))
             }
             _ => {
                 self.errors.push(crate::errors::SourceError::at(
@@ -1147,6 +1307,42 @@ fn simd_top_level_const_type(value: &LetStmt) -> Option<String> {
         .as_ref()
         .and_then(scalar_type)
         .or_else(|| value.value.as_ref().and_then(scalar_literal))
+}
+
+fn simd_pattern(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Wildcard => "_".into(),
+        Pattern::Bind(name) => name.clone(),
+        Pattern::None => "None".into(),
+        Pattern::Some(inner) => format!("Some({})", simd_pattern(inner)),
+        Pattern::Variant(name, fields) => {
+            if fields.is_empty() {
+                name.clone()
+            } else {
+                let fields = fields
+                    .iter()
+                    .map(simd_pattern)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{name}({fields})")
+            }
+        }
+        Pattern::Tuple(values) => {
+            let values = values
+                .iter()
+                .map(simd_pattern)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        }
+        Pattern::Lit(value) => match value {
+            LitPattern::Int(value) => value.to_string(),
+            LitPattern::Float(value) => value.to_string(),
+            LitPattern::Str(value) => format!("{:?}", value),
+            LitPattern::Bool(value) => value.to_string(),
+            LitPattern::Nil => "None".into(),
+        },
+    }
 }
 
 fn stmt_position(stmt: &Stmt) -> (usize, usize) {

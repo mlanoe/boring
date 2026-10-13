@@ -967,7 +967,14 @@ kernel Arrays:
         let [int] literal = [10, 20, 30, 40]
         let [int] filled = [2 for ..<4]
         let [int] computed = [j * 3 for j in ..<4]
-        output[i] = literal[i] + filled[i] + computed[i]
+        let [int] first = literal[..<2]
+        let [int] tail = literal[2..]
+        let [int] inclusive = literal[1..=2]
+        let half = i % 2
+        let scaled = do:
+            let base = literal[i] + filled[i]
+            base + computed[i]
+        output[i] = scaled + first[half] + tail[half] + inclusive[half]
 mut arrays = Arrays(output)
 kernel:
     arrays(block = 4)
@@ -991,7 +998,7 @@ print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3
         .output()
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "12 25 38 51");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "72 115 98 141");
 }
 
 #[test]
@@ -1011,8 +1018,14 @@ kernel Optionals:
     def ():
         let i = .thread.x
         var int? value = nil
-        value ?= i + 10
-        output[i] = value else 0
+        let int? direct = some(i + 10)
+        let direct_value = direct else 0
+        if value is nil and i % 2 == 0:
+            value ?= -i - 1
+        if value is not nil:
+            output[i] = (value?.abs() else 99) + direct_value
+        else:
+            output[i] = (value?.abs() else 99) + direct_value
 mut optionals = Optionals(output)
 kernel:
     optionals(block = 4)
@@ -1036,7 +1049,106 @@ print "{optionals.output[0]} {optionals.output[1]} {optionals.output[2]} {option
         .output()
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "11 110 15 112");
+}
+
+#[test]
+fn local_tuple_destructuring_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_tuple_destructure");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("tuples.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel Tuples:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let pair = (i + 1, i * 2, 100)
+        let (left, right, _) = pair
+        output[i] = left + right
+mut tuples = Tuples(output)
+kernel:
+    tuples(block = 4)
+print "{tuples.output[0]} {tuples.output[1]} {tuples.output[2]} {tuples.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("tuples_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let (left, right, _) = pair;"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("tuples_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1 4 7 10");
+}
+
+#[test]
+fn local_if_let_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_if_let");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("if_let.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel IfLet:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        var int? candidate = nil
+        let int? bonus = some(3)
+        if i % 2 == 0:
+            candidate ?= i + 2
+        if let value = candidate, let extra = bonus, value > 2:
+            output[i] = value + extra
+        elif i == 0:
+            output[i] = 10
+        else:
+            output[i] = 20
+mut values = IfLet(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("if_let_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 20 7 20");
 }
 
 #[test]
