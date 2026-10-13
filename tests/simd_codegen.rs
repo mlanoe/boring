@@ -1152,6 +1152,150 @@ print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3
 }
 
 #[test]
+fn local_while_let_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_while_let");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("while_let.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel WhileLet:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        var int? candidate = some(i + 1)
+        while let value = candidate:
+            output[i] = value
+            candidate = nil
+mut values = WhileLet(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("while_let_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1 2 3 4");
+}
+
+#[test]
+fn self_referencing_while_let_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_self_while_let");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("self_while_let.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel SelfWhileLet:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        var int? value = some(i + 1)
+        while let value:
+            if i == 3 and value == 2:
+                break
+            output[i] = output[i] + value
+            if value > 1:
+                value = some(value - 1)
+            else:
+                value = nil
+        if let stopped = value:
+            output[i] = output[i] + stopped * 10
+mut values = SelfWhileLet(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("self_while_let_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1 3 6 27");
+}
+
+#[test]
+fn local_do_while_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_do_while");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("do_while.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel DoWhile:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        var value = i
+        do: value = value + 1 while value < 3
+        output[i] = value
+mut values = DoWhile(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("do_while_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "3 3 3 4");
+}
+
+#[test]
 fn labeled_matrix_kernel_builds_and_runs() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_matrix_example");
     let _ = fs::remove_dir_all(&root);

@@ -76,6 +76,8 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         value_types: std::collections::HashMap::new(),
         replayable_locals: std::collections::HashMap::new(),
         replayed_assignments: std::collections::HashMap::new(),
+        while_let_redirect: std::collections::HashMap::new(),
+        while_let_break_sync: None,
         thread_override: None,
         control_flow_depth: 0,
     };
@@ -180,6 +182,8 @@ struct Emitter {
     value_types: std::collections::HashMap<String, String>,
     replayable_locals: std::collections::HashMap<String, Expr>,
     replayed_assignments: std::collections::HashMap<String, String>,
+    while_let_redirect: std::collections::HashMap<String, String>,
+    while_let_break_sync: Option<(String, String)>,
     thread_override: Option<String>,
     control_flow_depth: usize,
 }
@@ -206,6 +210,8 @@ impl Emitter {
         self.value_types.clear();
         self.replayable_locals.clear();
         self.replayed_assignments.clear();
+        self.while_let_redirect.clear();
+        self.while_let_break_sync = None;
         for field in &k.fields {
             let field_ty = if is_array(&field.ty) {
                 elem_ty(&field.ty)
@@ -515,11 +521,13 @@ impl Emitter {
             Stmt::For(f) => {
                 let iterable = self.expr(&f.iterable);
                 self.line(n, &format!("for {} in {} {{", f.vars.join(", "), iterable));
+                let previous_break_sync = self.while_let_break_sync.take();
                 self.control_flow_depth += 1;
                 for s in &f.body {
                     self.stmt(s, n + 1);
                 }
                 self.control_flow_depth -= 1;
+                self.while_let_break_sync = previous_break_sync;
                 self.line(n, "}");
             }
             Stmt::Comment(c) if c == "sync" => {
@@ -533,24 +541,97 @@ impl Emitter {
             Stmt::While(w) => {
                 let condition = self.expr(&w.condition);
                 self.line(n, &format!("while {} {{", condition));
+                let previous_break_sync = self.while_let_break_sync.take();
                 self.control_flow_depth += 1;
                 for s in &w.body {
                     self.stmt(s, n + 1);
                 }
                 self.control_flow_depth -= 1;
+                self.while_let_break_sync = previous_break_sync;
+                self.line(n, "}");
+            }
+            Stmt::WhileLet(w) => {
+                let self_shorthand = w.pattern.is_none()
+                    && matches!(&w.value.kind, ExprKind::Var(name) if name == &w.name);
+                if self_shorthand {
+                    let outer = format!("__boring_while_let_{}", w.name);
+                    self.line(n, "{");
+                    self.line(n + 1, &format!("let mut {outer} = {};", w.name));
+                    self.line(n + 1, &format!("while let Some({}) = {outer} {{", w.name));
+                    let previous_redirect = self
+                        .while_let_redirect
+                        .insert(w.name.clone(), outer.clone());
+                    let previous_break_sync = self
+                        .while_let_break_sync
+                        .replace((w.name.clone(), outer.clone()));
+                    self.control_flow_depth += 1;
+                    for stmt in &w.body {
+                        self.stmt(stmt, n + 2);
+                    }
+                    self.control_flow_depth -= 1;
+                    self.while_let_break_sync = previous_break_sync;
+                    if let Some(previous) = previous_redirect {
+                        self.while_let_redirect.insert(w.name.clone(), previous);
+                    } else {
+                        self.while_let_redirect.remove(&w.name);
+                    }
+                    self.line(n + 1, "}");
+                    self.line(n + 1, &format!("{} = {outer};", w.name));
+                    self.line(n, "}");
+                    return;
+                }
+                let value = self.expr(&w.value);
+                let pattern = w
+                    .pattern
+                    .as_ref()
+                    .map(simd_pattern)
+                    .unwrap_or_else(|| format!("Some({})", w.name));
+                self.line(n, &format!("while let {pattern} = {value} {{"));
+                let previous_break_sync = self.while_let_break_sync.take();
+                self.control_flow_depth += 1;
+                for stmt in &w.body {
+                    self.stmt(stmt, n + 1);
+                }
+                self.control_flow_depth -= 1;
+                self.while_let_break_sync = previous_break_sync;
+                self.line(n, "}");
+            }
+            Stmt::DoWhile(w) => {
+                self.line(n, "loop {");
+                let previous_break_sync = self.while_let_break_sync.take();
+                self.control_flow_depth += 1;
+                for stmt in &w.body {
+                    self.stmt(stmt, n + 1);
+                }
+                let condition = self.expr(&w.condition);
+                self.line(n + 1, &format!("if !({condition}) {{ break; }}"));
+                self.control_flow_depth -= 1;
+                self.while_let_break_sync = previous_break_sync;
                 self.line(n, "}");
             }
             Stmt::Loop(l) => {
                 self.line(n, "loop {");
+                let previous_break_sync = self.while_let_break_sync.take();
                 self.control_flow_depth += 1;
                 for s in &l.body {
                     self.stmt(s, n + 1);
                 }
                 self.control_flow_depth -= 1;
+                self.while_let_break_sync = previous_break_sync;
                 self.line(n, "}");
             }
-            Stmt::Break(_, _) => self.line(n, "break;"),
-            Stmt::Continue(_) => self.line(n, "continue;"),
+            Stmt::Break(_, _) => {
+                if let Some((name, outer)) = self.while_let_break_sync.clone() {
+                    self.line(n, &format!("{outer} = Some({name});"));
+                }
+                self.line(n, "break;");
+            }
+            Stmt::Continue(_) => {
+                if let Some((name, outer)) = self.while_let_break_sync.clone() {
+                    self.line(n, &format!("{outer} = Some({name});"));
+                }
+                self.line(n, "continue;");
+            }
             other => {
                 let (line, col) = stmt_position(other);
                 self.errors.push(crate::errors::SourceError::at(
@@ -1174,7 +1255,9 @@ impl Emitter {
     fn lvalue(&mut self, e: &Expr) -> String {
         match &e.kind {
             ExprKind::Var(v) => {
-                if v.starts_with("__") {
+                if let Some(outer) = self.while_let_redirect.get(v) {
+                    outer.clone()
+                } else if v.starts_with("__") {
                     v.clone()
                 } else if self.fields.contains(v) {
                     format!("self.{v}")
