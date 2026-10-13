@@ -518,6 +518,89 @@ impl Emitter {
                 );
                 self.control_flow_depth -= 1;
             }
+            Stmt::Match(m) => {
+                let subject = self.expr(&m.subject);
+                self.line(n, &format!("match {subject} {{"));
+                self.control_flow_depth += 1;
+                for arm in &m.arms {
+                    let patterns = arm
+                        .patterns
+                        .iter()
+                        .map(simd_pattern)
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|guard| format!(" if {}", self.expr(guard)))
+                        .unwrap_or_default();
+                    match &arm.body {
+                        MatchBody::Expr(value) => {
+                            let value = self.expr(value);
+                            self.line(n + 1, &format!("{patterns}{guard} => {value},"));
+                        }
+                        MatchBody::Block(body) => {
+                            self.line(n + 1, &format!("{patterns}{guard} => {{"));
+                            for stmt in body {
+                                self.stmt(stmt, n + 2);
+                            }
+                            self.line(n + 1, "},");
+                        }
+                    }
+                }
+                self.control_flow_depth -= 1;
+                self.line(n, "}");
+            }
+            Stmt::Guard(g) => {
+                self.control_flow_depth += 1;
+                match &g.cond {
+                    GuardCond::Expr(condition) => {
+                        let condition = self.expr(condition);
+                        self.line(n, &format!("if !({condition}) {{"));
+                        for stmt in &g.else_body {
+                            self.stmt(stmt, n + 1);
+                        }
+                        self.line(n, "}");
+                    }
+                    GuardCond::Clauses(clauses) => {
+                        for clause in clauses {
+                            match clause {
+                                CondClause::Let(name, value) => {
+                                    let value = self.expr(value);
+                                    self.line(n, &format!("let Some({name}) = {value} else {{"));
+                                }
+                                CondClause::LetPat(pattern, value) => {
+                                    let value = self.expr(value);
+                                    self.line(
+                                        n,
+                                        &format!(
+                                            "let {} = {value} else {{",
+                                            simd_pattern(pattern)
+                                        ),
+                                    );
+                                }
+                                CondClause::Expr(condition) => {
+                                    let condition = self.expr(condition);
+                                    self.line(n, &format!("if !({condition}) {{"));
+                                }
+                            }
+                            for stmt in &g.else_body {
+                                self.stmt(stmt, n + 1);
+                            }
+                            let ending = if matches!(
+                                clause,
+                                CondClause::Let(..) | CondClause::LetPat(..)
+                            ) {
+                                "};"
+                            } else {
+                                "}"
+                            };
+                            self.line(n, ending);
+                        }
+                    }
+                }
+                self.control_flow_depth -= 1;
+            }
             Stmt::For(f) => {
                 let iterable = self.expr(&f.iterable);
                 self.line(n, &format!("for {} in {} {{", f.vars.join(", "), iterable));
@@ -1011,6 +1094,32 @@ impl Emitter {
                 } else {
                     out.push_str(" else { Default::default() }");
                 }
+                out
+            }
+            ExprKind::Match(m) => {
+                let subject = self.expr(&m.subject);
+                let mut out = format!("match {subject} {{ ");
+                for arm in &m.arms {
+                    let patterns = arm
+                        .patterns
+                        .iter()
+                        .map(simd_pattern)
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|guard| format!(" if {}", self.expr(guard)))
+                        .unwrap_or_default();
+                    let body = match &arm.body {
+                        MatchBody::Expr(value) => self.expr(value),
+                        MatchBody::Block(body) => {
+                            format!("{{ {} }}", self.expr_body_as(body, None))
+                        }
+                    };
+                    out.push_str(&format!("{patterns}{guard} => {body}, "));
+                }
+                out.push('}');
                 out
             }
             ExprKind::Block(statements) | ExprKind::Do(statements) => {

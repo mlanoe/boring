@@ -1296,6 +1296,103 @@ print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3
 }
 
 #[test]
+fn local_match_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_match");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("match.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel Matches:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let offset = match i:
+            0: 7
+            _: 1
+        match i:
+            0 | 1: output[i] = 10 + i + offset
+            value if value == 2:
+                let doubled = value * 2
+                output[i] = doubled + offset
+            _: output[i] = 99 + offset
+mut values = Matches(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("match_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "17 12 5 100");
+}
+
+#[test]
+fn local_guard_let_runs_on_cpu() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_guard_let");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("guard_let.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified output = [0 for ..<4]
+kernel Guards:
+    mut [int]'unified output
+    init(mut [int]'unified o):
+        output = o
+    def ():
+        let i = .thread.x
+        let int? candidate = some(i)
+        for _ in 0..<1:
+            guard let value = candidate, value < 2 else: continue
+            output[i] = value + 10
+mut values = Guards(output)
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("guard_let_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 0 0");
+}
+
+#[test]
 fn labeled_matrix_kernel_builds_and_runs() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_matrix_example");
     let _ = fs::remove_dir_all(&root);
