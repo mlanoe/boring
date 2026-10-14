@@ -331,6 +331,7 @@ impl Emitter {
                 let Stmt::For(for_stmt) = stmt else { return None };
                 let safe_prefix = m.body[..for_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                        && !contains_nested_simd_barrier(stmt)
                 });
                 (safe_prefix
                     && self.block_uniform_expr(&for_stmt.iterable)
@@ -349,6 +350,7 @@ impl Emitter {
                         .is_some_and(|body| body.iter().any(is_simd_barrier_stmt));
                 let safe_prefix = m.body[..if_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                        && !contains_nested_simd_barrier(stmt)
                 });
                 (has_barrier
                     && safe_prefix
@@ -371,6 +373,7 @@ impl Emitter {
                         .is_some_and(|body| body.iter().any(is_simd_barrier_stmt));
                 let safe_prefix = m.body[..if_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                        && !contains_nested_simd_barrier(stmt)
                 });
                 (has_barrier
                     && safe_prefix
@@ -385,6 +388,7 @@ impl Emitter {
                 let Stmt::Match(match_stmt) = stmt else { return None };
                 let safe_prefix = m.body[..match_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                        && !contains_nested_simd_barrier(stmt)
                 });
                 (safe_prefix
                     && self.block_uniform_expr(&match_stmt.subject)
@@ -407,6 +411,7 @@ impl Emitter {
                 };
                 let safe_prefix = m.body[..guard_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                        && !contains_nested_simd_barrier(stmt)
                 });
                 (uniform
                     && safe_prefix
@@ -415,6 +420,12 @@ impl Emitter {
             });
             let barrier_while = m.body.iter().enumerate().find_map(|(while_index, stmt)| {
                 let Stmt::While(while_stmt) = stmt else { return None };
+                if m.body[..while_index]
+                    .iter()
+                    .any(contains_nested_simd_barrier)
+                {
+                    return None;
+                }
                 if !while_stmt.body.iter().any(is_simd_barrier_stmt) {
                     return None;
                 }
@@ -486,7 +497,7 @@ impl Emitter {
                     );
                     self.emit_barrier_phases_seeded(k, &for_stmt.body, 4, &replayed);
                     self.line(3, "}");
-                    self.emit_barrier_phases_seeded(
+                    self.emit_following_collective_controls(
                         k,
                         &m.body[for_index + 1..],
                         3,
@@ -513,7 +524,7 @@ impl Emitter {
                         self.emit_barrier_phases_seeded(k, body, 4, &replayed);
                         self.line(3, "}");
                     }
-                    self.emit_following_collective_ifs(
+                    self.emit_following_collective_controls(
                         k,
                         &m.body[if_index + 1..],
                         3,
@@ -533,7 +544,7 @@ impl Emitter {
                         3,
                         &replayed,
                     );
-                    self.emit_barrier_phases_seeded(
+                    self.emit_following_collective_controls(
                         k,
                         &m.body[if_index + 1..],
                         3,
@@ -554,7 +565,7 @@ impl Emitter {
                                 &replayed,
                             );
                             self.line(3, "}");
-                            self.emit_barrier_phases_seeded(
+                            self.emit_following_collective_controls(
                                 k,
                                 &m.body[guard_index + 1..],
                                 3,
@@ -602,7 +613,12 @@ impl Emitter {
                     let update = self.expr(update);
                     self.line(4, &format!("{uniform_name} = {update};"));
                     self.line(3, "}");
-                    self.emit_barrier_phases_seeded(k, &m.body[while_index + 1..], 3, &replayed);
+                    self.emit_following_collective_controls(
+                        k,
+                        &m.body[while_index + 1..],
+                        3,
+                        &replayed,
+                    );
                 } else if let Some((match_index, match_stmt)) = barrier_match {
                     let prefix = &m.body[..match_index];
                     let replayed = self.replayable_barrier_locals(prefix);
@@ -638,7 +654,7 @@ impl Emitter {
                         self.line(4, "},");
                     }
                     self.line(3, "}");
-                    self.emit_barrier_phases_seeded(
+                    self.emit_following_collective_controls(
                         k,
                         &m.body[match_index + 1..],
                         3,
@@ -714,39 +730,97 @@ impl Emitter {
         }
         locals
     }
-    fn emit_following_collective_ifs(
+    fn emit_following_collective_controls(
         &mut self,
         k: &KernelDecl,
         body: &[Stmt],
         indent: usize,
         initial_replayed: &[Stmt],
     ) {
-        let barrier_if = body.iter().enumerate().find_map(|(if_index, stmt)| {
-            let Stmt::If(if_stmt) = stmt else { return None };
-            let has_barrier = if_stmt
-                .branches
-                .iter()
-                .any(|(_, branch)| branch.iter().any(is_simd_barrier_stmt))
-                || if_stmt
-                    .else_body
-                    .as_ref()
-                    .is_some_and(|branch| branch.iter().any(is_simd_barrier_stmt));
-            let safe_prefix = body[..if_index].iter().all(|stmt| {
+        enum FollowingCollective<'a> {
+            For(&'a ForStmt),
+            If(&'a IfStmt),
+            IfLet(&'a IfLetStmt),
+            Match(&'a MatchStmt),
+            Guard(&'a GuardStmt),
+        }
+        let next = body.iter().enumerate().find_map(|(index, stmt)| {
+            let safe_prefix = body[..index].iter().all(|stmt| {
                 !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
             });
-            (has_barrier
-                && safe_prefix
-                && if_stmt
-                    .branches
-                    .iter()
-                    .all(|(condition, _)| self.block_uniform_expr(condition)))
-            .then_some((if_index, if_stmt))
+            if !safe_prefix {
+                return None;
+            }
+            match stmt {
+                Stmt::For(for_stmt) => (self.block_uniform_expr(&for_stmt.iterable)
+                    && for_stmt.body.iter().any(is_simd_barrier_stmt))
+                .then_some((index, FollowingCollective::For(for_stmt))),
+                Stmt::If(if_stmt) => {
+                    let has_barrier = if_stmt
+                        .branches
+                        .iter()
+                        .any(|(_, branch)| branch.iter().any(is_simd_barrier_stmt))
+                        || if_stmt
+                            .else_body
+                            .as_ref()
+                            .is_some_and(|branch| branch.iter().any(is_simd_barrier_stmt));
+                    (has_barrier
+                        && if_stmt
+                            .branches
+                            .iter()
+                            .all(|(condition, _)| self.block_uniform_expr(condition)))
+                    .then_some((index, FollowingCollective::If(if_stmt)))
+                }
+                Stmt::IfLet(if_stmt) => {
+                    let has_barrier = if_stmt.then_body.iter().any(is_simd_barrier_stmt)
+                        || if_stmt
+                            .elif_branches
+                            .iter()
+                            .any(|branch| branch.body.iter().any(is_simd_barrier_stmt))
+                        || if_stmt
+                            .else_body
+                            .as_ref()
+                            .is_some_and(|branch| branch.iter().any(is_simd_barrier_stmt));
+                    (has_barrier
+                        && self.block_uniform_guard_clauses(&if_stmt.clauses)
+                        && if_stmt
+                            .elif_branches
+                            .iter()
+                            .all(|branch| self.block_uniform_guard_clauses(&branch.clauses)))
+                    .then_some((index, FollowingCollective::IfLet(if_stmt)))
+                }
+                Stmt::Match(match_stmt) => {
+                    let has_barrier = match_stmt.arms.iter().any(|arm| {
+                        matches!(&arm.body, MatchBody::Block(branch)
+                            if branch.iter().any(is_simd_barrier_stmt))
+                    });
+                    (has_barrier
+                        && self.block_uniform_expr(&match_stmt.subject)
+                        && match_stmt.arms.iter().all(|arm| {
+                            arm.guard
+                                .as_ref()
+                                .map_or(true, |guard| self.block_uniform_expr(guard))
+                        }))
+                    .then_some((index, FollowingCollective::Match(match_stmt)))
+                }
+                Stmt::Guard(guard_stmt) => {
+                    let uniform = match &guard_stmt.cond {
+                        GuardCond::Expr(condition) => self.block_uniform_expr(condition),
+                        GuardCond::Clauses(clauses) => {
+                            self.block_uniform_guard_clauses(clauses)
+                        }
+                    };
+                    (uniform && guard_stmt.else_body.iter().any(is_simd_barrier_stmt))
+                        .then_some((index, FollowingCollective::Guard(guard_stmt)))
+                }
+                _ => None,
+            }
         });
-        let Some((if_index, if_stmt)) = barrier_if else {
+        let Some((control_index, control)) = next else {
             self.emit_barrier_phases_seeded(k, body, indent, initial_replayed);
             return;
         };
-        let prefix = &body[..if_index];
+        let prefix = &body[..control_index];
         let mut replayed = initial_replayed.to_vec();
         let mut replayed_names = replayed
             .iter()
@@ -762,26 +836,113 @@ impl Emitter {
             }
         }
         self.emit_barrier_phases_seeded(k, prefix, indent, initial_replayed);
-        for (branch_index, (condition, branch)) in if_stmt.branches.iter().enumerate() {
-            let condition = self.expr(condition);
-            self.line(
+        match control {
+            FollowingCollective::For(for_stmt) => {
+                let iterable = self.expr(&for_stmt.iterable);
+                self.line(
+                    indent,
+                    &format!("for {} in {} {{", for_stmt.vars.join(", "), iterable),
+                );
+                self.emit_barrier_phases_seeded(
+                    k,
+                    &for_stmt.body,
+                    indent + 1,
+                    &replayed,
+                );
+                self.line(indent, "}");
+            }
+            FollowingCollective::If(if_stmt) => {
+                for (branch_index, (condition, branch)) in if_stmt.branches.iter().enumerate() {
+                    let condition = self.expr(condition);
+                    self.line(
+                        indent,
+                        &format!(
+                            "{}if {condition} {{",
+                            if branch_index == 0 { "" } else { "else " }
+                        ),
+                    );
+                    self.emit_barrier_phases_seeded(k, branch, indent + 1, &replayed);
+                    self.line(indent, "}");
+                }
+                if let Some(branch) = &if_stmt.else_body {
+                    self.line(indent, "else {");
+                    self.emit_barrier_phases_seeded(k, branch, indent + 1, &replayed);
+                    self.line(indent, "}");
+                }
+            }
+            FollowingCollective::IfLet(if_stmt) => self.emit_collective_if_let_clauses(
+                k,
+                &if_stmt.clauses,
+                0,
+                &if_stmt.then_body,
+                &if_stmt.elif_branches,
+                if_stmt.else_body.as_deref(),
                 indent,
-                &format!(
-                    "{}if {condition} {{",
-                    if branch_index == 0 { "" } else { "else " }
-                ),
-            );
-            self.emit_barrier_phases_seeded(k, branch, indent + 1, &replayed);
-            self.line(indent, "}");
+                &replayed,
+            ),
+            FollowingCollective::Match(match_stmt) => {
+                let subject = self.expr(&match_stmt.subject);
+                self.line(indent, &format!("match {subject} {{"));
+                for arm in &match_stmt.arms {
+                    let patterns = arm
+                        .patterns
+                        .iter()
+                        .map(simd_pattern)
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|guard| format!(" if {}", self.expr(guard)))
+                        .unwrap_or_default();
+                    self.line(indent + 1, &format!("{patterns}{guard} => {{"));
+                    match &arm.body {
+                        MatchBody::Block(branch) => self.emit_barrier_phases_seeded(
+                            k,
+                            branch,
+                            indent + 2,
+                            &replayed,
+                        ),
+                        MatchBody::Expr(value) => self.emit_barrier_phases_seeded(
+                            k,
+                            &[Stmt::Expr(value.clone())],
+                            indent + 2,
+                            &replayed,
+                        ),
+                    }
+                    self.line(indent + 1, "},");
+                }
+                self.line(indent, "}");
+            }
+            FollowingCollective::Guard(guard_stmt) => match &guard_stmt.cond {
+                GuardCond::Expr(condition) => {
+                    let condition = self.expr(condition);
+                    self.line(indent, &format!("if !({condition}) {{"));
+                    self.emit_barrier_phases_seeded(
+                        k,
+                        &guard_stmt.else_body,
+                        indent + 1,
+                        &replayed,
+                    );
+                    self.line(indent, "}");
+                }
+                GuardCond::Clauses(clauses) => {
+                    self.emit_collective_guard_clauses(
+                        k,
+                        clauses,
+                        0,
+                        &guard_stmt.else_body,
+                        &body[control_index + 1..],
+                        indent,
+                        &replayed,
+                    );
+                    return;
+                }
+            },
         }
-        if let Some(branch) = &if_stmt.else_body {
-            self.line(indent, "else {");
-            self.emit_barrier_phases_seeded(k, branch, indent + 1, &replayed);
-            self.line(indent, "}");
-        }
-        self.emit_following_collective_ifs(
+        self.emit_following_collective_controls(
             k,
-            &body[if_index + 1..],
+            &body[control_index + 1..],
             indent,
             &replayed,
         );
@@ -2079,7 +2240,7 @@ impl Emitter {
         replayed: &[Stmt],
     ) {
         let Some(clause) = clauses.get(clause_index) else {
-            self.emit_barrier_phases_seeded(k, suffix, indent, replayed);
+            self.emit_following_collective_controls(k, suffix, indent, replayed);
             return;
         };
         let (condition, fallback_pattern) = match clause {
@@ -2547,6 +2708,46 @@ fn is_simd_barrier_stmt(stmt: &Stmt) -> bool {
             ExprKind::MethodCall(receiver, method, args)
                 if is_warp_receiver(receiver) && method == "sync" && args.is_empty()
         ),
+        _ => false,
+    }
+}
+
+fn contains_nested_simd_barrier(stmt: &Stmt) -> bool {
+    let body_has_barrier = |body: &[Stmt]| {
+        body.iter()
+            .any(|stmt| is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt))
+    };
+    match stmt {
+        Stmt::If(value) => {
+            value
+                .branches
+                .iter()
+                .any(|(_, body)| body_has_barrier(body))
+                || value
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| body_has_barrier(body))
+        }
+        Stmt::IfLet(value) => {
+            body_has_barrier(&value.then_body)
+                || value
+                    .elif_branches
+                    .iter()
+                    .any(|branch| body_has_barrier(&branch.body))
+                || value
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| body_has_barrier(body))
+        }
+        Stmt::Match(value) => value.arms.iter().any(|arm| {
+            matches!(&arm.body, MatchBody::Block(body) if body_has_barrier(body))
+        }),
+        Stmt::Guard(value) => body_has_barrier(&value.else_body),
+        Stmt::For(value) => body_has_barrier(&value.body),
+        Stmt::While(value) => body_has_barrier(&value.body),
+        Stmt::WhileLet(value) => body_has_barrier(&value.body),
+        Stmt::DoWhile(value) => body_has_barrier(&value.body),
+        Stmt::Loop(value) => body_has_barrier(&value.body),
         _ => false,
     }
 }
