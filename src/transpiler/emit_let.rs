@@ -1655,6 +1655,30 @@ impl Transpiler {
                 return;
             }
         }
+        // A bare local whose use sites inferred `'actor`/`'guard` (passed to a callee that
+        // demands it, captured by a closure, ...) and whose initializer is a plain
+        // struct-constructor call: emit it exactly as if it were declared `T'actor x = T(..)`
+        // — wrapped value, registered lock handle (reads/method calls lock, call sites pass
+        // `&x` instead of moving it).
+        if s.ty.is_none() && !self.rc_identity_vars.contains(&s.name) {
+            if let (Some(qual @ (OwnerQual::Actor | OwnerQual::Guard)), ExprKind::Call(callee, _)) =
+                (self.inferred_qualifiers.get(&s.name).cloned(), &s_value.kind)
+            {
+                if let ExprKind::Var(n) = &callee.kind {
+                    if n.chars().next().is_some_and(|c| c.is_uppercase())
+                        && self.struct_fields.contains_key(n.as_str())
+                        && !self.generic_struct_names.contains(n.as_str())
+                    {
+                        let qualified_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(
+                            &Type::Named(n.clone()), qual,
+                        );
+                        if self.try_emit_qualified_let(s, &qualified_ty, s_value) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         // Infer actor/refcell type for local let bindings from function return type (no explicit annotation).
         // E.g. `let child = new_env(...)` where `new_env` returns `Env'actor` — add child to managed_refcell_vars.
         if s.ty.is_none() {
@@ -2572,6 +2596,9 @@ impl Transpiler {
     /// the general `emit_let_value` path.
     pub(crate) fn emit_struct_field_value(&self, field_ty: Option<&Type>, value: &Expr) -> String {
         let field_ty = field_ty.map(Type::without_mut);
+        if let Some(fnty) = field_ty.and_then(|t| self.resolve_fn_field_type(t)) {
+            return self.emit_fn_field_value(&fnty, value);
+        }
         if self.config.is_gpu_target
             && field_ty.is_some_and(|t| t.gpu_resident_qual().is_some())
         {

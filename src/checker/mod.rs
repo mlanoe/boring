@@ -2427,6 +2427,12 @@ impl Checker {
         if let ExprKind::Var(name) = &lhs.kind {
             // `_` is the discard wildcard — never an error as assignment target.
             if name == "_" { return; }
+            // Resolves to a global only: inside a struct method that name is its field.
+            if self.current_struct_fields.contains(name.as_str()) && self.scopes.len() > 1
+                && !self.scopes[1..].iter().any(|sc| sc.contains_key(name.as_str()))
+            {
+                return;
+            }
             if let Some(binding) = self.lookup(name) {
                 // ── `'atomic`-qualified scalar bindings ─────────────────────────
                 //

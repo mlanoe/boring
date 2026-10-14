@@ -132,8 +132,13 @@ impl Transpiler {
             // see `helpers::collect_default_rest_targets`) → that call lowers to a trailing
             // `..Default::default()`, so the struct needs `Default` too.
             let needs_default = self.structs_needing_default.contains(&s.name);
-            let mut names: Vec<String> = if has_non_debug_trait_array_field { vec![] } else { vec!["Debug".to_string()] };
-            if has_non_clone_field {
+            // A function-typed field is an `Rc<RefCell<dyn FnMut..>>`/`Rc<dyn Fn..>` handle: `Clone`
+            // works (shared handle), but `dyn FnMut` has no `Debug`/`PartialEq`/`Default`.
+            let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some());
+            let mut names: Vec<String> = if has_non_debug_trait_array_field || has_fn_field { vec![] } else { vec!["Debug".to_string()] };
+            if has_fn_field {
+                names.push("Clone".to_string());
+            } else if has_non_clone_field {
                 if needs_default { names.push("Default".to_string()); }
             } else if has_custom_cmp || has_sync_mutex_field {
                 names.push("Clone".to_string());
@@ -182,7 +187,14 @@ impl Transpiler {
                 self.line(&format!("#[{}{}]", attr.name, args_s));
             }
             let fvis = if f.is_pub { "pub " } else { "" };
-            let ty_s = if f.transient {
+            let ty_s = if let Some(fnty) = self.resolve_fn_field_type(&f.ty) {
+                if matches!(fnty, Type::Fn(_, _, _, true, _)) {
+                    self.push_error(s.line, s.col, format!(
+                        "field `{}` of `{}` has a `task` function type, which is not supported in struct fields yet",
+                        f.name, s.name));
+                }
+                self.emit_fn_field_type(&fnty)
+            } else if f.transient {
                 let inner = self.emit_type(&f.ty);
                 if Self::is_copy_type(&f.ty) {
                     format!("std::cell::Cell<{}>", inner)
@@ -2949,6 +2961,8 @@ impl Transpiler {
             let inner = Self::rwlock_inner(fty).unwrap_or(fty);
             let raw = self.emit_let_value(Some(inner), def);
             if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) }
+        } else if let Some(fnty) = self.resolve_fn_field_type(fty) {
+            self.emit_fn_field_value(&fnty, def)
         } else {
             let val = self.emit_let_value(Some(fty), def);
             if self.transient_fields.contains_key(&key) {
@@ -2961,5 +2975,90 @@ impl Transpiler {
                 val
             }
         }
+    }
+
+    /// The resolved `Type::Fn` when `ty` — a struct field's declared type — is a function type,
+    /// written inline or through a `use Alias as def void()`-style alias (peeling `mut`).
+    pub(crate) fn resolve_fn_field_type(&self, ty: &Type) -> Option<Type> {
+        match ty.without_mut() {
+            t @ Type::Fn(..) => Some(t.clone()),
+            Type::Named(n) => self.fn_type_aliases.get(n.as_str()).filter(|t| matches!(t, Type::Fn(..))).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Rust type of a function-typed struct field. `impl Trait` is illegal in a field, so the
+    /// closure is stored behind a shared handle: `def` (FnMut) → `Rc<RefCell<dyn FnMut..>>` /
+    /// `Arc<Mutex<dyn FnMut.. + Send>>`; `req` (Fn) → `Rc<dyn Fn..>` / `Arc<dyn Fn.. + Send + Sync>`.
+    /// Sharing keeps the struct `Clone`, and lets a `let` binding call a `def` closure field.
+    pub(crate) fn emit_fn_field_type(&self, fnty: &Type) -> String {
+        let Type::Fn(ret, params, throws, _task, req) = fnty else { return self.emit_type(fnty) };
+        let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");
+        let base = ret.as_ref().map(|r| self.emit_type(r)).unwrap_or_else(|| "()".into());
+        let r = if *throws { format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base) } else { base };
+        let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+        match (*req, multi) {
+            (true, false) => format!("Rc<dyn Fn({}) -> {}>", ps, r),
+            (true, true) => format!("Arc<dyn Fn({}) -> {} + Send + Sync>", ps, r),
+            (false, false) => format!("Rc<RefCell<dyn FnMut({}) -> {}>>", ps, r),
+            (false, true) => format!("Arc<std::sync::Mutex<dyn FnMut({}) -> {} + Send>>", ps, r),
+        }
+    }
+
+    /// Value stored into a function-typed field: a closure literal / fn value is boxed behind
+    /// the handle `emit_fn_field_type` names; a read of another fn field is just cloned.
+    pub(crate) fn emit_fn_field_value(&self, fnty: &Type, value: &Expr) -> String {
+        if let Type::Fn(_, _, _, true, _) = fnty {
+            // Reported once per struct at the field declaration (`emit_struct`).
+            return self.emit_expr(value);
+        }
+        if let ExprKind::Field(obj, fname) = &value.kind {
+            if let Some(sn) = self.resolve_struct_name(obj) {
+                if self.struct_fields.get(&sn).and_then(|fs| fs.iter().find(|(n, _)| n == fname))
+                    .is_some_and(|(_, t)| self.resolve_fn_field_type(t).is_some())
+                {
+                    return format!("{}.clone()", self.emit_expr(value));
+                }
+            }
+        }
+        let mut raw = self.emit_expr(value);
+        // A stored closure must be `'static`: `move` it, first cloning each captured shared
+        // handle (actor/`Arc`/`Rc` binding — possibly only a borrowed `&Arc<..>` param) so the
+        // enclosing binding stays usable afterwards.
+        if matches!(&value.kind, ExprKind::Closure(..)) {
+            let clones: String = collect_var_names(value).iter()
+                .filter(|v| self.arc_vars.contains(*v))
+                .map(|v| if self.rc_vars.contains(v) {
+                    format!("let {v} = Rc::clone(&{v}); ")
+                } else {
+                    format!("let {v} = Arc::clone(&{v}); ")
+                })
+                .collect();
+            raw = if clones.is_empty() { format!("move {}", raw) } else { format!("{{ {}move {} }}", clones, raw) };
+        }
+        let Type::Fn(_, _, _, _, req) = fnty else { return raw };
+        let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+        match (*req, multi) {
+            (true, false) => format!("Rc::new({})", raw),
+            (true, true) => format!("Arc::new({})", raw),
+            (false, false) => format!("Rc::new(RefCell::new({}))", raw),
+            (false, true) => format!("Arc::new(std::sync::Mutex::new({}))", raw),
+        }
+    }
+
+    /// `recv.field(args)` where `field` is a function-typed struct field (and not a method).
+    pub(crate) fn try_emit_fn_field_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let sn = self.resolve_struct_name(obj)?;
+        if self.struct_method_names.get(&sn).is_some_and(|m| m.contains(method)) { return None; }
+        let fty = self.struct_fields.get(&sn)?.iter().find(|(n, _)| n == method)?.1.clone();
+        let Type::Fn(_, _, _, _, req) = self.resolve_fn_field_type(&fty)? else { return None };
+        let recv = self.emit_expr(obj);
+        let args_s = self.emit_args(args);
+        let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+        Some(match (req, multi) {
+            (true, _) => format!("({}.{})({})", recv, method, args_s),
+            (false, false) => format!("({}.{}.borrow_mut())({})", recv, method, args_s),
+            (false, true) => format!("({}.{}.lock().unwrap())({})", recv, method, args_s),
+        })
     }
 }

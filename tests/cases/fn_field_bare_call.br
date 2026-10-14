@@ -1,0 +1,27 @@
+use Cmd as def void(string)
+
+struct Runtime:
+    Cmd onCommand
+    Cmd other
+
+    req void fire(string s):
+        onCommand(s)
+
+    req void fireSelf(string s):
+        self.onCommand(s)
+
+    req void fireOther(string s):
+        other(s)
+
+def a(string s):
+    print "cmd {s}"
+
+def b(string s):
+    print "other {s}"
+
+def main():
+    let rt = Runtime(onCommand = a, other = b)
+    rt.fire("a")
+    rt.fireSelf("b")
+    rt.fireOther("c")
+    rt.onCommand("d")

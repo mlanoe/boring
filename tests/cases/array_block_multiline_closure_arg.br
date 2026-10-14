@@ -1,0 +1,49 @@
+# Trailing array-block items whose call argument is a multi-line (block) closure:
+# the closure body is indented relative to the item and the closing paren sits on the
+# body's last line. Siblings after it, nested blocks, and `if`/`for` lines around it
+# must all keep parsing as items of the same block.
+
+trait Widget:
+    req string label()
+    req tap()
+
+use Action as def void(int)
+
+def fire(Action f):
+    f(1)
+
+struct Button as Widget:
+    string caption
+    Action onTap
+    req string label(): "[{self.caption}]"
+    req tap(): fire(self.onTap)
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+    req tap():
+        for c in self.children:
+            c.tap()
+
+def main():
+    let show = true
+    let names = ["x", "y"]
+    let c = Column:
+        Button(caption = "a", onTap = (d):
+            print "a {d}")
+        if show:
+            Button(caption = "b", onTap = (d):
+                let e = d * 2
+                print "b {e}")
+        for nm in names:
+            Button(caption = nm, onTap = (d):
+                print "for {d}")
+        Column:
+            Button(caption = "inner", onTap = (d):
+                print "inner {d}")
+            Button(caption = "inner2", onTap = (d): print("inner2 {d}"))
+        Button(caption = "last", onTap = (d):
+            print "last {d}")
+    print c.label()
+    print c.children[0].label()
+    c.tap()

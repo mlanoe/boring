@@ -904,6 +904,30 @@ impl Env {
         }
     }
 
+    /// Like `get`, but implements the implicit-`self` rule: walking outward, at each
+    /// frame a local/parameter wins, then a field of that frame's `self`, and only
+    /// then the enclosing (ultimately global) scope. The bool is `true` when the
+    /// value came from a `self` field.
+    pub fn get_with_self_fields(&self, name: &str) -> Option<(Value, bool)> {
+        if let Some(v) = self.vars.get(name) {
+            return Some((v.clone(), false));
+        }
+        if let Some(Value::Object(rc)) = self.vars.get("self") {
+            if let Some((_, fv)) = rc.borrow().fields.iter().find(|(k, _)| k == name) {
+                return Some((fv.clone(), true));
+            }
+        }
+        match self.parent {
+            Some(ref parent) => parent.borrow().get_with_self_fields(name),
+            None => None,
+        }
+    }
+
+    /// True when `name` resolves (per `get_with_self_fields`) to a `self` field.
+    pub fn resolves_to_self_field(&self, name: &str) -> bool {
+        matches!(self.get_with_self_fields(name), Some((_, true)))
+    }
+
     /// Returns Err if the variable exists but is immutable, Ok(false) if not found, Ok(true) if set.
     #[allow(clippy::result_unit_err)]
     pub fn set(&mut self, name: &str, value: Value) -> Result<bool, ()> {
@@ -2830,6 +2854,9 @@ impl Interpreter {
         // module_works` in `tests_labeled_array.rs`).
         let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
         let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+        // Array-block sugar (`Column:` + indented items) in the imported module, resolved against
+        // its own imports and this project's `[deps]` like the entry file's.
+        let program = crate::desugar_array_block::desugar_array_block_with_imports(program, canonical.parent(), &self.deps).map_err(|e| err(e.msg(), decl.line))?;
         let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
@@ -2929,6 +2956,9 @@ impl Interpreter {
         // runs the early AST desugar passes right after parsing.
         let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
         let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+        // Array-block sugar (`Column:` + indented items) in the imported module, resolved against
+        // its own imports and this project's `[deps]` like the entry file's.
+        let program = crate::desugar_array_block::desugar_array_block_with_imports(program, None, &self.deps).map_err(|e| err(e.msg(), decl.line))?;
         let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
@@ -2988,6 +3018,9 @@ impl Interpreter {
         // runs the early AST desugar passes right after parsing.
         let program = crate::desugar_inline_kernel::desugar_inline_kernels(program);
         let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+        // Array-block sugar (`Column:` + indented items) in the imported module, resolved against
+        // its own imports and this project's `[deps]` like the entry file's.
+        let program = crate::desugar_array_block::desugar_array_block_with_imports(program, canonical.parent(), &self.deps).map_err(|e| err(e.msg(), decl.line))?;
         let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));

@@ -4725,6 +4725,16 @@ Column([
 ])
 ```
 
+An item may carry a multi-line closure argument: indent the closure body relative to the item and close the call's `)` on the body's last line.
+
+```boring
+Column:
+    Button(label = "+", onActivate = ():
+        taps += 1)
+    Button(label = "-", onActivate = ():
+        taps -= 1)
+```
+
 `if`/`elif`/`else` and `for` are allowed as lines inside the block, desugaring to an imperative builder (push per line, conditional push for `if`, looped push for `for`) instead of a plain array literal:
 
 ```boring

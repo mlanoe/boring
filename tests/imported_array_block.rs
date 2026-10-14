@@ -155,3 +155,31 @@ def main():
     assert!(!out.status.success());
     assert!(stderr(&out).contains("not exported"), "stderr: {}", stderr(&out));
 }
+
+#[test]
+fn array_block_inside_an_imported_module_is_desugared() {
+    // The imported file itself uses `Column:` — the interpreter's `use` loader must run the
+    // array-block pass on it (against its own imports), not only on the entry file.
+    let view = "\
+use lib.*
+
+pub Text screen():
+    let c = Column:
+        Text(\"a\")
+        if true:
+            Text(\"b\")
+        for i in [1, 2]:
+            Text(\"c{i}\")
+    Text(c.label())
+";
+    let main = "\
+use view
+
+def main():
+    print screen().label()
+";
+    let dir = project("imported_array_block_in_module", &[("lib.br", LIB), ("view.br", view), ("main.br", main)]);
+    let out = run(&dir, "main.br");
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Column(4)\n");
+}

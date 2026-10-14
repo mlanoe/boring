@@ -2390,6 +2390,12 @@ impl Interpreter {
                 // `_` is the explicit discard sink — evaluate for side effects, store nothing.
                 if name == "_" { return Ok(()); }
                 // Use a scoped block so the borrow_mut() is dropped before any recursive call.
+                // Implicit self: a `self` field shadows a same-named global/outer binding.
+                if env.borrow().resolves_to_self_field(name) {
+                    let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
+                    let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
+                    return self.assign(&field_expr, val, Rc::clone(&env), line);
+                }
                 let set_result = env.borrow_mut().set(name, val.clone());
                 match set_result {
                     Ok(true) => {}

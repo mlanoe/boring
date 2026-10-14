@@ -3307,6 +3307,7 @@ impl Transpiler {
             obj
         };
         self.record_closure_param_hints(obj, method, args);
+        if let Some(r) = self.try_emit_fn_field_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_host_tensor_cpu(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_introspect_handle_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }

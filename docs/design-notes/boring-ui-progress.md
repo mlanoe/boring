@@ -209,6 +209,24 @@ wrappers, and `viewProps()` now exposes a `bind` field's *current value* (a lowe
 value is readable. Test `semantics_test.br`. With layout, scene and semantics, the headless part of layer 3 has a
 first slice; remaining: the primitives/modifiers listed in `boring-ui/README.md`.
 
+**Controls + events slice (2026-10-14, layer 4 start).** `boring.ui`: `UIAction` alias, `View.viewAct(action, arg)`
+(generated for native controls: `onActivate` → activate, bool/string `value` bind → toggle/setText),
+`Button`/`Toggle` facades. `boring-ui`: `src/events.br` (pointer press, keys, typing, semantic `act`, focus order,
+one transaction + one update pass per event), `Runtime.focus`/`find`/`invalidateRoot`, controls in layout/scene/
+semantics. Test `events_test.br`; boring case `view_actions`. Callbacks capture the body's `__st` (reference
+semantics, interpreter only). Gap found (since fixed in the lexer — a closing `)` now ends the closure body's block, see
+`Lexer::scan_line_delims`): a multi-line closure argument inside an array-block item did not parse. Pitfalls hit: `native` is a keyword, trait defaults for `void` need a
+block body, a field closure is called via `let f = field; f()` inside methods.
+
+**Todo application (2026-10-14).** `boring-ui/examples/todo` + `tests/todo_test.br`: the first end-to-end app, headless,
+through core → layout → scene → semantics → events (details and deviations in `boring-ui/README.md`). Needed in
+`boring`: (1) module loaders (`use` of a file / dep / stdlib) now run the array-block pass on the imported module
+(before: `Column:` blocks in an imported file reached the evaluator undesugared; case in
+`tests/imported_array_block.rs`); (2) a `bind` argument may be a field projection (`item.completed`), passed
+through untouched — it must already evaluate to a `Slot`. Pitfalls found (one task filed): a global function named
+like a struct field shadows the implicit-self field in the interpreter (`key`, `focus`, `root` all bit), and a
+function-typed field can't be called as `onX(...)` inside a method (use `let f = onX; f()`).
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is

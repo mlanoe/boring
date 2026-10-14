@@ -224,6 +224,16 @@ impl Parser {
         if self.is_newline() || self.check(&TokenKind::Eof) {
             self.skip_newlines();
             Ok(())
+        } else if self.check(&TokenKind::Dedent)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace)
+            )
+        {
+            // The last statement of a multi-line closure body ended on the line's closing
+            // delimiter (`onTap = ():\n    foo())`): the lexer puts the body's `Dedent`
+            // right before that delimiter instead of after a newline.
+            Ok(())
         } else {
             Err(ParseError::Generic {
                 line: self.line(), col: self.col(),

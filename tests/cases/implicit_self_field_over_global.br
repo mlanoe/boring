@@ -1,0 +1,30 @@
+# A bare identifier inside a method resolves locals/params, then the struct's
+# own fields, and only then module/global scope.
+use Cmd as def void(string)
+
+def key(int x):
+    pass
+
+let root = 7
+
+struct Group:
+    string key
+    var string root = "field-root"
+
+    req string label(): key
+
+    def rename(string s):
+        root = s
+
+    req string readRoot(): root
+
+    req string shadowedByParam(string key): key
+
+def main():
+    var mut g = Group(key = "k1")
+    print g.label()
+    print g.readRoot()
+    g.rename("changed")
+    print g.readRoot()
+    print root
+    print g.shadowedByParam("param")

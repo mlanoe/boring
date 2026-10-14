@@ -1,0 +1,23 @@
+# boring-ui view callbacks written inline as multi-line closure arguments of array-block items
+# (previously only a pre-bound `let bump = ():` passed by name parsed correctly).
+use boring.ui.*
+
+view Counter:
+    state int taps = 0
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Button(label = "+", onActivate = ():
+                taps += 1)
+            Button(label = "-", onActivate = ():
+                taps -= 1)
+
+def main():
+    let c = Counter()
+    let st = c.newState()
+    var kids = c.expand(st).viewChildren()
+    print kids.length
+    mut b = kids[0]
+    b.viewAct("activate", "")
+    b.viewAct("activate", "")
+    mut typed = st as Counter__State else (Counter__State())
+    print typed.taps

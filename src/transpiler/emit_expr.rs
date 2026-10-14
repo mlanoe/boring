@@ -3492,6 +3492,28 @@ impl Transpiler {
             if is_type {
                 return self.emit_constructor(name, args);
             }
+            // A bare call of a function-typed field of the enclosing struct (`onCommand(x)`
+            // inside a method) is implicit-self field access followed by a call: emit it
+            // exactly like `self.onCommand(x)`. A local/param of the same name wins.
+            if let Some(sn) = self.self_type.as_ref() {
+                if !self.known_local_vars.contains(name.as_str()) {
+                    let is_fn_field = self.struct_fields.get(sn.as_str()).is_some_and(|fields| {
+                        fields.iter().any(|(f, fty)| f == name && match fty.without_mut() {
+                            Type::Fn(..) => true,
+                            Type::Named(n) => self.fn_type_aliases.contains_key(n.as_str()),
+                            _ => false,
+                        })
+                    });
+                    if is_fn_field {
+                        let self_var = Expr { kind: ExprKind::Var("self".into()), line: callee.line, col: callee.col, len: 0 };
+                        let call = Expr {
+                            kind: ExprKind::MethodCall(Box::new(self_var), name.clone(), args.to_vec()),
+                            line: callee.line, col: callee.col, len: 0,
+                        };
+                        return self.emit_expr(&call);
+                    }
+                }
+            }
             // A bare call to a sibling method of the enclosing struct (`one(n)` inside
             // `def two`) -- implicit `self` only covers fields (docs/book.md, "Implicit
             // `self`"), so this would be emitted as a free-function call that doesn't exist

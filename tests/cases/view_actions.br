@@ -1,0 +1,38 @@
+# Native controls' semantic actions (`viewAct`): a Button's `onActivate` callback runs against the
+# state it captured, a Toggle flips its bound slot, a TextField writes its bound text.
+use boring.ui.*
+
+view Counter:
+    state int taps = 0
+    state bool on = false
+    state string text = "a"
+
+    req string summary():
+        "{taps}/{on}/{text}"
+
+    body():
+        let bump = ():
+            taps += 1
+        Column(alignment = .Center, spacing = nil):
+            Button(label = "+", onActivate = bump)
+            Toggle(value = on, label = "on")
+            TextField(value = text, label = "t", placeholder = "")
+
+def main():
+    let c = Counter()
+    let st = c.newState()
+    # expand builds the body from the node's state; the controls captured that same state.
+    let body = c.expand(st)
+    var kids = body.viewChildren()
+    print kids[0].viewKind()
+    mut button = kids[0]
+    button.viewAct("activate", "")
+    button.viewAct("activate", "")
+    mut toggle = kids[1]
+    toggle.viewAct("toggle", "")
+    mut field = kids[2]
+    field.viewAct("setText", "hello")
+    # Re-expanding the same state shows the writes.
+    print c.expand(st).viewKind()
+    mut typed = st as Counter__State else (Counter__State())
+    print "{typed.taps}/{typed.on.value}/{typed.text.value}"

@@ -1,0 +1,33 @@
+# Transpile-suite twin of array_block_multiline_closure_arg: a trailing array-block item with a
+# multi-line closure argument, followed by sibling items and by code after the block. The
+# closure is consumed by the item's constructor function (a closure can't be a struct field
+# in transpiled output), so it compiles to plain Rust.
+
+trait Widget:
+    req string label()
+
+struct Text as Widget:
+    string text
+    req string label(): text
+
+struct Column as Widget:
+    [Widget] children
+    req string label(): "Column({self.children.length})"
+
+use Action as def void(int)
+
+Text run(string name, Action f):
+    f(1)
+    Text(name)
+
+def main():
+    let c = Column:
+        run("a", (d):
+            print "a {d}")
+        Text("plain")
+        run("b", (d):
+            let e = d * 2
+            print "b {e}")
+        Text("tail")
+    print c.label()
+    print c.children[2].label()

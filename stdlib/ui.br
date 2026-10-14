@@ -46,6 +46,9 @@ pub struct NoState as StateBox:
 #   isComposite   true for a view with a `body()`; the runtime then calls
 #   newState      once at mount (the declaration's default seed), and
 #   expand        on every build, with that node's persistent state, to get the body's view
+# A parameterless callback, as held by `Button.onActivate`.
+pub use UIAction as def void()
+
 pub trait View:
     req string viewKind(): ""
     req [View] viewChildren(): []
@@ -55,6 +58,11 @@ pub trait View:
     req bool isComposite(): false
     req StateBox'shared newState(): NoState()
     req View expand(StateBox'shared st): Text(content = "")
+    # The runtime delivering a semantic action to a native control: "activate" (Button), "toggle"
+    # (Toggle), "setText" with the new text as `arg` (TextField). Generated like the rest from the
+    # facade's shape (see src/lower_view.rs); default: nothing to do.
+    req void viewAct(string action, string arg):
+        pass
 
 # The shared storage cell behind `bind`: a parent's `state` that is handed to a child's `bind` is
 # stored as `Slot<T>'actor`, and the child's `bind T name` field is the same slot (see
@@ -169,6 +177,20 @@ pub view AccessibilityHidden:
 pub view AccessibilityGroup:
     string label = ""
     [View] children
+    body(): native
+
+# ── Controls ──────────────────────────────────────────────────────────────────────────────────────
+# Native controls: the runtime owns their interaction (focus, pointer, keyboard, accessibility
+# actions) and reaches the application through the `bind` slot (`Button`: its `onActivate` callback).
+
+pub view Button:
+    string label
+    UIAction onActivate
+    body(): native
+
+pub view Toggle:
+    bind bool value
+    string label
     body(): native
 
 pub view TextField:

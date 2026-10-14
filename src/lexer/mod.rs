@@ -411,6 +411,61 @@ impl<'a> Lexer<'a> {
         Self { source, line: 0, indent_stack: vec![0], indent_style: None }
     }
 
+    /// Tracks paren depth and inner colon-blocks (multi-line closures inside parens) for one
+    /// line's tokens, returning them (with synthesized `Dedent`s, see below) plus whether the
+    /// line's last meaningful token is a `:`.
+    ///
+    /// When a closing delimiter ends the paren that an inner colon-block was opened inside
+    /// (`onTap = ():\n    body)`), the block ends *at that delimiter*: the `Dedent`s are emitted
+    /// right before it, so the block's own tokens are balanced (`Indent stmts Dedent )`). Left to
+    /// the next line's indentation drop, the `Dedent` would arrive after the call's `)` and
+    /// newline, where it closes the *enclosing* block early (e.g. a trailing array-block item
+    /// followed by sibling items, or the rest of a function body).
+    fn scan_line_delims(
+        &mut self,
+        line_tokens: Vec<Token>,
+        line_indent: usize,
+        paren_depth: &mut i32,
+        inner_colon_blocks: &mut i32,
+        base_indents: &mut Vec<usize>,
+        block_paren_depths: &mut Vec<i32>,
+    ) -> (Vec<Token>, bool) {
+        let mut out = Vec::with_capacity(line_tokens.len());
+        let mut last_meaningful_is_colon = false;
+        for t in line_tokens {
+            match &t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                    *paren_depth += 1;
+                    last_meaningful_is_colon = false;
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    *paren_depth -= 1;
+                    last_meaningful_is_colon = false;
+                    while let Some(&d) = block_paren_depths.last() {
+                        if *paren_depth >= d { break; }
+                        let base = base_indents.pop().unwrap();
+                        block_paren_depths.pop();
+                        *inner_colon_blocks -= 1;
+                        while self.indent_stack.len() > 1 && *self.indent_stack.last().unwrap() > base {
+                            self.indent_stack.pop();
+                            out.push(Token { kind: TokenKind::Dedent, line: t.line, col: t.col, len: 0 });
+                        }
+                    }
+                }
+                TokenKind::Colon => { last_meaningful_is_colon = true; }
+                _ => { last_meaningful_is_colon = false; }
+            }
+            out.push(t);
+        }
+        // If this line ended with ':' while inside parens, the next lines form a block body.
+        if last_meaningful_is_colon && *paren_depth > 0 {
+            *inner_colon_blocks += 1;
+            base_indents.push(line_indent);
+            block_paren_depths.push(*paren_depth);
+        }
+        (out, last_meaningful_is_colon)
+    }
+
     fn tokenize(mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens: Vec<Token> = Vec::new();
         let lines: Vec<&str> = self.source.lines().collect();
@@ -423,6 +478,9 @@ impl<'a> Lexer<'a> {
         let mut inner_colon_blocks: i32 = 0;
         // The indent level at the time each inner colon block was opened, so we know when to pop.
         let mut inner_block_base_indents: Vec<usize> = Vec::new();
+        // Paren depth *inside* the opening paren of each inner colon block, parallel to
+        // `inner_block_base_indents` (see `Lexer::scan_line_delims`).
+        let mut inner_block_paren_depths: Vec<i32> = Vec::new();
         while i < lines.len() {
             self.line = i + 1;
             let raw = lines[i];
@@ -465,6 +523,7 @@ impl<'a> Lexer<'a> {
                         // The DEDENT tokens will be emitted below in the normal dedent logic.
                         inner_colon_blocks -= 1;
                         inner_block_base_indents.pop();
+                        inner_block_paren_depths.pop();
                     } else {
                         break;
                     }
@@ -494,27 +553,10 @@ impl<'a> Lexer<'a> {
             for t in &mut line_tokens {
                 t.col += indent_offset;
             }
-            // Update paren depth and track colon-blocks inside parens.
-            let mut last_meaningful_is_colon = false;
-            for t in &line_tokens {
-                match &t.kind {
-                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
-                        paren_depth += 1;
-                        last_meaningful_is_colon = false;
-                    }
-                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                        paren_depth -= 1;
-                        last_meaningful_is_colon = false;
-                    }
-                    TokenKind::Colon => { last_meaningful_is_colon = true; }
-                    _ => { last_meaningful_is_colon = false; }
-                }
-            }
-            // If this line ended with ':' while inside parens, the next lines form a block body.
-            if last_meaningful_is_colon && paren_depth > 0 {
-                inner_colon_blocks += 1;
-                inner_block_base_indents.push(line_indent);
-            }
+            let (line_tokens, last_meaningful_is_colon) = self.scan_line_delims(
+                line_tokens, line_indent, &mut paren_depth, &mut inner_colon_blocks,
+                &mut inner_block_base_indents, &mut inner_block_paren_depths,
+            );
             tokens.extend(line_tokens);
             // Emit newline when at top level or when ending a colon-block line inside parens.
             if paren_depth == 0 || last_meaningful_is_colon || inner_colon_blocks > 0 {
@@ -541,6 +583,9 @@ impl<'a> Lexer<'a> {
         let mut paren_depth: i32 = 0;
         let mut inner_colon_blocks: i32 = 0;
         let mut inner_block_base_indents: Vec<usize> = Vec::new();
+        // Paren depth *inside* the opening paren of each inner colon block, parallel to
+        // `inner_block_base_indents` (see `Lexer::scan_line_delims`).
+        let mut inner_block_paren_depths: Vec<i32> = Vec::new();
         while i < lines.len() {
             self.line = i + 1;
             let raw = lines[i];
@@ -587,6 +632,7 @@ impl<'a> Lexer<'a> {
                     if line_indent <= base {
                         inner_colon_blocks -= 1;
                         inner_block_base_indents.pop();
+                        inner_block_paren_depths.pop();
                     } else {
                         break;
                     }
@@ -620,25 +666,10 @@ impl<'a> Lexer<'a> {
             for t in &mut line_tokens {
                 t.col += indent_offset;
             }
-            let mut last_meaningful_is_colon = false;
-            for t in &line_tokens {
-                match &t.kind {
-                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
-                        paren_depth += 1;
-                        last_meaningful_is_colon = false;
-                    }
-                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                        paren_depth -= 1;
-                        last_meaningful_is_colon = false;
-                    }
-                    TokenKind::Colon => { last_meaningful_is_colon = true; }
-                    _ => { last_meaningful_is_colon = false; }
-                }
-            }
-            if last_meaningful_is_colon && paren_depth > 0 {
-                inner_colon_blocks += 1;
-                inner_block_base_indents.push(line_indent);
-            }
+            let (line_tokens, last_meaningful_is_colon) = self.scan_line_delims(
+                line_tokens, line_indent, &mut paren_depth, &mut inner_colon_blocks,
+                &mut inner_block_base_indents, &mut inner_block_paren_depths,
+            );
             tokens.extend(line_tokens);
             if paren_depth == 0 || last_meaningful_is_colon || inner_colon_blocks > 0 {
                 tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });

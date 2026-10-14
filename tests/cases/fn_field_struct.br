@@ -1,0 +1,53 @@
+# Function-typed struct fields: an alias (`def`/`req`) constructed with
+# labeled / positional args, a named closure, and a default; called through the field.
+use Action as def void()
+use Scale as req int(int)
+
+struct Counter:
+    var int n = 0
+
+struct Btn:
+    string label
+    Action onActivate
+
+struct Op:
+    string name
+    Scale apply
+    Scale twice = (x): x * 2
+
+struct Pair:
+    Action first
+    Action second
+
+Btn make(mut Counter'actor c):
+    Btn(label = "inc", onActivate = ():
+        c.n += 1)
+
+def main():
+    mut Counter'actor c = Counter()
+    let b = make(c)
+    b.onActivate()
+    b.onActivate()
+    print "{b.label} {c.n}"
+
+    let b2 = Btn("bump", ():
+        c.n += 10)
+    b2.onActivate()
+    print c.n
+
+    # Cloning shares the same closure (and the state it captured).
+    let b3 = b2
+    b3.onActivate()
+    print c.n
+
+    let op = Op(name = "triple", apply = (x):
+        x * 3)
+    print "{op.name} {op.apply(7)} {op.twice(7)}"
+
+    # A named closure (capture-free here) and another struct's field both work as values.
+    let hello = ():
+        print "hello"
+    let p = Pair(first = b.onActivate, second = hello)
+    p.first()
+    p.second()
+    print c.n

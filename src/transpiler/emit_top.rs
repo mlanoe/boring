@@ -657,6 +657,14 @@ impl Transpiler {
                 return;
             }
         };
+        // Array-block sugar in the imported module, resolved against its own imports and `[deps]`.
+        let program = match crate::desugar_array_block::desugar_array_block_with_imports(program, canonical.parent(), &self.deps) {
+            Ok(p) => p,
+            Err(e) => {
+                self.push_error(use_line, use_col, format!("in '{}': {}", canonical.display(), e.msg()));
+                return;
+            }
+        };
         let program = match crate::lower_view::lower_module(program) {
             Ok(p) => p,
             Err(e) => {
@@ -708,6 +716,13 @@ impl Transpiler {
             Ok(p) => p,
             Err(e) => {
                 self.push_error(use_line, use_col, format!("parse error in boring.{module}: {e}"));
+                return;
+            }
+        };
+        let program = match crate::desugar_array_block::desugar_array_block_with_imports(program, None, &self.deps) {
+            Ok(p) => p,
+            Err(e) => {
+                self.push_error(use_line, use_col, format!("in boring.{module}: {}", e.msg()));
                 return;
             }
         };

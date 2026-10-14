@@ -48,7 +48,8 @@
 //! ## Slice scope (what is NOT lowered yet)
 //!
 //! - Native views (`body(): native`, no `state`) lower to a plain struct conforming to `View`.
-//! - **`bind` projections** (`profile.name`, keyed elements), binding a `state let`, and
+//! - **Typed `bind` projections** (`profile.name` into a state struct, keyed elements; a field projection
+//!   is only passed through and must already evaluate to a `Slot`), binding a `state let`, and
 //!   `bind`'s permission levels (the child can always replace and mutate: the slot is `var mut`).
 //! - **Parent-supplied seeds** (`Counter(count = expensive())`): a `state` field is no longer a
 //!   constructor argument, so that is an ordinary "unknown field" error today.
@@ -215,6 +216,10 @@ fn find_bound_states(
                 match &a.value.kind {
                     ExprKind::Var(n) if states.contains(n) => { bound.insert(n.clone()); }
                     ExprKind::Var(n) if binds.contains(n) => {}
+                    // A projection (`item.completed`) is passed through untouched: it must evaluate
+                    // to a `Slot` (an input struct's shared field) — typed element projections are
+                    // not supported yet, so this is the application's responsibility.
+                    ExprKind::Field(..) => {}
                     _ => {
                         failure.get_or_insert_with(|| err(
                             format!(
@@ -400,6 +405,26 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                 }
                 _ => props.push_str(&format!("        p[\"{name}\"] = \"{{{name}}}\"\n", name = f.name)),
             }
+        }
+        // Semantic actions: a native control's reaction, derived from its facade's shape.
+        let mut acts = String::new();
+        if s.fields.iter().any(|f| f.name == "onActivate" && is_named(strip_mut(&f.ty), "UIAction")) {
+            acts.push_str("        if action == \"activate\":\n            let f = onActivate\n            f()\n");
+        }
+        if let Some(f) = s.fields.iter().find(|f| f.name == "value") {
+            if let Type::Qualified(inner, OwnerQual::Actor) = strip_mut(&f.ty) {
+                if let Type::Generic(g, args) = &**inner {
+                    if g == "Slot" && args.len() == 1 && is_named(&args[0], "bool") {
+                        acts.push_str("        if action == \"toggle\":\n            value.value = !value.value\n");
+                    }
+                    if g == "Slot" && args.len() == 1 && is_named(&args[0], "string") {
+                        acts.push_str("        if action == \"setText\":\n            value.value = arg\n");
+                    }
+                }
+            }
+        }
+        if !acts.is_empty() {
+            src.push_str(&format!("    req void viewAct(string action, string arg):\n{acts}"));
         }
         if !props.is_empty() {
             src.push_str(&format!("    req {{string=string}} viewProps():\n        mut {{string=string}} p = {{=}}\n{props}        p\n"));

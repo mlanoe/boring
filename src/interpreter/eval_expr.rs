@@ -493,6 +493,15 @@ impl Interpreter {
         // Implicit self method call: `foo(args)` inside a struct method —
         // if `foo` isn't in scope but `self` is, try `self.foo(args)`.
         if let ExprKind::Var(name) = &callee_expr.kind {
+            // A function-typed field called bare (`onCommand("x")`): invoke the stored closure.
+            let field_callee = match env.borrow().get_with_self_fields(name) {
+                Some((v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. } | Value::OverloadedFn { .. }), true)) => Some(v),
+                _ => None,
+            };
+            if let Some(f) = field_callee {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                return self.call_value(f, arg_vals, line, false);
+            }
             let not_in_scope = env.borrow().get(name).is_none();
             if not_in_scope {
                 let self_opt = env.borrow().get("self"); // borrow released after this line
@@ -513,7 +522,15 @@ impl Interpreter {
                 }
             }
         }
-        let callee = self.eval_expr(callee_expr, Rc::clone(&env))?;
+        // A bare call whose name is a non-callable `self` field while a global function
+        // of that name exists calls the function (fields only shadow when callable).
+        let callee = match &callee_expr.kind {
+            ExprKind::Var(n) if env.borrow().resolves_to_self_field(n) => match env.borrow().get(n) {
+                Some(g) if !matches!(g, Value::Uninitialized) => g,
+                _ => self.eval_expr(callee_expr, Rc::clone(&env))?,
+            },
+            _ => self.eval_expr(callee_expr, Rc::clone(&env))?,
+        };
         // `k(block = N)` short-hand — if the callee is a kernel Object and the
         // arguments contain a `block =` labeled arg, treat this as a kernel launch
         // and return a KernelHandle. The handle immediately returns `k` on `.wait`.
@@ -754,6 +771,24 @@ impl Interpreter {
             }
         }
         let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+        // `recv.field(args)` where `field` is a function-typed struct field (no method of that
+        // name): call the stored closure. Not a content mutation of `recv` — the closure
+        // mutates what it captured, never the struct — so the mutating-method gate below
+        // does not apply (same as the transpiler's `Rc<RefCell<dyn FnMut>>` field call).
+        if let Value::Object(inner_rc) = &obj {
+            let (type_name, field_val) = {
+                let inner = inner_rc.borrow();
+                (inner.type_name.clone(), inner.fields.iter().find(|(k, _)| k == method).map(|(_, v)| v.clone()))
+            };
+            if let Some(callee @ (Value::Closure { .. } | Value::Fn { .. } | Value::NativeFn { .. })) = field_val {
+                let has_method = matches!(self.global.borrow().get(&type_name),
+                    Some(Value::Struct { ref decl, .. }) if decl.methods.iter().any(|m| m.name == *method));
+                if !has_method {
+                    let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                    return self.call_value(callee, arg_vals, line, false);
+                }
+            }
+        }
         // GPU device property methods — simulation mock values.
         if let Value::GpuDevice(idx) = &obj {
             let idx = *idx;
@@ -1391,7 +1426,7 @@ impl Interpreter {
                         .collect();
                     return Ok(Value::Array(vals.into()));
                 }
-                if let Some(val) = env.borrow().get(name) {
+                if let Some((val, _)) = env.borrow().get_with_self_fields(name) {
                     if matches!(val, Value::Uninitialized) {
                         return Err(err(format!("variable '{}' used before being assigned", name), line));
                     }

@@ -692,7 +692,16 @@ impl Transpiler {
                                 }
                                 // Optional params require exact qualifier match: Option<T> cannot be
                                 // auto-coerced to Option<Arc<Mutex<T>>> at the call site.
+                                //
+                                // A plain `'inline`/`'owned` argument would be wrapped at the call
+                                // site (`run(&Arc::new(Mutex::new(st)))`), which *moves* it: the
+                                // caller's own later reads then fail rustc E0382, and — worse —
+                                // mutations the callee makes would never be visible to them. So
+                                // an `'actor`/`'guard` demand promotes the caller's variable to
+                                // that qualifier too (same as declaring it `T'actor` by hand).
                                 let compatible = if matches!(param_ty, Type::Optional(_)) {
+                                    vec![demanded.clone()]
+                                } else if matches!(demanded, OwnerQual::Actor | OwnerQual::Guard) {
                                     vec![demanded.clone()]
                                 } else {
                                     coercible_from(demanded.clone())
