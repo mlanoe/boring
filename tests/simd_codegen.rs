@@ -478,6 +478,57 @@ print "{collective.output[0]} {collective.output[1]} {collective.output[2]} {col
 }
 
 #[test]
+fn collective_for_with_prefix_and_suffix_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_for_context");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_for_context.br");
+    fs::write(
+        &input,
+        r#"
+kernel LoopPhases:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        tile[i] = i + 1
+        sync
+        for round in 0..<2:
+            tile[i] = tile[i] + 10 + round
+            sync
+        output[i] = tile[i]
+mut looped = LoopPhases()
+kernel:
+    looped(block = 4)
+print "{looped.output[0]} {looped.output[1]} {looped.output[2]} {looped.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_for_context_simd/src/main.rs")).unwrap();
+    assert!(source.contains("for round in 0..2"));
+    assert!(source.matches("let i = __thread.x").count() >= 4);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_for_context_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "22 23 24 25");
+}
+
+#[test]
 fn block_uniform_while_reduction_with_sync_runs_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_while");
     let _ = fs::remove_dir_all(&root);
@@ -579,6 +630,63 @@ print "{collective.output[0]} {collective.output[3]} {collective.output[4]} {col
 }
 
 #[test]
+fn collective_if_with_prefix_and_suffix_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_if_context");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_if_context.br");
+    fs::write(
+        &input,
+        r#"
+kernel ConditionalPhases:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        tile[i] = i + 1
+        sync
+        if .block.x == 0:
+            tile[i] = tile[i] + 10
+            sync
+        else:
+            tile[i] = tile[i] + 20
+            sync
+        output[i + .block.x * .block_dim.x] = tile[i]
+mut conditional = ConditionalPhases()
+kernel:
+    conditional(block = 4, grid = 2)
+print "{conditional.output[0]} {conditional.output[1]} {conditional.output[2]} {conditional.output[3]}"
+print "{conditional.output[4]} {conditional.output[5]} {conditional.output[6]} {conditional.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_if_context_simd/src/main.rs")).unwrap();
+    assert!(source.matches("let i = __thread.x").count() >= 4);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_if_context_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "11 12 13 14\n21 22 23 24"
+    );
+}
+
+#[test]
 fn block_uniform_elif_else_with_different_sync_counts_runs_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_branches");
     let _ = fs::remove_dir_all(&root);
@@ -643,6 +751,129 @@ print "{collective.output[8]} {collective.output[9]} {collective.output[10]} {co
 }
 
 #[test]
+fn block_uniform_match_with_sync_runs_in_collective_simd_phases() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_match");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_match.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectiveMatch:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<12]
+    def ():
+        match .block.x:
+            0:
+                let i = .thread.x
+                tile[i] = i + 1
+                sync
+                output[i] = tile[3 - i]
+            1:
+                let i = .thread.x
+                tile[i] = i + 10
+                sync
+                output[i + 4] = tile[3 - i] + 10
+                sync
+                output[i + 4] = output[i + 4]
+            _:
+                let i = .thread.x
+                output[i + 8] = 99 + i
+mut collective = CollectiveMatch()
+kernel:
+    collective(block = 4, grid = 3)
+print "{collective.output[0]} {collective.output[1]} {collective.output[2]} {collective.output[3]}"
+print "{collective.output[4]} {collective.output[5]} {collective.output[6]} {collective.output[7]}"
+print "{collective.output[8]} {collective.output[9]} {collective.output[10]} {collective.output[11]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_uniform_match_simd/src/main.rs")).unwrap();
+    assert!(source.contains("match __block.x"));
+    assert!(source.matches("'__boring_work_item: for __x").count() >= 6);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_match_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "4 3 2 1\n23 22 21 20\n99 100 101 102"
+    );
+}
+
+#[test]
+fn collective_match_with_prefix_and_suffix_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_match_context");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_match_context.br");
+    fs::write(
+        &input,
+        r#"
+kernel MatchPhases:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        tile[i] = i + 1
+        sync
+        match .block.x:
+            0:
+                tile[i] = tile[i] + 10
+                sync
+            _:
+                tile[i] = tile[i] + 20
+                sync
+        output[i + .block.x * .block_dim.x] = tile[i]
+mut matched = MatchPhases()
+kernel:
+    matched(block = 4, grid = 2)
+print "{matched.output[0]} {matched.output[1]} {matched.output[2]} {matched.output[3]}"
+print "{matched.output[4]} {matched.output[5]} {matched.output[6]} {matched.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_match_context_simd/src/main.rs")).unwrap();
+    assert!(source.matches("let i = __thread.x").count() >= 4);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_match_context_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "11 12 13 14\n21 22 23 24"
+    );
+}
+
+#[test]
 fn uniform_const_field_condition_can_guard_a_simd_barrier() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_const_if");
     let _ = fs::remove_dir_all(&root);
@@ -690,6 +921,88 @@ print "{conditional.output[0]} {conditional.output[1]} {conditional.output[2]} {
 }
 
 #[test]
+fn collective_guard_with_prefix_and_suffix_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_guard_context");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_guard_context.br");
+    fs::write(
+        &input,
+        r#"
+kernel GuardPhases:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        tile[i] = i + 1
+        sync
+        guard .block.x == 0 else:
+            tile[i] = tile[i] + 20
+            sync
+            output[i + 4] = tile[i]
+            return
+        tile[i] = tile[i] + 10
+        sync
+        output[i] = tile[i]
+mut guarded = GuardPhases()
+kernel:
+    guarded(block = 4, grid = 2)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_guard_context_simd/src/main.rs")).unwrap();
+    assert!(source.contains("if !((__block.x == 0))"));
+    assert!(source.contains("__boring_barrier_active[__boring_barrier_thread] = false"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_guard_context_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "11 12 13 14\n21 22 23 24"
+    );
+}
+
+#[test]
+fn thread_divergent_guard_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_guard");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_guard.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        guard .thread.x == 0 else:\n            sync\n            return\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(
+        String::from_utf8_lossy(&generated.stderr)
+            .contains("`sync` is not yet supported inside a --target simd kernel")
+    );
+}
+
+#[test]
 fn thread_divergent_if_with_sync_remains_rejected_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -698,6 +1011,52 @@ fn thread_divergent_if_with_sync_remains_rejected_on_simd() {
     fs::write(
         &input,
         "kernel Divergent:\n    def ():\n        if .thread.x == 0:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(
+        String::from_utf8_lossy(&generated.stderr)
+            .contains("`sync` is not yet supported inside a --target simd kernel")
+    );
+}
+
+#[test]
+fn thread_divergent_match_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_match");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_match.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        match .thread.x:\n            0:\n                sync\n            _:\n                pass\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(
+        String::from_utf8_lossy(&generated.stderr)
+            .contains("`sync` is not yet supported inside a --target simd kernel")
+    );
+}
+
+#[test]
+fn thread_divergent_for_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_for");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_for.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        for round in 0..<(.thread.x + 1):\n            sync\n",
     )
     .unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
@@ -1434,6 +1793,61 @@ print "{optionals.output[0]} {optionals.output[1]} {optionals.output[2]} {option
 }
 
 #[test]
+fn identity_operators_match_gpu_value_semantics_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_identity_operators");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("identity_operators.br");
+    fs::write(
+        &input,
+        r#"
+kernel Identity:
+    mut [bool]'unified output
+    init():
+        output = [false for ..<4]
+    def ():
+        let i = .thread.x
+        let value = i % 2
+        let int? optional = if i < 2: some(value) else: nil
+        if i == 0:
+            output[i] = value is 0
+        elif i == 1:
+            output[i] = value is not 0
+        elif i == 2:
+            output[i] = optional is nil
+        else:
+            output[i] = optional is not some(0)
+mut identity = Identity()
+kernel:
+    identity(block = 4)
+print "{identity.output[0]} {identity.output[1]} {identity.output[2]} {identity.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("identity_operators_simd/src/main.rs")).unwrap();
+    assert!(source.contains("value == 0"));
+    assert!(source.contains("value != 0"));
+    assert!(source.contains("optional.is_none()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("identity_operators_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "true true true true");
+}
+
+#[test]
 fn local_tuple_destructuring_runs_on_cpu() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_tuple_destructure");
     let _ = fs::remove_dir_all(&root);
@@ -1955,6 +2369,52 @@ print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "14 29 34 44");
+}
+
+#[test]
+fn inferred_local_alias_preserves_labeled_array_axes_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_labeled_alias");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("labeled_alias.br");
+    fs::write(
+        &input,
+        r#"
+kernel LabeledAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let [int, width = 2, height = 2] original = [10, 20, 30, 40]
+        let alias = original
+        output[i] = alias[width = i % alias.width, height = i / alias.height]
+mut values = LabeledAlias()
+kernel:
+    values(block = 4)
+print "{values.output[0]} {values.output[1]} {values.output[2]} {values.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("labeled_alias_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let alias = original.clone()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("labeled_alias_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 20 30 40");
 }
 
 #[test]

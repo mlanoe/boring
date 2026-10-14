@@ -327,32 +327,62 @@ impl Emitter {
                 .body
                 .iter()
                 .any(is_simd_barrier_stmt);
-            let barrier_for = if m.body.len() == 1 {
-                match &m.body[0] {
-                    Stmt::For(for_stmt)
-                        if for_stmt.body.iter().any(is_simd_barrier_stmt) => Some(for_stmt),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            let barrier_if = if m.body.len() == 1 {
-                match &m.body[0] {
-                    Stmt::If(if_stmt)
-                        if if_stmt
-                            .branches
-                            .iter()
-                            .all(|(condition, _)| self.block_uniform_expr(condition))
-                            && (if_stmt.branches.iter().any(|(_, body)| {
-                                body.iter().any(is_simd_barrier_stmt)
-                            }) || if_stmt.else_body.as_ref().is_some_and(|body| {
-                                body.iter().any(is_simd_barrier_stmt)
-                            })) => Some(if_stmt),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+            let barrier_for = m.body.iter().enumerate().find_map(|(for_index, stmt)| {
+                let Stmt::For(for_stmt) = stmt else { return None };
+                let safe_prefix = m.body[..for_index].iter().all(|stmt| {
+                    !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                });
+                (safe_prefix
+                    && self.block_uniform_expr(&for_stmt.iterable)
+                    && for_stmt.body.iter().any(is_simd_barrier_stmt))
+                .then_some((for_index, for_stmt))
+            });
+            let barrier_if = m.body.iter().enumerate().find_map(|(if_index, stmt)| {
+                let Stmt::If(if_stmt) = stmt else { return None };
+                let has_barrier = if_stmt
+                    .branches
+                    .iter()
+                    .any(|(_, body)| body.iter().any(is_simd_barrier_stmt))
+                    || if_stmt
+                        .else_body
+                        .as_ref()
+                        .is_some_and(|body| body.iter().any(is_simd_barrier_stmt));
+                let safe_prefix = m.body[..if_index].iter().all(|stmt| {
+                    !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                });
+                (has_barrier
+                    && safe_prefix
+                    && if_stmt
+                        .branches
+                        .iter()
+                        .all(|(condition, _)| self.block_uniform_expr(condition)))
+                .then_some((if_index, if_stmt))
+            });
+            let barrier_match = m.body.iter().enumerate().find_map(|(match_index, stmt)| {
+                let Stmt::Match(match_stmt) = stmt else { return None };
+                let safe_prefix = m.body[..match_index].iter().all(|stmt| {
+                    !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                });
+                (safe_prefix
+                    && self.block_uniform_expr(&match_stmt.subject)
+                    && match_stmt.arms.iter().all(|arm| arm.guard.is_none())
+                    && match_stmt.arms.iter().any(|arm| {
+                        matches!(&arm.body, MatchBody::Block(body)
+                            if body.iter().any(is_simd_barrier_stmt))
+                    }))
+                .then_some((match_index, match_stmt))
+            });
+            let barrier_guard = m.body.iter().enumerate().find_map(|(guard_index, stmt)| {
+                let Stmt::Guard(guard_stmt) = stmt else { return None };
+                let GuardCond::Expr(condition) = &guard_stmt.cond else { return None };
+                let safe_prefix = m.body[..guard_index].iter().all(|stmt| {
+                    !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                });
+                (safe_prefix
+                    && self.block_uniform_expr(condition)
+                    && guard_stmt.else_body.iter().any(is_simd_barrier_stmt))
+                .then_some((guard_index, guard_stmt, condition))
+            });
             let barrier_while = m.body.iter().enumerate().find_map(|(while_index, stmt)| {
                 let Stmt::While(while_stmt) = stmt else { return None };
                 if !while_stmt.body.iter().any(is_simd_barrier_stmt) {
@@ -380,6 +410,8 @@ impl Emitter {
             if has_top_level_sync
                 || barrier_for.is_some()
                 || barrier_if.is_some()
+                || barrier_match.is_some()
+                || barrier_guard.is_some()
                 || barrier_while.is_some()
             {
                 self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
@@ -412,15 +444,27 @@ impl Emitter {
                         ),
                     );
                 }
-                if let Some(for_stmt) = barrier_for {
+                if let Some((for_index, for_stmt)) = barrier_for {
+                    let prefix = &m.body[..for_index];
+                    let replayed = self.replayable_barrier_locals(prefix);
+                    self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
                     let iterable = self.expr(&for_stmt.iterable);
                     self.line(
                         3,
                         &format!("for {} in {} {{", for_stmt.vars.join(", "), iterable),
                     );
-                    self.emit_barrier_phases(k, &for_stmt.body, 4);
+                    self.emit_barrier_phases_seeded(k, &for_stmt.body, 4, &replayed);
                     self.line(3, "}");
-                } else if let Some(if_stmt) = barrier_if {
+                    self.emit_barrier_phases_seeded(
+                        k,
+                        &m.body[for_index + 1..],
+                        3,
+                        &replayed,
+                    );
+                } else if let Some((if_index, if_stmt)) = barrier_if {
+                    let prefix = &m.body[..if_index];
+                    let replayed = self.replayable_barrier_locals(prefix);
+                    self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
                     for (branch_index, (condition, body)) in if_stmt.branches.iter().enumerate() {
                         let condition = self.expr(condition);
                         self.line(
@@ -430,14 +474,34 @@ impl Emitter {
                                 if branch_index == 0 { "" } else { "else " }
                             ),
                         );
-                        self.emit_barrier_phases(k, body, 4);
+                        self.emit_barrier_phases_seeded(k, body, 4, &replayed);
                         self.line(3, "}");
                     }
                     if let Some(body) = &if_stmt.else_body {
                         self.line(3, "else {");
-                        self.emit_barrier_phases(k, body, 4);
+                        self.emit_barrier_phases_seeded(k, body, 4, &replayed);
                         self.line(3, "}");
                     }
+                    self.emit_barrier_phases_seeded(
+                        k,
+                        &m.body[if_index + 1..],
+                        3,
+                        &replayed,
+                    );
+                } else if let Some((guard_index, guard_stmt, condition)) = barrier_guard {
+                    let prefix = &m.body[..guard_index];
+                    let replayed = self.replayable_barrier_locals(prefix);
+                    self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
+                    let condition = self.expr(condition);
+                    self.line(3, &format!("if !({condition}) {{"));
+                    self.emit_barrier_phases_seeded(k, &guard_stmt.else_body, 4, &replayed);
+                    self.line(3, "}");
+                    self.emit_barrier_phases_seeded(
+                        k,
+                        &m.body[guard_index + 1..],
+                        3,
+                        &replayed,
+                    );
                 } else if let Some((while_index, declaration_index, while_stmt, declaration, update)) = barrier_while {
                     let uniform_name = &declaration.name;
                     let uniform_ty = declaration
@@ -470,6 +534,42 @@ impl Emitter {
                     self.line(4, &format!("{uniform_name} = {update};"));
                     self.line(3, "}");
                     self.emit_barrier_phases_seeded(k, &m.body[while_index + 1..], 3, &replayed);
+                } else if let Some((match_index, match_stmt)) = barrier_match {
+                    let prefix = &m.body[..match_index];
+                    let replayed = self.replayable_barrier_locals(prefix);
+                    self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
+                    let subject = self.expr(&match_stmt.subject);
+                    self.line(3, &format!("match {subject} {{"));
+                    for arm in &match_stmt.arms {
+                        let patterns = arm
+                            .patterns
+                            .iter()
+                            .map(simd_pattern)
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        self.line(4, &format!("{patterns} => {{"));
+                        match &arm.body {
+                            MatchBody::Block(body) => {
+                                self.emit_barrier_phases_seeded(k, body, 5, &replayed)
+                            }
+                            MatchBody::Expr(value) => {
+                                self.emit_barrier_phases_seeded(
+                                    k,
+                                    &[Stmt::Expr(value.clone())],
+                                    5,
+                                    &replayed,
+                                )
+                            }
+                        }
+                        self.line(4, "},");
+                    }
+                    self.line(3, "}");
+                    self.emit_barrier_phases_seeded(
+                        k,
+                        &m.body[match_index + 1..],
+                        3,
+                        &replayed,
+                    );
                 } else {
                     self.emit_barrier_phases(k, &m.body, 3);
                 }
@@ -663,7 +763,17 @@ impl Emitter {
                 let value = v
                     .value
                     .as_ref()
-                    .map(|x| self.expr(x))
+                    .map(|x| {
+                        let value = self.expr(x);
+                        if matches!(&x.kind, ExprKind::Var(source)
+                            if self.field_axes.contains_key(source)
+                                || self.local_axes.contains_key(source))
+                        {
+                            format!("{value}.clone()")
+                        } else {
+                            value
+                        }
+                    })
                     .unwrap_or_else(|| "Default::default()".into());
                 let value = match &v.ty {
                     Some(t)
@@ -690,6 +800,19 @@ impl Emitter {
                 }
                 if let Some((_, axes)) = v.ty.as_ref().and_then(Type::as_labeled_array) {
                     self.local_axes.insert(v.name.clone(), axes.to_vec());
+                } else if let Some(Expr {
+                    kind: ExprKind::Var(source),
+                    ..
+                }) = &v.value
+                {
+                    if let Some(axes) = self
+                        .field_axes
+                        .get(source)
+                        .or_else(|| self.local_axes.get(source))
+                        .cloned()
+                    {
+                        self.local_axes.insert(v.name.clone(), axes);
+                    }
                 }
                 let collection_initializer = v.value.as_ref().is_some_and(|value| {
                     matches!(
@@ -706,7 +829,10 @@ impl Emitter {
                             if matches!(method.as_str(), "map" | "filter")
                     )
                 });
-                if v.ty.as_ref().is_some_and(is_array) || collection_initializer {
+                if v.ty.as_ref().is_some_and(is_array)
+                    || collection_initializer
+                    || self.local_axes.contains_key(&v.name)
+                {
                     self.arrays.insert(v.name.clone());
                 }
                 if let Some(initializer) = v.value.as_ref().filter(|e| self.warp_replayable(e)) {
@@ -1269,6 +1395,14 @@ impl Emitter {
                             }
                         );
                     }
+                    let left_ty = self.expr_type(a);
+                    let right_ty = self.expr_type(b);
+                    let left = self.expr_as(a, right_ty.as_deref());
+                    let right = self.expr_as(b, left_ty.as_deref());
+                    return format!(
+                        "({left} {} {right})",
+                        if matches!(op, BinOp::Is) { "==" } else { "!=" }
+                    );
                 }
                 let left_ty = self.expr_type(a);
                 let right_ty = self.expr_type(b);
@@ -1276,14 +1410,7 @@ impl Emitter {
                 let right = self.expr_as(b, left_ty.as_deref());
                 match binop(op) {
                     Some(op) => format!("({left} {op} {right})"),
-                    None => {
-                        self.errors.push(crate::errors::SourceError::at(
-                            "identity/type-test operators are not supported inside a --target simd kernel",
-                            e.line,
-                            e.col,
-                        ));
-                        "/* rejected SIMD identity test */ false".into()
-                    }
+                    None => unreachable!("is/is not handled above"),
                 }
             }
             ExprKind::UnaryOp(op, a) => format!(
@@ -1761,6 +1888,10 @@ impl Emitter {
             ExprKind::BinOp(_, left, right) => {
                 self.block_uniform_expr_with_locals(left, locals)
                     && self.block_uniform_expr_with_locals(right, locals)
+            }
+            ExprKind::Range { start, end, .. } => {
+                self.block_uniform_expr_with_locals(start, locals)
+                    && self.block_uniform_expr_with_locals(end, locals)
             }
             _ => false,
         }
