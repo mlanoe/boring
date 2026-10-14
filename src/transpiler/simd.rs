@@ -339,12 +339,15 @@ impl Emitter {
             let barrier_if = if m.body.len() == 1 {
                 match &m.body[0] {
                     Stmt::If(if_stmt)
-                        if if_stmt.branches.len() == 1
-                            && if_stmt.else_body.is_none()
-                            && simd_block_uniform_expr(&if_stmt.branches[0].0)
-                            && if_stmt.branches[0].1.iter().any(is_simd_barrier_stmt) => {
-                        Some((&if_stmt.branches[0].0, if_stmt.branches[0].1.as_slice()))
-                    }
+                        if if_stmt
+                            .branches
+                            .iter()
+                            .all(|(condition, _)| self.block_uniform_expr(condition))
+                            && (if_stmt.branches.iter().any(|(_, body)| {
+                                body.iter().any(is_simd_barrier_stmt)
+                            }) || if_stmt.else_body.as_ref().is_some_and(|body| {
+                                body.iter().any(is_simd_barrier_stmt)
+                            })) => Some(if_stmt),
                     _ => None,
                 }
             } else {
@@ -381,129 +384,34 @@ impl Emitter {
                         ),
                     );
                 }
-                let (phase_body, phase_indent) = if let Some(for_stmt) = barrier_for {
+                if let Some(for_stmt) = barrier_for {
                     let iterable = self.expr(&for_stmt.iterable);
                     self.line(
                         3,
                         &format!("for {} in {} {{", for_stmt.vars.join(", "), iterable),
                     );
-                    (for_stmt.body.as_slice(), 4)
-                } else if let Some((condition, body)) = barrier_if {
-                    let condition = self.expr(condition);
-                    self.line(3, &format!("if {condition} {{"));
-                    (body, 4)
-                } else {
-                    (m.body.as_slice(), 3)
-                };
-                let phases = phase_body
-                    .split(|stmt| is_simd_barrier_stmt(stmt))
-                    .collect::<Vec<_>>();
-                let mut carried_mutable_locals = Vec::new();
-                for (declaration_phase, phase) in phases.iter().enumerate() {
-                    for stmt in *phase {
-                        if let Stmt::Let(local) = stmt {
-                            if local.binding.is_mutable() {
-                                if let Some(local_ty) = local
-                                    .ty
-                                    .as_ref()
-                                    .map(ty)
-                                    .or_else(|| {
-                                        local.value.as_ref().and_then(|value| self.expr_type(value))
-                                    })
-                                {
-                                    self.line(
-                                        phase_indent,
-                                        &format!(
-                                            "let mut __boring_barrier_{}: Vec<{}> = vec![Default::default(); (dx * dy * dz) as usize];",
-                                            local.name, local_ty
-                                        ),
-                                    );
-                                    carried_mutable_locals.push((
-                                        local.name.clone(),
-                                        local_ty,
-                                        declaration_phase,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut replayed_phase_locals = Vec::new();
-                let mut replayed_phase_local_names = std::collections::HashSet::new();
-                for (phase_index, phase) in phases.into_iter().enumerate() {
-                    self.line(phase_indent, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
-                    self.line(phase_indent + 1, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
-                    self.line(phase_indent + 1, "let __boring_barrier_thread = __x + dx as usize * (ty + dy as usize * tz);");
-                    self.line(phase_indent + 1, "if !__boring_barrier_active[__boring_barrier_thread] { continue '__boring_work_item; }");
-                    for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
-                        self.line(
-                            phase_indent + 1,
-                            &format!(
-                                "let mut {}: {} = __boring_local_{}[__boring_barrier_thread].clone();",
-                                field.name,
-                                ty(&field.ty),
-                                field.name
-                            ),
-                        );
-                    }
-                    self.work_item_return_uses_active_mask = Some(true);
-                    if phase_index > 0 {
-                        for local in &replayed_phase_locals {
-                            self.stmt(local, phase_indent + 1);
-                        }
-                    }
-                    for (name, local_ty, declaration_phase) in &carried_mutable_locals {
-                        if *declaration_phase < phase_index {
-                            self.line(
-                                phase_indent + 1,
-                                &format!(
-                                    "let mut {name}: {local_ty} = __boring_barrier_{name}[__boring_barrier_thread].clone();"
-                                ),
-                            );
-                        }
-                    }
-                    for stmt in phase {
-                        self.stmt(stmt, phase_indent + 1);
-                    }
-                    self.work_item_return_uses_active_mask = None;
-                    for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
-                        self.line(
-                            phase_indent + 1,
-                            &format!(
-                                "__boring_local_{}[__boring_barrier_thread] = {}.clone();",
-                                field.name, field.name
-                            ),
-                        );
-                    }
-                    for (name, _, declaration_phase) in &carried_mutable_locals {
-                        if *declaration_phase <= phase_index {
-                            self.line(
-                                phase_indent + 1,
-                                &format!(
-                                    "__boring_barrier_{name}[__boring_barrier_thread] = {name}.clone();"
-                                ),
-                            );
-                        }
-                    }
-                    for stmt in phase {
-                        if let Stmt::Let(local) = stmt {
-                            if matches!(local.binding, BindingKind::Let)
-                                && local.value.as_ref().is_some_and(|value| {
-                                    self.barrier_replayable(
-                                        value,
-                                        &replayed_phase_local_names,
-                                    )
-                                })
-                            {
-                                replayed_phase_local_names.insert(local.name.clone());
-                                replayed_phase_locals.push(stmt.clone());
-                            }
-                        }
-                    }
-                    self.line(phase_indent, "} } }");
-                }
-                if barrier_for.is_some() || barrier_if.is_some() {
+                    self.emit_barrier_phases(k, &for_stmt.body, 4);
                     self.line(3, "}");
+                } else if let Some(if_stmt) = barrier_if {
+                    for (branch_index, (condition, body)) in if_stmt.branches.iter().enumerate() {
+                        let condition = self.expr(condition);
+                        self.line(
+                            3,
+                            &format!(
+                                "{}if {condition} {{",
+                                if branch_index == 0 { "" } else { "else " }
+                            ),
+                        );
+                        self.emit_barrier_phases(k, body, 4);
+                        self.line(3, "}");
+                    }
+                    if let Some(body) = &if_stmt.else_body {
+                        self.line(3, "else {");
+                        self.emit_barrier_phases(k, body, 4);
+                        self.line(3, "}");
+                    }
+                } else {
+                    self.emit_barrier_phases(k, &m.body, 3);
                 }
                 self.line(2, "} } }");
             } else {
@@ -550,6 +458,107 @@ impl Emitter {
         self.line(2, "Ok(())");
         self.line(1, "}");
         self.line(0, "}");
+    }
+    fn emit_barrier_phases(&mut self, k: &KernelDecl, body: &[Stmt], indent: usize) {
+        let phases = body
+            .split(|stmt| is_simd_barrier_stmt(stmt))
+            .collect::<Vec<_>>();
+        let mut carried_mutable_locals = Vec::new();
+        for (declaration_phase, phase) in phases.iter().enumerate() {
+            for stmt in *phase {
+                if let Stmt::Let(local) = stmt {
+                    if local.binding.is_mutable() {
+                        if let Some(local_ty) = local.ty.as_ref().map(ty).or_else(|| {
+                            local.value.as_ref().and_then(|value| self.expr_type(value))
+                        }) {
+                            self.line(
+                                indent,
+                                &format!(
+                                    "let mut __boring_barrier_{}: Vec<{}> = vec![Default::default(); (dx * dy * dz) as usize];",
+                                    local.name, local_ty
+                                ),
+                            );
+                            carried_mutable_locals.push((
+                                local.name.clone(),
+                                local_ty,
+                                declaration_phase,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let mut replayed_phase_locals = Vec::new();
+        let mut replayed_phase_local_names = std::collections::HashSet::new();
+        for (phase_index, phase) in phases.into_iter().enumerate() {
+            self.line(indent, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
+            self.line(indent + 1, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
+            self.line(indent + 1, "let __boring_barrier_thread = __x + dx as usize * (ty + dy as usize * tz);");
+            self.line(indent + 1, "if !__boring_barrier_active[__boring_barrier_thread] { continue '__boring_work_item; }");
+            for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
+                self.line(
+                    indent + 1,
+                    &format!(
+                        "let mut {}: {} = __boring_local_{}[__boring_barrier_thread].clone();",
+                        field.name,
+                        ty(&field.ty),
+                        field.name
+                    ),
+                );
+            }
+            self.work_item_return_uses_active_mask = Some(true);
+            if phase_index > 0 {
+                for local in &replayed_phase_locals {
+                    self.stmt(local, indent + 1);
+                }
+            }
+            for (name, local_ty, declaration_phase) in &carried_mutable_locals {
+                if *declaration_phase < phase_index {
+                    self.line(
+                        indent + 1,
+                        &format!(
+                            "let mut {name}: {local_ty} = __boring_barrier_{name}[__boring_barrier_thread].clone();"
+                        ),
+                    );
+                }
+            }
+            for stmt in phase {
+                self.stmt(stmt, indent + 1);
+            }
+            self.work_item_return_uses_active_mask = None;
+            for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Local)) {
+                self.line(
+                    indent + 1,
+                    &format!(
+                        "__boring_local_{}[__boring_barrier_thread] = {}.clone();",
+                        field.name, field.name
+                    ),
+                );
+            }
+            for (name, _, declaration_phase) in &carried_mutable_locals {
+                if *declaration_phase <= phase_index {
+                    self.line(
+                        indent + 1,
+                        &format!(
+                            "__boring_barrier_{name}[__boring_barrier_thread] = {name}.clone();"
+                        ),
+                    );
+                }
+            }
+            for stmt in phase {
+                if let Stmt::Let(local) = stmt {
+                    if matches!(local.binding, BindingKind::Let)
+                        && local.value.as_ref().is_some_and(|value| {
+                            self.barrier_replayable(value, &replayed_phase_local_names)
+                        })
+                    {
+                        replayed_phase_local_names.insert(local.name.clone());
+                        replayed_phase_locals.push(stmt.clone());
+                    }
+                }
+            }
+            self.line(indent, "} } }");
+        }
     }
     fn stmt(&mut self, s: &Stmt, n: usize) {
         match s {
@@ -973,6 +982,32 @@ impl Emitter {
             ExprKind::Int(v) => v.to_string(),
             ExprKind::UInt64(v) => format!("{v}u64"),
             ExprKind::Float(v) => format!("{v}"),
+            ExprKind::Str(value) => format!("String::from({value:?})"),
+            ExprKind::StringInterp(segments) => {
+                let mut format_string = String::new();
+                let mut arguments = Vec::new();
+                for segment in segments {
+                    match segment {
+                        StringSegment::Lit(value) => {
+                            format_string.push_str(&value.replace('{', "{{").replace('}', "}}"));
+                        }
+                        StringSegment::Expr(value) => {
+                            format_string.push_str("{}");
+                            arguments.push(self.expr(value));
+                        }
+                        StringSegment::FormattedExpr(value, spec) => {
+                            let spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
+                            format_string.push_str(&format!("{{:{spec}}}"));
+                            arguments.push(self.expr(value));
+                        }
+                    }
+                }
+                let arguments = arguments
+                    .into_iter()
+                    .map(|argument| format!(", {argument}"))
+                    .collect::<String>();
+                format!("format!({format_string:?}{arguments})")
+            }
             ExprKind::Bool(v) => v.to_string(),
             ExprKind::Nil => "None".into(),
             ExprKind::Void => "()".into(),
@@ -1277,6 +1312,40 @@ impl Emitter {
                     .join(", ")
             ),
             ExprKind::MethodCall(o, m, args) => {
+                if matches!(&o.kind, ExprKind::Index(_, _) | ExprKind::LabeledIndex(_, _))
+                    && matches!(m.as_str(), "min" | "max" | "swap" | "cas")
+                    && args.len() == if m == "cas" { 2 } else { 1 }
+                {
+                    // SIMD work-items execute in a deterministic CPU loop, so an
+                    // indexed atomic operation needs no hardware atomic wrapper.
+                    // Keep the GPU contract nonetheless: mutate the element and
+                    // yield its previous value.  Taking one mutable reference also
+                    // ensures that a computed index is evaluated exactly once.
+                    let target = self.lvalue(o);
+                    let values = args
+                        .iter()
+                        .map(|arg| self.expr(&arg.value))
+                        .collect::<Vec<_>>();
+                    return match m.as_str() {
+                        "min" => format!(
+                            "{{ let __boring_atomic_target = &mut {target}; let __boring_atomic_old = (*__boring_atomic_target).clone(); let __boring_atomic_value = {}; *__boring_atomic_target = if __boring_atomic_old <= __boring_atomic_value {{ __boring_atomic_old.clone() }} else {{ __boring_atomic_value }}; __boring_atomic_old }}",
+                            values[0]
+                        ),
+                        "max" => format!(
+                            "{{ let __boring_atomic_target = &mut {target}; let __boring_atomic_old = (*__boring_atomic_target).clone(); let __boring_atomic_value = {}; *__boring_atomic_target = if __boring_atomic_old >= __boring_atomic_value {{ __boring_atomic_old.clone() }} else {{ __boring_atomic_value }}; __boring_atomic_old }}",
+                            values[0]
+                        ),
+                        "swap" => format!(
+                            "{{ let __boring_atomic_target = &mut {target}; let __boring_atomic_old = (*__boring_atomic_target).clone(); *__boring_atomic_target = {}; __boring_atomic_old }}",
+                            values[0]
+                        ),
+                        "cas" => format!(
+                            "{{ let __boring_atomic_target = &mut {target}; let __boring_atomic_old = (*__boring_atomic_target).clone(); let __boring_atomic_expected = {}; if __boring_atomic_old == __boring_atomic_expected {{ *__boring_atomic_target = {}; }} __boring_atomic_old }}",
+                            values[0], values[1]
+                        ),
+                        _ => unreachable!(),
+                    };
+                }
                 if m == "sum" && args.is_empty() {
                     let sum_ty = self.expr_type(o).unwrap_or_else(|| "i32".into());
                     return format!("{}.iter().cloned().sum::<{sum_ty}>()", self.expr(o));
@@ -1566,6 +1635,34 @@ impl Emitter {
             _ => false,
         }
     }
+    fn block_uniform_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::UInt64(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_) => true,
+            ExprKind::Var(name) => {
+                matches!(name.as_str(), "block" | "block_dim" | "grid_dim")
+                    || self.global_consts.contains_key(name)
+                    || self.fields.contains(name)
+            }
+            ExprKind::DotIdent(name) => matches!(name.as_str(), "block" | "block_dim"),
+            ExprKind::Field(object, _)
+                if matches!(
+                    &object.kind,
+                    ExprKind::Field(root, base)
+                        if matches!(&root.kind, ExprKind::Var(name) if name == "gpu")
+                            && matches!(base.as_str(), "block" | "block_dim" | "blockDim" | "grid_dim" | "gridDim")
+                ) => true,
+            ExprKind::Field(object, _)
+            | ExprKind::UnaryOp(_, object)
+            | ExprKind::Cast(object, _) => self.block_uniform_expr(object),
+            ExprKind::BinOp(_, left, right) => {
+                self.block_uniform_expr(left) && self.block_uniform_expr(right)
+            }
+            _ => false,
+        }
+    }
     fn expr_body_as(&mut self, body: &[Stmt], expected: Option<&str>) -> String {
         let mut parts = Vec::new();
         for (index, stmt) in body.iter().enumerate() {
@@ -1628,6 +1725,7 @@ impl Emitter {
             ExprKind::Int(_) => Some("i32".into()),
             ExprKind::UInt64(_) => Some("u64".into()),
             ExprKind::Float(_) => Some("f64".into()),
+            ExprKind::Str(_) | ExprKind::StringInterp(_) => Some("String".into()),
             ExprKind::Bool(_) => Some("bool".into()),
             ExprKind::Array(values) => values.first().and_then(|value| self.expr_type(value)),
             ExprKind::Var(name) => self
@@ -1889,31 +1987,6 @@ fn simd_pattern(pattern: &Pattern) -> String {
     }
 }
 
-fn simd_block_uniform_expr(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Int(_)
-        | ExprKind::UInt64(_)
-        | ExprKind::Float(_)
-        | ExprKind::Bool(_) => true,
-        ExprKind::Var(name) => matches!(name.as_str(), "block" | "block_dim" | "grid_dim"),
-        ExprKind::DotIdent(name) => matches!(name.as_str(), "block" | "block_dim"),
-        ExprKind::Field(object, _)
-            if matches!(
-                &object.kind,
-                ExprKind::Field(root, base)
-                    if matches!(&root.kind, ExprKind::Var(name) if name == "gpu")
-                        && matches!(base.as_str(), "block" | "block_dim" | "blockDim" | "grid_dim" | "gridDim")
-            ) => true,
-        ExprKind::Field(object, _) | ExprKind::UnaryOp(_, object) | ExprKind::Cast(object, _) => {
-            simd_block_uniform_expr(object)
-        }
-        ExprKind::BinOp(_, left, right) => {
-            simd_block_uniform_expr(left) && simd_block_uniform_expr(right)
-        }
-        _ => false,
-    }
-}
-
 fn is_simd_barrier_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Comment(comment) => comment == "sync",
@@ -1989,6 +2062,7 @@ fn ty(t: &Type) -> String {
         Type::Uint128 => "u128".into(),
         Type::Float64 => "f64".into(),
         Type::Float32 => "f32".into(),
+        Type::Str => "String".into(),
         Type::Bool => "bool".into(),
         Type::Named(n) => match n.as_str() {
             "float32" => "f32".into(),

@@ -524,6 +524,117 @@ print "{collective.output[0]} {collective.output[3]} {collective.output[4]} {col
 }
 
 #[test]
+fn block_uniform_elif_else_with_different_sync_counts_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_branches");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_branches.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectiveBranches:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<12]
+    def ():
+        if .block.x == 0:
+            let i = .thread.x
+            tile[i] = i + 1
+            sync
+            output[i] = tile[3 - i]
+        elif .block.x == 1:
+            let i = .thread.x
+            tile[i] = i + 10
+            sync
+            output[i + 4] = tile[3 - i] + 10
+            sync
+            output[i + 4] = output[i + 4]
+        else:
+            let i = .thread.x
+            output[i + 8] = 99 + i
+mut collective = CollectiveBranches()
+kernel:
+    collective(block = 4, grid = 3)
+print "{collective.output[0]} {collective.output[1]} {collective.output[2]} {collective.output[3]}"
+print "{collective.output[4]} {collective.output[5]} {collective.output[6]} {collective.output[7]}"
+print "{collective.output[8]} {collective.output[9]} {collective.output[10]} {collective.output[11]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_uniform_branches_simd/src/main.rs")).unwrap();
+    assert!(source.contains("else if (__block.x == 1)"));
+    assert!(source.matches("'__boring_work_item: for __x").count() >= 6);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_branches_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "4 3 2 1\n23 22 21 20\n99 100 101 102"
+    );
+}
+
+#[test]
+fn uniform_const_field_condition_can_guard_a_simd_barrier() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_const_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_const_if.br");
+    fs::write(
+        &input,
+        r#"
+kernel ConstIf:
+    let bool enabled = true
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        if enabled:
+            let i = .thread.x
+            tile[i] = i + 1
+            sync
+            output[i] = tile[3 - i]
+mut conditional = ConstIf()
+kernel:
+    conditional(block = 4)
+print "{conditional.output[0]} {conditional.output[1]} {conditional.output[2]} {conditional.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_const_if_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "4 3 2 1");
+}
+
+#[test]
 fn thread_divergent_if_with_sync_remains_rejected_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -2254,6 +2365,125 @@ print widths.output[0]
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5000000007");
+}
+
+#[test]
+fn string_literals_and_interpolation_run_inside_simd_kernels() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_kernel_strings");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("kernel_strings.br");
+    fs::write(
+        &input,
+        r#"
+kernel Strings:
+    mut [bool]'unified output
+    init():
+        output = [false for ..<2]
+    def ():
+        let i = .thread.x
+        let message = "lane {i}"
+        output[i] = message == (if i == 0: "lane 0" else: "lane 1")
+mut strings = Strings()
+kernel:
+    strings(block = 2)
+print "{strings.output[0]} {strings.output[1]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("kernel_strings_simd/src/main.rs")).unwrap();
+    assert!(source.contains("format!(\"lane {}\", i)"));
+    assert!(source.contains("String::from(\"lane 0\")"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("kernel_strings_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "true true");
+}
+
+#[test]
+fn indexed_atomic_methods_mutate_and_return_previous_values_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_atomic_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("atomic_methods.br");
+    fs::write(
+        &input,
+        r#"
+mut [int]'kernel'unified values = [10, 10, 10, 10, 1, 2, 4]
+mut [int]'kernel'unified old = [0 for ..<4]
+kernel Atomics:
+    mut [int]'actor'unified values
+    mut [int]'unified old
+    init(mut [int]'unified input_values, mut [int]'unified input_old):
+        values = input_values
+        old = input_old
+    def ():
+        let i = .thread.x
+        if i == 0:
+            old[0] = values[0].min(5)
+        elif i == 1:
+            old[1] = values[1].max(15)
+        elif i == 2:
+            old[2] = values[2].swap(20)
+        else:
+            old[3] = values[3].cas(10, 30)
+            values[4] += 2
+            values[5] |= 4
+            values[6] ^= 1
+mut atomics = Atomics(values, old)
+kernel:
+    atomics(block = 4)
+print "{atomics.old[0]} {atomics.old[1]} {atomics.old[2]} {atomics.old[3]}"
+print "{atomics.values[0]} {atomics.values[1]} {atomics.values[2]} {atomics.values[3]} {atomics.values[4]} {atomics.values[5]} {atomics.values[6]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("atomic_methods_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let __boring_atomic_target = &mut self.values"));
+    assert!(source.contains("let __boring_atomic_old = (*__boring_atomic_target).clone()"));
+    for scalar in [false, true] {
+        let mut command = Command::new("cargo");
+        command
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(root.join("atomic_methods_simd/Cargo.toml"));
+        if scalar {
+            command.env("BORING_SIMD_SCALAR", "1");
+        }
+        let run = command.output().unwrap();
+        assert!(
+            run.status.success(),
+            "scalar={scalar}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim(),
+            "10 10 10 10\n5 15 20 30 3 6 5",
+            "scalar={scalar}"
+        );
+    }
 }
 
 #[test]

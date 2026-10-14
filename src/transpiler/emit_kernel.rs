@@ -536,7 +536,13 @@ impl Transpiler {
             if any_missing || fields.is_empty() { continue; }
 
             let is_buffer_field = |f: &KernelFieldDecl| {
-                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
+                matches!(
+                    f.qual,
+                    GpuQual::Unified
+                        | GpuQual::Global
+                        | GpuQual::ActorGlobal
+                        | GpuQual::ActorUnified
+                )
                     && is_gpu_buffer_ty(&f.ty)
             };
             // At most one field a single param feeds is ever a real GPU buffer (the
@@ -1137,7 +1143,13 @@ impl Transpiler {
         let kname = self.kernel_vars.get(var_name.as_str())?;
         let decl = self.kernel_decls.get(kname)?;
         let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| f.name == field)?;
-        if !matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
+        if !matches!(
+            field_decl.qual,
+            GpuQual::Unified
+                | GpuQual::Global
+                | GpuQual::ActorGlobal
+                | GpuQual::ActorUnified
+        )
             || !is_gpu_buffer_ty(&field_decl.ty)
         {
             return None;
