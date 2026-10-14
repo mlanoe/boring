@@ -480,6 +480,10 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     assert!(msl.contains("if (n >= 4096 || k >= 4096)"), "{msl}");
     assert!(msl.contains("constexpr uint bp_rows = 4"), "{msl}");
     assert!(msl.contains("#pragma clang loop unroll(full)"), "{msl}");
+    assert!(msl.contains("for (; bp_ib + 4 < bp_nb; bp_ib += 8)"), "{msl}");
+    assert!(msl.contains("const float4 bp_y41 = *(device const float4*)(bp_y + 128)"), "{msl}");
+    assert!(msl.contains("bp_rowp[bp_r] += 8 * 34"), "{msl}");
+    assert!(msl.contains("if (bp_ib < bp_nb)"), "{msl}");
     assert!(msl.contains("const packed_char4 bp_q4"), "{msl}");
     assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{msl}");
     assert!(msl.contains("bp_scale = simd_shuffle(bp_scale, bp_slot * 8)"), "{msl}");

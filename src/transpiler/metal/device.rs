@@ -693,7 +693,9 @@ impl DeviceEmitter {
     /// Bandwidth-oriented Metal Q8_0 matrix-vector schedule. A SIMD group is
     /// split into four eight-lane partitions, each consuming one 32-value block
     /// with packed four-byte loads. Four weight rows share every float4
-    /// activation load, and four blocks remain in flight per loop iteration.
+    /// activation load. Large projections consume two block groups per loop
+    /// iteration so eight independent weight streams can overlap; the compact
+    /// path keeps four streams to avoid extra live state on small projections.
     /// Only the first lane in a partition reads the half scale; a partition-local
     /// shuffle broadcasts it before `simd_sum` combines all four partitions.
     fn emit_q8_rows_decode(&mut self, has_bias: bool) {
@@ -728,11 +730,38 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("}");
         self.line("device const float* bp_y = a + bp_slot * 32 + bp_it * 4;");
-        self.line("for (ulong bp_ib = bp_slot; bp_ib < bp_nb; bp_ib += 4) {");
-        self.indent += 1;
-        self.line("const float4 bp_y4 = *(device const float4*)bp_y;");
         if unroll_rows {
+            self.line("ulong bp_ib = bp_slot;");
+            self.line("for (; bp_ib + 4 < bp_nb; bp_ib += 8) {");
+            self.indent += 1;
+            self.line("const float4 bp_y40 = *(device const float4*)bp_y;");
+            self.line("const float4 bp_y41 = *(device const float4*)(bp_y + 128);");
             self.line("#pragma clang loop unroll(full)");
+            self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+            self.indent += 1;
+            self.line("device const uchar* bp_blk0 = bp_rowp[bp_r];");
+            self.line("device const uchar* bp_blk1 = bp_blk0 + 4 * 34;");
+            self.line("float bp_scale0 = bp_it == 0 ? float(as_type<half>(*(device const ushort*)bp_blk0)) : 0.0f;");
+            self.line("float bp_scale1 = bp_it == 0 ? float(as_type<half>(*(device const ushort*)bp_blk1)) : 0.0f;");
+            self.line("bp_scale0 = simd_shuffle(bp_scale0, bp_slot * 8);");
+            self.line("bp_scale1 = simd_shuffle(bp_scale1, bp_slot * 8);");
+            self.line("const packed_char4 bp_q40 = *(device const packed_char4*)(bp_blk0 + 2 + bp_it * 4);");
+            self.line("const packed_char4 bp_q41 = *(device const packed_char4*)(bp_blk1 + 2 + bp_it * 4);");
+            self.line("bp_sumf[bp_r] += bp_scale0 * dot(float4(bp_q40), bp_y40) + bp_scale1 * dot(float4(bp_q41), bp_y41);");
+            self.line("bp_rowp[bp_r] += 8 * 34;");
+            self.indent -= 1;
+            self.line("}");
+            self.line("bp_y += 8 * 32;");
+            self.indent -= 1;
+            self.line("}");
+            self.line("if (bp_ib < bp_nb) {");
+            self.indent += 1;
+            self.line("const float4 bp_y4 = *(device const float4*)bp_y;");
+            self.line("#pragma clang loop unroll(full)");
+        } else {
+            self.line("for (ulong bp_ib = bp_slot; bp_ib < bp_nb; bp_ib += 4) {");
+            self.indent += 1;
+            self.line("const float4 bp_y4 = *(device const float4*)bp_y;");
         }
         self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
         self.indent += 1;
