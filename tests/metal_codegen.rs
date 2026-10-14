@@ -31,7 +31,7 @@ pub req [float32]'kernel'unified scale([float32]'kernel'global src, int n) throw
     assert!(msl.contains("kernel void __InlineKernel_3_1_kernel"), "{msl}");
     assert!(rs.contains("__InlineKernel_3_1::new"), "{rs}");
     assert!(rs.contains("__inline_kernel_3_1.__boring_launch"), "{rs}");
-    assert!(rs.contains("BoringGpuArg::Resident(__inline_kernel_3_1.dst.clone()"), "{rs}");
+    assert!(rs.contains("BoringKernelArg::Resident(__inline_kernel_3_1.dst.clone()"), "{rs}");
 }
 
 #[test]
@@ -95,15 +95,15 @@ def main() throws:
         c(block = x.length)
 "#);
 
-    assert!(rs.contains("fn add_rms_norm_gpu(x: &Vec<f32>) -> Result<(BoringGpuArg<f32>, BoringGpuArg<f32>),"),
+    assert!(rs.contains("fn add_rms_norm_gpu(x: &Vec<f32>) -> Result<(BoringKernelArg<f32>, BoringKernelArg<f32>),"),
         "resident tuple positions should be reflected in the Rust return type:\n{rs}");
-    assert!(rs.contains("Ok((BoringGpuArg::Resident(k.sum.clone()")
-        && rs.contains("BoringGpuArg::Resident(k.normed.clone()"),
+    assert!(rs.contains("Ok((BoringKernelArg::Resident(k.sum.clone()")
+        && rs.contains("BoringKernelArg::Resident(k.normed.clone()"),
         "both tuple elements should return their resident Metal buffers:\n{rs}");
     assert!(rs.contains("let (sum, normed) = add_rms_norm_gpu("),
         "explicitly resident destructuring should bind the returned buffers directly:\n{rs}");
-    assert!(rs.contains("match &sum { BoringGpuArg::Resident(buf, _) => buf.clone()")
-        && rs.contains("match &normed { BoringGpuArg::Resident(buf, _) => buf.clone()"),
+    assert!(rs.contains("match &sum { BoringKernelArg::Resident(buf, _) => buf.clone()")
+        && rs.contains("match &normed { BoringKernelArg::Resident(buf, _) => buf.clone()"),
         "both explicitly resident bindings should be forwarded as resident kernel arguments:\n{rs}");
     assert!(!rs.contains("k.read_sum()") && !rs.contains("k.read_normed()"),
         "resident return positions must not read kernel buffers back to the host:\n{rs}");
@@ -195,7 +195,7 @@ fn resident_tuple_call_keeps_args_and_unannotated_slots_resident() {
          slots used only as resident arguments must bind the returned buffers directly:\n{main}");
     assert!(main.contains("pair(s.clone(), d.clone(), n)?"),
         "the second call must forward the first call's slots resident:\n{main}");
-    assert!(!main.contains("BoringGpuArg::Host(s") && !main.contains("BoringGpuArg::Host(d"),
+    assert!(!main.contains("BoringKernelArg::Host(s") && !main.contains("BoringKernelArg::Host(d"),
         "destructured slots must not be re-uploaded as host values:\n{main}");
     // `s2` is indexed on the host inside `with`, so it is the one slot that downloads;
     // `d2` is never used and must stay resident (a download would be pure waste).
@@ -205,7 +205,7 @@ fn resident_tuple_call_keeps_args_and_unannotated_slots_resident() {
     assert!(main.contains(", d2) = pair("), "unused slot must bind the resident value directly:\n{main}");
 
     // Tuple req called from another req, tail tuple built from resident locals.
-    assert!(rs.contains("pub fn twice(a: BoringGpuArg<f32>, b: BoringGpuArg<f32>, n: isize) -> Result<(BoringGpuArg<f32>, BoringGpuArg<f32>),"), "{rs}");
+    assert!(rs.contains("pub fn twice(a: BoringKernelArg<f32>, b: BoringKernelArg<f32>, n: isize) -> Result<(BoringKernelArg<f32>, BoringKernelArg<f32>),"), "{rs}");
     assert!(rs.contains("Ok((s2.clone(), d2.clone()))"),
         "a tuple tail of resident locals must pass them through:\n{rs}");
     assert!(rs.contains("twice(d.clone(), s.clone(), n.clone())?"), "{rs}");
@@ -214,7 +214,7 @@ fn resident_tuple_call_keeps_args_and_unannotated_slots_resident() {
 #[test]
 fn resident_tuple_slot_with_host_use_still_downloads() {
     // Unannotated slots that are indexed right away keep the pre-existing
-    // download-at-the-binding behavior (they cannot be indexed as `BoringGpuArg<T>`).
+    // download-at-the-binding behavior (they cannot be indexed as `BoringKernelArg<T>`).
     let (_, rs) = metal_codegen("resident_tuple_host_use", &format!("{}\n{}", &RESIDENT_TUPLE_CHAIN
         [..RESIDENT_TUPLE_CHAIN.find("def main()").unwrap()], r#"
 def main() throws:
@@ -281,7 +281,7 @@ def main() throws:
 #[test]
 fn host_array_passed_to_float32_gpu_param_is_wrapped_as_f32() {
     let (_, rs) = metal_codegen("float32_host_arg_codegen", FLOAT32_HOST_ARG_TO_GPU_REQ);
-    assert!(rs.contains("BoringGpuArg::Host((") && rs.contains(".iter().map(|&x| x as f32).collect::<Vec<f32>>())"),
+    assert!(rs.contains("BoringKernelArg::Host((") && rs.contains(".iter().map(|&x| x as f32).collect::<Vec<f32>>())"),
         "a host array at a `[float32]'kernel'global` position must be wrapped as Vec<f32>:\n{rs}");
     assert!(!rs.contains("x as f64).collect::<Vec<f64>>())"),
         "no f64 wrap may remain for a float32 callee parameter:\n{rs}");
@@ -1235,7 +1235,7 @@ fn host_fn_chained_resident_call_arg_no_stray_ref() {
     // host function directly into another such function's non-first `[T]`
     // argument, via a single intermediate `let` binding (`let stage1 =
     // add_one_gpu(a, 4); let stage2 = add_one_gpu(stage1, 4)`), used to emit
-    // an extraneous leading `&` around the whole `BoringGpuArg<T>` ->
+    // an extraneous leading `&` around the whole `BoringKernelArg<T>` ->
     // `Vec<T>` materializing match-expression at the second call site --
     // `emit_args_coerced`'s `resident_call_vars` branch always hardcoded
     // `&(match &stage1 { ... })` without ever checking whether the callee's
@@ -1289,8 +1289,8 @@ fn host_fn_alias_of_resident_local_stays_resident() {
     // Regression test: a plain alias of a resident GPU local (`let z = y`, where
     // `y` is bound to a `'kernel'unified`-returning call) used to fall through to
     // the host-array `let` path, so `z` was never registered as resident and
-    // `add2(y, z, n)` wrapped it as `BoringGpuArg::Host(z.clone())` -- a hard
-    // E0308 (`expected Vec<f32>, found BoringGpuArg<f32>`) -- and `let z = y;`
+    // `add2(y, z, n)` wrapped it as `BoringKernelArg::Host(z.clone())` -- a hard
+    // E0308 (`expected Vec<f32>, found BoringKernelArg<f32>`) -- and `let z = y;`
     // also moved `y` out from under its own later uses. The alias must be a
     // cheap `Arc::clone`-style `.clone()` that stays resident, exactly like `y`.
     let (_, rs) = metal_codegen("host_fn_resident_alias", r#"
@@ -1338,7 +1338,7 @@ def main() throws:
         "a plain alias of a resident local must be a resident clone;\ngot:\n{rs}");
     assert!(rs.contains("add2(y.clone(), z.clone(), n)"),
         "the alias must be passed exactly like the original (resident), not Host-wrapped;\ngot:\n{rs}");
-    assert!(!rs.contains("BoringGpuArg::Host(z.clone())"),
+    assert!(!rs.contains("BoringKernelArg::Host(z.clone())"),
         "the alias must never be re-wrapped as a host array;\ngot:\n{rs}");
     assert!(rs.contains("let mut v = x.clone();") && rs.contains("v = y.clone();"),
         "`var` aliases and reassignment from a resident local must stay resident;\ngot:\n{rs}");
@@ -1844,7 +1844,7 @@ def main() throws:
     kernel:
         c(block = 2)
 "#);
-    assert!(rs.contains("BoringGpuArg::Resident(buf, _) => buf.clone()"),
+    assert!(rs.contains("BoringKernelArg::Resident(buf, _) => buf.clone()"),
         "read-only Metal input should retain the resident Buffer without copying its contents:\n{rs}");
 }
 
@@ -2250,7 +2250,7 @@ def main() throws:
     print run_loop(m, n)
 "#);
     assert!(rs.contains("struct Layer"));
-    assert!(rs.contains("w: BoringGpuArg<f32>"), "resident field must retain its wrapper:\n{rs}");
+    assert!(rs.contains("w: BoringKernelArg<f32>"), "resident field must retain its wrapper:\n{rs}");
     assert!(rs.contains("mul_gpu((layer.w).clone()"),
         "aliased array element's resident field must pass through:\n{rs}");
     assert!(rs.contains("mul_gpu((m.layers[(0) as usize].w).clone()"),
@@ -2259,11 +2259,11 @@ def main() throws:
         "nested field/index chain must retain resident field type:\n{rs}");
     assert!(!rs.contains("m.layers[(0) as usize].clone().w"),
         "reading one resident field must not deep-clone the complete array element:\n{rs}");
-    assert!(!rs.contains("BoringGpuArg::Host((layer.w).clone())"));
-    assert!(!rs.contains("BoringGpuArg::Host((m.layers[(0) as usize].w).clone())"));
-    assert!(rs.contains("pub enum BoringGpuArg<T>"));
-    assert!(rs.contains("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T>"));
-    assert!(rs.contains("impl<T: PartialEq> PartialEq for BoringGpuArg<T>"));
+    assert!(!rs.contains("BoringKernelArg::Host((layer.w).clone())"));
+    assert!(!rs.contains("BoringKernelArg::Host((m.layers[(0) as usize].w).clone())"));
+    assert!(rs.contains("pub enum BoringKernelArg<T>"));
+    assert!(rs.contains("impl<T: std::fmt::Debug> std::fmt::Debug for BoringKernelArg<T>"));
+    assert!(rs.contains("impl<T: PartialEq> PartialEq for BoringKernelArg<T>"));
 
     let project = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal");
@@ -3334,7 +3334,7 @@ print "{k1.buf[0]} {k2.buf[0]}"
 
 // Real GPU: aliases of a resident local (`let z = y`, `var v = x; v = y`, an alias of
 // an alias) keep their resident classification through a real Metal dispatch.
-// Before the fix the generated Rust did not even compile (`BoringGpuArg::Host(z.clone())`
+// Before the fix the generated Rust did not even compile (`BoringKernelArg::Host(z.clone())`
 // where a `Vec<f32>` was expected). x = 1+2 = 3, y = 3+3 = 6, w = y+z = 12,
 // u = v+w = 6+12 = 18.
 #[test]

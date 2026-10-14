@@ -171,7 +171,7 @@ impl Transpiler {
                     // function with a `'kernel'unified`/`'kernel'global` return type and a bare
                     // `k.field` tail expression still got an eager `Ok(k.copy_y_to_host()...)`
                     // download wrapped in `Ok(...)`, which doesn't even type-check against the
-                    // function's own `Result<BoringGpuArg<T>, _>` return type — confirmed via a
+                    // function's own `Result<BoringKernelArg<T>, _>` return type — confirmed via a
                     // real `cargo check` against every `throws`-declared function in this file.
                     if let Some(resident) = self.try_emit_gpu_resident_return(e) {
                         self.line(&format!("Ok({resident})"));
@@ -187,26 +187,26 @@ impl Transpiler {
                         // The tail may itself be a bare call to another
                         // `fn_returns_resident` function (e.g. `outer_gpu`'s whole
                         // body is `inner_gpu(...)`) -- its Rust return is already
-                        // `BoringGpuArg<T>`, so `try_passthrough_resident_call`
+                        // `BoringKernelArg<T>`, so `try_passthrough_resident_call`
                         // passes it straight through instead of this branch's
-                        // default `BoringGpuArg::Host((expr).clone())`, which would
-                        // wrap an already-`BoringGpuArg<T>` value a second time (a
+                        // default `BoringKernelArg::Host((expr).clone())`, which would
+                        // wrap an already-`BoringKernelArg<T>` value a second time (a
                         // real E0308, confirmed via a real `cargo build` on the
                         // Metal backend).
                         if let Some(passthrough) = self.try_passthrough_resident_call(e) {
                             self.line(&format!("Ok({passthrough})"));
                             return;
                         }
-                        self.line(&format!("Ok(BoringGpuArg::Host(({}).clone()))", self.emit_expr_owned(e)));
+                        self.line(&format!("Ok(BoringKernelArg::Host(({}).clone()))", self.emit_expr_owned(e)));
                         return;
                     }
                     // This function's own return type is NOT itself resident (the case
                     // above already handled that, via a raw pass-through that "just
-                    // works" since both sides are `BoringGpuArg<T>`) — but the tail
+                    // works" since both sides are `BoringKernelArg<T>`) — but the tail
                     // expression may still be a bare call to a `fn_returns_resident`
                     // function (e.g. `Ok(linear_gpu(normed, ...))` inside a plain
                     // `[float]`-returning function). Materialize instead of letting
-                    // `Ok(...)` wrap a `BoringGpuArg<T>` where `Vec<T>` is expected.
+                    // `Ok(...)` wrap a `BoringKernelArg<T>` where `Vec<T>` is expected.
                     if self.current_fn_returns_resident.is_none() {
                         if let Some(materialized) = self.try_materialize_resident_call(e) {
                             self.line(&format!("Ok({materialized})"));
@@ -219,7 +219,7 @@ impl Transpiler {
                     // Interprocedural GPU residency (docs/scoped-access-blocks.md): this
                     // function's declared return type is `'kernel'unified`/`'kernel'global` and
                     // the tail expression is a bare `k.field` read — emit
-                    // `BoringGpuArg::Resident(...)` instead of the unconditional
+                    // `BoringKernelArg::Resident(...)` instead of the unconditional
                     // `copy_field_to_host()` download the normal expression emitter would
                     // otherwise produce via `try_emit_kernel_field_read`.
                     if let Some(resident) = self.try_emit_gpu_resident_return(e) {
@@ -239,7 +239,7 @@ impl Transpiler {
                             self.line(&passthrough);
                             return;
                         }
-                        self.line(&format!("BoringGpuArg::Host(({}).clone())", self.emit_expr_owned(e)));
+                        self.line(&format!("BoringKernelArg::Host(({}).clone())", self.emit_expr_owned(e)));
                         return;
                     }
                     // Same materializing fallback as the `throws` branch above, for a
@@ -448,7 +448,7 @@ impl Transpiler {
 
                 if self.config.is_simd_target {
                     self.line(&format!(
-                        "let {}{name} = match &{name} {{ BoringGpuArg::Host(v) => v.clone() }};",
+                        "let {}{name} = match &{name} {{ BoringKernelArg::Host(v) => v.clone() }};",
                         if is_write { "mut " } else { "" },
                     ));
                     self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));
@@ -463,11 +463,11 @@ impl Transpiler {
                 }
                 if is_write {
                     self.line(&format!(
-                        "let __{name}_buf = match &{name} {{ BoringGpuArg::Resident(buf, _) => Some(std::sync::Arc::clone(buf)), BoringGpuArg::Host(_) => None }};"
+                        "let __{name}_buf = match &{name} {{ BoringKernelArg::Resident(buf, _) => Some(std::sync::Arc::clone(buf)), BoringKernelArg::Host(_) => None }};"
                     ));
                 }
                 self.line(&format!(
-                    "let {}{name} = match &{name} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }};",
+                    "let {}{name} = match &{name} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }};",
                     if is_write { "mut " } else { "" },
                 ));
                 self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));

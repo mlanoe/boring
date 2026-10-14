@@ -158,8 +158,8 @@ fn __boring_simd_parallel_threshold() -> usize {
     };
     sign * magnitude
 }
-#[allow(dead_code)] #[derive(Clone, Debug, PartialEq)] enum BoringGpuArg<T> { Host(Vec<T>) }
-impl<T> BoringGpuArg<T> { fn len(&self) -> usize { match self { Self::Host(v) => v.len() } } }
+#[allow(dead_code)] #[derive(Clone, Debug, PartialEq)] enum BoringKernelArg<T> { Host(Vec<T>) }
+impl<T> BoringKernelArg<T> { fn len(&self) -> usize { match self { Self::Host(v) => v.len() } } }
 "#;
 
 struct Emitter {

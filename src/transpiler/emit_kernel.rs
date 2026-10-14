@@ -125,7 +125,7 @@ impl Transpiler {
     /// `try_emit_gpu_resident_let` above. Unlike that same-scope alias (no Rust
     /// binding at all, since the data is just a re-readable kernel field), this call
     /// already executed with real side effects, so `fc` needs a genuine `let`
-    /// binding — just typed `BoringGpuArg<T>` (via the callee's own return-type
+    /// binding — just typed `BoringKernelArg<T>` (via the callee's own return-type
     /// codegen, see `emit_top.rs`) instead of a plain host array. Registers `fc` in
     /// `resident_call_vars` so `with fc:` (see `emit_stmt::emit_with`) and further
     /// chained calls (see `emit_call`) know to treat it residently. Returns `true`
@@ -135,7 +135,7 @@ impl Transpiler {
     /// annotation, e.g. `let [float] fc = linear_gpu(...)`, exactly how every call
     /// site written before `linear_gpu` grew a resident return type still reads —
     /// is intercepted here too, not left to fall through: the callee's Rust
-    /// signature returns `BoringGpuArg<T>` unconditionally now, regardless of what
+    /// signature returns `BoringKernelArg<T>` unconditionally now, regardless of what
     /// this particular call site wants, so falling through to ordinary `let`
     /// codegen would bind that enum to a `Vec<T>`-declared binding, a hard type
     /// mismatch (confirmed against a real `cargo check` — this is not
@@ -175,13 +175,13 @@ impl Transpiler {
     }
 
     /// If `s` is a plain alias of an already-resident local (`let z = y` / `var z = y`
-    /// where `y` is in `resident_call_vars`), `z` is the very same `BoringGpuArg<T>`
+    /// where `y` is in `resident_call_vars`), `z` is the very same `BoringKernelArg<T>`
     /// Rust value, so it must stay resident: emit `let z = y.clone();` (an `Arc::clone`
     /// inside, no data copy, and `y` stays usable — boring has no moves) and register
     /// `z` in `resident_call_vars` with `y`'s type so later call arguments, `with z:`,
     /// kernel-constructor arguments and further aliases all treat it residently.
     /// Without this the alias fell through to the host-array `let` path, and every
-    /// later use wrapped it in `BoringGpuArg::Host(z.clone())` — a hard E0308 (and
+    /// later use wrapped it in `BoringKernelArg::Host(z.clone())` — a hard E0308 (and
     /// `let z = y;` also moved `y` out from under its own later uses).
     ///
     /// An explicit non-resident annotation (`let [float32] z = y`) materializes once,
@@ -209,14 +209,14 @@ impl Transpiler {
         true
     }
 
-    /// Downloads a `resident_call_vars` local (a `BoringGpuArg<T>`) to a plain host
+    /// Downloads a `resident_call_vars` local (a `BoringKernelArg<T>`) to a plain host
     /// `Vec<T>` *by reference*, leaving the variable usable afterward — the by-ref
     /// counterpart to `materialize_resident_call`, same match the call-argument
     /// materialization in `emit_methods.rs` builds.
     pub(crate) fn materialize_resident_var(&self, var_name: &str, ret_ty: &Type) -> String {
         if self.config.is_simd_target {
             return format!(
-                "match &{var_name} {{ BoringGpuArg::Host(v) => v.clone() }}"
+                "match &{var_name} {{ BoringKernelArg::Host(v) => v.clone() }}"
             );
         }
         let inner_ty = match ret_ty {
@@ -226,7 +226,7 @@ impl Transpiler {
         let host_ty = kernel_host_element_type(&inner_ty);
         let device_ty = kernel_host_scalar_type(&inner_ty);
         format!(
-            "match &{var_name} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }}"
+            "match &{var_name} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }}"
         )
     }
 
@@ -236,14 +236,14 @@ impl Transpiler {
     /// every "caller doesn't opt in" fallback (`try_emit_gpu_resident_call_let`
     /// above, and the tail-expression/plain-assignment call sites in
     /// `emit_stmt.rs`/`emit_expr.rs`). Same pattern `emit_with`'s
-    /// `resident_call_vars` branch already uses to unwrap a `BoringGpuArg<T>` back
+    /// `resident_call_vars` branch already uses to unwrap a `BoringKernelArg<T>` back
     /// to a plain host `Vec<T>`, just built from a fresh call instead of a
     /// pre-bound variable — no `.clone()` needed on the `Host` arm since we own
     /// the enum value outright here.
     pub(crate) fn materialize_resident_call(&self, call_expr: &Expr, ret_ty: &Type) -> String {
         let call_rust = self.emit_expr(call_expr);
         if self.config.is_simd_target {
-            return format!("match {call_rust} {{ BoringGpuArg::Host(v) => v }}");
+            return format!("match {call_rust} {{ BoringKernelArg::Host(v) => v }}");
         }
         let inner_ty = match ret_ty {
             Type::Qualified(inner, _) => array_inner_type(inner),
@@ -253,8 +253,8 @@ impl Transpiler {
         let device_ty = kernel_host_scalar_type(&inner_ty);
         format!(
             "match {call_rust} {{ \
-             BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), \
-             BoringGpuArg::Host(v) => v \
+             BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), \
+             BoringKernelArg::Host(v) => v \
              }}"
         )
     }
@@ -264,7 +264,7 @@ impl Transpiler {
     /// `Some`. For any consumption context that doesn't opt into keeping the
     /// value resident — a tail expression of a function whose own return type
     /// isn't itself resident, or a plain (re-)assignment — the callee's Rust
-    /// signature returns `BoringGpuArg<T>` unconditionally now, so skipping this
+    /// signature returns `BoringKernelArg<T>` unconditionally now, so skipping this
     /// check is a real type mismatch, not just a missed optimization (confirmed
     /// against real `cargo check` failures on whisper-boring's own call sites:
     /// `Ok(linear_gpu(normed, ...))` as a plain-`[float]`-returning function's
@@ -282,9 +282,9 @@ impl Transpiler {
     /// `fn_returns_resident` (`current_fn_returns_resident`), and its tail
     /// expression is a bare call to another `fn_returns_resident` function
     /// (e.g. `outer_gpu(...)` whose whole body is `inner_gpu(...)`). The
-    /// callee's Rust return is already `Result<BoringGpuArg<T>, _>` /
-    /// `BoringGpuArg<T>` — exactly the type this tail position needs — so
-    /// blindly wrapping it a second time in `BoringGpuArg::Host(...)` (which
+    /// callee's Rust return is already `Result<BoringKernelArg<T>, _>` /
+    /// `BoringKernelArg<T>` — exactly the type this tail position needs — so
+    /// blindly wrapping it a second time in `BoringKernelArg::Host(...)` (which
     /// expects a `Vec<T>` payload) is a real E0308, confirmed via a real
     /// `cargo build` on the Metal backend. When both functions' resident
     /// element types match, pass the call straight through unwrapped (keeps
@@ -310,7 +310,7 @@ impl Transpiler {
         }
         let materialized = self.materialize_resident_call(expr, &callee_ty);
         Some(format!(
-            "BoringGpuArg::Host(({materialized}).iter().map(|&x| x as {caller_host_ty}).collect::<Vec<{caller_host_ty}>>())"
+            "BoringKernelArg::Host(({materialized}).iter().map(|&x| x as {caller_host_ty}).collect::<Vec<{caller_host_ty}>>())"
         ))
     }
 
@@ -592,11 +592,11 @@ impl Transpiler {
                     let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
                     // If this constructor argument is literally one of the *current*
                     // function's own parameters, and that parameter is typed
-                    // `BoringGpuArg<T>` (`current_fn_gpu_arg_param_names` —
+                    // `BoringKernelArg<T>` (`current_fn_gpu_arg_param_names` —
                     // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found it
                     // used *only* this way), or a same-function local bound directly to a
                     // `fn_returns_resident` call (`resident_call_vars` —
-                    // `try_emit_gpu_resident_call_let`, also a genuine `BoringGpuArg<T>`-typed
+                    // `try_emit_gpu_resident_call_let`, also a genuine `BoringKernelArg<T>`-typed
                     // Rust binding), branch on the enum instead of always uploading: a
                     // resident argument hands its buffer over directly (an `Arc::clone`, no
                     // data copy), a host argument uploads exactly as before. See
@@ -606,7 +606,7 @@ impl Transpiler {
                             || self.resident_call_vars.contains_key(pname.as_str()));
                     if is_gpu_arg_param {
                         self.line(&format!("match &{a} {{"));
-                        self.line("    BoringGpuArg::Resident(buf, _len) => {");
+                        self.line("    BoringKernelArg::Resident(buf, _len) => {");
                         if field.binding == FieldBinding::Let {
                             // Read-only kernel inputs can share the exact resident
                             // allocation. Arc cloning only retains the handle; it does
@@ -620,7 +620,7 @@ impl Transpiler {
                         }
                         self.line(&format!("        {var_name}.rebuild_bind_group();"));
                         self.line("    }");
-                        self.line("    BoringGpuArg::Host(v) => {");
+                        self.line("    BoringKernelArg::Host(v) => {");
                         self.line(&format!(
                             "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
                         ));
@@ -1163,7 +1163,7 @@ impl Transpiler {
     /// If the function currently being emitted has a GPU-resident return type
     /// (`current_fn_returns_resident`, set in `emit_top.rs::emit_fn`) and `expr` is a
     /// bare `k.field` read on a tracked kernel instance whose field is
-    /// `'unified`/`'global`, emits `BoringGpuArg::Resident(Arc::clone(&k.field_buf),
+    /// `'unified`/`'global`, emits `BoringKernelArg::Resident(Arc::clone(&k.field_buf),
     /// len)` instead of the unconditional `copy_field_to_host()` download
     /// `try_emit_kernel_field_read` would otherwise produce. The buffer survives the
     /// kernel instance's own drop at function exit because the field is already
@@ -1195,7 +1195,7 @@ impl Transpiler {
         }
         if self.config.is_simd_target {
             return Some(format!(
-                "BoringGpuArg::Host({var_name}.copy_{field}_to_host())"
+                "BoringKernelArg::Host({var_name}.copy_{field}_to_host())"
             ));
         }
         let inner_ty = array_inner_type(&field_decl.ty);
@@ -1208,7 +1208,7 @@ impl Transpiler {
             format!("({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>()")
         };
         Some(format!(
-            "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), {len_expr})"
+            "BoringKernelArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), {len_expr})"
         ))
     }
 
@@ -1216,13 +1216,13 @@ impl Transpiler {
     /// `try_emit_gpu_resident_tuple_return`): is `expr` itself already resident —
     /// either a bare `k.field` read (same construction `try_emit_gpu_resident_return`
     /// builds for the single-value case), or a bare `Var` already bound to a
-    /// `BoringGpuArg<T>` Rust value (a same-scope `'kernel'unified` alias
+    /// `BoringKernelArg<T>` Rust value (a same-scope `'kernel'unified` alias
     /// (`gpu_resident_vars`), a local bound to a `fn_returns_resident` call
     /// (`resident_call_vars`), or the *enclosing* function's own
     /// transitively-qualifying parameter (`current_fn_gpu_arg_param_names`) forwarded
     /// straight through)? `None` means "not detectably resident" — the caller falls
-    /// back to wrapping it in `BoringGpuArg::Host(...)`, since the Rust return type at
-    /// this tuple position is `BoringGpuArg<T>` regardless of what this particular
+    /// back to wrapping it in `BoringKernelArg::Host(...)`, since the Rust return type at
+    /// this tuple position is `BoringKernelArg<T>` regardless of what this particular
     /// tail expression happens to produce.
     fn try_resident_tuple_element(&self, expr: &Expr) -> Option<String> {
         if let ExprKind::Field(obj, field) = &expr.kind {
@@ -1243,7 +1243,7 @@ impl Transpiler {
                 format!("({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>()")
             };
             return Some(format!(
-                "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), {len_expr})"
+                "BoringKernelArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), {len_expr})"
             ));
         }
         if let ExprKind::Var(name) = &expr.kind {
@@ -1262,8 +1262,8 @@ impl Transpiler {
     /// set in `emit_top.rs::emit_fn`) and `expr` is a tuple literal matching that
     /// arity, emits each element according to its own position's residency —
     /// `try_resident_tuple_element` (chained, no download) when recognized,
-    /// `BoringGpuArg::Host((expr).clone())` otherwise (a plain host value surfacing at
-    /// a position whose Rust type is `BoringGpuArg<T>` regardless), and the ordinary
+    /// `BoringKernelArg::Host((expr).clone())` otherwise (a plain host value surfacing at
+    /// a position whose Rust type is `BoringKernelArg<T>` regardless), and the ordinary
     /// expression emitter for a non-resident position. Called from `emit_stmt.rs`'s
     /// tail-expression handling, same convention as `try_emit_gpu_resident_return`.
     pub(crate) fn try_emit_gpu_resident_tuple_return(&self, expr: &Expr) -> Option<String> {
@@ -1273,7 +1273,7 @@ impl Transpiler {
         let parts: Vec<String> = elems.iter().enumerate().map(|(i, el)| {
             if flags.get(i).copied().unwrap_or(false) {
                 self.try_resident_tuple_element(el)
-                    .unwrap_or_else(|| format!("BoringGpuArg::Host(({}).clone())", self.emit_expr(el)))
+                    .unwrap_or_else(|| format!("BoringKernelArg::Host(({}).clone())", self.emit_expr(el)))
             } else {
                 self.emit_expr_owned(el)
             }

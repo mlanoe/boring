@@ -987,7 +987,7 @@ impl Transpiler {
     }
 
     /// Computes a function's Rust return-type string: GPU-resident substitution
-    /// (`BoringGpuArg<T>`, including the resident-tuple-slot variant), `impl Trait`
+    /// (`BoringKernelArg<T>`, including the resident-tuple-slot variant), `impl Trait`
     /// for a return type that names a known trait, `throws` → `Result<T, Box<dyn Error>>`,
     /// and bare `Result` return-type inference (`Ok`/`Err` return-statement scan).
     fn compute_fn_return_type(&self, f: &FnDecl) -> String {
@@ -999,7 +999,7 @@ impl Transpiler {
                 // function's tail expression (a bare `k.field` read — see
                 // `emit_kernel::try_emit_gpu_resident_return`, invoked from
                 // `emit_stmt.rs`'s tail-expression handling) returns
-                // `BoringGpuArg::Resident(...)` instead of a materialized `Vec<T>`.
+                // `BoringKernelArg::Resident(...)` instead of a materialized `Vec<T>`.
                 if t.gpu_resident_qual().is_some() {
                     let unqualified = match t {
                         Type::Qualified(inner, _) => inner.as_ref(),
@@ -1007,10 +1007,10 @@ impl Transpiler {
                     };
                     let inner_ty = super::emit_kernel::array_inner_type(unqualified);
                     let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                    return format!("BoringGpuArg<{}>", host_ty);
+                    return format!("BoringKernelArg<{}>", host_ty);
                 }
                 // Tuple analogue of the above: `([float]'kernel'unified, [float], [float])`
-                // (`mha_step_gpu`-style) -- substitute `BoringGpuArg<T>` at whichever
+                // (`mha_step_gpu`-style) -- substitute `BoringKernelArg<T>` at whichever
                 // positions `fn_returns_resident_tuple` flagged resident, leaving the
                 // rest as their ordinary Rust type.
                 if let Type::Tuple(elems) = t {
@@ -1023,7 +1023,7 @@ impl Transpiler {
                                 };
                                 let inner_ty = super::emit_kernel::array_inner_type(unqualified);
                                 let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                                format!("BoringGpuArg<{}>", host_ty)
+                                format!("BoringKernelArg<{}>", host_ty)
                             } else {
                                 self.emit_type(elem_ty)
                             }
@@ -1107,7 +1107,7 @@ impl Transpiler {
         }
     }
 
-    /// Computes a function/method's full Rust parameter list: `BoringGpuArg<T>` typing
+    /// Computes a function/method's full Rust parameter list: `BoringKernelArg<T>` typing
     /// for interprocedural-GPU-residency params, the `&self`/`&mut self` receiver for
     /// struct methods (with the arc-qualified-type validation for external `task fn`
     /// declarations), and the implicit `__task_cancel` parameter for cancellable
@@ -1115,7 +1115,7 @@ impl Transpiler {
     fn compute_fn_all_params(&self, f: &FnDecl, self_ty: Option<&str>, is_cancellable: bool) -> String {
         // Interprocedural GPU residency (docs/scoped-access-blocks.md): a parameter
         // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found used
-        // *exclusively* as a kernel-constructor argument gets typed `BoringGpuArg<T>`
+        // *exclusively* as a kernel-constructor argument gets typed `BoringKernelArg<T>`
         // instead of a plain host array, so a caller can pass an already-resident
         // value straight through (`emit_expr::emit_call`) with no upload. Free
         // functions only — `fn_gpu_arg_params` is keyed by plain fn name and only
@@ -1142,7 +1142,7 @@ impl Transpiler {
                     .map(super::emit_kernel::array_inner_type)
                     .unwrap_or(Type::Float64);
                 let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                format!("{}: BoringGpuArg<{}>", p.name, host_ty)
+                format!("{}: BoringKernelArg<{}>", p.name, host_ty)
             } else {
                 self.emit_param(p, self_ty.is_some())
             }
@@ -1751,7 +1751,7 @@ impl Transpiler {
         // across the boundary -- confirmed via a real `cargo check` failure on
         // whisper-boring: encoder.br's resident `h2` leaking into decoder.br's own,
         // unrelated, genuinely-plain `h2`, causing it to pass through unwrapped where
-        // `BoringGpuArg::Host(..)` was required.
+        // `BoringKernelArg::Host(..)` was required.
         let prev_resident_call_vars = std::mem::take(&mut self.resident_call_vars);
         if self_ty.is_none() {
             self.current_fn_returns_resident = self.fn_returns_resident.get(&f.name).cloned();
@@ -3041,7 +3041,7 @@ impl Transpiler {
     }
 
     /// Whether an expression reads a struct field whose declared representation is a
-    /// `BoringGpuArg<T>` on GPU targets.
+    /// `BoringKernelArg<T>` on GPU targets.
     pub(crate) fn expr_is_gpu_resident_field(&self, e: &Expr) -> bool {
         let ExprKind::Field(base, field) = &e.kind else { return false };
         let Some(struct_name) = self.resolve_struct_name(base) else { return false };
@@ -3928,7 +3928,7 @@ impl Transpiler {
                 if self.config.is_gpu_target =>
             {
                 let elem = super::emit_kernel::array_inner_type(inner);
-                format!("BoringGpuArg<{}>", super::emit_kernel::kernel_host_element_type(&elem))
+                format!("BoringKernelArg<{}>", super::emit_kernel::kernel_host_element_type(&elem))
             }
             Type::Fn(ret, params, throws, _task, _req) => {
                 let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");

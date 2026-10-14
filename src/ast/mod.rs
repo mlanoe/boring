@@ -1974,8 +1974,8 @@ fn with_stmt_mutates(
 /// parameter can have. Without this gate, an ordinary struct/enum parameter with a
 /// real field or method literally named `count`/`length` (e.g. `get_count(Thing t):
 /// t.count`) was misclassified as a qualifying GPU size query purely by field name,
-/// wrongly promoting `t` to `BoringGpuArg<T>` and wrapping call sites in
-/// `BoringGpuArg::Host(...)` even on non-GPU (std) targets, where that type doesn't
+/// wrongly promoting `t` to `BoringKernelArg<T>` and wrapping call sites in
+/// `BoringKernelArg::Host(...)` even on non-GPU (std) targets, where that type doesn't
 /// exist at all — see tests/cases/struct_count_field.br, ext_res_field, and
 /// builtin_name_user_members for the regression coverage.
 pub fn scan_var_call_arg_uses(
@@ -2139,9 +2139,9 @@ fn scan_expr_var_arg(
         ExprKind::BinOp(_, l, r) => { e!(l); e!(r); }
         ExprKind::UnaryOp(_, ex) | ExprKind::Cast(ex, _) => e!(ex),
         // `<name>.length`/`.count` is a size query, not a host materialization -- a
-        // `BoringGpuArg<T>` value can answer it without ever touching the buffer
+        // `BoringKernelArg<T>` value can answer it without ever touching the buffer
         // (`Resident` already carries its length, `Host` can `.len()` its Vec — see
-        // the `BoringGpuArg::len()` helper `wgpu::host::emit_gpu_copy_helpers` emits).
+        // the `BoringKernelArg::len()` helper `wgpu::host::emit_gpu_copy_helpers` emits).
         // Every kernel-launcher wrapper in practice sizes its dispatch block off the
         // very array it also passes to the kernel constructor (`k(block = x.length)`),
         // so treating this as disqualifying would make the exclusive-ctor-arg scan
@@ -2150,7 +2150,7 @@ fn scan_expr_var_arg(
         // generic `Field` recursion below. It deliberately does NOT set `any` either:
         // a size query alone says nothing about the array reaching a GPU context, so a
         // parameter whose only use is `xs.length` (`count_seen([int] xs): xs.length`)
-        // must stay a plain `&Vec<T>` -- promoting it to `BoringGpuArg<T>` emitted a
+        // must stay a plain `&Vec<T>` -- promoting it to `BoringKernelArg<T>` emitted a
         // type that doesn't exist on non-GPU targets. Only a genuine qualifying
         // call-argument use (a kernel constructor / already-qualifying callee) sets
         // `any`. See tests/cases/array_param_length_only.br.
@@ -2161,7 +2161,7 @@ fn scan_expr_var_arg(
         // field or method literally named `count`/`length` (e.g. `get_count(Thing t):
         // t.count`) matched here purely by field name and got misclassified as a
         // qualifying GPU size query, wrongly promoting the parameter to
-        // `BoringGpuArg<T>` on every target, including plain std builds where that
+        // `BoringKernelArg<T>` on every target, including plain std builds where that
         // type doesn't even exist. See tests/cases/struct_count_field.br.
         ExprKind::Field(ex, field) | ExprKind::OptionalField(ex, field)
             if treat_len_count_as_qualifying

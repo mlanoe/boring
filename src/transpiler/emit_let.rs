@@ -1520,7 +1520,7 @@ impl Transpiler {
         if let Some(value_expr) = resident_init {
             let value = self.emit_expr_owned(value_expr);
             let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
-            self.line(&format!("{kw} {} = BoringGpuArg::Host({value});", escape_rust_keyword(&s.name)));
+            self.line(&format!("{kw} {} = BoringKernelArg::Host({value});", escape_rust_keyword(&s.name)));
             self.resident_call_vars.insert(s.name.clone(), s.ty.clone().unwrap());
             self.known_local_vars.insert(s.name.clone());
             return;
@@ -2697,7 +2697,7 @@ impl Transpiler {
                 Type::Qualified(inner, _) => inner.as_ref(),
                 other => other,
             };
-            return format!("BoringGpuArg::Host({})", self.emit_let_value(Some(inner), value));
+            return format!("BoringKernelArg::Host({})", self.emit_let_value(Some(inner), value));
         }
         self.emit_let_value(field_ty, value)
     }
@@ -2789,10 +2789,10 @@ impl Transpiler {
         // Interprocedural GPU residency, tuple case (mirrors
         // `emit_kernel::try_emit_gpu_resident_call_let` for the single-value case):
         // when `s.value` calls a `fn_returns_resident_tuple` function, its Rust
-        // signature returns e.g. `(BoringGpuArg<f64>, Vec<f64>, Vec<f64>)` regardless
+        // signature returns e.g. `(BoringKernelArg<f64>, Vec<f64>, Vec<f64>)` regardless
         // of what this call site wants — handle that before any of the ordinary
         // destructure logic below (channel/oneshot/broadcast detection etc. all
-        // assume a plain value and would mis-handle a `BoringGpuArg<T>` element).
+        // assume a plain value and would mis-handle a `BoringKernelArg<T>` element).
         if let ExprKind::Call(callee, _) = &s.value.kind {
             if let ExprKind::Var(fn_name) = &callee.kind {
                 if let Some(flags) = self.fn_returns_resident_tuple.get(fn_name.as_str()).cloned() {
@@ -3009,7 +3009,7 @@ impl Transpiler {
     /// (which re-embeds the whole call expression per element); it destructures
     /// once into per-position temps, then downloads only the ones that didn't opt in.
     /// Whether an unannotated resident-tuple slot can skip the download at its binding
-    /// because every later use in this function takes a `BoringGpuArg<T>` natively
+    /// because every later use in this function takes a `BoringKernelArg<T>` natively
     /// (see `helpers::resident_slot_uses_stay_resident`). Needs the enclosing function's
     /// body (`current_fn_body`); without it (a method, a closure) the old
     /// download-unless-annotated default applies.
@@ -3065,7 +3065,7 @@ impl Transpiler {
                 let tmp = format!("__resid_tmp_{}", i);
                 let mut_kw = if s.binding.is_mutable() { "mut " } else { "" };
                 self.line(&format!(
-                    "let {mut_kw}{name} = match {tmp} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v }};",
+                    "let {mut_kw}{name} = match {tmp} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v }};",
                     name = b.name
                 ));
             } else if flags.get(i).copied().unwrap_or(false) {

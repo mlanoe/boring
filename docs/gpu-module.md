@@ -736,10 +736,10 @@ The mechanism differs by backend, since only CUDA/HIP/Metal can express "read th
 
 ## GPU error handling
 
-`GpuError` is a built-in enum, always available without import — the same mechanism as the built-in `Error` enum ([`book.md`](book.html), "Error Handling"):
+`KernelError` is a built-in enum, always available without import — the same mechanism as the built-in `Error` enum ([`book.md`](book.html), "Error Handling"):
 
 ```boring
-enum GpuError:
+enum KernelError:
     LaunchError
     OutOfMemory
     IllegalAccess
@@ -753,15 +753,15 @@ mut k = Scale(data)
 try:
     kernel:
         k(block = 256)
-catch GpuError.OutOfMemory:
+catch KernelError.OutOfMemory:
     print "ran out of GPU memory"
-catch GpuError.LaunchError:
+catch KernelError.LaunchError:
     print "kernel launch was rejected"
 ```
 
-**Only genuinely catchable on `--target wgpu`.** `catch GpuError.Variant:` desugars to a `BoringError` downcast — the exact mechanism `throws CalcError`/`catch CalcError.Variant:` already uses for a user-declared enum (`book.md`). wgpu's host codegen shares the same general transpiler pipeline that mechanism lives in; CUDA, ROCm, and Metal each have their own smaller, kernel-only host transpiler that doesn't (the same prerequisite gap already documented for `with` in `scoped-access-blocks.md`). On those three backends, a GPU failure is still reported as a `Box<dyn Error>` with a classified message (e.g. `"GPU out of memory: ..."`) — informative, but not something a Boring `catch GpuError.OutOfMemory:` block will match. See each backend's own doc for exactly what's classified:
+**Only genuinely catchable on `--target wgpu`.** `catch KernelError.Variant:` desugars to a `BoringError` downcast — the exact mechanism `throws CalcError`/`catch CalcError.Variant:` already uses for a user-declared enum (`book.md`). wgpu's host codegen shares the same general transpiler pipeline that mechanism lives in; CUDA, ROCm, and Metal each have their own smaller, kernel-only host transpiler that doesn't (the same prerequisite gap already documented for `with` in `scoped-access-blocks.md`). On those three backends, a GPU failure is still reported as a `Box<dyn Error>` with a classified message (e.g. `"GPU out of memory: ..."`) — informative, but not something a Boring `catch KernelError.OutOfMemory:` block will match. See each backend's own doc for exactly what's classified:
 
-- [`wgpu-backend.md`](wgpu-backend.html) — full typed `GpuError`, catchable
+- [`wgpu-backend.md`](wgpu-backend.html) — full typed `KernelError`, catchable
 - [`cuda-module.md`](cuda-module.html), [`rocm-backend.md`](rocm-backend.html), [`metal-backend.md`](metal-backend.html) — classified message only
 
 ---

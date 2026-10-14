@@ -3,7 +3,7 @@
 //
 // Regression test: `boring build` on the plain `std` target (no `--target`
 // flag) used to silently transpile a program that declares a `kernel` struct
-// and emit Rust referencing GPU-only runtime machinery (`BoringGpuArg<T>`,
+// and emit Rust referencing GPU-only runtime machinery (`BoringKernelArg<T>`,
 // `__boring_gpu_copy_d2h`/`__boring_gpu_device`/`__boring_gpu_queue`, the
 // kernel struct type itself) — none of which the `std` target's generated
 // project ever defines (that machinery only exists in the cuda/rocm/metal/wgpu

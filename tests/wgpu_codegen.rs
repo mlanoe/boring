@@ -1282,24 +1282,24 @@ with fc2:
 
     // Signature: dual-typed param (the only use of `xv` is as a kernel-constructor
     // argument at a 'unified field position), resident return type.
-    assert!(rs.contains("fn scale_gpu(xv: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+    assert!(rs.contains("fn scale_gpu(xv: BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
         "expected dual-typed param + resident return signature:\n{rs}");
 
     // Tail expression returns the buffer directly -- no download.
-    assert!(rs.contains("BoringGpuArg::Resident(std::sync::Arc::clone(&k.y_buf)"),
+    assert!(rs.contains("BoringKernelArg::Resident(std::sync::Arc::clone(&k.y_buf)"),
         "tail expression should return a Resident handle, not a download:\n{rs}");
 
     // Kernel-construction consumes `xv` via the dual-mode branch, not an
     // unconditional upload.
-    assert!(rs.contains("match &xv {"), "constructor argument for `xv` should branch on BoringGpuArg:\n{rs}");
+    assert!(rs.contains("match &xv {"), "constructor argument for `xv` should branch on BoringKernelArg:\n{rs}");
     assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "read-only resident input should reuse the same GPU allocation:\n{rs}");
     assert!(rs.contains("k.rebuild_bind_group();"), "resident branch should rebuild the bind group:\n{rs}");
 
     // Call sites: `ha` (a plain host array) is wrapped; `fc` (already resident) is
     // passed straight through, not re-wrapped as a host upload.
-    assert!(rs.contains("scale_gpu(BoringGpuArg::Host(ha.clone())"), "plain host argument should wrap as BoringGpuArg::Host:\n{rs}");
+    assert!(rs.contains("scale_gpu(BoringKernelArg::Host(ha.clone())"), "plain host argument should wrap as BoringKernelArg::Host:\n{rs}");
     assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
-    assert!(!rs.contains("BoringGpuArg::Host(fc"), "resident value should not be re-wrapped as a host upload:\n{rs}");
+    assert!(!rs.contains("BoringKernelArg::Host(fc"), "resident value should not be re-wrapped as a host upload:\n{rs}");
 
     // The whole point: no kernel-field download (`copy_y_to_host`) happens anywhere
     // in the chain -- only the final `with fc2:` materializes, via the free d2h
@@ -1336,7 +1336,7 @@ req [uint8]'kernel'unified make_bytes(int n):
     k.out
 "#;
     let (_wgsl, rs) = wgpu_codegen("packed_resident_exact_len", src);
-    assert!(rs.contains("BoringGpuArg::Resident(std::sync::Arc::clone(&k.out_buf), k.out_len)"),
+    assert!(rs.contains("BoringKernelArg::Resident(std::sync::Arc::clone(&k.out_buf), k.out_len)"),
         "packed resident return must carry the separately tracked logical length:\n{rs}");
     assert!(!rs.contains("k.out_buf.size() as usize) / std::mem::size_of::<u8>()"),
         "padded wgpu byte size is not the logical uint8 element count:\n{rs}");
@@ -1363,7 +1363,7 @@ with fc2:
 "#);
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_call_chain_inferred", &src);
 
-    assert!(rs.contains("fn scale_gpu(xv: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+    assert!(rs.contains("fn scale_gpu(xv: BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
         "expected dual-typed param + resident return signature:\n{rs}");
     assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through even without an explicit annotation:\n{rs}");
     assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur anywhere in the chain:\n{rs}");
@@ -1400,7 +1400,7 @@ fn test_with_gpu_resident_call_param_used_for_dispatch_size() {
     // `x` is used both as the kernel-constructor argument AND to size the dispatch
     // block (`x.length`) -- a second, non-constructor use that must NOT disqualify
     // the exclusive-ctor-arg scan (`ast::scan_var_call_arg_uses`), since a dual-typed
-    // `BoringGpuArg<T>` can answer `.length` without ever materializing.
+    // `BoringKernelArg<T>` can answer `.length` without ever materializing.
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
 req [float]'kernel'unified scale_gpu([float] x, float factor):
     mut k = Scale(factor, x)
@@ -1418,15 +1418,15 @@ def main() throws:
 "#);
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_dispatch_size", &src);
 
-    assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+    assert!(rs.contains("fn scale_gpu(x: BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
         "x.length use should not disqualify x from the dual-typed param treatment:\n{rs}");
-    assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
+    assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringKernelArg:\n{rs}");
     assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "read-only resident input should reuse the same GPU allocation:\n{rs}");
-    assert!(rs.contains("(x.len()) as usize"), "x.length should compile via BoringGpuArg::len(), not a bare field access:\n{rs}");
+    assert!(rs.contains("(x.len()) as usize"), "x.length should compile via BoringKernelArg::len(), not a bare field access:\n{rs}");
     assert!(!rs.contains("x::length") && !rs.contains("x::count"), "x.length must not be emitted as a module path:\n{rs}");
 
     // Chain: plain host array wraps, already-resident value passes straight through.
-    assert!(rs.contains("scale_gpu(BoringGpuArg::Host(a.clone())"), "plain host argument should wrap as BoringGpuArg::Host:\n{rs}");
+    assert!(rs.contains("scale_gpu(BoringKernelArg::Host(a.clone())"), "plain host argument should wrap as BoringKernelArg::Host:\n{rs}");
     assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
     assert!(!rs.contains("scale_gpu(&fc"), "the by-ref array-argument convention must not apply to a dual-typed param:\n{rs}");
 }
@@ -1458,7 +1458,7 @@ req [float]'kernel'unified mutate_gpu([float] x) throws:
 fn test_with_gpu_resident_call_param_explicit_annotation_used_for_dispatch_size() {
     // Same shape as above, but `x` carries an explicit `'kernel'unified` annotation --
     // the annotation must not survive into the emitted parameter type (it should
-    // still collapse to the same dual-typed `BoringGpuArg<T>` signature, matching the
+    // still collapse to the same dual-typed `BoringKernelArg<T>` signature, matching the
     // return-type case), and the same `x.length` use must not disqualify it either.
     let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
 req [float]'kernel'unified scale_gpu([float]'kernel'unified x, float factor):
@@ -1477,9 +1477,9 @@ def main() throws:
 "#);
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_annotated_dispatch_size", &src);
 
-    assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
-        "an explicit 'kernel'unified annotation on the param should collapse to BoringGpuArg<T>, not a plain Vec:\n{rs}");
-    assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
+    assert!(rs.contains("fn scale_gpu(x: BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
+        "an explicit 'kernel'unified annotation on the param should collapse to BoringKernelArg<T>, not a plain Vec:\n{rs}");
+    assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringKernelArg:\n{rs}");
     assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
 }
 
@@ -1489,7 +1489,7 @@ fn test_kernel_constructor_consumes_resident_local_no_function_boundary() {
     // a pure compile-time alias with no Rust binding) and then used directly as
     // `k2`'s constructor argument. This isolates the constructor-argument-consumption
     // gap from the fn-parameter dual-typing above -- `fc` never has a Rust identifier
-    // to type `BoringGpuArg<T>` in the first place, so the fix must reach into
+    // to type `BoringKernelArg<T>` in the first place, so the fix must reach into
     // `gpu_resident_vars` directly rather than going through that enum at all.
     let src = r#"
 kernel Scale:
@@ -1551,8 +1551,8 @@ fn test_fn_gpu_arg_param_transitive_two_hop_wrapper() {
     // one call-graph hop beyond the base case `scale_gpu` itself uses. Exercises the
     // actual gap this fix closes: a caller passing an already-resident value into the
     // wrapper (confirmed against a real `cargo check` failure before this fix:
-    // `BoringGpuArg::Host(xv.clone())` passed where `scale_gpu` expects
-    // `BoringGpuArg<f64>` directly).
+    // `BoringKernelArg::Host(xv.clone())` passed where `scale_gpu` expects
+    // `BoringKernelArg<f64>` directly).
     let src = format!(r#"{SCALE_GPU_KERNEL}
 req [float]'kernel'unified scale_gpu([float] xv, float factor):
     var [float] zero = [0.0, 0.0]
@@ -1573,12 +1573,12 @@ with fc2:
     let (_wgsl, rs) = wgpu_codegen("fn_gpu_arg_param_transitive_wrapper", &src);
 
     // The wrapper's own parameter should be dual-typed too, transitively.
-    assert!(rs.contains("fn wrap_scale_gpu(xv: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+    assert!(rs.contains("fn wrap_scale_gpu(xv: BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
         "wrapper's forwarded parameter should qualify transitively:\n{rs}");
     // Forwarding `xv` into `scale_gpu(xv, factor)` inside the wrapper must pass the
     // enum straight through, not re-wrap it as a host upload.
     assert!(rs.contains("scale_gpu(xv.clone()"), "forwarded resident parameter should pass straight through:\n{rs}");
-    assert!(!rs.contains("BoringGpuArg::Host(xv"), "forwarded resident parameter must not be re-wrapped as a host upload:\n{rs}");
+    assert!(!rs.contains("BoringKernelArg::Host(xv"), "forwarded resident parameter must not be re-wrapped as a host upload:\n{rs}");
     // Call site: an already-resident value (`fc`) passed into the wrapper passes
     // straight through too.
     assert!(rs.contains("wrap_scale_gpu(fc.clone()"), "already-resident argument into the wrapper should pass straight through:\n{rs}");
@@ -1616,7 +1616,7 @@ def main() throws:
 "#);
     let (_wgsl, rs) = wgpu_codegen("fn_gpu_arg_param_disqualified_mixed_use", &src);
 
-    assert!(!rs.contains("fn mixed_use(x: BoringGpuArg<f64>"),
+    assert!(!rs.contains("fn mixed_use(x: BoringKernelArg<f64>"),
         "a parameter with any non-qualifying use anywhere must not dual-type, even transitively:\n{rs}");
 }
 
@@ -1655,9 +1655,9 @@ def main() throws:
 "#);
     let (_wgsl, rs) = wgpu_codegen("gpu_resident_tuple_return", &src);
 
-    // Return type: position 0 collapses to BoringGpuArg<T>, position 1 stays Vec<T>.
-    assert!(rs.contains("fn tuple_fn(x: BoringGpuArg<f64>, factor: f64) -> (BoringGpuArg<f64>, Vec<f64>)"),
-        "tuple return type should substitute BoringGpuArg<T> only at the resident position:\n{rs}");
+    // Return type: position 0 collapses to BoringKernelArg<T>, position 1 stays Vec<T>.
+    assert!(rs.contains("fn tuple_fn(x: BoringKernelArg<f64>, factor: f64) -> (BoringKernelArg<f64>, Vec<f64>)"),
+        "tuple return type should substitute BoringKernelArg<T> only at the resident position:\n{rs}");
     // Tail expression: element 0 (already a resident local) passes through as a
     // clone, no download; element 1 emits normally.
     // (`side` is the last use of its local, so the last-use analysis moves it: no `.clone()`.)
@@ -1666,7 +1666,7 @@ def main() throws:
     assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur inside tuple_fn:\n{rs}");
     // Destructure at the call site: `r` opted in explicitly, so it binds straight
     // from the call with no materialization; `s` is an ordinary Vec<f64>.
-    assert!(rs.contains("let (r, s) = tuple_fn(BoringGpuArg::Host(a.clone()), 2.0);"),
+    assert!(rs.contains("let (r, s) = tuple_fn(BoringKernelArg::Host(a.clone()), 2.0);"),
         "opted-in destructure should bind straight from the call, no extra materialization:\n{rs}");
 }
 
@@ -1701,10 +1701,10 @@ def main() throws:
     let (_wgsl, rs) = wgpu_codegen("gpu_resident_tuple_return_default_materialize", &src);
 
     // The call still runs exactly once, into per-position temp bindings.
-    assert_eq!(rs.matches("tuple_fn(BoringGpuArg::Host(a.clone())").count(), 1,
+    assert_eq!(rs.matches("tuple_fn(BoringKernelArg::Host(a.clone())").count(), 1,
         "tuple_fn should be called exactly once, not re-invoked to materialize a second time:\n{rs}");
     // The unannotated resident position is materialized via a temp binding, not left as a raw enum.
-    assert!(rs.contains("BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf)"),
+    assert!(rs.contains("BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf)"),
         "unannotated resident position should materialize through the free d2h helper by default:\n{rs}");
     assert!(rs.contains("let r ="), "default-materialized binding should still end up bound to the plain name `r`:\n{rs}");
 }
@@ -1762,7 +1762,7 @@ for g in Device.all():
     assert!(rs.contains("(g as i64)"), "loop var should get the .index() rewrite:\n{rs}");
 }
 
-// ─── typed GpuError ─────────────────────────────────────────────────────────
+// ─── typed KernelError ─────────────────────────────────────────────────────────
 
 #[test]
 fn dispatch_pushes_outofmemory_and_validation_scopes_and_wraps_typed_gpu_error() {
@@ -1772,9 +1772,9 @@ fn dispatch_pushes_outofmemory_and_validation_scopes_and_wraps_typed_gpu_error()
     // way for Boring source to `catch` a specific cause at all. `wgpu`
     // already exposes `ErrorFilter::OutOfMemory` unused (confirmed against
     // real wgpu 22.1.0 source); this wires it up alongside Validation and
-    // classifies each into a typed `GpuError` variant wrapped in
+    // classifies each into a typed `KernelError` variant wrapped in
     // `BoringError::Other`, exactly the same mechanism `throws CalcError`
-    // already uses (`book.md`), so `catch GpuError.OutOfMemory:` genuinely
+    // already uses (`book.md`), so `catch KernelError.OutOfMemory:` genuinely
     // dispatches -- verified end to end via a real `cargo check` against
     // real wgpu.
     let (_, rs) = wgpu_codegen("gpu_error_scopes", r#"
@@ -1790,17 +1790,17 @@ kernel Scale:
         "expected an OutOfMemory error scope pushed alongside Validation;\ngot:\n{rs}");
     assert!(rs.contains("self.device.push_error_scope(wgpu::ErrorFilter::Validation);"),
         "expected the existing Validation error scope to still be pushed;\ngot:\n{rs}");
-    assert!(rs.contains("BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::LaunchError)"),
-        "expected the Validation-scope error to classify as GpuError::LaunchError, typed via BoringError::Other;\ngot:\n{rs}");
-    assert!(rs.contains("BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::OutOfMemory)"),
-        "expected the OutOfMemory-scope error to classify as GpuError::OutOfMemory, typed via BoringError::Other;\ngot:\n{rs}");
-    assert!(rs.contains("enum GpuError") && rs.contains("OutOfMemory,") && rs.contains("DeviceLost,"),
-        "expected the built-in GpuError enum (all 6 documented variants) in the generated prelude;\ngot:\n{rs}");
+    assert!(rs.contains("BoringError::Other(std::any::TypeId::of::<KernelError>(), Box::new(KernelError::LaunchError)"),
+        "expected the Validation-scope error to classify as KernelError::LaunchError, typed via BoringError::Other;\ngot:\n{rs}");
+    assert!(rs.contains("BoringError::Other(std::any::TypeId::of::<KernelError>(), Box::new(KernelError::OutOfMemory)"),
+        "expected the OutOfMemory-scope error to classify as KernelError::OutOfMemory, typed via BoringError::Other;\ngot:\n{rs}");
+    assert!(rs.contains("enum KernelError") && rs.contains("OutOfMemory,") && rs.contains("DeviceLost,"),
+        "expected the built-in KernelError enum (all 6 documented variants) in the generated prelude;\ngot:\n{rs}");
 }
 
 #[test]
 fn catch_gpu_error_by_variant_downcasts_correctly() {
-    // End-to-end: a Boring `catch GpuError.OutOfMemory:` inside a `try:`
+    // End-to-end: a Boring `catch KernelError.OutOfMemory:` inside a `try:`
     // wrapping a `kernel:` dispatch must lower to a real BoringError
     // downcast + variant match, the same codegen shape `catch CalcError.X:`
     // already produces for a user-declared enum (book.md:6565) -- confirmed
@@ -1820,17 +1820,17 @@ def run() throws:
     try:
         kernel:
             k(block = 2)
-    catch GpuError.OutOfMemory:
+    catch KernelError.OutOfMemory:
         print "out of memory"
-    catch GpuError.LaunchError:
+    catch KernelError.LaunchError:
         print "launch error"
 "#);
-    assert!(rs.contains("__tid == std::any::TypeId::of::<GpuError>()"),
-        "expected a TypeId-gated downcast for GpuError;\ngot:\n{rs}");
-    assert!(rs.contains(".downcast_ref::<GpuError>()"),
-        "expected a downcast_ref::<GpuError> call at the catch site;\ngot:\n{rs}");
-    assert!(rs.contains("GpuError::OutOfMemory =>") && rs.contains("GpuError::LaunchError =>"),
-        "expected both catch arms to match on the specific GpuError variant;\ngot:\n{rs}");
+    assert!(rs.contains("__tid == std::any::TypeId::of::<KernelError>()"),
+        "expected a TypeId-gated downcast for KernelError;\ngot:\n{rs}");
+    assert!(rs.contains(".downcast_ref::<KernelError>()"),
+        "expected a downcast_ref::<KernelError> call at the catch site;\ngot:\n{rs}");
+    assert!(rs.contains("KernelError::OutOfMemory =>") && rs.contains("KernelError::LaunchError =>"),
+        "expected both catch arms to match on the specific KernelError variant;\ngot:\n{rs}");
 }
 
 #[test]
@@ -4387,7 +4387,7 @@ kernel WarpEmulated:
 /// A plain, non-resident `int`/`float` local inside a `pub req [T]'kernel'unified`
 /// function — used only to compute a grid/block dispatch dimension before a
 /// `kernel:` call, never itself GPU-resident and never returned — used to get
-/// wrongly wrapped in `BoringGpuArg::Host(...)` by the wgpu host-codegen path,
+/// wrongly wrapped in `BoringKernelArg::Host(...)` by the wgpu host-codegen path,
 /// as if it were the function's own return value. Root cause: `ExprKind::If`
 /// (and `Match`/`Do`) used as an ordinary expression value clones the parent
 /// emitter's `current_fn_returns_resident` flag onto its branch sub-emitter
@@ -4396,7 +4396,7 @@ kernel WarpEmulated:
 /// Metal backend never exhibited this (its host codegen for scalar locals
 /// doesn't consult that flag), only wgpu. Confirmed this test fails to compile
 /// with `E0308: expected struct Vec<_>, found isize` against the pre-fix code
-/// (mismatched types on `BoringGpuArg::Host(blocks.clone())`), and runs to
+/// (mismatched types on `BoringKernelArg::Host(blocks.clone())`), and runs to
 /// completion with the correct GPU-computed values after.
 #[test]
 fn wgpu_scalar_local_if_expr_in_resident_fn_not_wrapped_in_boringgpuarg() {
@@ -4439,23 +4439,23 @@ def main() throws:
     // Codegen shape: the `if`-expression computing `gx` must emit plain `isize`
     // branches (bare `65535`/`blocks`, no residency wrapping at all) -- that
     // wrapping belongs solely to the function's actual tail expression (`k.y`,
-    // emitted as `BoringGpuArg::Resident`). `BoringGpuArg::Host` legitimately
+    // emitted as `BoringKernelArg::Resident`). `BoringKernelArg::Host` legitimately
     // appears elsewhere (e.g. the `x` parameter's host/resident match), so assert
     // narrowly against `gx`'s own `let` statement rather than the whole file.
     let gx_let_line = rs.lines().find(|l| l.contains("let gx"))
         .unwrap_or_else(|| panic!("expected a `let gx` statement in generated code;\ngot:\n{rs}"));
     assert!(
-        !rs.contains("BoringGpuArg::Host((65535")
-            && !rs.contains("BoringGpuArg::Host((blocks")
-            && !rs.contains("BoringGpuArg::Host(blocks"),
+        !rs.contains("BoringKernelArg::Host((65535")
+            && !rs.contains("BoringKernelArg::Host((blocks")
+            && !rs.contains("BoringKernelArg::Host(blocks"),
         "expected `gx`'s if-expression branches (`65535`/`blocks`) to stay plain \
-         `isize`, not wrapped in `BoringGpuArg::Host(...)` as if they were the \
+         `isize`, not wrapped in `BoringKernelArg::Host(...)` as if they were the \
          function's own return value;\ngx's `let` line:\n{gx_let_line}\nfull output:\n{rs}"
     );
     assert!(
-        rs.contains("BoringGpuArg::Resident"),
+        rs.contains("BoringKernelArg::Resident"),
         "expected the function's real tail expression (`k.y`) to still emit \
-         `BoringGpuArg::Resident(...)`;\ngot:\n{rs}"
+         `BoringKernelArg::Resident(...)`;\ngot:\n{rs}"
     );
 
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))

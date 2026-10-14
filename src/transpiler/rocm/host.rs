@@ -501,7 +501,7 @@ impl<T> KernelHandle<T> {
 
 impl HostEmitter {
     /// Everything below `ROCM_HOST_PRELUDE`'s hand-rolled FFI/wrapper layer:
-    /// `BoringGpuArg`, the GPU-context statics, `boring_gpu_init`/`_ctx`/`_ctx_n`,
+    /// `BoringKernelArg`, the GPU-context statics, `boring_gpu_init`/`_ctx`/`_ctx_n`,
     /// the shared-stream cache, and boring's built-in `Dimension` type. Split
     /// out of the constant above only because `Dimension`'s definition is
     /// shared verbatim with `cuda`/`metal` via `helpers::DIMENSION_STRUCT_RUST`.
@@ -537,29 +537,29 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // See `cuda::host`'s identical `BoringGpuArg` contract. Returned kernel
+        // See `cuda::host`'s identical `BoringKernelArg` contract. Returned kernel
         // buffers remain resident across functions; read-only consumers retain
         // the Arc while mutable consumers receive independent storage.
         self.line("#[allow(dead_code)]");
-        self.line("pub enum BoringGpuArg<T> {");
+        self.line("pub enum BoringKernelArg<T> {");
         self.indent += 1;
         self.line("Resident(Arc<DeviceBuffer<T>>, usize),");
         self.line("Host(Vec<T>),");
         self.indent -= 1;
         self.line("}");
         self.blank();
-        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T> { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringGpuArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringGpuArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } } }");
-        self.line("impl<T: PartialEq> PartialEq for BoringGpuArg<T> { fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringGpuArg::Resident(a, an), BoringGpuArg::Resident(b, bn)) => Arc::ptr_eq(a, b) && an == bn, (BoringGpuArg::Host(a), BoringGpuArg::Host(b)) => a == b, _ => false } } }");
+        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringKernelArg<T> { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringKernelArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringKernelArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } } }");
+        self.line("impl<T: PartialEq> PartialEq for BoringKernelArg<T> { fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringKernelArg::Resident(a, an), BoringKernelArg::Resident(b, bn)) => Arc::ptr_eq(a, b) && an == bn, (BoringKernelArg::Host(a), BoringKernelArg::Host(b)) => a == b, _ => false } } }");
         self.blank();
         self.line("#[allow(dead_code)]");
-        self.line("impl<T: Clone> Clone for BoringGpuArg<T> {");
+        self.line("impl<T: Clone> Clone for BoringKernelArg<T> {");
         self.indent += 1;
         self.line("fn clone(&self) -> Self {");
         self.indent += 1;
         self.line("match self {");
         self.indent += 1;
-        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(b.clone(), *n),");
-        self.line("BoringGpuArg::Host(v) => BoringGpuArg::Host(v.clone()),");
+        self.line("BoringKernelArg::Resident(b, n) => BoringKernelArg::Resident(b.clone(), *n),");
+        self.line("BoringKernelArg::Host(v) => BoringKernelArg::Host(v.clone()),");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -568,11 +568,11 @@ impl HostEmitter {
         self.line("}");
         self.blank();
         self.line("#[allow(dead_code)]");
-        self.line("impl<T> BoringGpuArg<T> {");
+        self.line("impl<T> BoringKernelArg<T> {");
         self.indent += 1;
         self.line("fn len(&self) -> usize {");
         self.indent += 1;
-        self.line("match self { BoringGpuArg::Resident(_, len) => *len, BoringGpuArg::Host(v) => v.len() }");
+        self.line("match self { BoringKernelArg::Resident(_, len) => *len, BoringKernelArg::Host(v) => v.len() }");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -713,12 +713,12 @@ struct HostEmitter {
     ref_params: std::collections::HashSet<String>,
     /// True while emitting the body of a GPU-resident-returning function (see
     /// `emit_fn`'s `resident_elem`) — gates wrapping `Stmt::Return`'s value in
-    /// `BoringGpuArg::Host(...)` to match the declared `BoringGpuArg<T>` return
+    /// `BoringKernelArg::Host(...)` to match the declared `BoringKernelArg<T>` return
     /// type every general-spliced caller unconditionally expects.
     in_resident_return: bool,
     /// Free function name → its `Type` when GPU-resident-returning (see
     /// `emit_fn`'s `resident_elem`). A call from one kernel-touching function
-    /// to another that returns `BoringGpuArg<T>` must materialize the result —
+    /// to another that returns `BoringKernelArg<T>` must materialize the result —
     /// this emitter has no cross-function residency-preservation optimization
     /// of its own, unlike the general pipeline's `resident_call_vars`.
     fn_returns_resident: std::collections::HashMap<String, Type>,
@@ -726,7 +726,7 @@ struct HostEmitter {
     /// Local variable names (current function only, reset per `emit_fn` call)
     /// bound to a call into a `fn_returns_resident` function WHOSE OWN `let`
     /// type is itself `'kernel'unified` (`s.ty.gpu_resident_qual().is_some()`) --
-    /// these stay `BoringGpuArg<f64>`-typed (never unwrapped to a plain
+    /// these stay `BoringKernelArg<f64>`-typed (never unwrapped to a plain
     /// `Vec`), so a later kernel-constructor call passing one of these as an
     /// argument can share the underlying `DeviceBuffer` through an `Arc`
     /// instead of reading it back to host and re-uploading. See `Stmt::Let`'s own
@@ -735,7 +735,7 @@ struct HostEmitter {
     resident_locals: std::collections::HashSet<String>,
     /// One-shot flag: `Stmt::Let` sets this to `true` immediately before
     /// calling `self.expr(val)` for a call it has determined should stay
-    /// `BoringGpuArg`-typed (see `resident_locals`'s doc). The `Call` arm of
+    /// `BoringKernelArg`-typed (see `resident_locals`'s doc). The `Call` arm of
     /// `expr()` takes (consumes) this flag for ITS OWN top-level call only,
     /// before recursing into argument sub-expressions, so a resident-
     /// preserving call passed as an argument to this outer call isn't
@@ -1199,7 +1199,7 @@ impl HostEmitter {
             if let Some(value) = self.try_resident_field_expr(rhs) { return value; }
             if let ExprKind::Field(obj, field) = &rhs.kind {
                 if let ExprKind::Var(obj) = &obj.kind {
-                    return format!("{{ let __n = {obj}.{field}.len(); BoringGpuArg::Resident(Arc::new({obj}.{field}), __n) }}");
+                    return format!("{{ let __n = {obj}.{field}.len(); BoringKernelArg::Resident(Arc::new({obj}.{field}), __n) }}");
                 }
             }
         }
@@ -2045,7 +2045,7 @@ impl HostEmitter {
             match &p.ty {
                 Some(ty) => {
                     let base = if is_gpu_array_param(ty) {
-                        format!("BoringGpuArg<{}>", elem_rust_type(ty))
+                        format!("BoringKernelArg<{}>", elem_rust_type(ty))
                     } else { rust_type(ty) };
                     let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
                         format!("&{}", base)
@@ -2066,7 +2066,7 @@ impl HostEmitter {
         };
         let resident_elem = f.return_ty.as_ref().and_then(|t| t.gpu_resident_qual().map(|_| elem_rust_type(t)));
         let plain_ret = match &resident_elem {
-            Some(elem) => format!("BoringGpuArg<{}>", elem),
+            Some(elem) => format!("BoringKernelArg<{}>", elem),
             None => f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into()),
         };
         let ret = if f.throws {
@@ -2107,7 +2107,7 @@ impl HostEmitter {
                             match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }
                                 .or_else(|| self.try_resident_field_expr(e)).unwrap_or_else(|| {
                                 let s = self.expr(e);
-                                format!("BoringGpuArg::Host({})", s)
+                                format!("BoringKernelArg::Host({})", s)
                             })
                         } else {
                             self.expr(e)
@@ -2120,7 +2120,7 @@ impl HostEmitter {
                         let wrapped = match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }
                             .or_else(|| self.try_resident_field_expr(e)).unwrap_or_else(|| {
                             let s = self.expr(e);
-                            format!("BoringGpuArg::Host({})", s)
+                            format!("BoringKernelArg::Host({})", s)
                         });
                         self.line(&wrapped);
                         continue;
@@ -2152,7 +2152,7 @@ impl HostEmitter {
                 let is_resident_preserving = explicit_resident && (resident_call || self.in_resident_return);
                 let ty_ann = if is_resident_preserving {
                     self.resident_locals.insert(s.name.clone());
-                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", elem_rust_type(t.without_mut()))).unwrap_or_default()
+                    s.ty.as_ref().map(|t| format!(": BoringKernelArg<{}>", elem_rust_type(t.without_mut()))).unwrap_or_default()
                 } else {
                     s.ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default()
                 };
@@ -2161,7 +2161,7 @@ impl HostEmitter {
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
-                    let rhs = if is_resident_preserving && !resident_call { format!("BoringGpuArg::Host({})", self.expr(val)) } else { self.expr(val) };
+                    let rhs = if is_resident_preserving && !resident_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr(val) };
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
@@ -2211,7 +2211,7 @@ impl HostEmitter {
                     let s = if self.in_resident_return {
                         self.try_resident_field_expr(val).unwrap_or_else(|| {
                             let s = self.expr(val);
-                            format!("BoringGpuArg::Host({})", s)
+                            format!("BoringKernelArg::Host({})", s)
                         })
                     } else {
                         self.expr(val)
@@ -2779,7 +2779,7 @@ impl HostEmitter {
                                 return format!("{}.clone()", name);
                             }
                         }
-                        return format!("BoringGpuArg::Host(({}).clone())", self.expr(&a.value));
+                        return format!("BoringKernelArg::Host(({}).clone())", self.expr(&a.value));
                     }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                     self.coerce_call_arg(&a.value, expects_ref)
@@ -2797,7 +2797,7 @@ impl HostEmitter {
                 if let Some(ret_ty) = callee_name.and_then(|n| self.fn_returns_resident.get(n)).cloned() {
                     let elem = elem_rust_type(&ret_ty);
                     return format!(
-                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{elem}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
+                        "match {call} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{elem}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringKernelArg::Host(v) => v }}"
                     );
                 }
                 call
@@ -3198,9 +3198,9 @@ impl HostEmitter {
                     if self.resident_locals.contains(vname.as_str()) {
                         // Same reasoning as the `k_prev.field` case above.
                         return if read_only {
-                            format!("(match &{v} {{ BoringGpuArg::Resident(buf, _) => Arc::clone(buf), BoringGpuArg::Host(v) => Arc::new(boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(v)?) }})", v = vname, elem = elem)
+                            format!("(match &{v} {{ BoringKernelArg::Resident(buf, _) => Arc::clone(buf), BoringKernelArg::Host(v) => Arc::new(boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(v)?) }})", v = vname, elem = elem)
                         } else {
-                            format!("(match &{v} {{ BoringGpuArg::Resident(buf, _) => (**buf).clone(), BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(v)? }})", v = vname, elem = elem)
+                            format!("(match &{v} {{ BoringKernelArg::Resident(buf, _) => (**buf).clone(), BoringKernelArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(v)? }})", v = vname, elem = elem)
                         };
                     }
                 }
@@ -3258,7 +3258,7 @@ impl HostEmitter {
         match kf.qual {
             GpuQual::Unified => match &kf.ty {
                 Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => Some(format!(
-                    "{{ let __n = {obj}.{field}.len(); BoringGpuArg::Resident(Arc::new({obj}.{field}), __n) }}",
+                    "{{ let __n = {obj}.{field}.len(); BoringKernelArg::Resident(Arc::new({obj}.{field}), __n) }}",
                     obj = obj_name, field = field
                 )),
                 _ => None,

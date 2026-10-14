@@ -1419,7 +1419,7 @@ transpile_test!(collection_named_methods);
 transpile_test!(set_param_methods);
 
 // Regression test: a plain `[T]` parameter used only via `.length`/`.count` was promoted to a
-// GPU-resident `BoringGpuArg<T>` parameter by the exclusive-ctor-arg scan (the size query counted
+// GPU-resident `BoringKernelArg<T>` parameter by the exclusive-ctor-arg scan (the size query counted
 // as a use without ever disqualifying it), a type that doesn't exist on non-GPU targets. See
 // `scan_expr_var_arg` in `src/ast/mod.rs`.
 transpile_test!(array_param_length_only);

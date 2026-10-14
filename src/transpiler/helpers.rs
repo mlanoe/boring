@@ -2848,14 +2848,14 @@ mod labeled_array_tests {
 }
 
 /// Decides whether an *unannotated* destructured slot of a resident-tuple call
-/// (`let (s, d) = pair(x, y, n)`) may stay a `BoringGpuArg<T>` instead of being
+/// (`let (s, d) = pair(x, y, n)`) may stay a `BoringKernelArg<T>` instead of being
 /// downloaded to the host right at the binding.
 ///
 /// Annotating a slot `'kernel'unified` has always opted it into staying resident; an
 /// unannotated slot used to download unconditionally because existing code indexes or
-/// iterates it right away (a `BoringGpuArg<T>` supports neither). This keeps that
+/// iterates it right away (a `BoringKernelArg<T>` supports neither). This keeps that
 /// behavior for any slot with a host-style use, but keeps the slot resident when every
-/// use of `name` anywhere in `body` is one a `BoringGpuArg<T>` handles natively: an
+/// use of `name` anywhere in `body` is one a `BoringKernelArg<T>` handles natively: an
 /// argument at a position `classify` accepts (a kernel-constructor buffer argument or
 /// a `fn_gpu_arg_params` position), a `.length` size query, or an element of the
 /// function's own resident-tuple tail at a resident position (`tail_flags`). A slot

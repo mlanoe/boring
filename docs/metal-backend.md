@@ -137,11 +137,11 @@ That flush point is also where a GPU-side failure (invalid threadgroup size, out
 
 There is no synchronous rejection at dispatch time the way CUDA's `cuLaunchKernel` can reject an invalid config immediately — Metal's `dispatch_thread_groups` has no `Result`-returning signature at all, so an invalid config is either caught by the (async) command-buffer status above, or — if Metal's own API validation layer is active — an assertion/abort outside Boring's control.
 
-### Classified error messages, not typed `GpuError`
+### Classified error messages, not typed `KernelError`
 
 `status() == MTLCommandBufferStatus::Error` used to be the whole story — `{:?}` on the status enum just prints the literal word `Error`, no indication of the real cause. The `metal` crate exposes no safe `.error()` getter on `CommandBufferRef` (checked against real `metal` 0.29 source — no such method exists), but `CommandBufferRef` does implement `objc::Message`, so the real `NSError` is one `objc::msg_send![buf_ref, error]` away, classified against Apple's own `MTLCommandBufferError` codes (out of memory, page fault, timeout, device removed, ...). `objc` is now an **unconditional** dependency of every Metal-generated project (previously only added when `Screen` was present) since this flush path needs it regardless of whether the program does any display work.
 
-This is a message improvement, not a catchable [`GpuError`](gpu-module.html#gpu-error-handling) — `catch GpuError.OutOfMemory:` is not reachable here. Metal's host transpiler is its own small, kernel-only transpiler (like CUDA's and ROCm's), not the general pipeline `BoringError`/`catch`-by-variant lives in — the same prerequisite gap already documented for `with` in `scoped-access-blocks.md`.
+This is a message improvement, not a catchable [`KernelError`](gpu-module.html#gpu-error-handling) — `catch KernelError.OutOfMemory:` is not reachable here. Metal's host transpiler is its own small, kernel-only transpiler (like CUDA's and ROCm's), not the general pipeline `BoringError`/`catch`-by-variant lives in — the same prerequisite gap already documented for `with` in `scoped-access-blocks.md`.
 
 ---
 

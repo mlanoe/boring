@@ -259,7 +259,7 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     t.source_dir = t.config.source_dir.clone();
     t.deps = t.config.deps.clone();
     // The `std` target (plain `boring build`, no `--target`) has no GPU runtime at
-    // all -- `BoringGpuArg<T>`, `__boring_gpu_copy_d2h`/`__boring_gpu_device`/
+    // all -- `BoringKernelArg<T>`, `__boring_gpu_copy_d2h`/`__boring_gpu_device`/
     // `__boring_gpu_queue`, and kernel struct/dispatch codegen are only ever emitted
     // by the cuda/rocm/metal/wgpu backends (see each backend's own `host.rs`).
     // Without this check, a `kernel` struct on the `std` target silently transpiles
@@ -1275,7 +1275,7 @@ struct Transpiler {
     /// Free function name -> its declared return type, for functions whose return
     /// type is `'kernel'unified`/`'kernel'global`-qualified — mirrors the checker's own
     /// `fn_returns_resident` (checker/mod.rs). Populated once up front (`pre_scan`).
-    /// Drives: (1) `emit_top.rs`'s return-type emission (`BoringGpuArg<T>` instead of
+    /// Drives: (1) `emit_top.rs`'s return-type emission (`BoringKernelArg<T>` instead of
     /// `Vec<T>`), (2) `emit_kernel::try_emit_gpu_resident_call_let` recognizing
     /// `let fc = some_fn(...)` as an interprocedural resident binding. See
     /// docs/scoped-access-blocks.md's interprocedural residency case.
@@ -1285,7 +1285,7 @@ struct Transpiler {
     /// kernel constructor at a `'unified`/`'global` field position (mirrors the
     /// checker's own `fn_gpu_arg_params`, computed independently here from the same
     /// bounded scan, `ast::scan_var_call_arg_uses`). Such a parameter is emitted
-    /// `BoringGpuArg<T>` instead of a plain host array (`emit_top.rs`), and the
+    /// `BoringKernelArg<T>` instead of a plain host array (`emit_top.rs`), and the
     /// kernel-construction codegen that consumes it branches on the enum instead of
     /// always uploading (`emit_kernel::emit_kernel_construction`).
     pub(crate) fn_gpu_arg_params: std::collections::HashMap<String, Vec<bool>>,
@@ -1303,13 +1303,13 @@ struct Transpiler {
     /// Unlike that map (a pure compile-time alias with no Rust binding, since the
     /// data is just a re-readable kernel field), this call already executed with
     /// real side effects, so `fc` gets a real `let` binding, just typed
-    /// `BoringGpuArg<T>` — see `emit_kernel::try_emit_gpu_resident_call_let` and
+    /// `BoringKernelArg<T>` — see `emit_kernel::try_emit_gpu_resident_call_let` and
     /// `emit_stmt::emit_with`'s matching materialization branch.
     pub(crate) resident_call_vars: std::collections::HashMap<String, Type>,
     /// Scoped to the function currently being emitted (saved/restored around the
     /// body in `emit_top.rs::emit_fn`, same convention as `fn_current_params` etc.):
     /// `Some(return type)` when this function's declared return is GPU-resident, so
-    /// the tail-expression emitter can branch to `BoringGpuArg::Resident(...)`
+    /// the tail-expression emitter can branch to `BoringKernelArg::Resident(...)`
     /// instead of the unconditional `copy_{field}_to_host()` download.
     pub(crate) current_fn_returns_resident: Option<Type>,
     /// Scoped to the function currently being emitted, same convention as
@@ -1326,7 +1326,7 @@ struct Transpiler {
     /// `current_fn_returns_resident`: per-position flags copied from
     /// `fn_gpu_arg_params` for whichever function is being emitted right now, so
     /// `emit_kernel_construction`'s buffer-argument branch knows which of *this*
-    /// function's own parameters to treat as `BoringGpuArg<T>`.
+    /// function's own parameters to treat as `BoringKernelArg<T>`.
     pub(crate) current_fn_gpu_arg_params: Vec<bool>,
     /// Same information as `current_fn_gpu_arg_params`, but by parameter *name*
     /// rather than position — the convenient form for consumption sites that only
@@ -2425,10 +2425,10 @@ impl Transpiler {
              // cuda/rocm/metal report GPU failures as plain string-message errors\n\
              // instead of this typed enum -- see `docs/gpu-module.md`'s error-handling\n\
              // notes for why (their host transpilers don't share this prelude).\n\
-             // Use `catch GpuError.OutOfMemory:` / `match err: GpuError.Timeout: ...`\n\
+             // Use `catch KernelError.OutOfMemory:` / `match err: KernelError.Timeout: ...`\n\
              #[derive(Debug, Clone)]\n\
              #[allow(dead_code)]\n\
-             enum GpuError {\n\
+             enum KernelError {\n\
              \x20   LaunchError,\n\
              \x20   OutOfMemory,\n\
              \x20   IllegalAccess,\n\
@@ -2436,19 +2436,19 @@ impl Transpiler {
              \x20   Timeout,\n\
              \x20   DeviceLost,\n\
              }\n\
-             impl std::fmt::Display for GpuError {\n\
+             impl std::fmt::Display for KernelError {\n\
              \x20   fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n\
              \x20       match self {\n\
-             \x20           GpuError::LaunchError   => write!(f, \"GPU kernel launch failed\"),\n\
-             \x20           GpuError::OutOfMemory   => write!(f, \"GPU out of memory\"),\n\
-             \x20           GpuError::IllegalAccess => write!(f, \"GPU illegal memory access\"),\n\
-             \x20           GpuError::StackOverflow => write!(f, \"GPU stack overflow\"),\n\
-             \x20           GpuError::Timeout       => write!(f, \"GPU operation timed out\"),\n\
-             \x20           GpuError::DeviceLost    => write!(f, \"GPU device lost\"),\n\
+             \x20           KernelError::LaunchError   => write!(f, \"GPU kernel launch failed\"),\n\
+             \x20           KernelError::OutOfMemory   => write!(f, \"GPU out of memory\"),\n\
+             \x20           KernelError::IllegalAccess => write!(f, \"GPU illegal memory access\"),\n\
+             \x20           KernelError::StackOverflow => write!(f, \"GPU stack overflow\"),\n\
+             \x20           KernelError::Timeout       => write!(f, \"GPU operation timed out\"),\n\
+             \x20           KernelError::DeviceLost    => write!(f, \"GPU device lost\"),\n\
              \x20       }\n\
              \x20   }\n\
              }\n\
-             impl std::error::Error for GpuError {}\n\n"
+             impl std::error::Error for KernelError {}\n\n"
         );
 
         if self.config.instrument {
@@ -3430,7 +3430,7 @@ impl Transpiler {
         }
     }
 
-    /// Does position `arg_idx` of a call to `fn_name` take a `BoringGpuArg<T>` natively —
+    /// Does position `arg_idx` of a call to `fn_name` take a `BoringKernelArg<T>` natively —
     /// a kernel constructor's `'unified`/`'global` array field, or a function parameter
     /// `compute_gpu_arg_params` flagged? Same classification as that fixed point, over
     /// its final result.
@@ -7897,7 +7897,7 @@ def main():\n    mut {int} seen = {1, 2}\n    note(seen)\n    drop(seen)\n";
     #[test]
     fn array_param_used_only_via_length_is_a_plain_vec_ref() {
         // A size query is neutral for the GPU-resident-arg scan: `.length`/`.count` alone must
-        // not promote the parameter to `BoringGpuArg<T>` (undefined on non-GPU targets).
+        // not promote the parameter to `BoringKernelArg<T>` (undefined on non-GPU targets).
         let src = "\
 def int count_seen([int] xs):\n    xs.length\n\n\
 def int count_of([int] xs):\n    xs.count\n\n\
@@ -7905,7 +7905,7 @@ def main():\n    let [int] a = [5, 6, 7]\n    print count_seen(a)\n    print cou
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(code.contains("fn count_seen(xs: &Vec<isize>)"), "got:\n{}", code);
         assert!(code.contains("fn count_of(xs: &Vec<isize>)"), "got:\n{}", code);
-        assert!(!code.contains("BoringGpuArg"), "no GPU arg type may appear, got:\n{}", code);
+        assert!(!code.contains("BoringKernelArg"), "no GPU arg type may appear, got:\n{}", code);
     }
 
     #[test]

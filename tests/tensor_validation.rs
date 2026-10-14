@@ -1223,21 +1223,21 @@ fn dynamic_tensor_linear_chains_resident_results_across_functions() {
     }
 
     let wgpu = fs::read_to_string(root.join("tensor_dynamic_chain_wgpu/src/main.rs")).unwrap();
-    assert!(wgpu.contains("BoringGpuArg::Resident(buf, _len) =>"));
+    assert!(wgpu.contains("BoringKernelArg::Resident(buf, _len) =>"));
     assert!(wgpu.contains("std::sync::Arc::clone(buf)"));
     assert!(!wgpu.contains("a_buf = __boring_gpu_copy_d2d"));
 
     let metal = fs::read_to_string(root.join("tensor_dynamic_chain_metal/src/main.rs")).unwrap();
-    assert!(metal.contains("BoringGpuArg::Resident(buf, _) => buf.clone()"));
+    assert!(metal.contains("BoringKernelArg::Resident(buf, _) => buf.clone()"));
 
     let cuda = fs::read_to_string(root.join("tensor_dynamic_chain_cuda/src/main.rs")).unwrap();
     assert!(cuda.contains("Resident(Arc<CudaSlice<T>>, usize)"));
-    assert!(cuda.contains("BoringGpuArg::Resident(buf, _) => Arc::clone(buf)"));
+    assert!(cuda.contains("BoringKernelArg::Resident(buf, _) => Arc::clone(buf)"));
     assert!(cuda.contains("a: Arc<CudaSlice<f32>>"));
 
     let rocm = fs::read_to_string(root.join("tensor_dynamic_chain_rocm/src/main.rs")).unwrap();
     assert!(rocm.contains("Resident(Arc<DeviceBuffer<T>>, usize)"));
-    assert!(rocm.contains("BoringGpuArg::Resident(buf, _) => Arc::clone(buf)"));
+    assert!(rocm.contains("BoringKernelArg::Resident(buf, _) => Arc::clone(buf)"));
     assert!(rocm.contains("a: Arc<DeviceBuffer<f32>>"));
 }
 
@@ -1253,8 +1253,8 @@ fn tensor_linear_builds_inside_loop_and_branch_on_all_gpu_targets() {
             .args(["build", "--target", target]).arg(&path).output().unwrap();
         assert!(build.status.success(), "{target}: {}", String::from_utf8_lossy(&build.stderr));
         let generated = fs::read_to_string(root.join(format!("tensor_control_flow_{target}/src/main.rs"))).unwrap();
-        assert!(generated.contains("let mut y") && generated.contains("BoringGpuArg::Host"), "{target}: loop-carried y must use BoringGpuArg");
-        assert!(generated.contains("y = BoringGpuArg::Resident") || generated.contains("y = { let __n = __boring_tensor_host_0.c.len(); BoringGpuArg::Resident"), "{target}: loop result must remain resident");
+        assert!(generated.contains("let mut y") && generated.contains("BoringKernelArg::Host"), "{target}: loop-carried y must use BoringKernelArg");
+        assert!(generated.contains("y = BoringKernelArg::Resident") || generated.contains("y = { let __n = __boring_tensor_host_0.c.len(); BoringKernelArg::Resident"), "{target}: loop result must remain resident");
         assert!(!generated.contains("y = __boring_tensor_host_0.read_c()"), "{target}: unexpected loop D2H readback");
         assert!(!generated.contains("y = __boring_tensor_host_0.copy_c_to_host()"), "{target}: unexpected loop D2H readback");
     }

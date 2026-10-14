@@ -4391,20 +4391,20 @@ impl Transpiler {
                 // type is always a plain, unqualified array, so none of the richer
                 // per-position coercion below (weak-ref checks, Borrow handling,
                 // hierarchy checks) can ever actually apply to it. Short-circuit
-                // straight to the `BoringGpuArg<T>` wrap instead: pass an already-
+                // straight to the `BoringKernelArg<T>` wrap instead: pass an already-
                 // resident value through directly (`resident_call_vars` — an
                 // `Arc::clone` inside, no data copy), otherwise wrap the plain host
-                // value as `BoringGpuArg::Host(...)` for upload as today. Caller keeps
+                // value as `BoringKernelArg::Host(...)` for upload as today. Caller keeps
                 // ownership either way (`.clone()` on a bare variable), matching
                 // Boring's normal by-value argument semantics.
                 if self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false) {
                     let wrapped = if let ExprKind::Var(vname) = &a.value.kind {
-                        // Already a `BoringGpuArg<T>`-typed Rust binding either way:
+                        // Already a `BoringKernelArg<T>`-typed Rust binding either way:
                         // `resident_call_vars` (a same-function local bound to a
                         // `fn_returns_resident` call) or `current_fn_gpu_arg_param_names`
                         // (the *enclosing* function's own transitively-qualifying
                         // parameter, forwarded straight through — the two-hop wrapper
-                        // case: `wrap_scale`'s `x` is itself `BoringGpuArg<T>`, so
+                        // case: `wrap_scale`'s `x` is itself `BoringKernelArg<T>`, so
                         // re-wrapping it in `Host(...)` on the way into `scale(x, n)`
                         // would be a type error, not just a missed optimization).
                         if self.resident_call_vars.contains_key(vname.as_str())
@@ -4412,7 +4412,7 @@ impl Transpiler {
                         {
                             format!("{}.clone()", vname)
                         } else {
-                            format!("BoringGpuArg::Host({}.clone())", vname)
+                            format!("BoringKernelArg::Host({}.clone())", vname)
                         }
                     } else if self.expr_is_gpu_resident_field(&a.value) {
                         format!("({}).clone()", self.emit_expr(&a.value))
@@ -4421,11 +4421,11 @@ impl Transpiler {
                         // `linear_gpu(x, self.mlp_fc_w, ...)`) needs the same clone the
                         // `Var` branch above gives a bare local: `self.mlp_fc_w` is
                         // behind `&self`/`&mut self`, and moving it into
-                        // `BoringGpuArg::Host(...)` without cloning is a real E0507,
+                        // `BoringKernelArg::Host(...)` without cloning is a real E0507,
                         // confirmed against a real `cargo check` on whisper-boring's
                         // actual call sites (every weight-matrix argument is a struct
                         // field, never a bare local).
-                        format!("BoringGpuArg::Host(({}).clone())", self.emit_expr(&a.value))
+                        format!("BoringKernelArg::Host(({}).clone())", self.emit_expr(&a.value))
                     };
                     result.push(wrapped);
                     i += 1;
@@ -4433,9 +4433,9 @@ impl Transpiler {
                 }
                 // Interprocedural GPU residency, the materializing counterpart to the
                 // `fn_gpu_arg_params` branch above: this position does NOT want a
-                // `BoringGpuArg<T>` (checked above and not taken), but the argument
+                // `BoringKernelArg<T>` (checked above and not taken), but the argument
                 // itself is a bare `resident_call_vars` local (`let fc =
-                // linear_gpu(...)?`) — a real `BoringGpuArg<T>` Rust value, not the
+                // linear_gpu(...)?`) — a real `BoringKernelArg<T>` Rust value, not the
                 // plain array the callee's signature declares. The generic by-ref
                 // coercion below has no idea this Var's actual Rust type diverges
                 // from its boring-level declared type, and would emit a bare `&fc`
@@ -4456,7 +4456,7 @@ impl Transpiler {
                         let host_ty = crate::transpiler::emit_kernel::kernel_host_element_type(&inner_ty);
                         let device_ty = crate::transpiler::emit_kernel::kernel_host_scalar_type(&inner_ty);
                         let materialized = format!(
-                            "match &{vname} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }}"
+                            "match &{vname} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }}"
                         );
                         // Only wrap in an extra `&(...)` when the callee's declared
                         // parameter at this position is actually `T&` (Borrow/BorrowMut-

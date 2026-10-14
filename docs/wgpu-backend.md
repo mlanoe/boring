@@ -363,22 +363,22 @@ Previously, no error-scope/callback machinery existed at all: `dispatch()` retur
 
 Validation is checked at command-buffer *encoding* time (synchronously, on the CPU, as `dispatch_workgroups` is called) — no `device.poll()` is needed to catch it. This does **not** cover execution-time faults (out-of-bounds access, device loss), which WebGPU instead reports via device-lost callbacks/uncaptured-error events, not scoped validation; those aren't wired up.
 
-Pipeline creation (`create_compute_pipeline`, inside the per-kernel `PIPELINE.get_or_init` cache in `emit_kernel_new` — see `Workgroup size and pipeline overrides` above) is **not** wrapped in an error scope either, unlike shader-module creation and `dispatch()`: `OnceLock::get_or_init`'s closure can't itself return a `Result`, and `new()` returns bare `Self`. A validation error here (e.g. an oversized fixed-shape bare-`'actor` `Image`/`Volume` field exceeding `.maxSharedMem()`) would otherwise hit wgpu's default uncaptured-error handler, which panics. Fixed by installing a non-panicking `device.on_uncaptured_error(...)` handler once at device-creation time (`async_main`/`emit_screen_main`'s `main()`) — the error is reported instead of crashing the process, and a subsequent `dispatch()` call against the resulting (unusable) pipeline raises its own validation error, which the existing per-dispatch error scope above *does* catch and convert to `GpuError::LaunchError`.
+Pipeline creation (`create_compute_pipeline`, inside the per-kernel `PIPELINE.get_or_init` cache in `emit_kernel_new` — see `Workgroup size and pipeline overrides` above) is **not** wrapped in an error scope either, unlike shader-module creation and `dispatch()`: `OnceLock::get_or_init`'s closure can't itself return a `Result`, and `new()` returns bare `Self`. A validation error here (e.g. an oversized fixed-shape bare-`'actor` `Image`/`Volume` field exceeding `.maxSharedMem()`) would otherwise hit wgpu's default uncaptured-error handler, which panics. Fixed by installing a non-panicking `device.on_uncaptured_error(...)` handler once at device-creation time (`async_main`/`emit_screen_main`'s `main()`) — the error is reported instead of crashing the process, and a subsequent `dispatch()` call against the resulting (unusable) pipeline raises its own validation error, which the existing per-dispatch error scope above *does* catch and convert to `KernelError::LaunchError`.
 
-### Typed `GpuError`
+### Typed `KernelError`
 
-Each popped scope's error is classified into the built-in [`GpuError`](gpu-module.html#gpu-error-handling) enum and wrapped in `BoringError::Other` — the Validation scope maps to `GpuError::LaunchError`, the OutOfMemory scope to `GpuError::OutOfMemory` — instead of the single generic formatted-string error this used to return. Because wgpu's host codegen shares the same general transpiler pipeline `BoringError`/`catch`-by-variant already lives in (unlike CUDA/ROCm/Metal — see below), this is the one backend where `catch GpuError.OutOfMemory:` genuinely dispatches on the real cause:
+Each popped scope's error is classified into the built-in [`KernelError`](gpu-module.html#gpu-error-handling) enum and wrapped in `BoringError::Other` — the Validation scope maps to `KernelError::LaunchError`, the OutOfMemory scope to `KernelError::OutOfMemory` — instead of the single generic formatted-string error this used to return. Because wgpu's host codegen shares the same general transpiler pipeline `BoringError`/`catch`-by-variant already lives in (unlike CUDA/ROCm/Metal — see below), this is the one backend where `catch KernelError.OutOfMemory:` genuinely dispatches on the real cause:
 
 ```boring
 mut k = Scale(data)
 try:
     kernel:
         k(block = 256)
-catch GpuError.OutOfMemory:
+catch KernelError.OutOfMemory:
     print "GPU ran out of memory"
 ```
 
-Verified end to end via a real `cargo check` against real wgpu 22.1.0: the generated downcast/match codegen for `catch GpuError.OutOfMemory:` is identical in shape to what a user-declared `throws CalcError` enum already produces (`book.md`).
+Verified end to end via a real `cargo check` against real wgpu 22.1.0: the generated downcast/match codegen for `catch KernelError.OutOfMemory:` is identical in shape to what a user-declared `throws CalcError` enum already produces (`book.md`).
 
 ---
 

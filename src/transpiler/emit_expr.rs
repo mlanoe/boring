@@ -2262,7 +2262,7 @@ impl Transpiler {
         }
         // Project a resident field directly out of an indexed element instead of first
         // cloning the complete struct (`arr[i].clone().field`).  The resident-field
-        // consumer clones the `BoringGpuArg` handle itself, so cloning unrelated host
+        // consumer clones the `BoringKernelArg` handle itself, so cloning unrelated host
         // fields in the element is both unnecessary and potentially very expensive.
         let obj_s = if matches!(&obj.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..))
             && self.resolve_expr_struct_type(obj)
@@ -3282,7 +3282,7 @@ impl Transpiler {
         // real "opt-in stays resident" case: don't force-materialize into it).
         let target_is_resident = matches!(&target.kind, ExprKind::Var(name)
             if self.resident_call_vars.contains_key(name.as_str()));
-        // A bare resident local on the RHS (`z = y`) is itself a `BoringGpuArg<T>`:
+        // A bare resident local on the RHS (`z = y`) is itself a `BoringKernelArg<T>`:
         // alias it (cheap `Arc::clone`) into a resident target, materialize it by
         // reference into any other target.
         let rhs_resident_var = match &value.kind {

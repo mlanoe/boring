@@ -201,7 +201,7 @@ struct Checker {
     /// Free function name -> per-position flags: `true` when the checker's bounded
     /// body scan (`scan_fn_gpu_arg_params`) found that parameter used *exclusively*
     /// as a bare-argument to a kernel constructor at a `'unified`/`'global` field
-    /// position — the transpiler uses this to type that parameter `BoringGpuArg<T>`
+    /// position — the transpiler uses this to type that parameter `BoringKernelArg<T>`
     /// instead of a plain host array, and this carve-out is what lets a caller pass
     /// a GPU-resident value into such a call without a `with` block first.
     fn_gpu_arg_params: HashMap<String, Vec<bool>>,
@@ -642,7 +642,7 @@ impl Checker {
     // can't be folded into `collect_signatures` itself — a function may be
     // declared before the kernel type it constructs.
 
-    /// A parameter becomes `BoringGpuArg`-dual-typed (see docs/scoped-access-blocks.md,
+    /// A parameter becomes `BoringKernelArg`-dual-typed (see docs/scoped-access-blocks.md,
     /// "Kernel Constructor Interaction") when it's used *exclusively*, everywhere in
     /// its function's body, as a bare argument at a position that either (a) is a raw
     /// kernel constructor's `'unified`/`'global` array-field init position, or (b) is

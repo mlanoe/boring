@@ -122,7 +122,7 @@ struct HostEmitter {
     /// Free function name -> per-parameter `Some(host element type)` for each
     /// `'kernel'global`/`'kernel'unified` array parameter (`None` for any other
     /// parameter). The element type is `general_host_elem_type` of the param,
-    /// i.e. the `T` in the callee's own `BoringGpuArg<T>` signature, so a
+    /// i.e. the `T` in the callee's own `BoringKernelArg<T>` signature, so a
     /// host value wrapped at a call site converts to exactly that width
     /// (`f32` for `[float32]`, `f64` for `[float]`) instead of a fixed `f64`.
     fn_gpu_array_params: std::collections::HashMap<String, Vec<Option<String>>>,
@@ -139,7 +139,7 @@ struct HostEmitter {
     /// same scoping as `f64_array_locals`) bound to a call into a
     /// `fn_returns_resident` function WHOSE OWN `let` type is itself
     /// `'kernel'unified` (`s.ty.gpu_resident_qual().is_some()`) -- these stay
-    /// `BoringGpuArg<f64>`-typed (never unwrapped to a plain `Vec` at the
+    /// `BoringKernelArg<f64>`-typed (never unwrapped to a plain `Vec` at the
     /// binding), so a later kernel-constructor call passing one of these as
     /// an argument can hand the underlying `Buffer` straight through instead
     /// of reading it back to host and re-uploading. See the kernel-
@@ -148,7 +148,7 @@ struct HostEmitter {
     resident_locals: std::collections::HashSet<String>,
     /// One-shot flag: `Stmt::Let` sets this to `true` immediately before
     /// calling `self.expr(val)` for a call it has determined should stay
-    /// `BoringGpuArg`-typed (see `resident_locals`'s doc). The `Call` arm of
+    /// `BoringKernelArg`-typed (see `resident_locals`'s doc). The `Call` arm of
     /// `expr()` takes (consumes) this flag for ITS OWN top-level call only,
     /// before recursing into argument sub-expressions, so a resident-
     /// preserving call passed as an argument to this outer call is not
@@ -879,7 +879,7 @@ impl HostEmitter {
         // function whose declared return type is `'kernel'unified`/`'kernel'global`-qualified
         // as "GPU-resident-returning" and renders every CALLER of it (in the general-
         // pipeline-spliced "plain" code this backend embeds -- see `metal::mod`'s doc
-        // comment) to expect a `BoringGpuArg<T>` value back, unconditionally.
+        // comment) to expect a `BoringKernelArg<T>` value back, unconditionally.
         // Unlike CUDA (where a genuine device-to-device buffer handoff is the only way
         // to avoid a real `cudaMemcpy`), Metal's buffers use `StorageModeShared` --
         // real, unified CPU/GPU memory -- so `Resident` here holds a real `metal::Buffer`
@@ -890,33 +890,33 @@ impl HostEmitter {
         // when the tail expression is a bare `k.field` read, skipping the
         // read-to-Vec-then-reupload round trip a chained GPU call used to always pay.
         self.line("#[allow(dead_code)]");
-        self.line("pub enum BoringGpuArg<T> {");
+        self.line("pub enum BoringKernelArg<T> {");
         self.indent += 1;
         self.line("Resident(Buffer, usize),");
         self.line("Host(Vec<T>),");
         self.indent -= 1;
         self.line("}");
         self.blank();
-        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T> {");
+        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringKernelArg<T> {");
         self.indent += 1;
-        self.line("fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringGpuArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringGpuArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } }");
+        self.line("fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringKernelArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringKernelArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } }");
         self.indent -= 1;
         self.line("}");
-        self.line("impl<T: PartialEq> PartialEq for BoringGpuArg<T> {");
+        self.line("impl<T: PartialEq> PartialEq for BoringKernelArg<T> {");
         self.indent += 1;
-        self.line("fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringGpuArg::Resident(a, an), BoringGpuArg::Resident(b, bn)) => std::ptr::eq(&**a, &**b) && an == bn, (BoringGpuArg::Host(a), BoringGpuArg::Host(b)) => a == b, _ => false } }");
+        self.line("fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringKernelArg::Resident(a, an), BoringKernelArg::Resident(b, bn)) => std::ptr::eq(&**a, &**b) && an == bn, (BoringKernelArg::Host(a), BoringKernelArg::Host(b)) => a == b, _ => false } }");
         self.indent -= 1;
         self.line("}");
         self.blank();
         self.line("#[allow(dead_code)]");
-        self.line("impl<T: Clone> Clone for BoringGpuArg<T> {");
+        self.line("impl<T: Clone> Clone for BoringKernelArg<T> {");
         self.indent += 1;
         self.line("fn clone(&self) -> Self {");
         self.indent += 1;
         self.line("match self {");
         self.indent += 1;
-        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(b.clone(), *n),");
-        self.line("BoringGpuArg::Host(v) => BoringGpuArg::Host(v.clone()),");
+        self.line("BoringKernelArg::Resident(b, n) => BoringKernelArg::Resident(b.clone(), *n),");
+        self.line("BoringKernelArg::Host(v) => BoringKernelArg::Host(v.clone()),");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -925,11 +925,11 @@ impl HostEmitter {
         self.line("}");
         self.blank();
         self.line("#[allow(dead_code)]");
-        self.line("impl<T> BoringGpuArg<T> {");
+        self.line("impl<T> BoringKernelArg<T> {");
         self.indent += 1;
         self.line("fn len(&self) -> usize {");
         self.indent += 1;
-        self.line("match self { BoringGpuArg::Resident(_, len) => *len, BoringGpuArg::Host(v) => v.len() }");
+        self.line("match self { BoringKernelArg::Resident(_, len) => *len, BoringKernelArg::Host(v) => v.len() }");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -1366,7 +1366,7 @@ impl HostEmitter {
                         if let Some(decl) = self.kernel_decls.get(kernel_type) {
                             if let Some(kf) = decl.fields.iter().find(|f| f.name == *field) {
                                 let device_ty = elem_rust_type(&kf.ty);
-                                return format!("BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<{device_ty}>())");
+                                return format!("BoringKernelArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<{device_ty}>())");
                             }
                         }
                     }
@@ -1951,7 +1951,7 @@ impl HostEmitter {
                     // rationale (confirmed necessary for cross-calls between
                     // this emitter and the general-pipeline splice to type-check).
                     let base = if is_gpu_array_param(ty) {
-                        format!("BoringGpuArg<{}>", general_host_elem_type(ty))
+                        format!("BoringKernelArg<{}>", general_host_elem_type(ty))
                     } else if is_float_array_param(ty) {
                         "Vec<f64>".to_string()
                     } else {
@@ -1982,12 +1982,12 @@ impl HostEmitter {
         let resident_elem = f.return_ty.as_ref().and_then(|t| t.gpu_resident_qual().map(|_| general_host_elem_type(t)));
         let resident_tuple = self.fn_returns_resident_tuple.get(&f.name).cloned();
         let plain_ret = match &resident_elem {
-            Some(elem) => format!("BoringGpuArg<{}>", elem),
+            Some(elem) => format!("BoringKernelArg<{}>", elem),
             None => match (&f.return_ty, &resident_tuple) {
                 (Some(Type::Tuple(elems)), Some(flags)) => {
                     let parts: Vec<String> = elems.iter().enumerate().map(|(i, ty)| {
                         if flags.get(i).copied().unwrap_or(false) {
-                            format!("BoringGpuArg<{}>", general_host_elem_type(ty))
+                            format!("BoringKernelArg<{}>", general_host_elem_type(ty))
                         } else {
                             rust_type(ty)
                         }
@@ -2076,7 +2076,7 @@ impl HostEmitter {
                             } else {
                                 let s = self.expr(e);
                                 let elem = self.in_resident_return.clone().unwrap();
-                                format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
+                                format!("BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
                             }
                         } else {
                             self.expr(e)
@@ -2090,7 +2090,7 @@ impl HostEmitter {
                             resident
                         } else {
                             let s = self.expr(e);
-                            format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
+                            format!("BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
                         };
                         self.line(&wrapped);
                         continue;
@@ -2171,7 +2171,7 @@ impl HostEmitter {
                 // `'kernel'unified` (e.g. `let [float]'kernel'unified k_t =
                 // transpose_gpu(...)`) means the programmer wants this value
                 // to stay resident for a later chained kernel-touching call --
-                // see `resident_locals`'s doc. Keep it `BoringGpuArg<f64>`-
+                // see `resident_locals`'s doc. Keep it `BoringKernelArg<f64>`-
                 // typed and suppress the eager materializing wrap this
                 // specific call would otherwise get.
                 let explicit_resident = s.ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some());
@@ -2179,7 +2179,7 @@ impl HostEmitter {
                     && (is_materializing_call || self.in_resident_return.is_some());
                 let ty_ann = if is_resident_preserving {
                     self.resident_locals.insert(s.name.clone());
-                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", general_host_elem_type(t.without_mut()))).unwrap_or_default()
+                    s.ty.as_ref().map(|t| format!(": BoringKernelArg<{}>", general_host_elem_type(t.without_mut()))).unwrap_or_default()
                 } else if is_materializing_call {
                     self.f64_array_locals.insert(s.name.clone());
                     s.ty.as_ref().map(|t| format!(": Vec<{}>", general_host_elem_type(t))).unwrap_or_default()
@@ -2191,7 +2191,7 @@ impl HostEmitter {
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
-                    let rhs = if is_resident_preserving && !is_materializing_call { format!("BoringGpuArg::Host({})", self.expr(val)) } else { self.expr(val) };
+                    let rhs = if is_resident_preserving && !is_materializing_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr(val) };
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
@@ -2267,7 +2267,7 @@ impl HostEmitter {
                         }
                         Some(elem) => {
                             let s = self.expr(val);
-                            format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
+                            format!("BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
                         }
                         None => self.expr(val),
                     };
@@ -2861,11 +2861,11 @@ impl HostEmitter {
                                 return format!("{}.clone()", name);
                             }
                         }
-                        // Convert to the callee's own `BoringGpuArg<elem>` width
+                        // Convert to the callee's own `BoringKernelArg<elem>` width
                         // (not a fixed `f64`): a `[float32]` param is
-                        // `BoringGpuArg<f32>`.
+                        // `BoringKernelArg<f32>`.
                         let value = self.expr(&a.value);
-                        return format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", value);
+                        return format!("BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", value);
                     }
                     // A `[float]` position on the callee expects `&Vec<f64>` (see
                     // `is_float_array_param`'s doc), but every value flowing
@@ -2893,12 +2893,12 @@ impl HostEmitter {
                     call
                 };
                 // Interprocedural GPU residency: a call from one kernel-touching
-                // function to another that returns `BoringGpuArg<T>` must
+                // function to another that returns `BoringKernelArg<T>` must
                 // materialize the result -- UNLESS the caller explicitly asked
                 // to keep it resident (`__suppress_materialize`, set by
                 // `Stmt::Let` for a `'kernel'unified`-typed binding; see
                 // `resident_locals`'s doc), in which case the plain `call`
-                // (already typed `BoringGpuArg<T>` by `emit_fn`) is returned
+                // (already typed `BoringKernelArg<T>` by `emit_fn`) is returned
                 // as-is. See `cuda::host`'s identical case for the unconditional
                 // (non-suppressible) version of this same rule.
                 if __suppress_materialize {
@@ -2906,14 +2906,14 @@ impl HostEmitter {
                 }
                 if let Some(ret_ty) = callee_name.and_then(|n| self.fn_returns_resident.get(n)).cloned() {
                     // `general_host_elem_type` (not this backend's own
-                    // `elem_rust_type`) -- must match `BoringGpuArg<T>`'s actual
+                    // `elem_rust_type`) -- must match `BoringKernelArg<T>`'s actual
                     // `T` (see `emit_fn`'s `resident_elem`), which is always the
                     // general pass's `f64` convention, not this backend's native
                     // `f32`.
                     let elem = general_host_elem_type(&ret_ty);
                     let device_elem = elem_rust_type(&ret_ty);
                     return format!(
-                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_elem}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
+                        "match {call} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_elem}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringKernelArg::Host(v) => v }}"
                     );
                 }
                 call
@@ -3395,7 +3395,7 @@ impl HostEmitter {
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         return format!(
-                            "(match &{v} {{ BoringGpuArg::Resident(buf, _) => {resident}, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            "(match &{v} {{ BoringKernelArg::Resident(buf, _) => {resident}, BoringKernelArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
                             resident = if is_read_only_buffer { "buf.clone()".to_string() } else { format!("__boring_metal_buffer_copy(&{dev}, &buf)?") },
                             v = vname, dev = dev, elem = elem
                         );
@@ -3465,7 +3465,7 @@ impl HostEmitter {
     /// called where `in_resident_return` is `Some`, i.e. this function's
     /// return type is itself `'kernel'unified`), skips `try_gpu_field_read`'s
     /// materializing `k.read_field()` entirely and instead hands back the
-    /// kernel's own output `Buffer` wrapped as `BoringGpuArg::Resident` --
+    /// kernel's own output `Buffer` wrapped as `BoringKernelArg::Resident` --
     /// letting a chained GPU caller consume it without a host round trip.
     /// Returns `None` for anything else (a more complex tail expression, or a
     /// var this pass doesn't know is a kernel-struct instance), which keeps
@@ -3482,7 +3482,7 @@ impl HostEmitter {
                     Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => {
                         let device_ty = elem_rust_type(&kf.ty);
                         Some(format!(
-                            "BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<{device_ty}>())",
+                            "BoringKernelArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<{device_ty}>())",
                             obj = obj_name, field = field
                         ))
                     }
@@ -3511,7 +3511,7 @@ impl HostEmitter {
             }
             self.try_resident_field_expr(elem).unwrap_or_else(|| {
                 let value = self.expr(elem);
-                format!("BoringGpuArg::Host({value})")
+                format!("BoringKernelArg::Host({value})")
             })
         }).collect::<Vec<_>>();
         Some(format!("({})", parts.join(", ")))
@@ -3550,7 +3550,7 @@ fn elem_rust_type(ty: &Type) -> String {
 /// `kernel_host_element_type`) — always `f64` for a float array, UNLIKE this
 /// backend's own `elem_rust_type`/`rust_type` (`f32`, Metal's device-native
 /// float width, used for the kernel struct's own buffer/field types). Every
-/// general-spliced caller of a `BoringGpuArg<T>`-returning function expects
+/// general-spliced caller of a `BoringKernelArg<T>`-returning function expects
 /// `T` to follow the GENERAL pass's convention, not this backend's internal
 /// one — confirmed via a real cross-compile `cargo check` (a genuine E0308,
 /// `Vec<f32>` vs `Vec<f64>`, not hypothetical). See `emit_fn`'s `resident_elem`

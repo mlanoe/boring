@@ -2,8 +2,8 @@
 # classified as a GPU-resident-candidate argument by the exclusive-ctor-arg scan
 # (`ast::scan_var_call_arg_uses`, mirrored by `Checker::collect_gpu_arg_params` and
 # `Transpiler::compute_gpu_arg_params`) -- the size query counted as a "use" that never
-# disqualified it -- so it was emitted as `BoringGpuArg<i64>` and called with
-# `BoringGpuArg::Host(a.clone())`, a type that doesn't exist on non-GPU targets (E0425/
+# disqualified it -- so it was emitted as `BoringKernelArg<i64>` and called with
+# `BoringKernelArg::Host(a.clone())`, a type that doesn't exist on non-GPU targets (E0425/
 # E0433). A size query alone is now neutral: the parameter stays a plain `&Vec<T>`.
 def int count_seen([int] xs):
     xs.length

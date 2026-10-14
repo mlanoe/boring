@@ -716,8 +716,8 @@ impl<'a> HostEmitter<'a> {
         // CPU side as the command buffer is built, not during GPU execution.
         //
         // Two nested scopes -- OutOfMemory pushed first (outer), Validation
-        // second (inner) -- so a GpuError::OutOfMemory and a
-        // GpuError::LaunchError can be told apart instead of collapsing into
+        // second (inner) -- so a KernelError::OutOfMemory and a
+        // KernelError::LaunchError can be told apart instead of collapsing into
         // one generic "kernel dispatch rejected" string, as this used to.
         self.line("        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);");
         self.line("        self.device.push_error_scope(wgpu::ErrorFilter::Validation);");
@@ -756,16 +756,16 @@ impl<'a> HostEmitter<'a> {
         //
         // Pop order mirrors push order in reverse: Validation (pushed last)
         // comes off first, OutOfMemory (pushed first) comes off second. Each
-        // popped error is classified into a typed `GpuError` and wrapped in
-        // `BoringError::Other` so `catch GpuError.OutOfMemory:` / `catch
-        // GpuError.LaunchError:` can dispatch on it in Boring source, instead
+        // popped error is classified into a typed `KernelError` and wrapped in
+        // `BoringError::Other` so `catch KernelError.OutOfMemory:` / `catch
+        // KernelError.LaunchError:` can dispatch on it in Boring source, instead
         // of the single opaque formatted-string error this used to return.
         self.line("        if pollster::block_on(self.device.pop_error_scope()).is_some() {");
         self.line("            let _ = pollster::block_on(self.device.pop_error_scope());");
-        self.line("            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::LaunchError) as Box<dyn BoringVal + Send + Sync>)));");
+        self.line("            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<KernelError>(), Box::new(KernelError::LaunchError) as Box<dyn BoringVal + Send + Sync>)));");
         self.line("        }");
         self.line("        if pollster::block_on(self.device.pop_error_scope()).is_some() {");
-        self.line("            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::OutOfMemory) as Box<dyn BoringVal + Send + Sync>)));");
+        self.line("            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<KernelError>(), Box::new(KernelError::OutOfMemory) as Box<dyn BoringVal + Send + Sync>)));");
         self.line("        }");
         self.line("        Ok(())");
         self.line("    }");
@@ -910,16 +910,16 @@ impl<'a> HostEmitter<'a> {
         // "Kernel Constructor Interaction".
         self.line("#[allow(dead_code)]");
         self.line("#[derive(Clone)]");
-        self.line("pub enum BoringGpuArg<T> {");
+        self.line("pub enum BoringKernelArg<T> {");
         self.line("    Resident(std::sync::Arc<wgpu::Buffer>, usize),");
         self.line("    Host(Vec<T>),");
         self.line("}");
         self.blank();
-        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringGpuArg<T> {");
-        self.line("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringGpuArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringGpuArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } }");
+        self.line("impl<T: std::fmt::Debug> std::fmt::Debug for BoringKernelArg<T> {");
+        self.line("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { BoringKernelArg::Resident(_, n) => f.debug_tuple(\"Resident\").field(n).finish(), BoringKernelArg::Host(v) => f.debug_tuple(\"Host\").field(v).finish() } }");
         self.line("}");
-        self.line("impl<T: PartialEq> PartialEq for BoringGpuArg<T> {");
-        self.line("    fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringGpuArg::Resident(a, an), BoringGpuArg::Resident(b, bn)) => std::sync::Arc::ptr_eq(a, b) && an == bn, (BoringGpuArg::Host(a), BoringGpuArg::Host(b)) => a == b, _ => false } }");
+        self.line("impl<T: PartialEq> PartialEq for BoringKernelArg<T> {");
+        self.line("    fn eq(&self, other: &Self) -> bool { match (self, other) { (BoringKernelArg::Resident(a, an), BoringKernelArg::Resident(b, bn)) => std::sync::Arc::ptr_eq(a, b) && an == bn, (BoringKernelArg::Host(a), BoringKernelArg::Host(b)) => a == b, _ => false } }");
         self.line("}");
         self.blank();
         // `<param>.length`/`.count` (mapped to `.len()` by the general `map_field`
@@ -927,11 +927,11 @@ impl<'a> HostEmitter<'a> {
         // dual-typed param doesn't materialize just to answer a size query -- a
         // `Resident` buffer already carries its element count.
         self.line("#[allow(dead_code)]");
-        self.line("impl<T> BoringGpuArg<T> {");
+        self.line("impl<T> BoringKernelArg<T> {");
         self.line("    fn len(&self) -> usize {");
         self.line("        match self {");
-        self.line("            BoringGpuArg::Resident(_, len) => *len,");
-        self.line("            BoringGpuArg::Host(v) => v.len(),");
+        self.line("            BoringKernelArg::Resident(_, len) => *len,");
+        self.line("            BoringKernelArg::Host(v) => v.len(),");
         self.line("        }");
         self.line("    }");
         self.line("}");
@@ -1170,7 +1170,7 @@ impl<'a> HostEmitter<'a> {
             // continue instead of crashing outright — a later dispatch() call on
             // a pipeline that failed to create will raise its own validation
             // error, which dispatch's own push/pop_error_scope DOES already
-            // catch and convert to a proper GpuError::LaunchError.
+            // catch and convert to a proper KernelError::LaunchError.
             self.line("    device.on_uncaptured_error(Box::new(|e| eprintln!(\"boring: uncaptured GPU error: {}\", e)));");
             self.line("    let device = std::sync::Arc::new(device);");
             self.line("    let queue = std::sync::Arc::new(queue);");
