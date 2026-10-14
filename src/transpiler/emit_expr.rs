@@ -3405,8 +3405,17 @@ impl Transpiler {
                 // `id = items[1].as_str()` where `as_str()` already returns `string?`.
                 // See docs/option-return-double-some-wrap-bug.md.
                 || self.expr_is_declared_optional(value);
+            // `Trait'shared?` field: alias an existing shared pointer rather than moving it out
+            // of the local it came from, wrap a concrete implementor.
+            let shared_trait_inner = match target_field_ty.as_ref().map(Type::without_mut) {
+                Some(Type::Optional(i)) if matches!(i.without_mut(), Type::Qualified(q, OwnerQual::Shared)
+                    if matches!(q.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) => Some(i.without_mut().clone()),
+                _ => None,
+            };
             if rhs_already_opt {
                 rhs_s
+            } else if let Some(i) = shared_trait_inner {
+                format!("Some({})", self.emit_let_value(Some(&i), value))
             } else {
                 format!("Some({})", rhs_s)
             }

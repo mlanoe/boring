@@ -410,6 +410,19 @@ impl Transpiler {
     /// This populates fn_throws, fn_sigs, struct_fields, etc. for all files before any code is
     /// emitted, so forward references to throws functions work correctly across file boundaries.
     pub(crate) fn deep_pre_scan(&mut self, program: &crate::ast::Program, visited: &mut std::collections::HashSet<std::path::PathBuf>) {
+        let rewritten;
+        let program = if self.dyn_fact_pass || self.shared_dyn_traits.is_empty() {
+            program
+        } else {
+            let mut cloned = program.clone();
+            share_dyn_traits::rewrite_program(&mut cloned, &self.shared_dyn_traits);
+            rewritten = cloned;
+            &rewritten
+        };
+        if self.dyn_fact_pass {
+            self.dyn_facts.collect(program);
+            return self.deep_pre_scan_uses(program, visited);
+        }
         self.pre_scan(program);
         self.pre_infer_fn_qualifiers(program);
         self.collect_trait_borrow_facts(program);
@@ -483,6 +496,11 @@ impl Transpiler {
         let candidates = monomorphize::collect_candidate_calls(program);
         self.pending_generic_call_candidates.extend(candidates.free);
         self.pending_method_call_candidates.extend(candidates.methods);
+        self.deep_pre_scan_uses(program, visited);
+    }
+
+    /// The recursion half of `deep_pre_scan`: visit every file `program` `use`s.
+    fn deep_pre_scan_uses(&mut self, program: &crate::ast::Program, visited: &mut std::collections::HashSet<std::path::PathBuf>) {
         for item in &program.items {
             if let crate::ast::Item::Use(u) = item {
                 // `use boring.<module>` — pre-scan the embedded stdlib source the same way
@@ -3468,6 +3486,8 @@ impl Transpiler {
                     || t.struct_fields.contains_key(n.as_str())
                     || t.all_enum_types.contains(n.as_str()),
                 Type::Optional(inner) => needs(t, inner),
+                // `Rc`/`Arc`: an owned read is a (cheap) pointer clone, never a move out of the struct.
+                Type::Qualified(_, OwnerQual::Shared) => true,
                 _ => false,
             }
         }

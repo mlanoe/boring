@@ -403,6 +403,12 @@ impl Transpiler {
                     };
                     self.var_types.insert(s.vars[0].clone(), canonical);
                 }
+                // `[Trait'shared]` element: the loop variable is itself a shared trait object
+                // (aliased, not re-wrapped, when it is passed on).
+                Some(ty @ Type::Qualified(i, OwnerQual::Shared))
+                    if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) => {
+                    self.var_types.insert(s.vars[0].clone(), ty.clone());
+                }
                 _ => {}
             }
         }
@@ -423,6 +429,11 @@ impl Transpiler {
             if let Some(Type::Named(n)) = &val_ty {
                 if self.is_known_user_type(n.as_str()) {
                     self.var_struct_types.insert(s.vars[1].clone(), n.clone());
+                }
+            }
+            if let Some(ty @ Type::Qualified(i, OwnerQual::Shared)) = &val_ty {
+                if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) {
+                    self.var_types.insert(s.vars[1].clone(), ty.clone());
                 }
             }
         }

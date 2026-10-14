@@ -255,7 +255,12 @@ impl Transpiler {
                 }
             }
             ExprKind::MethodCall(recv, method, _) => {
-                let owner = self.resolve_expr_struct_type(recv)?;
+                // A call through a trait object (a trait-typed local/param/field) is typed by the
+                // trait's own declaration.
+                let owner = self.resolve_expr_struct_type(recv).or_else(|| {
+                    self.resolve_expr_type(recv).as_ref().and_then(receiver_type_name)
+                        .filter(|n| self.trait_method_names.contains_key(n.as_str()))
+                })?;
                 self.struct_method_return_types.get(&format!("{}::{}", owner, method)).cloned()
             }
             _ => None,
@@ -4052,9 +4057,22 @@ impl Transpiler {
                 }),
                 _ => None,
             };
+            // `[Trait'shared]` local: alias/wrap each pushed element into the shared pointer.
+            let shared_elem = self.resolve_expr_type(obj).and_then(|t| match t.without_mut() {
+                Type::Array(inner) => match inner.without_mut() {
+                    t @ Type::Qualified(i, OwnerQual::Shared)
+                        if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            if let (Some(elem), "push") = (&shared_elem, method) {
+                args.iter().map(|a| self.emit_let_value(Some(elem), &a.value)).collect()
+            } else {
             match trait_name {
                 Some(tn) => args.iter().map(|a| self.box_if_trait_typed(&a.value, tn.as_str())).collect(),
                 None => args.iter().map(|a| self.emit_expr_owned(&a.value)).collect(),
+            }
             }
         } else {
             args.iter().map(|a| self.emit_external_fallback_arg(&a.value)).collect()
@@ -4069,6 +4087,13 @@ impl Transpiler {
                 if trait_params.get(i).is_some_and(|p| self.is_lent_param(p, true)) {
                     if let Some(slot) = args_s.get_mut(i) {
                         *slot = self.emit_lent_arg(&a.value);
+                    }
+                } else if trait_params.get(i).and_then(|p| p.ty.as_ref()).is_some_and(|t| matches!(t,
+                    Type::Qualified(i, OwnerQual::Shared)
+                        if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))) {
+                    // `Trait'shared`: alias an existing shared pointer, wrap a concrete value.
+                    if let Some(slot) = args_s.get_mut(i) {
+                        *slot = self.emit_let_value(trait_params[i].ty.as_ref(), &a.value);
                     }
                 } else if trait_params.get(i).and_then(|p| p.ty.as_ref()).is_some_and(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned)) && self.is_boxed_trait_type(t)) {
                     // `Trait'owned`: by value, boxed like a bare trait slot.
@@ -4924,6 +4949,35 @@ impl Transpiler {
                     return !debug_only || !self.trait_requires_debug(n.as_str());
                 }
                 self.struct_holds_dyn(n, debug_only, visiting)
+            }
+            _ => false,
+        }
+    }
+
+    /// True when `ty` (transitively, through user structs' fields) holds a *shared* trait object
+    /// (`Arc<dyn Trait>`, see `share_dyn_traits.rs`): always `Clone`, but never `PartialEq`, and
+    /// `Debug` only if the trait requires it (`debug_only` asks the `Debug` question alone).
+    pub(crate) fn type_holds_shared_dyn(&self, ty: &Type, debug_only: bool, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::Set(i) => {
+                self.type_holds_shared_dyn(i, debug_only, visiting)
+            }
+            Type::Dict(k, v) => self.type_holds_shared_dyn(k, debug_only, visiting) || self.type_holds_shared_dyn(v, debug_only, visiting),
+            Type::Tuple(es) => es.iter().any(|e| self.type_holds_shared_dyn(e, debug_only, visiting)),
+            Type::Qualified(i, OwnerQual::Shared) => match i.as_ref() {
+                Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => {
+                    !debug_only || !self.trait_requires_debug(n.as_str())
+                }
+                other => self.type_holds_shared_dyn(other, debug_only, visiting),
+            },
+            Type::Qualified(i, OwnerQual::Owned | OwnerQual::Inline) => self.type_holds_shared_dyn(i, debug_only, visiting),
+            Type::Named(n) if !self.trait_method_names.contains_key(n.as_str()) => {
+                if visiting.iter().any(|v| v == n) { return false; }
+                let Some(fields) = self.struct_fields.get(n.as_str()) else { return false };
+                visiting.push(n.clone());
+                let r = fields.iter().any(|(_, t)| self.type_holds_shared_dyn(t, debug_only, visiting));
+                visiting.pop();
+                r
             }
             _ => false,
         }
@@ -5884,6 +5938,9 @@ impl Transpiler {
             struct_req_methods: self.struct_req_methods.clone(),
             struct_protocols: self.struct_protocols.clone(),
             struct_derives_clone: self.struct_derives_clone.clone(),
+            shared_dyn_traits: self.shared_dyn_traits.clone(),
+            dyn_fact_pass: false,
+            dyn_facts: Default::default(),
             trait_default_mutating: self.trait_default_mutating.clone(),
             trait_method_params: self.trait_method_params.clone(),
             closure_param_hints: std::cell::RefCell::new(std::collections::HashMap::new()),

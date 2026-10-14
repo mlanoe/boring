@@ -1,0 +1,74 @@
+# A trait whose methods are all `req` and that is held by a struct is stored as a shared
+# (`Arc`/`Rc`) trait object, so a struct tree holding it is `Clone` again and Boring's
+# by-value copy semantics (`let copy = tree`, `kids[i]`, `Option` fields, passing a view on,
+# pushing into a builder array) are valid Rust. A trait with a `def` method keeps its `Box`.
+
+trait Widget:
+    req string kind(): ""
+    req string label(): ""
+    req [Widget] children(): []
+
+struct Label as Widget:
+    string content
+    req string kind(): "Label"
+    req string label(): content
+
+struct Stack as Widget:
+    [Widget] items
+    req string kind(): "Stack"
+    req [Widget] children():
+        mut [Widget] out = []
+        for i in items:
+            out.push(i)
+        out
+
+# A tree of structs holding views, rebuilt and copied by value.
+struct Desc:
+    string kind
+    [Desc] kids = []
+    Widget? view = nil
+
+struct Mounted:
+    int id
+    var mut [mut Mounted] children = []
+    var Widget? view = nil
+
+def Desc describe(Widget v):
+    mut [Desc] kids = []
+    for c in v.children():
+        kids.push(describe(c))
+    Desc(kind = v.kind(), kids = kids, view = v)
+
+def int count(Desc d):
+    var n = 1
+    for k in d.kids:
+        n += count(k)
+    n
+
+def main():
+    let tree = Stack(items = [Label("a"), Stack(items = [Label("b"), Label("c")])])
+    let d = describe(tree)
+    let copy = d.clone()
+    let inner = d.kids[1]
+    print count(copy)
+    print inner.kind
+    print inner.kids.length
+    if let v = copy.kids[0].view:
+        print v.label()
+
+    # `Option` field assigned from a local that is used again afterwards.
+    let shown = Label("shown")
+    mut m = Mounted(id = 1)
+    m.view = shown
+    print shown.label()
+    m.children.push(Mounted(id = 2, view = shown))
+    let snapshot = m.children[0]
+    let kept = m.clone()
+    if let sv = snapshot.view:
+        print sv.label()
+    print kept.children.length
+
+    # A view stored in a local array and iterated.
+    let [Widget] views = [Label("x"), Label("y"), tree]
+    for w in views:
+        print w.kind()

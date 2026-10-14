@@ -1904,6 +1904,13 @@ impl Transpiler {
             } else {
                 format!("Rc::downgrade(&{})", e)
             }
+        } else if matches!(inner.without_mut(), Type::Qualified(i, OwnerQual::Shared)
+                if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
+            && !matches!(self.resolve_expr_type(value), Some(Type::Optional(_)))
+        {
+            // `Trait'shared?`: alias an existing shared pointer (never move a local that is used
+            // again), wrap a concrete implementor.
+            self.emit_let_value(Some(inner.without_mut()), value)
         } else {
             self.emit_expr(value)
         };
@@ -2092,6 +2099,29 @@ impl Transpiler {
     /// expression that already emitted a `Box::new(...)` wrapper.
     /// A bare trait type, or its explicit by-value spelling `Trait'owned`: both are a
     /// `Box<dyn Trait>` slot.
+    /// Whether `value` is positively known to already be a `Trait'shared` pointer
+    /// (`Arc<dyn Trait>` / `Rc<dyn Trait>`) rather than a concrete implementor to wrap.
+    /// A bare local whose qualifier inference resolved to `'shared`: a concrete `Rc<Impl>` /
+    /// `Arc<Impl>` that still has to be unsized into a `Trait'shared` slot.
+    pub(crate) fn expr_is_inferred_shared_local(&self, value: &Expr) -> bool {
+        matches!(&value.kind, ExprKind::Var(v)
+            if matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Shared)))
+    }
+
+    pub(crate) fn expr_is_shared_trait_object(&self, value: &Expr) -> bool {
+        let is_shared_trait = |t: &Type| matches!(t.without_mut(),
+            Type::Qualified(i, OwnerQual::Shared)
+                if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())));
+        if let ExprKind::Var(v) = &value.kind {
+            if self.var_types.get(v.as_str()).is_some_and(|t| is_shared_trait(t))
+                || self.fn_current_params.get(v.as_str()).is_some_and(|t| is_shared_trait(t))
+            {
+                return true;
+            }
+        }
+        self.resolve_expr_type(value).is_some_and(|t| is_shared_trait(&t))
+    }
+
     pub(crate) fn is_boxed_trait_type(&self, ty: &Type) -> bool {
         match ty.without_mut() {
             Type::Named(n) => self.trait_method_names.contains_key(n.as_str()),
@@ -2307,6 +2337,19 @@ impl Transpiler {
                     _ => self.emit_expr(value),
                 }
             }
+            // `[Trait'shared]`: each element is aliased or wrapped into the shared pointer.
+            Some(Type::Array(elem_ty)) if matches!(elem_ty.without_mut(),
+                Type::Qualified(i, OwnerQual::Shared) if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) => {
+                match &value.kind {
+                    ExprKind::Array(elems) => {
+                        let es: Vec<String> = elems.iter()
+                            .map(|e| self.emit_let_value(Some(elem_ty.without_mut()), e))
+                            .collect();
+                        format!("vec![{}]", es.join(", "))
+                    }
+                    _ => self.emit_expr(value),
+                }
+            }
             // [Trait] (dynamic dispatch): box each element into `Box<dyn Trait>` so the
             // literal matches the `Vec<Box<dyn Trait>>` type `emit_type` already produces
             // for the declared local/field/param — see docs/book.md "Traits as types".
@@ -2474,6 +2517,33 @@ impl Transpiler {
                     format!("{}.clone()", s)
                 } else {
                     self.str_from_expr(&format!("{}.to_string()", s))
+                }
+            }
+            // `Trait'shared` (`Arc<dyn Trait>`): a value that is already a shared trait object
+            // (a `Trait'shared` local/param/field/element) is aliased, never wrapped again; a
+            // concrete implementor is wrapped into the pointer (the unsized coercion happens at
+            // the `Arc::new(..)` site).
+            Some(t @ Type::Qualified(inner_ty, OwnerQual::Shared))
+                if matches!(inner_ty.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
+                    && (self.expr_is_shared_trait_object(value) || self.expr_is_inferred_shared_local(value)) =>
+            {
+                let inner = self.emit_expr(value);
+                let ptr = match self.config.threading {
+                    crate::transpiler::ThreadingMode::Single => "Rc",
+                    _ => "Arc",
+                };
+                let aliased = if matches!(&value.kind, ExprKind::Var(_) | ExprKind::Field(..) | ExprKind::Index(..))
+                    && !inner.ends_with(".clone()") && !inner.starts_with(&format!("{ptr}::clone("))
+                {
+                    format!("{ptr}::clone(&{inner})")
+                } else {
+                    inner
+                };
+                if self.expr_is_inferred_shared_local(value) {
+                    // A concrete `'shared` local (`Rc<Impl>`): unsize it into the trait object.
+                    format!("({aliased} as {})", self.emit_type(t))
+                } else {
+                    aliased
                 }
             }
             // T'shared → Arc<T> (multi) or Rc<T> (single): wrap accordingly.

@@ -28,6 +28,7 @@ mod emit_methods;
 mod emit_kernel;
 mod infer_qualifiers;
 mod infer_trait_borrow;
+mod share_dyn_traits;
 mod last_use;
 mod promote_atomic;
 pub(crate) mod monomorphize;
@@ -798,6 +799,13 @@ struct Transpiler {
     /// (`emit_struct.rs`) to gate `FieldValue::Nested` on `'inline`/`'owned` fields —
     /// see that function's doc comment for the full "why Clone matters here" story.
     pub(crate) struct_derives_clone: std::collections::HashSet<String>,
+    /// Non-mutating traits held by structs, represented as `Trait'shared` (`Arc<dyn Trait>`)
+    /// program-wide so the holding structs stay `Clone` — see `share_dyn_traits.rs`.
+    pub(crate) shared_dyn_traits: std::collections::HashSet<String>,
+    /// While true, `deep_pre_scan` only gathers `dyn_facts` (the cheap pass that decides
+    /// `shared_dyn_traits`) instead of registering anything.
+    pub(crate) dyn_fact_pass: bool,
+    pub(crate) dyn_facts: share_dyn_traits::DynFacts,
     /// Types reachable via a user-defined `as T:` conversion (lowercased).
     /// Used in emit_expr to route `x as T` to the generated `into_t()` method.
     pub(crate) user_conv_targets: std::collections::HashSet<String>,
@@ -1532,6 +1540,9 @@ impl Transpiler {
             ]),
             struct_protocols: std::collections::HashMap::new(),
             struct_derives_clone: std::collections::HashSet::new(),
+            shared_dyn_traits: std::collections::HashSet::new(),
+            dyn_fact_pass: false,
+            dyn_facts: share_dyn_traits::DynFacts::default(),
             user_conv_targets: std::collections::HashSet::new(),
             string_arc_vars: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
@@ -2050,6 +2061,17 @@ impl Transpiler {
         // already rewritten to `Call`, and monomorphization never adds/removes the
         // `Item::Use` entries its recursion inspects.
         if !self.prelude_emitted {
+            // Fact pass first: which traits get the `'shared` representation (share_dyn_traits.rs)
+            // must be known before the real scan registers a single type.
+            {
+                let mut visited = std::collections::HashSet::new();
+                let prev_dir = self.source_dir.clone();
+                self.dyn_fact_pass = true;
+                self.deep_pre_scan(program, &mut visited);
+                self.dyn_fact_pass = false;
+                self.source_dir = prev_dir;
+                self.shared_dyn_traits = self.dyn_facts.targets();
+            }
             let mut visited = std::collections::HashSet::new();
             let prev_dir = self.source_dir.clone();
             self.deep_pre_scan(program, &mut visited);
@@ -2093,6 +2115,15 @@ impl Transpiler {
         // A bare struct param whose struct (transitively) holds a trait object can't be
         // `Clone`d, so the by-value-plus-clone convention can't apply to it: desugar to an
         // explicit `T&` borrow (as if the author had written it) before any pre-scan.
+        let owned_program_sd;
+        let program: &Program = if self.shared_dyn_traits.is_empty() {
+            program
+        } else {
+            let mut cloned = program.clone();
+            share_dyn_traits::rewrite_program(&mut cloned, &self.shared_dyn_traits);
+            owned_program_sd = cloned;
+            &owned_program_sd
+        };
         let owned_program2;
         let program: &Program = match self.borrow_noclone_struct_params(program) {
             Some(p) => { owned_program2 = p; &owned_program2 }
@@ -4437,6 +4468,18 @@ impl Transpiler {
                     for d   in &t.defaults   { names.insert(d.name.clone()); }
                     self.trait_method_names.insert(t.name.clone(), names);
                     self.trait_parents.insert(t.name.clone(), t.parents.clone());
+                    // A call through a trait object (`v.viewChildren()`) is typed by the trait's
+                    // own declared return type.
+                    for sig in &t.signatures {
+                        if let Some(rt) = &sig.return_ty {
+                            self.struct_method_return_types.insert(format!("{}::{}", t.name, sig.name), rt.clone());
+                        }
+                    }
+                    for d in &t.defaults {
+                        if let Some(rt) = &d.return_ty {
+                            self.struct_method_return_types.insert(format!("{}::{}", t.name, d.name), rt.clone());
+                        }
+                    }
                     let type_names: std::collections::HashSet<String> = t.type_signatures.iter()
                         .map(|sig| sig.name.clone())
                         .collect();
@@ -6286,9 +6329,11 @@ def main():\n    let [Drawable] shapes = [Circle(r = 1.0), Square(s = 2.0)]\n   
         // dispatch kind), and the call site never boxed its argument.
         // The parameter is *consumed* (stored in a struct), so it stays by value:
         // a receiver-only param is inferred borrowed instead (next test).
+        // (The trait has a `def` method, so it is not shareable — see `share_dyn_traits.rs`; the
+        // all-`req` case is the next test.)
         let src = "\
-trait Drawable:\n    req string label()\n\n\
-struct Circle as Drawable:\n    float r\n    req string label(): \"circle\"\n\n\
+trait Drawable:\n    req string label()\n    def touch()\n\n\
+struct Circle as Drawable:\n    float r\n    req string label(): \"circle\"\n    def touch():\n        pass\n\n\
 struct Holder:\n    Drawable d\n\n\
 def keep(Drawable item):\n    let h = Holder(item)\n    print h.d.label()\n\n\
 def main():\n    keep(Circle(r = 1.0))\n";
@@ -6297,6 +6342,32 @@ def main():\n    keep(Circle(r = 1.0))\n";
             "a consumed bare trait-typed param must emit `Box<dyn Trait>`, got:\n{}", code);
         assert!(code.contains("keep(Box::new(Circle"),
             "a struct literal passed to a `Box<dyn Trait>` param must be boxed at the call site, got:\n{}", code);
+    }
+
+    #[test]
+    fn all_req_trait_held_by_a_struct_is_a_shared_trait_object_and_the_struct_stays_clone() {
+        // A trait with only `req` methods that some struct holds is stored as `Arc<dyn Trait>`
+        // program-wide (`share_dyn_traits.rs`): every position agrees, and the holding struct (and a
+        // struct holding *that*) derives `Clone` again.
+        let src = "\
+trait Drawable:\n    req string label()\n\n\
+struct Circle as Drawable:\n    float r\n    req string label(): \"circle\"\n\n\
+struct Holder:\n    Drawable? d = nil\n    [Drawable] more = []\n\n\
+struct Outer:\n    [Holder] hs = []\n\n\
+Holder keep(Drawable item):\n    Holder(d = item)\n\n\
+def main():\n    let h = keep(Circle(r = 1.0))\n    let copy = h.clone()\n    let o = Outer(hs = [h, copy])\n    let o2 = o.clone()\n    print o2.hs.length\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("item: Arc<dyn Drawable>"), "shared trait param, got:\n{code}");
+        assert!(code.contains("d: Option<Arc<dyn Drawable>>"), "shared trait optional field, got:\n{code}");
+        assert!(code.contains("more: Vec<Arc<dyn Drawable>>"), "shared trait array field, got:\n{code}");
+        assert!(code.contains("keep(Arc::new(Circle"), "a concrete value is wrapped at the call site, got:\n{code}");
+        assert!(!code.contains("Box<dyn Drawable>"), "no `Box<dyn>` left for a shared trait, got:\n{code}");
+        for name in ["Holder", "Outer"] {
+            let at = code.find(&format!("pub struct {name} {{")).or_else(|| code.find(&format!("struct {name} {{"))).unwrap();
+            let derive = code[..at].lines().rev().find(|l| l.starts_with("#[derive")).unwrap_or("");
+            assert!(derive.contains("Clone"), "{name} must derive Clone, got `{derive}` in:\n{code}");
+            assert!(!derive.contains("PartialEq"), "{name} must not derive PartialEq, got `{derive}`");
+        }
     }
 
     #[test]
@@ -6833,7 +6904,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
     // or the parameter is `mut`, the borrow is kept.
     #[test]
     fn actor_collection_field_by_ref_argument_is_cloned_out_of_the_guard_when_clone() {
-        let src = "trait Sized:\n    req int size()\n\nstruct Sq as Sized:\n    var int n\n\n    req int size():\n        n\n\n@derive(Debug)\nstruct Raw:\n    var int n\n\nstruct Interp:\n    var int hits\n    var [int] log\n    var [string] words\n    var {string=int} table\n    var [[int]] grid\n    var [Sized] shapes\n    var [Raw] raws\n\ndef int h_arr(mut Interp'actor interp, [int] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_words(mut Interp'actor interp, [string] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_table(mut Interp'actor interp, {string=int} v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_grid(mut Interp'actor interp, [[int]] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_shapes(Interp'actor interp, [Sized] v):\n    v.length\n\ndef int h_raws(Interp'actor interp, [Raw] v):\n    v.length\n\ndef int h_mut(mut Interp'actor interp, mut [int] v):\n    v.push(1)\n    v.length\n\ndef int t(mut Interp'actor interp):\n    h_arr(interp, interp.log) + h_words(interp, interp.words) + h_table(interp, interp.table) + h_grid(interp, interp.grid) + h_shapes(interp, interp.shapes) + h_raws(interp, interp.raws) + h_mut(interp, interp.log)\n\ndef main():\n    let interp'actor = Interp(hits = 1, log = [1], words = [\"a\"], table = {\"k\" = 1}, grid = [[1]], shapes = [Sq(n = 1)], raws = [Raw(n = 2)])\n    print t(interp)\n";
+        let src = "trait Sized:\n    req int size()\n\nstruct Sq as Sized:\n    var int n\n\n    req int size():\n        n\n\ntrait Bump:\n    def bump()\n\nstruct Bp as Bump:\n    var int n\n\n    def bump():\n        n += 1\n\n@derive(Debug)\nstruct Raw:\n    var int n\n\nstruct Interp:\n    var int hits\n    var [int] log\n    var [string] words\n    var {string=int} table\n    var [[int]] grid\n    var [Sized] shapes\n    var [Bump] bumps\n    var [Raw] raws\n\ndef int h_arr(mut Interp'actor interp, [int] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_words(mut Interp'actor interp, [string] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_table(mut Interp'actor interp, {string=int} v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_grid(mut Interp'actor interp, [[int]] v):\n    interp.hits += v.length\n    interp.hits\n\ndef int h_shapes(Interp'actor interp, [Sized] v):\n    v.length\n\ndef int h_bumps(Interp'actor interp, [Bump] v):\n    v.length\n\ndef int h_raws(Interp'actor interp, [Raw] v):\n    v.length\n\ndef int h_mut(mut Interp'actor interp, mut [int] v):\n    v.push(1)\n    v.length\n\ndef int t(mut Interp'actor interp):\n    h_arr(interp, interp.log) + h_words(interp, interp.words) + h_table(interp, interp.table) + h_grid(interp, interp.grid) + h_shapes(interp, interp.shapes) + h_bumps(interp, interp.bumps) + h_raws(interp, interp.raws) + h_mut(interp, interp.log)\n\ndef main():\n    let interp'actor = Interp(hits = 1, log = [1], words = [\"a\"], table = {\"k\" = 1}, grid = [[1]], shapes = [Sq(n = 1)], bumps = [Bp(n = 1)], raws = [Raw(n = 2)])\n    print t(interp)\n";
         for (threading, tok) in [
             (ThreadingMode::Multi, "interp.lock().unwrap()"),
             (ThreadingMode::Single, "interp.borrow()"),
@@ -6843,9 +6914,12 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
                 let want = format!("{callee}(&interp, &{{ let __a = {tok}.{field}.clone(); __a }})");
                 assert!(code.contains(&want), "`Clone` field must be cloned out of the guard ({want}), got:\n{code}");
             }
+            // `[Trait]` of an all-`req` trait is `Vec<Arc<dyn Trait>>` (`share_dyn_traits.rs`): `Clone`.
+            let want = format!("h_shapes(&interp, &{{ let __a = {tok}.shapes.clone(); __a }})");
+            assert!(code.contains(&want), "shared `[Trait]` field must be cloned out of the guard ({want}), got:\n{code}");
             // Not provably `Clone`: the borrow into the guard is kept.
-            assert!(code.contains(&format!("h_shapes(&interp, &{tok}.shapes)")),
-                "`[Trait]` field must keep its borrow, got:\n{code}");
+            assert!(code.contains(&format!("h_bumps(&interp, &{tok}.bumps)")),
+                "`[Trait]` (`Vec<Box<dyn Trait>>`, `def` method) field must keep its borrow, got:\n{code}");
             assert!(code.contains(&format!("h_raws(&interp, &{tok}.raws)")),
                 "field of a struct without `Clone` must keep its borrow, got:\n{code}");
             // A `mut` borrow must reach the real storage: never cloned.

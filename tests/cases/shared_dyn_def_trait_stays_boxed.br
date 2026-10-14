@@ -1,0 +1,25 @@
+# Control for shared_dyn_tree_copy: a trait with a mutating (`def`) method cannot be shared
+# (an `Arc<dyn Trait>` has no `&mut` access), so it keeps `Box<dyn Trait>` — and the holding
+# struct is still not `Clone`, handled by borrowing it.
+
+trait Counter:
+    def inc()
+    req int get(): 0
+
+struct Tally as Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get(): n
+
+struct Holder:
+    var mut Counter? c = nil
+
+def int peek(Holder h):
+    if let c = h.c:
+        return c.get()
+    -1
+
+def main():
+    mut h = Holder(c = Tally())
+    print peek(h)

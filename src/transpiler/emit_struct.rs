@@ -105,6 +105,12 @@ impl Transpiler {
                     || field_is_boxed_trait(ty, &self.trait_method_names).is_some_and(|n| !self.trait_requires_debug(n))
                     || self.type_holds_dyn(ty, true, &mut vec![s.name.clone()])
             });
+            // `Arc<dyn Trait>` (a shared trait object, see `share_dyn_traits.rs`) is `Clone` but has
+            // no `PartialEq`, and `Debug` only when the trait requires it.
+            let has_shared_dyn_field = s.fields.iter()
+                .any(|f| self.type_holds_shared_dyn(&f.ty, false, &mut vec![s.name.clone()]));
+            let has_non_debug_shared_dyn = s.fields.iter()
+                .any(|f| self.type_holds_shared_dyn(&f.ty, true, &mut vec![s.name.clone()]));
             // Don't derive PartialEq when the struct has any comparison operator method —
             // emit_operator_trait_impls will generate PartialEq/PartialOrd impls that would conflict.
             let has_custom_cmp = ["eq", "ne", "lt", "le", "gt", "ge"].iter().any(|m| {
@@ -138,12 +144,12 @@ impl Transpiler {
             // A function-typed field is an `Rc<RefCell<dyn FnMut..>>`/`Rc<dyn Fn..>` handle: `Clone`
             // works (shared handle), but `dyn FnMut` has no `Debug`/`PartialEq`/`Default`.
             let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some());
-            let mut names: Vec<String> = if has_non_debug_trait_array_field || has_fn_field { vec![] } else { vec!["Debug".to_string()] };
+            let mut names: Vec<String> = if has_non_debug_trait_array_field || has_non_debug_shared_dyn || has_fn_field { vec![] } else { vec!["Debug".to_string()] };
             if has_fn_field {
                 names.push("Clone".to_string());
             } else if has_non_clone_field {
                 if needs_default { names.push("Default".to_string()); }
-            } else if has_custom_cmp || has_sync_mutex_field {
+            } else if has_custom_cmp || has_sync_mutex_field || has_shared_dyn_field {
                 names.push("Clone".to_string());
                 if needs_default { names.push("Default".to_string()); }
             } else {
