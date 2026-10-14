@@ -478,6 +478,61 @@ print "{collective.output[0]} {collective.output[1]} {collective.output[2]} {col
 }
 
 #[test]
+fn block_uniform_while_reduction_with_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_while");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_while.br");
+    fs::write(
+        &input,
+        r#"
+kernel Reduce:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let tid = .thread.x
+        var int stride = .block_dim.x / 2
+        tile[tid] = tid + 1
+        sync
+        while stride > 0:
+            if tid < stride:
+                tile[tid] = tile[tid] + tile[tid + stride]
+            sync
+            stride = stride / 2
+        output[tid] = tile[tid]
+mut reduce = Reduce()
+kernel:
+    reduce(block = 4)
+print "{reduce.output[0]} {reduce.output[1]} {reduce.output[2]} {reduce.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("sync_uniform_while_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let mut stride: i32 = (__block_dim.x / 2)"));
+    assert!(source.contains("while (stride > 0)"));
+    assert!(source.matches("let tid = __thread.x").count() >= 3);
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_while_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 6 3 4");
+}
+
+#[test]
 fn block_uniform_if_with_sync_runs_in_collective_simd_phases() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_if");
     let _ = fs::remove_dir_all(&root);

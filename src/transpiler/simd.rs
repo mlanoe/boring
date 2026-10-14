@@ -353,7 +353,35 @@ impl Emitter {
             } else {
                 None
             };
-            if has_top_level_sync || barrier_for.is_some() || barrier_if.is_some() {
+            let barrier_while = m.body.iter().enumerate().find_map(|(while_index, stmt)| {
+                let Stmt::While(while_stmt) = stmt else { return None };
+                if !while_stmt.body.iter().any(is_simd_barrier_stmt) {
+                    return None;
+                }
+                let Stmt::Expr(update) = while_stmt.body.last()? else { return None };
+                let ExprKind::Assign(update_target, update_value) = &update.kind else { return None };
+                let ExprKind::Var(update_name) = &update_target.kind else { return None };
+                let declaration_index = m.body[..while_index].iter().position(|candidate| {
+                    matches!(candidate, Stmt::Let(local)
+                        if local.name == *update_name
+                            && local.binding.is_mutable()
+                            && local.value.as_ref().is_some_and(|value| self.block_uniform_expr(value)))
+                })?;
+                let Stmt::Let(declaration) = &m.body[declaration_index] else { unreachable!() };
+                let uniform_locals = std::collections::HashSet::from([update_name.clone()]);
+                if !expr_mentions_var(&while_stmt.condition, update_name)
+                    || !self.block_uniform_expr_with_locals(&while_stmt.condition, &uniform_locals)
+                    || !self.block_uniform_expr_with_locals(update_value, &uniform_locals)
+                {
+                    return None;
+                }
+                Some((while_index, declaration_index, while_stmt, declaration, update_value.as_ref()))
+            });
+            if has_top_level_sync
+                || barrier_for.is_some()
+                || barrier_if.is_some()
+                || barrier_while.is_some()
+            {
                 self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
                 self.line(3, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
                 for field in k.fields.iter().filter(|f| matches!(f.qual, GpuQual::Actor)) {
@@ -410,6 +438,38 @@ impl Emitter {
                         self.emit_barrier_phases(k, body, 4);
                         self.line(3, "}");
                     }
+                } else if let Some((while_index, declaration_index, while_stmt, declaration, update)) = barrier_while {
+                    let uniform_name = &declaration.name;
+                    let uniform_ty = declaration
+                        .ty
+                        .as_ref()
+                        .map(ty)
+                        .or_else(|| declaration.value.as_ref().and_then(|value| self.expr_type(value)))
+                        .unwrap_or_else(|| "i32".into());
+                    let initial = self.expr(declaration.value.as_ref().expect("checked above"));
+                    self.line(3, &format!("let mut {uniform_name}: {uniform_ty} = {initial};"));
+                    self.value_types.insert(uniform_name.clone(), uniform_ty);
+
+                    let prefix = m.body[..while_index]
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| *index != declaration_index)
+                        .map(|(_, stmt)| stmt.clone())
+                        .collect::<Vec<_>>();
+                    let replayed = self.replayable_barrier_locals(&prefix);
+                    self.emit_barrier_phases_seeded(k, &prefix, 3, &[]);
+                    let condition = self.expr(&while_stmt.condition);
+                    self.line(3, &format!("while {condition} {{"));
+                    self.emit_barrier_phases_seeded(
+                        k,
+                        &while_stmt.body[..while_stmt.body.len() - 1],
+                        4,
+                        &replayed,
+                    );
+                    let update = self.expr(update);
+                    self.line(4, &format!("{uniform_name} = {update};"));
+                    self.line(3, "}");
+                    self.emit_barrier_phases_seeded(k, &m.body[while_index + 1..], 3, &replayed);
                 } else {
                     self.emit_barrier_phases(k, &m.body, 3);
                 }
@@ -460,6 +520,33 @@ impl Emitter {
         self.line(0, "}");
     }
     fn emit_barrier_phases(&mut self, k: &KernelDecl, body: &[Stmt], indent: usize) {
+        self.emit_barrier_phases_seeded(k, body, indent, &[]);
+    }
+    fn replayable_barrier_locals(&self, body: &[Stmt]) -> Vec<Stmt> {
+        let mut names = std::collections::HashSet::new();
+        let mut locals = Vec::new();
+        for stmt in body {
+            if let Stmt::Let(local) = stmt {
+                if matches!(local.binding, BindingKind::Let)
+                    && local
+                        .value
+                        .as_ref()
+                        .is_some_and(|value| self.barrier_replayable(value, &names))
+                {
+                    names.insert(local.name.clone());
+                    locals.push(stmt.clone());
+                }
+            }
+        }
+        locals
+    }
+    fn emit_barrier_phases_seeded(
+        &mut self,
+        k: &KernelDecl,
+        body: &[Stmt],
+        indent: usize,
+        initial_replayed_locals: &[Stmt],
+    ) {
         let phases = body
             .split(|stmt| is_simd_barrier_stmt(stmt))
             .collect::<Vec<_>>();
@@ -488,8 +575,14 @@ impl Emitter {
                 }
             }
         }
-        let mut replayed_phase_locals = Vec::new();
-        let mut replayed_phase_local_names = std::collections::HashSet::new();
+        let mut replayed_phase_locals = initial_replayed_locals.to_vec();
+        let mut replayed_phase_local_names = initial_replayed_locals
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Let(local) => Some(local.name.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
         for (phase_index, phase) in phases.into_iter().enumerate() {
             self.line(indent, "for tz in 0..dz as usize { for ty in 0..dy as usize { '__boring_work_item: for __x in 0..dx as usize {");
             self.line(indent + 1, "let __thread = __BoringDim3 { x: __x as i32, y: ty as i32, z: tz as i32 };");
@@ -507,7 +600,7 @@ impl Emitter {
                 );
             }
             self.work_item_return_uses_active_mask = Some(true);
-            if phase_index > 0 {
+            if phase_index > 0 || !initial_replayed_locals.is_empty() {
                 for local in &replayed_phase_locals {
                     self.stmt(local, indent + 1);
                 }
@@ -1636,6 +1729,13 @@ impl Emitter {
         }
     }
     fn block_uniform_expr(&self, expr: &Expr) -> bool {
+        self.block_uniform_expr_with_locals(expr, &std::collections::HashSet::new())
+    }
+    fn block_uniform_expr_with_locals(
+        &self,
+        expr: &Expr,
+        locals: &std::collections::HashSet<String>,
+    ) -> bool {
         match &expr.kind {
             ExprKind::Int(_)
             | ExprKind::UInt64(_)
@@ -1645,6 +1745,7 @@ impl Emitter {
                 matches!(name.as_str(), "block" | "block_dim" | "grid_dim")
                     || self.global_consts.contains_key(name)
                     || self.fields.contains(name)
+                    || locals.contains(name)
             }
             ExprKind::DotIdent(name) => matches!(name.as_str(), "block" | "block_dim"),
             ExprKind::Field(object, _)
@@ -1656,9 +1757,10 @@ impl Emitter {
                 ) => true,
             ExprKind::Field(object, _)
             | ExprKind::UnaryOp(_, object)
-            | ExprKind::Cast(object, _) => self.block_uniform_expr(object),
+            | ExprKind::Cast(object, _) => self.block_uniform_expr_with_locals(object, locals),
             ExprKind::BinOp(_, left, right) => {
-                self.block_uniform_expr(left) && self.block_uniform_expr(right)
+                self.block_uniform_expr_with_locals(left, locals)
+                    && self.block_uniform_expr_with_locals(right, locals)
             }
             _ => false,
         }
@@ -1995,6 +2097,29 @@ fn is_simd_barrier_stmt(stmt: &Stmt) -> bool {
             ExprKind::MethodCall(receiver, method, args)
                 if is_warp_receiver(receiver) && method == "sync" && args.is_empty()
         ),
+        _ => false,
+    }
+}
+
+fn expr_mentions_var(expr: &Expr, sought: &str) -> bool {
+    match &expr.kind {
+        ExprKind::Var(name) => name == sought,
+        ExprKind::BinOp(_, left, right)
+        | ExprKind::Assign(left, right)
+        | ExprKind::QuestionAssign(left, right) => {
+            expr_mentions_var(left, sought) || expr_mentions_var(right, sought)
+        }
+        ExprKind::UnaryOp(_, value)
+        | ExprKind::Cast(value, _)
+        | ExprKind::RelabelCast(value, _)
+        | ExprKind::Field(value, _) => expr_mentions_var(value, sought),
+        ExprKind::Index(value, index) => {
+            expr_mentions_var(value, sought) || expr_mentions_var(index, sought)
+        }
+        ExprKind::Call(callee, args) | ExprKind::MethodCall(callee, _, args) => {
+            expr_mentions_var(callee, sought)
+                || args.iter().any(|arg| expr_mentions_var(&arg.value, sought))
+        }
         _ => false,
     }
 }
