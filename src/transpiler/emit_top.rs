@@ -2547,7 +2547,12 @@ impl Transpiler {
                     .map(|fields| fields.iter().any(|(fname, _)| fname == field))
                     .unwrap_or(false);
                 let field_s = if is_user_field { field.as_str() } else { map_field(field) };
-                let result = if (obj_s == "self" || field.chars().all(|c| c.is_ascii_digit())) && !field_s.ends_with(')') {
+                let field_holds_dyn = is_user_field && self.resolve_expr_type(expr)
+                    .is_some_and(|t| self.type_holds_dyn(&t, false, &mut vec![]));
+                let result = if field_holds_dyn {
+                    // Not `Clone` (holds a trait object): read in place, never `.clone()`.
+                    format!("{}.{}", obj_s, field_s)
+                } else if (obj_s == "self" || field.chars().all(|c| c.is_ascii_digit())) && !field_s.ends_with(')') {
                     // self.field or tuple index .0/.1/... — always clone in owned context (value semantics)
                     format!("{}.{}.clone()", obj_s, field_s)
                 } else if is_user_field && self.field_read_needs_clone(expr) {
@@ -2575,6 +2580,13 @@ impl Transpiler {
                 && !self.var_mutex_types.contains(v.as_str())
                 && !self.var_primitive_params.contains(v.as_str()) =>
             {
+                // A struct that (transitively) holds a trait object isn't `Clone`: forward it
+                // as-is (a borrowed param re-borrows, an owned local moves).
+                if self.var_struct_types.get(v.as_str())
+                    .is_some_and(|n| self.struct_holds_dyn(n, false, &mut vec![]))
+                {
+                    return self.emit_expr(expr);
+                }
                 // Last use of an owned local: move it instead of cloning (see `last_use.rs`).
                 if self.is_last_use_move(expr) {
                     self.emit_expr(expr)
@@ -2620,6 +2632,10 @@ impl Transpiler {
                 self.var_types.get(v.as_str()).map(|t| t.without_mut()),
                 Some(crate::ast::Type::Named(_) | crate::ast::Type::Array(_) | crate::ast::Type::Dict(..) | crate::ast::Type::Set(_))
             ) || self.is_owned_collection_local(v) => {
+                // Holds a trait object (not `Clone`): forward, never `.clone()`.
+                if self.var_types.get(v.as_str()).is_some_and(|t| self.type_holds_dyn(t, false, &mut vec![])) {
+                    return v.clone();
+                }
                 // Last use of an owned local: move it instead of cloning (see `last_use.rs`).
                 if self.is_last_use_move(expr) { v.clone() } else { format!("{}.clone()", v) }
             }
@@ -3444,6 +3460,8 @@ impl Transpiler {
     /// (trait objects, closures, channels, type parameters, ...) is left as a plain read.
     pub(crate) fn field_read_needs_clone(&self, expr: &Expr) -> bool {
         fn needs(t: &Transpiler, ty: &Type) -> bool {
+            // Holds a trait object → not `Clone`; a read can only move/borrow it.
+            if t.type_holds_dyn(ty, false, &mut vec![]) { return false; }
             match ty.without_mut() {
                 Type::Str | Type::Array(_) | Type::ArrayN(..) | Type::Dict(..) | Type::Set(_) | Type::Tuple(_) => true,
                 Type::Named(n) => n == "string"

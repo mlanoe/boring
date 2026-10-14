@@ -1,0 +1,30 @@
+# Transitive non-Clone struct (holds a trait object via another struct), read through
+# `if let` on an implicit-self field / dict index: matched by borrow, no clone.
+
+trait Node:
+    req string kind(): ""
+
+struct Leaf as Node:
+    string t
+    req string kind(): "Leaf"
+
+struct Mnt:
+    Node? v = nil
+    [Mnt] kids = []
+
+struct Rt:
+    var Mnt? root = nil
+    var {int=Mnt} nodes = {=}
+
+    req int show():
+        if let r = root:
+            return r.kids.length
+        0
+    req int show2(int i):
+        if let r = nodes[i]:
+            return 1
+        0
+
+def main():
+    let rt = Rt()
+    print rt.show()

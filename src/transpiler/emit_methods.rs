@@ -4908,6 +4908,36 @@ impl Transpiler {
         }
     }
 
+    /// True when `ty` (transitively, through user structs' fields) holds a trait object
+    /// (`Box<dyn Trait>`): such a type cannot be `Clone`/`PartialEq`, and is `Debug` only if
+    /// the trait requires it. `debug_only` asks the `Debug` question alone.
+    pub(crate) fn type_holds_dyn(&self, ty: &Type, debug_only: bool, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::Set(i) => {
+                self.type_holds_dyn(i, debug_only, visiting)
+            }
+            Type::Dict(k, v) => self.type_holds_dyn(k, debug_only, visiting) || self.type_holds_dyn(v, debug_only, visiting),
+            Type::Tuple(es) => es.iter().any(|e| self.type_holds_dyn(e, debug_only, visiting)),
+            Type::Qualified(i, OwnerQual::Owned | OwnerQual::Inline) => self.type_holds_dyn(i, debug_only, visiting),
+            Type::Named(n) => {
+                if self.trait_method_names.contains_key(n.as_str()) {
+                    return !debug_only || !self.trait_requires_debug(n.as_str());
+                }
+                self.struct_holds_dyn(n, debug_only, visiting)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn struct_holds_dyn(&self, name: &str, debug_only: bool, visiting: &mut Vec<String>) -> bool {
+        if visiting.iter().any(|v| v == name) { return false; }
+        let Some(fields) = self.struct_fields.get(name) else { return false };
+        visiting.push(name.to_string());
+        let r = fields.iter().any(|(_, t)| self.type_holds_dyn(t, debug_only, visiting));
+        visiting.pop();
+        r
+    }
+
     /// Whether a value of Boring type `ty` is *positively known* to implement Rust `Clone` in the
     /// generated code. Stricter than `field_read_needs_clone`, which only asks "is a by-value read
     /// of this a non-`Copy` value type" and so says yes to every `[T]` whatever `T` is: a
@@ -4928,7 +4958,7 @@ impl Transpiler {
             Type::Named(n) => {
                 if self.trait_method_names.contains_key(n.as_str()) { return false; }
                 if Self::is_copy_type(ty) || n == "string" { return true; }
-                self.struct_derives_clone.contains(n.as_str()) || self.all_enum_types.contains(n.as_str())
+                (self.struct_derives_clone.contains(n.as_str()) && !self.struct_holds_dyn(n, false, &mut vec![])) || self.all_enum_types.contains(n.as_str())
             }
             Type::Str => true,
             Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool

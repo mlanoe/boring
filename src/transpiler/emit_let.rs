@@ -1966,7 +1966,15 @@ impl Transpiler {
             });
         if already_opt { return inner_val; }
         // `T'? (Box<T>?)` or managed-mode `T'?`: wrap the value appropriately.
-        let wrapped = if matches!(inner, Type::Qualified(_, q) if q.is_owned_or_new()) {
+        let wrapped = if self.is_boxed_trait_type(inner) {
+            // `Trait?` field/local = `Option<Box<dyn Trait>>`: box the concrete value.
+            let tn = match inner.without_mut() {
+                Type::Named(n) => n.as_str(),
+                Type::Qualified(i, _) => match i.as_ref() { Type::Named(n) => n.as_str(), _ => "" },
+                _ => "",
+            };
+            self.box_if_trait_typed(value, tn)
+        } else if matches!(inner, Type::Qualified(_, q) if q.is_owned_or_new()) {
             // Managed mode: wrap in Arc<std::sync::Mutex<T>> or RefCell<T>
             if self.is_managed_owned_user(inner) {
                 if inner_val.starts_with("Arc::new(std::sync::Mutex::new(")

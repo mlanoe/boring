@@ -577,6 +577,8 @@ interp_test!(mut_array_shared_element);
 interp_test!(mut_collection_param);
 interp_test!(mut_local_trait_array_push);
 interp_test!(mut_elem_trait_array_literal);
+interp_test!(dyn_struct_fields_optional);
+interp_test!(dyn_struct_transitive_iflet);
 
 // Same case as the transpile_test of the same name (a `mut`/`var mut` collection passed by value is
 // never invalidated for the caller) -- the interpreter must print the identical output.

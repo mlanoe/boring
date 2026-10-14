@@ -365,7 +365,21 @@ impl Transpiler {
                 }
                 // Auto-clone: actor fields and general field accesses must be cloned
                 // to avoid moving out of the struct.
-                let expr_s = if self.expr_yields_actor(expr)
+                // A field holding a trait object can't be cloned out: match through a borrow.
+                let ty_holds_dyn = |e: &Expr| self.resolve_expr_type(e)
+                    .is_some_and(|t| self.type_holds_dyn(&t, false, &mut vec![]));
+                let holds_dyn = !expr_s.starts_with('&')
+                    && (matches!(&expr.kind, ExprKind::Field(..) | ExprKind::Var(_) | ExprKind::Index(..)))
+                    && ty_holds_dyn(expr);
+                let expr_s = if holds_dyn {
+                    if let Some(base) = expr_s.strip_suffix(".cloned()") {
+                        base.to_string()
+                    } else if let Some(base) = expr_s.strip_suffix(".clone()") {
+                        format!("&{}", base)
+                    } else {
+                        format!("&{}", expr_s)
+                    }
+                } else if self.expr_yields_actor(expr)
                     || (matches!(&expr.kind, ExprKind::Field(..))
                         && !expr_s.ends_with(".clone()")
                         && !expr_s.starts_with('&')

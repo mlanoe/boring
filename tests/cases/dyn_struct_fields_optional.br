@@ -1,0 +1,44 @@
+# A struct holding trait objects (`Trait?`, `[Trait]`, and transitively via another
+# struct) can't derive Clone/PartialEq; params of such structs are borrowed, an
+# optional trait field is boxed on construction, `if let` matches through a borrow.
+
+trait Node:
+    req string kind(): ""
+
+struct Leaf as Node:
+    string t
+    req string kind(): "Leaf"
+
+struct Holder:
+    string name
+    Node? held = nil
+    [Node] kids = []
+
+struct Outer:
+    Holder inner
+    [Holder] more = []
+
+int count(Holder h):
+    h.kids.length
+
+string heldKind(Holder h):
+    if let n = h.held:
+        return n.kind()
+    "none"
+
+int outerCount(Outer o):
+    count(o.inner) + o.more.length
+
+def main():
+    let h = Holder(name = "a", held = Leaf(t = "x"), kids = [Leaf(t = "y")])
+    print heldKind(h)
+    print count(h)
+    print count(h)
+    for k in h.kids:
+        print k.kind()
+    if let n = h.held:
+        print n.kind()
+    let e = Holder(name = "e")
+    print heldKind(e)
+    let o = Outer(inner = h)
+    print outerCount(o)

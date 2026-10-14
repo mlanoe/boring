@@ -943,6 +943,8 @@ transpile_test!(mut_local_trait_array_push);
 // `Type::Array(Type::Mut(Named))`) boxes each element, like the plain `[Trait]` form -- the
 // element's `Type::Mut` wrapper is looked through at every `[Trait]` match (was E0308).
 transpile_test!(mut_elem_trait_array_literal);
+transpile_test!(dyn_struct_fields_optional);
+transpile_test!(dyn_struct_transitive_iflet);
 
 // A Boring-declared struct method named like a builtin Vec/iterator index method (`swap`,
 // `insert`, `drain`, ...) no longer gets its first argument cast `as usize`. See

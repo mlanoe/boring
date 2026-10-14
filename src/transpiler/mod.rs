@@ -1944,6 +1944,70 @@ impl Transpiler {
         }
     }
 
+    /// See the call site in `emit_program`. Returns a rewritten clone only when some free
+    /// function / protocol-free struct method has such a param.
+    fn borrow_noclone_struct_params(&mut self, program: &Program) -> Option<Program> {
+        let noclone = |ty: &Type| -> bool {
+            matches!(ty, Type::Named(n) if self.struct_fields.contains_key(n.as_str())
+                && self.struct_holds_dyn(n, false, &mut vec![]))
+        };
+        let wants = |f: &crate::ast::FnDecl| f.params.iter().any(|p| {
+            !p.mutable && !p.rebindable && p.ty.as_ref().is_some_and(|t| noclone(t))
+        });
+        fn any_item(items: &[Item], wants: &dyn Fn(&crate::ast::FnDecl) -> bool) -> bool {
+            items.iter().any(|i| match i {
+                Item::Fn(f) => wants(f),
+                Item::Struct(s) => s.protocols.is_empty() && s.methods.iter().any(|m| wants(m)),
+                Item::Mod(m) => any_item(&m.items, wants),
+                _ => false,
+            })
+        }
+        if !any_item(&program.items, &wants) { return None; }
+        fn rewrite_fn(f: &mut crate::ast::FnDecl, noclone: &dyn Fn(&Type) -> bool) {
+            for p in f.params.iter_mut() {
+                if p.mutable || p.rebindable { continue; }
+                if let Some(t) = &p.ty {
+                    if noclone(t) {
+                        p.ty = Some(Type::Qualified(Box::new(t.clone()), OwnerQual::Borrow));
+                    }
+                }
+            }
+        }
+        fn rewrite_items(items: &mut [Item], noclone: &dyn Fn(&Type) -> bool) {
+            for i in items.iter_mut() {
+                match i {
+                    Item::Fn(f) => rewrite_fn(f, noclone),
+                    Item::Struct(s) if s.protocols.is_empty() => {
+                        for m in s.methods.iter_mut() { rewrite_fn(m, noclone); }
+                    }
+                    Item::Mod(m) => rewrite_items(&mut m.items, noclone),
+                    _ => {}
+                }
+            }
+        }
+        let mut cloned = program.clone();
+        rewrite_items(&mut cloned.items, &noclone);
+        // Sigs were already registered from the original params by `deep_pre_scan`
+        // (`or_insert`, first wins): overwrite the rewritten free functions' entries.
+        fn collect(orig: &[Item], new: &[Item], out: &mut Vec<(String, Vec<Param>, Vec<Param>)>) {
+            for (o, n) in orig.iter().zip(new.iter()) {
+                match (o, n) {
+                    (Item::Fn(a), Item::Fn(b)) => out.push((a.name.clone(), a.params.clone(), b.params.clone())),
+                    (Item::Mod(a), Item::Mod(b)) => collect(&a.items, &b.items, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut pairs = Vec::new();
+        collect(&program.items, &cloned.items, &mut pairs);
+        for (name, old_ps, new_ps) in pairs {
+            let types: Vec<Type> = new_ps.iter().filter_map(helpers::sig_param_type).collect();
+            self.fn_sigs.insert(mangle_overload_name(&name, &old_ps), types.clone());
+            if self.fn_sigs.contains_key(&name) { self.fn_sigs.insert(name, types); }
+        }
+        Some(cloned)
+    }
+
     // ── Output helpers ────────────────────────────────────────────────────────
 
     fn push_error(&self, line: usize, col: usize, msg: impl Into<String>) {
@@ -2025,6 +2089,14 @@ impl Transpiler {
             &owned_program
         } else {
             program
+        };
+        // A bare struct param whose struct (transitively) holds a trait object can't be
+        // `Clone`d, so the by-value-plus-clone convention can't apply to it: desugar to an
+        // explicit `T&` borrow (as if the author had written it) before any pre-scan.
+        let owned_program2;
+        let program: &Program = match self.borrow_noclone_struct_params(program) {
+            Some(p) => { owned_program2 = p; &owned_program2 }
+            None => program,
         };
         // Interprocedural GPU residency (docs/scoped-access-blocks.md), transitive
         // parameter case: needs the whole program's call graph in one shot for its
@@ -3402,6 +3474,9 @@ impl Transpiler {
                     let mut ty = &f.ty;
                     while let Type::Mut(inner) = ty { ty = inner; }
                     matches!(ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
+                        // bare / `'owned` / optional trait field (`Box<dyn Trait>`)
+                        || matches!(ty.without_mut(), t if self.is_boxed_trait_type(t)
+                            || matches!(t, Type::Optional(i) if self.is_boxed_trait_type(i)))
                         // `[Trait]` field (`Vec<Box<dyn Trait>>`) — same non-Clone
                         // reasoning as an atomic field; see emit_struct.rs's mirrored check.
                         || matches!(ty, Type::Array(elem) if matches!(

@@ -62,6 +62,7 @@ impl Transpiler {
                 trait_method_names: &std::collections::HashMap<String, std::collections::HashSet<String>>,
             ) -> Option<&'a str> {
                 match ty {
+                    Type::Optional(inner) => field_is_boxed_trait(inner.without_mut(), trait_method_names),
                     Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
                     Type::Qualified(inner, OwnerQual::Owned) => match inner.as_ref() {
                         Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
@@ -86,6 +87,7 @@ impl Transpiler {
                     || matches!(ty, Type::Array(elem) if matches!(
                         elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
                     || field_is_boxed_trait(ty, &self.trait_method_names).is_some()
+                    || self.type_holds_dyn(ty, false, &mut vec![s.name.clone()])
             });
             // `Box<dyn Trait>: Debug` (needed for the struct's own auto-derived `Debug`,
             // kept below even when `has_non_clone_field` drops `Clone`/`PartialEq`) only
@@ -101,6 +103,7 @@ impl Transpiler {
                     Type::Named(n) if self.trait_method_names.contains_key(n.as_str())
                         && !self.trait_requires_debug(n.as_str())))
                     || field_is_boxed_trait(ty, &self.trait_method_names).is_some_and(|n| !self.trait_requires_debug(n))
+                    || self.type_holds_dyn(ty, true, &mut vec![s.name.clone()])
             });
             // Don't derive PartialEq when the struct has any comparison operator method —
             // emit_operator_trait_impls will generate PartialEq/PartialOrd impls that would conflict.
@@ -1423,7 +1426,7 @@ impl Transpiler {
         if !implements_introspect { return None; }
         if needs_clone {
             let is_clone = self.all_enum_types.contains(type_name)
-                || self.struct_derives_clone.contains(type_name);
+                || (self.struct_derives_clone.contains(type_name) && !self.struct_holds_dyn(type_name, false, &mut vec![]));
             if !is_clone { return None; }
         }
         let cloned = format!("{}{}.clone()", deref, access);
