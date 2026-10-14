@@ -256,7 +256,17 @@ impl Emitter {
             {
                 continue;
             }
-            self.line(3, &format!("{}: {},", f.name, default_value(&f.ty)));
+            let initial = if let Some(default) = &f.default {
+                let value = self.expr(default);
+                if matches!(base(&f.ty), Type::Optional(_)) {
+                    value
+                } else {
+                    format!("({value}) as {}", ty(&f.ty))
+                }
+            } else {
+                default_value(&f.ty)
+            };
+            self.line(3, &format!("{}: {},", f.name, initial));
         }
         self.line(2, "}");
         self.line(1, "}");
@@ -1967,6 +1977,16 @@ fn ty(t: &Type) -> String {
     match base(t) {
         Type::Int => "i32".into(),
         Type::Uint => "u32".into(),
+        Type::Int8 => "i8".into(),
+        Type::Int16 => "i16".into(),
+        Type::Int32 => "i32".into(),
+        Type::Int64 => "i64".into(),
+        Type::Int128 => "i128".into(),
+        Type::Uint8 => "u8".into(),
+        Type::Uint16 => "u16".into(),
+        Type::Uint32 => "u32".into(),
+        Type::Uint64 => "u64".into(),
+        Type::Uint128 => "u128".into(),
         Type::Float64 => "f64".into(),
         Type::Float32 => "f32".into(),
         Type::Bool => "bool".into(),
@@ -1979,10 +1999,12 @@ fn ty(t: &Type) -> String {
             "int16" => "i16".into(),
             "int32" => "i32".into(),
             "int64" => "i64".into(),
+            "int128" => "i128".into(),
             "uint8" => "u8".into(),
             "uint16" => "u16".into(),
             "uint32" => "u32".into(),
             "uint64" => "u64".into(),
+            "uint128" => "u128".into(),
             "bool" => "bool".into(),
             _ => "isize".into(),
         },
@@ -2018,10 +2040,12 @@ fn primitive_cast_type(name: &str) -> Option<&'static str> {
         "int8" => Some("i8"),
         "int16" => Some("i16"),
         "int64" => Some("i64"),
+        "int128" => Some("i128"),
         "uint" | "uint32" => Some("u32"),
         "uint8" => Some("u8"),
         "uint16" => Some("u16"),
         "uint64" => Some("u64"),
+        "uint128" => Some("u128"),
         _ => None,
     }
 }

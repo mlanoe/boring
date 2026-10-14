@@ -2165,6 +2165,98 @@ print "{sized.output[0]} {sized.output[1]} {sized.output[2]} {sized.output[3]}"
 }
 
 #[test]
+fn scalar_kernel_field_defaults_seed_const_and_thread_local_values() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_kernel_field_defaults");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("kernel_field_defaults.br");
+    fs::write(
+        &input,
+        r#"
+kernel Defaults:
+    let int factor = 3
+    var int offset = 2
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        output[i] = i * factor + offset
+mut defaults = Defaults()
+kernel:
+    defaults(block = 4)
+print "{defaults.output[0]} {defaults.output[1]} {defaults.output[2]} {defaults.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("kernel_field_defaults_simd/src/main.rs")).unwrap();
+    assert!(source.contains("factor: (3) as i32"));
+    assert!(source.contains("offset: (2) as i32"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("kernel_field_defaults_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "2 5 8 11");
+}
+
+#[test]
+fn fixed_width_integer_types_are_preserved_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_fixed_width_integers");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("fixed_width_integers.br");
+    fs::write(
+        &input,
+        r#"
+kernel Widths:
+    let int128 wide = int128(5000000000)
+    mut [int128]'unified output
+    init():
+        output = [int128(0) for ..<1]
+    def ():
+        output[0] = wide + int128(7)
+mut widths = Widths()
+kernel:
+    widths(block = 1)
+print widths.output[0]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let source = fs::read_to_string(root.join("fixed_width_integers_simd/src/main.rs")).unwrap();
+    assert!(source.contains("wide: i128"));
+    assert!(source.contains("output: Vec<i128>"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("fixed_width_integers_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5000000007");
+}
+
+#[test]
 fn surface_buffers_run_on_simd_as_cpu_pixel_vectors() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_surface_buffer");
     let _ = fs::remove_dir_all(&root);
