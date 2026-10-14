@@ -64,6 +64,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         value_types: std::collections::HashMap::new(),
         replayable_locals: std::collections::HashMap::new(),
         replayed_assignments: std::collections::HashMap::new(),
+        collective_uniform_locals: std::collections::HashSet::new(),
         while_let_redirect: std::collections::HashMap::new(),
         while_let_break_sync: None,
         value_loop_depth: 0,
@@ -174,6 +175,7 @@ struct Emitter {
     value_types: std::collections::HashMap<String, String>,
     replayable_locals: std::collections::HashMap<String, Expr>,
     replayed_assignments: std::collections::HashMap<String, String>,
+    collective_uniform_locals: std::collections::HashSet<String>,
     while_let_redirect: std::collections::HashMap<String, String>,
     while_let_break_sync: Option<(String, String)>,
     value_loop_depth: usize,
@@ -191,6 +193,7 @@ impl Emitter {
         self.out.push('\n');
     }
     fn kernel(&mut self, k: &KernelDecl) {
+        self.collective_uniform_locals.clear();
         self.fields = k
             .fields
             .iter()
@@ -333,9 +336,15 @@ impl Emitter {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
                         && !contains_nested_simd_barrier(stmt)
                 });
+                let uniform_locals = self.block_uniform_locals(&m.body[..for_index]);
                 (safe_prefix
-                    && self.block_uniform_expr(&for_stmt.iterable)
-                    && for_stmt.body.iter().any(is_simd_barrier_stmt))
+                    && self.block_uniform_expr_with_locals(
+                        &for_stmt.iterable,
+                        &uniform_locals,
+                    )
+                    && for_stmt.body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    }))
                 .then_some((for_index, for_stmt))
             });
             let barrier_if = m.body.iter().enumerate().find_map(|(if_index, stmt)| {
@@ -343,45 +352,67 @@ impl Emitter {
                 let has_barrier = if_stmt
                     .branches
                     .iter()
-                    .any(|(_, body)| body.iter().any(is_simd_barrier_stmt))
+                    .any(|(_, body)| body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    }))
                     || if_stmt
                         .else_body
                         .as_ref()
-                        .is_some_and(|body| body.iter().any(is_simd_barrier_stmt));
+                        .is_some_and(|body| body.iter().any(|stmt| {
+                            is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                        }));
                 let safe_prefix = m.body[..if_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
                         && !contains_nested_simd_barrier(stmt)
                 });
+                let uniform_locals = self.block_uniform_locals(&m.body[..if_index]);
                 (has_barrier
                     && safe_prefix
                     && if_stmt
                         .branches
                         .iter()
-                        .all(|(condition, _)| self.block_uniform_expr(condition)))
+                        .all(|(condition, _)| {
+                            self.block_uniform_expr_with_locals(condition, &uniform_locals)
+                        }))
                 .then_some((if_index, if_stmt))
             });
             let barrier_if_let = m.body.iter().enumerate().find_map(|(if_index, stmt)| {
                 let Stmt::IfLet(if_stmt) = stmt else { return None };
-                let has_barrier = if_stmt.then_body.iter().any(is_simd_barrier_stmt)
+                let has_barrier = if_stmt.then_body.iter().any(|stmt| {
+                    is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                })
                     || if_stmt
                         .elif_branches
                         .iter()
-                        .any(|branch| branch.body.iter().any(is_simd_barrier_stmt))
+                        .any(|branch| branch.body.iter().any(|stmt| {
+                            is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                        }))
                     || if_stmt
                         .else_body
                         .as_ref()
-                        .is_some_and(|body| body.iter().any(is_simd_barrier_stmt));
+                        .is_some_and(|body| body.iter().any(|stmt| {
+                            is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                        }));
                 let safe_prefix = m.body[..if_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
                         && !contains_nested_simd_barrier(stmt)
                 });
+                let uniform_locals = self.block_uniform_locals(&m.body[..if_index]);
                 (has_barrier
                     && safe_prefix
-                    && self.block_uniform_guard_clauses(&if_stmt.clauses)
+                    && self.block_uniform_guard_clauses_with_locals(
+                        &if_stmt.clauses,
+                        &uniform_locals,
+                    )
                     && if_stmt
                         .elif_branches
                         .iter()
-                        .all(|branch| self.block_uniform_guard_clauses(&branch.clauses)))
+                        .all(|branch| {
+                            self.block_uniform_guard_clauses_with_locals(
+                                &branch.clauses,
+                                &uniform_locals,
+                            )
+                        }))
                 .then_some((if_index, if_stmt))
             });
             let barrier_match = m.body.iter().enumerate().find_map(|(match_index, stmt)| {
@@ -390,29 +421,38 @@ impl Emitter {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
                         && !contains_nested_simd_barrier(stmt)
                 });
+                let uniform_locals = self.block_uniform_locals(&m.body[..match_index]);
                 (safe_prefix
-                    && self.block_uniform_expr(&match_stmt.subject)
+                    && self.block_uniform_expr_with_locals(
+                        &match_stmt.subject,
+                        &uniform_locals,
+                    )
                     && match_stmt.arms.iter().all(|arm| {
-                        arm.guard
-                            .as_ref()
-                            .map_or(true, |guard| self.block_uniform_expr(guard))
+                        self.block_uniform_match_arm_guard_with_locals(arm, &uniform_locals)
                     })
                     && match_stmt.arms.iter().any(|arm| {
                         matches!(&arm.body, MatchBody::Block(body)
-                            if body.iter().any(is_simd_barrier_stmt))
+                            if body.iter().any(|stmt| {
+                                is_simd_barrier_stmt(stmt)
+                                    || contains_nested_simd_barrier(stmt)
+                            }))
                     }))
                 .then_some((match_index, match_stmt))
             });
             let barrier_guard = m.body.iter().enumerate().find_map(|(guard_index, stmt)| {
                 let Stmt::Guard(guard_stmt) = stmt else { return None };
-                let uniform = match &guard_stmt.cond {
-                    GuardCond::Expr(condition) => self.block_uniform_expr(condition),
-                    GuardCond::Clauses(clauses) => self.block_uniform_guard_clauses(clauses),
-                };
                 let safe_prefix = m.body[..guard_index].iter().all(|stmt| {
                     !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
                         && !contains_nested_simd_barrier(stmt)
                 });
+                let uniform_locals = self.block_uniform_locals(&m.body[..guard_index]);
+                let uniform = match &guard_stmt.cond {
+                    GuardCond::Expr(condition) => {
+                        self.block_uniform_expr_with_locals(condition, &uniform_locals)
+                    }
+                    GuardCond::Clauses(clauses) => self
+                        .block_uniform_guard_clauses_with_locals(clauses, &uniform_locals),
+                };
                 (uniform
                     && safe_prefix
                     && guard_stmt.else_body.iter().any(is_simd_barrier_stmt))
@@ -489,13 +529,28 @@ impl Emitter {
                 if let Some((for_index, for_stmt)) = barrier_for {
                     let prefix = &m.body[..for_index];
                     let replayed = self.replayable_barrier_locals(prefix);
+                    for local in self.block_uniform_local_statements(prefix) {
+                        self.stmt(&local, 3);
+                    }
                     self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
                     let iterable = self.expr(&for_stmt.iterable);
                     self.line(
                         3,
                         &format!("for {} in {} {{", for_stmt.vars.join(", "), iterable),
                     );
-                    self.emit_barrier_phases_seeded(k, &for_stmt.body, 4, &replayed);
+                    let inherited_loop_vars = for_stmt
+                        .vars
+                        .iter()
+                        .filter(|name| self.collective_uniform_locals.contains(*name))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.collective_uniform_locals.extend(for_stmt.vars.iter().cloned());
+                    self.emit_following_collective_controls(k, &for_stmt.body, 4, &replayed);
+                    for name in &for_stmt.vars {
+                        if !inherited_loop_vars.contains(name) {
+                            self.collective_uniform_locals.remove(name);
+                        }
+                    }
                     self.line(3, "}");
                     self.emit_following_collective_controls(
                         k,
@@ -506,6 +561,9 @@ impl Emitter {
                 } else if let Some((if_index, if_stmt)) = barrier_if {
                     let prefix = &m.body[..if_index];
                     let replayed = self.replayable_barrier_locals(prefix);
+                    for local in self.block_uniform_local_statements(prefix) {
+                        self.stmt(&local, 3);
+                    }
                     self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
                     for (branch_index, (condition, body)) in if_stmt.branches.iter().enumerate() {
                         let condition = self.expr(condition);
@@ -516,12 +574,12 @@ impl Emitter {
                                 if branch_index == 0 { "" } else { "else " }
                             ),
                         );
-                        self.emit_barrier_phases_seeded(k, body, 4, &replayed);
+                        self.emit_following_collective_controls(k, body, 4, &replayed);
                         self.line(3, "}");
                     }
                     if let Some(body) = &if_stmt.else_body {
                         self.line(3, "else {");
-                        self.emit_barrier_phases_seeded(k, body, 4, &replayed);
+                        self.emit_following_collective_controls(k, body, 4, &replayed);
                         self.line(3, "}");
                     }
                     self.emit_following_collective_controls(
@@ -533,6 +591,9 @@ impl Emitter {
                 } else if let Some((if_index, if_stmt)) = barrier_if_let {
                     let prefix = &m.body[..if_index];
                     let replayed = self.replayable_barrier_locals(prefix);
+                    for local in self.block_uniform_local_statements(prefix) {
+                        self.stmt(&local, 3);
+                    }
                     self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
                     self.emit_collective_if_let_clauses(
                         k,
@@ -553,6 +614,9 @@ impl Emitter {
                 } else if let Some((guard_index, guard_stmt)) = barrier_guard {
                     let prefix = &m.body[..guard_index];
                     let replayed = self.replayable_barrier_locals(prefix);
+                    for local in self.block_uniform_local_statements(prefix) {
+                        self.stmt(&local, 3);
+                    }
                     self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
                     match &guard_stmt.cond {
                         GuardCond::Expr(condition) => {
@@ -622,8 +686,18 @@ impl Emitter {
                 } else if let Some((match_index, match_stmt)) = barrier_match {
                     let prefix = &m.body[..match_index];
                     let replayed = self.replayable_barrier_locals(prefix);
+                    for local in self.block_uniform_local_statements(prefix) {
+                        self.stmt(&local, 3);
+                    }
                     self.emit_barrier_phases_seeded(k, prefix, 3, &[]);
+                    let subject_is_string =
+                        self.expr_type(&match_stmt.subject).as_deref() == Some("String");
                     let subject = self.expr(&match_stmt.subject);
+                    let subject = if subject_is_string {
+                        format!("({subject}).as_str()")
+                    } else {
+                        subject
+                    };
                     self.line(3, &format!("match {subject} {{"));
                     for arm in &match_stmt.arms {
                         let patterns = arm
@@ -638,9 +712,19 @@ impl Emitter {
                             .map(|guard| format!(" if {}", self.expr(guard)))
                             .unwrap_or_default();
                         self.line(4, &format!("{patterns}{guard} => {{"));
+                        let mut bound_names = std::collections::HashSet::new();
+                        for pattern in &arm.patterns {
+                            collect_simd_pattern_bind_names(pattern, &mut bound_names);
+                        }
+                        let inherited_bound_names = bound_names
+                            .iter()
+                            .filter(|name| self.collective_uniform_locals.contains(*name))
+                            .cloned()
+                            .collect::<std::collections::HashSet<_>>();
+                        self.collective_uniform_locals.extend(bound_names.iter().cloned());
                         match &arm.body {
                             MatchBody::Block(body) => {
-                                self.emit_barrier_phases_seeded(k, body, 5, &replayed)
+                                self.emit_following_collective_controls(k, body, 5, &replayed)
                             }
                             MatchBody::Expr(value) => {
                                 self.emit_barrier_phases_seeded(
@@ -649,6 +733,11 @@ impl Emitter {
                                     5,
                                     &replayed,
                                 )
+                            }
+                        }
+                        for name in bound_names {
+                            if !inherited_bound_names.contains(&name) {
+                                self.collective_uniform_locals.remove(&name);
                             }
                         }
                         self.line(4, "},");
@@ -743,71 +832,167 @@ impl Emitter {
             IfLet(&'a IfLetStmt),
             Match(&'a MatchStmt),
             Guard(&'a GuardStmt),
+            While {
+                stmt: &'a WhileStmt,
+                declaration_index: usize,
+                declaration: &'a LetStmt,
+                update: &'a Expr,
+            },
         }
         let next = body.iter().enumerate().find_map(|(index, stmt)| {
+            let mut inherited_uniform = self.block_uniform_locals(initial_replayed);
+            let prefix_uniform = self
+                .block_uniform_local_statements_with_locals(
+                    &body[..index],
+                    &inherited_uniform,
+                )
+                .into_iter()
+                .filter_map(|stmt| match stmt {
+                    Stmt::Let(local) => Some(local.name),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            inherited_uniform.extend(prefix_uniform);
+            if let Stmt::While(while_stmt) = stmt {
+                if !while_stmt.body.iter().any(is_simd_barrier_stmt) {
+                    return None;
+                }
+                let Stmt::Expr(update) = while_stmt.body.last()? else { return None };
+                let ExprKind::Assign(update_target, update_value) = &update.kind else { return None };
+                let ExprKind::Var(update_name) = &update_target.kind else { return None };
+                let declaration_index = body[..index].iter().position(|candidate| {
+                    matches!(candidate, Stmt::Let(local)
+                        if local.name == *update_name
+                            && local.binding.is_mutable()
+                            && local.value.as_ref().is_some_and(|value| {
+                                self.block_uniform_expr_with_locals(value, &inherited_uniform)
+                            }))
+                })?;
+                let safe_prefix = body[..index].iter().enumerate().all(|(prefix_index, stmt)| {
+                    prefix_index == declaration_index
+                        || (!matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                            && !contains_nested_simd_barrier(stmt))
+                });
+                let Stmt::Let(declaration) = &body[declaration_index] else { unreachable!() };
+                let mut uniform_locals = inherited_uniform;
+                uniform_locals.insert(update_name.clone());
+                if safe_prefix
+                    && expr_mentions_var(&while_stmt.condition, update_name)
+                    && self.block_uniform_expr_with_locals(&while_stmt.condition, &uniform_locals)
+                    && self.block_uniform_expr_with_locals(update_value, &uniform_locals)
+                {
+                    return Some((index, FollowingCollective::While {
+                        stmt: while_stmt,
+                        declaration_index,
+                        declaration,
+                        update: update_value,
+                    }));
+                }
+                return None;
+            }
             let safe_prefix = body[..index].iter().all(|stmt| {
                 !matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
             });
             if !safe_prefix {
                 return None;
             }
+            let uniform_locals = inherited_uniform;
             match stmt {
-                Stmt::For(for_stmt) => (self.block_uniform_expr(&for_stmt.iterable)
-                    && for_stmt.body.iter().any(is_simd_barrier_stmt))
+                Stmt::For(for_stmt) => (self.block_uniform_expr_with_locals(
+                    &for_stmt.iterable,
+                    &uniform_locals,
+                )
+                    && for_stmt.body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    }))
                 .then_some((index, FollowingCollective::For(for_stmt))),
                 Stmt::If(if_stmt) => {
                     let has_barrier = if_stmt
                         .branches
                         .iter()
-                        .any(|(_, branch)| branch.iter().any(is_simd_barrier_stmt))
+                        .any(|(_, branch)| branch.iter().any(|stmt| {
+                            is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                        }))
                         || if_stmt
                             .else_body
                             .as_ref()
-                            .is_some_and(|branch| branch.iter().any(is_simd_barrier_stmt));
+                            .is_some_and(|branch| branch.iter().any(|stmt| {
+                                is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                            }));
                     (has_barrier
                         && if_stmt
                             .branches
                             .iter()
-                            .all(|(condition, _)| self.block_uniform_expr(condition)))
+                            .all(|(condition, _)| {
+                                self.block_uniform_expr_with_locals(condition, &uniform_locals)
+                            }))
                     .then_some((index, FollowingCollective::If(if_stmt)))
                 }
                 Stmt::IfLet(if_stmt) => {
-                    let has_barrier = if_stmt.then_body.iter().any(is_simd_barrier_stmt)
+                    let has_barrier = if_stmt.then_body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    })
                         || if_stmt
                             .elif_branches
                             .iter()
-                            .any(|branch| branch.body.iter().any(is_simd_barrier_stmt))
+                            .any(|branch| branch.body.iter().any(|stmt| {
+                                is_simd_barrier_stmt(stmt)
+                                    || contains_nested_simd_barrier(stmt)
+                            }))
                         || if_stmt
                             .else_body
                             .as_ref()
-                            .is_some_and(|branch| branch.iter().any(is_simd_barrier_stmt));
+                            .is_some_and(|branch| branch.iter().any(|stmt| {
+                                is_simd_barrier_stmt(stmt)
+                                    || contains_nested_simd_barrier(stmt)
+                            }));
                     (has_barrier
-                        && self.block_uniform_guard_clauses(&if_stmt.clauses)
+                        && self.block_uniform_guard_clauses_with_locals(
+                            &if_stmt.clauses,
+                            &uniform_locals,
+                        )
                         && if_stmt
                             .elif_branches
                             .iter()
-                            .all(|branch| self.block_uniform_guard_clauses(&branch.clauses)))
+                            .all(|branch| {
+                                self.block_uniform_guard_clauses_with_locals(
+                                    &branch.clauses,
+                                    &uniform_locals,
+                                )
+                            }))
                     .then_some((index, FollowingCollective::IfLet(if_stmt)))
                 }
                 Stmt::Match(match_stmt) => {
                     let has_barrier = match_stmt.arms.iter().any(|arm| {
                         matches!(&arm.body, MatchBody::Block(branch)
-                            if branch.iter().any(is_simd_barrier_stmt))
+                            if branch.iter().any(|stmt| {
+                                is_simd_barrier_stmt(stmt)
+                                    || contains_nested_simd_barrier(stmt)
+                            }))
                     });
                     (has_barrier
-                        && self.block_uniform_expr(&match_stmt.subject)
+                        && self.block_uniform_expr_with_locals(
+                            &match_stmt.subject,
+                            &uniform_locals,
+                        )
                         && match_stmt.arms.iter().all(|arm| {
-                            arm.guard
-                                .as_ref()
-                                .map_or(true, |guard| self.block_uniform_expr(guard))
+                            self.block_uniform_match_arm_guard_with_locals(
+                                arm,
+                                &uniform_locals,
+                            )
                         }))
                     .then_some((index, FollowingCollective::Match(match_stmt)))
                 }
                 Stmt::Guard(guard_stmt) => {
                     let uniform = match &guard_stmt.cond {
-                        GuardCond::Expr(condition) => self.block_uniform_expr(condition),
+                        GuardCond::Expr(condition) => {
+                            self.block_uniform_expr_with_locals(condition, &uniform_locals)
+                        }
                         GuardCond::Clauses(clauses) => {
-                            self.block_uniform_guard_clauses(clauses)
+                            self.block_uniform_guard_clauses_with_locals(
+                                clauses,
+                                &uniform_locals,
+                            )
                         }
                     };
                     (uniform && guard_stmt.else_body.iter().any(is_simd_barrier_stmt))
@@ -820,7 +1005,25 @@ impl Emitter {
             self.emit_barrier_phases_seeded(k, body, indent, initial_replayed);
             return;
         };
-        let prefix = &body[..control_index];
+        let excluded_declaration = match &control {
+            FollowingCollective::While { declaration_index, .. } => Some(*declaration_index),
+            _ => None,
+        };
+        let prefix = body[..control_index]
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != excluded_declaration)
+            .map(|(_, stmt)| stmt.clone())
+            .collect::<Vec<_>>();
+        if let FollowingCollective::While { declaration, .. } = &control {
+            let uniform_name = &declaration.name;
+            let uniform_ty = declaration.ty.as_ref().map(ty)
+                .or_else(|| declaration.value.as_ref().and_then(|value| self.expr_type(value)))
+                .unwrap_or_else(|| "i32".into());
+            let initial = self.expr(declaration.value.as_ref().expect("collective while counter initializer was checked"));
+            self.line(indent, &format!("let mut {uniform_name}: {uniform_ty} = {initial};"));
+            self.value_types.insert(uniform_name.clone(), uniform_ty);
+        }
         let mut replayed = initial_replayed.to_vec();
         let mut replayed_names = replayed
             .iter()
@@ -829,13 +1032,16 @@ impl Emitter {
                 _ => None,
             })
             .collect::<std::collections::HashSet<_>>();
-        for local in self.replayable_barrier_locals(prefix) {
+        for local in self.replayable_barrier_locals(&prefix) {
             let Stmt::Let(declaration) = &local else { unreachable!() };
             if replayed_names.insert(declaration.name.clone()) {
                 replayed.push(local);
             }
         }
-        self.emit_barrier_phases_seeded(k, prefix, indent, initial_replayed);
+        for local in self.block_uniform_local_statements_with_locals(&prefix, &replayed_names) {
+            self.stmt(&local, indent);
+        }
+        self.emit_barrier_phases_seeded(k, &prefix, indent, initial_replayed);
         match control {
             FollowingCollective::For(for_stmt) => {
                 let iterable = self.expr(&for_stmt.iterable);
@@ -843,12 +1049,24 @@ impl Emitter {
                     indent,
                     &format!("for {} in {} {{", for_stmt.vars.join(", "), iterable),
                 );
-                self.emit_barrier_phases_seeded(
+                let inherited_loop_vars = for_stmt
+                    .vars
+                    .iter()
+                    .filter(|name| self.collective_uniform_locals.contains(*name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.collective_uniform_locals.extend(for_stmt.vars.iter().cloned());
+                self.emit_following_collective_controls(
                     k,
                     &for_stmt.body,
                     indent + 1,
                     &replayed,
                 );
+                for name in &for_stmt.vars {
+                    if !inherited_loop_vars.contains(name) {
+                        self.collective_uniform_locals.remove(name);
+                    }
+                }
                 self.line(indent, "}");
             }
             FollowingCollective::If(if_stmt) => {
@@ -861,12 +1079,12 @@ impl Emitter {
                             if branch_index == 0 { "" } else { "else " }
                         ),
                     );
-                    self.emit_barrier_phases_seeded(k, branch, indent + 1, &replayed);
+                    self.emit_following_collective_controls(k, branch, indent + 1, &replayed);
                     self.line(indent, "}");
                 }
                 if let Some(branch) = &if_stmt.else_body {
                     self.line(indent, "else {");
-                    self.emit_barrier_phases_seeded(k, branch, indent + 1, &replayed);
+                    self.emit_following_collective_controls(k, branch, indent + 1, &replayed);
                     self.line(indent, "}");
                 }
             }
@@ -881,7 +1099,14 @@ impl Emitter {
                 &replayed,
             ),
             FollowingCollective::Match(match_stmt) => {
+                let subject_is_string =
+                    self.expr_type(&match_stmt.subject).as_deref() == Some("String");
                 let subject = self.expr(&match_stmt.subject);
+                let subject = if subject_is_string {
+                    format!("({subject}).as_str()")
+                } else {
+                    subject
+                };
                 self.line(indent, &format!("match {subject} {{"));
                 for arm in &match_stmt.arms {
                     let patterns = arm
@@ -896,8 +1121,18 @@ impl Emitter {
                         .map(|guard| format!(" if {}", self.expr(guard)))
                         .unwrap_or_default();
                     self.line(indent + 1, &format!("{patterns}{guard} => {{"));
+                    let mut bound_names = std::collections::HashSet::new();
+                    for pattern in &arm.patterns {
+                        collect_simd_pattern_bind_names(pattern, &mut bound_names);
+                    }
+                    let inherited_bound_names = bound_names
+                        .iter()
+                        .filter(|name| self.collective_uniform_locals.contains(*name))
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>();
+                    self.collective_uniform_locals.extend(bound_names.iter().cloned());
                     match &arm.body {
-                        MatchBody::Block(branch) => self.emit_barrier_phases_seeded(
+                        MatchBody::Block(branch) => self.emit_following_collective_controls(
                             k,
                             branch,
                             indent + 2,
@@ -909,6 +1144,11 @@ impl Emitter {
                             indent + 2,
                             &replayed,
                         ),
+                    }
+                    for name in bound_names {
+                        if !inherited_bound_names.contains(&name) {
+                            self.collective_uniform_locals.remove(&name);
+                        }
                     }
                     self.line(indent + 1, "},");
                 }
@@ -939,6 +1179,19 @@ impl Emitter {
                     return;
                 }
             },
+            FollowingCollective::While { stmt, declaration, update, .. } => {
+                let condition = self.expr(&stmt.condition);
+                self.line(indent, &format!("while {condition} {{"));
+                self.emit_barrier_phases_seeded(
+                    k,
+                    &stmt.body[..stmt.body.len() - 1],
+                    indent + 1,
+                    &replayed,
+                );
+                let update = self.expr(update);
+                self.line(indent + 1, &format!("{} = {update};", declaration.name));
+                self.line(indent, "}");
+            }
         }
         self.emit_following_collective_controls(
             k,
@@ -2096,7 +2349,18 @@ impl Emitter {
     }
     fn warp_replayable(&self, expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Int(_)
+            | ExprKind::UInt64(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Nil => true,
+            ExprKind::StringInterp(segments) => segments.iter().all(|segment| match segment {
+                StringSegment::Lit(_) => true,
+                StringSegment::Expr(value) | StringSegment::FormattedExpr(value, _) => {
+                    self.warp_replayable(value)
+                }
+            }),
             ExprKind::Var(name) => {
                 matches!(name.as_str(), "thread" | "block" | "block_dim" | "gpu")
                     || self.fields.contains(name)
@@ -2105,7 +2369,7 @@ impl Emitter {
                     || self.replayed_assignments.contains_key(name)
             }
             ExprKind::DotIdent(name) => {
-                matches!(name.as_str(), "thread" | "block" | "block_dim")
+                matches!(name.as_str(), "thread" | "block" | "block_dim" | "grid_dim")
             }
             ExprKind::Field(object, _) | ExprKind::UnaryOp(_, object) | ExprKind::Cast(object, _) => {
                 self.warp_replayable(object)
@@ -2133,14 +2397,25 @@ impl Emitter {
         locals: &std::collections::HashSet<String>,
     ) -> bool {
         match &expr.kind {
-            ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Int(_)
+            | ExprKind::UInt64(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Nil => true,
+            ExprKind::StringInterp(segments) => segments.iter().all(|segment| match segment {
+                StringSegment::Lit(_) => true,
+                StringSegment::Expr(value) | StringSegment::FormattedExpr(value, _) => {
+                    self.barrier_replayable(value, locals)
+                }
+            }),
             ExprKind::Var(name) => {
                 matches!(name.as_str(), "thread" | "block" | "block_dim" | "gpu")
                     || self.global_consts.contains_key(name)
                     || locals.contains(name)
             }
             ExprKind::DotIdent(name) => {
-                matches!(name.as_str(), "thread" | "block" | "block_dim")
+                matches!(name.as_str(), "thread" | "block" | "block_dim" | "grid_dim")
             }
             ExprKind::Field(object, _) | ExprKind::UnaryOp(_, object) | ExprKind::Cast(object, _) => {
                 self.barrier_replayable(object, locals)
@@ -2165,8 +2440,62 @@ impl Emitter {
     fn block_uniform_expr(&self, expr: &Expr) -> bool {
         self.block_uniform_expr_with_locals(expr, &std::collections::HashSet::new())
     }
-    fn block_uniform_guard_clauses(&self, clauses: &[CondClause]) -> bool {
-        let mut locals = std::collections::HashSet::new();
+    fn block_uniform_locals(&self, body: &[Stmt]) -> std::collections::HashSet<String> {
+        self.block_uniform_local_statements(body)
+            .into_iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Let(local) => Some(local.name),
+                _ => None,
+            })
+            .collect()
+    }
+    fn block_uniform_local_statements(&self, body: &[Stmt]) -> Vec<Stmt> {
+        self.block_uniform_local_statements_with_locals(
+            body,
+            &std::collections::HashSet::new(),
+        )
+    }
+    fn block_uniform_local_statements_with_locals(
+        &self,
+        body: &[Stmt],
+        initial_locals: &std::collections::HashSet<String>,
+    ) -> Vec<Stmt> {
+        let mut locals = initial_locals.clone();
+        let mut declarations = Vec::new();
+        for stmt in body {
+            let Stmt::Let(local) = stmt else { continue };
+            if matches!(local.binding, BindingKind::Let)
+                && local
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| self.block_uniform_expr_with_locals(value, &locals))
+            {
+                locals.insert(local.name.clone());
+                declarations.push(stmt.clone());
+            }
+        }
+        declarations
+    }
+    fn block_uniform_match_arm_guard_with_locals(
+        &self,
+        arm: &MatchArm,
+        initial_locals: &std::collections::HashSet<String>,
+    ) -> bool {
+        let Some(guard) = &arm.guard else {
+            return true;
+        };
+        let mut locals = initial_locals.clone();
+        for pattern in &arm.patterns {
+            collect_simd_pattern_bind_names(pattern, &mut locals);
+        }
+        self.block_uniform_expr_with_locals(guard, &locals)
+    }
+    fn block_uniform_guard_clauses_with_locals(
+        &self,
+        clauses: &[CondClause],
+        initial_locals: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut locals = initial_locals.clone();
         for clause in clauses {
             match clause {
                 CondClause::Let(name, value) => {
@@ -2199,14 +2528,25 @@ impl Emitter {
             ExprKind::Int(_)
             | ExprKind::UInt64(_)
             | ExprKind::Float(_)
-            | ExprKind::Bool(_) => true,
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Nil => true,
+            ExprKind::StringInterp(segments) => segments.iter().all(|segment| match segment {
+                StringSegment::Lit(_) => true,
+                StringSegment::Expr(value) | StringSegment::FormattedExpr(value, _) => {
+                    self.block_uniform_expr_with_locals(value, locals)
+                }
+            }),
             ExprKind::Var(name) => {
                 matches!(name.as_str(), "block" | "block_dim" | "grid_dim")
                     || self.global_consts.contains_key(name)
                     || self.fields.contains(name)
+                    || self.collective_uniform_locals.contains(name)
                     || locals.contains(name)
             }
-            ExprKind::DotIdent(name) => matches!(name.as_str(), "block" | "block_dim"),
+            ExprKind::DotIdent(name) => {
+                matches!(name.as_str(), "block" | "block_dim" | "grid_dim")
+            }
             ExprKind::Field(object, _)
                 if matches!(
                     &object.kind,
@@ -2298,7 +2638,7 @@ impl Emitter {
         replayed: &[Stmt],
     ) {
         let Some(clause) = clauses.get(clause_index) else {
-            self.emit_barrier_phases_seeded(k, then_body, indent, replayed);
+            self.emit_following_collective_controls(k, then_body, indent, replayed);
             return;
         };
         let condition = match clause {
@@ -2313,6 +2653,22 @@ impl Emitter {
             CondClause::Expr(value) => self.expr(value),
         };
         self.line(indent, &format!("if {condition} {{"));
+        let mut bound_names = std::collections::HashSet::new();
+        match clause {
+            CondClause::Let(name, _) => {
+                bound_names.insert(name.clone());
+            }
+            CondClause::LetPat(pattern, _) => {
+                collect_simd_pattern_bind_names(pattern, &mut bound_names);
+            }
+            CondClause::Expr(_) => {}
+        }
+        let inherited_bound_names = bound_names
+            .iter()
+            .filter(|name| self.collective_uniform_locals.contains(*name))
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        self.collective_uniform_locals.extend(bound_names.iter().cloned());
         self.emit_collective_if_let_clauses(
             k,
             clauses,
@@ -2323,6 +2679,11 @@ impl Emitter {
             indent + 1,
             replayed,
         );
+        for name in bound_names {
+            if !inherited_bound_names.contains(&name) {
+                self.collective_uniform_locals.remove(&name);
+            }
+        }
         if !remaining.is_empty() || else_body.is_some() {
             self.line(indent, "} else {");
             self.emit_collective_if_let_fallback(
@@ -2355,7 +2716,7 @@ impl Emitter {
                 replayed,
             );
         } else if let Some(else_body) = else_body {
-            self.emit_barrier_phases_seeded(k, else_body, indent, replayed);
+            self.emit_following_collective_controls(k, else_body, indent, replayed);
         }
     }
     fn expr_body_as(&mut self, body: &[Stmt], expected: Option<&str>) -> String {
