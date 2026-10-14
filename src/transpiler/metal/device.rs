@@ -555,7 +555,7 @@ impl DeviceEmitter {
         }
         self.line("if (m == 1) {");
         self.indent += 1;
-        self.emit_q8_rows_decode(has_bias);
+        self.emit_q8_rows_decode(has_bias, !kernel_name.contains("HalfPrefill"));
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -698,14 +698,88 @@ impl DeviceEmitter {
     /// path keeps four streams to avoid extra live state on small projections.
     /// Only the first lane in a partition reads the half scale; a partition-local
     /// shuffle broadcasts it before `simd_sum` combines all four partitions.
-    fn emit_q8_rows_decode(&mut self, has_bias: bool) {
-        self.line("if (n >= 4096 || k >= 4096) {");
+    fn emit_q8_rows_decode(&mut self, has_bias: bool, split_k: bool) {
+        if split_k {
+            self.line("if (n <= 256 && k <= 2048) {");
+            self.indent += 1;
+            self.emit_q8_split_k_decode(has_bias);
+            self.indent -= 1;
+            self.line("} else if (n >= 4096 || k >= 4096) {");
+        } else {
+            self.line("if (n >= 4096 || k >= 4096) {");
+        }
         self.indent += 1;
         self.emit_q8_rows_decode_variant(has_bias, true);
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
         self.emit_q8_rows_decode_variant(has_bias, false);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Latency-oriented Q8_0 matrix-vector schedule for narrow projections.
+    /// Four SIMD groups split the packed input blocks and
+    /// cooperate on two output rows. This deliberately trades the four-row
+    /// activation reuse of the bandwidth schedule for sixteen times as many
+    /// threadgroups at a fixed output width. It mirrors llama.cpp's structural
+    /// choice for Q8_0 decode while retaining packed four-byte loads.
+    fn emit_q8_split_k_decode(&mut self, has_bias: bool) {
+        self.line("constexpr uint bp_rows = 2;");
+        self.line("constexpr uint bp_simdgroups = 4;");
+        self.line("threadgroup float bp_partial[bp_rows * 32];");
+        self.line("const uint bp_lane = __simd_lane_id;");
+        self.line("const uint bp_warp = __thread_pos.x / 32;");
+        self.line("const ulong bp_row0 = (ulong)__block_pos.x * bp_rows;");
+        self.line("const ulong bp_nb = (ulong)k / 32;");
+        self.line("const uint bp_ix = bp_lane / 4;");
+        self.line("const uint bp_it = bp_lane % 4;");
+        self.line("float bp_sumf[bp_rows] = { 0.0f, 0.0f };");
+        self.line("for (ulong bp_ib = (ulong)bp_warp * 8 + bp_ix; bp_ib < bp_nb; bp_ib += bp_simdgroups * 8) {");
+        self.indent += 1;
+        self.line("device const float* bp_y = a + bp_ib * 32 + bp_it * 8;");
+        self.line("const float4 bp_y40 = *(device const float4*)bp_y;");
+        self.line("const float4 bp_y41 = *(device const float4*)(bp_y + 4);");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("const ulong bp_row = min(bp_row0 + bp_r, (ulong)n - 1);");
+        self.line("device const uchar* bp_blk = b + (bp_row * bp_nb + bp_ib) * 34;");
+        self.line("const float bp_scale = float(as_type<half>(*(device const ushort*)bp_blk));");
+        self.line("const packed_char4 bp_q40 = *(device const packed_char4*)(bp_blk + 2 + bp_it * 8);");
+        self.line("const packed_char4 bp_q41 = *(device const packed_char4*)(bp_blk + 6 + bp_it * 8);");
+        self.line("bp_sumf[bp_r] += bp_scale * (dot(float4(bp_q40), bp_y40) + dot(float4(bp_q41), bp_y41));");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) bp_sumf[bp_r] = simd_sum(bp_sumf[bp_r]);");
+        self.line("for (uint bp_i = __thread_pos.x; bp_i < bp_rows * 32; bp_i += __block_dim.x) bp_partial[bp_i] = 0.0f;");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("if (bp_lane == 0) {");
+        self.indent += 1;
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) bp_partial[bp_r * 32 + bp_warp] = bp_sumf[bp_r];");
+        self.indent -= 1;
+        self.line("}");
+        self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+        self.line("if (bp_warp == 0) {");
+        self.indent += 1;
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("const float bp_total = simd_sum(bp_partial[bp_r * 32 + bp_lane]);");
+        self.line("if (bp_lane == 0 && bp_row0 + bp_r < (ulong)n) {");
+        self.indent += 1;
+        if has_bias {
+            self.line("c[bp_row0 + bp_r] = bp_total + bias[bp_row0 + bp_r];");
+        } else {
+            self.line("c[bp_row0 + bp_r] = bp_total;");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
     }
@@ -1144,7 +1218,7 @@ impl DeviceEmitter {
         let kf = bk / 8;
         let fragments = fm * fn_;
         let out_cells = bm * 64;
-        self.line("threadgroup uint bp_scratch[8192];");
+        self.line(&format!("threadgroup uint bp_scratch[{}];", if half { 8192 } else { 4096 }));
         self.line(&format!("threadgroup {activation}* bp_a_tile = (threadgroup {activation}*)bp_scratch;"));
         self.line(&format!("threadgroup {weight}* bp_b_tile = bp_a_tile + {};", bm * bk));
         self.line("const uint bp_thread = __thread_pos.x;");

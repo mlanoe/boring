@@ -477,7 +477,12 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
     assert!(msl.contains("if (m == 1)"), "{msl}");
-    assert!(msl.contains("if (n >= 4096 || k >= 4096)"), "{msl}");
+    assert!(msl.contains("if (n <= 256 && k <= 2048)"), "{msl}");
+    assert!(msl.contains("constexpr uint bp_simdgroups = 4"), "{msl}");
+    assert!(msl.contains("threadgroup float bp_partial[bp_rows * 32]"), "{msl}");
+    assert!(msl.contains("bp_ib += bp_simdgroups * 8"), "{msl}");
+    assert!(msl.contains("bp_partial[bp_r * 32 + bp_warp] = bp_sumf[bp_r]"), "{msl}");
+    assert!(msl.contains("} else if (n >= 4096 || k >= 4096)"), "{msl}");
     assert!(msl.contains("constexpr uint bp_rows = 4"), "{msl}");
     assert!(msl.contains("#pragma clang loop unroll(full)"), "{msl}");
     assert!(msl.contains("for (; bp_ib + 4 < bp_nb; bp_ib += 8)"), "{msl}");
@@ -487,7 +492,7 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     assert!(msl.contains("const packed_char4 bp_q4"), "{msl}");
     assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{msl}");
     assert!(msl.contains("bp_scale = simd_shuffle(bp_scale, bp_slot * 8)"), "{msl}");
-    assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
+    assert!(msl.contains("threadgroup uint bp_scratch[4096]"), "{msl}");
     assert!(msl.contains("const uint bp_sg_m = bp_warp / 4, bp_sg_n = bp_warp % 4"), "{msl}");
     assert!(msl.contains("const packed_char4 bp_q0"), "{msl}");
     assert!(msl.contains("float4(*(device const float4*)bp_src_a)"), "{msl}");
@@ -498,6 +503,8 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     let bias = msl[barrier..].find("+ bias[bp_output_col]").unwrap() + barrier;
     assert!(store < barrier && barrier < bias, "bias must be added only after the complete output tile is visible:\n{msl}");
     assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("__boring_launch((128 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("+ 1") && host.contains("/ 2"), "{host}");
     assert!(host.contains("+ 31") && host.contains("/ 32"), "{host}");
     assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
 }
@@ -563,6 +570,61 @@ fn q8_four_block_partition_math_matches_scalar_for_signed_values_and_scales() {
 }
 
 #[test]
+fn q8_split_k_partition_math_matches_scalar_for_signed_values_and_scales() {
+    // Mirrors the latency schedule: four SIMD groups, eight Q8 blocks per
+    // group and iteration, two output rows.  K=1184 gives 37 blocks so the
+    // second split-K iteration is deliberately partial.
+    const N: usize = 3;
+    const K: usize = 1184;
+    const ROWS: usize = 2;
+    const SIMDGROUPS: usize = 4;
+    const BLOCKS_PER_SIMDGROUP: usize = 8;
+    let x: Vec<f32> = (0..K)
+        .map(|i| ((i * 13 % 37) as f32 - 18.0) / 32.0)
+        .collect();
+    let q: Vec<i8> = (0..N * K)
+        .map(|i| ((i * 17 + 131) % 256) as u8 as i8)
+        .collect();
+    let scales: Vec<f32> = (0..N * K / 32)
+        .map(|i| if i % 2 == 0 { 0.0625 } else { -0.03125 })
+        .collect();
+
+    for row0 in (0..N).step_by(ROWS) {
+        for row_offset in 0..ROWS {
+            let row = (row0 + row_offset).min(N - 1);
+            let mut partial = [0.0f32; SIMDGROUPS];
+            for simdgroup in 0..SIMDGROUPS {
+                for ix in 0..BLOCKS_PER_SIMDGROUP {
+                    let mut block = simdgroup * BLOCKS_PER_SIMDGROUP + ix;
+                    while block < K / 32 {
+                        let scale = scales[row * (K / 32) + block];
+                        for i in 0..32 {
+                            partial[simdgroup] +=
+                                scale * q[row * K + block * 32 + i] as f32 * x[block * 32 + i];
+                        }
+                        block += SIMDGROUPS * BLOCKS_PER_SIMDGROUP;
+                    }
+                }
+            }
+            let split_k: f32 = partial.iter().sum();
+            let scalar: f32 = (0..K / 32)
+                .map(|block| {
+                    let scale = scales[row * (K / 32) + block];
+                    (0..32)
+                        .map(|i| scale * q[row * K + block * 32 + i] as f32 * x[block * 32 + i])
+                        .sum::<f32>()
+                })
+                .sum();
+            let tolerance = 1e-4 * scalar.abs().max(1.0);
+            assert!(
+                (split_k - scalar).abs() <= tolerance,
+                "row {row}: split-k {split_k}, scalar {scalar}"
+            );
+        }
+    }
+}
+
+#[test]
 fn dynamic_quantized_prefill_half_precision_is_explicit_opt_in() {
     let source = r#"
 req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
@@ -576,6 +638,8 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     );
     assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill"), "{msl}");
     assert!(msl.contains("threadgroup half* bp_a_tile"), "{msl}");
+    assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
+    assert!(!msl.contains("constexpr uint bp_simdgroups = 4"), "{msl}");
     assert!(msl.contains("bp_a_tile + 8192"), "{msl}");
     assert!(msl.contains("bp_base += 64"), "{msl}");
     assert!(host.contains("+ 127") && host.contains("/ 128"), "{host}");
@@ -602,7 +666,7 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
             assert!(msl.contains("const uint2 bp_raw"), "{msl}");
             assert!(msl.contains("bp_lane8 * 8"), "{msl}");
         }
-        assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
+        assert!(msl.contains("threadgroup uint bp_scratch[4096]"), "{msl}");
         assert!(msl.contains("for (uint bp_base = 0; bp_base < (uint)k; bp_base += 32)"), "{msl}");
         assert!(msl.contains("float4(*(device const float4*)bp_src_a)"), "{msl}");
         assert!(msl.contains("ulong2(0, 0), true"), "{msl}");

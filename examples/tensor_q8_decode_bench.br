@@ -94,6 +94,7 @@ def main() throws:
 
     benchmark(896, 896, calls)
     benchmark(128, 896, calls)
+    benchmark(1152, 896, calls)
     benchmark(4864, 896, calls)
     benchmark(896, 4864, calls)
     benchmark(151936, 896, calls)

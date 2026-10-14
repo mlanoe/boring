@@ -875,7 +875,11 @@ fn parse_dynamic_replacement_stmts(
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed {
         let rows_per_block = 8 * Q8_ROWS_PER_SIMDGROUP;
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
+        if call.format == Some("q8_0") && tensor_config.prefill_precision.as_deref() != Some("half") {
+            format!("    if {m} == 1:\n        if {n} <= 256 and {k} <= 2048:\n            kernel:\n                {instance}(block = 128, grid = ({n} + 1) / 2)\n        else:\n            kernel:\n                {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, k = call.k, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
+        } else {
+            format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
+        }
     } else if portable_tiled_quantized {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 15) / 16))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else {

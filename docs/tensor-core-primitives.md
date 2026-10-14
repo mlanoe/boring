@@ -282,9 +282,15 @@ four 32-value blocks concurrently. A lane vector-loads four signed weights and
 one aligned `float4` activation slice; that activation is reused across all four
 rows, and one scale load per partition is broadcast before a final `simd_sum`.
 One 256-thread threadgroup therefore covers 32 rows. Explicit `scalar` keeps the
-one-thread-per-row accumulation-order reference. The resident benchmark
-`examples/tensor_q8_decode_bench.br` covers the five Qwen2.5-0.5B projection
-shapes and uses signed values plus positive and negative scales.
+one-thread-per-row accumulation-order reference. For narrow projections
+(`n <= 256`, `k <= 2048`) with float32 native prefill, a latency schedule instead
+assigns two rows to a 128-thread threadgroup: four SIMD groups split the Q8
+blocks along `k`, write their partial sums to threadgroup memory and reduce them
+before the final store. The half-prefill kernel retains the four-row decode path
+because its prefill tile already consumes Metal's complete 32 KiB threadgroup
+allocation. The resident benchmark `examples/tensor_q8_decode_bench.br` covers
+the five Qwen2.5-0.5B projection shapes plus its joined 1,152x896 QKV projection,
+and uses signed values plus positive and negative scales.
 
 Q4_K single-row decode (`auto`) uses a dedicated multi-row schedule too: each SIMD
 group computes two output rows, four 256-value super-blocks at a time with eight lanes per
