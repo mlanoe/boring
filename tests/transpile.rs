@@ -1442,3 +1442,7 @@ transpile_test!(string_methods_after_index);
 transpile_test!(cast_float_lit_to_int);
 transpile_test!(zero_arg_ctor_defaults_with_optional);
 transpile_test!(unwrap_or_struct_local_by_value);
+
+// Same case through `boring build`: `Rt` holding `M?` (which holds a `Node?` trait object) must
+// not derive Debug/Clone/PartialEq (E0277/E0369 before `type_holds_dyn` saw through `TypeParam`).
+transpile_test!(single_letter_struct_holds_dyn);

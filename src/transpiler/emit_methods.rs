@@ -4950,6 +4950,10 @@ impl Transpiler {
                 }
                 self.struct_holds_dyn(n, debug_only, visiting)
             }
+            // A one-uppercase-letter struct name (`struct M`) parses its uses as `TypeParam`.
+            Type::TypeParam(n) if self.struct_fields.contains_key(n.as_str()) => {
+                self.struct_holds_dyn(n, debug_only, visiting)
+            }
             _ => false,
         }
     }
@@ -4971,7 +4975,7 @@ impl Transpiler {
                 other => self.type_holds_shared_dyn(other, debug_only, visiting),
             },
             Type::Qualified(i, OwnerQual::Owned | OwnerQual::Inline) => self.type_holds_shared_dyn(i, debug_only, visiting),
-            Type::Named(n) if !self.trait_method_names.contains_key(n.as_str()) => {
+            Type::Named(n) | Type::TypeParam(n) if !self.trait_method_names.contains_key(n.as_str()) => {
                 if visiting.iter().any(|v| v == n) { return false; }
                 let Some(fields) = self.struct_fields.get(n.as_str()) else { return false };
                 visiting.push(n.clone());
@@ -5025,7 +5029,9 @@ impl Transpiler {
                 | OwnerQual::Guard | OwnerQual::GuardTask) => true,
             // `Box<T>` is `Clone` exactly when `T` is.
             Type::Qualified(inner, OwnerQual::Owned | OwnerQual::Inline) => self.type_is_known_clone(inner),
-            Type::Named(n) => {
+            Type::Named(n) | Type::TypeParam(n)
+                if !matches!(ty, Type::TypeParam(_))
+                    || self.struct_fields.contains_key(n.as_str()) || self.all_enum_types.contains(n.as_str()) => {
                 if self.trait_method_names.contains_key(n.as_str()) { return false; }
                 if Self::is_copy_type(ty) || n == "string" { return true; }
                 (self.struct_derives_clone.contains(n.as_str()) && !self.struct_holds_dyn(n, false, &mut vec![])) || self.all_enum_types.contains(n.as_str())

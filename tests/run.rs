@@ -839,3 +839,7 @@ interp_test!(field_mut_content_mutation);
 interp_test!(field_mut_param_content_mutation);
 interp_test!(cast_float_lit_to_int);
 interp_test!(zero_arg_ctor_defaults_with_optional);
+
+// A single-uppercase-letter struct name (`struct M`) parses its uses as `Type::TypeParam`;
+// see tests/cases/single_letter_struct_holds_dyn.br.
+interp_test!(single_letter_struct_holds_dyn);
