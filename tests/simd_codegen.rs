@@ -650,6 +650,74 @@ print "{reduce.output[0]} {reduce.output[1]} {reduce.output[2]} {reduce.output[3
 }
 
 #[test]
+fn collective_while_with_nested_if_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_while_nested_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_while_nested_if.br");
+    fs::write(
+        &input,
+        r#"
+kernel NestedWhile:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        var int stride = 2
+        tile[i] = i
+        while stride > 0:
+            if stride > 0:
+                tile[i] = tile[i] + stride
+                sync
+            stride = stride - 1
+        output[i] = tile[i]
+mut nested = NestedWhile()
+kernel:
+    nested(block = 4)
+print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_while_nested_if_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "3 4 5 6");
+}
+
+#[test]
+fn collective_while_with_nested_divergent_if_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_while_nested_divergent_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_while_nested_divergent_if.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        var int stride = 2\n        while stride > 0:\n            if .thread.x < stride:\n                sync\n            stride = stride - 1\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
 fn block_uniform_if_with_sync_runs_in_collective_simd_phases() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_if");
     let _ = fs::remove_dir_all(&root);

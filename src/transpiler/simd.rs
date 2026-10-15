@@ -468,7 +468,9 @@ impl Emitter {
                 {
                     return None;
                 }
-                if !while_stmt.body.iter().any(is_simd_barrier_stmt) {
+                if !while_stmt.body.iter().any(|stmt| {
+                    is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                }) {
                     return None;
                 }
                 let Stmt::Expr(update) = while_stmt.body.last()? else { return None };
@@ -670,12 +672,18 @@ impl Emitter {
                     self.emit_barrier_phases_seeded(k, &prefix, 3, &[]);
                     let condition = self.expr(&while_stmt.condition);
                     self.line(3, &format!("while {condition} {{"));
-                    self.emit_barrier_phases_seeded(
+                    let inserted_uniform = self
+                        .collective_uniform_locals
+                        .insert(uniform_name.clone());
+                    self.emit_following_collective_controls(
                         k,
                         &while_stmt.body[..while_stmt.body.len() - 1],
                         4,
                         &replayed,
                     );
+                    if inserted_uniform {
+                        self.collective_uniform_locals.remove(uniform_name);
+                    }
                     let update = self.expr(update);
                     self.line(4, &format!("{uniform_name} = {update};"));
                     self.line(3, "}");
@@ -856,7 +864,9 @@ impl Emitter {
                 .collect::<Vec<_>>();
             inherited_uniform.extend(prefix_uniform);
             if let Stmt::While(while_stmt) = stmt {
-                if !while_stmt.body.iter().any(is_simd_barrier_stmt) {
+                if !while_stmt.body.iter().any(|stmt| {
+                    is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                }) {
                     return None;
                 }
                 let Stmt::Expr(update) = while_stmt.body.last()? else { return None };
@@ -1186,12 +1196,18 @@ impl Emitter {
             FollowingCollective::While { stmt, declaration, update, .. } => {
                 let condition = self.expr(&stmt.condition);
                 self.line(indent, &format!("while {condition} {{"));
-                self.emit_barrier_phases_seeded(
+                let inserted_uniform = self
+                    .collective_uniform_locals
+                    .insert(declaration.name.clone());
+                self.emit_following_collective_controls(
                     k,
                     &stmt.body[..stmt.body.len() - 1],
                     indent + 1,
                     &replayed,
                 );
+                if inserted_uniform {
+                    self.collective_uniform_locals.remove(&declaration.name);
+                }
                 let update = self.expr(update);
                 self.line(indent + 1, &format!("{} = {update};", declaration.name));
                 self.line(indent, "}");
