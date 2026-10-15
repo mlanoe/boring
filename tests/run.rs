@@ -135,6 +135,8 @@ macro_rules! error_test_exact {
 // ── Interpreter tests ────────────────────────────────────────────────────────
 
 interp_test!(basics);
+interp_test!(move_struct_actor_alias_ok);
+interp_test!(struct_store_by_value);
 interp_test!(guard_let_mut_field_escape);
 interp_test!(if_let_mut_field_escape);
 interp_test!(strings);
@@ -844,3 +846,9 @@ interp_test!(zero_arg_ctor_defaults_with_optional);
 // A single-uppercase-letter struct name (`struct M`) parses its uses as `Type::TypeParam`;
 // see tests/cases/single_letter_struct_holds_dyn.br.
 interp_test!(single_letter_struct_holds_dyn);
+
+interp_test!(parse_float_if_let_dict_index);
+interp_test!(self_field_collection_return_by_value);
+interp_test!(trait_method_casing_unknown_receiver);
+interp_test!(stored_closure_captures_self_and_loop_item);
+interp_test!(view_callbacks_capture_state_handles);

@@ -74,10 +74,10 @@ impl Interpreter {
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_ty = s.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
+                    matches!(self.resolve_type(ty).without_mut(), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
                 let is_actor_ty = s.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                    matches!(self.resolve_type(ty).without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
                 }).unwrap_or(false);
                 // Propagate shared/actor from source when no type annotation.
                 let src_var_name = if let ExprKind::Var(src) = &s_val.kind { Some(src.clone()) } else { None };
@@ -144,7 +144,7 @@ impl Interpreter {
                 // Borrow annotations (`T&`, `var T& ref = p`) alias rather than move.
                 // 'shared/'actor/'guard bindings are reference-counted — assignment is an alias.
                 let is_borrow = s.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
+                    matches!(self.resolve_type(ty).without_mut(), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
                 }).unwrap_or(false);
                 let src_is_rc_like = src_var_name.as_ref().map(|s| {
                     env.borrow().is_shared(s.as_str()) || env.borrow().is_actor(s.as_str())
@@ -296,6 +296,7 @@ impl Interpreter {
                                 } else { None };
 
                             // Evaluate args, then call the method with the already-evaluated receiver
+                            self.copy_var_args = matches!(method.as_str(), "push" | "append" | "insert" | "add" | "set" | "put");
                             let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                             let mut out_self: Option<Value> = None;
                             let result = self.call_method(obj_val, method, arg_vals, line, &mut out_self)?;

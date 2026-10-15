@@ -1,0 +1,41 @@
+# boring-ui callbacks in transpiled output are 'static: they capture the mounted state as shared
+# slot handles and a snapshot of the view's inputs, including from inside a keyed `for`
+# (`boring build` used to fail with "lifetime may not live long enough" / moved `item`).
+# Only compiled here — a transpiled `body` is not runnable without the runtime.
+use boring.ui.*
+
+use Command as def void(string)
+
+pub struct Item:
+    pub int id
+    pub string title
+
+pub view Entry:
+    Item item
+    Command onCommand
+    body():
+        Button(label = item.title, onActivate = ():
+            onCommand("tap"))
+
+pub view Board:
+    state [Item] items = [Item(id = 1, title = "a")]
+    state int selection = -1
+    state bool adding = false
+
+    def select(int id):
+        selection = id
+
+    def command(string name, int id):
+        if name == "tap":
+            self.select(id)
+
+    body():
+        Column(alignment = .Leading, spacing = 4.0):
+            Button(label = "Add", onActivate = ():
+                adding = true)
+            for item in items with item.id:
+                Entry(item = item, onCommand = (name):
+                    self.command(name, item.id))
+
+def main():
+    print "ok"

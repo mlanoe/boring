@@ -254,6 +254,29 @@ impl Transpiler {
                     }
                 }
             }
+        } else if matches!(&expr.kind, crate::ast::ExprKind::Index(..)) {
+            // `if let s = dict[key]:` / `if let s = arr[i]:` — an index into a declared
+            // collection yields its value type `V` (or `V?` when that is itself optional,
+            // in which case the binding unwraps one more level). Without recording it, a
+            // string binding misses string-method dispatch (`s.parseFloat()` fell through
+            // to the generic `s.parse_float()`, E0599 on `Arc<str>`).
+            if let Some(ty) = self.resolve_expr_declared_type(expr) {
+                let inner = match ty.without_mut() {
+                    crate::ast::Type::Optional(i) => (**i).clone(),
+                    other => other.clone(),
+                };
+                self.var_types.insert(name.to_string(), inner.clone());
+                if Self::is_string_type(&inner) {
+                    self.string_vars.insert(name.to_string());
+                } else {
+                    self.string_vars.remove(name);
+                }
+                if let crate::ast::Type::Named(n) = &inner {
+                    if self.is_known_user_type(n.as_str()) {
+                        self.var_struct_types.insert(name.to_string(), n.clone());
+                    }
+                }
+            }
         } else if let crate::ast::ExprKind::Call(callee, _) = &expr.kind {
             // `if let b = make():` where `make()` returns `T?` — mirror the
             // `Var`/`Field` branch above using the callee's declared return type

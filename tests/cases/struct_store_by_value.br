@@ -1,0 +1,38 @@
+# A bare struct variable stored into a dict / array / field / constructor argument is stored
+# BY VALUE (book: "Move semantics"), matching `boring build`: later mutation of the source
+# must not show through the stored instance. 'actor bindings stay aliases.
+struct M:
+    var [int] xs = []
+    def add(int x):
+        xs.push(x)
+
+struct W:
+    var mut M m
+
+def main():
+    mut a = M()
+    mut d = {=}
+    d[1] = a
+    a.add(1)
+    print d[1].xs.length
+
+    mut arr = []
+    arr.push(a)
+    a.add(2)
+    print arr[0].xs.length
+
+    mut w = W(m = M())
+    w.m = a
+    a.add(3)
+    print w.m.xs.length
+
+    let w2 = W(m = a)
+    a.add(4)
+    print w2.m.xs.length
+    print a.xs.length
+
+    mut M'actor s = M()
+    mut ds = {=}
+    ds[1] = s
+    s.add(1)
+    print ds[1].xs.length

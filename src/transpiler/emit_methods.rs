@@ -208,6 +208,11 @@ impl Transpiler {
                 let else_ty = tail_type(if_stmt.else_body.as_deref()?)?;
                 (else_ty == first).then_some(first)
             }
+            // `<T?-typed expr> else default` unwraps the optional to its inner `T`.
+            ExprKind::Else(inner, _) => match self.resolve_expr_type(inner)? {
+                Type::Optional(t) => Some(*t),
+                _ => None,
+            },
             ExprKind::Var(v) if v == "self" => self.self_type.clone().map(Type::Named),
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))
@@ -215,6 +220,12 @@ impl Transpiler {
                 .cloned()
                 .or_else(|| self.var_struct_types.get(v.as_str()).cloned().map(Type::Named))
                 .or_else(|| self.bare_self_field_type(v)),
+            // `slot.value` of a `Slot<T>'actor` (a lowered view's `state`/`bind`) is the `T`.
+            ExprKind::Field(inner, field) if field == "value" && matches!(
+                self.resolve_expr_type(inner).as_ref().map(slot_value_type), Some(Some(_))) =>
+            {
+                slot_value_type(&self.resolve_expr_type(inner)?)
+            }
             ExprKind::Field(inner, field) => {
                 let owner = self.resolve_expr_struct_type(inner)?;
                 self.struct_fields.get(owner.as_str())?
@@ -325,6 +336,16 @@ impl Transpiler {
         self.struct_fields.get(struct_name.as_str())?
             .iter().find(|(f, _)| f == name)
             .map(|(_, ty)| ty.clone())
+    }
+
+    /// Is bare `name` an implicit-self `[T]`/`{K=V}`/`{T}` field (behind `&self`, so it can't
+    /// be moved out) whose type is `Clone`? Not for a field holding a plain trait object
+    /// (`[Trait]` is `Vec<Box<dyn Trait>>`, not `Clone`): that is read in place.
+    pub(crate) fn bare_self_field_collection_needs_clone(&self, name: &str) -> bool {
+        self.bare_self_field_type(name).is_some_and(|t| {
+            matches!(t.without_mut(), Type::Array(_) | Type::Dict(..) | Type::Set(_))
+                && !self.type_holds_dyn(&t, false, &mut vec![])
+        })
     }
 
     /// The declared type of `expr` when it names one of the struct's own fields under a
@@ -525,7 +546,7 @@ impl Transpiler {
                 // spurious extra `Some(...)` wrapped around the already-`Option<T>` `Vec::
                 // pop()` call, because this function said "not proven Optional" for a plain
                 // array receiver.
-                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find"];
+                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find", "parseInt", "parseFloat", "parseFloat32"];
                 if ALWAYS_OPTION.contains(&method.as_str()) { return true; }
                 // `get(k)` (1-arg dict form, try_emit_dict_method) is the same story as the
                 // names above -- always Option<T>. The 2-arg `get(k, default)` form unwraps
@@ -3926,7 +3947,16 @@ impl Transpiler {
             ("insert".to_string(), None)
         } else {
             let (m, w) = map_method(method, args.len(), self.want_raw_option_pop.get());
-            (m, w)
+            // A receiver whose type could not be resolved (`let node = found else (...)`, a
+            // closure param, ...) must not lose the casing of a method some `trait` declares:
+            // the generic camel→snake fallback would call a method that doesn't exist.
+            if w.is_none() && m == camel_to_snake(method) && m != method
+                && self.trait_method_names.values().any(|ms| ms.contains(method))
+            {
+                (method.to_string(), None)
+            } else {
+                (m, w)
+            }
         };
         // A hand-verified (or `boring.toml [external_fns]`-declared) argument-borrow entry
         // for this exact (receiver type, method) pair — see `KNOWN_EXTERNAL_FN_BORROWS`'s doc
@@ -6486,4 +6516,13 @@ fn param_ty_is_copy(ty: Option<&Type>) -> bool {
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128) |
         Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
     )
+}
+
+/// `T` of a `Slot<T>` (any `mut`/qualifier wrapping), else `None`.
+fn slot_value_type(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Mut(t) | Type::Qualified(t, _) => slot_value_type(t),
+        Type::Generic(g, args) if g == "Slot" && args.len() == 1 => Some(args[0].clone()),
+        _ => None,
+    }
 }

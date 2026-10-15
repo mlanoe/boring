@@ -1447,3 +1447,9 @@ transpile_test!(unwrap_or_struct_local_by_value);
 // Same case through `boring build`: `Rt` holding `M?` (which holds a `Node?` trait object) must
 // not derive Debug/Clone/PartialEq (E0277/E0369 before `type_holds_dyn` saw through `TypeParam`).
 transpile_test!(single_letter_struct_holds_dyn);
+
+transpile_test!(parse_float_if_let_dict_index);
+transpile_test!(self_field_collection_return_by_value);
+transpile_test!(trait_method_casing_unknown_receiver);
+transpile_test!(stored_closure_captures_self_and_loop_item);
+transpile_test!(view_callbacks_capture_state_handles);

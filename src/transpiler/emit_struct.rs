@@ -3030,11 +3030,57 @@ impl Transpiler {
                 }
             }
         }
+        // A stored closure must be `'static`: `move` it, first cloning what it captures so the
+        // enclosing code stays usable afterwards and nothing borrowed from the enclosing frame
+        // leaks in. That is every shared handle (actor/`Arc`/`Rc` binding — possibly only a
+        // borrowed `&Arc<..>` param), every captured local of a `Clone` user struct type (a loop
+        // element, a lowered view's `__st` bundle of slot handles), and `self` (a snapshot,
+        // seen inside the closure as `__self`).
+        let is_closure = matches!(&value.kind, ExprKind::Closure(..));
+        let mut prelude = String::new();
+        let mut alias_self = false;
+        let mut cloned_locals: Vec<String> = Vec::new();
+        if let ExprKind::Closure(params, ..) = &value.kind {
+            let names = collect_var_names(value);
+            let is_param = |v: &str| params.iter().any(|p| p.name == v);
+            alias_self = self.self_type.is_some() && !self.in_init_body
+                && names.iter().any(|v| v == "self"
+                    || (!is_param(v) && self.bare_self_field_type(v).is_some()));
+            if alias_self {
+                prelude.push_str("let __self = self.clone(); ");
+            }
+            for v in &names {
+                if v == "self" || is_param(v) || self.arc_vars.contains(v) { continue; }
+                if !self.known_local_vars.contains(v.as_str()) { continue; }
+                let Some(ty) = self.resolve_expr_type(&Expr { kind: ExprKind::Var(v.clone()), line: 0, col: 0, len: 0 }) else { continue };
+                let ty = ty.without_mut();
+                let Type::Named(n) = ty else { continue };
+                if self.struct_fields.contains_key(n.as_str()) && !self.type_holds_dyn(ty, false, &mut vec![]) {
+                    prelude.push_str(&format!("let mut {v} = {v}.clone(); "));
+                    cloned_locals.push(v.clone());
+                }
+            }
+        }
         let mut raw = self.emit_expr(value);
-        // A stored closure must be `'static`: `move` it, first cloning each captured shared
-        // handle (actor/`Arc`/`Rc` binding — possibly only a borrowed `&Arc<..>` param) so the
-        // enclosing binding stays usable afterwards.
-        if matches!(&value.kind, ExprKind::Closure(..)) {
+        if alias_self { raw = rename_self_token(&raw, "__self"); }
+        // The clone is a plain owned local, no longer the `&mut` parameter it was copied from:
+        // an emitted reborrow (`&mut *v`, `&*v`) of it becomes a plain borrow.
+        for v in &cloned_locals {
+            for (from, to) in [(format!("&mut *{v}"), format!("&mut {v}")), (format!("&*{v}"), format!("&{v}"))] {
+                let mut out = String::new();
+                let mut rest = raw.as_str();
+                while let Some(i) = rest.find(&from) {
+                    let after = &rest[i + from.len()..];
+                    let ident_continues = after.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    out.push_str(&rest[..i]);
+                    out.push_str(if ident_continues { &from } else { &to });
+                    rest = after;
+                }
+                out.push_str(rest);
+                raw = out;
+            }
+        }
+        if is_closure {
             let clones: String = collect_var_names(value).iter()
                 .filter(|v| self.arc_vars.contains(*v))
                 .map(|v| if self.rc_vars.contains(v) {
@@ -3043,6 +3089,7 @@ impl Transpiler {
                     format!("let {v} = Arc::clone(&{v}); ")
                 })
                 .collect();
+            let clones = format!("{prelude}{clones}");
             raw = if clones.is_empty() { format!("move {}", raw) } else { format!("{{ {}move {} }}", clones, raw) };
         }
         let Type::Fn(_, _, _, _, req) = fnty else { return raw };
@@ -3070,4 +3117,40 @@ impl Transpiler {
             (false, true) => format!("({}.{}.lock().unwrap())({})", recv, method, args_s),
         })
     }
+}
+
+/// Rewrites every `self` token of emitted Rust (outside string literals) to `to`: a stored
+/// closure cannot capture the `&self` it was built in, so it works on a `self.clone()` snapshot
+/// bound under another name. Sites that spell `self.` literally (assignments to a field, locked
+/// slots, ...) make a textual pass the one mechanism that covers them all.
+fn rename_self_token(code: &str, to: &str) -> String {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() { out.push(chars[i + 1]); i += 2; continue; }
+                i += 1;
+                if chars[i - 1] == '"' { break; }
+            }
+            continue;
+        }
+        let is_self = chars[i..].starts_with(&['s', 'e', 'l', 'f'])
+            && (i == 0 || !(is_ident(chars[i - 1]) || chars[i - 1] == '.'))
+            && chars.get(i + 4).map_or(true, |&n| !is_ident(n));
+        if is_self {
+            out.push_str(to);
+            i += 4;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }

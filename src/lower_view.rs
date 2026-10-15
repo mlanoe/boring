@@ -32,6 +32,16 @@
 //! `__st.field`, every method becomes `req` (the description itself is never written), and `self.method(...)` calls forward `__st`. Callback closures capture `__st`
 //! like any other local, which is the "callback `self` as mounted-view context" of the draft.
 //!
+//! ## Callbacks in transpiled output
+//!
+//! A callback is stored in the mounted tree, so in Rust it must be `'static`: it cannot borrow
+//! the `&self` / `&mut __st` of the `body()` call that built it. `boring build` therefore (a)
+//! stores *every* `state` in a `Slot<T>'actor` (not only bound ones), making `V__State` a bundle
+//! of shared handles, and (b) has the transpiler build a stored closure from clones — `self`
+//! becomes a `self.clone()` snapshot of the inputs (the draft's "ordinary inputs come from the
+//! callback's ephemeral snapshot"), and each captured user-struct local (`__st`, a keyed `for`
+//! element) a `.clone()` that shares the same slots. The interpreter keeps plain state fields.
+//!
 //! ## `bind` and `env`
 //!
 //! - **`bind T name`** becomes an input field `name: Slot<T>'actor` (`Slot` is `boring.ui`'s shared
@@ -283,6 +293,11 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         ));
     }
     let states: HashSet<String> = state_fields.iter().map(|f| f.name.clone()).collect();
+    // Transpiled output (no runtime methods) stores *every* `state` in a `Slot`: `V__State` is
+    // then a bundle of shared handles, so a callback — `'static`, stored in the mounted tree —
+    // captures a clone of it that still reads and writes the mounted storage (see the module
+    // docs, "Callbacks"). The interpreter keeps plain fields: its closures capture by reference.
+    let slot_all = env.has_slot && !RUNTIME_METHODS.load(std::sync::atomic::Ordering::Relaxed);
     let binds: HashSet<String> = bind_fields.iter().map(|f| f.name.clone()).collect();
     let envs: HashSet<String> = env_fields.iter().map(|f| f.name.clone()).collect();
     let bound = find_bound_states(&s, &states, &binds, &env.bind_views)?;
@@ -293,6 +308,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         ));
     }
 
+    let slotted: &HashSet<String> = if slot_all { &states } else { &bound };
     let state_name = format!("{}__State", s.name);
     let env_name = format!("{}__Env", s.name);
     let mut generated = Vec::new();
@@ -303,7 +319,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
             f.view_kind = None;
             f.explicit_perm = false;
             f.is_pub = true;
-            if bound.contains(&f.name) {
+            if slot_all || bound.contains(&f.name) {
                 let seed = slot_seed(f.default.as_ref().expect("checked above"));
                 f.ty = slot_type(&f.ty);
                 f.mutable = true;
@@ -346,7 +362,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
     let has_env = !env_fields.is_empty();
     if has_state || has_env || !binds.is_empty() {
         let ctx = Ctx {
-            states: &states, binds: &binds, envs: &envs, bound: &bound,
+            states: &states, binds: &binds, envs: &envs, bound: slotted,
             own_methods: s.methods.iter().map(|m| m.name.clone()).collect(),
             bind_views: &env.bind_views,
             has_state, has_env,

@@ -1,0 +1,33 @@
+# A camelCase trait method called through a local whose type is only reachable via
+# `opt else (...)` + `if let` keeps its casing (no snake_case rewrite).
+trait Control:
+    req string viewAct(string action)
+
+struct Button as Control:
+    req string viewAct(string action):
+        "button:{action}"
+
+struct Mounted:
+    int id
+    Control'shared? control
+
+[Mounted] mountedList():
+    [Mounted(id = 1, control = Button())]
+
+Mounted? find(int id):
+    for m in mountedList():
+        if m.id == id:
+            return m
+    nil
+
+string act(int id, string action):
+    let found = find(id)
+    if found == nil:
+        return "stale"
+    let node = found else (Mounted(id = -1, control = nil))
+    if let control = node.control:
+        return control.viewAct(action)
+    "none"
+
+print act(1, "go")
+print act(2, "go")

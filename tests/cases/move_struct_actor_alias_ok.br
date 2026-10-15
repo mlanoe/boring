@@ -1,0 +1,18 @@
+struct M:
+    var [int] xs = []
+    def add(int x):
+        xs.push(x)
+
+def fill(mut M p):
+    p.add(9)
+
+def main():
+    mut M'actor a = M()
+    mut d = {=}
+    d[1] = a
+    a.add(1)
+    print d[1].xs.length
+    mut b = M()
+    fill(b)
+    fill(b)
+    print b.xs.length

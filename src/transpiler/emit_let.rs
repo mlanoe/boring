@@ -973,8 +973,15 @@ impl Transpiler {
         // `let x = <T?-returning call>.unwrap_or(d)` (also `unwrap`/`expect`/`unwrap_or_default`):
         // `x` is a plain `T`. Record it so a by-value non-Copy read is cloned at call sites.
         if s.ty.is_none() {
-            if let ExprKind::MethodCall(_, method, _) = &s_value.kind {
-                if matches!(method.as_str(), "unwrap_or" | "unwrap" | "expect" | "unwrap_or_default") {
+            let unwrapping = match &s_value.kind {
+                ExprKind::MethodCall(_, method, _) =>
+                    matches!(method.as_str(), "unwrap_or" | "unwrap" | "expect" | "unwrap_or_default"),
+                // `let x = opt else (d)` is the same unwrap.
+                ExprKind::Else(..) => true,
+                _ => false,
+            };
+            {
+                if unwrapping {
                     match self.resolve_expr_type(s_value) {
                         Some(Type::Named(n)) if self.is_known_user_type(n.as_str()) => {
                             self.var_struct_types.insert(s.name.clone(), n.clone());
@@ -2331,6 +2338,7 @@ impl Transpiler {
                         format!("vec![{}]", es.join(", "))
                     }
                     ExprKind::Var(v) if self.is_borrowed_collection_param(v)
+                        || self.bare_self_field_collection_needs_clone(v)
                         || (self.is_owned_collection_local(v) && !self.is_last_use_move(value)) => {
                         format!("{}.clone()", self.emit_expr(value))
                     }
@@ -2346,6 +2354,9 @@ impl Transpiler {
                             .map(|e| self.emit_let_value(Some(elem_ty.without_mut()), e))
                             .collect();
                         format!("vec![{}]", es.join(", "))
+                    }
+                    ExprKind::Var(v) if self.bare_self_field_collection_needs_clone(v) => {
+                        format!("{}.clone()", self.emit_expr(value))
                     }
                     _ => self.emit_expr(value),
                 }
@@ -2749,6 +2760,10 @@ impl Transpiler {
             // the local's type as the reference itself, and any later mutation
             // (`.push()`, index-assign, etc.) fails to borrow it as mutable.
             if self.is_borrowed_collection_param(v) && !s.ends_with(".clone()") {
+                return format!("{}.clone()", s);
+            }
+            // Bare implicit-self collection field read by value (`return items`): clone.
+            if self.bare_self_field_collection_needs_clone(v) && !s.ends_with(".clone()") {
                 return format!("{}.clone()", s);
             }
             // Local `[T]`/`{K=V}`/`{T}` (any of `let`/`var`/`mut`/`var mut`) read by value:

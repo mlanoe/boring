@@ -2384,6 +2384,8 @@ impl Transpiler {
             && !self.var_mutex_types.contains(v.as_str())
             && !self.var_primitive_params.contains(v.as_str())
             && !self.fn_current_params.contains_key(v.as_str())
+            // A bare implicit-self field is behind `&self`, never an owned local to move out of.
+            && self.bare_self_field_type(v).is_none()
             // Only a plain owned value: an inferred `'inline` / `'owned` local is a Rust `T` /
             // `Box<T>` (a move is fine); a borrow, `'weak`, `'observed`, optional, ... may be a
             // reference or a differently-typed wrapper, where a move would change the type.
@@ -2663,6 +2665,14 @@ impl Transpiler {
                 }
                 // Last use of an owned local: move it instead of cloning (see `last_use.rs`).
                 if self.is_last_use_move(expr) { v.clone() } else { format!("{}.clone()", v) }
+            }
+            // Bare implicit-self field (`items` meaning `self.items`) in owned/return position:
+            // a collection field is behind `&self`, so it must be cloned out exactly like the
+            // explicit `self.items` read above. Not applicable to locals/params (those are
+            // matched by the arms above via var_types) and never to a field holding a trait
+            // object (not `Clone`; read in place).
+            ExprKind::Var(v) if self.bare_self_field_collection_needs_clone(v) => {
+                format!("{}.clone()", self.emit_expr(expr))
             }
             _ => self.emit_expr(expr),
         }

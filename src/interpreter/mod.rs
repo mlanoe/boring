@@ -2243,6 +2243,8 @@ pub struct Interpreter {
     pub gpu_profile: gpu_profile::GpuProfile,
     pub global: EnvRef,
     pub traits: HashMap<String, TraitDecl>,
+    /// One-shot flag: the next `eval_args` stores bare struct variables by value (copy).
+    pub copy_var_args: bool,
     pub enums: HashMap<String, EnumDecl>,  // enum declarations keyed by name
     pub aliases: HashMap<String, Type>,   // user-defined + built-in type aliases
     pub search_paths: Vec<PathBuf>,
@@ -2468,6 +2470,7 @@ impl Interpreter {
             gpu_profile: gpu_profile::GpuProfile::default(),
             global,
             traits: HashMap::new(),
+            copy_var_args: false,
             enums: HashMap::new(),
             aliases,
             search_paths: Vec::new(),
@@ -2515,6 +2518,7 @@ impl Interpreter {
             gpu_profile,
             global,
             traits,
+            copy_var_args: false,
             enums,
             aliases,
             search_paths: Vec::new(),
@@ -3264,10 +3268,10 @@ impl Interpreter {
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_ty = stmt.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
+                    matches!(self.resolve_type(ty).without_mut(), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
                 let is_actor_ty = stmt.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                    matches!(self.resolve_type(ty).without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
                 }).unwrap_or(false);
                 // Propagate shared/actor status from source when no type annotation.
                 let src_var_name = stmt.value.as_ref().and_then(|v| {
@@ -3329,7 +3333,7 @@ impl Interpreter {
                 // 'shared/'actor/'guard bindings are reference-counted — assignment is an alias,
                 // not a move. Both source and dest remain valid.
                 let is_borrow = stmt.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
+                    matches!(self.resolve_type(ty).without_mut(), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
                 }).unwrap_or(false);
                 let src_is_rc_like = src_var_name.as_ref().map(|s| {
                     env.borrow().is_shared(s.as_str()) || env.borrow().is_actor(s.as_str())

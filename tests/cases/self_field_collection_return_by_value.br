@@ -1,0 +1,37 @@
+# Returning a bare implicit-self collection field by value from a `&self` method must
+# clone, not move out of `&self` (E0507).
+trait Shape:
+    req int area()
+
+struct Sq as Shape:
+    int s
+    req int area(): s * s
+
+struct S:
+    [int] items
+    {string=int} d
+    {int} st
+    [string] names
+    [Sq] sqs
+    [Shape'shared] shapes
+    req [int] get(): items
+    req [int] get2():
+        return items
+    req {string=int} getd(): d
+    req {int} gets():
+        return st
+    req [string] getNames(): names
+    req [Sq] getSqs(): sqs
+    req [Shape'shared] getShapes():
+        return shapes
+
+def main():
+    let x = S(items = [1, 2], d = {"a" = 1}, st = {2}, names = ["p", "q", "r"], sqs = [Sq(3)], shapes = [Sq(4), Sq(5)])
+    print x.get().length
+    print x.get2().length
+    print x.getd().length
+    print x.gets().length
+    print x.getNames().length
+    print x.getSqs().length
+    print x.getShapes().length
+    print x.get().length

@@ -324,6 +324,7 @@ impl Interpreter {
             return None;
         }
         Some((|| {
+            self.copy_var_args = matches!(method, "push" | "append" | "insert");
             let arg_vals = self.eval_args(args, Rc::clone(env))?;
             let taken = env.borrow_mut().take(name).ok_or_else(|| {
                 err(format!("internal error: variable '{}' disappeared", name), line)
@@ -394,6 +395,61 @@ impl Interpreter {
     /// method resolves to `self.foo(args)` when `foo` isn't otherwise in scope), the
     /// `k(block = N)` kernel-launch shorthand, and owned/`var`-param bookkeeping around
     /// an ordinary call.
+    /// Receiver expressions that are safe to evaluate twice (no side effects).
+    fn is_pure_path(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var(_) => true,
+            ExprKind::Field(inner, _) => Self::is_pure_path(inner),
+            _ => false,
+        }
+    }
+
+    /// A bare struct variable stored into a collection / field / constructor argument is
+    /// stored BY VALUE (book.md "Move semantics"; the transpiler clones or moves — either way
+    /// the stored instance is distinct from any later use of the source). The interpreter's
+    /// structs are `Rc` references, so return a fresh copy instead of the shared instance.
+    /// `'shared`/`'actor`/`'guard` bindings are aliases and `self` is left alone.
+    pub(crate) fn stored_copy(&self, e: &Expr, v: Value, env: &EnvRef) -> Value {
+        let ExprKind::Var(name) = &e.kind else { return v };
+        if name == "self" || !matches!(v, Value::Object(_)) { return v; }
+        {
+            let b = env.borrow();
+            if b.is_shared(name) || b.is_actor(name) { return v; }
+        }
+        self.copy_struct_value(&v)
+    }
+
+    /// Deep copy of a struct instance. Fields declared `'shared`/`'actor`/`'guard`/`'weak`/borrow
+    /// or typed by a trait stay aliased (reference-counted handles in the emitted Rust).
+    pub(crate) fn copy_struct_value(&self, v: &Value) -> Value {
+        match v {
+            Value::Object(rc) => {
+                let inner = rc.borrow();
+                let decl = match self.global.borrow().get(&inner.type_name) {
+                    Some(Value::Struct { decl, .. }) => Some(decl),
+                    _ => None,
+                };
+                let fields = inner.fields.iter().map(|(k, fv)| {
+                    let alias = decl.as_ref().and_then(|d| d.fields.iter().find(|f| &f.name == k)).map(|f| {
+                        match self.resolve_type(&f.ty).without_mut() {
+                            Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask
+                                | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Weak
+                                | OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared) => true,
+                            other => Self::type_base_name(other).map(|n| self.traits.contains_key(&n)).unwrap_or(false),
+                        }
+                    }).unwrap_or(false);
+                    (k.clone(), if alias { fv.clone() } else { self.copy_struct_value(fv) })
+                }).collect();
+                Value::Object(Rc::new(RefCell::new(ObjectInner { type_name: inner.type_name.clone(), fields })))
+            }
+            Value::Array(a) if a.iter().any(|x| matches!(x, Value::Object(_) | Value::Array(_))) =>
+                Value::Array(a.iter().map(|x| self.copy_struct_value(x)).collect::<Vec<_>>().into()),
+            Value::Tuple(t) => Value::Tuple(t.iter().map(|x| self.copy_struct_value(x)).collect()),
+            Value::Dict(d) => Value::Dict(d.iter().map(|(k, x)| (k.clone(), self.copy_struct_value(x))).collect()),
+            other => other.clone(),
+        }
+    }
+
     fn eval_expr_call(&mut self, callee_expr: &Expr, args: &[Arg], env: EnvRef, line: usize) -> Eval {
         // channel/oneshot/broadcast/watch without type args: return (Sender, Receiver) pair
         if let ExprKind::Var(name) = &callee_expr.kind {
@@ -1537,7 +1593,10 @@ impl Interpreter {
                         ));
                     }
                 }
-                let val = self.eval_expr(value, Rc::clone(&env))?;
+                let mut val = self.eval_expr(value, Rc::clone(&env))?;
+                if matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
+                    val = self.stored_copy(value, val, &env);
+                }
                 self.assign(target, val.clone(), Rc::clone(&env), line)?;
                 Ok(val)
             }
@@ -1591,9 +1650,25 @@ impl Interpreter {
 
             ExprKind::Index(obj_expr, idx_expr) => self.eval_expr_index(obj_expr, idx_expr, env, line),
 
-            ExprKind::Call(callee_expr, args) => self.eval_expr_call(callee_expr, args, env, line),
+            ExprKind::Call(callee_expr, args) => {
+                self.copy_var_args = match &callee_expr.kind {
+                    ExprKind::Var(n) => matches!(self.global.borrow().get(n), Some(Value::Struct { .. })),
+                    _ => false,
+                };
+                let res = self.eval_expr_call(callee_expr, args, Rc::clone(&env), line);
+                self.copy_var_args = false;
+                res
+            }
 
-            ExprKind::MethodCall(obj_expr, method, args) => self.eval_expr_method_call(obj_expr, method, args, env, line),
+            ExprKind::MethodCall(obj_expr, method, args) => {
+                // Storing a struct into a built-in collection stores a copy (book: "Move semantics").
+                self.copy_var_args = matches!(method.as_str(), "push" | "insert" | "append" | "add" | "put" | "set")
+                    && Self::is_pure_path(obj_expr)
+                    && matches!(self.eval_expr(obj_expr, Rc::clone(&env)), Ok(Value::Array(_) | Value::Dict(_) | Value::Set(_)));
+                let res = self.eval_expr_method_call(obj_expr, method, args, Rc::clone(&env), line);
+                self.copy_var_args = false;
+                res
+            }
 
             ExprKind::New { ctor, .. } => {
                 // Arena placement has no runtime effect — just evaluate the constructor.
@@ -2770,6 +2845,7 @@ impl Interpreter {
     /// param types, or a merged hint built across several overload candidates (see
     /// `merged_overload_param_hints`) — there is no single `FnDecl` in the latter case.
     pub(crate) fn eval_args_with_hints(&mut self, args: &[Arg], env: EnvRef, hints: &[Option<Type>]) -> Result<Vec<Value>, Signal> {
+        let copy_vars = std::mem::take(&mut self.copy_var_args);
         let mut vals = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             if arg.default_rest {
@@ -2793,6 +2869,7 @@ impl Interpreter {
                 Some(v) => v,
                 None => self.eval_expr(&arg.value, Rc::clone(&env))?,
             };
+            let v = if copy_vars && !arg.spread { self.stored_copy(&arg.value, v, &env) } else { v };
             if arg.spread {
                 // `..expr` — expand all fields of the source struct as labeled args.
                 // Explicit labeled args that come after will override these via HashMap::insert.
