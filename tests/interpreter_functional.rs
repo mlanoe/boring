@@ -185,6 +185,7 @@ itest!(traits);
 itest!(numeric);
 itest!(float_width_cross_eq);
 itest!(int_width_cross_assert_eq);
+itest!(assert_eq_string_literal);
 itest!(scalar_catch);
 itest!(modules);
 itest!(boring_stdlib_collections);

@@ -4980,8 +4980,7 @@ impl Transpiler {
                 }
             }
             "assert_eq" => {
-                let a = self.emit_expr(&args[0].value);
-                let b = self.emit_expr(&args[1].value);
+                let (a, b) = self.emit_assert_cmp_args(&args[0].value, &args[1].value);
                 if args.len() > 2 {
                     let msg = self.emit_expr(&args[2].value);
                     format!("assert_eq!({}, {}, \"{{:?}}\", {})", a, b, msg)
@@ -4990,8 +4989,7 @@ impl Transpiler {
                 }
             }
             "assert_neq" => {
-                let a = self.emit_expr(&args[0].value);
-                let b = self.emit_expr(&args[1].value);
+                let (a, b) = self.emit_assert_cmp_args(&args[0].value, &args[1].value);
                 format!("assert_ne!({}, {})", a, b)
             }
             "panic" => {

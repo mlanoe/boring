@@ -5486,6 +5486,24 @@ impl Transpiler {
         self.emit_expr(e)
     }
 
+    /// Emit the two operands of `assert_eq`/`assert_neq`. A bare string literal
+    /// opposite a non-literal operand is promoted to `Rc/Arc::<str>::from(..)` — same
+    /// rule as the `==` operator — because the other side is typically an owned
+    /// `Rc<str>`/`Arc<str>` and `assert_eq!(Arc<str>, &str)` fails with E0308.
+    /// Skipped when the other side is a known `&str` variable.
+    pub(crate) fn emit_assert_cmp_args(&self, l: &Expr, r: &Expr) -> (String, String) {
+        let l_lit = matches!(&l.kind, ExprKind::Str(_));
+        let r_lit = matches!(&r.kind, ExprKind::Str(_));
+        let is_str_ref = |e: &Expr| matches!(&e.kind, ExprKind::Var(v)
+            if self.var_types.get(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
+        let wrap = (l_lit != r_lit) && !is_str_ref(l) && !is_str_ref(r);
+        let emit = |e: &Expr, is_lit: bool| match (&e.kind, is_lit && wrap) {
+            (ExprKind::Str(s), true) => self.str_from(&escape_str(s)),
+            _ => self.emit_expr(e),
+        };
+        (emit(l, l_lit), emit(r, r_lit))
+    }
+
     pub(crate) fn emit_interp(&self, segs: &[StringSegment]) -> String {
         let (fmt, args) = self.build_format_string(segs);
         let str_ty = match self.config.threading {

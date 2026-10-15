@@ -1,0 +1,12 @@
+struct R:
+    var mut [string] events = []
+    req string show():
+        "x"
+
+mut r = R()
+r.events.push("a")
+assert_eq(r.show(), "x")
+assert_eq("x", r.show())
+assert_eq(r.events[0], "a")
+assert_neq(r.show(), "y")
+print "ok"

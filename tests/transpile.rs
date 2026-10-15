@@ -420,6 +420,7 @@ transpile_test!(numeric);
 transpile_test!(uint_int_cross_eq);
 transpile_test!(float_width_cross_eq);
 transpile_test!(int_width_cross_assert_eq);
+transpile_test!(assert_eq_string_literal);
 transpile_test!(scalar_catch);
 transpile_test!(modules);
 // `use boring.collections` — the first-party stdlib mechanism (docs/cross-
