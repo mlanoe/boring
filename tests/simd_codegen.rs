@@ -2618,6 +2618,73 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
+fn collective_guard_let_binding_guards_later_nested_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_guard_let_nested_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_guard_let_nested_if.br");
+    fs::write(
+        &input,
+        r#"
+kernel BoundGuard:
+    let int? selected = some(2)
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        guard let value = selected else:
+            sync
+            return
+        if value == 2:
+            output[i] = value + i + 10
+            sync
+mut guarded = BoundGuard()
+kernel:
+    guarded(block = 4)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_guard_let_nested_if_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "12 13 14 15");
+}
+
+#[test]
+fn collective_guard_let_binding_with_divergent_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_guard_let_nested_divergent_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_guard_let_nested_divergent_if.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    let int? selected = some(0)\n    def ():\n        guard let value = selected else:\n            sync\n            return\n        if value == .thread.x:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
 fn collective_guard_let_pattern_with_sync_runs_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_guard_let_pattern");
     let _ = fs::remove_dir_all(&root);

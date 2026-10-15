@@ -2612,9 +2612,25 @@ impl Emitter {
             }
             CondClause::Expr(value) => (self.expr(value), None),
         };
+        let mut bound_names = std::collections::HashSet::new();
+        match clause {
+            CondClause::Let(name, _) => {
+                bound_names.insert(name.clone());
+            }
+            CondClause::LetPat(pattern, _) => {
+                collect_simd_pattern_bind_names(pattern, &mut bound_names);
+            }
+            CondClause::Expr(_) => {}
+        }
+        let inherited_bound_names = bound_names
+            .iter()
+            .filter(|name| self.collective_uniform_locals.contains(*name))
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         if let Some(value) = fallback_pattern {
             self.line(indent, &format!("match {value} {{"));
             self.line(indent + 1, &format!("{condition} => {{"));
+            self.collective_uniform_locals.extend(bound_names.iter().cloned());
             self.emit_collective_guard_clauses(
                 k,
                 clauses,
@@ -2624,6 +2640,11 @@ impl Emitter {
                 indent + 2,
                 replayed,
             );
+            for name in &bound_names {
+                if !inherited_bound_names.contains(name) {
+                    self.collective_uniform_locals.remove(name);
+                }
+            }
             self.line(indent + 1, "},");
             self.line(indent + 1, "_ => {");
             self.emit_following_collective_controls(k, else_body, indent + 2, replayed);
@@ -2631,6 +2652,7 @@ impl Emitter {
             self.line(indent, "}");
         } else {
             self.line(indent, &format!("if {condition} {{"));
+            self.collective_uniform_locals.extend(bound_names.iter().cloned());
             self.emit_collective_guard_clauses(
                 k,
                 clauses,
@@ -2640,6 +2662,11 @@ impl Emitter {
                 indent + 1,
                 replayed,
             );
+            for name in &bound_names {
+                if !inherited_bound_names.contains(name) {
+                    self.collective_uniform_locals.remove(name);
+                }
+            }
             self.line(indent, "} else {");
             self.emit_following_collective_controls(k, else_body, indent + 1, replayed);
             self.line(indent, "}");
