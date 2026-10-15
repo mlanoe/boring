@@ -372,6 +372,7 @@ impl Transpiler {
                     && (matches!(&expr.kind, ExprKind::Field(..) | ExprKind::Var(_) | ExprKind::Index(..)))
                     && ty_holds_dyn(expr);
                 let expr_s = if holds_dyn {
+                    self.dyn_borrowed_vars.borrow_mut().insert(name.clone());
                     if let Some(base) = expr_s.strip_suffix(".cloned()") {
                         base.to_string()
                     } else if let Some(base) = expr_s.strip_suffix(".clone()") {

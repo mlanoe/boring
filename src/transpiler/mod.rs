@@ -1141,6 +1141,10 @@ struct Transpiler {
     pub(crate) shared_ref_params: std::collections::HashSet<String>,
     /// `var` parameters of primitive/stack type — emitted as `&mut T`, so usages are auto-derefed.
     pub(crate) var_primitive_params: std::collections::HashSet<String>,
+    /// Names bound by reference to a non-`Clone` (trait-object-holding) value in the current
+    /// function: `T&` params and `if let` bindings matched by borrow. Returning one owned is
+    /// impossible; see `check_dyn_borrow_escape`.
+    pub(crate) dyn_borrowed_vars: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Parameters of the current function that grant *content* mutation: a `mut` parameter
     /// or a `var mut`/`mut T` one. A bare `var` parameter is only rebindable, so it is
     /// absent. Parameter-level counterpart of `content_mutable_local_vars`.
@@ -1642,6 +1646,7 @@ impl Transpiler {
             rc_vars: std::collections::HashSet::new(),
             shared_ref_params: std::collections::HashSet::new(),
             var_primitive_params: std::collections::HashSet::new(),
+            dyn_borrowed_vars: std::cell::RefCell::new(std::collections::HashSet::new()),
             content_mutable_params: std::collections::HashSet::new(),
             managed_mutex_vars: std::collections::HashSet::new(),
             managed_mutex_fn_return_vars: std::collections::HashSet::new(),

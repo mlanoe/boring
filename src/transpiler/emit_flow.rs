@@ -23,6 +23,7 @@ impl Transpiler {
                 self.line("return;")
             },
             Some(e) => {
+                self.check_dyn_borrow_escape(e);
                 let is_optional_return = matches!(&self.fn_return_ty, Some(Type::Optional(_)));
                 // Check if the declared return type is a known trait → wrap value in Box::new().
                 let _is_trait_return = matches!(&self.fn_return_ty, Some(Type::Named(n))

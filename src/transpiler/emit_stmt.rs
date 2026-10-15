@@ -252,6 +252,7 @@ impl Transpiler {
                             return;
                         }
                     }
+                    self.check_dyn_borrow_escape(e);
                     // Expression return: no semicolon (value-returning function).
                     // If the function returns Option<T>, wrap non-nil, non-Some values in Some().
                     let is_optional_return = matches!(

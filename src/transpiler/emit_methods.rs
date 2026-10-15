@@ -4983,6 +4983,22 @@ impl Transpiler {
         }
     }
 
+    /// `return x` / tail `x` where `x` is a borrow of a non-`Clone` trait-object-holding value
+    /// (a `T&` param, or an `if let` binding matched by borrow) in a function whose return type
+    /// itself holds a bare trait object (`Box<dyn Trait>`): Rust can neither clone nor move it
+    /// out of the borrow, so say so here instead of emitting `E0308`.
+    pub(crate) fn check_dyn_borrow_escape(&self, e: &Expr) {
+        let Some(ret) = &self.fn_return_ty else { return };
+        if !self.type_holds_dyn(ret, false, &mut vec![]) { return; }
+        let ExprKind::Var(v) = &e.kind else { return };
+        if !self.dyn_borrowed_vars.borrow().contains(v.as_str()) { return; }
+        self.push_error(e.line, e.col, format!(
+            "cannot return `{v}`: it is borrowed from a value holding a trait object (`Box<dyn Trait>`), \
+             which can be neither cloned nor moved out of the borrow. Make the trait all-`req` (it is then \
+             shared automatically), or declare the field/return type `Trait'shared`, or return a plain \
+             value derived from it instead"));
+    }
+
     pub(crate) fn struct_holds_dyn(&self, name: &str, debug_only: bool, visiting: &mut Vec<String>) -> bool {
         if visiting.iter().any(|v| v == name) { return false; }
         let Some(fields) = self.struct_fields.get(name) else { return false };
@@ -6048,6 +6064,7 @@ impl Transpiler {
             rc_vars: self.rc_vars.clone(),
             shared_ref_params: self.shared_ref_params.clone(),
             var_primitive_params: self.var_primitive_params.clone(),
+            dyn_borrowed_vars: std::cell::RefCell::new(self.dyn_borrowed_vars.borrow().clone()),
             content_mutable_params: self.content_mutable_params.clone(),
             managed_mutex_vars: self.managed_mutex_vars.clone(),
             managed_mutex_fn_return_vars: self.managed_mutex_fn_return_vars.clone(),

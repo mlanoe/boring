@@ -1,0 +1,18 @@
+trait Node:
+    req string kind(): ""
+struct Leaf as Node:
+    string t
+    req string kind(): "Leaf"
+struct Holder:
+    string name
+    Node? held = nil
+    [Node] kids = []
+Node? pick(Holder h):
+    if let x = h.held:
+        return x
+    nil
+def main():
+    let h = Holder(name = "a", held = Leaf(t = "x"), kids = [Leaf(t = "y")])
+    if let n = pick(h):
+        print n.kind()
+    print h.kids.length

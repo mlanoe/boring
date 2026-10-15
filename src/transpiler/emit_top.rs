@@ -1887,6 +1887,12 @@ impl Transpiler {
             ))
             .map(|p| p.name.clone())
             .collect();
+        let prev_dyn_borrowed_vars = std::mem::take(&mut *self.dyn_borrowed_vars.borrow_mut());
+        *self.dyn_borrowed_vars.borrow_mut() = f.params.iter()
+            .filter(|p| matches!(&p.ty, Some(Type::Qualified(inner, OwnerQual::Borrow))
+                if self.type_holds_dyn(inner, false, &mut vec![])))
+            .map(|p| p.name.clone())
+            .collect();
         let prev_var_primitive_params = std::mem::take(&mut self.var_primitive_params);
         self.var_primitive_params = f.params.iter()
             .filter(|p| p.rebindable && !matches!(&p.ty,
@@ -2002,6 +2008,7 @@ impl Transpiler {
         self.mut_checked_local_vars = prev_mut_checked_local_vars;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
+        *self.dyn_borrowed_vars.borrow_mut() = prev_dyn_borrowed_vars;
         self.content_mutable_params = prev_content_mutable_params;
         self.task_vars             = prev_task_vars;
         self.arc_vars          = prev_arc_vars;

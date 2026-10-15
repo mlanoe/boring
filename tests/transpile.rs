@@ -945,6 +945,8 @@ transpile_test!(mut_local_trait_array_push);
 transpile_test!(mut_elem_trait_array_literal);
 transpile_test!(dyn_struct_fields_optional);
 transpile_test!(dyn_struct_transitive_iflet);
+transpile_test!(dyn_return_borrowed_field_req_trait);
+transpile_test!(dyn_return_borrowed_field_shared);
 transpile_test!(shared_dyn_tree_copy);
 transpile_test!(shared_dyn_def_trait_stays_boxed);
 

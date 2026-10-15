@@ -1,0 +1,21 @@
+trait Node:
+    req string kind(): ""
+    def bump()
+struct Leaf as Node:
+    string t
+    req string kind(): "Leaf"
+    var int n = 0
+    def bump(): n += 1
+struct Holder:
+    string name
+    Node'shared? held = nil
+    [Node'shared] kids = []
+Node'shared? pick(Holder h):
+    if let x = h.held:
+        return x
+    nil
+def main():
+    let h = Holder(name = "a", held = Leaf(t = "x"), kids = [Leaf(t = "y")])
+    if let n = pick(h):
+        print n.kind()
+    print h.kids.length
