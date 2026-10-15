@@ -2557,6 +2557,9 @@ impl Emitter {
                     self.block_uniform_expr_with_locals(value, locals)
                 }
             }),
+            ExprKind::Tuple(elements) => elements
+                .iter()
+                .all(|element| self.block_uniform_expr_with_locals(element, locals)),
             ExprKind::Var(name) => {
                 matches!(name.as_str(), "block" | "block_dim" | "grid_dim")
                     || self.global_consts.contains_key(name)

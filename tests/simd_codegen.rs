@@ -1019,6 +1019,72 @@ print "{collective.output[8]} {collective.output[9]} {collective.output[10]} {co
 }
 
 #[test]
+fn block_uniform_tuple_match_with_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_uniform_tuple_match");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_tuple_match.br");
+    fs::write(
+        &input,
+        r#"
+kernel TupleMatch:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        match (.block.x, .block_dim.x):
+            (0, 4):
+                output[i] = i + 10
+                sync
+            _:
+                output[i] = 99
+                sync
+mut matched = TupleMatch()
+kernel:
+    matched(block = 4)
+print "{matched.output[0]} {matched.output[1]} {matched.output[2]} {matched.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_tuple_match_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn thread_divergent_tuple_match_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_tuple_match");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_tuple_match.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        match (.block.x, .thread.x):\n            (0, 0):\n                sync\n            _:\n                pass\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
 fn collective_match_with_prefix_and_suffix_sync_runs_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_match_context");
     let _ = fs::remove_dir_all(&root);
