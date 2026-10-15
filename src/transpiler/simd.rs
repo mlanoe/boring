@@ -455,7 +455,9 @@ impl Emitter {
                 };
                 (uniform
                     && safe_prefix
-                    && guard_stmt.else_body.iter().any(is_simd_barrier_stmt))
+                    && guard_stmt.else_body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    }))
                 .then_some((guard_index, guard_stmt))
             });
             let barrier_while = m.body.iter().enumerate().find_map(|(while_index, stmt)| {
@@ -622,7 +624,7 @@ impl Emitter {
                         GuardCond::Expr(condition) => {
                             let condition = self.expr(condition);
                             self.line(3, &format!("if !({condition}) {{"));
-                            self.emit_barrier_phases_seeded(
+                            self.emit_following_collective_controls(
                                 k,
                                 &guard_stmt.else_body,
                                 4,
@@ -995,7 +997,9 @@ impl Emitter {
                             )
                         }
                     };
-                    (uniform && guard_stmt.else_body.iter().any(is_simd_barrier_stmt))
+                    (uniform && guard_stmt.else_body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    }))
                         .then_some((index, FollowingCollective::Guard(guard_stmt)))
                 }
                 _ => None,
@@ -1158,7 +1162,7 @@ impl Emitter {
                 GuardCond::Expr(condition) => {
                     let condition = self.expr(condition);
                     self.line(indent, &format!("if !({condition}) {{"));
-                    self.emit_barrier_phases_seeded(
+                    self.emit_following_collective_controls(
                         k,
                         &guard_stmt.else_body,
                         indent + 1,
@@ -2606,7 +2610,7 @@ impl Emitter {
             );
             self.line(indent + 1, "},");
             self.line(indent + 1, "_ => {");
-            self.emit_barrier_phases_seeded(k, else_body, indent + 2, replayed);
+            self.emit_following_collective_controls(k, else_body, indent + 2, replayed);
             self.line(indent + 1, "},");
             self.line(indent, "}");
         } else {
@@ -2621,7 +2625,7 @@ impl Emitter {
                 replayed,
             );
             self.line(indent, "} else {");
-            self.emit_barrier_phases_seeded(k, else_body, indent + 1, replayed);
+            self.emit_following_collective_controls(k, else_body, indent + 1, replayed);
             self.line(indent, "}");
         }
     }

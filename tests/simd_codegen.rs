@@ -2434,6 +2434,73 @@ print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.outp
 }
 
 #[test]
+fn collective_guard_with_nested_if_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_guard_nested_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_guard_nested_if.br");
+    fs::write(
+        &input,
+        r#"
+kernel NestedGuard:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        tile[i] = i
+        guard .block.x == 1 else:
+            if .block_dim.x == 4:
+                tile[i] = tile[i] + 10
+                sync
+            output[i] = tile[i]
+            return
+mut nested = NestedGuard()
+kernel:
+    nested(block = 4)
+print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_guard_nested_if_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn collective_guard_with_nested_divergent_if_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_guard_nested_divergent_if");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_guard_nested_divergent_if.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        guard .block.x == 0 else:\n            if .thread.x == 0:\n                sync\n            return\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
 fn collective_guard_let_with_sync_runs_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_guard_let");
     let _ = fs::remove_dir_all(&root);
