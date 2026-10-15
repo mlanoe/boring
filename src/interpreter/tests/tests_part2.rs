@@ -187,7 +187,7 @@ let _neq = a == {1, 2}
 
 #[test]
 fn test_is_reference_identity() {
-    // Dog b = a.clone() → b and a share the same instance
+    // Dog b = a.clone() → b is a deep copy, not the same instance
     let src = r#"
 struct Dog:
     string name
@@ -200,7 +200,7 @@ let _diff = c is a
 "#;
     let (interp, res) = run(src);
     res.expect("no error");
-    assert_eq!(get_var(&interp, "_same"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "_same"), Value::Bool(false));
     assert_eq!(get_var(&interp, "_diff"), Value::Bool(false));
 }
 

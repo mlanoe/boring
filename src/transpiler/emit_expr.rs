@@ -358,7 +358,7 @@ impl Transpiler {
                     if self.expr_is_dict(dict_obj) {
                         let dict_s = self.emit_expr(dict_obj);
                         let key_ref = self.emit_dict_key_borrow(key);
-                        let dv = self.emit_expr_owned(default);
+                        let dv = self.emit_else_default(e, default);
                         return format!("{}.get({}).cloned().unwrap_or_else(|| {})",
                             dict_s, key_ref, dv);
                     }
@@ -369,14 +369,14 @@ impl Transpiler {
                     if !self.expr_is_dict(arr_obj) {
                         let arr_s = self.emit_expr(arr_obj);
                         let idx_s = self.emit_expr(idx_expr);
-                        let dv = self.emit_expr_owned(default);
+                        let dv = self.emit_else_default(e, default);
                         return format!("{}.get(({}) as usize).cloned().unwrap_or_else(|| {})",
                             arr_s, idx_s, dv);
                     }
                 }
                 // `expr else default` — nil coalescing / Option unwrap
                 let e_s = self.emit_expr(e);
-                let dv = self.emit_expr_owned(default);
+                let dv = self.emit_else_default(e, default);
                 // When a numeric optional (Option<i64/f64>) is coalesced with a string default,
                 // unwrap_or_else won't compile — use map_or_else to convert the value to string.
                 let is_numeric_opt_var = matches!(&e.kind, ExprKind::Var(v)
@@ -3178,7 +3178,11 @@ impl Transpiler {
                 if is_dict_field {
                     let key_owned = self.emit_dict_key_owned(key);
                     let val_s = self.emit_expr_owned(value);
+                    // `d[k].field[k2] = v`: the element is a place (`get_mut`), not a clone.
+                    let in_place = matches!(&inner_obj.kind, ExprKind::Index(..));
+                    let old = self.in_lhs_assign.replace(in_place || self.in_lhs_assign.get());
                     let obj_s = self.emit_expr(inner_obj);
+                    self.in_lhs_assign.set(old);
                     return format!("{}.{}.insert({}, {})", obj_s, field_name, key_owned, val_s);
                 }
             }
@@ -3216,7 +3220,11 @@ impl Transpiler {
             // Mirrors the interpreter's `assign`'s recursive `ExprKind::Index`
             // semantics: panics if the outer key is absent rather than silently
             // auto-vivifying an empty inner dict.
-            if matches!(&dict_obj.kind, ExprKind::Index(..)) && self.expr_is_dict(dict_obj) {
+            // `d[k].field[k2] = v` (a dict-typed field of a dict element) is the same place
+            // expression one level deeper: `.get_mut(k)` the element, not a throwaway clone.
+            let nested_field_of_index = matches!(&dict_obj.kind, ExprKind::Field(inner, _)
+                if matches!(&inner.kind, ExprKind::Index(..)));
+            if (matches!(&dict_obj.kind, ExprKind::Index(..)) || nested_field_of_index) && self.expr_is_dict(dict_obj) {
                 self.in_lhs_assign.set(true);
                 let place_s = self.emit_expr(dict_obj);
                 self.in_lhs_assign.set(false);
@@ -4003,6 +4011,34 @@ impl Transpiler {
             // Method call: delegate directly to emit_method_call with the real lhs expr.
             self.emit_method_call(lhs, name, args)
         }
+    }
+
+    /// The fallback of `e else default`, boxed when the unwrapped value is a bare trait
+    /// (`Box<dyn Trait>`): the fallback is typically a concrete implementor.
+    fn emit_else_default(&self, e: &Expr, default: &Expr) -> String {
+        let inner = match self.resolve_expr_type(e) {
+            Some(Type::Optional(t)) => Some(*t),
+            // `xs[i] else d` / `dict[k] else d`: the element itself is what is unwrapped.
+            Some(t) if matches!(&e.kind, ExprKind::Index(..)) => Some(t),
+            _ => None,
+        };
+        if let Some(t) = inner {
+            let is_shared_trait = matches!(t.without_mut(), Type::Qualified(i, OwnerQual::Shared)
+                if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())));
+            if is_shared_trait {
+                // `Trait'shared` slot (`Arc<dyn Trait>`): coerce the fallback the way a `let` would.
+                return self.emit_let_value(Some(&t), default);
+            }
+            if self.is_boxed_trait_type(&t) {
+                let tn = match t.without_mut() {
+                    Type::Named(n) => Some(n.clone()),
+                    Type::Qualified(i, _) => match i.as_ref() { Type::Named(n) => Some(n.clone()), _ => None },
+                    _ => None,
+                };
+                if let Some(tn) = tn { return self.box_if_trait_typed(default, &tn); }
+            }
+        }
+        self.emit_expr_owned(default)
     }
 
     pub(crate) fn emit_constructor(&self, name: &str, args: &[Arg]) -> String {

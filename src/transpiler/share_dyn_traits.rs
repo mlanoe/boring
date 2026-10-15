@@ -103,8 +103,59 @@ impl DynFacts {
 }
 
 /// Rewrites every type in `program` naming a target trait to `Trait'shared`.
-pub(crate) fn rewrite_program(program: &mut Program, targets: &HashSet<String>) {
-    rw_items(&mut program.items, targets);
+///
+/// A parameter written as the bare trait is, to borrow inference (`infer_trait_borrow.rs`),
+/// either borrowed (`&dyn Trait`) or by value. So it is left bare while that decision is
+/// pending (`borrow` is `None`) and afterwards when it was decided borrowed — or is a trait
+/// contract parameter, always borrowed; a by-value one becomes `Trait'shared` like any other
+/// position.
+pub(crate) fn rewrite_program(program: &mut Program, targets: &HashSet<String>, borrow: Option<&BorrowView>) {
+    rw_items(&mut program.items, targets, &borrow);
+}
+
+/// The outcome of borrow inference, as published by `resolve_trait_borrow_params`.
+pub(crate) struct BorrowView<'a> {
+    pub(crate) fns: &'a HashMap<String, Vec<bool>>,
+    pub(crate) methods: &'a HashMap<String, Vec<Option<Type>>>,
+    pub(crate) by_name: &'a HashMap<String, String>,
+}
+
+/// `ty` as a by-value parameter of a program where `targets` are shared: a bare target trait
+/// becomes `Trait'shared`, anything else is unchanged.
+pub(crate) fn shared_if_bare(ty: &Type, targets: &HashSet<String>) -> Type {
+    match ty {
+        Type::Named(n) if targets.contains(n.as_str()) =>
+            Type::Qualified(Box::new(Type::Named(n.clone())), OwnerQual::Shared),
+        _ => ty.clone(),
+    }
+}
+
+type B<'a, 'b> = &'b Option<&'a BorrowView<'a>>;
+
+fn is_target_bare(p: &Param, t: &HashSet<String>) -> bool {
+    matches!(p.ty.as_ref().map(Type::without_mut), Some(Type::Named(n)) if t.contains(n.as_str()))
+}
+
+/// Should bare parameter `i` of the function/method `key` (`Type::name` for a method) stay bare?
+fn keeps_bare(b: B, key: &str, name: &str, i: usize, is_method: bool) -> bool {
+    let Some(v) = b else { return true };
+    if is_method {
+        if v.methods.get(key).is_some_and(|ts| ts.get(i).is_some_and(Option::is_some)) { return true; }
+        // An implementer's method follows its trait's contract (`@Trait::name`).
+        return v.by_name.get(name).is_some_and(|k| k.starts_with('@')
+            && v.methods.get(k).is_some_and(|ts| ts.get(i).is_some_and(Option::is_some)));
+    }
+    v.fns.get(key).is_some_and(|fl| fl.get(i).copied().unwrap_or(false))
+}
+
+/// `rw_fn`, except the bare parameters that `keeps_bare` names.
+fn rw_decl(f: &mut FnDecl, t: &HashSet<String>, b: B, owner: &str, method_of: Option<&str>) {
+    let key = match method_of { Some(ty) => format!("{}::{}", ty, f.name), None => owner.to_string() };
+    let kept: Vec<(usize, Option<Type>)> = f.params.iter().enumerate()
+        .filter(|(i, p)| is_target_bare(p, t) && keeps_bare(b, &key, &f.name, *i, method_of.is_some()))
+        .map(|(i, p)| (i, p.ty.clone())).collect();
+    rw_fn(f, t);
+    for (i, ty) in kept { f.params[i].ty = ty; }
 }
 
 fn rw_type(ty: &mut Type, t: &HashSet<String>) {
@@ -185,10 +236,10 @@ fn rw_expr(e: &mut Expr, t: &HashSet<String>) {
     Walker { expr: &mut on_expr, stmt: &mut noop }.expr(e);
 }
 
-fn rw_items(items: &mut [Item], t: &HashSet<String>) {
+fn rw_items(items: &mut [Item], t: &HashSet<String>, b: B) {
     for item in items {
         match item {
-            Item::Fn(f) => rw_fn(f, t),
+            Item::Fn(f) => { let n = f.name.clone(); rw_decl(f, t, b, &n, None) }
             Item::Struct(s) => {
                 for f in &mut s.fields {
                     rw_type(&mut f.ty, t);
@@ -197,7 +248,8 @@ fn rw_items(items: &mut [Item], t: &HashSet<String>) {
                 for i in &mut s.inits {
                     for p in &mut i.params { rw_opt(&mut p.ty, t); }
                 }
-                for m in &mut s.methods { rw_fn(m, t); }
+                let sn = s.name.clone();
+                for m in &mut s.methods { rw_decl(m, t, b, &sn, Some(&sn)); }
                 for c in &mut s.conversions { rw_type(&mut c.ty, t); rw_stmts(&mut c.body, t); }
                 for st in &mut s.setters { rw_type(&mut st.param_ty, t); rw_stmts(&mut st.body, t); }
                 for m in &mut s.type_methods {
@@ -209,18 +261,28 @@ fn rw_items(items: &mut [Item], t: &HashSet<String>) {
             }
             Item::Enum(e) => {
                 for v in &mut e.variants { for f in &mut v.fields { rw_type(&mut f.ty, t); } }
-                for m in &mut e.methods { rw_fn(m, t); }
+                let en = e.name.clone();
+                for m in &mut e.methods { rw_decl(m, t, b, &en, Some(&en)); }
                 for c in &mut e.conversions { rw_type(&mut c.ty, t); rw_stmts(&mut c.body, t); }
             }
             Item::Trait(tr) => {
+                // Trait contract: a bare parameter is always borrowed (or spelled `'owned`).
                 for s in &mut tr.signatures {
+                    let kept: Vec<(usize, Option<Type>)> = s.params.iter().enumerate()
+                        .filter(|(_, p)| is_target_bare(p, t)).map(|(i, p)| (i, p.ty.clone())).collect();
                     rw_params(&mut s.params, t);
+                    for (i, ty) in kept { s.params[i].ty = ty; }
                     rw_opt(&mut s.return_ty, t);
                 }
-                for d in &mut tr.defaults { rw_fn(d, t); }
+                for d in &mut tr.defaults {
+                    let kept: Vec<(usize, Option<Type>)> = d.params.iter().enumerate()
+                        .filter(|(_, p)| is_target_bare(p, t)).map(|(i, p)| (i, p.ty.clone())).collect();
+                    rw_fn(d, t);
+                    for (i, ty) in kept { d.params[i].ty = ty; }
+                }
             }
-            Item::Ext(x) => for m in &mut x.methods { rw_fn(m, t); },
-            Item::Mod(m) => rw_items(&mut m.items, t),
+            Item::Ext(x) => { let xn = x.type_name.clone(); for m in &mut x.methods { rw_decl(m, t, b, &xn, Some(&xn)); } }
+            Item::Mod(m) => rw_items(&mut m.items, t, b),
             Item::Let(l) => {
                 rw_opt(&mut l.ty, t);
                 if let Some(v) = &mut l.value { rw_expr(v, t); }

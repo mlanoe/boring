@@ -1,0 +1,22 @@
+trait Node:
+    req string kind(): ""
+
+struct Leaf as Node:
+    string t
+    req string kind(): "Leaf"
+
+string describe(Node n):
+    n.kind()
+
+Node make(string t):
+    Leaf(t = t)
+
+Node wrap(string t):
+    make(t)
+
+def main():
+    let kids = [make("a"), make("b")]
+    for k in kids:
+        print describe(k)
+    print describe(make("c"))
+    print wrap("d").kind()

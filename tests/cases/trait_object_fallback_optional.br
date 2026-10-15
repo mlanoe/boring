@@ -1,0 +1,50 @@
+trait Node:
+    req string kind(): ""
+    def bump(): print "bump"
+
+struct Leaf as Node:
+    string t
+    req string kind(): "Leaf"
+    def bump(): print "bump"
+
+struct Holder:
+    Node? held
+
+struct Cell:
+    string t
+
+struct Finder:
+    {int=Cell} nodes
+    req string? find(int id):
+        if let node = nodes[id]:
+            return nameOf(node)
+        nil
+    req int? findInt(int id):
+        let xs = [1, 2]
+        let y = xs[id]
+        y
+
+string? nameOf(Cell c):
+    c.t
+
+struct Builder:
+    string s
+    req Node body(string t):
+        Leaf(t = t)
+    req Node build(string t):
+        self.body(t)
+    req Node build2(string t):
+        return self.body(t)
+
+def main():
+    let holder = Holder(held = nil)
+    let n = holder.held else (Leaf(t = "none"))
+    print n.kind()
+    let f = Finder(nodes = {0 = Cell(t = "c")})
+    if let r = f.find(0):
+        print r
+    if let i = f.findInt(1):
+        print i
+    let b = Builder(s = "s")
+    print b.build("q").kind()
+    print b.build2("q").kind()

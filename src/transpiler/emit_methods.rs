@@ -3926,6 +3926,13 @@ impl Transpiler {
                     }
                 }
             }
+            // What is still a bare shared trait after the borrow overrides is by value: `Trait'shared`.
+            for (i, slot) in struct_method_param_types.iter_mut().enumerate() {
+                let by_value = chosen_decl.and_then(|d| d.params.get(i)).is_some_and(|p| !p.mutable);
+                if by_value {
+                    if let Some(ty) = slot { *ty = super::share_dyn_traits::shared_if_bare(ty, &self.shared_dyn_traits); }
+                }
+            }
             struct_method_param_rebindable = chosen_decl
                 .map(|decl| decl.params.iter().map(|p| p.rebindable).collect())
                 .unwrap_or_default();
@@ -4039,6 +4046,12 @@ impl Transpiler {
                 // `Box<dyn Drawable>`, found `Circle`).
                 if let Some(Some(param_ty @ Type::Named(n))) = struct_method_param_types.get(i) {
                     if self.trait_method_names.contains_key(n.as_str()) {
+                        return self.emit_let_value(Some(param_ty), &a.value);
+                    }
+                }
+                // A by-value bare param of a shared trait is `Trait'shared`: alias or wrap.
+                if let Some(Some(param_ty @ Type::Qualified(inner, OwnerQual::Shared))) = struct_method_param_types.get(i) {
+                    if matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) {
                         return self.emit_let_value(Some(param_ty), &a.value);
                     }
                 }
@@ -5353,10 +5366,19 @@ impl Transpiler {
     /// passed through; anything else (a fresh value, a concrete-typed local) unsizes directly.
     fn emit_trait_borrow_arg(&self, trait_name: &str, mutable: bool, arg: &Expr) -> String {
         let r = if mutable { "&mut " } else { "&" };
-        let is_trait = |t: &Type| matches!(t.without_mut(), Type::Named(n) if n == trait_name);
+        // A bare trait is `Box<dyn Trait>`; a shared trait object (`share_dyn_traits.rs`) is
+        // `Arc<dyn Trait>`. Both reborrow as `&dyn Trait` with a single `*`.
+        let is_trait = |t: &Type| match t.without_mut() {
+            Type::Named(n) => n == trait_name,
+            Type::Qualified(i, OwnerQual::Shared) => matches!(i.as_ref(), Type::Named(n) if n == trait_name),
+            _ => false,
+        };
         let is_dyn_ref = |t: &Type| matches!(t.without_mut(), Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)
             if matches!(inner.as_ref(), Type::Named(n) if n == trait_name));
         match &arg.kind {
+            ExprKind::Var(v) if !mutable && self.boxed_trait_ref_vars.contains(v.as_str())
+                && !self.fn_current_params.contains_key(v.as_str())
+                && !self.var_types.contains_key(v.as_str()) => format!("&**{}", v),
             ExprKind::Var(v) => {
                 let ty = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()));
                 match ty {
@@ -5722,6 +5744,8 @@ impl Transpiler {
                     ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
                         .or_else(|| self.var_struct_type.get(v.as_str()))
                         .cloned(),
+                    // `d[k].slots` / `xs[i].slots`: the element's struct type, when known.
+                    ExprKind::Index(..) => self.resolve_expr_struct_type(obj),
                     _ => None,
                 };
                 struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
@@ -5937,6 +5961,7 @@ impl Transpiler {
             dict_vars: self.dict_vars.clone(),
             instant_vars: self.instant_vars.clone(),
             chars_vars: self.chars_vars.clone(),
+            boxed_trait_ref_vars: self.boxed_trait_ref_vars.clone(),
             fn_return_types: self.fn_return_types.clone(),
             index_vars: self.index_vars.clone(),
             fn_sigs: self.fn_sigs.clone(),
@@ -6110,6 +6135,7 @@ impl Transpiler {
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
             arc_qualified_types: self.arc_qualified_types.clone(),
+            trait_borrow_resolved: self.trait_borrow_resolved,
             unit_enums: self.unit_enums.clone(),
             recursive_fields: self.recursive_fields.clone(),
             user_types: self.user_types.clone(),

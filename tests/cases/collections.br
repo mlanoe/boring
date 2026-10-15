@@ -66,7 +66,7 @@ let csb = {3, 1, 2}
 print csa == csb
 print csa == {1, 2}
 
-# is reference identity
+# is reference identity (clone is a real copy, so not identical)
 struct CDog:
     string name
 

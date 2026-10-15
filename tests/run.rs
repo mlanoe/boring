@@ -852,3 +852,8 @@ interp_test!(self_field_collection_return_by_value);
 interp_test!(trait_method_casing_unknown_receiver);
 interp_test!(stored_closure_captures_self_and_loop_item);
 interp_test!(view_callbacks_capture_state_handles);
+interp_test!(clone_deep_copy);
+interp_test!(trait_object_no_rebox);
+interp_test!(trait_object_fallback_optional);
+interp_test!(nested_dict_field_assign_in_place);
+interp_test!(actor_collection_field_derive);

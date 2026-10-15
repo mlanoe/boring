@@ -129,10 +129,7 @@ impl Transpiler {
             // recurse through an extra `Observed` layer.
             let has_sync_mutex_field = !self.use_async_actors()
                 && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-                && (s.fields.iter().any(|f| {
-                    Self::is_arc_qualified(&f.ty)
-                    || matches!(&f.ty, Type::Optional(inner) if Self::is_arc_qualified(inner))
-                }) || s.fields.iter().any(|f| {
+                && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty)) || s.fields.iter().any(|f| {
                     self.observed_fields.get(&format!("{}::{}", s.name, f.name))
                         .is_some_and(|(_, base)| matches!(base,
                             OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))

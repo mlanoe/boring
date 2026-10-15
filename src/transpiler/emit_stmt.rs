@@ -678,6 +678,17 @@ impl Transpiler {
 
     /// Returns true for types that map to `Arc<Mutex<T>>` or `Arc<RwLock<T>>` in Rust.
     /// Does NOT include `Shared` — handled separately because `Shared` is threading-aware.
+    /// `is_arc_qualified` looking through optionals and collections (`T'actor?`, `[T'actor]`,
+    /// `{K=T'actor}`): such a field holds an `Arc<Mutex<T>>`/`Arc<RwLock<T>>` too.
+    pub(crate) fn holds_arc_qualified(ty: &Type) -> bool {
+        match ty.without_mut() {
+            Type::Optional(i) | Type::Array(i) | Type::Set(i) => Self::holds_arc_qualified(i),
+            Type::Dict(_, v) => Self::holds_arc_qualified(v),
+            Type::Tuple(ts) => ts.iter().any(Self::holds_arc_qualified),
+            t => Self::is_arc_qualified(t),
+        }
+    }
+
     pub(crate) fn is_arc_qualified(ty: &Type) -> bool {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
     }

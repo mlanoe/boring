@@ -365,6 +365,10 @@ impl Transpiler {
             }));
             // `[mut T]` elements: the loop variable is a `T` as far as dispatch goes.
             let elem_ty = elem_ty.map(|t| t.without_mut().clone());
+            // `[Trait]` element: the loop variable is a `&Box<dyn Trait>`.
+            if matches!(&elem_ty, Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str())) {
+                self.boxed_trait_ref_vars.insert(s.vars[0].clone());
+            }
             match &elem_ty {
                 // `is_known_user_type` (not `struct_fields` alone) so iterating a `[SomeEnum]`
                 // array (`for w in walls: w.position()`) also gets the loop var registered for

@@ -144,7 +144,9 @@ impl Transpiler {
             for i in 0..f.params.len() {
                 let bad = labeled || shapes.len() > f.params.len() || match shapes.get(i) {
                     Some(ArgShape::Other) => true,
-                    Some(ArgShape::Ctor(n)) => !self.is_known_value_ctor(n),
+                    Some(ArgShape::Ctor(n)) => !self.is_known_value_ctor(n) && !decls.get(n.as_str()).is_some_and(|g|
+                        // a free fn returning a bare trait: `&*f(..)` reborrows its box
+                        matches!(&g.return_ty, Some(Type::Named(t)) if self.trait_method_names.contains_key(t.as_str()))),
                     _ => false,
                 };
                 // A `mut` parameter is lent whatever its call sites look like.

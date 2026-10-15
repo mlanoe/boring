@@ -1,0 +1,14 @@
+struct N:
+    pub int id
+
+struct Tree:
+    pub var mut [N'actor] kids = []
+    pub var mut {int=N'actor} byId = {=}
+    pub var mut N'actor? root = nil
+
+def main():
+    mut t = Tree()
+    let c = t.kids.length
+    print c
+    let d = t.byId.length
+    print d

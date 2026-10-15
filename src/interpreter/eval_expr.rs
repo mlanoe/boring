@@ -827,6 +827,21 @@ impl Interpreter {
             }
         }
         let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+        // `.clone()` on a struct instance is a real deep copy (Rust `Clone`), except on a
+        // `'shared`/`'actor`/`'guard` binding, where it clones the handle (alias, like `Rc::clone`).
+        if method == "clone" && args.is_empty() {
+            if let Value::Object(rc) = &obj {
+                let user_clone = matches!(self.global.borrow().get(&rc.borrow().type_name),
+                    Some(Value::Struct { ref decl, .. }) if decl.methods.iter().any(|m| m.name == "clone"));
+                let handle = matches!(&obj_expr.kind, ExprKind::Var(n) if {
+                    let b = env.borrow();
+                    b.is_shared(n) || b.is_actor(n)
+                });
+                if !user_clone && !handle {
+                    return Ok(self.copy_struct_value(&obj));
+                }
+            }
+        }
         // `recv.field(args)` where `field` is a function-typed struct field (no method of that
         // name): call the stored closure. Not a content mutation of `recv` — the closure
         // mutates what it captured, never the struct — so the mutating-method gate below

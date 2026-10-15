@@ -395,6 +395,8 @@ struct Transpiler {
     pub(crate) instant_vars: std::collections::HashSet<String>,
     /// For-loop variables iterating over `.chars()` — need `.to_string()` when used as dict keys.
     pub(crate) chars_vars: std::collections::HashSet<String>,
+    /// `for k in <[Trait]>`: `k` is a `&Box<dyn Trait>`; passing it on as `&dyn Trait` needs `&**k`.
+    pub(crate) boxed_trait_ref_vars: std::collections::HashSet<String>,
     /// Top-level function return types: fn_name → return Type (for {:?} formatting in print).
     pub(crate) fn_return_types: std::collections::HashMap<String, Type>,
     /// Variables that hold an opaque collection index (Option<usize> from firstIndex/nextIndex).
@@ -1106,6 +1108,8 @@ struct Transpiler {
     /// borrowed (`&dyn Trait`) rather than a by-value `Box<dyn Trait>`.
     pub(crate) trait_borrowed_fns: std::collections::HashMap<String, Vec<bool>>,
     /// `Type::method` → per-parameter replacement type (`Trait&`) for the bare-trait params
+    /// Set once borrow inference has run: later `share_dyn_traits` rewrites may consult its result.
+    pub(crate) trait_borrow_resolved: bool,
     /// inferred borrowed on a struct method (`None` = unchanged). Call sites consult this
     /// instead of the registered declaration, which stays as written.
     pub(crate) trait_borrowed_methods: std::collections::HashMap<String, Vec<Option<Type>>>,
@@ -1417,6 +1421,7 @@ impl Transpiler {
             dict_vars: std::collections::HashSet::new(),
             instant_vars: std::collections::HashSet::new(),
             chars_vars: std::collections::HashSet::new(),
+            boxed_trait_ref_vars: std::collections::HashSet::new(),
             fn_return_types: std::collections::HashMap::new(),
             index_vars: std::collections::HashSet::new(),
             fn_sigs: std::collections::HashMap::new(),
@@ -1635,6 +1640,7 @@ impl Transpiler {
             trait_borrowed_fns: std::collections::HashMap::new(),
             trait_borrowed_methods: std::collections::HashMap::new(),
             trait_borrowed_method_by_name: std::collections::HashMap::new(),
+            trait_borrow_resolved: false,
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),
@@ -2085,6 +2091,13 @@ impl Transpiler {
             self.global_instantiations = monomorphize::build_instantiation_map(
                 &self.pending_generic_call_candidates,
                 &self.global_generic_structs,
+            self.trait_borrow_resolved = true;
+            // Registrations made before inference saw every bare param as bare: by-value ones are
+            // `Trait'shared` for a shared trait (`share_dyn_traits.rs`).
+            let targets = self.shared_dyn_traits.clone();
+            for sig in self.fn_sigs.values_mut() {
+                for ty in sig.iter_mut() { *ty = share_dyn_traits::shared_if_bare(ty, &targets); }
+            }
                 &self.global_generic_fns,
             );
             self.global_method_instantiations = monomorphize::build_method_instantiation_map(
@@ -2125,7 +2138,12 @@ impl Transpiler {
             program
         } else {
             let mut cloned = program.clone();
-            share_dyn_traits::rewrite_program(&mut cloned, &self.shared_dyn_traits);
+            let view = self.trait_borrow_resolved.then(|| share_dyn_traits::BorrowView {
+                fns: &self.trait_borrowed_fns,
+                methods: &self.trait_borrowed_methods,
+                by_name: &self.trait_borrowed_method_by_name,
+            });
+            share_dyn_traits::rewrite_program(&mut cloned, &self.shared_dyn_traits, view.as_ref());
             owned_program_sd = cloned;
             &owned_program_sd
         };

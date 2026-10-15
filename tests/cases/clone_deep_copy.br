@@ -1,0 +1,29 @@
+struct M:
+    var [int] xs = []
+    def add(int x):
+        xs.push(x)
+
+struct W:
+    var mut M inner = M()
+
+mut b = M()
+b.add(1)
+mut c = b.clone()
+b.add(2)
+print c.xs.length
+print b.xs.length
+mut d = {=}
+d[1] = b.clone()
+b.add(3)
+print d[1].xs.length
+print b.xs.length
+mut w = W()
+mut w2 = w.clone()
+w.inner.add(5)
+print w2.inner.xs.length
+print w.inner.xs.length
+
+mut M'actor h = M()
+let h2 = h.clone()
+h.add(7)
+print h2.xs.length

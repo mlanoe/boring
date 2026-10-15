@@ -2155,6 +2155,14 @@ impl Transpiler {
                 return self.emit_expr(value);
             }
         }
+        // Any other expression whose static type is already this bare trait (a `[Trait]`
+        // element / loop variable, a trait-typed field, a method call returning the trait)
+        // is a `Box<dyn Trait>` value: forward it as is, never re-box.
+        if matches!(&value.kind, ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::MethodCall(..) | ExprKind::Call(..))
+            && self.resolve_expr_type(value).is_some_and(|t| same_trait(&t))
+        {
+            return self.emit_expr(value);
+        }
         let emitted = self.emit_expr_owned(value);
         // A call to a function declared to return this same bare trait already yields a
         // `Box<dyn Trait>` (a bare trait in return position is boxed): hand it over as is.
@@ -2565,6 +2573,20 @@ impl Transpiler {
                 let is_heap = self.arg_is_heap_var(value);
                 // A bare (unannotated) local assigned from a call to a `'shared`-returning
                 // function (`let s = makeShared()`, no `Counter'shared` annotation) never
+            // `Trait'shared` slot fed by a by-value bare/`'owned` trait binding (`Box<dyn Trait>`):
+            // `Arc::from(boxed)` converts the box without re-wrapping or cloning it.
+            Some(Type::Qualified(inner_ty, OwnerQual::Shared))
+                if matches!(inner_ty.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
+                    && matches!(&value.kind, ExprKind::Var(v)
+                        if self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()))
+                            .is_some_and(|t| self.is_boxed_trait_type(t))) =>
+            {
+                let ptr = match self.config.threading {
+                    crate::transpiler::ThreadingMode::Single => "Rc",
+                    _ => "Arc",
+                };
+                format!("{ptr}::from({})", self.emit_expr(value))
+            }
                 // gets `s` recorded into `var_types`/`arc_vars`/`rc_vars` — those are only
                 // ever populated from an EXPLICIT `'shared` annotation or a bare struct-
                 // constructor RHS (see `compute_let_ty_and_value`'s "Priority 5" doc), never

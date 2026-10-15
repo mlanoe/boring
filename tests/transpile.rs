@@ -1453,3 +1453,7 @@ transpile_test!(self_field_collection_return_by_value);
 transpile_test!(trait_method_casing_unknown_receiver);
 transpile_test!(stored_closure_captures_self_and_loop_item);
 transpile_test!(view_callbacks_capture_state_handles);
+transpile_test!(trait_object_no_rebox);
+transpile_test!(trait_object_fallback_optional);
+transpile_test!(nested_dict_field_assign_in_place);
+transpile_test!(actor_collection_field_derive);
