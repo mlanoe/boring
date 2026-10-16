@@ -176,10 +176,10 @@ string (`KeyedGroup("{key}", items)`). In `boring-ui`, `Desc` can carry a compos
 `StateBox`, and `describe`/`ViewRoot` adapt `ViewBuilder`s. `tests/core_views_test.br` proves typed state
 persists across rebuilds/reorders and dies with its identity.
 
-**Interpreter only.** `boring build` switches the generated methods off (`lower_view::set_runtime_methods(false)`,
-called from the `build` command): the Rust output cannot express returning owned `[View]` children or an
-expanded body that borrows its mounted state. Real fix needs the draft's runtime design (shared handles /
-callback context), not more lowering. Gotchas met: a view named `Screen` collides with the interpreter's
+**Transpiler status (corrected 2026-10-16).** The earlier "interpreter only" note was wrong/stale: the generated methods
+are emitted under `boring build` too; the build switch only turns `body()`'s `impl View` into `Arc<dyn View>`. All of
+`boring-ui/tests/*_test.br` (incl. the Todo app) transpile, compile and pass under `boring build` with output identical
+to `boring run` (`boring-ui/tests/run_tests_transpiled.sh`). Remaining: a real Rust host/renderer on top. Gotchas met: a view named `Screen` collides with the interpreter's
 GPU `Screen` builtin; a top-level script variable named like a struct field (`root`) shadows the implicit
 `self.root` inside methods.
 
