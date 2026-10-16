@@ -3059,15 +3059,35 @@ impl Transpiler {
                 && names.iter().any(|v| v == "self"
                     || (!is_param(v) && self.bare_self_field_type(v).is_some()));
             if alias_self {
+                if let Some(sn) = &self.self_type {
+                    if self.struct_holds_dyn(sn, false, &mut vec![]) {
+                        self.push_error(value.line, value.col, format!(
+                            "closure stored in a function-typed field captures `self`, but struct `{sn}` is not Clone \
+                             (it holds a `Box<dyn Trait>`); the closure must own its captures — capture the needed \
+                             fields into locals first, or make the held trait `'shared`"));
+                    }
+                }
                 prelude.push_str("let __self = self.clone(); ");
             }
             for v in &names {
                 if v == "self" || is_param(v) || self.arc_vars.contains(v) { continue; }
                 if !self.known_local_vars.contains(v.as_str()) { continue; }
-                let Some(ty) = self.resolve_expr_type(&Expr { kind: ExprKind::Var(v.clone()), line: 0, col: 0, len: 0 }) else { continue };
-                let ty = ty.without_mut();
-                let Type::Named(n) = ty else { continue };
-                if self.struct_fields.contains_key(n.as_str()) && !self.type_holds_dyn(ty, false, &mut vec![]) {
+                let resolved = self.resolve_expr_type(&Expr { kind: ExprKind::Var(v.clone()), line: 0, col: 0, len: 0 });
+                // Loop variables over `[string]` are tracked only as string-ness flags.
+                let ty = match &resolved {
+                    Some(t) => t.without_mut(),
+                    None if self.string_vars.contains(v.as_str()) || self.string_arc_vars.contains(v.as_str()) => &Type::Str,
+                    None => continue,
+                };
+                // Owned, non-`Copy` value types (strings, collections, optionals, tuples) are
+                // cloned in too, so a captured loop variable stays usable after the closure.
+                let is_value_type = match ty {
+                    Type::Named(n) => self.struct_fields.contains_key(n.as_str()),
+                    Type::Str | Type::Array(_) | Type::Dict(..) | Type::Set(_)
+                        | Type::Optional(_) | Type::Tuple(_) => true,
+                    _ => false,
+                };
+                if is_value_type && !self.type_holds_dyn(ty, false, &mut vec![]) {
                     prelude.push_str(&format!("let mut {v} = {v}.clone(); "));
                     cloned_locals.push(v.clone());
                 }

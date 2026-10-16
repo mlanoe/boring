@@ -874,3 +874,4 @@ interp_test!(fn_handle_pass_and_str_arg);
 interp_test!(fn_handle_inline_closure_ctor);
 interp_test!(guard_string_trim_temporary);
 interp_test!(struct_param_nested_loop_call);
+interp_test!(closure_owned_captures);

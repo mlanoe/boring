@@ -1477,3 +1477,4 @@ transpile_test!(fn_handle_inline_closure_ctor);
 transpile_test!(guard_string_trim_temporary);
 transpile_test!(struct_param_nested_loop_call);
 transpile_test!(for_mut_elem_iter_mut);
+transpile_test!(closure_owned_captures);

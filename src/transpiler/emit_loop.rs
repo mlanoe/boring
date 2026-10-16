@@ -428,6 +428,12 @@ impl Transpiler {
                     if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) => {
                     self.var_types.insert(s.vars[0].clone(), ty.clone());
                 }
+                // `[string]` element: recorded so a stored closure capturing the loop variable
+                // knows to clone it in (see `emit_fn_field_value`).
+                Some(Type::Str) | Some(Type::Named(_)) if matches!(&elem_ty, Some(Type::Str))
+                    || matches!(&elem_ty, Some(Type::Named(n)) if n == "string") => {
+                    self.var_types.insert(s.vars[0].clone(), Type::Str);
+                }
                 _ => {}
             }
         }
