@@ -1473,6 +1473,7 @@ transpile_test!(nested_dict_field_assign_in_place);
 transpile_test!(actor_collection_field_derive);
 transpile_test!(fn_field_handle_call);
 transpile_test!(fn_handle_pass_and_str_arg);
+transpile_test!(fn_handle_inline_closure_ctor);
 transpile_test!(guard_string_trim_temporary);
 transpile_test!(struct_param_nested_loop_call);
 transpile_test!(for_mut_elem_iter_mut);

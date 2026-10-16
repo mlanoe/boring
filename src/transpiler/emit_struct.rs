@@ -3014,6 +3014,21 @@ impl Transpiler {
     /// Value stored into a function-typed field: a closure literal / fn value is boxed behind
     /// the handle `emit_fn_field_type` names; a read of another fn field is just cloned.
     pub(crate) fn emit_fn_field_value(&self, fnty: &Type, value: &Expr) -> String {
+        // An inline closure's untyped params take the field's declared parameter types, so the
+        // body is emitted with them known (`(s): s.len()` -> `isize`, not a raw `usize`).
+        if let (Type::Fn(_, ptys, ..), ExprKind::Closure(params, ret, body, throws, task)) = (fnty, &value.kind) {
+            if params.len() == ptys.len() && params.iter().any(|p| p.ty.is_none()) {
+                let mut params = params.clone();
+                for (p, t) in params.iter_mut().zip(ptys) {
+                    if p.ty.is_none() { p.ty = Some(t.clone()); }
+                }
+                let typed = Expr {
+                    kind: ExprKind::Closure(params, ret.clone(), body.clone(), *throws, *task),
+                    line: value.line, col: value.col, len: value.len,
+                };
+                return self.emit_fn_field_value(fnty, &typed);
+            }
+        }
         if let Type::Fn(_, _, _, true, _) = fnty {
             // Reported once per struct at the field declaration (`emit_struct`).
             return self.emit_expr(value);

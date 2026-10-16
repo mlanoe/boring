@@ -4191,7 +4191,8 @@ impl Transpiler {
             } else {
                 continue;
             };
-            let eff_value: &Expr = if let ExprKind::Closure(_, _, ClosureBody::Expr(e), _, _) = &a.value.kind {
+            // Only the label-less shorthand wraps its value; `label = (s): body` is a real closure.
+            let eff_value: &Expr = if let (None, ExprKind::Closure(_, _, ClosureBody::Expr(e), _, _)) = (&a.label, &a.value.kind) {
                 e.as_ref()
             } else {
                 &a.value
@@ -4420,7 +4421,7 @@ impl Transpiler {
                     } else { unreachable!() };
                     let label = &label;
                     // When arg is a closure-style labeled arg `|field| expr`, unwrap to get the value.
-                    let eff_value: &Expr = if let ExprKind::Closure(params, _, body, _, _) = &a.value.kind {
+                    let eff_value: &Expr = if let (None, ExprKind::Closure(params, _, body, _, _)) = (&a.label, &a.value.kind) {
                         if params.len() == 1 {
                             if let ClosureBody::Expr(e) = body { e.as_ref() } else { &a.value }
                         } else { &a.value }

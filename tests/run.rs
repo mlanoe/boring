@@ -871,5 +871,6 @@ interp_test!(nested_dict_field_assign_in_place);
 interp_test!(actor_collection_field_derive);
 interp_test!(fn_field_handle_call);
 interp_test!(fn_handle_pass_and_str_arg);
+interp_test!(fn_handle_inline_closure_ctor);
 interp_test!(guard_string_trim_temporary);
 interp_test!(struct_param_nested_loop_call);
