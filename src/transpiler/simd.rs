@@ -2606,6 +2606,45 @@ impl Emitter {
                     .join(", ")
             ),
             ExprKind::MethodCall(o, m, args) => {
+                let string_receiver = matches!(&o.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
+                    || self.expr_type(o).as_deref() == Some("String");
+                if string_receiver {
+                    match (m.as_str(), args.as_slice()) {
+                        ("length" | "count", []) => {
+                            return format!("({}.len() as i32)", self.expr(o));
+                        }
+                        ("len", []) => {
+                            return format!("{}.len()", self.expr(o));
+                        }
+                        ("isEmpty", []) => {
+                            return format!("{}.is_empty()", self.expr(o));
+                        }
+                        ("trim", []) => {
+                            return format!("{}.trim().to_string()", self.expr(o));
+                        }
+                        ("toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper", []) => {
+                            return format!("{}.to_uppercase()", self.expr(o));
+                        }
+                        ("toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower", []) => {
+                            return format!("{}.to_lowercase()", self.expr(o));
+                        }
+                        ("startsWith" | "hasPrefix", [prefix, ..]) => {
+                            return format!(
+                                "{}.starts_with({}.as_str())",
+                                self.expr(o),
+                                self.expr(&prefix.value)
+                            );
+                        }
+                        ("endsWith" | "hasSuffix", [suffix, ..]) => {
+                            return format!(
+                                "{}.ends_with({}.as_str())",
+                                self.expr(o),
+                                self.expr(&suffix.value)
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 let local_collection = matches!(
                     &o.kind,
                     ExprKind::Var(name)
@@ -3659,6 +3698,13 @@ impl Emitter {
                     && self.block_uniform_expr_with_locals(&args[0].value, locals)
             }
             ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "startsWith" | "hasPrefix" | "endsWith" | "hasSuffix")
+                    && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
                 if method == "indexOf" && args.len() == 1 =>
             {
                 self.block_uniform_expr_with_locals(receiver, locals)
@@ -4183,6 +4229,24 @@ impl Emitter {
                 ExprKind::Var(name) => primitive_cast_type(name).map(str::to_string),
                 _ => None,
             },
+            ExprKind::MethodCall(object, method, _)
+                if matches!(
+                    method.as_str(),
+                    "trim"
+                        | "toUpperCase"
+                        | "uppercased"
+                        | "upper"
+                        | "to_upper"
+                        | "toUpper"
+                        | "toLowerCase"
+                        | "lowercased"
+                        | "lower"
+                        | "to_lower"
+                        | "toLower"
+                ) && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("String".into())
+            }
             ExprKind::MethodCall(object, method, _) if method == "filter" => self.expr_type(object),
             ExprKind::MethodCall(_, method, args) if method == "map" => args
                 .first()

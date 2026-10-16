@@ -3445,6 +3445,54 @@ print "{transforms.output[0]} {transforms.output[1]} {transforms.output[2]} {tra
 }
 
 #[test]
+fn local_string_alias_methods_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_string_alias_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_string_alias_methods.br");
+    fs::write(
+        &input,
+        r#"
+kernel StringAliases:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let text = " Hello "
+        let trimmed = text.trim()
+        let upper = trimmed.toUpperCase()
+        let lower = upper.toLowerCase()
+        output[i] = trimmed.length() + int(upper == "HELLO") + int(lower.startsWith("he")) + int(lower.endsWith("lo")) + i
+mut aliases = StringAliases()
+kernel:
+    aliases(block = 4)
+print "{aliases.output[0]} {aliases.output[1]} {aliases.output[2]} {aliases.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_string_alias_methods_simd/src/main.rs")).unwrap();
+    assert!(source.contains("text.trim().to_string()"));
+    assert!(source.contains("trimmed.to_uppercase()"));
+    assert!(source.contains("upper.to_lowercase()"));
+    assert!(source.contains("lower.starts_with(String::from(\"he\").as_str())"));
+    assert!(source.contains("lower.ends_with(String::from(\"lo\").as_str())"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_string_alias_methods_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "8 9 10 11");
+}
+
+#[test]
 fn local_dict_and_set_transformations_run_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_local_dict_set_transformations");
