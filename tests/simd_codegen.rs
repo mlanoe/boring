@@ -6537,7 +6537,8 @@ kernel Tuples:
         let i = .thread.x
         let pair = (i + 1, i * 2, 100)
         let (left, right, _) = pair
-        output[i] = left + right
+        let ((int32, int32) nested, int32 bonus) = ((left, right), 100)
+        output[i] = nested.first() + nested.last()
 mut tuples = Tuples(output)
 kernel:
     tuples(block = 4)
@@ -6557,6 +6558,8 @@ print "{tuples.output[0]} {tuples.output[1]} {tuples.output[2]} {tuples.output[3
     );
     let source = fs::read_to_string(root.join("tuples_simd/src/main.rs")).unwrap();
     assert!(source.contains("let (left, right, _) = pair;"));
+    assert!(source.contains("nested.0.clone()"));
+    assert!(source.contains("nested.1.clone()"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(root.join("tuples_simd/Cargo.toml"))

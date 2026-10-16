@@ -1954,6 +1954,9 @@ impl Emitter {
                     if let Some(binding_ty) = &binding.ty {
                         self.value_types
                             .insert(binding.name.clone(), ty(binding_ty));
+                        if let Some(arity) = tuple_type_arity(binding_ty) {
+                            self.tuple_arities.insert(binding.name.clone(), arity);
+                        }
                     }
                     self.replayable_locals.remove(&binding.name);
                     self.replayed_assignments.remove(&binding.name);
