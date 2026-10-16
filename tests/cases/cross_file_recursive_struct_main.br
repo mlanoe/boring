@@ -1,0 +1,23 @@
+use cross_file_recursive_struct_lib
+
+
+def int search(Mounted m, string kind):
+    if m.kind == kind:
+        return m.id
+    for c in m.children:
+        let r = search(c, kind)
+        if r >= 0:
+            return r
+    -1
+
+def int countKind(Mounted m, string kind):
+    var n = 0
+    if m.kind == kind:
+        n = 1
+    for c in m.children:
+        n += countKind(c, kind)
+    n
+
+let root = Mounted(id = 1, kind = "a", children = [Mounted(id = 2, kind = "b")])
+print(search(root, "b"))
+print(countKind(root, "b"))

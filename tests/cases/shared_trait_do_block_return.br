@@ -1,0 +1,24 @@
+trait Node:
+    req string label()
+
+struct Leaf as Node:
+    string name
+    req string label(): name
+
+struct Group as Node:
+    [Node] kids
+    req string label(): "group"
+
+struct Holder:
+    [Node] items
+
+def Node make(bool two):
+    if two:
+        return Leaf(name = "two")
+    Group:
+        Leaf(name = "a")
+        if two:
+            Leaf(name = "b")
+
+print(make(true).label())
+print(make(false).label())

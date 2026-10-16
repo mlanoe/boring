@@ -1,0 +1,23 @@
+trait Shape:
+    req string name()
+
+struct Sq as Shape:
+    req string name(): "sq"
+
+struct Cmd:
+    string op
+
+def string describe(Shape s):
+    "shape {s.name()}"
+
+def string describe(Cmd c):
+    "cmd {c.op}"
+
+def [Cmd] cmds():
+    [Cmd(op = "a"), Cmd(op = "b")]
+
+mut parts = []
+for c in cmds():
+    parts.push(describe(c))
+parts.push(describe(Sq()))
+print(parts.join("; "))

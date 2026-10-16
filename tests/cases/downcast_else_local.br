@@ -1,0 +1,27 @@
+trait Box0:
+    req string name()
+
+struct NoBox as Box0:
+    req string name(): "none"
+
+struct Counter as Box0:
+    int taps = 0
+    req string name(): "counter"
+
+struct Holder:
+    [Box0] items
+
+struct Reg:
+    var Box0? slot = nil
+    req Box0? get(int i):
+        slot
+
+def tap(Reg r):
+    let b = r.get(0) else (NoBox())
+    let c = b as Counter else (Counter())
+    print(c.taps)
+    print(b.name())
+
+mut r = Reg()
+r.slot = Counter(taps = 5)
+tap(r)

@@ -1,0 +1,23 @@
+struct Rt:
+    var int n = 0
+    var Handle? focus = nil
+    def inc():
+        n += 1
+
+struct Handle:
+    int id
+
+def bool act(mut Rt rt, string s):
+    rt.inc()
+    true
+
+def bool typeText(mut Rt rt, string s):
+    if let f = rt.focus:
+        return act(rt, "{f.id}{s}")
+    false
+
+mut c = Rt()
+c.focus = Handle(id = 3)
+assert(typeText(c, "x"))
+assert(typeText(c, "y"))
+print(c.n)

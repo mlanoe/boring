@@ -659,6 +659,15 @@ impl Transpiler {
         let is_trait_array_field = self_field_ty.as_ref().is_some_and(|t| matches!(t,
             Type::Array(elem) if matches!(elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))));
         let iter_expr = match &s.iterable.kind {
+            // A bound read through a lock (`0..st.items.length` on an `'actor`/`Slot` state)
+            // leaves its guard alive as a temporary for the whole `for` — the body re-locking the
+            // same cell would deadlock. Evaluate the range first, so the guard dies there.
+            ExprKind::Range { .. } if iter.contains(".lock()") || iter.contains(".read()")
+                || iter.contains(".write()") || iter.contains(".borrow()") || iter.contains(".borrow_mut()") =>
+            {
+                self.line(&format!("let __boring_range = {};", iter));
+                "__boring_range".to_string()
+            }
             ExprKind::Range { .. } => iter,
             _ if is_trait_array_field => format!("&{}", iter),
             _ if is_borrowed_collection_field => match &self_field_ty {

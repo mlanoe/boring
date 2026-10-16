@@ -387,8 +387,18 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         }
         if let Some(e) = failure { return Err(e); }
     }
-    if env.view_trait && RUNTIME_METHODS.load(std::sync::atomic::Ordering::Relaxed) {
+    if env.view_trait {
         s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name));
+    }
+    // Transpiled output: `body()` is the `<View>` opaque return the parser gave it, which Rust
+    // can only satisfy with ONE concrete type — but a body may return `Row` on one branch and
+    // `Column` on another. A bare `View` is the dynamic (`Arc<dyn View>`) return instead.
+    if env.view_trait && !RUNTIME_METHODS.load(std::sync::atomic::Ordering::Relaxed) {
+        for m in s.methods.iter_mut().filter(|m| m.name == "body") {
+            if matches!(&m.return_ty, Some(Type::Impl(t)) if matches!(&**t, Type::Named(n) if n == "View")) {
+                m.return_ty = Some(Type::Named("View".to_string()));
+            }
+        }
     }
     generated.push(s);
     Ok(generated)
@@ -414,7 +424,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                 Type::Optional(inner) if !matches!(**inner, Type::Array(_)) => {
                     props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
                 }
-                Type::Named(n) if n == "View" => {}
+                Type::Named(n) if n == "View" || n == "UIAction" => {}
                 // A lowered `bind` field is a shared `Slot`: its prop is the current value.
                 Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot") => {
                     props.push_str(&format!("        p[\"{name}\"] = \"{{{name}.value}}\"\n", name = f.name));
@@ -425,7 +435,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         // Semantic actions: a native control's reaction, derived from its facade's shape.
         let mut acts = String::new();
         if s.fields.iter().any(|f| f.name == "onActivate" && is_named(strip_mut(&f.ty), "UIAction")) {
-            acts.push_str("        if action == \"activate\":\n            let f = onActivate\n            f()\n");
+            acts.push_str("        if action == \"activate\":\n            onActivate()\n");
         }
         if let Some(f) = s.fields.iter().find(|f| f.name == "value") {
             if let Type::Qualified(inner, OwnerQual::Actor) = strip_mut(&f.ty) {

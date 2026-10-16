@@ -111,35 +111,34 @@ fn trait_array_field_and_param_codegen_shape() {
     // dozen bytes is enough to catch an adjacent attribute line without also matching a
     // *different*, unrelated struct's derive line further back).
     let preceding = &generated[scene_start.saturating_sub(64)..scene_start];
+    // All-`req` trait held in a struct field is shared (`Arc<dyn Trait>`), which is Clone but
+    // neither Debug nor PartialEq: the derive is exactly `Clone` (no Debug without a Debug supertrait).
     assert!(
-        !preceding.contains("#[derive("),
-        "a struct whose only `[Trait]` field's trait does NOT require Debug must get NO \
-         derive attribute at all (Box<dyn Trait> implements neither Clone, PartialEq, nor \
-         Debug here) -- got, just before `struct Scene {{`:\n{}", preceding
+        preceding.trim_end().ends_with("#[derive(Clone)]"),
+        "a struct whose only `[Trait]` field's trait does NOT require Debug must derive just \
+         Clone (Arc<dyn Trait> is Clone but not Debug/PartialEq) -- got, just before \
+         `struct Scene {{`:\n{}", preceding
     );
 
     // ── Bug 2: `for s in scene.shapes:` (field access) must borrow, not clone ─
     let main_body = body_of("fn main", "\n}\n");
+    // `Arc<dyn Trait>` is Clone, so either a borrow or `.iter().cloned()` is valid here
+    // (the build_and_run test proves it compiles); it must just not move the field out.
     assert!(
-        main_body.contains("for s in &scene.shapes"),
-        "iterating a `[Trait]` struct field must borrow (`&scene.shapes`), got:\n{}",
+        main_body.contains("for s in &scene.shapes") || main_body.contains("for s in scene.shapes.iter().cloned()"),
+        "iterating a `[Trait]` struct field must borrow or iter().cloned(), got:\n{}",
         main_body
-    );
-    assert!(
-        !main_body.contains(".iter().cloned()"),
-        "iterating a `[Trait]` struct field must not use `.iter().cloned()` \
-         (Box<dyn Trait> isn't Clone), got:\n{}", main_body
     );
 
     // ── Bug 3: `for s in shapes:` over a `[Trait]`-typed parameter must not double-borrow ─
     let param_body = body_of("fn describeParam", "\n}\n");
     assert!(
-        param_body.contains("shapes: &Vec<Box<dyn Drawable>>"),
+        param_body.contains("shapes: &Vec<Arc<dyn Drawable>>"),
         "expected the `[Trait]` parameter to be a single reference, got:\n{}", param_body
     );
     assert!(
-        param_body.contains("for s in shapes {"),
-        "a `[Trait]`-typed parameter is already `&Vec<Box<dyn Trait>>` -- iterating it \
+        param_body.contains("for s in shapes {") || param_body.contains("for s in shapes.iter().cloned() {"),
+        "a `[Trait]`-typed parameter is already `&Vec<Arc<dyn Trait>>` -- iterating it \
          must not add another `&`, got:\n{}", param_body
     );
     assert!(
@@ -232,7 +231,7 @@ fn trait_array_field_debug_supertrait_is_kept_and_compiles() {
         .unwrap_or_else(|| panic!("`struct Scene` not found in generated source:\n{}", generated));
     let preceding = &generated[scene_start.saturating_sub(64)..scene_start];
     assert!(
-        preceding.contains("#[derive(Debug)]"),
+        preceding.contains("#[derive(Debug, Clone)]"),
         "Scene's `[Trait]` field's trait requires Debug, so Scene must still derive it, \
          got, just before `struct Scene {{`:\n{}", preceding
     );

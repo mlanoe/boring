@@ -158,3 +158,16 @@ fn emit_rust_includes_deps_cross_project_monomorphized_module() {
     let actual = emit_and_run(br_file, out_dir);
     assert_eq!(actual.trim_end(), "hi\nhi");
 }
+
+/// A recursive free function over a struct declared in a `use`d sibling file
+/// (`search(c, ...)` with `c` a loop variable over `m.children`): the function's own
+/// parameter qualifier inference has to see the sibling's struct fields, otherwise the
+/// recursive call site passes `c.clone()` where the signature takes `&Mounted`.
+#[test]
+fn emit_rust_cross_file_recursive_struct_param_is_borrowed() {
+    let br_file = Path::new("tests/cases/cross_file_recursive_struct_main.br");
+    let out_dir = Path::new("tests/cases/cross_file_recursive_struct_emit_rust_rust");
+
+    let actual = emit_and_run(br_file, out_dir);
+    assert_eq!(actual.trim_end(), "2\n1");
+}

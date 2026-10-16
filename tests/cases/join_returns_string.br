@@ -1,0 +1,15 @@
+def string dump([string] a):
+    a.join(",")
+
+def string dump2([string] a):
+    return a.join(",")
+
+let a = ["x", "y"]
+let s = a.join("-")
+print(s)
+print(dump(a))
+print(dump2(a))
+assert_eq(dump(a), "x,y")
+assert_eq(a.join(","), "x,y")
+let t = a.join(",") + "z"
+print(t)

@@ -583,7 +583,7 @@ impl Transpiler {
             Stmt::LetDestructure(s) => {
                 if let ExprKind::Field(obj, _) = &s.value.kind {
                     if let ExprKind::Var(vname) = &obj.kind {
-                        if auto_ref_param_vars.contains(vname.as_str()) {
+                        if auto_ref_param_vars.contains(vname.as_str()) && !self.fn_current_params_mut.contains(vname.as_str()) {
                             has_qualifier_constraint.insert(vname.clone());
                         }
                     }
@@ -963,9 +963,11 @@ impl Transpiler {
             }
         };
         // Suppress auto-ref if the source is a field of an auto-ref param (moving-out pattern).
+        // Never for a `mut` param: turning it into a by-value copy would silently drop the
+        // callee's mutations (and a field read is cloned out anyway).
         if let ExprKind::Field(obj, _) = &expr.kind {
             if let ExprKind::Var(vname) = &obj.kind {
-                if auto_ref_param_vars.contains(vname.as_str()) {
+                if auto_ref_param_vars.contains(vname.as_str()) && !self.fn_current_params_mut.contains(vname.as_str()) {
                     has_qualifier_constraint.insert(vname.clone());
                 }
             }

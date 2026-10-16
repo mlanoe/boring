@@ -1,0 +1,14 @@
+struct Handle:
+    int id
+
+struct Rt:
+    var Handle? focus = nil
+    var int? count = nil
+
+mut rt = Rt()
+rt.focus = Handle(id = 3)
+let a = rt.focus else (Handle(id = -1))
+let b = rt.focus else (Handle(id = -2))
+print(a.id)
+print(b.id)
+print(rt.count else (7))

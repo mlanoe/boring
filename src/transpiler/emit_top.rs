@@ -429,7 +429,6 @@ impl Transpiler {
             return self.deep_pre_scan_uses(program, visited);
         }
         self.pre_scan(program);
-        self.pre_infer_fn_qualifiers(program);
         self.collect_trait_borrow_facts(program);
         // Cross-file monomorphization (see `monomorphize.rs`'s module doc comment):
         // fold two more things into this same recursive walk over every reachable
@@ -502,9 +501,22 @@ impl Transpiler {
         self.pending_generic_call_candidates.extend(candidates.free);
         self.pending_method_call_candidates.extend(candidates.methods);
         self.deep_pre_scan_uses(program, visited);
+        // Qualifier inference needs every struct this file's functions mention, including
+        // those declared in the files it `use`s (their fields decide whether a loop variable
+        // over `m.children` is a known struct, i.e. whether a recursive call passes `&c`) —
+        // so it runs after the imported files have been pre-scanned, not before.
+        self.pre_infer_fn_qualifiers(program);
     }
 
     /// The recursion half of `deep_pre_scan`: visit every file `program` `use`s.
+    /// An imported file as the real emission will see it: `view` declarations lowered (their
+    /// generated state downcasts, `View` methods, ... are what pre-scan facts such as
+    /// `downcast_traits` have to be collected from). A file that fails to lower is left raw —
+    /// emission reports the real error.
+    fn lowered_for_pre_scan(program: crate::ast::Program) -> crate::ast::Program {
+        crate::lower_view::lower_module(program.clone()).unwrap_or(program)
+    }
+
     fn deep_pre_scan_uses(&mut self, program: &crate::ast::Program, visited: &mut std::collections::HashSet<std::path::PathBuf>) {
         for item in &program.items {
             if let crate::ast::Item::Use(u) = item {
@@ -519,6 +531,7 @@ impl Transpiler {
                     if !visited.insert(synthetic) { continue; }
                     let Ok(tokens) = crate::lexer::lex(src) else { continue };
                     let Ok(sub_program) = crate::parser::parse(tokens) else { continue };
+                    let sub_program = Self::lowered_for_pre_scan(sub_program);
                     self.deep_pre_scan(&sub_program, visited);
                     continue;
                 }
@@ -540,7 +553,8 @@ impl Transpiler {
                         let Ok(source) = std::fs::read_to_string(&canonical) else { continue };
                         let Ok(tokens) = crate::lexer::lex(&source) else { continue };
                         let Ok(sub_program) = crate::parser::parse(tokens) else { continue };
-                        self.deep_pre_scan(&sub_program, visited);
+                        let sub_program = Self::lowered_for_pre_scan(sub_program);
+                    self.deep_pre_scan(&sub_program, visited);
                         continue;
                     }
                 }
@@ -568,7 +582,8 @@ impl Transpiler {
                 if let Some(dir) = canonical.parent() {
                     self.source_dir = dir.to_path_buf();
                 }
-                self.deep_pre_scan(&sub_program, visited);
+                let sub_program = Self::lowered_for_pre_scan(sub_program);
+                    self.deep_pre_scan(&sub_program, visited);
                 self.source_dir = prev_dir;
             }
         }
@@ -1715,7 +1730,7 @@ impl Transpiler {
         } else if is_free_overload || is_method_overload {
             mangle_overload_name(&f.name, &f.params)
         } else {
-            f.name.clone()
+            escape_rust_keyword(&f.name)
         };
         let sig = format!(
             "{}{}fn {}{}({}) -> {}",

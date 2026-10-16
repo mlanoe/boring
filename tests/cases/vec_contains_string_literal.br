@@ -1,0 +1,10 @@
+struct Rt:
+    var mut [string] events = []
+
+mut rt = Rt()
+rt.events.push("a b")
+assert(rt.events.contains("a b"))
+assert(!rt.events.contains("zzz"))
+let names = ["x", "y"]
+assert(names.contains("y"))
+print(rt.events.contains("a b"))

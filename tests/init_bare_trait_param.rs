@@ -24,8 +24,8 @@
 // `emit_let_value` rendering — a bare trait-typed param fell through to the
 // qualifier-blind `emit_expr`, so `greeterProvider()` (returning bare `impl
 // Greeter`) was never wrapped in `Box::new(...)` to match the field/param's
-// own `Box<dyn Greeter>` type, and the generated Rust failed to compile
-// (E0308: expected `Box<dyn Greeter>`, found opaque type).
+// own `Arc<dyn Greeter>` type, and the generated Rust failed to compile
+// (E0308: expected `Arc<dyn Greeter>`, found opaque type).
 //
 // Run with:
 //   cargo test --test init_bare_trait_param
@@ -82,26 +82,26 @@ def main():
 fn bare_trait_init_param_default_is_wrapped() {
     let generated = emit_rust(SRC);
 
-    // The field and `new()`'s param must be `Box<dyn Greeter>` (unconditional
+    // The field and `new()`'s param must be `Arc<dyn Greeter>` (unconditional
     // for a bare trait-typed field — no double-boxing risk here since there's
     // no explicit `'owned` qualifier for `emit_type` to additionally wrap).
     assert!(
-        generated.contains("pub greeter: Box<dyn Greeter>,"),
-        "expected a `Box<dyn Greeter>` field — generated source:\n{}",
+        generated.contains("pub greeter: Arc<dyn Greeter>,"),
+        "expected a `Arc<dyn Greeter>` field — generated source:\n{}",
         generated
     );
     assert!(
-        generated.contains("pub fn new(greeter: Box<dyn Greeter>) -> Self {"),
-        "expected `new()`'s param to be `Box<dyn Greeter>` — generated source:\n{}",
+        generated.contains("pub fn new(greeter: Arc<dyn Greeter>) -> Self {"),
+        "expected `new()`'s param to be `Arc<dyn Greeter>` — generated source:\n{}",
         generated
     );
 
     // `greeterProvider()` is declared to return a bare trait, so it already
-    // yields `Box<dyn Greeter>`: the call site passes it as-is (no re-boxing).
+    // yields `Arc<dyn Greeter>`: the call site passes it as-is (no re-boxing).
     assert!(
         generated.contains("Greeting::new(greeterProvider())")
-            && !generated.contains("Box::new(greeterProvider())"),
-        "expected the default-arg call site to pass `greeterProvider()`'s already-boxed result as-is — generated source:\n{}",
+            && !generated.contains("Arc::new(greeterProvider())"),
+        "expected the default-arg call site to pass `greeterProvider()`'s already-shared result as-is — generated source:\n{}",
         generated
     );
 }

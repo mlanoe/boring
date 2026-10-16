@@ -1,0 +1,4 @@
+pub struct Mounted:
+    pub int id
+    pub string kind
+    pub var mut [Mounted] children = []

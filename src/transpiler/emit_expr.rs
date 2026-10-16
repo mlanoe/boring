@@ -392,6 +392,13 @@ impl Transpiler {
                     dv
                 } else if is_numeric_opt_var && dv_is_str {
                     format!("{}.as_ref().map_or_else(|| {}, |v| {rc_ty}::<str>::from(format!(\"{{}}\", v)))", e_s, dv)
+                } else if matches!(&e.kind, ExprKind::Field(..)) && !e_s.ends_with(".clone()") && !e_s.starts_with('{')
+                    // A field holding a `Box<dyn Trait>` is not `Clone`: it is read in place.
+                    && !self.resolve_expr_type(e).is_some_and(|t| self.type_holds_dyn(&t, false, &mut vec![]))
+                {
+                    // `obj.field else d` reads the field by value (value semantics): `unwrap_or_else`
+                    // would move the `Option` out of `obj`, leaving it unusable afterwards.
+                    format!("{}.clone().unwrap_or_else(|| {})", e_s, dv)
                 } else {
                     format!("{}.unwrap_or_else(|| {})", e_s, dv)
                 }
@@ -2128,6 +2135,9 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        if let Some(value_access) = self.state_slot_value_expr(obj, field) {
+            return self.emit_expr(&value_access);
+        }
         // `.pointee` — explicit dereference for opaque/external Rust values (e.g.
         // Bevy's `Single<T>`, `Mut<T>`) that implement `Deref`/`DerefMut` but are
         // not structs Boring itself manages. Pure syntactic pass-through:
@@ -2597,6 +2607,11 @@ impl Transpiler {
     /// assignment desugaring (`x += y`), dict/array-index writes, and the general
     /// fallback (GPU-resident materialization, actor auto-clone, Optional auto-wrap).
     fn emit_expr_assign(&self, target: &Expr, value: &Expr) -> String {
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let Some(value_access) = self.state_slot_value_expr(obj, field) {
+                return self.emit_expr_assign(&value_access, value);
+            }
+        }
         // Global mutable var assignment: `logX = val` → `*LOGX.lock().unwrap() = val`.
         if let ExprKind::Var(var_name) = &target.kind {
             // Inside a self-referencing `while let v:` loop body (see
@@ -3589,8 +3604,18 @@ impl Transpiler {
                                         &self.fn_return_types,
                                         &self.struct_fields,
                                     );
+                                    // A loop variable / call result the quick inference can't type: the
+                                    // declared-type walk (or the struct a local is known to hold) can.
+                                    let inferred = inferred
+                                        .or_else(|| self.resolve_expr_type(&arg.value))
+                                        .or_else(|| match &arg.value.kind {
+                                            ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                                                .map(|n| Type::Named(n.clone())),
+                                            _ => None,
+                                        });
                                     match inferred {
-                                        Some(inferred_ty) => types_compatible(expected_ty, &inferred_ty),
+                                        Some(inferred_ty) => types_compatible(expected_ty, &inferred_ty)
+                                            || self.struct_implements_param_trait(expected_ty, &inferred_ty),
                                         None => true, // can't determine — optimistically match
                                     }
                                 }
@@ -4409,7 +4434,11 @@ impl Transpiler {
                             if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_fields);
                         if already_rc {
-                            let raw = self.emit_expr(eff_value);
+                            // A view state's own cell (`NameEditor(name = st.name)`) is passed as the cell.
+                            let raw = match self.mark_state_cell(eff_value) {
+                                Some(cell) => self.emit_expr(&cell),
+                                None => self.emit_expr(eff_value),
+                            };
                             match self.config.threading {
                                 crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
                                 crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),

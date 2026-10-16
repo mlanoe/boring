@@ -2518,7 +2518,9 @@ impl Transpiler {
             let sep_s = args.first()
                 .map(|a| self.emit_expr_owned(&a.value))
                 .unwrap_or_else(|| self.str_from(""));
-            return Some(format!("{}.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*{})", obj_s, sep_s));
+            // Wrapped in `Arc<str>` so the result is a boring `string` everywhere
+            // (return type, `assert_eq` against a literal, ...), not a bare `String`.
+            return Some(format!("Arc::<str>::from({}.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*{}))", obj_s, sep_s));
         }
 
         // `any(closure)` → iter().cloned().any(|x| { let x = x.clone(); body })
@@ -4005,7 +4007,20 @@ impl Transpiler {
             // method (preserved as-is above) isn't mistaken for the builtin — same
             // false-positive-by-name bug class as `.position()`/`.count` (see
             // `try_emit_array_special_method`'s `expr_receiver_is_known_user_type` guard).
-            args.iter().map(|a| format!("&{}", self.emit_expr(&a.value))).collect()
+            // A string literal is `&'static str` unless owned: `Vec<Arc<str>>::contains(&"x")` is
+            // `&&str` against `&Arc<str>`.
+            let recv_is_string_array = match &obj.kind {
+                ExprKind::Var(v) if self.str_vec_vars.contains(v.as_str()) => true,
+                _ => self.resolve_expr_type(obj).is_some_and(|t| {
+                    let mut cur = t.without_mut();
+                    while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+                    matches!(cur, Type::Array(elem) if Self::is_string_type(elem))
+                }),
+            };
+            args.iter().map(|a| match &a.value.kind {
+                ExprKind::Str(_) if recv_is_string_array => format!("&{}", self.emit_expr_owned(&a.value)),
+                _ => format!("&{}", self.emit_expr(&a.value)),
+            }).collect()
         } else if is_user_struct_receiver {
             // User-defined struct methods: coerce string literals to Arc<str> to match
             // generated method signatures (Boring `string` params map to `Arc<str>`).
@@ -5746,6 +5761,8 @@ impl Transpiler {
                         .cloned(),
                     // `d[k].slots` / `xs[i].slots`: the element's struct type, when known.
                     ExprKind::Index(..) => self.resolve_expr_struct_type(obj),
+                    // `make().props` / `obj.method().props`: the callee's declared return type.
+                    ExprKind::Call(..) | ExprKind::MethodCall(..) => self.resolve_expr_struct_type(obj),
                     _ => None,
                 };
                 struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
@@ -5821,6 +5838,57 @@ impl Transpiler {
         let field_ty = self.struct_fields.get(struct_name.as_str())?
             .iter().find(|(n, _)| *n == field).map(|(_, t)| t.clone())?;
         Some(LockFieldRef { key, handle: format!("{}.{}", base, field), rwlock, field_ty })
+    }
+
+    /// An overload parameter declared as a trait (`View`, `View'shared`, ...) accepts an argument
+    /// whose type is a struct/enum implementing that trait.
+    pub(crate) fn struct_implements_param_trait(&self, param_ty: &Type, arg_ty: &Type) -> bool {
+        let mut p = param_ty.without_mut();
+        while let Type::Qualified(inner, _) = p { p = inner.without_mut(); }
+        let mut a = arg_ty.without_mut();
+        while let Type::Qualified(inner, _) = a { a = inner.without_mut(); }
+        match (p, a) {
+            (Type::Named(tr), Type::Named(ty)) =>
+                self.trait_method_names.contains_key(tr.as_str()) && self.type_traits.implements(ty, tr),
+            _ => false,
+        }
+    }
+
+    /// `st.field` where `st` is a lowered `view` state (`V__State`) and `field` one of its
+    /// `Slot` cells: in transpiled output every state field is a shared `Slot` handle (see
+    /// `lower_view`), yet source code outside the view reads/writes it as the plain value
+    /// (`st.taps = st.taps + 1`, exactly as under `boring run`). Returns `st.field.value`.
+    pub(crate) fn state_slot_value_expr(&self, obj: &Expr, field: &str) -> Option<Expr> {
+        // The rewritten access re-emits `st.field` as its own receiver (marked by `len`): that
+        // one is the `Slot` handle itself and must not be rewritten again.
+        if obj.len == STATE_SLOT_RECEIVER { return None; }
+        // Inside the view itself (`__st`), `lower_view` already spells out `.value` where the cell's
+        // content is meant and passes the bare cell to a child's `bind`.
+        if matches!(&obj.kind, ExprKind::Var(v) if v == "__st") { return None; }
+        let owner = self.resolve_expr_struct_type(obj)?;
+        if !owner.ends_with("__State") { return None; }
+        let (_, fty) = self.struct_fields.get(owner.as_str())?.iter().find(|(n, _)| n == field)?;
+        let mut cur = fty.without_mut();
+        let is_slot_cell = loop {
+            match cur {
+                Type::Qualified(inner, q) if matches!(q, OwnerQual::Actor | OwnerQual::Guard) => {
+                    break matches!(inner.without_mut(), Type::Generic(g, _) if g == "Slot");
+                }
+                Type::Qualified(inner, _) => cur = inner.without_mut(),
+                _ => break false,
+            }
+        };
+        if !is_slot_cell { return None; }
+        let mut receiver = obj.clone();
+        receiver.len = STATE_SLOT_RECEIVER;
+        let inner = Expr {
+            kind: ExprKind::Field(Box::new(receiver), field.to_string()),
+            line: obj.line, col: obj.col, len: 0,
+        };
+        Some(Expr {
+            kind: ExprKind::Field(Box::new(inner), "value".to_string()),
+            line: obj.line, col: obj.col, len: 0,
+        })
     }
 
     /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.
@@ -6129,13 +6197,13 @@ impl Transpiler {
             fn_overload_decls: self.fn_overload_decls.clone(),
             overloaded_fn_names: self.overloaded_fn_names.clone(),
             trait_borrow_facts: Default::default(),
+            trait_borrow_resolved: self.trait_borrow_resolved,
             trait_borrowed_fns: self.trait_borrowed_fns.clone(),
             trait_borrowed_methods: self.trait_borrowed_methods.clone(),
             trait_borrowed_method_by_name: self.trait_borrowed_method_by_name.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
             arc_qualified_types: self.arc_qualified_types.clone(),
-            trait_borrow_resolved: self.trait_borrow_resolved,
             unit_enums: self.unit_enums.clone(),
             recursive_fields: self.recursive_fields.clone(),
             user_types: self.user_types.clone(),
@@ -6509,6 +6577,9 @@ impl Transpiler {
     }
 }
 
+
+/// `Expr::len` sentinel on the receiver of a `state_slot_value_expr` rewrite.
+const STATE_SLOT_RECEIVER: usize = usize::MAX;
 
 fn is_auto_ref_param(ty: Option<&Type>) -> bool {
     matches!(ty,

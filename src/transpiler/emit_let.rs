@@ -621,7 +621,11 @@ impl Transpiler {
             || matches!(inner.as_ref(), Type::Named(n) if n == "string" || n == "str"));
         let is_split_or_chars = matches!(&s_value.kind,
             ExprKind::MethodCall(_, m, _) if m == "split" || m == "chars");
-        if is_str_array_ty || is_split_or_chars {
+        // An un-annotated array literal of string literals (`let names = ["x", "y"]`).
+        let is_str_literal_array = s.ty.is_none() && matches!(&s_value.kind,
+            ExprKind::Array(elems) if matches!(elems.first().map(|e| &e.kind),
+                Some(ExprKind::Str(_) | ExprKind::StringInterp(_))));
+        if is_str_array_ty || is_split_or_chars || is_str_literal_array {
             self.str_vec_vars.insert(s.name.clone());
         }
         // A bare (un-annotated) `let x = recv.split(...)`/`let x = recv.chars()` needs its
@@ -988,6 +992,13 @@ impl Transpiler {
                             self.var_types.insert(s.name.clone(), Type::Named(n));
                         }
                         Some(t @ (Type::Array(_) | Type::Dict(..) | Type::Set(_))) => {
+                            self.var_types.insert(s.name.clone(), t);
+                        }
+                        // A trait object (`let b = reg.get(0) else (NoBox())`): its static type is
+                        // what a later downcast (`b as Counter`) dispatches on.
+                        Some(t) if crate::downcast::trait_object_source(
+                            &t, &|n| self.trait_method_names.contains_key(n)).is_some() =>
+                        {
                             self.var_types.insert(s.name.clone(), t);
                         }
                         _ => {}
@@ -1760,7 +1771,19 @@ impl Transpiler {
                 self.rc_identity_vars.contains(vname.as_str())
             } else { false };
 
-            if is_struct_ctor {
+            // `src.clone()` on an rc_identity var is a real copy (fresh pointer), not an Rc handle clone.
+            let deep_clone_src = if let ExprKind::MethodCall(recv, m, args) = &s_value.kind {
+                match &recv.kind {
+                    ExprKind::Var(v) if m == "clone" && args.is_empty() && self.rc_identity_vars.contains(v.as_str()) => Some(escape_rust_keyword(v)),
+                    _ => None,
+                }
+            } else { None };
+
+            if let Some(src_var) = deep_clone_src {
+                self.line(&format!("{}{} {}{} = Rc::new((*{}).clone());", vis, kw, escape_rust_keyword(&s.name), ty, src_var));
+                self.var_types.insert(s.name.clone(), Type::Named("Rc<ref>".to_string()));
+                return;
+            } else if is_struct_ctor {
                 let rc_val = format!("Rc::new({})", val);
                 self.line(&format!("{}{} {}{} = {};", vis, kw, escape_rust_keyword(&s.name), ty, rc_val));
                 self.var_types.insert(s.name.clone(), Type::Named(format!("Rc<{}>", val)));
@@ -2014,7 +2037,31 @@ impl Transpiler {
     /// single-thread mode). Clones an existing Arc/Rc var instead of moving it; unboxes
     /// a `'owned` source with `*` before wrapping; `.clone()`s an `'inline` source so the
     /// original binding stays valid.
+    /// `value` is `st.field` — a `Slot` cell of a lowered view state — headed for a `Slot`-typed
+    /// target: the same expression with its receiver marked, so the plain-value rewrite of
+    /// `state_slot_value_expr` leaves the cell itself alone.
+    fn state_cell_for_slot_target(&self, target: Option<&Type>, value: &Expr) -> Option<Expr> {
+        let ExprKind::Field(obj, f) = &value.kind else { return None };
+        let mut cur = target?.without_mut();
+        while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+        if !matches!(cur, Type::Generic(g, _) if g == "Slot") { return None; }
+        self.mark_state_cell(value)
+    }
+
+    /// `st.field` (a `Slot` cell of a lowered view state) with its receiver marked so
+    /// `state_slot_value_expr` leaves the cell itself alone; `None` for anything else.
+    pub(crate) fn mark_state_cell(&self, value: &Expr) -> Option<Expr> {
+        let ExprKind::Field(obj, f) = &value.kind else { return None };
+        self.state_slot_value_expr(obj, f)?;
+        let mut receiver = (**obj).clone();
+        receiver.len = usize::MAX;
+        Some(Expr { kind: ExprKind::Field(Box::new(receiver), f.clone()), line: value.line, col: value.col, len: value.len })
+    }
+
     pub(crate) fn emit_let_value_arc_qualified(&self, t: &Type, value: &Expr) -> String {
+        if let Some(cell) = self.state_cell_for_slot_target(Some(t), value) {
+            return self.emit_let_value_arc_qualified(t, &cell);
+        }
         let is_actor = Self::is_mutex_binding(false, t);
         let is_guard = Self::is_rwlock_binding(false, t);
         let is_actor_or_guard = is_actor || is_guard;
@@ -2110,6 +2157,16 @@ impl Transpiler {
     /// (`Arc<dyn Trait>` / `Rc<dyn Trait>`) rather than a concrete implementor to wrap.
     /// A bare local whose qualifier inference resolved to `'shared`: a concrete `Rc<Impl>` /
     /// `Arc<Impl>` that still has to be unsized into a `Trait'shared` slot.
+    /// A `do:` block (what a trailing array block with `if`/`for` lowers to) whose own tail value
+    /// the block's body emission already wrapped into the shared pointer: wrapping the block
+    /// again would build an `Arc<Arc<T>>`.
+    fn do_block_tail_is_shared_pointer(value: &Expr, emitted: &str) -> bool {
+        if !matches!(&value.kind, ExprKind::Do(_)) { return false; }
+        let tail = emitted.trim_end().strip_suffix('}').unwrap_or(emitted).trim_end()
+            .lines().last().unwrap_or("").trim_start();
+        ["Arc::new(", "Arc::clone(", "Rc::new(", "Rc::clone("].iter().any(|p| tail.starts_with(p))
+    }
+
     pub(crate) fn expr_is_inferred_shared_local(&self, value: &Expr) -> bool {
         matches!(&value.kind, ExprKind::Var(v)
             if matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Shared)))
@@ -2262,6 +2319,11 @@ impl Transpiler {
         // correct `Box<Counter>`. A plain `let Counter'owned c = ...` (no `Type::Mut` wrapper)
         // was never affected — only `mut`/`var mut` bindings were.
         let declared_ty = declared_ty.map(Type::without_mut);
+        // A lowered view state's `Slot` cell handed to a slot-typed slot (`NameEditor(name = st.name)`,
+        // a `bind` argument) is the cell itself, not the value `st.name` reads as elsewhere.
+        if let Some(cell) = self.state_cell_for_slot_target(declared_ty, value) {
+            return self.emit_let_value(declared_ty, &cell);
+        }
         // Resolve named type aliases through non_fn_type_aliases before dispatching.
         // e.g. `use Pt as LPoint'` makes `Pt` an alias for `Box<LPoint>`;
         // when calling `describe(p)` where describe expects `Pt`, we must Box::new() the arg.
@@ -2565,14 +2627,6 @@ impl Transpiler {
                     aliased
                 }
             }
-            // T'shared → Arc<T> (multi) or Rc<T> (single): wrap accordingly.
-            // 'inline source: wrap with .clone() to avoid moving the original binding.
-            // 'owned source (Box<T>): dereference with * to move out of the box before wrapping.
-            Some(Type::Qualified(_, OwnerQual::Shared)) => {
-                let inner = self.emit_expr(value);
-                let is_heap = self.arg_is_heap_var(value);
-                // A bare (unannotated) local assigned from a call to a `'shared`-returning
-                // function (`let s = makeShared()`, no `Counter'shared` annotation) never
             // `Trait'shared` slot fed by a by-value bare/`'owned` trait binding (`Box<dyn Trait>`):
             // `Arc::from(boxed)` converts the box without re-wrapping or cloning it.
             Some(Type::Qualified(inner_ty, OwnerQual::Shared))
@@ -2587,6 +2641,14 @@ impl Transpiler {
                 };
                 format!("{ptr}::from({})", self.emit_expr(value))
             }
+            // T'shared → Arc<T> (multi) or Rc<T> (single): wrap accordingly.
+            // 'inline source: wrap with .clone() to avoid moving the original binding.
+            // 'owned source (Box<T>): dereference with * to move out of the box before wrapping.
+            Some(Type::Qualified(_, OwnerQual::Shared)) => {
+                let inner = self.emit_expr(value);
+                let is_heap = self.arg_is_heap_var(value);
+                // A bare (unannotated) local assigned from a call to a `'shared`-returning
+                // function (`let s = makeShared()`, no `Counter'shared` annotation) never
                 // gets `s` recorded into `var_types`/`arc_vars`/`rc_vars` — those are only
                 // ever populated from an EXPLICIT `'shared` annotation or a bare struct-
                 // constructor RHS (see `compute_let_ty_and_value`'s "Priority 5" doc), never
@@ -2603,7 +2665,8 @@ impl Transpiler {
                     if matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Shared)));
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => {
-                        let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(");
+                        let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")
+                            || Self::do_block_tail_is_shared_pointer(value, &inner);
                         let is_existing_shared_var = matches!(&value.kind, ExprKind::Var(v)
                                 if matches!(self.var_types.get(v.as_str()),
                                     Some(Type::Qualified(_, OwnerQual::Shared))));
@@ -2621,7 +2684,9 @@ impl Transpiler {
                         }
                     }
                     crate::transpiler::ThreadingMode::Multi => {
-                        if inner.starts_with("Arc::new(") || inner.starts_with("Arc::clone(") {
+                        if inner.starts_with("Arc::new(") || inner.starts_with("Arc::clone(")
+                            || Self::do_block_tail_is_shared_pointer(value, &inner)
+                        {
                             return inner;
                         }
                         let is_existing_arc = matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
