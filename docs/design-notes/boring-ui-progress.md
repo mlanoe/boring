@@ -236,6 +236,14 @@ passes under `boring run` and `boring build`. Transpiler gaps found (filed as ta
 passed to a trait-object method are emitted as `&str`, not `Arc<str>`; `.join` on a `state` array field; a `let`-bound
 closure capturing view state is not `'static` (inline closures are fine).
 
+**Method-form modifiers (2026-10-17).** `src/desugar_view_modifiers.rs` (run first thing in `lower_views`): a method call whose
+name is a modifier view's lowerCamel name (`padding`, `frame`, `background`, `onMount`, …) on a receiver that is
+syntactically a view construction (or an already-rewritten modifier) becomes the ordered wrapper
+`View(<positional args as the view's input fields>, children = [receiver])`. No type inference, hence the syntactic
+receiver rule. Cases `view_method_modifiers` (interpreter + 4 transpile configs); `boring-ui/tests/layout_test.br` has the
+draft's two order examples in method form. Not done: convenience modifiers (`width(200)` → `frame`), modifiers on
+helper-function results / `<View>` locals, generic `ext View` modifiers.
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is

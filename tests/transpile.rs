@@ -434,6 +434,7 @@ transpile_test!(boring_stdlib_ui);
 transpile_test!(struct_default_labeled);
 transpile_test!(view_state_lowering);
 transpile_test!(view_bind_env);
+transpile_test!(view_method_modifiers);
 transpile_test!(actor_field_through);
 transpile_test!(view_env_only);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]

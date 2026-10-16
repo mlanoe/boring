@@ -642,6 +642,7 @@ pub fn lower_views(mut program: Program) -> Result<Program, ParseError> {
     if let Some(e) = crate::checker::check_view_declarations(&program).into_iter().next() {
         return Err(err(e.message, e.line, e.col));
     }
+    crate::desugar_view_modifiers::desugar_view_modifiers(&mut program.items);
     let mut bind_views = BindViews::new();
     collect_bind_views(&program.items, &mut bind_views);
     let env = Env {
