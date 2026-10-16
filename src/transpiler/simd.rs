@@ -1798,18 +1798,7 @@ impl Emitter {
                 if let Some(inferred_ty) = inferred_ty {
                     self.value_types.insert(v.name.clone(), inferred_ty);
                 }
-                if let Some(arity) = v.value.as_ref().and_then(|value| match &value.kind {
-                    ExprKind::Tuple(elements) => Some(elements.len()),
-                    ExprKind::Var(source) => self.tuple_arities.get(source).copied(),
-                    ExprKind::MethodCall(receiver, method, _)
-                    | ExprKind::Pipe(receiver, method, _)
-                        if method == "map" => match &receiver.kind {
-                            ExprKind::Tuple(elements) => Some(elements.len()),
-                            ExprKind::Var(source) => self.tuple_arities.get(source).copied(),
-                            _ => None,
-                        },
-                    _ => None,
-                }) {
+                if let Some(arity) = v.value.as_ref().and_then(|value| self.tuple_arity(value)) {
                     self.tuple_arities.insert(v.name.clone(), arity);
                 }
                 if let Some((_, axes)) = v.ty.as_ref().and_then(Type::as_labeled_array) {
@@ -2666,11 +2655,7 @@ impl Emitter {
                 }
             }
             ExprKind::MethodCall(o, m, args) => {
-                let tuple_arity = match &o.kind {
-                    ExprKind::Tuple(elements) => Some(elements.len()),
-                    ExprKind::Var(name) => self.tuple_arities.get(name).copied(),
-                    _ => None,
-                };
+                let tuple_arity = self.tuple_arity(o);
                 if let Some(arity) = tuple_arity {
                     match (m.as_str(), args.as_slice()) {
                         ("length" | "count", []) => return arity.to_string(),
@@ -2682,9 +2667,11 @@ impl Emitter {
                             return format!("{}.{}.clone()", self.expr(o), arity - 1);
                         }
                         ("map", [transform])
-                            if arity > 0
-                                && matches!(&transform.value.kind, ExprKind::Closure(..)) =>
+                            if matches!(&transform.value.kind, ExprKind::Closure(..)) =>
                         {
+                            if arity == 0 {
+                                return "()".into();
+                            }
                             let (param, body) = self
                                 .tuple_closure(&transform.value)
                                 .expect("closure checked above");
@@ -2703,9 +2690,11 @@ impl Emitter {
                             };
                         }
                         ("all" | "any", [predicate])
-                            if arity > 0
-                                && matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                            if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
                         {
+                            if arity == 0 {
+                                return (m == "all").to_string();
+                            }
                             let (param, body) = self
                                 .tuple_closure(&predicate.value)
                                 .expect("closure checked above");
@@ -2719,36 +2708,6 @@ impl Emitter {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(operator);
-                        }
-                        ("contains", [needle]) if arity > 0 => {
-                            let object = self.expr(o);
-                            let needle = self.expr(&needle.value);
-                            let comparisons = (0..arity)
-                                .map(|index| {
-                                    format!("{object}.{index} == __boring_tuple_needle")
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" || ");
-                            return format!(
-                                "{{ let __boring_tuple_needle = {needle}; {comparisons} }}"
-                            );
-                        }
-                        ("count", [predicate])
-                            if arity > 0
-                                && matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
-                        {
-                            let (param, body) = self
-                                .tuple_closure(&predicate.value)
-                                .expect("closure checked above");
-                            let object = self.expr(o);
-                            return (0..arity)
-                                .map(|index| {
-                                    format!(
-                                        "({{ let {param} = {object}.{index}.clone(); {body} }} as i32)"
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" + ");
                         }
                         _ => {}
                     }
@@ -3619,6 +3578,21 @@ impl Emitter {
             }
         };
         Some((param, body))
+    }
+    fn tuple_arity(&self, expr: &Expr) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Tuple(elements) => Some(elements.len()),
+            ExprKind::Var(name) => self.tuple_arities.get(name).copied(),
+            ExprKind::MethodCall(receiver, method, _) if method == "map" => {
+                self.tuple_arity(receiver)
+            }
+            ExprKind::Pipe(receiver, method, _)
+                if method == "map" && !self.function_names.contains(method) =>
+            {
+                self.tuple_arity(receiver)
+            }
+            _ => None,
+        }
     }
     fn warp_shuffle(&mut self, call: &Expr, method: &str, args: &[Arg]) -> String {
         if args.len() != 2 || !self.warp_replayable(&args[0].value) {
