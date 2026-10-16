@@ -1279,6 +1279,12 @@ impl Transpiler {
             && self.resolve_field_or_index_type(e)
                 .map(|t| is_known_numeric_scalar_type(t.without_mut()))
                 .unwrap_or(false);
+        // `s.length` / `arr.count` — builtin integer-valued pseudo-fields (emitted as
+        // `.len() as isize`) are numeric even when the receiver's own type is a string.
+        // Skipped when a declared struct field of that name resolves to a string.
+        let src_is_builtin_len_field = matches!(&e.kind, ExprKind::Field(_, f) if f == "length" || f == "count")
+            && !matches!(self.resolve_field_or_index_type(e).as_ref().map(Type::without_mut), Some(Type::Str));
+        let src_is_known_numeric_access = src_is_known_numeric_access || src_is_builtin_len_field;
         if src_is_known_numeric_access && is_float_ty {
             return format!("({} as {})", src, dst);
         }

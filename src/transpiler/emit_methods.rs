@@ -2189,6 +2189,11 @@ impl Transpiler {
                 in_string_set && not_collection && type_confirms
             }
             ExprKind::Str(_) | ExprKind::StringInterp(_) => true,
+            // A struct field whose declared type is `string` (`p.txt.parseFloat()`).
+            ExprKind::Field(_, _) => self.resolve_expr_type(obj).is_some_and(|ty| {
+                matches!(ty.without_mut(), Type::Str)
+                    || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+            }),
             // A chained call to a method that itself always returns a string
             // (`line.trim().split(",")`) — without this, the receiver `line.trim()`
             // fails this check (it's a `MethodCall`, not a bare `Var`/literal), so the

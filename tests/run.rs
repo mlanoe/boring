@@ -564,6 +564,7 @@ interp_test!(cast_bare_field_index);
 interp_test!(explicit_borrow_field_type_cast);
 interp_test!(cast_lhs_of_lt);
 interp_test!(if_else_cast_numeric);
+interp_test!(string_len_cast_parse_field);
 
 // Regression: `boring run` (the interpreter) had the analogous bug to the
 // transpiler's `in_instance_setter` recursion guard (see
