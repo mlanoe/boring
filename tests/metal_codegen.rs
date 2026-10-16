@@ -475,8 +475,9 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k, format = "q8_0")
     y
 "#);
-    assert!(msl.contains("kernel BoringTensorDynamicQ8Native0"), "{msl}");
-    assert!(msl.contains("if (m == 1)"), "{msl}");
+    assert!(msl.contains("kernel void BoringTensorDynamicQ8Native0Decode_kernel"), "{msl}");
+    assert!(msl.contains("kernel void BoringTensorDynamicQ8Native0Prefill_kernel"), "{msl}");
+    assert!(!msl.contains("if (m == 1)"), "decode and prefill must be separate MSL entrypoints:\n{msl}");
     assert!(msl.contains("if (n <= 256 && k <= 2048)"), "{msl}");
     assert!(msl.contains("constexpr uint bp_simdgroups = 4"), "{msl}");
     assert!(msl.contains("threadgroup float bp_partial[bp_rows * 32]"), "{msl}");
@@ -498,6 +499,10 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     assert!(msl.contains("float4(*(device const float4*)bp_src_a)"), "{msl}");
     assert!(msl.contains("ulong2(0, 0), true"), "{msl}");
     assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    let decode_start = msl.find("kernel void BoringTensorDynamicQ8Native0Decode_kernel").unwrap();
+    let prefill_start = msl.find("kernel void BoringTensorDynamicQ8Native0Prefill_kernel").unwrap();
+    let decode_msl = &msl[decode_start..prefill_start];
+    assert!(!decode_msl.contains("bp_scratch"), "decode must not reserve the prefill tile:\n{decode_msl}");
     let store = msl.find("simdgroup_store(bp_result7, bp_out_tile").unwrap();
     let barrier = msl[store..].find("threadgroup_barrier(mem_flags::mem_threadgroup);").unwrap() + store;
     let bias = msl[barrier..].find("+ bias[bp_output_col]").unwrap() + barrier;
@@ -507,6 +512,12 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     assert!(host.contains("+ 1") && host.contains("/ 2"), "{host}");
     assert!(host.contains("+ 31") && host.contains("/ 32"), "{host}");
     assert!(host.contains("+ 63") && host.contains("/ 64"), "{host}");
+    let compute_start = host.find("fn compute(").unwrap();
+    let compute_end = host[compute_start + 1..].find("\nfn ").map_or(host.len(), |i| compute_start + 1 + i);
+    let compute_host = &host[compute_start..compute_end];
+    assert!(!compute_host.contains("__boring_gpu_copy_d2h"), "Q8 branch result must stay GPU-resident:\n{compute_host}");
+    assert!(compute_host.contains("BoringTensorDynamicQ8Native0Decode::new"), "{compute_host}");
+    assert!(compute_host.contains("BoringTensorDynamicQ8Native0Prefill::new"), "{compute_host}");
 }
 
 #[test]
@@ -636,10 +647,11 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
         "dynamic_q8_half_prefill", source,
         Some("[tensor.linear.prefill]\nprecision = \"half\"\n"),
     );
-    assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill"), "{msl}");
+    assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill0Decode_kernel"), "{msl}");
+    assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill0Prefill_kernel"), "{msl}");
     assert!(msl.contains("threadgroup half* bp_a_tile"), "{msl}");
     assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
-    assert!(!msl.contains("constexpr uint bp_simdgroups = 4"), "{msl}");
+    assert!(msl.contains("constexpr uint bp_simdgroups = 4"), "separate decode must permit split-K with half prefill:\n{msl}");
     assert!(msl.contains("bp_a_tile + 8192"), "{msl}");
     assert!(msl.contains("bp_base += 64"), "{msl}");
     assert!(host.contains("+ 127") && host.contains("/ 128"), "{host}");

@@ -283,12 +283,15 @@ one aligned `float4` activation slice; that activation is reused across all four
 rows, and one scale load per partition is broadcast before a final `simd_sum`.
 One 256-thread threadgroup therefore covers 32 rows. Explicit `scalar` keeps the
 one-thread-per-row accumulation-order reference. For narrow projections
-(`n <= 256`, `k <= 2048`) with float32 native prefill, a latency schedule instead
+(`n <= 256`, `k <= 2048`), a latency schedule instead
 assigns two rows to a 128-thread threadgroup: four SIMD groups split the Q8
 blocks along `k`, write their partial sums to threadgroup memory and reduce them
-before the final store. The half-prefill kernel retains the four-row decode path
-because its prefill tile already consumes Metal's complete 32 KiB threadgroup
-allocation. The resident benchmark `examples/tensor_q8_decode_bench.br` covers
+before the final store. Native Q8_0 decode and prefill are separate Metal
+entrypoints and host pipelines. Decode therefore reserves only its 256-byte
+split-K reduction array (and no threadgroup memory on wider shapes), independent
+of whether prefill uses a 16 KiB float or 32 KiB half tile. The host constructs
+only the entrypoint selected by `m`, and its result remains GPU-resident. The
+resident benchmark `examples/tensor_q8_decode_bench.br` covers
 the five Qwen2.5-0.5B projection shapes plus its joined 1,152x896 QKV projection,
 and uses signed values plus positive and negative scales.
 

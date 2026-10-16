@@ -293,21 +293,52 @@ fn lower_function_body(
                 "BoringTensorHost"
             };
             let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names, prefix);
-            match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, tensor_config) {
-                Ok(kernel) => kernels.push(Item::Kernel(kernel)),
-                Err(message) => {
-                    errors.push(super::TranspileError::at_line(message, call.line));
+            let split_native_q8 = native_packed && dynamic.format == Some("q8_0");
+            let q8_entrypoints = if split_native_q8 {
+                let decode_name = format!("{kernel_name}Decode");
+                let prefill_name = format!("{kernel_name}Prefill");
+                let decode_instance = format!("{instance}_decode");
+                let prefill_instance = format!("{instance}_prefill");
+                let mut failed = false;
+                let mut parsed_kernels = Vec::new();
+                for name in [&decode_name, &prefill_name] {
+                    match parse_dynamic_linear_kernel(name, quals.clone(), dynamic.bias.is_some(), dynamic.format, tensor_config) {
+                        Ok(kernel) => parsed_kernels.push(Item::Kernel(kernel)),
+                        Err(message) => {
+                            errors.push(super::TranspileError::at_line(message, call.line));
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                if failed {
                     out.push(stmt.clone());
                     index += 1;
                     continue;
                 }
-            }
-            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, tensor_config) {
+                kernels.extend(parsed_kernels);
+                Some((decode_name, decode_instance, prefill_name, prefill_instance))
+            } else {
+                match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, tensor_config) {
+                    Ok(kernel) => kernels.push(Item::Kernel(kernel)),
+                    Err(message) => {
+                        errors.push(super::TranspileError::at_line(message, call.line));
+                        out.push(stmt.clone());
+                        index += 1;
+                        continue;
+                    }
+                }
+                None
+            };
+            let q8_entrypoint_refs = q8_entrypoints.as_ref().map(|(dn, di, pn, pi)| {
+                (dn.as_str(), di.as_str(), pn.as_str(), pi.as_str())
+            });
+            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, tensor_config, q8_entrypoint_refs) {
                 Ok(mut replacement) => {
                     let returns_destination = body.get(index + 1).is_some_and(|next| {
                         matches!(next, Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Var(name) if name == dynamic.operands[2]))
                     });
-                    if returns_destination {
+                    if returns_destination && !split_native_q8 {
                         replacement.pop();
                         out.extend(replacement);
                         let next = match &body[index + 1] { Stmt::Expr(expr) => expr, _ => unreachable!() };
@@ -825,6 +856,7 @@ fn parse_dynamic_replacement_stmts(
     instance: &str,
     call: &DynamicLinearCall<'_>,
     tensor_config: &TensorLinearConfig,
+    q8_entrypoints: Option<(&str, &str, &str, &str)>,
 ) -> Result<Vec<Stmt>, String> {
     let bias_guard = call.bias.map(|bias| format!("    guard {bias}.length == {{n}} else throw \"tensor bias length mismatch\"\n")).unwrap_or_default().replace("{n}", &call.n);
     let bias_arg = call.bias.map(|bias| format!("{bias}, ")).unwrap_or_default();
@@ -885,11 +917,23 @@ fn parse_dynamic_replacement_stmts(
     } else {
         format!("    kernel:\n        {instance}(block = 256, grid = {grid})\n")
     };
-    let source = format!(
-        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{dispatch}{launch}    {c} = {instance}.c\n",
-        a = call.operands[0], b = call.operands[1], c = call.operands[2],
-        m = call.m, n = call.n, k = call.k,
+    let common = format!(
+        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n",
+        a = call.operands[0], c = call.operands[2], m = call.m, n = call.n, k = call.k,
     );
+    let source = if let Some((decode_name, decode_instance, prefill_name, prefill_instance)) = q8_entrypoints {
+        let prefill_rows = native_prefill_rows;
+        format!(
+            "{common}    if {m} == 1:\n        mut {decode_instance} = {decode_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        if {n} <= 256 and {k} <= 2048:\n            kernel:\n                {decode_instance}(block = 128, grid = ({n} + 1) / 2)\n        else:\n            kernel:\n                {decode_instance}(block = 256, grid = ({n} + 31) / 32)\n        {c} = {decode_instance}.c\n    else:\n        mut {prefill_instance} = {prefill_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        kernel:\n            {prefill_instance}(block = 256, grid = (({n} + 63) / 64, ({m} + {prefill_tail}) / {prefill_rows}))\n        {c} = {prefill_instance}.c\n",
+            a = call.operands[0], b = call.operands[1], c = call.operands[2], m = call.m, n = call.n, k = call.k,
+            prefill_tail = prefill_rows - 1,
+        )
+    } else {
+        format!(
+            "{common}    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{dispatch}{launch}    {c} = {instance}.c\n",
+            a = call.operands[0], b = call.operands[1], c = call.operands[2], m = call.m, n = call.n, k = call.k,
+        )
+    };
     let parsed = crate::parser::parse(
         crate::lexer::lex(&source).map_err(|e| format!("dynamic tensor dispatch lex error: {e:?}"))?
     ).map_err(|e| format!("dynamic tensor dispatch parse error: {}", e.msg()))?;

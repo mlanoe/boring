@@ -451,7 +451,15 @@ impl DeviceEmitter {
         }
 
         if decl.name.starts_with("BoringTensorDynamicQ8Native") {
-            self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q8_0", true, &decl.name);
+            let has_bias = decl.fields.iter().any(|field| field.name == "bias");
+            if decl.name.ends_with("Decode") {
+                self.emit_q8_rows_decode(has_bias, true);
+            } else if decl.name.ends_with("Prefill") {
+                let activation = if decl.name.contains("HalfPrefill") { "half" } else { "float" };
+                self.emit_blocked_quant_prefill(has_bias, "q8_0", activation, activation);
+            } else {
+                self.emit_dynamic_packed_linear_body(has_bias, "q8_0", true, &decl.name);
+            }
             self.indent -= 1;
             self.line("}");
             return;
