@@ -178,6 +178,17 @@ intended for resident A/B benchmarks; `auto` retains the measured shape selector
 and is the production default. They affect decode only and are rejected under
 `[tensor.linear.prefill]`.
 
+`tools/bench_q8_decode_schedules.py` automates that A/B without editing the
+project configuration. It creates two temporary Metal projects, builds one per
+schedule, alternates their execution order, checks their numeric summaries and
+reports medians plus min-max ranges for all six resident benchmark shapes. It
+refuses to time a busy machine by default. After building the release compiler:
+
+```console
+cargo build --release
+python3 tools/bench_q8_decode_schedules.py
+```
+
 Statically shaped `matmul`, `mma`, and `linear` calls have a separate matrix
 schedule switch:
 
