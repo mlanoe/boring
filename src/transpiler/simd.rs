@@ -2572,8 +2572,78 @@ impl Emitter {
                     .join(", ")
             ),
             ExprKind::MethodCall(o, m, args) => {
+                let local_collection = matches!(
+                    &o.kind,
+                    ExprKind::Var(name)
+                        if self.arrays.contains(name)
+                            || self.dicts.contains(name)
+                            || self.sets.contains(name)
+                );
+                if local_collection && args.is_empty() {
+                    match m.as_str() {
+                        "length" | "count" => {
+                            return format!("({}.len() as i32)", self.expr(o));
+                        }
+                        "len" => {
+                            return format!("{}.len()", self.expr(o));
+                        }
+                        "isEmpty" => {
+                            return format!("{}.is_empty()", self.expr(o));
+                        }
+                        _ => {}
+                    }
+                }
                 if matches!(&o.kind, ExprKind::Var(name) if self.arrays.contains(name)) {
                     match (m.as_str(), args.as_slice()) {
+                        ("first" | "last", []) => {
+                            return format!("{}.{}().cloned()", self.expr(o), m);
+                        }
+                        ("reversed", []) => {
+                            return format!(
+                                "{}.iter().rev().cloned().collect::<Vec<_>>()",
+                                self.expr(o)
+                            );
+                        }
+                        ("count", [predicate])
+                            if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let predicate = self
+                                .owned_filter_predicate(&predicate.value)
+                                .expect("closure checked above");
+                            return format!(
+                                "({}.iter().cloned().filter({}).count() as i32)",
+                                self.expr(o),
+                                predicate
+                            );
+                        }
+                        ("find", [predicate])
+                            if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let predicate = self
+                                .owned_filter_predicate(&predicate.value)
+                                .expect("closure checked above");
+                            return format!(
+                                "{}.iter().cloned().find({})",
+                                self.expr(o),
+                                predicate
+                            );
+                        }
+                        ("indexOf" | "position", [predicate])
+                            if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            return format!(
+                                "{}.iter().cloned().position({}).map(|__boring_index| __boring_index as i32)",
+                                self.expr(o),
+                                self.expr(&predicate.value)
+                            );
+                        }
+                        ("indexOf", [value]) => {
+                            return format!(
+                                "{}.iter().position(|__boring_item| __boring_item == &({})).map(|__boring_index| __boring_index as i32)",
+                                self.expr(o),
+                                self.expr(&value.value)
+                            );
+                        }
                         ("push", [value]) => {
                             return format!("{}.push({})", self.expr(o), self.expr(&value.value));
                         }
@@ -2946,6 +3016,22 @@ impl Emitter {
             }
         }
     }
+    fn owned_filter_predicate(&mut self, predicate: &Expr) -> Option<String> {
+        let ExprKind::Closure(params, _, body, _, _) = &predicate.kind else {
+            return None;
+        };
+        let param = params.first()?;
+        let body = match body {
+            ClosureBody::Expr(value) => self.expr(value),
+            ClosureBody::Block(statements) => {
+                format!("{{ {} }}", self.expr_body_as(statements, None))
+            }
+        };
+        Some(format!(
+            "|__boring_item| {{ let {} = __boring_item.clone(); {} }}",
+            param.name, body
+        ))
+    }
     fn warp_shuffle(&mut self, call: &Expr, method: &str, args: &[Arg]) -> String {
         if args.len() != 2 || !self.warp_replayable(&args[0].value) {
             self.errors.push(crate::errors::SourceError::at(
@@ -3213,7 +3299,19 @@ impl Emitter {
                     .all(|arg| self.block_uniform_expr_with_locals(&arg.value, locals))
             }
             ExprKind::MethodCall(receiver, method, args)
-                if args.is_empty() && matches!(method.as_str(), "is_some" | "is_none") =>
+                if args.is_empty()
+                    && matches!(
+                        method.as_str(),
+                        "is_some"
+                            | "is_none"
+                            | "length"
+                            | "count"
+                            | "len"
+                            | "isEmpty"
+                            | "first"
+                            | "last"
+                            | "reversed"
+                    ) =>
             {
                 self.block_uniform_expr_with_locals(receiver, locals)
             }
@@ -3223,7 +3321,9 @@ impl Emitter {
                 self.block_uniform_expr_with_locals(receiver, locals)
             }
             ExprKind::MethodCall(receiver, method, args)
-                if matches!(method.as_str(), "any" | "all") && args.len() == 1 =>
+                if matches!(method.as_str(), "any" | "all" | "count" | "find" | "indexOf" | "position")
+                    && args.len() == 1
+                    && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
             {
                 let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
                     return false;
@@ -3239,6 +3339,12 @@ impl Emitter {
                             self.block_uniform_expr_body_with_locals(body, &closure_locals)
                         }
                     }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if method == "indexOf" && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
             }
             ExprKind::MethodCall(receiver, method, args)
                 if matches!(method.as_str(), "map" | "filter") && args.len() == 1 =>

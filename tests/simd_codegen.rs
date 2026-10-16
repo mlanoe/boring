@@ -2808,6 +2808,107 @@ print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3
 }
 
 #[test]
+fn local_collection_query_methods_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_collection_query_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_collection_query_methods.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectionQueries:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [10, 20, 30]
+        let first = values.first() else 0
+        let last = values.last() else 0
+        let reversed = values.reversed()
+        let empty = values.isEmpty()
+        output[i] = first + last + reversed[0] + values.count() + (if empty: 100 else: 0) + i
+mut queries = CollectionQueries()
+kernel:
+    queries(block = 4)
+print "{queries.output[0]} {queries.output[1]} {queries.output[2]} {queries.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_collection_query_methods_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("values.first().cloned()"));
+    assert!(source.contains("values.last().cloned()"));
+    assert!(source.contains("values.iter().rev().cloned().collect::<Vec<_>>()"));
+    assert!(source.contains("values.is_empty()"));
+    assert!(source.contains("values.len() as i32"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_collection_query_methods_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "73 74 75 76");
+}
+
+#[test]
+fn local_array_search_methods_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_search_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_search_methods.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArraySearches:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [10, 20, 30, 40]
+        let selected = values.count((value): value >= 20)
+        let found = values.find((value): value > 25) else 0
+        let index = values.indexOf(30) else -1
+        let predicate_index = values.indexOf((value): value == 40) else -1
+        output[i] = selected + found + index + predicate_index + i
+mut searches = ArraySearches()
+kernel:
+    searches(block = 4)
+print "{searches.output[0]} {searches.output[1]} {searches.output[2]} {searches.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_search_methods_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("iter().cloned().filter"));
+    assert!(source.contains("iter().cloned().find"));
+    assert!(source.contains("__boring_item == &(30)"));
+    assert!(source.contains("iter().cloned().position"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_search_methods_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "38 39 40 41");
+}
+
+#[test]
 fn local_dict_and_set_transformations_run_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_local_dict_set_transformations");
