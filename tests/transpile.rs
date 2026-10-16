@@ -389,6 +389,7 @@ transpile_test!(trait_borrow_mut);
 transpile_test!(trait_borrow_method_param);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);
+transpile_test!(trait_downcast_shared_actor_state);
 
 // `do: ...` used as a value (`let x = do: ...`) whose body contains a `for`
 // loop must evaluate to its tail expression, not silently degrade to `()`

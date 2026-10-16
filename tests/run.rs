@@ -210,6 +210,7 @@ interp_test!(trait_borrow_mut);
 interp_test!(trait_borrow_method_param);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);
+interp_test!(trait_downcast_shared_actor_state);
 interp_test!(trait_enum_param);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);

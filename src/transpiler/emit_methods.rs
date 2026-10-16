@@ -4061,6 +4061,17 @@ impl Transpiler {
                 if struct_method_param_lent.get(i).copied().unwrap_or(false) {
                     return self.emit_lent_arg(&a.value);
                 }
+                // An `'actor`/`'guard` handle param (`mut Counter'actor c` too) is declared
+                // `&Arc<Mutex<T>>`: lend the handle by reference, never move or clone it.
+                if let Some(Some(pt)) = struct_method_param_types.get(i) {
+                    if matches!(pt.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask
+                        | OwnerQual::Guard | OwnerQual::GuardTask))
+                    {
+                        let e = self.emit_expr(&a.value);
+                        let e = e.strip_suffix(".clone()").map(str::to_owned).unwrap_or(e);
+                        return if e.starts_with('&') { e } else { format!("&{e}") };
+                    }
+                }
                 if matches!(&a.value.kind, ExprKind::DotIdent(_)) {
                     if let Some(Some(param_ty)) = struct_method_param_types.get(i) {
                         return self.emit_let_value(Some(param_ty), &a.value);
@@ -4556,7 +4567,15 @@ impl Transpiler {
                         continue;
                     }
                 }
-                let param_ty = sig.get(i);
+                // `mut Counter'actor c` is `Mut(Qualified(Counter, Actor))`: the content-mutability
+                // marker is irrelevant to how the handle is passed, so look through it for the
+                // `'actor`/`'guard` family and apply the same by-reference convention.
+                let param_ty = match sig.get(i) {
+                    Some(Type::Mut(inner)) if matches!(inner.without_mut(),
+                        Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask
+                            | OwnerQual::Guard | OwnerQual::GuardTask)) => Some(inner.without_mut()),
+                    other => other,
+                };
                 let param_rebindable = rebindable_flags.get(i).copied().unwrap_or(false);
                 let param_mutable = mutable_flags.get(i).copied().unwrap_or(false);
                 // When passing a `throws` function where a non-throws fn param is expected,
