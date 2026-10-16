@@ -3530,6 +3530,11 @@ impl Transpiler {
             if is_type {
                 return self.emit_constructor(name, args);
             }
+            if self.known_local_vars.contains(name.as_str()) {
+                if let Some(req) = self.fn_handle_vars.get(name.as_str()).copied() {
+                    return self.emit_fn_handle_call(name, req, args);
+                }
+            }
             // A bare call of a function-typed field of the enclosing struct (`onCommand(x)`
             // inside a method) is implicit-self field access followed by a call: emit it
             // exactly like `self.onCommand(x)`. A local/param of the same name wins.
@@ -3768,7 +3773,7 @@ impl Transpiler {
             // When the param type is also `throws` (returns Future<Output=Result<T,_>>),
             // add `?` in a throws / try context so errors propagate correctly.
             if self.in_async && self.task_vars.contains(name.as_str()) {
-                let args_s = self.emit_args(args);
+                let args_s = self.emit_fn_local_args(name, args);
                 let call_s = format!("{}({})", escape_rust_keyword(name), args_s);
                 return if self.in_throws || self.in_try_body {
                     format!("{}.await?", call_s)
@@ -3778,7 +3783,7 @@ impl Transpiler {
             }
             // Non-task fn params declared as `throws` return Result — add `?` in throws context.
             if (self.in_throws || self.in_try_body) && self.throws_fn_params.contains(name.as_str()) {
-                let args_s = self.emit_args(args);
+                let args_s = self.emit_fn_local_args(name, args);
                 let call_s = format!("{}({})", escape_rust_keyword(name), args_s);
                 return format!("{}?", call_s);
             }
@@ -3827,8 +3832,29 @@ impl Transpiler {
             }
         }
         let callee_s = self.emit_expr(callee);
-        let args_s = self.emit_args(args);
+        let args_s = match &callee.kind {
+            ExprKind::Var(n) => self.emit_fn_local_args(n, args),
+            _ => self.emit_args(args),
+        };
         format!("{}({})", callee_s, args_s)
+    }
+
+    /// The function type of a param/local `name` declared with one (inline or via a `use` alias).
+    pub(crate) fn local_fn_type(&self, name: &str) -> Option<Type> {
+        self.fn_current_params.get(name).or_else(|| self.var_types.get(name))
+            .and_then(|t| self.resolve_fn_field_type(t))
+    }
+
+    /// Arguments of a call of a function-typed param/local (`c("q")`): a string literal is
+    /// promoted to the owned string type the fn type's parameter declares (`Arc<str>`/`Rc<str>`),
+    /// which the raw `&'static str` would not satisfy. Other arguments are emitted as usual.
+    pub(crate) fn emit_fn_local_args(&self, name: &str, args: &[Arg]) -> String {
+        let Some(Type::Fn(_, ptys, ..)) = self.local_fn_type(name) else { return self.emit_args(args) };
+        args.iter().enumerate().map(|(i, a)| match (&a.value.kind, ptys.get(i)) {
+            (ExprKind::Str(_), Some(pty)) if Self::is_string_type(pty) =>
+                self.emit_let_value(Some(pty), &a.value),
+            _ => self.emit_expr_owned(&a.value),
+        }).collect::<Vec<_>>().join(", ")
     }
 
     /// Emits `obj?.method(args)` (turbofish == "") or `obj?.method<T>(args)`
@@ -5293,6 +5319,9 @@ impl Transpiler {
             }
             _ => {
                 // Look up registered signature for optional-arg coercion
+                if !self.fn_sigs.contains_key(name) && self.local_fn_type(name).is_some() {
+                    return format!("{}({})", escape_rust_keyword(name), self.emit_fn_local_args(name, args));
+                }
                 let mut args_s = self.emit_args_coerced_vec(name, args);
                 // A free function Boring has no declaration for — one pulled in by
                 // `use std.fs.create_dir_all` and the like — has no signature to coerce

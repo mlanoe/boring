@@ -699,6 +699,10 @@ struct Transpiler {
     /// All local variable names in the current function scope.
     /// Used to distinguish module/type paths (use `::`) from instance variable access (use `.`).
     pub(crate) known_local_vars: std::collections::HashSet<String>,
+    /// Locals bound to a function-typed struct field's *handle* (`let f = r.onCommand`): they hold
+    /// the `Rc<RefCell<dyn FnMut..>>`/`Arc<Mutex<..>>`/`Rc<dyn Fn..>` itself, so calling one must
+    /// lock/borrow first (see `emit_fn_handle_call`). Cleared at each function start.
+    pub(crate) fn_handle_vars: std::collections::HashMap<String, bool>,
     /// Active only while emitting the body of a self-referencing `while let v:`
     /// shorthand loop (`≡ while let v = v:`, docs/book.md). Maps the loop-bound
     /// name to the mangled Rust identifier `emit_while_let` introduced for the
@@ -1106,10 +1110,10 @@ struct Transpiler {
     pub(crate) trait_borrow_facts: infer_trait_borrow::TraitBorrowFacts,
     /// Free function name → per-parameter flag: this bare-trait parameter is inferred
     /// borrowed (`&dyn Trait`) rather than a by-value `Box<dyn Trait>`.
-    pub(crate) trait_borrowed_fns: std::collections::HashMap<String, Vec<bool>>,
-    /// `Type::method` → per-parameter replacement type (`Trait&`) for the bare-trait params
     /// Set once borrow inference has run: later `share_dyn_traits` rewrites may consult its result.
     pub(crate) trait_borrow_resolved: bool,
+    pub(crate) trait_borrowed_fns: std::collections::HashMap<String, Vec<bool>>,
+    /// `Type::method` → per-parameter replacement type (`Trait&`) for the bare-trait params
     /// inferred borrowed on a struct method (`None` = unchanged). Call sites consult this
     /// instead of the registered declaration, which stays as written.
     pub(crate) trait_borrowed_methods: std::collections::HashMap<String, Vec<Option<Type>>>,
@@ -1494,6 +1498,7 @@ impl Transpiler {
             with_open_names: std::collections::HashSet::new(),
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
+            fn_handle_vars: std::collections::HashMap::new(),
             while_let_redirect: std::collections::HashMap::new(),
             while_let_break_sync: None,
             fn_returns_void: false,
@@ -1637,10 +1642,10 @@ impl Transpiler {
             fn_overload_decls: std::collections::HashMap::new(),
             overloaded_fn_names: std::collections::HashSet::new(),
             trait_borrow_facts: Default::default(),
+            trait_borrow_resolved: false,
             trait_borrowed_fns: std::collections::HashMap::new(),
             trait_borrowed_methods: std::collections::HashMap::new(),
             trait_borrowed_method_by_name: std::collections::HashMap::new(),
-            trait_borrow_resolved: false,
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),
@@ -2088,9 +2093,6 @@ impl Transpiler {
             self.deep_pre_scan(program, &mut visited);
             self.source_dir = prev_dir;
             self.resolve_trait_borrow_params();
-            self.global_instantiations = monomorphize::build_instantiation_map(
-                &self.pending_generic_call_candidates,
-                &self.global_generic_structs,
             self.trait_borrow_resolved = true;
             // Registrations made before inference saw every bare param as bare: by-value ones are
             // `Trait'shared` for a shared trait (`share_dyn_traits.rs`).
@@ -2098,6 +2100,9 @@ impl Transpiler {
             for sig in self.fn_sigs.values_mut() {
                 for ty in sig.iter_mut() { *ty = share_dyn_traits::shared_if_bare(ty, &targets); }
             }
+            self.global_instantiations = monomorphize::build_instantiation_map(
+                &self.pending_generic_call_candidates,
+                &self.global_generic_structs,
                 &self.global_generic_fns,
             );
             self.global_method_instantiations = monomorphize::build_method_instantiation_map(

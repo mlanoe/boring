@@ -318,6 +318,12 @@ impl Transpiler {
         // Loop variables are scoped to the for body: save outer set first so
         // that after the loop the loop vars are not visible to subsequent code.
         let saved_locals = self.known_local_vars.clone();
+        // Likewise for string-ness: a loop var registered as a string (`for i, v in fruits`)
+        // must not leak to a later `for k, v in scores` where `v` is an int (`total += v`
+        // would be emitted as string concatenation).
+        let saved_string_membership: Vec<(String, bool, bool)> = s.vars.iter()
+            .map(|v| (v.clone(), self.string_vars.contains(v.as_str()), self.string_arc_vars.contains(v.as_str())))
+            .collect();
         // Track loop variables as known locals so field accesses inside the
         // loop body use `.` not `::`.
         for v in &s.vars {
@@ -658,7 +664,19 @@ impl Transpiler {
         // instead, exactly like the local-variable case.
         let is_trait_array_field = self_field_ty.as_ref().is_some_and(|t| matches!(t,
             Type::Array(elem) if matches!(elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))));
+        // `for n in nodes:` over a `mut [mut T]` collection whose body writes through `n`: borrow the
+        // elements mutably (`iter_mut`) so the writes land in the collection, not in a clone.
+        let iter_mut_loop = s.vars.len() == 1 && !needs_auto_enumerate
+            && match &s.iterable.kind {
+                ExprKind::Var(v) => self.content_mutable_local_vars.contains(v.as_str()),
+                ExprKind::Field(..) => true,
+                _ => false,
+            }
+            && self.resolve_iterable_type(&s.iterable).as_ref()
+                .is_some_and(|t| matches!(t.without_mut(), Type::Array(elem) if elem.is_mut()))
+            && self.loop_body_mutates_var(&s.body, &s.vars[0]);
         let iter_expr = match &s.iterable.kind {
+            _ if iter_mut_loop => format!("{}.iter_mut()", iter),
             // A bound read through a lock (`0..st.items.length` on an `'actor`/`Slot` state)
             // leaves its guard alive as a temporary for the whole `for` — the body re-locking the
             // same cell would deadlock. Evaluate the range first, so the guard dies there.
@@ -771,6 +789,39 @@ impl Transpiler {
         // visible after the for loop (emit_loop_body already saved/restored
         // its own inner lets; here we restore the loop var additions).
         self.known_local_vars = saved_locals;
+        for (name, in_string_vars, in_string_arc_vars) in saved_string_membership {
+            set_membership(&mut self.string_vars, &name, in_string_vars);
+            set_membership(&mut self.string_arc_vars, &name, in_string_arc_vars);
+        }
+    }
+
+    /// Whether `stmts` assign through `name` (`name.f = ..`, `name[i] = ..`) or call a `def` method on it.
+    fn loop_body_mutates_var(&self, stmts: &[Stmt], name: &str) -> bool {
+        fn root(e: &Expr) -> Option<&str> {
+            match &e.kind {
+                ExprKind::Var(n) => Some(n.as_str()),
+                ExprKind::Field(o, _) | ExprKind::Index(o, _) => root(o),
+                _ => None,
+            }
+        }
+        let found = std::cell::Cell::new(false);
+        let mut body = stmts.to_vec();
+        let mut on_expr = |e: &mut Expr| match &e.kind {
+            ExprKind::Assign(lhs, _) | ExprKind::QuestionAssign(lhs, _)
+                if !matches!(lhs.kind, ExprKind::Var(_)) && root(lhs) == Some(name) => found.set(true),
+            ExprKind::MethodCall(obj, method, _) if matches!(obj.kind, ExprKind::Var(_)) && root(obj) == Some(name) => {
+                let owner = self.resolve_expr_struct_type(obj);
+                if owner.is_some_and(|sn| !self.method_is_req_or_task(&sn, method)
+                    && self.struct_method_names.get(&sn).is_some_and(|m| m.contains(method.as_str())))
+                {
+                    found.set(true);
+                }
+            }
+            _ => {}
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
+        found.get()
     }
 
     /// Emit a `for item in iter_stream_fn(args):` as a plain Rust `for` loop.

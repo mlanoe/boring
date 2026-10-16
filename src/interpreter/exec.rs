@@ -691,10 +691,27 @@ impl Interpreter {
         if let Value::Dict(pairs) = iterable {
             return self.exec_for_dict(pairs, s, env);
         }
+        // `for n in nodes` over a bare variable declared `[mut T]` (elements are
+        // mutable, e.g. `mut [mut T]` parameter): the loop variable is content-mutable,
+        // matching what `boring build` accepts (`.iter_mut()`). Any other iterable
+        // keeps an immutable loop variable.
+        let elems_mut = s.vars.len() == 1
+            && match &s.iterable.kind {
+                ExprKind::Var(name) => env
+                    .borrow()
+                    .get_declared_type(name)
+                    .map(|t| self.resolve_type(&t))
+                    .and_then(|t| t.index_element_type().map(|e| e.grants_mut()))
+                    .unwrap_or(false),
+                _ => false,
+            };
         let items = self.collect_iterable(iterable, s.iterable.line)?;
         for (idx, item) in items.into_iter().enumerate() {
             let child = Env::child(Rc::clone(&env));
             Self::bind_for_item(&s.vars, idx as i64, item, &child);
+            if elems_mut {
+                child.borrow_mut().mark_content_mutable(&s.vars[0]);
+            }
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,

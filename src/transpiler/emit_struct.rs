@@ -3099,6 +3099,50 @@ impl Transpiler {
         }
     }
 
+    /// `Some(req)` when `e` reads a function-typed struct field's handle (`r.onCommand`) or a local
+    /// already bound to one; `req` is whether the callee is `Fn` (no lock) rather than `FnMut`.
+    pub(crate) fn fn_handle_req(&self, e: &Expr) -> Option<bool> {
+        match &e.kind {
+            ExprKind::Var(v) => self.fn_handle_vars.get(v).copied(),
+            ExprKind::Field(obj, fname) => {
+                let sn = self.resolve_struct_name(obj)?;
+                let fty = &self.struct_fields.get(&sn)?.iter().find(|(n, _)| n == fname)?.1;
+                match self.resolve_fn_field_type(fty)? {
+                    Type::Fn(_, _, _, false, req) => Some(req),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// A closure forwarding to the fn-field handle `e` (see `fn_handle_req`), for passing it to a
+    /// parameter typed `impl Fn`/`impl FnMut`: the handle is cloned in, locked/borrowed per call.
+    pub(crate) fn emit_fn_handle_adapter(&self, e: &Expr, req: bool, arity: usize) -> String {
+        let h = self.emit_expr(e);
+        let ps: Vec<String> = (0..arity).map(|j| format!("__a{j}")).collect();
+        let ps = ps.join(", ");
+        let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+        let call = match (req, multi) {
+            (true, _) => format!("(__h)({ps})"),
+            (false, false) => format!("(__h.borrow_mut())({ps})"),
+            (false, true) => format!("(__h.lock().unwrap())({ps})"),
+        };
+        format!("{{ let __h = {h}.clone(); move |{ps}| {call} }}")
+    }
+
+    /// Call of a local holding a fn-field handle: lock/borrow, then call.
+    pub(crate) fn emit_fn_handle_call(&self, name: &str, req: bool, args: &[Arg]) -> String {
+        let recv = escape_rust_keyword(name);
+        let args_s = self.emit_args(args);
+        let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+        match (req, multi) {
+            (true, _) => format!("({})({})", recv, args_s),
+            (false, false) => format!("({}.borrow_mut())({})", recv, args_s),
+            (false, true) => format!("({}.lock().unwrap())({})", recv, args_s),
+        }
+    }
+
     /// `recv.field(args)` where `field` is a function-typed struct field (and not a method).
     pub(crate) fn try_emit_fn_field_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let sn = self.resolve_struct_name(obj)?;

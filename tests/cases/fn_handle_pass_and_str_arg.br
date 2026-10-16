@@ -1,0 +1,36 @@
+# A fn-field handle passed on as a function-typed argument (directly or via a local), and string
+# literals passed to a function-typed parameter / local.
+use Cmd as def void(string)
+use Look as req int(string)
+
+struct Row:
+    int id
+    Cmd onCommand
+    Look onLook
+
+struct St:
+    var int n = 0
+
+int len4(string s): 4
+
+Row make(mut St st):
+    Row(id = 1, onLook = len4, onCommand = (c):
+        st.n += 1)
+
+def run(Cmd c):
+    c("q")
+    c("rs")
+
+int look(Look l):
+    l("abcd")
+
+def main():
+    mut st = St()
+    let r = make(st)
+    run(r.onCommand)
+    let h = r.onCommand
+    run(h)
+    print st.n
+    print look(r.onLook)
+    let k = r.onLook
+    print look(k)

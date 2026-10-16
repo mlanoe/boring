@@ -1824,6 +1824,7 @@ impl Transpiler {
         let prev_var_mutex_task_types = std::mem::take(&mut self.var_mutex_task_types);
         let prev_var_rwlock_types  = std::mem::take(&mut self.var_rwlock_types);
         let prev_known_local_vars  = std::mem::take(&mut self.known_local_vars);
+        self.fn_handle_vars.clear();
         let prev_optional_vars    = std::mem::take(&mut self.optional_vars);
         let prev_var_types        = std::mem::take(&mut self.var_types);
         let prev_string_vars      = std::mem::take(&mut self.string_vars);
@@ -2078,6 +2079,7 @@ impl Transpiler {
         let prev_fn_returns_void = self.fn_returns_void;
         let prev_fn_return_ty    = self.fn_return_ty.clone();
         let prev_known           = std::mem::take(&mut self.known_local_vars);
+        self.fn_handle_vars.clear();
         let prev_iter_stream     = self.in_iter_stream;
         self.fn_returns_void = true;
         self.fn_return_ty    = None;
@@ -2135,6 +2137,7 @@ impl Transpiler {
         let prev_fn_returns_void = self.fn_returns_void;
         let prev_fn_return_ty = self.fn_return_ty.clone();
         let prev_known  = std::mem::take(&mut self.known_local_vars);
+        self.fn_handle_vars.clear();
         self.in_throws = f.throws;
         self.in_async  = true; // stream bodies are implicitly async (macros support .await)
         self.fn_returns_void = true; // yield is not a return

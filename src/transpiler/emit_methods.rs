@@ -1823,6 +1823,16 @@ impl Transpiler {
                 let guard = self.lock_field_write(&r);
                 let call = format!("{}.{}.{}({})", guard, sub, rust_method, args_s.join(", "));
                 let call = Self::with_hoisted_args(&hoisted, call);
+                // `trim*` borrow from the guard temporary; `let clean = slot.value.trim()` would then
+                // outlive it (E0716). Own the result inside the full expression, as a plain string's
+                // `trim` does.
+                if matches!(method, "trim" | "trimStart" | "trimEnd") && !is_known
+                    && sub_ty.as_ref().map_or(true, |t| matches!(t.without_mut(), Type::Str)
+                        || matches!(t.without_mut(), Type::Named(n) if n == "string" || n == "str"))
+                {
+                    let str_ty = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) { "Rc::<str>" } else { "Arc::<str>" };
+                    return Some(format!("{}::from({})", str_ty, call));
+                }
                 return Some(if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call });
             }
         }
@@ -4623,6 +4633,19 @@ impl Transpiler {
                         )
                     } else { false }
                 }).unwrap_or(false);
+                // A fn-field handle (`r.onCommand`, or a local bound to one) passed where a function
+                // value (`impl FnMut`/`impl Fn`) is expected: the handle itself is not callable, so
+                // hand over a closure that locks/borrows it per call.
+                if coerced.is_none() {
+                    if let (Some(req), Some(Type::Fn(_, fparams, ..))) = (
+                        self.fn_handle_req(&a.value),
+                        param_ty.and_then(|t| self.resolve_fn_field_type(t)),
+                    ) {
+                        result.push(self.emit_fn_handle_adapter(&a.value, req, fparams.len()));
+                        i += 1;
+                        continue;
+                    }
+                }
                 let emit_ty = borrow_inner.map(Some).unwrap_or(param_ty);
                 let emitted = coerced.unwrap_or_else(|| self.emit_let_value(emit_ty, &a.value));
                 // Strip a trailing `.clone()` added by emit_let_value for struct variables when
@@ -6117,6 +6140,7 @@ impl Transpiler {
             with_open_names: self.with_open_names.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
+            fn_handle_vars: self.fn_handle_vars.clone(),
             while_let_redirect: self.while_let_redirect.clone(),
             // A nested fn/closure body is its own Rust item — a bare `break` inside
             // it can never target an enclosing Boring loop (Rust itself rejects

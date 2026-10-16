@@ -1,0 +1,30 @@
+# Calling a function-typed struct field through a local (`let f = r.onCommand; f(..)`), a
+# second local, and `r.onCommand(..)` — all must lock/borrow the stored handle before calling.
+use Cmd as def void(string)
+
+struct Row:
+    int id
+    Cmd onCommand
+
+struct St:
+    var int n = 0
+
+Row make(mut St st):
+    Row(id = 1, onCommand = (c):
+        st.n += 1)
+
+string report(Row r):
+    let f = r.onCommand
+    f("x")
+    let g = f
+    g("yz")
+    "ok"
+
+def main():
+    mut st = St()
+    let r = make(st)
+    print report(r)
+    print st.n
+    mut r2 = make(st)
+    r2.onCommand("abc")
+    print st.n

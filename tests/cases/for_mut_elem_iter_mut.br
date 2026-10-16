@@ -1,0 +1,21 @@
+# `for n in nodes` over a `mut [mut T]` parameter whose body writes through `n` borrows the
+# elements mutably, so the writes (and the recursive `mut` lend of `n.children`) land in the
+# caller's collection.
+struct SemNode:
+    var bool focused = false
+    var int id = 0
+    var int hits = 0
+    var mut [SemNode] children = []
+
+def markFocus(mut [mut SemNode] nodes, int id):
+    for n in nodes:
+        n.focused = n.id == id
+        n.hits += 1
+        markFocus(n.children, id)
+
+def main():
+    mut nodes = [SemNode(id = 1), SemNode(id = 2, children = [SemNode(id = 3)])]
+    markFocus(nodes, 3)
+    print nodes[0].focused
+    print nodes[1].children[0].focused
+    print nodes[1].hits

@@ -1561,6 +1561,10 @@ impl Transpiler {
         // Track every declared local variable so that field/method access can distinguish
         // instance variables (use `.`) from type/module paths (use `::`).
         self.known_local_vars.insert(s.name.clone());
+        match s.value.as_ref().and_then(|v| self.fn_handle_req(v)) {
+            Some(req) => { self.fn_handle_vars.insert(s.name.clone(), req); }
+            None => { self.fn_handle_vars.remove(&s.name); }
+        }
         // Track binding kind for parameter-passing checks (let ≤ mut ≤ var hierarchy).
         match s.binding {
             BindingKind::Let => {
