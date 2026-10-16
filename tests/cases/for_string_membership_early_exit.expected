@@ -1,0 +1,6 @@
+actor a
+actor b
+total 6
+guard x
+guard y
+total2 30

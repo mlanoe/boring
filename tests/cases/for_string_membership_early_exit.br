@@ -1,0 +1,24 @@
+# Regression test: `for ... in <string array>` registers its loop vars as strings; every exit
+# path of emit_for (not just the normal one) must restore that, otherwise a later loop reusing
+# the name for an int (`total += v`) is emitted as string concatenation (E0308).
+# Covers the early-return forms: 'actor (mutex) iteration and 'guard (rwlock) iteration.
+# NOTE: today those forms never register their loop var as a string (the iterable isn't in
+# str_vec_vars), so this passes even without the wrapper in emit_for; it guards the paths if
+# that ever changes. The normal-path leak is covered by for_destructure.
+def main():
+    var names'actor = ["a", "b"]
+    for v in names:
+        print "actor {v}"
+    var total = 0
+    let scores = {"p" = 1, "q" = 5}
+    for k, v in scores:
+        total += v
+    print "total {total}"
+
+    var tags'guard = ["x", "y"]
+    for v in tags:
+        print "guard {v}"
+    var total2 = 0
+    for k, v in {"p" = 10, "q" = 20}:
+        total2 += v
+    print "total2 {total2}"

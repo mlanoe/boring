@@ -315,15 +315,24 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_for(&mut self, s: &ForStmt) {
-        // Loop variables are scoped to the for body: save outer set first so
-        // that after the loop the loop vars are not visible to subsequent code.
-        let saved_locals = self.known_local_vars.clone();
-        // Likewise for string-ness: a loop var registered as a string (`for i, v in fruits`)
-        // must not leak to a later `for k, v in scores` where `v` is an int (`total += v`
-        // would be emitted as string concatenation).
+        // String-ness of loop vars is scoped to the loop: a loop var registered as a string
+        // (`for i, v in fruits`) must not leak to a later `for k, v in scores` where `v` is an
+        // int (`total += v` would be emitted as string concatenation). Snapshot/restore around
+        // `emit_for_inner` so every exit path (early returns, stream/channel forms) is covered.
         let saved_string_membership: Vec<(String, bool, bool)> = s.vars.iter()
             .map(|v| (v.clone(), self.string_vars.contains(v.as_str()), self.string_arc_vars.contains(v.as_str())))
             .collect();
+        self.emit_for_inner(s);
+        for (name, in_string_vars, in_string_arc_vars) in saved_string_membership {
+            set_membership(&mut self.string_vars, &name, in_string_vars);
+            set_membership(&mut self.string_arc_vars, &name, in_string_arc_vars);
+        }
+    }
+
+    fn emit_for_inner(&mut self, s: &ForStmt) {
+        // Loop variables are scoped to the for body: save outer set first so
+        // that after the loop the loop vars are not visible to subsequent code.
+        let saved_locals = self.known_local_vars.clone();
         // Track loop variables as known locals so field accesses inside the
         // loop body use `.` not `::`.
         for v in &s.vars {
@@ -789,10 +798,6 @@ impl Transpiler {
         // visible after the for loop (emit_loop_body already saved/restored
         // its own inner lets; here we restore the loop var additions).
         self.known_local_vars = saved_locals;
-        for (name, in_string_vars, in_string_arc_vars) in saved_string_membership {
-            set_membership(&mut self.string_vars, &name, in_string_vars);
-            set_membership(&mut self.string_arc_vars, &name, in_string_arc_vars);
-        }
     }
 
     /// Whether `stmts` assign through `name` (`name.f = ..`, `name[i] = ..`) or call a `def` method on it.
