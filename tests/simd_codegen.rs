@@ -3594,6 +3594,144 @@ print "{transforms.output[0]} {transforms.output[1]} {transforms.output[2]} {tra
 }
 
 #[test]
+fn collection_and_string_pipelines_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_collection_string_pipelines");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("collection_string_pipelines.br");
+    fs::write(
+        &input,
+        r#"
+kernel Pipelines:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3]
+        let transformed = values |> map((value): value * 2) |> reversed()
+        let text = " hi " |> trim() |> upper()
+        output[i] = transformed[0] + int(text == "HI") + i
+mut pipelines = Pipelines()
+kernel:
+    pipelines(block = 4)
+print "{pipelines.output[0]} {pipelines.output[1]} {pipelines.output[2]} {pipelines.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("collection_string_pipelines_simd/src/main.rs")).unwrap();
+    assert!(source.contains("iter().cloned().map"));
+    assert!(source.contains("iter().rev().cloned()"));
+    assert!(source.contains("trim().to_string().to_uppercase()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("collection_string_pipelines_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "7 8 9 10");
+}
+
+#[test]
+fn local_tuple_queries_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_tuple_queries");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_tuple_queries.br");
+    fs::write(
+        &input,
+        r#"
+kernel TupleQueries:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = (10, 20, 30)
+        let alias = values
+        output[i] = alias.length() + alias.first() + alias.last() + int(alias.isEmpty()) + i
+mut queries = TupleQueries()
+kernel:
+    queries(block = 4)
+print "{queries.output[0]} {queries.output[1]} {queries.output[2]} {queries.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_tuple_queries_simd/src/main.rs")).unwrap();
+    assert!(source.contains("alias.0.clone()"));
+    assert!(source.contains("alias.2.clone()"));
+    assert!(source.contains("3 + alias.0.clone()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_tuple_queries_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "43 44 45 46");
+}
+
+#[test]
+fn local_tuple_functional_methods_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_tuple_functional_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_tuple_functional_methods.br");
+    fs::write(
+        &input,
+        r#"
+kernel TupleFunctions:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = (1, 2, 3)
+        let doubled = values.map((value): value * 2)
+        let all_positive = doubled.all((value): value > 0)
+        let has_four = doubled.any((value): value == 4)
+        output[i] = doubled.first() + doubled.last() + int(all_positive) + int(has_four) + i
+mut functions = TupleFunctions()
+kernel:
+    functions(block = 4)
+print "{functions.output[0]} {functions.output[1]} {functions.output[2]} {functions.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_tuple_functional_methods_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("let value = values.0.clone()"));
+    assert!(source.contains("let value = doubled.2.clone()"));
+    assert!(source.contains(" && "));
+    assert!(source.contains(" || "));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_tuple_functional_methods_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
 fn local_dict_and_set_transformations_run_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_local_dict_set_transformations");

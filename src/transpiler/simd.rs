@@ -61,6 +61,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         arrays: std::collections::HashSet::new(),
         dicts: std::collections::HashSet::new(),
         sets: std::collections::HashSet::new(),
+        tuple_arities: std::collections::HashMap::new(),
         global_consts,
         locals: std::collections::HashSet::new(),
         value_types: std::collections::HashMap::new(),
@@ -174,6 +175,7 @@ struct Emitter {
     arrays: std::collections::HashSet<String>,
     dicts: std::collections::HashSet<String>,
     sets: std::collections::HashSet<String>,
+    tuple_arities: std::collections::HashMap<String, usize>,
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
@@ -231,6 +233,7 @@ impl Emitter {
             })
             .collect();
         self.locals.clear();
+        self.tuple_arities.clear();
         self.local_axes.clear();
         self.value_types.clear();
         self.replayable_locals.clear();
@@ -1786,6 +1789,20 @@ impl Emitter {
                 if let Some(inferred_ty) = inferred_ty {
                     self.value_types.insert(v.name.clone(), inferred_ty);
                 }
+                if let Some(arity) = v.value.as_ref().and_then(|value| match &value.kind {
+                    ExprKind::Tuple(elements) => Some(elements.len()),
+                    ExprKind::Var(source) => self.tuple_arities.get(source).copied(),
+                    ExprKind::MethodCall(receiver, method, _)
+                    | ExprKind::Pipe(receiver, method, _)
+                        if method == "map" => match &receiver.kind {
+                            ExprKind::Tuple(elements) => Some(elements.len()),
+                            ExprKind::Var(source) => self.tuple_arities.get(source).copied(),
+                            _ => None,
+                        },
+                    _ => None,
+                }) {
+                    self.tuple_arities.insert(v.name.clone(), arity);
+                }
                 if let Some((_, axes)) = v.ty.as_ref().and_then(Type::as_labeled_array) {
                     self.local_axes.insert(v.name.clone(), axes.to_vec());
                 } else if let Some(Expr {
@@ -1839,6 +1856,30 @@ impl Emitter {
                                     if matches!(method.as_str(), "map" | "filter")
                                         && matches!(&receiver.kind, ExprKind::Var(source)
                                             if self.dicts.contains(source)))
+                    ) || matches!(
+                        &value.kind,
+                        ExprKind::Pipe(_, method, _)
+                            if matches!(
+                                method.as_str(),
+                                "map"
+                                    | "filter"
+                                    | "keys"
+                                    | "values"
+                                    | "toArray"
+                                    | "reversed"
+                                    | "take"
+                                    | "drop"
+                                    | "slice"
+                                    | "flatMap"
+                                    | "flat"
+                                    | "sorted"
+                                    | "sortedBy"
+                                    | "zip"
+                                    | "enumerate"
+                                    | "removeAt"
+                                    | "split"
+                                    | "chars"
+                            )
                     )
                 });
                 if v.ty.as_ref().is_some_and(is_array)
@@ -2601,16 +2642,70 @@ impl Emitter {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            ExprKind::Pipe(value, method, args) => format!(
-                "{}.{}({})",
-                self.expr(value),
-                method,
-                args.iter()
-                    .map(|arg| self.expr(&arg.value))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            ExprKind::Pipe(value, method, args) => self.expr(&Expr {
+                kind: ExprKind::MethodCall(value.clone(), method.clone(), args.clone()),
+                line: e.line,
+                col: e.col,
+                len: e.len,
+            }),
             ExprKind::MethodCall(o, m, args) => {
+                let tuple_arity = match &o.kind {
+                    ExprKind::Tuple(elements) => Some(elements.len()),
+                    ExprKind::Var(name) => self.tuple_arities.get(name).copied(),
+                    _ => None,
+                };
+                if let Some(arity) = tuple_arity {
+                    match (m.as_str(), args.as_slice()) {
+                        ("length" | "count", []) => return arity.to_string(),
+                        ("isEmpty", []) => return (arity == 0).to_string(),
+                        ("first", []) if arity > 0 => {
+                            return format!("{}.0.clone()", self.expr(o));
+                        }
+                        ("last", []) if arity > 0 => {
+                            return format!("{}.{}.clone()", self.expr(o), arity - 1);
+                        }
+                        ("map", [transform])
+                            if arity > 0
+                                && matches!(&transform.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (param, body) = self
+                                .tuple_closure(&transform.value)
+                                .expect("closure checked above");
+                            let object = self.expr(o);
+                            let values = (0..arity)
+                                .map(|index| {
+                                    format!(
+                                        "{{ let {param} = {object}.{index}.clone(); {body} }}"
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            return if arity == 1 {
+                                format!("({},)", values[0])
+                            } else {
+                                format!("({})", values.join(", "))
+                            };
+                        }
+                        ("all" | "any", [predicate])
+                            if arity > 0
+                                && matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (param, body) = self
+                                .tuple_closure(&predicate.value)
+                                .expect("closure checked above");
+                            let object = self.expr(o);
+                            let operator = if m == "all" { " && " } else { " || " };
+                            return (0..arity)
+                                .map(|index| {
+                                    format!(
+                                        "{{ let {param} = {object}.{index}.clone(); {body} }}"
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(operator);
+                        }
+                        _ => {}
+                    }
+                }
                 let string_receiver = matches!(&o.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
                     || self.expr_type(o).as_deref() == Some("String");
                 if string_receiver {
@@ -2735,7 +2830,7 @@ impl Emitter {
                         _ => {}
                     }
                 }
-                if matches!(&o.kind, ExprKind::Var(name) if self.arrays.contains(name)) {
+                if self.is_local_array_expr(o) {
                     match (m.as_str(), args.as_slice()) {
                         ("first" | "last", []) => {
                             return format!("{}.{}().cloned()", self.expr(o), m);
@@ -3427,6 +3522,56 @@ impl Emitter {
             }
         };
         Some((key, value, body))
+    }
+    fn is_local_array_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Var(name) => self.arrays.contains(name),
+            ExprKind::Array(_)
+            | ExprKind::ArrayFill { .. }
+            | ExprKind::ArrayAlloc { .. }
+            | ExprKind::ArrayComp { .. }
+            | ExprKind::ArrayCompIter { .. }
+            | ExprKind::LabeledArrayComp { .. } => true,
+            ExprKind::MethodCall(receiver, method, _) | ExprKind::Pipe(receiver, method, _) => {
+                matches!(
+                    method.as_str(),
+                    "map"
+                        | "filter"
+                        | "reversed"
+                        | "take"
+                        | "drop"
+                        | "slice"
+                        | "flatMap"
+                        | "flat"
+                        | "sorted"
+                        | "sortedBy"
+                        | "zip"
+                        | "enumerate"
+                        | "removeAt"
+                        | "split"
+                        | "chars"
+                        | "keys"
+                        | "values"
+                        | "toArray"
+                ) && !matches!(&receiver.kind, ExprKind::Var(name)
+                    if self.dicts.contains(name)
+                        && matches!(method.as_str(), "map" | "filter" | "removeAt"))
+            }
+            _ => false,
+        }
+    }
+    fn tuple_closure(&mut self, closure: &Expr) -> Option<(String, String)> {
+        let ExprKind::Closure(params, _, body, _, _) = &closure.kind else {
+            return None;
+        };
+        let param = params.first()?.name.clone();
+        let body = match body {
+            ClosureBody::Expr(value) => self.expr(value),
+            ClosureBody::Block(statements) => {
+                format!("{{ {} }}", self.expr_body_as(statements, None))
+            }
+        };
+        Some((param, body))
     }
     fn warp_shuffle(&mut self, call: &Expr, method: &str, args: &[Arg]) -> String {
         if args.len() != 2 || !self.warp_replayable(&args[0].value) {
@@ -4372,6 +4517,39 @@ impl Emitter {
                     }
                     _ => None,
                 }),
+            ExprKind::Pipe(object, method, _) if method == "filter" => self.expr_type(object),
+            ExprKind::Pipe(_, method, args) if method == "map" => args
+                .first()
+                .and_then(|arg| match &arg.value.kind {
+                    ExprKind::Closure(_, _, ClosureBody::Expr(value), _, _) => {
+                        self.expr_type(value)
+                    }
+                    _ => None,
+                }),
+            ExprKind::Pipe(object, method, _)
+                if matches!(
+                    method.as_str(),
+                    "trim"
+                        | "trimStart"
+                        | "trimEnd"
+                        | "toUpperCase"
+                        | "uppercased"
+                        | "upper"
+                        | "to_upper"
+                        | "toUpper"
+                        | "toLowerCase"
+                        | "lowercased"
+                        | "lower"
+                        | "to_lower"
+                        | "toLower"
+                        | "slice"
+                        | "replace"
+                        | "replaceAll"
+                        | "repeat"
+                ) && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("String".into())
+            }
             ExprKind::UnaryOp(_, value) => self.expr_type(value),
             ExprKind::BinOp(op, left, right) => {
                 if matches!(
