@@ -464,7 +464,7 @@ transpile_test!(multi_catch);
 transpile_test!(implicit_self);
 transpile_test!(shadowing);
 transpile_test!(for_destructure);
-transpile_test!(for_string_membership_early_exit, ignore_single);
+transpile_test!(for_string_membership_early_exit);
 transpile_test!(struct_spread);
 transpile_test!(default_rest);
 transpile_test!(tuple_string);

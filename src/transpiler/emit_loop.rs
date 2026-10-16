@@ -509,7 +509,6 @@ impl Transpiler {
         if let ExprKind::Var(actor_name) = &s.iterable.kind {
             let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
             if (self.var_mutex_types.contains(actor_name.as_str()) || self.var_mutex_task_types.contains(actor_name.as_str()))
-                && (self.in_async || is_multi)
             {
                 let vars = if s.vars.is_empty() {
                     "_".into()
@@ -518,8 +517,14 @@ impl Transpiler {
                 };
                 let guard = format!("__guard_{}", actor_name);
                 let lock_expr = self.mutex_var_write(actor_name, actor_name);
-                self.line(&format!("let {} = {};", guard, lock_expr));
-                self.line(&format!("for {} in {}.iter().cloned() {{", vars, guard));
+                if is_multi {
+                    self.line(&format!("let {} = {};", guard, lock_expr));
+                    self.line(&format!("for {} in {}.iter().cloned() {{", vars, guard));
+                } else {
+                    // Single-thread: snapshot the items so the body can mutate the cell.
+                    self.line(&format!("let {} = {}.iter().cloned().collect::<Vec<_>>();", guard, lock_expr));
+                    self.line(&format!("for {} in {} {{", vars, guard));
+                }
                 self.indent += 1;
                 self.emit_loop_body(&s.body);
                 self.indent -= 1;
@@ -533,7 +538,6 @@ impl Transpiler {
         if let ExprKind::Var(guard_name) = &s.iterable.kind {
             let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
             if self.var_rwlock_types.contains(guard_name.as_str())
-                && (self.in_async || is_multi)
             {
                 let vars = if s.vars.is_empty() {
                     "_".into()
@@ -544,10 +548,15 @@ impl Transpiler {
                 let read_expr = if self.use_async_actors() && self.in_async {
                     format!("{}.read().await", guard_name)
                 } else {
-                    format!("{}.read().unwrap()", guard_name)
+                    self.guard_read_access(guard_name)
                 };
-                self.line(&format!("let {} = {};", rguard, read_expr));
-                self.line(&format!("for {} in {}.iter().cloned() {{", vars, rguard));
+                if is_multi || self.in_async {
+                    self.line(&format!("let {} = {};", rguard, read_expr));
+                    self.line(&format!("for {} in {}.iter().cloned() {{", vars, rguard));
+                } else {
+                    self.line(&format!("let {} = {}.iter().cloned().collect::<Vec<_>>();", rguard, read_expr));
+                    self.line(&format!("for {} in {} {{", vars, rguard));
+                }
                 self.indent += 1;
                 self.emit_loop_body(&s.body);
                 self.indent -= 1;
