@@ -3219,7 +3219,7 @@ fn rename_self_token(code: &str, to: &str) -> String {
         }
         let is_self = chars[i..].starts_with(&['s', 'e', 'l', 'f'])
             && (i == 0 || !(is_ident(chars[i - 1]) || chars[i - 1] == '.'))
-            && chars.get(i + 4).map_or(true, |&n| !is_ident(n));
+            && chars.get(i + 4).is_none_or( |&n| !is_ident(n));
         if is_self {
             out.push_str(to);
             i += 4;

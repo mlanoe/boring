@@ -186,7 +186,6 @@ fn walk_items(items: &mut [Item], out: &mut HashSet<String>) {
             _ => {}
         }
     }
-    drop(w);
     for m in nested { walk_items(&mut m.items, out); }
 }
 

@@ -2045,7 +2045,7 @@ impl Transpiler {
     /// target: the same expression with its receiver marked, so the plain-value rewrite of
     /// `state_slot_value_expr` leaves the cell itself alone.
     fn state_cell_for_slot_target(&self, target: Option<&Type>, value: &Expr) -> Option<Expr> {
-        let ExprKind::Field(obj, f) = &value.kind else { return None };
+        let ExprKind::Field(..) = &value.kind else { return None };
         let mut cur = target?.without_mut();
         while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
         if !matches!(cur, Type::Generic(g, _) if g == "Slot") { return None; }
@@ -2181,8 +2181,8 @@ impl Transpiler {
             Type::Qualified(i, OwnerQual::Shared)
                 if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())));
         if let ExprKind::Var(v) = &value.kind {
-            if self.var_types.get(v.as_str()).is_some_and(|t| is_shared_trait(t))
-                || self.fn_current_params.get(v.as_str()).is_some_and(|t| is_shared_trait(t))
+            if self.var_types.get(v.as_str()).is_some_and(&is_shared_trait)
+                || self.fn_current_params.get(v.as_str()).is_some_and(&is_shared_trait)
             {
                 return true;
             }
@@ -2207,12 +2207,12 @@ impl Transpiler {
             _ => false,
         };
         if let ExprKind::Var(v) = &value.kind {
-            if self.var_types.get(v.as_str()).is_some_and(|t| same_trait(t)) {
+            if self.var_types.get(v.as_str()).is_some_and(&same_trait) {
                 // `Box<dyn Trait>` is not `Clone`: forward the box itself (a move)
                 // instead of the `.clone()` `emit_expr_owned` would add.
                 return self.emit_expr(value);
             }
-            if self.fn_current_params.get(v.as_str()).is_some_and(|t| same_trait(t)) {
+            if self.fn_current_params.get(v.as_str()).is_some_and(&same_trait) {
                 return self.emit_expr(value);
             }
         }

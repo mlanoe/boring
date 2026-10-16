@@ -2746,7 +2746,7 @@ impl HostEmitter {
                     if name == "Device" {
                         if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
                             if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
-                                if value.to_ascii_uppercase() != "METAL" {
+                                if !value.eq_ignore_ascii_case("METAL") {
                                     return format!("compile_error!(\"Device target {} is not available in a Metal build\")", value);
                                 }
                             }

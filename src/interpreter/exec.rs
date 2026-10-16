@@ -1682,7 +1682,7 @@ impl Interpreter {
         fn go(it: &Interpreter, sub: &str, sup: &str, depth: usize) -> bool {
             if sub == sup { return true; }
             if depth > 32 { return false; }
-            it.traits.get(sub).map_or(false, |t| t.parents.iter().any(|p| go(it, p, sup, depth + 1)))
+            it.traits.get(sub).is_some_and(|t| t.parents.iter().any(|p| go(it, p, sup, depth + 1)))
         }
         go(self, sub, sup, 0)
     }

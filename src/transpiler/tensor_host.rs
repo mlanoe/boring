@@ -1102,8 +1102,7 @@ mod tests {
 
     #[test]
     fn native_fixed_geometry_requires_aligned_dimensions() {
-        let mut config = TensorLinearConfig::default();
-        config.native_fixed_matrices = true;
+        let mut config = TensorLinearConfig { native_fixed_matrices: true, ..Default::default() };
         let spec = Spec {
             m: 64,
             n: 32,
@@ -1121,8 +1120,7 @@ mod tests {
     #[test]
     fn portable_quantized_prefill_adds_shared_tiles_while_scalar_stays_reference() {
         let quals = [GpuQual::Global, GpuQual::Global, GpuQual::Unified];
-        let mut tiled_config = TensorLinearConfig::default();
-        tiled_config.portable_tiled_dynamic_quantized_linear = true;
+        let tiled_config = TensorLinearConfig { portable_tiled_dynamic_quantized_linear: true, ..Default::default() };
         for format in ["q8_0", "q5_0", "q4_0", "iq4_nl", "q6_k", "q4_k", "q3_k", "q2_k"] {
             let tiled = parse_dynamic_linear_kernel(
                 &format!("Tiled{format}"), quals.clone(), true, Some(format), &tiled_config,

@@ -415,7 +415,7 @@ impl Transpiler {
             program
         } else {
             let mut cloned = program.clone();
-            let view = self.trait_borrow_resolved.then(|| share_dyn_traits::BorrowView {
+            let view = self.trait_borrow_resolved.then_some(share_dyn_traits::BorrowView {
                 fns: &self.trait_borrowed_fns,
                 methods: &self.trait_borrowed_methods,
                 by_name: &self.trait_borrowed_method_by_name,

@@ -699,9 +699,9 @@ impl Transpiler {
                                 // mutations the callee makes would never be visible to them. So
                                 // an `'actor`/`'guard` demand promotes the caller's variable to
                                 // that qualifier too (same as declaring it `T'actor` by hand).
-                                let compatible = if matches!(param_ty, Type::Optional(_)) {
-                                    vec![demanded.clone()]
-                                } else if matches!(demanded, OwnerQual::Actor | OwnerQual::Guard) {
+                                let compatible = if matches!(param_ty, Type::Optional(_))
+                                    || matches!(demanded, OwnerQual::Actor | OwnerQual::Guard)
+                                {
                                     vec![demanded.clone()]
                                 } else {
                                     coercible_from(demanded.clone())

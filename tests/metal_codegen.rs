@@ -564,13 +564,15 @@ fn q8_four_block_partition_math_matches_scalar_for_signed_values_and_scales() {
     let scalar: Vec<f32> = (0..N).map(|row| {
         (0..K).map(|i| x[i] * q[row * K + i] as f32 * scales[i / 32]).sum()
     }).collect();
-    let mut scheduled = vec![0.0f32; N];
+    let mut scheduled = [0.0f32; N];
     for row0 in (0..N).step_by(ROWS) {
         let mut lane_sums = [[0.0f32; 32]; ROWS];
+        #[allow(clippy::needless_range_loop)]
         for lane in 0..32 {
             let slot = lane / 8;
             let it = lane % 8;
             for block in (slot..K / 32).step_by(4) {
+                #[allow(clippy::needless_range_loop)]
                 for r in 0..ROWS {
                     let row = (row0 + r).min(N - 1);
                     for j in 0..4 {
@@ -617,6 +619,7 @@ fn q8_split_k_partition_math_matches_scalar_for_signed_values_and_scales() {
         for row_offset in 0..ROWS {
             let row = (row0 + row_offset).min(N - 1);
             let mut partial = [0.0f32; SIMDGROUPS];
+            #[allow(clippy::needless_range_loop)]
             for simdgroup in 0..SIMDGROUPS {
                 for ix in 0..BLOCKS_PER_SIMDGROUP {
                     let mut block = simdgroup * BLOCKS_PER_SIMDGROUP + ix;

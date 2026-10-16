@@ -2561,8 +2561,7 @@ impl Interpreter {
                             let struct_val = self.global.borrow().get(&type_name);
                             if let Some(Value::Struct { decl, .. }) = struct_val {
                                 if let Some(fd) = decl.fields.iter().find(|f| f.name == *field) {
-                                    if !fd.mutable && !self.in_init_body
-                                        && !(content_wb && fd.ty.grants_mut())
+                                    if !(fd.mutable || self.in_init_body || content_wb && fd.ty.grants_mut())
                                     {
                                         return Err(err(format!("cannot assign to immutable field '{}'", field), line));
                                     }

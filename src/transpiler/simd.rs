@@ -1654,7 +1654,7 @@ impl Emitter {
         initial_replayed_locals: &[Stmt],
     ) {
         let phases = body
-            .split(|stmt| is_simd_barrier_stmt(stmt))
+            .split(is_simd_barrier_stmt)
             .collect::<Vec<_>>();
         let mut carried_mutable_locals = Vec::new();
         for (declaration_phase, phase) in phases.iter().enumerate() {

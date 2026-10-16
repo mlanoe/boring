@@ -2736,6 +2736,57 @@ pub(crate) fn first_loop_index(stmts: &[Stmt]) -> usize {
         .unwrap_or(stmts.len())
 }
 
+
+/// Decides whether an *unannotated* destructured slot of a resident-tuple call
+/// (`let (s, d) = pair(x, y, n)`) may stay a `BoringKernelArg<T>` instead of being
+/// downloaded to the host right at the binding.
+///
+/// Annotating a slot `'kernel'unified` has always opted it into staying resident; an
+/// unannotated slot used to download unconditionally because existing code indexes or
+/// iterates it right away (a `BoringKernelArg<T>` supports neither). This keeps that
+/// behavior for any slot with a host-style use, but keeps the slot resident when every
+/// use of `name` anywhere in `body` is one a `BoringKernelArg<T>` handles natively: an
+/// argument at a position `classify` accepts (a kernel-constructor buffer argument or
+/// a `fn_gpu_arg_params` position), a `.length` size query, or an element of the
+/// function's own resident-tuple tail at a resident position (`tail_flags`). A slot
+/// that is never used also stays resident (a download there would be pure waste).
+///
+/// The scan is by name over the whole function body, so a same-named variable
+/// elsewhere can only make the answer more conservative (download), never wrongly
+/// resident: every host use of the slot is itself a use of its name.
+pub(crate) fn resident_slot_uses_stay_resident(
+    body: &[Stmt],
+    name: &str,
+    tail_flags: Option<&[bool]>,
+    classify: &mut dyn FnMut(&str, usize) -> bool,
+) -> bool {
+    let tail_elems = match (body.last(), tail_flags) {
+        (Some(Stmt::Expr(e)), Some(flags)) => match &e.kind {
+            ExprKind::Tuple(elems) if elems.len() == flags.len() => Some((elems, flags)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let scanned = if tail_elems.is_some() { &body[..body.len() - 1] } else { body };
+    let (any, only_qualifying) = crate::ast::scan_var_call_arg_uses(scanned, name, classify, true);
+    if any && !only_qualifying {
+        return false;
+    }
+    if let Some((elems, flags)) = tail_elems {
+        for (i, el) in elems.iter().enumerate() {
+            if flags[i] && matches!(&el.kind, ExprKind::Var(v) if v == name) {
+                continue;
+            }
+            let probe = [Stmt::Expr(el.clone())];
+            let (any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&probe, name, classify, true);
+            if any && !only_qualifying {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod labeled_array_tests {
     use super::*;
@@ -2845,54 +2896,4 @@ mod labeled_array_tests {
         );
         assert_eq!(desugared_labeled_array_shadow_fields("other", &fields), None);
     }
-}
-
-/// Decides whether an *unannotated* destructured slot of a resident-tuple call
-/// (`let (s, d) = pair(x, y, n)`) may stay a `BoringKernelArg<T>` instead of being
-/// downloaded to the host right at the binding.
-///
-/// Annotating a slot `'kernel'unified` has always opted it into staying resident; an
-/// unannotated slot used to download unconditionally because existing code indexes or
-/// iterates it right away (a `BoringKernelArg<T>` supports neither). This keeps that
-/// behavior for any slot with a host-style use, but keeps the slot resident when every
-/// use of `name` anywhere in `body` is one a `BoringKernelArg<T>` handles natively: an
-/// argument at a position `classify` accepts (a kernel-constructor buffer argument or
-/// a `fn_gpu_arg_params` position), a `.length` size query, or an element of the
-/// function's own resident-tuple tail at a resident position (`tail_flags`). A slot
-/// that is never used also stays resident (a download there would be pure waste).
-///
-/// The scan is by name over the whole function body, so a same-named variable
-/// elsewhere can only make the answer more conservative (download), never wrongly
-/// resident: every host use of the slot is itself a use of its name.
-pub(crate) fn resident_slot_uses_stay_resident(
-    body: &[Stmt],
-    name: &str,
-    tail_flags: Option<&[bool]>,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
-) -> bool {
-    let tail_elems = match (body.last(), tail_flags) {
-        (Some(Stmt::Expr(e)), Some(flags)) => match &e.kind {
-            ExprKind::Tuple(elems) if elems.len() == flags.len() => Some((elems, flags)),
-            _ => None,
-        },
-        _ => None,
-    };
-    let scanned = if tail_elems.is_some() { &body[..body.len() - 1] } else { body };
-    let (any, only_qualifying) = crate::ast::scan_var_call_arg_uses(scanned, name, classify, true);
-    if any && !only_qualifying {
-        return false;
-    }
-    if let Some((elems, flags)) = tail_elems {
-        for (i, el) in elems.iter().enumerate() {
-            if flags[i] && matches!(&el.kind, ExprKind::Var(v) if v == name) {
-                continue;
-            }
-            let probe = [Stmt::Expr(el.clone())];
-            let (any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&probe, name, classify, true);
-            if any && !only_qualifying {
-                return false;
-            }
-        }
-    }
-    true
 }

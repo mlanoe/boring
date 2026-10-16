@@ -2736,7 +2736,7 @@ impl HostEmitter {
                     if name == "Device" {
                         if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
                             if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
-                                if value.to_ascii_uppercase() != "CUDA" {
+                                if !value.eq_ignore_ascii_case("CUDA") {
                                     return format!("compile_error!(\"Device target {} is not available in a CUDA build\")", value);
                                 }
                             }

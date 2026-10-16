@@ -514,7 +514,7 @@ impl Transpiler {
         // Lock the mutex, iterate with `.iter().cloned()` to keep items as owned values.
         if let ExprKind::Var(actor_name) = &s.iterable.kind {
             let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
-            if (self.var_mutex_types.contains(actor_name.as_str()) || self.var_mutex_task_types.contains(actor_name.as_str()))
+            if self.var_mutex_types.contains(actor_name.as_str()) || self.var_mutex_task_types.contains(actor_name.as_str())
             {
                 let vars = if s.vars.is_empty() {
                     "_".into()

@@ -1979,12 +1979,12 @@ impl Transpiler {
                 && self.struct_holds_dyn(n, false, &mut vec![]))
         };
         let wants = |f: &crate::ast::FnDecl| f.params.iter().any(|p| {
-            !p.mutable && !p.rebindable && p.ty.as_ref().is_some_and(|t| noclone(t))
+            !p.mutable && !p.rebindable && p.ty.as_ref().is_some_and(&noclone)
         });
         fn any_item(items: &[Item], wants: &dyn Fn(&crate::ast::FnDecl) -> bool) -> bool {
             items.iter().any(|i| match i {
                 Item::Fn(f) => wants(f),
-                Item::Struct(s) => s.protocols.is_empty() && s.methods.iter().any(|m| wants(m)),
+                Item::Struct(s) => s.protocols.is_empty() && s.methods.iter().any(wants),
                 Item::Mod(m) => any_item(&m.items, wants),
                 _ => false,
             })
@@ -2143,7 +2143,7 @@ impl Transpiler {
             program
         } else {
             let mut cloned = program.clone();
-            let view = self.trait_borrow_resolved.then(|| share_dyn_traits::BorrowView {
+            let view = self.trait_borrow_resolved.then_some(share_dyn_traits::BorrowView {
                 fns: &self.trait_borrowed_fns,
                 methods: &self.trait_borrowed_methods,
                 by_name: &self.trait_borrowed_method_by_name,

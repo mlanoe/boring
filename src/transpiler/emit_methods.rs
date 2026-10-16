@@ -1827,7 +1827,7 @@ impl Transpiler {
                 // outlive it (E0716). Own the result inside the full expression, as a plain string's
                 // `trim` does.
                 if matches!(method, "trim" | "trimStart" | "trimEnd") && !is_known
-                    && sub_ty.as_ref().map_or(true, |t| matches!(t.without_mut(), Type::Str)
+                    && sub_ty.as_ref().is_none_or( |t| matches!(t.without_mut(), Type::Str)
                         || matches!(t.without_mut(), Type::Named(n) if n == "string" || n == "str"))
                 {
                     let str_ty = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) { "Rc::<str>" } else { "Arc::<str>" };
@@ -5465,7 +5465,7 @@ impl Transpiler {
             }
             // A call to a function declared to return this trait yields a `Box<dyn Trait>`.
             ExprKind::Call(callee, _) if matches!(&callee.kind, ExprKind::Var(f)
-                if self.fn_return_types.get(f.as_str()).is_some_and(|t| is_trait(t))) =>
+                if self.fn_return_types.get(f.as_str()).is_some_and(&is_trait)) =>
                 format!("{}*{}", r, self.emit_expr(arg)),
             ExprKind::Field(obj, field) => {
                 let fty = self.resolve_expr_struct_type(obj)
@@ -5918,7 +5918,7 @@ impl Transpiler {
         let mut cur = fty.without_mut();
         let is_slot_cell = loop {
             match cur {
-                Type::Qualified(inner, q) if matches!(q, OwnerQual::Actor | OwnerQual::Guard) => {
+                Type::Qualified(inner, OwnerQual::Actor | OwnerQual::Guard) => {
                     break matches!(inner.without_mut(), Type::Generic(g, _) if g == "Slot");
                 }
                 Type::Qualified(inner, _) => cur = inner.without_mut(),
