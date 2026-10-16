@@ -2911,22 +2911,30 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
         eprintln!("error: unsupported tensor matrix algorithm '{}' (expected auto, native, or scalar)", config.matrix_algorithm.as_deref().unwrap());
         process::exit(1);
     }
-    let valid = |value: &str| matches!(value, "auto" | "native" | "scalar" | "warp" | "warp-broadcast");
+    let valid = |value: &str| matches!(value, "auto" | "native" | "scalar" | "warp" | "warp-broadcast" | "rows" | "split-k");
     for value in config.decode_algorithm.iter().chain(config.prefill_algorithm.iter())
         .chain(config.decode_formats.values()).chain(config.prefill_formats.values()) {
         if !valid(value) {
-            eprintln!("error: unsupported tensor linear algorithm '{}' (expected auto, native, scalar, warp, or warp-broadcast)", value);
+            eprintln!("error: unsupported tensor linear algorithm '{}' (expected auto, native, scalar, warp, warp-broadcast, rows, or split-k)", value);
             process::exit(1);
         }
     }
+    if config.decode_algorithm.as_deref().is_some_and(|value| matches!(value, "rows" | "split-k")) {
+        eprintln!("error: tensor linear decode algorithm '{}' is Q8_0-specific; set it as q8_0 under [tensor.linear.decode]", config.decode_algorithm.as_deref().unwrap());
+        process::exit(1);
+    }
     for (format, algorithm) in &config.decode_formats {
+        if matches!(algorithm.as_str(), "rows" | "split-k") && format != "q8_0" {
+            eprintln!("error: tensor linear decode algorithm '{}' is implemented only for q8_0", algorithm);
+            process::exit(1);
+        }
         if matches!(algorithm.as_str(), "warp" | "warp-broadcast") && !matches!(format.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") {
             eprintln!("error: tensor linear decode algorithm '{}' is not implemented for {}", algorithm, format);
             process::exit(1);
         }
     }
-    if config.prefill_algorithm.as_deref().is_some_and(|value| matches!(value, "warp" | "warp-broadcast")) || config.prefill_formats.values().any(|value| matches!(value.as_str(), "warp" | "warp-broadcast")) {
-        eprintln!("error: tensor linear warp algorithms are not implemented for prefill; use auto or scalar");
+    if config.prefill_algorithm.as_deref().is_some_and(|value| matches!(value, "warp" | "warp-broadcast" | "rows" | "split-k")) || config.prefill_formats.values().any(|value| matches!(value.as_str(), "warp" | "warp-broadcast" | "rows" | "split-k")) {
+        eprintln!("error: tensor linear warp and Q8 decode diagnostic algorithms are not implemented for prefill; use auto or scalar");
         process::exit(1);
     }
     if config.prefill_precision.as_deref().is_some_and(|value| !matches!(value, "float" | "half")) {

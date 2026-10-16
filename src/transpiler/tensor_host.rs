@@ -286,6 +286,10 @@ fn lower_function_body(
                     Some("q6_k") if half_prefill => "BoringTensorDynamicQ6KNativeHalfPrefill",
                     Some("q4_k") => "BoringTensorDynamicQ4KNative",
                     Some("q6_k") => "BoringTensorDynamicQ6KNative",
+                    Some("q8_0") if tensor_config.algorithm(dynamic.format, true) == "split-k" && half_prefill => "BoringTensorDynamicQ8NativeSplitKHalfPrefill",
+                    Some("q8_0") if tensor_config.algorithm(dynamic.format, true) == "split-k" => "BoringTensorDynamicQ8NativeSplitK",
+                    Some("q8_0") if tensor_config.algorithm(dynamic.format, true) == "rows" && half_prefill => "BoringTensorDynamicQ8NativeRowsHalfPrefill",
+                    Some("q8_0") if tensor_config.algorithm(dynamic.format, true) == "rows" => "BoringTensorDynamicQ8NativeRows",
                     _ if half_prefill => "BoringTensorDynamicQ8NativeHalfPrefill",
                     _ => "BoringTensorDynamicQ8Native",
                 }
@@ -923,8 +927,13 @@ fn parse_dynamic_replacement_stmts(
     );
     let source = if let Some((decode_name, decode_instance, prefill_name, prefill_instance)) = q8_entrypoints {
         let prefill_rows = native_prefill_rows;
+        let decode_launch = match decode_algorithm {
+            "split-k" => format!("        kernel:\n            {decode_instance}(block = 128, grid = ({{n}} + 1) / 2)\n"),
+            "rows" => format!("        kernel:\n            {decode_instance}(block = 256, grid = ({{n}} + 31) / 32)\n"),
+            _ => format!("        if {{n}} <= 256 and {{k}} <= 2048:\n            kernel:\n                {decode_instance}(block = 128, grid = ({{n}} + 1) / 2)\n        else:\n            kernel:\n                {decode_instance}(block = 256, grid = ({{n}} + 31) / 32)\n"),
+        }.replace("{n}", &call.n).replace("{k}", &call.k);
         format!(
-            "{common}    if {m} == 1:\n        mut {decode_instance} = {decode_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        if {n} <= 256 and {k} <= 2048:\n            kernel:\n                {decode_instance}(block = 128, grid = ({n} + 1) / 2)\n        else:\n            kernel:\n                {decode_instance}(block = 256, grid = ({n} + 31) / 32)\n        {c} = {decode_instance}.c\n    else:\n        mut {prefill_instance} = {prefill_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        kernel:\n            {prefill_instance}(block = 256, grid = (({n} + 63) / 64, ({m} + {prefill_tail}) / {prefill_rows}))\n        {c} = {prefill_instance}.c\n",
+            "{common}    if {m} == 1:\n        mut {decode_instance} = {decode_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{decode_launch}        {c} = {decode_instance}.c\n    else:\n        mut {prefill_instance} = {prefill_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        kernel:\n            {prefill_instance}(block = 256, grid = (({n} + 63) / 64, ({m} + {prefill_tail}) / {prefill_rows}))\n        {c} = {prefill_instance}.c\n",
             a = call.operands[0], b = call.operands[1], c = call.operands[2], m = call.m, n = call.n, k = call.k,
             prefill_tail = prefill_rows - 1,
         )

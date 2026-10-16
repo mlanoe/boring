@@ -171,6 +171,13 @@ q8_0 = "warp-broadcast"
 algorithm = "auto"
 ```
 
+For native Metal Q8_0 diagnosis, decode also accepts `rows` and `split-k`.
+They force respectively the four-row activation-reuse schedule or the two-row,
+four-SIMD-group cooperative schedule for every matrix shape. These values are
+intended for resident A/B benchmarks; `auto` retains the measured shape selector
+and is the production default. They affect decode only and are rejected under
+`[tensor.linear.prefill]`.
+
 Statically shaped `matmul`, `mma`, and `linear` calls have a separate matrix
 schedule switch:
 

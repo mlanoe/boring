@@ -521,6 +521,31 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
 }
 
 #[test]
+fn dynamic_q8_decode_schedule_can_be_forced_for_resident_benchmarks() {
+    let source = r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "q8_0")
+    y
+"#;
+
+    for (algorithm, name, launch, forbidden) in [
+        ("rows", "BoringTensorDynamicQ8NativeRows0Decode_kernel", "Some((((n + 31) / 32) as u32", "bp_partial"),
+        ("split-k", "BoringTensorDynamicQ8NativeSplitK0Decode_kernel", "Some((((n + 1) / 2) as u32", "bp_rowp"),
+    ] {
+        let config = format!(
+            "[tensor.linear.decode]\nq8_0 = \"{algorithm}\"\n\n[tensor.linear.prefill]\nq8_0 = \"native\"\n"
+        );
+        let (msl, host, _) = run_metal_with_config("dynamic_q8_forced_schedule", source, Some(&config));
+        let decode_start = msl.find(name).unwrap_or_else(|| panic!("missing {name}:\n{msl}"));
+        let prefill_start = msl[decode_start..].find("Prefill_kernel").unwrap() + decode_start;
+        let decode = &msl[decode_start..prefill_start];
+        assert!(!decode.contains(forbidden), "{algorithm} emitted the other schedule:\n{decode}");
+        assert!(host.contains(launch), "{algorithm} host launch does not match its kernel:\n{host}");
+    }
+}
+
+#[test]
 fn dynamic_q8_native_prefill_bounds_partial_row_and_column_tiles() {
     let (msl, host) = metal_codegen("dynamic_native_q8_partial_tiles", r#"
 req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
