@@ -1832,7 +1832,11 @@ impl Emitter {
                                     | "zip"
                                     | "enumerate"
                                     | "removeAt"
-                            )
+                            ) && !matches!(&value.kind,
+                                ExprKind::MethodCall(receiver, method, _)
+                                    if matches!(method.as_str(), "map" | "filter")
+                                        && matches!(&receiver.kind, ExprKind::Var(source)
+                                            if self.dicts.contains(source) || self.sets.contains(source)))
                     )
                 });
                 if v.ty.as_ref().is_some_and(is_array)
@@ -1848,6 +1852,10 @@ impl Emitter {
                     || matches!(v.value.as_ref().map(|value| &value.kind),
                         Some(ExprKind::MethodCall(receiver, method, _))
                             if method == "removeAt"
+                                && matches!(&receiver.kind, ExprKind::Var(source) if self.dicts.contains(source)))
+                    || matches!(v.value.as_ref().map(|value| &value.kind),
+                        Some(ExprKind::MethodCall(receiver, method, _))
+                            if matches!(method.as_str(), "map" | "filter")
                                 && matches!(&receiver.kind, ExprKind::Var(source) if self.dicts.contains(source)))
                 {
                     self.dicts.insert(v.name.clone());
@@ -2893,6 +2901,28 @@ impl Emitter {
                                 "{{ let mut __boring_collection = {object}.clone(); __boring_collection.remove(&{key}); __boring_collection }}"
                             );
                         }
+                        ("map", [transform])
+                            if matches!(&transform.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (key, value, body) = self
+                                .dict_closure(&transform.value)
+                                .expect("closure checked above");
+                            return format!(
+                                "{}.iter().map(|__boring_entry| {{ let {key} = __boring_entry.0.clone(); let {value} = __boring_entry.1.clone(); ({key}.clone(), {body}) }}).collect::<std::collections::HashMap<_, _>>()",
+                                self.expr(o)
+                            );
+                        }
+                        ("filter", [predicate])
+                            if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (key, value, body) = self
+                                .dict_closure(&predicate.value)
+                                .expect("closure checked above");
+                            return format!(
+                                "{}.iter().filter(|__boring_entry| {{ let {key} = __boring_entry.0.clone(); let {value} = __boring_entry.1.clone(); {body} }}).map(|(__boring_key, __boring_value)| (__boring_key.clone(), __boring_value.clone())).collect::<std::collections::HashMap<_, _>>()",
+                                self.expr(o)
+                            );
+                        }
                         ("get", [key]) => {
                             return format!(
                                 "{}.get(&{}).cloned()",
@@ -3275,6 +3305,20 @@ impl Emitter {
             }
         };
         Some((param, body))
+    }
+    fn dict_closure(&mut self, closure: &Expr) -> Option<(String, String, String)> {
+        let ExprKind::Closure(params, _, body, _, _) = &closure.kind else {
+            return None;
+        };
+        let key = params.first()?.name.clone();
+        let value = params.get(1)?.name.clone();
+        let body = match body {
+            ClosureBody::Expr(value) => self.expr(value),
+            ClosureBody::Block(statements) => {
+                format!("{{ {} }}", self.expr_body_as(statements, None))
+            }
+        };
+        Some((key, value, body))
     }
     fn warp_shuffle(&mut self, call: &Expr, method: &str, args: &[Arg]) -> String {
         if args.len() != 2 || !self.warp_replayable(&args[0].value) {

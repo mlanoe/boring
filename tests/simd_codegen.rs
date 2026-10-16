@@ -3352,6 +3352,53 @@ print "{operations.output[0]} {operations.output[1]} {operations.output[2]} {ope
 }
 
 #[test]
+fn local_dict_map_and_filter_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_dict_map_filter");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_dict_map_filter.br");
+    fs::write(
+        &input,
+        r#"
+kernel DictTransforms:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = {0 = 1, 1 = 2, 2 = 3}
+        let doubled = values.map((key, value): value * 2)
+        let filtered = doubled.filter((key, value): key > 0)
+        let high = doubled.get(2) else 0
+        let middle = filtered.get(1) else 0
+        output[i] = high + middle + i
+mut transforms = DictTransforms()
+kernel:
+    transforms(block = 4)
+print "{transforms.output[0]} {transforms.output[1]} {transforms.output[2]} {transforms.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_dict_map_filter_simd/src/main.rs")).unwrap();
+    assert!(source.contains("collect::<std::collections::HashMap<_, _>>()"));
+    assert!(source.contains("let key = __boring_entry.0.clone()"));
+    assert!(source.contains("let value = __boring_entry.1.clone()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_dict_map_filter_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
 fn local_dict_and_set_transformations_run_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_local_dict_set_transformations");
