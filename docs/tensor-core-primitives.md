@@ -294,17 +294,12 @@ precision = "half"
 prefill only; decode and the portable GPU schedules are unaffected. Regression
 coverage compares 40 outputs on irrational-ish activations with the scalar
 schedule, with relative bounds of `1e-5` for float staging and `1e-3` for half.
-On Metal, Q8_0 single-row decode (`auto`) uses a dedicated multi-row schedule:
-each SIMD group computes four output rows while four eight-lane partitions walk
-four 32-value blocks concurrently. A lane vector-loads four signed weights and
-one aligned `float4` activation slice; that activation is reused across all four
-rows, and one scale load per partition is broadcast before a final `simd_sum`.
-One 256-thread threadgroup therefore covers 32 rows. Explicit `scalar` keeps the
-one-thread-per-row accumulation-order reference. For narrow projections
-(`n <= 256`, `k <= 2048`), a latency schedule instead
-assigns two rows to a 128-thread threadgroup: four SIMD groups split the Q8
+On Metal, Q8_0 single-row decode (`auto`) assigns two rows to a 128-thread
+threadgroup: four SIMD groups split the Q8
 blocks along `k`, write their partial sums to threadgroup memory and reduce them
-before the final store. Native Q8_0 decode and prefill are separate Metal
+before the final store. The former four-row activation-reuse schedule remains
+available as the diagnostic `rows` override, while explicit `scalar` keeps the
+one-thread-per-row accumulation-order reference. Native Q8_0 decode and prefill are separate Metal
 entrypoints and host pipelines. Decode therefore reserves only its 256-byte
 split-K reduction array (and no threadgroup memory on wider shapes), independent
 of whether prefill uses a 16 KiB float or 32 KiB half tile. The host constructs

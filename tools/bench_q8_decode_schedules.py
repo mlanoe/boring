@@ -61,12 +61,12 @@ def build(schedule: str, compiler: Path, workspace: Path) -> Path:
     print(run([str(compiler), "build", "--target", "metal", "main.br"], project), end="")
     generated = project / "main_metal"
     print(run(["cargo", "build", "--release"], generated), end="")
-    return generated / "target" / "release" / "main_metal"
+    return generated / "target" / "release" / "main"
 
 
-def measure(binary: Path, calls: int) -> dict[tuple[int, int], dict[str, float]]:
+def measure(binary: Path, calls: int, batch: int) -> dict[tuple[int, int], dict[str, float]]:
     env = os.environ.copy()
-    env["BORING_METAL_BATCH"] = "1"
+    env["BORING_METAL_BATCH"] = str(batch)
     output = run([str(binary), str(calls)], binary.parent, env)
     print(output, end="")
     result: dict[tuple[int, int], dict[str, float]] = {}
@@ -87,12 +87,13 @@ def main() -> None:
     parser.add_argument("--compiler", type=Path, default=ROOT / "target" / "release" / "boring")
     parser.add_argument("--calls", type=int, default=500)
     parser.add_argument("--repetitions", type=int, default=5)
+    parser.add_argument("--batch", type=int, default=8, help="Metal launches per command buffer")
     parser.add_argument("--max-load", type=float, default=2.0, help="maximum accepted one-minute load average")
     parser.add_argument("--force", action="store_true", help="run even when the load check fails")
     args = parser.parse_args()
 
-    if args.calls < 1 or args.repetitions < 1:
-        parser.error("--calls and --repetitions must be positive")
+    if args.calls < 1 or args.repetitions < 1 or args.batch < 1:
+        parser.error("--calls, --repetitions, and --batch must be positive")
     load = os.getloadavg()[0]
     if load > args.max_load and not args.force:
         parser.error(f"one-minute load is {load:.2f}, above {args.max_load:.2f}; retry on a quiet machine or pass --force")
@@ -110,7 +111,7 @@ def main() -> None:
             order = SCHEDULES if repetition % 2 == 0 else tuple(reversed(SCHEDULES))
             print(f"\nrepetition {repetition + 1}/{args.repetitions}: {' then '.join(order)}")
             for schedule in order:
-                measured = measure(binaries[schedule], args.calls)
+                measured = measure(binaries[schedule], args.calls, args.batch)
                 for shape, values in measured.items():
                     samples[schedule].setdefault(shape, []).append(values)
 

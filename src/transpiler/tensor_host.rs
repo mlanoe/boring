@@ -930,7 +930,7 @@ fn parse_dynamic_replacement_stmts(
         let decode_launch = match decode_algorithm {
             "split-k" => format!("        kernel:\n            {decode_instance}(block = 128, grid = ({{n}} + 1) / 2)\n"),
             "rows" => format!("        kernel:\n            {decode_instance}(block = 256, grid = ({{n}} + 31) / 32)\n"),
-            _ => format!("        if {{n}} <= 256 and {{k}} <= 2048:\n            kernel:\n                {decode_instance}(block = 128, grid = ({{n}} + 1) / 2)\n        else:\n            kernel:\n                {decode_instance}(block = 256, grid = ({{n}} + 31) / 32)\n"),
+            _ => format!("        kernel:\n            {decode_instance}(block = 128, grid = ({{n}} + 1) / 2)\n"),
         }.replace("{n}", &call.n).replace("{k}", &call.k);
         format!(
             "{common}    if {m} == 1:\n        mut {decode_instance} = {decode_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{decode_launch}        {c} = {decode_instance}.c\n    else:\n        mut {prefill_instance} = {prefill_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        kernel:\n            {prefill_instance}(block = 256, grid = (({n} + 63) / 64, ({m} + {prefill_tail}) / {prefill_rows}))\n        {c} = {prefill_instance}.c\n",

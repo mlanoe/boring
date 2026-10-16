@@ -714,14 +714,10 @@ impl DeviceEmitter {
     /// shuffle broadcasts it before `simd_sum` combines all four partitions.
     fn emit_q8_rows_decode(&mut self, has_bias: bool, split_k: bool) {
         if split_k {
-            self.line("if (n <= 256 && k <= 2048) {");
-            self.indent += 1;
             self.emit_q8_split_k_decode(has_bias);
-            self.indent -= 1;
-            self.line("} else if (n >= 4096 || k >= 4096) {");
-        } else {
-            self.line("if (n >= 4096 || k >= 4096) {");
+            return;
         }
+        self.line("if (n >= 4096 || k >= 4096) {");
         self.indent += 1;
         self.emit_q8_rows_decode_variant(has_bias, true);
         self.indent -= 1;
