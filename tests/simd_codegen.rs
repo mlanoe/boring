@@ -2530,7 +2530,7 @@ kernel TransformAlias:
     def ():
         let i = .thread.x
         let values = [1, 2, 3, 4]
-        let doubled = values.map((value): value * 2).map((value): value)
+        let doubled = values.map((value): value * 2)
         let selected = doubled.filter((value): value >= 4)
         let enabled = doubled.sum() == 20 and selected.sum() == 18
         if enabled:
@@ -3735,14 +3735,24 @@ fn local_tuple_functional_methods_run_on_simd() {
     fs::write(
         &input,
         r#"
+def (int32, int32, int32) makeValues(): (1, 2, 3)
+
 kernel TupleFunctions:
+    let (int32, int32, int32) stored = (4, 5, 6)
     mut [int]'unified output
     init():
         output = [0 for ..<4]
     def ():
         let i = .thread.x
-        let values = (1, 2, 3)
-        let doubled = values.map((value): value * 2)
+        let (int32, int32, int32) typed = makeValues()
+        let conditional = if i >= 0: typed else: stored
+        let candidate = some(conditional)
+        let values = candidate else (7, 8, 9)
+        let selected = match i:
+            _: values
+        let prepared = do:
+            selected
+        let doubled = prepared |> map((value): value * 2) |> map((value): value)
         let all_positive = doubled.all((value): value > 0)
         let has_four = doubled.any((value): value == 4)
         output[i] = doubled.first() + doubled.last() + int(all_positive) + int(has_four) + i
@@ -3761,7 +3771,8 @@ print "{functions.output[0]} {functions.output[1]} {functions.output[2]} {functi
     assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
     let source = fs::read_to_string(root.join("local_tuple_functional_methods_simd/src/main.rs"))
         .unwrap();
-    assert!(source.contains("let value = values.0.clone()"));
+    assert!(source.contains("let selected = match i"));
+    assert!(source.contains("let prepared = { selected }"));
     assert!(source.contains("let value = doubled.2.clone()"));
     assert!(source.contains(" && "));
     assert!(source.contains(" || "));

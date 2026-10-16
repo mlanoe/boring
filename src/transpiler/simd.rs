@@ -243,6 +243,9 @@ impl Emitter {
             .collect();
         self.locals.clear();
         self.tuple_arities.clear();
+        self.tuple_arities.extend(k.fields.iter().filter_map(|field| {
+            tuple_type_arity(&field.ty).map(|arity| (field.name.clone(), arity))
+        }));
         self.local_axes.clear();
         self.value_types.clear();
         self.replayable_locals.clear();
@@ -264,6 +267,9 @@ impl Emitter {
             for param in &method.params {
                 if let Some(param_ty) = &param.ty {
                     self.value_types.insert(param.name.clone(), ty(param_ty));
+                    if let Some(arity) = tuple_type_arity(param_ty) {
+                        self.tuple_arities.insert(param.name.clone(), arity);
+                    }
                 }
             }
             crate::transpiler::helpers::collect_local_decl_names(&method.body, &mut self.locals);
@@ -289,10 +295,10 @@ impl Emitter {
             }
             let initial = if let Some(default) = &f.default {
                 let value = self.expr(default);
-                if matches!(base(&f.ty), Type::Optional(_)) {
-                    value
-                } else {
+                if simd_needs_as_cast(&f.ty) {
                     format!("({value}) as {}", ty(&f.ty))
+                } else {
+                    value
                 }
             } else {
                 default_value(&f.ty)
@@ -1776,11 +1782,7 @@ impl Emitter {
                     })
                     .unwrap_or_else(|| "Default::default()".into());
                 let value = match &v.ty {
-                    Some(t)
-                        if !is_array(t) && !matches!(base(t), Type::Optional(_)) =>
-                    {
-                        format!("({value}) as {}", ty(t))
-                    }
+                    Some(t) if simd_needs_as_cast(t) => format!("({value}) as {}", ty(t)),
                     _ => value,
                 };
                 self.line(
@@ -1798,7 +1800,12 @@ impl Emitter {
                 if let Some(inferred_ty) = inferred_ty {
                     self.value_types.insert(v.name.clone(), inferred_ty);
                 }
-                if let Some(arity) = v.value.as_ref().and_then(|value| self.tuple_arity(value)) {
+                if let Some(arity) = v
+                    .ty
+                    .as_ref()
+                    .and_then(tuple_type_arity)
+                    .or_else(|| v.value.as_ref().and_then(|value| self.tuple_arity(value)))
+                {
                     self.tuple_arities.insert(v.name.clone(), arity);
                 }
                 if let Some((_, axes)) = v.ty.as_ref().and_then(Type::as_labeled_array) {
@@ -3591,6 +3598,32 @@ impl Emitter {
             {
                 self.tuple_arity(receiver)
             }
+            ExprKind::If(if_expr) => {
+                let else_body = if_expr.else_body.as_ref()?;
+                let mut arities = if_expr
+                    .branches
+                    .iter()
+                    .map(|(_, body)| self.body_tuple_arity(body))
+                    .chain(std::iter::once(self.body_tuple_arity(else_body)));
+                let first = arities.next()??;
+                arities.all(|arity| arity == Some(first)).then_some(first)
+            }
+            ExprKind::Match(match_expr) => {
+                let mut arities = match_expr.arms.iter().map(|arm| match &arm.body {
+                    MatchBody::Expr(value) => self.tuple_arity(value),
+                    MatchBody::Block(body) => self.body_tuple_arity(body),
+                });
+                let first = arities.next()??;
+                arities.all(|arity| arity == Some(first)).then_some(first)
+            }
+            ExprKind::Else(_, fallback) => self.tuple_arity(fallback),
+            ExprKind::Block(body) | ExprKind::Do(body) => self.body_tuple_arity(body),
+            _ => None,
+        }
+    }
+    fn body_tuple_arity(&self, body: &[Stmt]) -> Option<usize> {
+        match body.last() {
+            Some(Stmt::Expr(expr)) => self.tuple_arity(expr),
             _ => None,
         }
     }
@@ -4411,9 +4444,7 @@ impl Emitter {
                         .map(|e| self.expr(e))
                         .unwrap_or_else(|| "Default::default()".into());
                     let value = match &v.ty {
-                        Some(t)
-                            if !is_array(t) && !matches!(base(t), Type::Optional(_)) =>
-                        {
+                        Some(t) if simd_needs_as_cast(t) => {
                             format!("({value}) as {}", ty(t))
                         }
                         _ => value,
@@ -4977,6 +5008,12 @@ fn base(t: &Type) -> &Type {
         _ => t,
     }
 }
+fn tuple_type_arity(value_ty: &Type) -> Option<usize> {
+    match base(value_ty) {
+        Type::Tuple(elements) => Some(elements.len()),
+        _ => None,
+    }
+}
 fn is_array(t: &Type) -> bool {
     matches!(
         base(t),
@@ -5036,7 +5073,36 @@ fn ty(t: &Type) -> String {
         ),
         Type::Set(element) => format!("std::collections::HashSet<{}>", ty(element)),
         Type::Optional(inner) => format!("Option<{}>", ty(inner)),
+        Type::Tuple(elements) => {
+            let values = elements.iter().map(ty).collect::<Vec<_>>();
+            if values.len() == 1 {
+                format!("({},)", values[0])
+            } else {
+                format!("({})", values.join(", "))
+            }
+        }
         _ => "isize".into(),
+    }
+}
+fn simd_needs_as_cast(value_ty: &Type) -> bool {
+    match base(value_ty) {
+        Type::Int
+        | Type::Uint
+        | Type::Int8
+        | Type::Int16
+        | Type::Int32
+        | Type::Int64
+        | Type::Int128
+        | Type::Uint8
+        | Type::Uint16
+        | Type::Uint32
+        | Type::Uint64
+        | Type::Uint128
+        | Type::Float32
+        | Type::Float64
+        | Type::Bool => true,
+        Type::Named(name) => primitive_cast_type(name).is_some(),
+        _ => false,
     }
 }
 fn default_value(t: &Type) -> String {
