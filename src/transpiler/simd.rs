@@ -62,6 +62,14 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         dicts: std::collections::HashSet::new(),
         sets: std::collections::HashSet::new(),
         tuple_arities: std::collections::HashMap::new(),
+        function_names: renamed
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fn(function) => Some(function.name.clone()),
+                _ => None,
+            })
+            .collect(),
         global_consts,
         locals: std::collections::HashSet::new(),
         value_types: std::collections::HashMap::new(),
@@ -176,6 +184,7 @@ struct Emitter {
     dicts: std::collections::HashSet<String>,
     sets: std::collections::HashSet<String>,
     tuple_arities: std::collections::HashMap<String, usize>,
+    function_names: std::collections::HashSet<String>,
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
@@ -2642,12 +2651,20 @@ impl Emitter {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            ExprKind::Pipe(value, method, args) => self.expr(&Expr {
-                kind: ExprKind::MethodCall(value.clone(), method.clone(), args.clone()),
-                line: e.line,
-                col: e.col,
-                len: e.len,
-            }),
+            ExprKind::Pipe(value, method, args) => {
+                if self.function_names.contains(method) {
+                    let mut values = vec![self.expr(value)];
+                    values.extend(args.iter().map(|arg| self.expr(&arg.value)));
+                    format!("{method}({})", values.join(", "))
+                } else {
+                    self.expr(&Expr {
+                        kind: ExprKind::MethodCall(value.clone(), method.clone(), args.clone()),
+                        line: e.line,
+                        col: e.col,
+                        len: e.len,
+                    })
+                }
+            }
             ExprKind::MethodCall(o, m, args) => {
                 let tuple_arity = match &o.kind {
                     ExprKind::Tuple(elements) => Some(elements.len()),
@@ -2702,6 +2719,36 @@ impl Emitter {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(operator);
+                        }
+                        ("contains", [needle]) if arity > 0 => {
+                            let object = self.expr(o);
+                            let needle = self.expr(&needle.value);
+                            let comparisons = (0..arity)
+                                .map(|index| {
+                                    format!("{object}.{index} == __boring_tuple_needle")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            return format!(
+                                "{{ let __boring_tuple_needle = {needle}; {comparisons} }}"
+                            );
+                        }
+                        ("count", [predicate])
+                            if arity > 0
+                                && matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (param, body) = self
+                                .tuple_closure(&predicate.value)
+                                .expect("closure checked above");
+                            let object = self.expr(o);
+                            return (0..arity)
+                                .map(|index| {
+                                    format!(
+                                        "({{ let {param} = {object}.{index}.clone(); {body} }} as i32)"
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" + ");
                         }
                         _ => {}
                     }

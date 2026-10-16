@@ -3639,6 +3639,49 @@ print "{pipelines.output[0]} {pipelines.output[1]} {pipelines.output[2]} {pipeli
 }
 
 #[test]
+fn known_function_pipelines_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_known_function_pipelines");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("known_function_pipelines.br");
+    fs::write(
+        &input,
+        r#"
+def int32 add(int32 value, int32 amount): value + amount
+def int32 double(int32 value): value * 2
+
+kernel FunctionPipelines:
+    mut [int]'unified output
+    init():
+        output = [0]
+    def ():
+        let value = 3 |> add(2) |> double()
+        output[0] = value
+mut pipelines = FunctionPipelines()
+kernel:
+    pipelines(block = 1)
+print pipelines.output[0]
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("known_function_pipelines_simd/src/main.rs")).unwrap();
+    assert!(source.contains("let value = double(add(3, 2))"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("known_function_pipelines_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10");
+}
+
+#[test]
 fn local_tuple_queries_run_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_tuple_queries");
     let _ = fs::remove_dir_all(&root);
@@ -3702,7 +3745,9 @@ kernel TupleFunctions:
         let doubled = values.map((value): value * 2)
         let all_positive = doubled.all((value): value > 0)
         let has_four = doubled.any((value): value == 4)
-        output[i] = doubled.first() + doubled.last() + int(all_positive) + int(has_four) + i
+        let contains_six = doubled.contains(6)
+        let greater_than_two = doubled.count((value): value > 2)
+        output[i] = doubled.first() + doubled.last() + int(all_positive) + int(has_four) + int(contains_six) + greater_than_two + i
 mut functions = TupleFunctions()
 kernel:
     functions(block = 4)
@@ -3722,13 +3767,15 @@ print "{functions.output[0]} {functions.output[1]} {functions.output[2]} {functi
     assert!(source.contains("let value = doubled.2.clone()"));
     assert!(source.contains(" && "));
     assert!(source.contains(" || "));
+    assert!(source.contains("let __boring_tuple_needle = 6"));
+    assert!(source.contains("as i32) +"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(root.join("local_tuple_functional_methods_simd/Cargo.toml"))
         .output()
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "13 14 15 16");
 }
 
 #[test]
