@@ -7564,12 +7564,15 @@ fn string_literals_and_interpolation_run_inside_simd_kernels() {
         &input,
         r#"
 kernel Strings:
+    let string prefix = "lane"
     mut [bool]'unified output
     init():
         output = [false for ..<2]
     def ():
         let i = .thread.x
-        let message = "lane {i}"
+        let string message = do:
+            let string base = "{prefix} {i}"
+            base
         output[i] = message == (if i == 0: "lane 0" else: "lane 1")
 mut strings = Strings()
 kernel:
@@ -7589,7 +7592,10 @@ print "{strings.output[0]} {strings.output[1]}"
         String::from_utf8_lossy(&generated.stderr)
     );
     let source = fs::read_to_string(root.join("kernel_strings_simd/src/main.rs")).unwrap();
-    assert!(source.contains("format!(\"lane {}\", i)"));
+    assert!(source.contains("prefix: String"));
+    assert!(source.contains("prefix: String::from(\"lane\")"));
+    assert!(source.contains("let base: String = format!("));
+    assert!(source.contains("self.prefix"));
     assert!(source.contains("String::from(\"lane 0\")"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])

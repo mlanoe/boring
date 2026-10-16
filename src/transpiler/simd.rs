@@ -5048,6 +5048,7 @@ fn ty(t: &Type) -> String {
         Type::Named(n) => match n.as_str() {
             "float32" => "f32".into(),
             "float" | "float64" => "f64".into(),
+            "string" => "String".into(),
             "int" => "i32".into(),
             "uint" => "u32".into(),
             "int8" => "i8".into(),
