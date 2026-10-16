@@ -301,7 +301,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
     let binds: HashSet<String> = bind_fields.iter().map(|f| f.name.clone()).collect();
     let envs: HashSet<String> = env_fields.iter().map(|f| f.name.clone()).collect();
     let bound = find_bound_states(&s, &states, &binds, &env.bind_views)?;
-    for f in state_fields.iter().filter(|f| bound.contains(&f.name) && !f.mutable && !f.ty.is_mut()) {
+    if let Some(f) = state_fields.iter().find(|f| bound.contains(&f.name) && !f.mutable && !f.ty.is_mut()) {
         return Err(err(
             format!("`state {}` is read-only (`state let`) but is bound to a child's `bind`", f.name),
             f.line, f.col,
@@ -424,7 +424,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                 Type::Optional(inner) if !matches!(**inner, Type::Array(_)) => {
                     props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
                 }
-                Type::Named(n) if n == "View" || n == "UIAction" => {}
+                Type::Named(n) if n == "View" || n == "UIAction" || n == "TaskAction" => {}
                 // A lowered `bind` field is a shared `Slot`: its prop is the current value.
                 Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot") => {
                     props.push_str(&format!("        p[\"{name}\"] = \"{{{name}.value}}\"\n", name = f.name));
@@ -437,6 +437,12 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         if s.fields.iter().any(|f| f.name == "onActivate" && is_named(strip_mut(&f.ty), "UIAction")) {
             acts.push_str("        if action == \"activate\":\n            onActivate()\n");
         }
+        // Lifecycle modifiers (`OnMount`/`OnUnmount`): the runtime delivers the hook as an action.
+        for (field, action) in [("onMount", "mount"), ("onUnmount", "unmount")] {
+            if s.fields.iter().any(|f| f.name == field && is_named(strip_mut(&f.ty), "UIAction")) {
+                acts.push_str(&format!("        if action == \"{action}\":\n            {field}()\n"));
+            }
+        }
         if let Some(f) = s.fields.iter().find(|f| f.name == "value") {
             if let Type::Qualified(inner, OwnerQual::Actor) = strip_mut(&f.ty) {
                 if let Type::Generic(g, args) = &**inner {
@@ -448,6 +454,10 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                     }
                 }
             }
+        }
+        // `OnTask`: the runtime starts a task run by handing the body its `TaskRun`.
+        if s.fields.iter().any(|f| f.name == "onTask" && is_named(strip_mut(&f.ty), "TaskAction")) {
+            src.push_str("    req void viewTask(TaskRun run):\n        onTask(run)\n");
         }
         if !acts.is_empty() {
             src.push_str(&format!("    req void viewAct(string action, string arg):\n{acts}"));

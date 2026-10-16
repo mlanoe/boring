@@ -1,0 +1,42 @@
+# Lifecycle modifiers' hooks reach the application through generated `viewAct` ("mount"/"unmount")
+# and `viewTask` (an `OnTask` body handed its `TaskRun`).
+use boring.ui.*
+
+view Probe:
+    state [string] log = []
+
+    def note(string line):
+        log.push(line)
+
+    req int count():
+        log.length
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            OnMount(onMount = ():
+                self.note("mount")):
+                OnUnmount(onUnmount = ():
+                    self.note("unmount")):
+                    OnTask(id = "q", onTask = (run):
+                        self.note("task {run.id}#{run.generation}")):
+                        Text("x")
+
+def main():
+    let p = Probe()
+    let st = p.newState()
+    let body = p.expand(st)
+    mut mount = body.viewChildren()[0]
+    print mount.viewKind()
+    mount.viewAct("mount", "")
+    mut unmount = mount.viewChildren()[0]
+    print unmount.viewKind()
+    unmount.viewAct("unmount", "")
+    mut work = unmount.viewChildren()[0]
+    print work.viewKind()
+    print work.viewProps()["id"]
+    work.viewTask(TaskRun(node = 1, nodeGeneration = 1, generation = 7, id = "q"))
+    mut typed = st as Probe__State else (Probe__State())
+    print "{typed.log.length}"
+    print typed.log[0]
+    print typed.log[1]
+    print typed.log[2]

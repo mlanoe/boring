@@ -49,6 +49,18 @@ pub struct NoState as StateBox:
 # A parameterless callback, as held by `Button.onActivate`.
 pub use UIAction as def void()
 
+# One start of an `OnTask` body. Plain data: whether it is still current is the runtime's call
+# (`Runtime.isCurrent(run)`), because it is current only while BOTH the mounted node's generation
+# and the task-run generation still match — an `id` change or an unmount makes it stale.
+pub struct TaskRun:
+    pub int node
+    pub int nodeGeneration
+    pub int generation
+    pub string id
+
+# The body of an `OnTask`, handed its own run.
+pub use TaskAction as def void(TaskRun)
+
 pub trait View:
     req string viewKind(): ""
     req [View] viewChildren(): []
@@ -62,6 +74,9 @@ pub trait View:
     # (Toggle), "setText" with the new text as `arg` (TextField). Generated like the rest from the
     # facade's shape (see src/lower_view.rs); default: nothing to do.
     req void viewAct(string action, string arg):
+        pass
+    # An `OnTask` view starting one run of its body (generated from the facade's `onTask` field).
+    req void viewTask(TaskRun run):
         pass
 
 # The shared storage cell behind `bind`: a parent's `state` that is handed to a child's `bind` is
@@ -197,4 +212,27 @@ pub view TextField:
     bind string value
     string label
     string placeholder = ""
+    body(): native
+
+# ── Lifecycle modifiers (docs/design-notes/boring-ui-draft.md, "Lifecycle and identity-scoped tasks") ──
+# Ordered wrappers, layout- and paint-transparent; each owns its own identity and lifetime.
+#   OnMount     runs once after the wrapper and its subtree committed (before any task starts)
+#   OnUnmount   runs once, while inputs are still valid, as the wrapper is released
+#   OnTask      starts a run after the update following mount is stable; a changed `id` cancels the old
+#               run (its generation goes stale) and starts a new one; unmount cancels it
+
+pub view OnMount:
+    UIAction onMount
+    [View] children
+    body(): native
+
+pub view OnUnmount:
+    UIAction onUnmount
+    [View] children
+    body(): native
+
+pub view OnTask:
+    string id = ""
+    TaskAction onTask
+    [View] children
     body(): native

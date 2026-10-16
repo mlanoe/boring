@@ -227,6 +227,15 @@ through untouched — it must already evaluate to a `Slot`. Pitfalls found (one 
 like a struct field shadows the implicit-self field in the interpreter (`key`, `focus`, `root` all bit), and a
 function-typed field can't be called as `onX(...)` inside a method (use `let f = onX; f()`).
 
+**Lifecycle hooks and tasks (2026-10-17).** `boring.ui` gained `OnMount`/`OnUnmount`/`OnTask` facades, `TaskRun`, the
+`TaskAction` alias and `View.viewTask`; `lower_view` generates `viewAct("mount"/"unmount")` and `viewTask` from the
+facade fields (case `view_lifecycle_actions`). `boring-ui/src/core.br`: mount hooks after commit in preorder, unmount
+hooks innermost-first with task cancellation before the first one, task start only after a stable update, `id` restarts
+with per-node task-run generations, `isCurrent`/`deliver` (details in `boring-ui/README.md`); test `core_hooks_test.br`
+passes under `boring run` and `boring build`. Transpiler gaps found (filed as tasks, worked around): string literals/locals
+passed to a trait-object method are emitted as `&str`, not `Arc<str>`; `.join` on a `state` array field; a `let`-bound
+closure capturing view state is not `'static` (inline closures are fine).
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
