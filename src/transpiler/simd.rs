@@ -1832,6 +1832,8 @@ impl Emitter {
                                     | "zip"
                                     | "enumerate"
                                     | "removeAt"
+                                    | "split"
+                                    | "chars"
                             ) && !matches!(&value.kind,
                                 ExprKind::MethodCall(receiver, method, _)
                                     if matches!(method.as_str(), "map" | "filter")
@@ -2562,11 +2564,14 @@ impl Emitter {
                     format!("({})", values.join(", "))
                 }
             }
-            ExprKind::Else(value, fallback) => format!(
-                "{}.unwrap_or_else(|| {})",
-                self.expr(value),
-                self.expr(fallback)
-            ),
+            ExprKind::Else(value, fallback) => {
+                let expected = self.expr_type(value);
+                format!(
+                    "{}.unwrap_or_else(|| {})",
+                    self.expr(value),
+                    self.expr_as(fallback, expected.as_deref())
+                )
+            }
             ExprKind::Call(c, args) => {
                 if let ExprKind::Var(name) = &c.kind {
                     if name == "some" && args.len() == 1 {
@@ -2619,8 +2624,13 @@ impl Emitter {
                         ("isEmpty", []) => {
                             return format!("{}.is_empty()", self.expr(o));
                         }
-                        ("trim", []) => {
-                            return format!("{}.trim().to_string()", self.expr(o));
+                        ("trim" | "trimStart" | "trimEnd", []) => {
+                            let method = match m.as_str() {
+                                "trimStart" => "trim_start",
+                                "trimEnd" => "trim_end",
+                                _ => "trim",
+                            };
+                            return format!("{}.{method}().to_string()", self.expr(o));
                         }
                         ("toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper", []) => {
                             return format!("{}.to_uppercase()", self.expr(o));
@@ -2640,6 +2650,65 @@ impl Emitter {
                                 "{}.ends_with({}.as_str())",
                                 self.expr(o),
                                 self.expr(&suffix.value)
+                            );
+                        }
+                        ("parseInt", []) => {
+                            return format!("{}.trim().parse::<i32>().ok()", self.expr(o));
+                        }
+                        ("parseFloat", []) => {
+                            return format!("{}.trim().parse::<f64>().ok()", self.expr(o));
+                        }
+                        ("parseFloat32", []) => {
+                            return format!("{}.trim().parse::<f32>().ok()", self.expr(o));
+                        }
+                        ("chars", []) => {
+                            return format!(
+                                "{}.chars().map(|__boring_char| __boring_char.to_string()).collect::<Vec<String>>()",
+                                self.expr(o)
+                            );
+                        }
+                        ("split", [separator, ..]) => {
+                            return format!(
+                                "{}.split({}.as_str()).map(|__boring_part| __boring_part.to_string()).collect::<Vec<String>>()",
+                                self.expr(o),
+                                self.expr(&separator.value)
+                            );
+                        }
+                        ("indexOf", [needle, ..]) => {
+                            return format!(
+                                "{}.find({}.as_str()).map(|__boring_index| __boring_index as i32)",
+                                self.expr(o),
+                                self.expr(&needle.value)
+                            );
+                        }
+                        ("slice", [start, end, ..]) => {
+                            let object = self.expr(o);
+                            let start = self.expr(&start.value);
+                            let end = self.expr(&end.value);
+                            return format!(
+                                "{{ let __boring_chars = {object}.chars().collect::<Vec<_>>(); let __boring_len = __boring_chars.len() as i64; let __boring_start = ({start}) as i64; let __boring_end = ({end}) as i64; let __boring_start = if __boring_start < 0 {{ __boring_len + __boring_start }} else {{ __boring_start }}.clamp(0, __boring_len); let __boring_end = if __boring_end < 0 {{ __boring_len + __boring_end }} else {{ __boring_end }}.clamp(__boring_start, __boring_len); __boring_chars[__boring_start as usize..__boring_end as usize].iter().collect::<String>() }}"
+                            );
+                        }
+                        ("contains", [needle, ..]) => {
+                            return format!(
+                                "{}.contains({}.as_str())",
+                                self.expr(o),
+                                self.expr(&needle.value)
+                            );
+                        }
+                        ("replace" | "replaceAll", [from, to, ..]) => {
+                            return format!(
+                                "{}.replace({}.as_str(), {}.as_str())",
+                                self.expr(o),
+                                self.expr(&from.value),
+                                self.expr(&to.value)
+                            );
+                        }
+                        ("repeat", [count, ..]) => {
+                            return format!(
+                                "{}.repeat(({}) as usize)",
+                                self.expr(o),
+                                self.expr(&count.value)
                             );
                         }
                         _ => {}
@@ -3705,6 +3774,22 @@ impl Emitter {
                     && self.block_uniform_expr_with_locals(&args[0].value, locals)
             }
             ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "indexOf" | "contains" | "repeat")
+                    && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "slice" | "replace" | "replaceAll")
+                    && args.len() >= 2 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && args.iter().all(|arg| {
+                        self.block_uniform_expr_with_locals(&arg.value, locals)
+                    })
+            }
+            ExprKind::MethodCall(receiver, method, args)
                 if method == "indexOf" && args.len() == 1 =>
             {
                 self.block_uniform_expr_with_locals(receiver, locals)
@@ -4195,6 +4280,7 @@ impl Emitter {
             (ExprKind::Int(value), Some("f32")) => format!("{value}.0f32"),
             (ExprKind::Int(value), Some("f64")) => format!("{value}.0f64"),
             (ExprKind::Float(value), Some("f32")) => format!("{value}f32"),
+            (ExprKind::Float(value), Some("f64")) => format!("{value}f64"),
             _ => self.expr(expr),
         }
     }
@@ -4233,6 +4319,8 @@ impl Emitter {
                 if matches!(
                     method.as_str(),
                     "trim"
+                        | "trimStart"
+                        | "trimEnd"
                         | "toUpperCase"
                         | "uppercased"
                         | "upper"
@@ -4243,9 +4331,37 @@ impl Emitter {
                         | "lower"
                         | "to_lower"
                         | "toLower"
+                        | "slice"
+                        | "replace"
+                        | "replaceAll"
+                        | "repeat"
                 ) && self.expr_type(object).as_deref() == Some("String") =>
             {
                 Some("String".into())
+            }
+            ExprKind::MethodCall(object, method, _)
+                if matches!(method.as_str(), "split" | "chars")
+                    && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("String".into())
+            }
+            ExprKind::MethodCall(object, method, _)
+                if method == "parseInt"
+                    && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("i32".into())
+            }
+            ExprKind::MethodCall(object, method, _)
+                if method == "parseFloat"
+                    && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("f64".into())
+            }
+            ExprKind::MethodCall(object, method, _)
+                if method == "parseFloat32"
+                    && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("f32".into())
             }
             ExprKind::MethodCall(object, method, _) if method == "filter" => self.expr_type(object),
             ExprKind::MethodCall(_, method, args) if method == "map" => args
