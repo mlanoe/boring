@@ -1814,7 +1814,25 @@ impl Emitter {
                     ) || matches!(
                         &value.kind,
                         ExprKind::MethodCall(_, method, _)
-                            if matches!(method.as_str(), "map" | "filter" | "keys" | "values" | "toArray")
+                            if matches!(
+                                method.as_str(),
+                                "map"
+                                    | "filter"
+                                    | "keys"
+                                    | "values"
+                                    | "toArray"
+                                    | "reversed"
+                                    | "take"
+                                    | "drop"
+                                    | "slice"
+                                    | "flatMap"
+                                    | "flat"
+                                    | "sorted"
+                                    | "sortedBy"
+                                    | "zip"
+                                    | "enumerate"
+                                    | "removeAt"
+                            )
                     )
                 });
                 if v.ty.as_ref().is_some_and(is_array)
@@ -1827,6 +1845,10 @@ impl Emitter {
                     || matches!(v.value.as_ref().map(|value| &value.kind), Some(ExprKind::Dict(_)))
                     || matches!(v.value.as_ref().map(|value| &value.kind),
                         Some(ExprKind::Var(source)) if self.dicts.contains(source))
+                    || matches!(v.value.as_ref().map(|value| &value.kind),
+                        Some(ExprKind::MethodCall(receiver, method, _))
+                            if method == "removeAt"
+                                && matches!(&receiver.kind, ExprKind::Var(source) if self.dicts.contains(source)))
                 {
                     self.dicts.insert(v.name.clone());
                 }
@@ -1837,6 +1859,10 @@ impl Emitter {
                     || matches!(v.value.as_ref().map(|value| &value.kind),
                         Some(ExprKind::MethodCall(_, method, _))
                             if matches!(method.as_str(), "union" | "intersection" | "difference"))
+                    || matches!(v.value.as_ref().map(|value| &value.kind),
+                        Some(ExprKind::MethodCall(receiver, method, _))
+                            if method == "removeAt"
+                                && matches!(&receiver.kind, ExprKind::Var(source) if self.sets.contains(source)))
                 {
                     self.sets.insert(v.name.clone());
                 }
@@ -2628,6 +2654,22 @@ impl Emitter {
                                 predicate
                             );
                         }
+                        ("forEach" | "each", [action])
+                            if matches!(&action.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            return format!(
+                                "{}.iter().cloned().for_each({})",
+                                self.expr(o),
+                                self.expr(&action.value)
+                            );
+                        }
+                        ("join" | "joined", [separator, ..]) => {
+                            return format!(
+                                "{}.join({}.as_str())",
+                                self.expr(o),
+                                self.expr(&separator.value)
+                            );
+                        }
                         ("indexOf" | "position", [predicate])
                             if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
                         {
@@ -2642,6 +2684,100 @@ impl Emitter {
                                 "{}.iter().position(|__boring_item| __boring_item == &({})).map(|__boring_index| __boring_index as i32)",
                                 self.expr(o),
                                 self.expr(&value.value)
+                            );
+                        }
+                        ("take", [count, ..]) => {
+                            return format!(
+                                "{}.iter().cloned().take(({}) as usize).collect::<Vec<_>>()",
+                                self.expr(o),
+                                self.expr(&count.value)
+                            );
+                        }
+                        ("drop", [count, ..]) => {
+                            return format!(
+                                "{}.iter().cloned().skip(({}) as usize).collect::<Vec<_>>()",
+                                self.expr(o),
+                                self.expr(&count.value)
+                            );
+                        }
+                        ("slice", [start, end, ..]) => {
+                            let object = self.expr(o);
+                            let start = self.expr(&start.value);
+                            let end = self.expr(&end.value);
+                            return format!(
+                                "{{ let __boring_len = {object}.len() as i64; let __boring_start = ({start}) as i64; let __boring_end = ({end}) as i64; let __boring_start = if __boring_start < 0 {{ __boring_len + __boring_start }} else {{ __boring_start }}.clamp(0, __boring_len); let __boring_end = if __boring_end < 0 {{ __boring_len + __boring_end }} else {{ __boring_end }}.clamp(__boring_start, __boring_len); {object}[__boring_start as usize..__boring_end as usize].to_vec() }}"
+                            );
+                        }
+                        ("flatMap", [transform])
+                            if matches!(&transform.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            return format!(
+                                "{}.iter().cloned().flat_map({}).collect::<Vec<_>>()",
+                                self.expr(o),
+                                self.expr(&transform.value)
+                            );
+                        }
+                        ("flat", []) => {
+                            return format!(
+                                "{}.iter().cloned().flatten().collect::<Vec<_>>()",
+                                self.expr(o)
+                            );
+                        }
+                        ("sorted", []) => {
+                            return format!(
+                                "{{ let mut __boring_sorted = {}.clone(); __boring_sorted.sort_by(|__boring_a, __boring_b| __boring_a.partial_cmp(__boring_b).unwrap_or(std::cmp::Ordering::Equal)); __boring_sorted }}",
+                                self.expr(o)
+                            );
+                        }
+                        ("sortedBy", [key])
+                            if matches!(&key.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (param, body) = self
+                                .sort_key(&key.value)
+                                .expect("closure checked above");
+                            return format!(
+                                "{{ let mut __boring_sorted = {}.clone(); __boring_sorted.sort_by(|__boring_a, __boring_b| {{ let __boring_key_a = {{ let {param} = __boring_a.clone(); {body} }}; let __boring_key_b = {{ let {param} = __boring_b.clone(); {body} }}; __boring_key_a.partial_cmp(&__boring_key_b).unwrap_or(std::cmp::Ordering::Equal) }}); __boring_sorted }}",
+                                self.expr(o)
+                            );
+                        }
+                        ("zip", [other, ..]) => {
+                            return format!(
+                                "{}.iter().cloned().zip({}.iter().cloned()).collect::<Vec<_>>()",
+                                self.expr(o),
+                                self.expr(&other.value)
+                            );
+                        }
+                        ("enumerate", []) => {
+                            return format!(
+                                "{}.iter().cloned().enumerate().map(|(__boring_index, __boring_value)| (__boring_index as i32, __boring_value)).collect::<Vec<_>>()",
+                                self.expr(o)
+                            );
+                        }
+                        ("firstIndex", []) => {
+                            return format!(
+                                "if {}.is_empty() {{ None }} else {{ Some(0i32) }}",
+                                self.expr(o)
+                            );
+                        }
+                        ("nextIndex", [index, ..]) => {
+                            let object = self.expr(o);
+                            let index = self.expr(&index.value);
+                            return format!(
+                                "{{ let __boring_next = ({index}) as i64 + 1; if __boring_next >= 0 && (__boring_next as usize) < {object}.len() {{ Some(__boring_next as i32) }} else {{ None }} }}"
+                            );
+                        }
+                        ("getAt", [index, ..]) => {
+                            return format!(
+                                "{}[({}) as usize].clone()",
+                                self.expr(o),
+                                self.expr(&index.value)
+                            );
+                        }
+                        ("removeAt" | "remove_at", [index, ..]) => {
+                            let object = self.expr(o);
+                            let index = self.expr(&index.value);
+                            return format!(
+                                "{{ let mut __boring_collection = {object}.clone(); let __boring_idx = ({index}) as i64; let __boring_idx = if __boring_idx < 0 {{ (__boring_collection.len() as i64 + __boring_idx) as usize }} else {{ __boring_idx as usize }}; __boring_collection.remove(__boring_idx); __boring_collection }}"
                             );
                         }
                         ("push", [value]) => {
@@ -2665,23 +2801,67 @@ impl Emitter {
                         ("clear", []) => {
                             return format!("{}.clear()", self.expr(o));
                         }
+                        ("dedup", []) => {
+                            return format!("{}.dedup()", self.expr(o));
+                        }
+                        ("truncate", [length, ..]) => {
+                            return format!(
+                                "{}.truncate(({}) as usize)",
+                                self.expr(o),
+                                self.expr(&length.value)
+                            );
+                        }
+                        ("retain", [predicate])
+                            if matches!(&predicate.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let predicate = self
+                                .owned_filter_predicate(&predicate.value)
+                                .expect("closure checked above");
+                            return format!("{}.retain({predicate})", self.expr(o));
+                        }
                         ("reverse", []) => {
                             return format!("{}.reverse()", self.expr(o));
                         }
                         ("sort", []) => {
-                            return format!("{}.sort()", self.expr(o));
-                        }
-                        ("pop", []) => {
                             return format!(
-                                "{}.pop().expect(\"pop from empty SIMD array\")",
+                                "{}.sort_by(|__boring_a, __boring_b| __boring_a.partial_cmp(__boring_b).unwrap_or(std::cmp::Ordering::Equal))",
                                 self.expr(o)
                             );
                         }
-                        ("remove" | "removeAt" | "remove_at", [index, ..]) => {
+                        ("sortBy", [key])
+                            if matches!(&key.value.kind, ExprKind::Closure(..)) =>
+                        {
+                            let (param, body) = self
+                                .sort_key(&key.value)
+                                .expect("closure checked above");
+                            return format!(
+                                "{}.sort_by(|__boring_a, __boring_b| {{ let __boring_key_a = {{ let {param} = __boring_a.clone(); {body} }}; let __boring_key_b = {{ let {param} = __boring_b.clone(); {body} }}; __boring_key_a.partial_cmp(&__boring_key_b).unwrap_or(std::cmp::Ordering::Equal) }})",
+                                self.expr(o)
+                            );
+                        }
+                        ("pop", []) => {
+                            return format!("{}.pop().unwrap_or_default()", self.expr(o));
+                        }
+                        ("remove", [index, ..]) => {
                             let object = self.expr(o);
                             let index = self.expr(&index.value);
                             return format!(
                                 "{{ let __boring_idx = ({index}) as i64; let __boring_idx = if __boring_idx < 0 {{ ({object}.len() as i64 + __boring_idx) as usize }} else {{ __boring_idx as usize }}; {object}.remove(__boring_idx) }}"
+                            );
+                        }
+                        ("move", [from, to, ..]) => {
+                            let object = self.expr(o);
+                            let from = self.expr(&from.value);
+                            let to = self.expr(&to.value);
+                            return format!(
+                                "{{ let __boring_from = ({from}) as i64; let __boring_to = ({to}) as i64; let __boring_len = {object}.len() as i64; assert!(__boring_from >= 0 && __boring_from < __boring_len && __boring_to >= 0 && __boring_to < __boring_len, \"move indices out of range\"); if __boring_from != __boring_to {{ let __boring_item = {object}.remove(__boring_from as usize); {object}.insert(__boring_to as usize, __boring_item); }} }}"
+                            );
+                        }
+                        ("removeIndices", [indices, ..]) => {
+                            let object = self.expr(o);
+                            let indices = self.expr(&indices.value);
+                            return format!(
+                                "{{ let __boring_indices = {indices}; let __boring_len = {object}.len() as i64; let mut __boring_previous = -1i64; for &__boring_index in &__boring_indices {{ let __boring_index = __boring_index as i64; assert!(__boring_index >= 0 && __boring_index < __boring_len, \"removeIndices index out of range\"); assert!(__boring_index > __boring_previous, \"removeIndices indices must be unique and strictly ascending\"); __boring_previous = __boring_index; }} for &__boring_index in __boring_indices.iter().rev() {{ {object}.remove(__boring_index as usize); }} }}"
                             );
                         }
                         _ => {}
@@ -2689,6 +2869,30 @@ impl Emitter {
                 }
                 if matches!(&o.kind, ExprKind::Var(name) if self.dicts.contains(name)) {
                     match (m.as_str(), args.as_slice()) {
+                        ("firstIndex", []) => {
+                            return format!("{}.keys().next().cloned()", self.expr(o));
+                        }
+                        ("nextIndex", [key, ..]) => {
+                            let object = self.expr(o);
+                            let key = self.expr(&key.value);
+                            return format!(
+                                "{{ let __boring_key = {key}; let mut __boring_keys = {object}.keys(); let _ = __boring_keys.find(|__boring_candidate| *__boring_candidate == &__boring_key); __boring_keys.next().cloned() }}"
+                            );
+                        }
+                        ("getAt", [key, ..]) => {
+                            return format!(
+                                "{}.get(&{}).cloned().expect(\"getAt key not found\")",
+                                self.expr(o),
+                                self.expr(&key.value)
+                            );
+                        }
+                        ("removeAt", [key, ..]) => {
+                            let object = self.expr(o);
+                            let key = self.expr(&key.value);
+                            return format!(
+                                "{{ let mut __boring_collection = {object}.clone(); __boring_collection.remove(&{key}); __boring_collection }}"
+                            );
+                        }
                         ("get", [key]) => {
                             return format!(
                                 "{}.get(&{}).cloned()",
@@ -2730,6 +2934,33 @@ impl Emitter {
                 }
                 if matches!(&o.kind, ExprKind::Var(name) if self.sets.contains(name)) {
                     match (m.as_str(), args.as_slice()) {
+                        ("firstIndex", []) => {
+                            return format!(
+                                "if {}.is_empty() {{ None }} else {{ Some(0i32) }}",
+                                self.expr(o)
+                            );
+                        }
+                        ("nextIndex", [index, ..]) => {
+                            let object = self.expr(o);
+                            let index = self.expr(&index.value);
+                            return format!(
+                                "{{ let __boring_next = ({index}) as i64 + 1; if __boring_next >= 0 && (__boring_next as usize) < {object}.len() {{ Some(__boring_next as i32) }} else {{ None }} }}"
+                            );
+                        }
+                        ("getAt", [index, ..]) => {
+                            return format!(
+                                "{}.iter().nth(({}) as usize).cloned().expect(\"getAt index out of range\")",
+                                self.expr(o),
+                                self.expr(&index.value)
+                            );
+                        }
+                        ("removeAt", [index, ..]) => {
+                            let object = self.expr(o);
+                            let index = self.expr(&index.value);
+                            return format!(
+                                "{{ let __boring_element = {object}.iter().nth(({index}) as usize).cloned(); let mut __boring_collection = {object}.clone(); if let Some(__boring_element) = __boring_element {{ __boring_collection.remove(&__boring_element); }} __boring_collection }}"
+                            );
+                        }
                         ("toArray", []) => {
                             return format!("{}.iter().cloned().collect::<Vec<_>>()", self.expr(o));
                         }
@@ -2832,7 +3063,7 @@ impl Emitter {
                 }
                 if matches!(m.as_str(), "min" | "max") && args.is_empty() {
                     return format!(
-                        "{}.iter().cloned().{}().expect(\"empty SIMD collection reduction\")",
+                        "{}.iter().cloned().{}().unwrap_or_default()",
                         self.expr(o),
                         m
                     );
@@ -2870,7 +3101,7 @@ impl Emitter {
                         }
                     }
                 }
-                if m == "reduce" && args.len() == 2 {
+                if matches!(m.as_str(), "reduce" | "fold") && args.len() == 2 {
                     return format!(
                         "{}.iter().cloned().fold({}, {})",
                         self.expr(o),
@@ -3031,6 +3262,19 @@ impl Emitter {
             "|__boring_item| {{ let {} = __boring_item.clone(); {} }}",
             param.name, body
         ))
+    }
+    fn sort_key(&mut self, key: &Expr) -> Option<(String, String)> {
+        let ExprKind::Closure(params, _, body, _, _) = &key.kind else {
+            return None;
+        };
+        let param = params.first()?.name.clone();
+        let body = match body {
+            ClosureBody::Expr(value) => self.expr(value),
+            ClosureBody::Block(statements) => {
+                format!("{{ {} }}", self.expr_body_as(statements, None))
+            }
+        };
+        Some((param, body))
     }
     fn warp_shuffle(&mut self, call: &Expr, method: &str, args: &[Arg]) -> String {
         if args.len() != 2 || !self.warp_replayable(&args[0].value) {
@@ -3311,6 +3555,10 @@ impl Emitter {
                             | "first"
                             | "last"
                             | "reversed"
+                            | "flat"
+                            | "sorted"
+                            | "enumerate"
+                            | "firstIndex"
                     ) =>
             {
                 self.block_uniform_expr_with_locals(receiver, locals)
@@ -3341,10 +3589,111 @@ impl Emitter {
                     }
             }
             ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "forEach" | "each")
+                    && args.len() == 1
+                    && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "join" | "joined") && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
                 if method == "indexOf" && args.len() == 1 =>
             {
                 self.block_uniform_expr_with_locals(receiver, locals)
                     && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "take" | "drop") && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if method == "zip" && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "nextIndex" | "getAt" | "removeAt" | "remove_at")
+                    && args.len() == 1 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "move" | "removeIndices") =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && args.iter().all(|arg| {
+                        self.block_uniform_expr_with_locals(&arg.value, locals)
+                    })
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if method == "slice" && args.len() >= 2 =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && args.iter().all(|arg| {
+                        self.block_uniform_expr_with_locals(&arg.value, locals)
+                    })
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if method == "flatMap"
+                    && args.len() == 1
+                    && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "sortBy" | "sortedBy")
+                    && args.len() == 1
+                    && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
             }
             ExprKind::MethodCall(receiver, method, args)
                 if matches!(method.as_str(), "map" | "filter") && args.len() == 1 =>
@@ -3365,7 +3714,7 @@ impl Emitter {
                     }
             }
             ExprKind::MethodCall(receiver, method, args)
-                if method == "reduce" && args.len() == 2 =>
+                if matches!(method.as_str(), "reduce" | "fold") && args.len() == 2 =>
             {
                 let ExprKind::Closure(params, _, body, _, _) = &args[1].value.kind else {
                     return false;
@@ -3374,6 +3723,26 @@ impl Emitter {
                 closure_locals.extend(params.iter().map(|param| param.name.clone()));
                 self.block_uniform_expr_with_locals(receiver, locals)
                     && self.block_uniform_expr_with_locals(&args[0].value, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if method == "retain"
+                    && args.len() == 1
+                    && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
                     && match body {
                         ClosureBody::Expr(value) => {
                             self.block_uniform_expr_with_locals(value, &closure_locals)

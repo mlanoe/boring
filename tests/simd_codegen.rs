@@ -2744,7 +2744,7 @@ print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3
         .unwrap();
     assert!(source.contains("values.push(40)"));
     assert!(source.contains("values.insert((0) as usize, 5)"));
-    assert!(source.contains("pop from empty SIMD array"));
+    assert!(source.contains("values.pop().unwrap_or_default()"));
     assert!(source.contains("__boring_idx < 0"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
@@ -2775,7 +2775,7 @@ kernel ArrayBulkMutations:
         values.append([5, 4])
         values.reverse()
         values.sort()
-        let removed = values.removeAt(-2)
+        let removed = values.remove(-2)
         values.clear()
         values.push(removed + i)
         output[i] = values[0]
@@ -2796,7 +2796,7 @@ print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3
         .unwrap();
     assert!(source.contains("values.extend(vec![5, 4].iter().cloned())"));
     assert!(source.contains("values.reverse()"));
-    assert!(source.contains("values.sort()"));
+    assert!(source.contains("values.sort_by("));
     assert!(source.contains("values.clear()"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
@@ -2906,6 +2906,449 @@ print "{searches.output[0]} {searches.output[1]} {searches.output[2]} {searches.
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "38 39 40 41");
+}
+
+#[test]
+fn local_array_sequence_transforms_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_sequence_transforms");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_sequence_transforms.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArraySequences:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3, 4, 5]
+        let taken = values.take(3)
+        let dropped = values.drop(2)
+        let sliced = values.slice(-4, -1)
+        let expanded = values.flatMap((value): [value, value * 10])
+        let nested = [[1, 2], [3, 4]]
+        let flattened = nested.flat()
+        output[i] = taken[2] + dropped[0] + sliced[2] + expanded[3] + flattened[2] + i
+mut sequences = ArraySequences()
+kernel:
+    sequences(block = 4)
+print "{sequences.output[0]} {sequences.output[1]} {sequences.output[2]} {sequences.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_sequence_transforms_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains(".take((3) as usize)"));
+    assert!(source.contains(".skip((2) as usize)"));
+    assert!(source.contains(".clamp(__boring_start, __boring_len)"));
+    assert!(source.contains(".flat_map("));
+    assert!(source.contains(".flatten().collect::<Vec<_>>()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_sequence_transforms_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "33 34 35 36");
+}
+
+#[test]
+fn local_array_structural_transforms_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_structural_transforms");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_structural_transforms.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayStructures:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [3, 1, 2]
+        let sorted = values.sorted()
+        let zipped = sorted.zip([10, 20, 30])
+        let enumerated = sorted.enumerate()
+        output[i] = sorted[0] + zipped.count() + enumerated.count() + i
+mut structures = ArrayStructures()
+kernel:
+    structures(block = 4)
+print "{structures.output[0]} {structures.output[1]} {structures.output[2]} {structures.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_structural_transforms_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("__boring_sorted.sort_by"));
+    assert!(source.contains(".zip(vec![10, 20, 30].iter().cloned())"));
+    assert!(source.contains("__boring_index as i32"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_structural_transforms_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "7 8 9 10");
+}
+
+#[test]
+fn local_array_key_sorting_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_array_key_sorting");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_key_sorting.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayKeySorting:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        mut values = [3, 1, 2]
+        values.sortBy((value): -value)
+        let ascending = values.sortedBy((value): value)
+        output[i] = values[0] + ascending[0] + i
+mut sorting = ArrayKeySorting()
+kernel:
+    sorting(block = 4)
+print "{sorting.output[0]} {sorting.output[1]} {sorting.output[2]} {sorting.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_key_sorting_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("let __boring_key_a"));
+    assert!(source.contains("let mut __boring_sorted = values.clone()"));
+    assert!(source.contains("partial_cmp(&__boring_key_b)"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_key_sorting_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "4 5 6 7");
+}
+
+#[test]
+fn local_array_cursor_protocol_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_local_array_cursor_protocol");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_cursor_protocol.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayCursors:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [10, 20, 30]
+        let first = values.firstIndex() else -1
+        let second = values.nextIndex(first) else -1
+        let value = values.getAt(first)
+        let trimmed = values.removeAt(first)
+        output[i] = first + second + value + trimmed[0] + i
+mut cursors = ArrayCursors()
+kernel:
+    cursors(block = 4)
+print "{cursors.output[0]} {cursors.output[1]} {cursors.output[2]} {cursors.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_cursor_protocol_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("Some(0i32)"));
+    assert!(source.contains("let __boring_next"));
+    assert!(source.contains("let mut __boring_collection = values.clone()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_cursor_protocol_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "31 32 33 34");
+}
+
+#[test]
+fn local_array_structural_mutations_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_structural_mutations");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_structural_mutations.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayStructuralMutations:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        mut values = [10, 20, 30, 40, 50]
+        values.move(1, 3)
+        values.removeIndices([0, 2, 4])
+        output[i] = values[0] + values[1] + i
+mut mutations = ArrayStructuralMutations()
+kernel:
+    mutations(block = 4)
+print "{mutations.output[0]} {mutations.output[1]} {mutations.output[2]} {mutations.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_structural_mutations_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("let __boring_item = values.remove"));
+    assert!(source.contains("removeIndices indices must be unique and strictly ascending"));
+    assert!(source.contains("__boring_indices.iter().rev()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_structural_mutations_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "50 51 52 53");
+}
+
+#[test]
+fn local_array_iteration_and_join_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_iteration_and_join");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_iteration_and_join.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayIteration:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3]
+        mut total = 0
+        values.forEach (value):
+            total += value
+        let words = ["a", "bb", "c"]
+        let joined = words.join("-")
+        output[i] = total + int(joined.len()) + i
+mut iteration = ArrayIteration()
+kernel:
+    iteration(block = 4)
+print "{iteration.output[0]} {iteration.output[1]} {iteration.output[2]} {iteration.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_iteration_and_join_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("iter().cloned().for_each"));
+    assert!(source.contains("words.join(String::from(\"-\").as_str())"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_iteration_and_join_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "12 13 14 15");
+}
+
+#[test]
+fn local_dict_and_set_cursor_protocol_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_dict_and_set_cursor_protocol");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_dict_and_set_cursor_protocol.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectionCursors:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let dictionary = {"a" = 10, "b" = 20}
+        let key = dictionary.firstIndex() else ""
+        let value = dictionary.getAt(key)
+        let smaller_dictionary = dictionary.removeAt(key)
+        let values = {10, 20, 30}
+        let cursor = values.firstIndex() else -1
+        let element = values.getAt(cursor)
+        let smaller_set = values.removeAt(cursor)
+        output[i] = dictionary.count() + smaller_dictionary.count() + values.count() + smaller_set.count() + int(value > 0) + int(element > 0) + i
+mut cursors = CollectionCursors()
+kernel:
+    cursors(block = 4)
+print "{cursors.output[0]} {cursors.output[1]} {cursors.output[2]} {cursors.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_dict_and_set_cursor_protocol_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("dictionary.keys().next().cloned()"));
+    assert!(source.contains("getAt key not found"));
+    assert!(source.contains("values.iter().nth"));
+    assert!(source.contains("let __boring_element"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_dict_and_set_cursor_protocol_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn local_array_cleanup_and_fold_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_cleanup_and_fold");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_cleanup_and_fold.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayCleanup:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        mut values = [1, 2, 2, 3, 4, 4]
+        values.dedup()
+        values.retain((value): value % 2 == 1)
+        values.append([5, 6])
+        values.truncate(3)
+        let total = values.fold(0, (sum, value): sum + value)
+        output[i] = total + i
+mut cleanup = ArrayCleanup()
+kernel:
+    cleanup(block = 4)
+print "{cleanup.output[0]} {cleanup.output[1]} {cleanup.output[2]} {cleanup.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_cleanup_and_fold_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("values.dedup()"));
+    assert!(source.contains("values.retain("));
+    assert!(source.contains("values.truncate((3) as usize)"));
+    assert!(source.contains(".iter().cloned().fold(0"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_cleanup_and_fold_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "9 10 11 12");
+}
+
+#[test]
+fn empty_local_array_operations_use_defaults_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_empty_local_array_operations");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("empty_local_array_operations.br");
+    fs::write(
+        &input,
+        r#"
+kernel EmptyArrayOperations:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        mut [int] values = []
+        let popped = values.pop()
+        let minimum = values.min()
+        let maximum = values.max()
+        output[i] = popped + minimum + maximum + i
+mut operations = EmptyArrayOperations()
+kernel:
+    operations(block = 4)
+print "{operations.output[0]} {operations.output[1]} {operations.output[2]} {operations.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("empty_local_array_operations_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("values.pop().unwrap_or_default()"));
+    assert!(source.contains("values.iter().cloned().min().unwrap_or_default()"));
+    assert!(source.contains("values.iter().cloned().max().unwrap_or_default()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("empty_local_array_operations_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "0 1 2 3");
 }
 
 #[test]
