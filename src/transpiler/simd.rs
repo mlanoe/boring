@@ -1836,7 +1836,7 @@ impl Emitter {
                                 ExprKind::MethodCall(receiver, method, _)
                                     if matches!(method.as_str(), "map" | "filter")
                                         && matches!(&receiver.kind, ExprKind::Var(source)
-                                            if self.dicts.contains(source) || self.sets.contains(source)))
+                                            if self.dicts.contains(source)))
                     )
                 });
                 if v.ty.as_ref().is_some_and(is_array)
