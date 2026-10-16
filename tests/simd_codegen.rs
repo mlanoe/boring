@@ -2057,6 +2057,71 @@ fn thread_comprehension_alias_with_sync_remains_rejected_on_simd() {
 }
 
 #[test]
+fn uniform_allocated_array_alias_can_guard_collective_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_uniform_allocated_array_alias");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_allocated_array_alias.br");
+    fs::write(
+        &input,
+        r#"
+kernel AllocatedAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let [bool] decisions = [..<2]
+        let enabled = decisions.length == 2 and not decisions[0]
+        if enabled:
+            output[i] = i + 10
+            sync
+mut guarded = AllocatedAlias()
+kernel:
+    guarded(block = 4)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_allocated_array_alias_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn thread_sized_allocated_array_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_allocated_array_alias");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_allocated_array_alias.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        let [bool] decisions = [..<(.thread.x + 1)]\n        if decisions.length > 0:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
 fn uniformly_sliced_collection_alias_can_guard_collective_sync_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_uniform_slice_alias");
@@ -2250,6 +2315,337 @@ fn thread_set_contains_alias_with_sync_remains_rejected_on_simd() {
 }
 
 #[test]
+fn uniform_dict_get_alias_can_guard_collective_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_uniform_dict_get_alias");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_dict_get_alias.br");
+    fs::write(
+        &input,
+        r#"
+kernel DictGetAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        let {int=bool} decisions = {0=true, 1=false}
+        let enabled = decisions.get(.block.x, false)
+        if enabled:
+            output[i + .block.x * .block_dim.x] = i + 10
+            sync
+mut guarded = DictGetAlias()
+kernel:
+    guarded(block = 4, grid = 2)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_dict_get_alias_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "10 11 12 13\n0 0 0 0"
+    );
+}
+
+#[test]
+fn thread_dict_get_alias_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_dict_get_alias");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_dict_get_alias.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        let {int=bool} decisions = {0=true}\n        let enabled = decisions.get(.thread.x, false)\n        if enabled:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn uniform_collection_reductions_can_guard_collective_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_uniform_collection_reductions");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_collection_reductions.br");
+    fs::write(
+        &input,
+        r#"
+kernel ReductionAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3]
+        let enabled = values.sum() == 6 and values.min() == 1 and values.max() == 3
+        if enabled:
+            output[i] = i + 10
+            sync
+mut guarded = ReductionAlias()
+kernel:
+    guarded(block = 4)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_collection_reductions_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn thread_collection_reduction_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_collection_reduction");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_collection_reduction.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        let values = [.thread.x, 1]\n        if values.sum() > 0:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn uniform_collection_predicates_can_guard_collective_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_uniform_collection_predicates");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_collection_predicates.br");
+    fs::write(
+        &input,
+        r#"
+kernel PredicateAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3]
+        let enabled = values.all((value): value > 0) and values.any((value): value == 2)
+        if enabled:
+            output[i] = i + 10
+            sync
+mut guarded = PredicateAlias()
+kernel:
+    guarded(block = 4)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_collection_predicates_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn thread_collection_predicate_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_collection_predicate");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_collection_predicate.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        let values = [1, 2]\n        if values.any((value): value == .thread.x):\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn uniform_collection_transformations_can_guard_collective_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_uniform_collection_transformations");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_collection_transformations.br");
+    fs::write(
+        &input,
+        r#"
+kernel TransformAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3, 4]
+        let doubled = values.map((value): value * 2)
+        let selected = doubled.filter((value): value >= 4)
+        let enabled = doubled.sum() == 20 and selected.sum() == 18
+        if enabled:
+            output[i] = i + 10
+            sync
+mut guarded = TransformAlias()
+kernel:
+    guarded(block = 4)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_collection_transformations_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn thread_collection_transformation_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_collection_transformation");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_collection_transformation.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        let values = [1, 2]\n        let mapped = values.map((value): value + .thread.x)\n        if mapped.sum() > 0:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn uniform_collection_reduce_can_guard_collective_sync_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_uniform_collection_reduce");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_uniform_collection_reduce.br");
+    fs::write(
+        &input,
+        r#"
+kernel ReduceAlias:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let values = [1, 2, 3]
+        let total = values.reduce(0, (sum, value): sum + value)
+        if total == 6:
+            output[i] = i + 10
+            sync
+mut guarded = ReduceAlias()
+kernel:
+    guarded(block = 4)
+print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("sync_uniform_collection_reduce_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "10 11 12 13");
+}
+
+#[test]
+fn thread_collection_reduce_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_sync_divergent_collection_reduce");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("sync_divergent_collection_reduce.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        let values = [1, 2]\n        let total = values.reduce(.thread.x, (sum, value): sum + value)\n        if total > 0:\n            sync\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
 fn local_dict_and_set_mutations_run_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_local_dict_set_mutations");
@@ -2306,6 +2702,168 @@ print "{collections.output[0]} {collections.output[1]} {collections.output[2]} {
         .unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "100 101 102 103");
+}
+
+#[test]
+fn local_array_mutation_methods_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_mutation_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_mutation_methods.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayMutations:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        mut values = [10, 20, 30]
+        values.push(40)
+        values.insert(0, 5)
+        let last = values.pop()
+        let tail = values.remove(-1)
+        let first = values.remove(0)
+        output[i] = last + tail + first + values[0] + i
+mut arrays = ArrayMutations()
+kernel:
+    arrays(block = 4)
+print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_mutation_methods_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("values.push(40)"));
+    assert!(source.contains("values.insert((0) as usize, 5)"));
+    assert!(source.contains("pop from empty SIMD array"));
+    assert!(source.contains("__boring_idx < 0"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_mutation_methods_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "85 86 87 88");
+}
+
+#[test]
+fn local_array_bulk_mutation_methods_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_array_bulk_mutation_methods");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_array_bulk_mutation_methods.br");
+    fs::write(
+        &input,
+        r#"
+kernel ArrayBulkMutations:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        mut values = [3, 1, 2]
+        values.append([5, 4])
+        values.reverse()
+        values.sort()
+        let removed = values.removeAt(-2)
+        values.clear()
+        values.push(removed + i)
+        output[i] = values[0]
+mut arrays = ArrayBulkMutations()
+kernel:
+    arrays(block = 4)
+print "{arrays.output[0]} {arrays.output[1]} {arrays.output[2]} {arrays.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(root.join("local_array_bulk_mutation_methods_simd/src/main.rs"))
+        .unwrap();
+    assert!(source.contains("values.extend(vec![5, 4].iter().cloned())"));
+    assert!(source.contains("values.reverse()"));
+    assert!(source.contains("values.sort()"));
+    assert!(source.contains("values.clear()"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_array_bulk_mutation_methods_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "4 5 6 7");
+}
+
+#[test]
+fn local_dict_and_set_transformations_run_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_local_dict_set_transformations");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("local_dict_set_transformations.br");
+    fs::write(
+        &input,
+        r#"
+kernel CollectionTransforms:
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        let {int=int} values = {0=10, 1=20}
+        let present = values.get(0) else -1
+        let missing = values.get(9, 30)
+        let keys = values.keys()
+        let entries = values.values()
+        let {int} left = {1, 2}
+        let {int} right = {2, 3}
+        let united = left.union(right)
+        let shared = left.intersection(right)
+        let distinct = left.difference(right)
+        let flattened = united.toArray()
+        if united.contains(3) and shared.contains(2) and distinct.contains(1):
+            output[i] = present + missing + united.length + shared.length + distinct.length + flattened.length + keys.length + entries.length + i
+mut collections = CollectionTransforms()
+kernel:
+    collections(block = 4)
+print "{collections.output[0]} {collections.output[1]} {collections.output[2]} {collections.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let source = fs::read_to_string(
+        root.join("local_dict_set_transformations_simd/src/main.rs"),
+    )
+    .unwrap();
+    assert!(source.contains(".get(&0).cloned()"));
+    assert!(source.contains(".union(&right)"));
+    assert!(source.contains(".intersection(&right)"));
+    assert!(source.contains(".difference(&right)"));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("local_dict_set_transformations_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "52 53 54 55");
 }
 
 #[test]
@@ -3924,6 +4482,228 @@ fn thread_divergent_while_let_with_sync_remains_rejected_on_simd() {
     fs::write(
         &input,
         "kernel Divergent:\n    def ():\n        var int? phase = some(.thread.x)\n        while let value = phase:\n            sync\n            phase = if value > 0: some(value - 1) else: nil\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn nested_collective_while_let_with_sync_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_nested_collective_while_let_sync");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("nested_collective_while_let_sync.br");
+    fs::write(
+        &input,
+        r#"
+kernel NestedWhileLet:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        tile[i] = i
+        if .block.x == 0:
+            var int? phase = some(0)
+            while let Some(value) = phase:
+                tile[i] = tile[i] + value
+                sync
+                phase = if value < 2: some(value + 1) else: nil
+        else:
+            tile[i] = tile[i] + 20
+            sync
+        output[i + .block.x * .block_dim.x] = tile[i]
+mut phased = NestedWhileLet()
+kernel:
+    phased(block = 4, grid = 2)
+print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3]}"
+print "{phased.output[4]} {phased.output[5]} {phased.output[6]} {phased.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("nested_collective_while_let_sync_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "3 4 5 6\n20 21 22 23"
+    );
+}
+
+#[test]
+fn nested_thread_while_let_with_sync_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_nested_divergent_while_let_sync");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("nested_divergent_while_let_sync.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        if .block.x == 0:\n            var int? phase = some(.thread.x)\n            while let value = phase:\n                sync\n                phase = if value > 0: some(value - 1) else: nil\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn collective_loop_with_uniform_break_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_collective_loop_uniform_break");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("collective_loop_uniform_break.br");
+    fs::write(
+        &input,
+        r#"
+kernel LoopPhases:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<4]
+    def ():
+        let i = .thread.x
+        tile[i] = i
+        var round = 0
+        loop:
+            tile[i] = tile[i] + round + 1
+            sync
+            round = round + 1
+            if round >= 3: break
+        output[i] = tile[i]
+mut phased = LoopPhases()
+kernel:
+    phased(block = 4)
+print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("collective_loop_uniform_break_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "6 7 8 9");
+}
+
+#[test]
+fn collective_loop_with_thread_break_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_collective_loop_thread_break");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("collective_loop_thread_break.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        var round = 0\n        loop:\n            sync\n            round = round + 1\n            if round > .thread.x: break\n",
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!generated.status.success());
+    assert!(String::from_utf8_lossy(&generated.stderr)
+        .contains("`sync` is not yet supported inside a --target simd kernel"));
+}
+
+#[test]
+fn nested_collective_loop_with_uniform_break_runs_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_nested_collective_loop_uniform_break");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("nested_collective_loop_uniform_break.br");
+    fs::write(
+        &input,
+        r#"
+kernel NestedLoopPhases:
+    mut [int, 4]'actor tile
+    mut [int]'unified output
+    init():
+        output = [0 for ..<8]
+    def ():
+        let i = .thread.x
+        tile[i] = i
+        if .block.x == 0:
+            var round = 0
+            loop:
+                tile[i] = tile[i] + round + 1
+                sync
+                round = round + 1
+                if round >= 3: break
+        else:
+            tile[i] = tile[i] + 20
+            sync
+        output[i + .block.x * .block_dim.x] = tile[i]
+mut phased = NestedLoopPhases()
+kernel:
+    phased(block = 4, grid = 2)
+print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3]}"
+print "{phased.output[4]} {phased.output[5]} {phased.output[6]} {phased.output[7]}"
+"#,
+    )
+    .unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join("nested_collective_loop_uniform_break_simd/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "6 7 8 9\n20 21 22 23"
+    );
+}
+
+#[test]
+fn nested_collective_loop_with_thread_break_remains_rejected_on_simd() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("simd_nested_collective_loop_thread_break");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("nested_collective_loop_thread_break.br");
+    fs::write(
+        &input,
+        "kernel Divergent:\n    def ():\n        if .block.x == 0:\n            var round = 0\n            loop:\n                sync\n                round = round + 1\n                if round > .thread.x: break\n",
     )
     .unwrap();
     let generated = Command::new(env!("CARGO_BIN_EXE_boring"))

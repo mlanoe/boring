@@ -535,7 +535,8 @@ impl Emitter {
             });
             let barrier_while_let = m.body.iter().enumerate().find_map(|(loop_index, stmt)| {
                 let Stmt::WhileLet(loop_stmt) = stmt else { return None };
-                if loop_stmt.pattern.is_some()
+                let bound_names = collective_while_let_bound_names(loop_stmt);
+                if bound_names.is_empty()
                     || m.body[..loop_index].iter().any(contains_nested_simd_barrier)
                     || !loop_stmt.body.iter().any(|stmt| {
                         is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
@@ -556,13 +557,45 @@ impl Emitter {
                             && local.value.as_ref().is_some_and(|value| self.block_uniform_expr(value)))
                 })?;
                 let Stmt::Let(declaration) = &m.body[declaration_index] else { unreachable!() };
-                let uniform_locals = std::collections::HashSet::from([
-                    state_name.clone(),
-                    loop_stmt.name.clone(),
-                ]);
-                (expr_mentions_var(update_value, &loop_stmt.name)
+                let mut uniform_locals = std::collections::HashSet::from([state_name.clone()]);
+                uniform_locals.extend(bound_names.iter().cloned());
+                (bound_names.iter().any(|name| expr_mentions_var(update_value, name))
                     && self.block_uniform_expr_with_locals(update_value, &uniform_locals))
                     .then_some((loop_index, declaration_index, loop_stmt, declaration, update_value.as_ref()))
+            });
+            let barrier_loop = m.body.iter().enumerate().find_map(|(loop_index, stmt)| {
+                let Stmt::Loop(loop_stmt) = stmt else { return None };
+                if m.body[..loop_index].iter().any(contains_nested_simd_barrier)
+                    || !loop_stmt.body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    })
+                    || loop_stmt.body.len() < 2
+                {
+                    return None;
+                }
+                let Stmt::Expr(update) = &loop_stmt.body[loop_stmt.body.len() - 2] else { return None };
+                let ExprKind::Assign(update_target, update_value) = &update.kind else { return None };
+                let ExprKind::Var(update_name) = &update_target.kind else { return None };
+                let break_condition = canonical_collective_loop_break_condition(loop_stmt.body.last()?)?;
+                let declaration_index = m.body[..loop_index].iter().position(|candidate| {
+                    matches!(candidate, Stmt::Let(local)
+                        if local.name == *update_name
+                            && local.binding.is_mutable()
+                            && local.value.as_ref().is_some_and(|value| self.block_uniform_expr(value)))
+                })?;
+                let Stmt::Let(declaration) = &m.body[declaration_index] else { unreachable!() };
+                let uniform_locals = std::collections::HashSet::from([update_name.clone()]);
+                (expr_mentions_var(break_condition, update_name)
+                    && self.block_uniform_expr_with_locals(update_value, &uniform_locals)
+                    && self.block_uniform_expr_with_locals(break_condition, &uniform_locals))
+                    .then_some((
+                        loop_index,
+                        declaration_index,
+                        loop_stmt,
+                        declaration,
+                        update_value.as_ref(),
+                        break_condition,
+                    ))
             });
             if has_top_level_sync
                 || barrier_for.is_some()
@@ -573,6 +606,7 @@ impl Emitter {
                 || barrier_while.is_some()
                 || barrier_do_while.is_some()
                 || barrier_while_let.is_some()
+                || barrier_loop.is_some()
             {
                 self.line(2, "for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {");
                 self.line(3, "let __block = __BoringDim3 { x: bx as i32, y: by as i32, z: bz as i32 };");
@@ -801,14 +835,51 @@ impl Emitter {
                         .map(|(_, stmt)| stmt.clone()).collect::<Vec<_>>();
                     let replayed = self.replayable_barrier_locals(&prefix);
                     self.emit_barrier_phases_seeded(k, &prefix, 3, &[]);
-                    self.line(3, &format!("while let Some({}) = {state_name} {{", loop_stmt.name));
+                    let match_pattern = simd_collective_while_let_pattern(loop_stmt);
+                    self.line(3, &format!("while let {match_pattern} = {state_name} {{"));
                     let inserted_state = self.collective_uniform_locals.insert(state_name.clone());
-                    let inserted_value = self.collective_uniform_locals.insert(loop_stmt.name.clone());
+                    let bound_names = collective_while_let_bound_names(loop_stmt);
+                    let inherited_bound_names = bound_names.iter()
+                        .filter(|name| self.collective_uniform_locals.contains(*name))
+                        .cloned().collect::<std::collections::HashSet<_>>();
+                    self.collective_uniform_locals.extend(bound_names.iter().cloned());
                     self.emit_following_collective_controls(k, &loop_stmt.body[..loop_stmt.body.len() - 1], 4, &replayed);
-                    if inserted_value { self.collective_uniform_locals.remove(&loop_stmt.name); }
+                    for name in bound_names {
+                        if !inherited_bound_names.contains(&name) {
+                            self.collective_uniform_locals.remove(&name);
+                        }
+                    }
                     if inserted_state { self.collective_uniform_locals.remove(state_name); }
                     let update = self.expr(update);
                     self.line(4, &format!("{state_name} = {update};"));
+                    self.line(3, "}");
+                    self.emit_following_collective_controls(k, &m.body[loop_index + 1..], 3, &replayed);
+                } else if let Some((loop_index, declaration_index, loop_stmt, declaration, update, break_condition)) = barrier_loop {
+                    let uniform_name = &declaration.name;
+                    let uniform_ty = declaration.ty.as_ref().map(ty)
+                        .or_else(|| declaration.value.as_ref().and_then(|value| self.expr_type(value)))
+                        .unwrap_or_else(|| "i32".into());
+                    let initial = self.expr(declaration.value.as_ref().expect("checked above"));
+                    self.line(3, &format!("let mut {uniform_name}: {uniform_ty} = {initial};"));
+                    self.value_types.insert(uniform_name.clone(), uniform_ty);
+                    let prefix = m.body[..loop_index].iter().enumerate()
+                        .filter(|(index, _)| *index != declaration_index)
+                        .map(|(_, stmt)| stmt.clone()).collect::<Vec<_>>();
+                    let replayed = self.replayable_barrier_locals(&prefix);
+                    self.emit_barrier_phases_seeded(k, &prefix, 3, &[]);
+                    self.line(3, "loop {");
+                    let inserted_uniform = self.collective_uniform_locals.insert(uniform_name.clone());
+                    self.emit_following_collective_controls(
+                        k,
+                        &loop_stmt.body[..loop_stmt.body.len() - 2],
+                        4,
+                        &replayed,
+                    );
+                    if inserted_uniform { self.collective_uniform_locals.remove(uniform_name); }
+                    let update = self.expr(update);
+                    self.line(4, &format!("{uniform_name} = {update};"));
+                    let break_condition = self.expr(break_condition);
+                    self.line(4, &format!("if {break_condition} {{ break; }}"));
                     self.line(3, "}");
                     self.emit_following_collective_controls(k, &m.body[loop_index + 1..], 3, &replayed);
                 } else if let Some((match_index, match_stmt)) = barrier_match {
@@ -972,6 +1043,19 @@ impl Emitter {
                 declaration: &'a LetStmt,
                 update: &'a Expr,
             },
+            WhileLet {
+                stmt: &'a WhileLetStmt,
+                declaration_index: usize,
+                declaration: &'a LetStmt,
+                update: &'a Expr,
+            },
+            Loop {
+                stmt: &'a LoopStmt,
+                declaration_index: usize,
+                declaration: &'a LetStmt,
+                update: &'a Expr,
+                break_condition: &'a Expr,
+            },
         }
         let next = body.iter().enumerate().find_map(|(index, stmt)| {
             let mut inherited_uniform = self.block_uniform_locals(initial_replayed);
@@ -1061,6 +1145,93 @@ impl Emitter {
                         declaration_index,
                         declaration,
                         update: update_value,
+                    }));
+                }
+                return None;
+            }
+            if let Stmt::WhileLet(loop_stmt) = stmt {
+                let bound_names = collective_while_let_bound_names(loop_stmt);
+                if bound_names.is_empty()
+                    || !loop_stmt.body.iter().any(|stmt| {
+                        is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                    })
+                {
+                    return None;
+                }
+                let ExprKind::Var(state_name) = &loop_stmt.value.kind else { return None };
+                let Stmt::Expr(update) = loop_stmt.body.last()? else { return None };
+                let ExprKind::Assign(update_target, update_value) = &update.kind else { return None };
+                if !matches!(&update_target.kind, ExprKind::Var(name) if name == state_name) {
+                    return None;
+                }
+                let declaration_index = body[..index].iter().position(|candidate| {
+                    matches!(candidate, Stmt::Let(local)
+                        if local.name == *state_name
+                            && local.binding.is_mutable()
+                            && local.value.as_ref().is_some_and(|value| {
+                                self.block_uniform_expr_with_locals(value, &inherited_uniform)
+                            }))
+                })?;
+                let safe_prefix = body[..index].iter().enumerate().all(|(prefix_index, stmt)| {
+                    prefix_index == declaration_index
+                        || (!matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                            && !contains_nested_simd_barrier(stmt))
+                });
+                let Stmt::Let(declaration) = &body[declaration_index] else { unreachable!() };
+                let mut uniform_locals = inherited_uniform;
+                uniform_locals.insert(state_name.clone());
+                uniform_locals.extend(bound_names.iter().cloned());
+                if safe_prefix
+                    && bound_names.iter().any(|name| expr_mentions_var(update_value, name))
+                    && self.block_uniform_expr_with_locals(update_value, &uniform_locals)
+                {
+                    return Some((index, FollowingCollective::WhileLet {
+                        stmt: loop_stmt,
+                        declaration_index,
+                        declaration,
+                        update: update_value,
+                    }));
+                }
+                return None;
+            }
+            if let Stmt::Loop(loop_stmt) = stmt {
+                if !loop_stmt.body.iter().any(|stmt| {
+                    is_simd_barrier_stmt(stmt) || contains_nested_simd_barrier(stmt)
+                }) || loop_stmt.body.len() < 2
+                {
+                    return None;
+                }
+                let Stmt::Expr(update) = &loop_stmt.body[loop_stmt.body.len() - 2] else { return None };
+                let ExprKind::Assign(update_target, update_value) = &update.kind else { return None };
+                let ExprKind::Var(update_name) = &update_target.kind else { return None };
+                let break_condition = canonical_collective_loop_break_condition(loop_stmt.body.last()?)?;
+                let declaration_index = body[..index].iter().position(|candidate| {
+                    matches!(candidate, Stmt::Let(local)
+                        if local.name == *update_name
+                            && local.binding.is_mutable()
+                            && local.value.as_ref().is_some_and(|value| {
+                                self.block_uniform_expr_with_locals(value, &inherited_uniform)
+                            }))
+                })?;
+                let safe_prefix = body[..index].iter().enumerate().all(|(prefix_index, stmt)| {
+                    prefix_index == declaration_index
+                        || (!matches!(stmt, Stmt::Let(local) if local.binding.is_mutable())
+                            && !contains_nested_simd_barrier(stmt))
+                });
+                let Stmt::Let(declaration) = &body[declaration_index] else { unreachable!() };
+                let mut uniform_locals = inherited_uniform;
+                uniform_locals.insert(update_name.clone());
+                if safe_prefix
+                    && expr_mentions_var(break_condition, update_name)
+                    && self.block_uniform_expr_with_locals(update_value, &uniform_locals)
+                    && self.block_uniform_expr_with_locals(break_condition, &uniform_locals)
+                {
+                    return Some((index, FollowingCollective::Loop {
+                        stmt: loop_stmt,
+                        declaration_index,
+                        declaration,
+                        update: update_value,
+                        break_condition,
                     }));
                 }
                 return None;
@@ -1184,7 +1355,9 @@ impl Emitter {
         };
         let excluded_declaration = match &control {
             FollowingCollective::While { declaration_index, .. }
-            | FollowingCollective::DoWhile { declaration_index, .. } => Some(*declaration_index),
+            | FollowingCollective::DoWhile { declaration_index, .. }
+            | FollowingCollective::WhileLet { declaration_index, .. }
+            | FollowingCollective::Loop { declaration_index, .. } => Some(*declaration_index),
             _ => None,
         };
         let prefix = body[..control_index]
@@ -1194,7 +1367,9 @@ impl Emitter {
             .map(|(_, stmt)| stmt.clone())
             .collect::<Vec<_>>();
         if let FollowingCollective::While { declaration, .. }
-            | FollowingCollective::DoWhile { declaration, .. } = &control {
+            | FollowingCollective::DoWhile { declaration, .. }
+            | FollowingCollective::WhileLet { declaration, .. }
+            | FollowingCollective::Loop { declaration, .. } = &control {
             let uniform_name = &declaration.name;
             let uniform_ty = declaration.ty.as_ref().map(ty)
                 .or_else(|| declaration.value.as_ref().and_then(|value| self.expr_type(value)))
@@ -1393,6 +1568,58 @@ impl Emitter {
                 self.line(indent + 1, &format!("if !({condition}) {{ break; }}"));
                 self.line(indent, "}");
             }
+            FollowingCollective::WhileLet { stmt, declaration, update, .. } => {
+                let state_name = &declaration.name;
+                let match_pattern = simd_collective_while_let_pattern(stmt);
+                self.line(
+                    indent,
+                    &format!("while let {match_pattern} = {state_name} {{"),
+                );
+                let inserted_state = self.collective_uniform_locals.insert(state_name.clone());
+                let bound_names = collective_while_let_bound_names(stmt);
+                let inherited_bound_names = bound_names.iter()
+                    .filter(|name| self.collective_uniform_locals.contains(*name))
+                    .cloned().collect::<std::collections::HashSet<_>>();
+                self.collective_uniform_locals.extend(bound_names.iter().cloned());
+                self.emit_following_collective_controls(
+                    k,
+                    &stmt.body[..stmt.body.len() - 1],
+                    indent + 1,
+                    &replayed,
+                );
+                for name in bound_names {
+                    if !inherited_bound_names.contains(&name) {
+                        self.collective_uniform_locals.remove(&name);
+                    }
+                }
+                if inserted_state { self.collective_uniform_locals.remove(state_name); }
+                let update = self.expr(update);
+                self.line(indent + 1, &format!("{state_name} = {update};"));
+                self.line(indent, "}");
+            }
+            FollowingCollective::Loop {
+                stmt,
+                declaration,
+                update,
+                break_condition,
+                ..
+            } => {
+                let uniform_name = &declaration.name;
+                self.line(indent, "loop {");
+                let inserted_uniform = self.collective_uniform_locals.insert(uniform_name.clone());
+                self.emit_following_collective_controls(
+                    k,
+                    &stmt.body[..stmt.body.len() - 2],
+                    indent + 1,
+                    &replayed,
+                );
+                if inserted_uniform { self.collective_uniform_locals.remove(uniform_name); }
+                let update = self.expr(update);
+                self.line(indent + 1, &format!("{uniform_name} = {update};"));
+                let break_condition = self.expr(break_condition);
+                self.line(indent + 1, &format!("if {break_condition} {{ break; }}"));
+                self.line(indent, "}");
+            }
         }
         self.emit_following_collective_controls(
             k,
@@ -1587,7 +1814,7 @@ impl Emitter {
                     ) || matches!(
                         &value.kind,
                         ExprKind::MethodCall(_, method, _)
-                            if matches!(method.as_str(), "map" | "filter")
+                            if matches!(method.as_str(), "map" | "filter" | "keys" | "values" | "toArray")
                     )
                 });
                 if v.ty.as_ref().is_some_and(is_array)
@@ -1607,6 +1834,9 @@ impl Emitter {
                     || matches!(v.value.as_ref().map(|value| &value.kind), Some(ExprKind::Set(_)))
                     || matches!(v.value.as_ref().map(|value| &value.kind),
                         Some(ExprKind::Var(source)) if self.sets.contains(source))
+                    || matches!(v.value.as_ref().map(|value| &value.kind),
+                        Some(ExprKind::MethodCall(_, method, _))
+                            if matches!(method.as_str(), "union" | "intersection" | "difference"))
                 {
                     self.sets.insert(v.name.clone());
                 }
@@ -2342,8 +2572,74 @@ impl Emitter {
                     .join(", ")
             ),
             ExprKind::MethodCall(o, m, args) => {
+                if matches!(&o.kind, ExprKind::Var(name) if self.arrays.contains(name)) {
+                    match (m.as_str(), args.as_slice()) {
+                        ("push", [value]) => {
+                            return format!("{}.push({})", self.expr(o), self.expr(&value.value));
+                        }
+                        ("insert", [index, value, ..]) => {
+                            return format!(
+                                "{}.insert(({}) as usize, {})",
+                                self.expr(o),
+                                self.expr(&index.value),
+                                self.expr(&value.value)
+                            );
+                        }
+                        ("append" | "extend", [values, ..]) => {
+                            return format!(
+                                "{}.extend({}.iter().cloned())",
+                                self.expr(o),
+                                self.expr(&values.value)
+                            );
+                        }
+                        ("clear", []) => {
+                            return format!("{}.clear()", self.expr(o));
+                        }
+                        ("reverse", []) => {
+                            return format!("{}.reverse()", self.expr(o));
+                        }
+                        ("sort", []) => {
+                            return format!("{}.sort()", self.expr(o));
+                        }
+                        ("pop", []) => {
+                            return format!(
+                                "{}.pop().expect(\"pop from empty SIMD array\")",
+                                self.expr(o)
+                            );
+                        }
+                        ("remove" | "removeAt" | "remove_at", [index, ..]) => {
+                            let object = self.expr(o);
+                            let index = self.expr(&index.value);
+                            return format!(
+                                "{{ let __boring_idx = ({index}) as i64; let __boring_idx = if __boring_idx < 0 {{ ({object}.len() as i64 + __boring_idx) as usize }} else {{ __boring_idx as usize }}; {object}.remove(__boring_idx) }}"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 if matches!(&o.kind, ExprKind::Var(name) if self.dicts.contains(name)) {
                     match (m.as_str(), args.as_slice()) {
+                        ("get", [key]) => {
+                            return format!(
+                                "{}.get(&{}).cloned()",
+                                self.expr(o),
+                                self.expr(&key.value)
+                            );
+                        }
+                        ("get", [key, fallback, ..]) => {
+                            return format!(
+                                "{}.get(&{}).cloned().unwrap_or_else(|| {})",
+                                self.expr(o),
+                                self.expr(&key.value),
+                                self.expr(&fallback.value)
+                            );
+                        }
+                        ("keys", []) => {
+                            return format!("{}.keys().cloned().collect::<Vec<_>>()", self.expr(o));
+                        }
+                        ("values", []) => {
+                            return format!("{}.values().cloned().collect::<Vec<_>>()", self.expr(o));
+                        }
                         ("set" | "put", [key, value, ..]) => {
                             return format!(
                                 "{}.insert({}, {})",
@@ -2364,6 +2660,30 @@ impl Emitter {
                 }
                 if matches!(&o.kind, ExprKind::Var(name) if self.sets.contains(name)) {
                     match (m.as_str(), args.as_slice()) {
+                        ("toArray", []) => {
+                            return format!("{}.iter().cloned().collect::<Vec<_>>()", self.expr(o));
+                        }
+                        ("union", [other]) => {
+                            return format!(
+                                "{}.union(&{}).cloned().collect::<std::collections::HashSet<_>>()",
+                                self.expr(o),
+                                self.expr(&other.value)
+                            );
+                        }
+                        ("intersection", [other]) => {
+                            return format!(
+                                "{}.intersection(&{}).cloned().collect::<std::collections::HashSet<_>>()",
+                                self.expr(o),
+                                self.expr(&other.value)
+                            );
+                        }
+                        ("difference", [other]) => {
+                            return format!(
+                                "{}.difference(&{}).cloned().collect::<std::collections::HashSet<_>>()",
+                                self.expr(o),
+                                self.expr(&other.value)
+                            );
+                        }
                         ("add" | "insert", [value, ..]) => {
                             return format!(
                                 "{}.insert({})",
@@ -2861,6 +3181,9 @@ impl Emitter {
                 self.block_uniform_expr_with_locals(value, locals)
                     && self.block_uniform_expr_with_locals(count, locals)
             }
+            ExprKind::ArrayAlloc { count } => {
+                self.block_uniform_expr_with_locals(count, locals)
+            }
             ExprKind::ArrayComp { expr, var, count } => {
                 let mut element_locals = locals.clone();
                 element_locals.insert(var.clone());
@@ -2895,15 +3218,87 @@ impl Emitter {
                 self.block_uniform_expr_with_locals(receiver, locals)
             }
             ExprKind::MethodCall(receiver, method, args)
-                if method == "contains"
-                    && args.len() == 1
+                if args.is_empty() && matches!(method.as_str(), "sum" | "min" | "max") =>
+            {
+                self.block_uniform_expr_with_locals(receiver, locals)
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "any" | "all") && args.len() == 1 =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(method.as_str(), "map" | "filter") && args.len() == 1 =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[0].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if method == "reduce" && args.len() == 2 =>
+            {
+                let ExprKind::Closure(params, _, body, _, _) = &args[1].value.kind else {
+                    return false;
+                };
+                let mut closure_locals = locals.clone();
+                closure_locals.extend(params.iter().map(|param| param.name.clone()));
+                self.block_uniform_expr_with_locals(receiver, locals)
+                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+                    && match body {
+                        ClosureBody::Expr(value) => {
+                            self.block_uniform_expr_with_locals(value, &closure_locals)
+                        }
+                        ClosureBody::Block(body) => {
+                            self.block_uniform_expr_body_with_locals(body, &closure_locals)
+                        }
+                    }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if matches!(
+                    method.as_str(),
+                    "contains"
+                        | "get"
+                        | "keys"
+                        | "values"
+                        | "toArray"
+                        | "union"
+                        | "intersection"
+                        | "difference"
+                )
                     && matches!(&receiver.kind, ExprKind::Var(name)
                         if locals.contains(name)
                             || self.arrays.contains(name)
-                            || self.sets.contains(name)) =>
+                            || self.sets.contains(name)
+                            || self.dicts.contains(name)) =>
             {
                 self.block_uniform_expr_with_locals(receiver, locals)
-                    && self.block_uniform_expr_with_locals(&args[0].value, locals)
+                    && args.iter().all(|arg| {
+                        self.block_uniform_expr_with_locals(&arg.value, locals)
+                    })
             }
             ExprKind::Var(name) => {
                 matches!(name.as_str(), "block" | "block_dim" | "grid_dim")
@@ -3493,6 +3888,25 @@ fn collect_simd_pattern_bind_names(
     }
 }
 
+fn collective_while_let_bound_names(
+    stmt: &WhileLetStmt,
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    if let Some(pattern) = &stmt.pattern {
+        collect_simd_pattern_bind_names(pattern, &mut names);
+    } else {
+        names.insert(stmt.name.clone());
+    }
+    names
+}
+
+fn simd_collective_while_let_pattern(stmt: &WhileLetStmt) -> String {
+    stmt.pattern
+        .as_ref()
+        .map(simd_pattern)
+        .unwrap_or_else(|| format!("Some({})", stmt.name))
+}
+
 fn simd_pattern(pattern: &Pattern) -> String {
     match pattern {
         Pattern::Wildcard => "_".into(),
@@ -3579,6 +3993,15 @@ fn contains_nested_simd_barrier(stmt: &Stmt) -> bool {
         Stmt::Loop(value) => body_has_barrier(&value.body),
         _ => false,
     }
+}
+
+fn canonical_collective_loop_break_condition(stmt: &Stmt) -> Option<&Expr> {
+    let Stmt::If(if_stmt) = stmt else { return None };
+    if if_stmt.branches.len() != 1 || if_stmt.else_body.is_some() {
+        return None;
+    }
+    let (condition, body) = &if_stmt.branches[0];
+    matches!(body.as_slice(), [Stmt::Break(_, None)]).then_some(condition)
 }
 
 fn expr_mentions_var(expr: &Expr, sought: &str) -> bool {
