@@ -232,9 +232,9 @@ function-typed field can't be called as `onX(...)` inside a method (use `let f =
 facade fields (case `view_lifecycle_actions`). `boring-ui/src/core.br`: mount hooks after commit in preorder, unmount
 hooks innermost-first with task cancellation before the first one, task start only after a stable update, `id` restarts
 with per-node task-run generations, `isCurrent`/`deliver` (details in `boring-ui/README.md`); test `core_hooks_test.br`
-passes under `boring run` and `boring build`. Transpiler gaps found (filed as tasks, worked around): string literals/locals
-passed to a trait-object method are emitted as `&str`, not `Arc<str>`; `.join` on a `state` array field; a `let`-bound
-closure capturing view state is not `'static` (inline closures are fine).
+passes under `boring run` and `boring build`. Three transpiler gaps found on the way (string literals passed to a trait-object method, `.join` on a `state` array
+field, a `let`-bound closure capturing view state) were fixed on `boring` main (45f3aac5, 752498e4, 0d727020) and the
+workarounds removed.
 
 **Method-form modifiers (2026-10-17).** `src/desugar_view_modifiers.rs` (run first thing in `lower_views`): a method call whose
 name is a modifier view's lowerCamel name (`padding`, `frame`, `background`, `onMount`, …) on a receiver that is
