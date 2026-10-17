@@ -124,8 +124,20 @@ pub enum ScrollAxis:
     Vertical
     Horizontal
 
+# Typography roles (docs/design-notes/boring-ui-draft.md, "Semantic tokens"): the theme maps each to a
+# size, weight and line height.
+pub enum FontRole:
+    LargeTitle
+    Title
+    Headline
+    Body
+    Label
+    Caption
+    Monospace
+
 pub view Text:
     string content
+    FontRole font = .Body
     # At most this many lines: the text wraps first, then the last visible line is truncated with an
     # ellipsis (draft, "Text").
     int? lineLimit = nil
@@ -242,10 +254,20 @@ pub enum ButtonRole:
     Destructive
     Cancel
 
+# A button's built-in visual style. `Inherit` takes the active theme's choice for the button's role;
+# the others fix it (docs/design-notes/boring-ui-draft.md, "Component styles").
+pub enum ButtonStyle:
+    Inherit
+    Primary
+    Secondary
+    Plain
+    Compact
+
 pub view Button:
     string label
     UIAction onActivate
     ButtonRole role = .Normal
+    ButtonStyle style = .Inherit
     body(): native
 
 pub view Toggle:

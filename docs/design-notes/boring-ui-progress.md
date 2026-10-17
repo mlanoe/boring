@@ -287,6 +287,17 @@ button) and Escape (the `Cancel` button), TextField editing with caret and selec
 projection test no longer needs the double-read workaround (deadlock fix 876f5518). Still open: IME/undo, `.focused(...)`
 bindings, focus scopes, `focusOrder`/`focusable`, modal routing/`Sheet`, `List`, focus rings, callback error reporting.
 
+**Theme slice (2026-10-17).** `boring.ui` gained `FontRole`, `ButtonStyle`, `Text.font` and `Button.style`. `boring-ui/src/theme.br`:
+an immutable `Theme` of overrides on a light/dark base (`ColorRole`, `MetricRole`, font sizes, role→button-style map, builders,
+`issues()` validation), installed with `Provide(value = theme)`; the core resolves the nearest theme onto every `Mounted`
+(`Mounted.theme`, `Placed.theme`) and refuses to install an invalid one (reported in `errors`). Layout reads spacing, control and
+text-field metrics, `MinimumHitSize` and per-role fonts off the node; painting resolves tokens to `Command.hex` and paints
+buttons with their built-in style. Tests `theme_test.br`, `theme_scene_test.br`; `view_props.expected` gained `font=Body`.
+Deviations: `PrimaryText`/`ControlBorder`/`ShadowColor`/`Danger` role names (variants named like views shadow them),
+hex-string colors, entry-list token tables (dictionary iteration differs under `boring build`), `Theme` is a library name,
+`Theme.validate` is `issues` (the interpreter's checker infers mutability by method name; `Runtime.validate` is mutating).
+Still open: adaptive spacing pairs, text scale, per-token variants, custom style traits, inherited style providers.
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
