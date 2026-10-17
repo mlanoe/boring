@@ -29,8 +29,8 @@
 //! An optional-valued call in an `if let`/`else` is evaluated once per use of its flag/value
 //! (the callee runs twice), so it must be free of side effects.
 //!
-//! Not lowered: optional struct fields (structs are not emitted in device code at all),
-//! optional kernel buffer fields, optional `[T?]` buffers.
+//! Optional struct fields are handled by `desugar_gpu_struct` (which runs first and leaves
+//! them as optional locals). Not lowered: optional kernel buffer fields, `[T?]` buffers.
 
 use crate::ast::*;
 use crate::ast_walk::Walker;

@@ -103,7 +103,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     tensor_config.target_warp_width = 64;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
-    let optional_lowered = crate::desugar_gpu_optional::desugar(&tensor_host.program);
+    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
     let program = &optional_lowered;
     // Collect all kernel names.
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {

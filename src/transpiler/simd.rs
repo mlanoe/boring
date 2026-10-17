@@ -3297,6 +3297,9 @@ impl Emitter {
                                             {
                                                 format!("Some(({}) as {host})", self.expr(&inner[0].value))
                                             }
+                                            (ExprKind::Nil, _) => self.expr(&wrapped),
+                                            // Already optional (a kernel-width `Option<i32>`): widen it.
+                                            (_, Some(host)) => format!("({}).map(|__v| __v as {host})", self.expr(&wrapped)),
                                             _ => self.expr(&wrapped),
                                         }
                                     }

@@ -1,0 +1,44 @@
+struct V:
+    int x
+    int y
+
+struct Body:
+    V pos
+    int mass
+    int? tag = nil
+
+V add(V a, V b):
+    V(x = a.x + b.x, y = a.y + b.y)
+
+int dot(V a, V b):
+    a.x * b.x + a.y * b.y
+
+Body heavier(Body b, int by):
+    Body(pos = V(x = b.pos.x, y = b.pos.y), mass = b.mass + by, tag = 9)
+
+mut [int]'kernel'unified out = [0 for ..<4]
+kernel O:
+    mut [int]'unified out
+    init(mut [int]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        let v = V(x = i, y = 2)
+        var w = V(3, 4)
+        w.x += 10
+        let s = add(v, w)
+        var b = Body(pos = s, mass = 5)
+        b.pos.y = b.pos.y + 100
+        let c = heavier(b, i)
+        var total = dot(v, w) + s.x + s.y + b.pos.y + c.mass + c.pos.x
+        total += (b.tag else 1000) + (c.tag else 2000)
+        if let t = c.tag:
+            total += t
+        var u = v
+        u = V(x = 7, y = 8)
+        total += u.x * u.y
+        out[i] = total
+mut o = O(out)
+kernel:
+    o(block = 4)
+print "{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}"
