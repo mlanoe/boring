@@ -198,7 +198,7 @@ impl Interpreter {
                 const KNOWN_ARRAY_METHODS: &[&str] = &[
                     "len", "length", "push", "contains", "first", "last", "reverse", "sort", "sortBy",
                     "map", "filter", "reduce", "join", "any", "all", "find", "indexOf", "flatMap", "flat",
-                    "zip", "enumerate", "slice", "insert", "remove", "append", "count", "min", "max", "sum",
+                    "zip", "enumerate", "slice", "insert", "remove", "append", "extend", "count", "min", "max", "sum",
                     "isEmpty", "reversed", "sorted", "sortedBy", "take", "drop", "joined",
                     "firstIndex", "nextIndex", "removeAt", "getAt", "move", "removeIndices",
                 ];
@@ -207,7 +207,7 @@ impl Interpreter {
                         Some(result) => result,
                         None => return Err(err(format!("no method '{}' on Array", method), line)),
                     };
-                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
+                    const MUTATING: &[&str] = &["push", "append", "extend", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -217,7 +217,7 @@ impl Interpreter {
                 }
                 if let Some(result) = self.call_array_method(obj.clone(), method, args.clone(), line)? {
                     // For mutating array methods, set out_self so the caller can write back.
-                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
+                    const MUTATING: &[&str] = &["push", "append", "extend", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -228,7 +228,7 @@ impl Interpreter {
             }
             Value::Dict(_) => {
                 if let Some(result) = self.call_dict_method(&obj, method, &args, line)? {
-                    const MUTATING: &[&str] = &["set", "put", "remove", "removeAt"];
+                    const MUTATING: &[&str] = &["set", "put", "insert", "remove", "removeAt"];
                     if MUTATING.contains(&method) {
                         if let Value::Dict(_) = &result {
                             *out_self = Some(result.clone());
@@ -1496,6 +1496,27 @@ impl Interpreter {
                 new_arr.extend(other);
                 Ok(Some(Value::Array(new_arr.into())))
             }
+            // `extend(iterable)`: like the transpiler's `Vec::extend` — accepts an array,
+            // a set, or a range (not just an array like `append`).
+            "extend" => {
+                let other: Vec<Value> = match args.into_iter().next() {
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
+                    Some(Value::ByteArray(b)) => match Value::inflate_byte_array(&b) {
+                        Value::Array(a) => Value::rc_vec_into_owned(a),
+                        _ => vec![],
+                    },
+                    Some(Value::Set(items)) => items,
+                    Some(Value::Range { start, end, inclusive }) => {
+                        let end = if inclusive { end.saturating_add(1) } else { end };
+                        (start..end).map(Value::Int).collect()
+                    }
+                    Some(other) => return Err(err(format!("extend: expected an array, set or range, got {}", other.type_name()), line)),
+                    None => vec![],
+                };
+                let mut new_arr = Value::rc_vec_into_owned(arr);
+                new_arr.extend(other);
+                Ok(Some(Value::Array(new_arr.into())))
+            }
             "count" => {
                 match args.into_iter().next() {
                     Some(closure @ (Value::Closure { .. } | Value::Fn { .. } | Value::NativeFn { .. })) => {
@@ -1785,7 +1806,7 @@ impl Interpreter {
             }
             "isEmpty" => Ok(Some(Value::Bool(pairs.is_empty()))),
             "count"   => Ok(Some(Value::Int(pairs.len() as i64))),
-            "set" | "put" => {
+            "set" | "put" | "insert" => {
                 let key = args.first().cloned().unwrap_or(Value::Nil);
                 let val = args.get(1).cloned().unwrap_or(Value::Nil);
                 let mut new_pairs = pairs;

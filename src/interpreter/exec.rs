@@ -247,7 +247,7 @@ impl Interpreter {
                 // The receiver expression is evaluated exactly ONCE here; calling
                 // `eval_expr(e)` a second time would re-evaluate it (bug for
                 // non-idempotent receivers like `getArray().push(x)`).
-                const MUTATING: &[&str] = &["push", "append", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop", "move", "removeIndices"];
+                const MUTATING: &[&str] = &["push", "append", "extend", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop", "move", "removeIndices"];
                 // "set"/"put" are mutating on Dict/Set but NOT on user-defined structs
                 const MUTATING_COLL_ONLY: &[&str] = &["set", "put"];
                 if let ExprKind::MethodCall(obj_expr, method, args) = &e.kind {
@@ -296,7 +296,7 @@ impl Interpreter {
                                 } else { None };
 
                             // Evaluate args, then call the method with the already-evaluated receiver
-                            self.copy_var_args = matches!(method.as_str(), "push" | "append" | "insert" | "add" | "set" | "put");
+                            self.copy_var_args = matches!(method.as_str(), "push" | "append" | "extend" | "insert" | "add" | "set" | "put");
                             let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                             let mut out_self: Option<Value> = None;
                             let result = self.call_method(obj_val, method, arg_vals, line, &mut out_self)?;

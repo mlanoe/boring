@@ -317,14 +317,14 @@ impl Interpreter {
         line: usize,
     ) -> Option<Eval> {
         const FAST_MUTATING_ARRAY_METHODS: &[&str] =
-            &["push", "append", "insert", "remove", "sort", "reverse", "move", "removeIndices"];
+            &["push", "append", "extend", "insert", "remove", "sort", "reverse", "move", "removeIndices"];
         if !FAST_MUTATING_ARRAY_METHODS.contains(&method)
             || !matches!(env.borrow().get(name), Some(Value::Array(_) | Value::ByteArray(_)))
         {
             return None;
         }
         Some((|| {
-            self.copy_var_args = matches!(method, "push" | "append" | "insert");
+            self.copy_var_args = matches!(method, "push" | "append" | "extend" | "insert");
             let arg_vals = self.eval_args(args, Rc::clone(env))?;
             let taken = env.borrow_mut().take(name).ok_or_else(|| {
                 err(format!("internal error: variable '{}' disappeared", name), line)
@@ -1677,7 +1677,7 @@ impl Interpreter {
 
             ExprKind::MethodCall(obj_expr, method, args) => {
                 // Storing a struct into a built-in collection stores a copy (book: "Move semantics").
-                self.copy_var_args = matches!(method.as_str(), "push" | "insert" | "append" | "add" | "put" | "set")
+                self.copy_var_args = matches!(method.as_str(), "push" | "insert" | "append" | "extend" | "add" | "put" | "set")
                     && Self::is_pure_path(obj_expr)
                     && matches!(self.eval_expr(obj_expr, Rc::clone(&env)), Ok(Value::Array(_) | Value::Dict(_) | Value::Set(_)));
                 let res = self.eval_expr_method_call(obj_expr, method, args, Rc::clone(&env), line);
