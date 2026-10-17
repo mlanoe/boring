@@ -1947,7 +1947,7 @@ impl Emitter {
                     .join(", ");
                 let value = self.expr(&v.value);
                 self.line(n, &format!("let ({bindings}) = {value};"));
-                for binding in &v.bindings {
+                for (index, binding) in v.bindings.iter().enumerate() {
                     if binding.name == "_" {
                         continue;
                     }
@@ -1955,6 +1955,13 @@ impl Emitter {
                         self.value_types
                             .insert(binding.name.clone(), ty(binding_ty));
                         if let Some(arity) = tuple_type_arity(binding_ty) {
+                            self.tuple_arities.insert(binding.name.clone(), arity);
+                        }
+                    } else if let ExprKind::Tuple(elements) = &v.value.kind {
+                        if let Some(arity) = elements
+                            .get(index)
+                            .and_then(|element| self.tuple_arity(element))
+                        {
                             self.tuple_arities.insert(binding.name.clone(), arity);
                         }
                     }
@@ -2078,6 +2085,11 @@ impl Emitter {
                                 "}"
                             };
                             self.line(n, ending);
+                            if let CondClause::Let(name, value) = clause {
+                                if let Some(arity) = self.optional_tuple_arity(value) {
+                                    self.tuple_arities.insert(name.clone(), arity);
+                                }
+                            }
                         }
                     }
                 }
@@ -2152,6 +2164,14 @@ impl Emitter {
                     .map(simd_pattern)
                     .unwrap_or_else(|| format!("Some({})", w.name));
                 self.line(n, &format!("while let {pattern} = {value} {{"));
+                let bound_tuple_arity = w
+                    .pattern
+                    .is_none()
+                    .then(|| self.optional_tuple_arity(&w.value))
+                    .flatten();
+                let previous_tuple_arity = bound_tuple_arity.and_then(|arity| {
+                    self.tuple_arities.insert(w.name.clone(), arity)
+                });
                 let previous_break_sync = self.while_let_break_sync.take();
                 self.control_flow_depth += 1;
                 for stmt in &w.body {
@@ -2159,6 +2179,13 @@ impl Emitter {
                 }
                 self.control_flow_depth -= 1;
                 self.while_let_break_sync = previous_break_sync;
+                if bound_tuple_arity.is_some() {
+                    if let Some(previous) = previous_tuple_arity {
+                        self.tuple_arities.insert(w.name.clone(), previous);
+                    } else {
+                        self.tuple_arities.remove(&w.name);
+                    }
+                }
                 self.line(n, "}");
             }
             Stmt::DoWhile(w) => {
@@ -2259,6 +2286,15 @@ impl Emitter {
             }
             CondClause::Expr(value) => self.expr(value),
         };
+        let bound_tuple = match clause {
+            CondClause::Let(name, value) => self
+                .optional_tuple_arity(value)
+                .map(|arity| (name.clone(), arity)),
+            _ => None,
+        };
+        let previous_tuple_arity = bound_tuple.as_ref().and_then(|(name, arity)| {
+            self.tuple_arities.insert(name.clone(), *arity)
+        });
         self.line(n, &format!("if {condition} {{"));
         self.emit_if_let_branch(
             clauses,
@@ -2268,6 +2304,13 @@ impl Emitter {
             else_body,
             n + 1,
         );
+        if let Some((name, _)) = &bound_tuple {
+            if let Some(previous) = previous_tuple_arity {
+                self.tuple_arities.insert(name.clone(), previous);
+            } else {
+                self.tuple_arities.remove(name);
+            }
+        }
         self.line(n, "} else {");
         self.emit_if_let_fallback(remaining, else_body, n + 1);
         self.line(n, "}");
@@ -3621,6 +3664,17 @@ impl Emitter {
             }
             ExprKind::Else(_, fallback) => self.tuple_arity(fallback),
             ExprKind::Block(body) | ExprKind::Do(body) => self.body_tuple_arity(body),
+            _ => None,
+        }
+    }
+    fn optional_tuple_arity(&self, expr: &Expr) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Call(callee, args)
+                if matches!(&callee.kind, ExprKind::Var(name) if name == "some")
+                    && args.len() == 1 =>
+            {
+                self.tuple_arity(&args[0].value)
+            }
             _ => None,
         }
     }
