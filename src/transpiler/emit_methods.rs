@@ -5139,6 +5139,25 @@ impl Transpiler {
         prelude
     }
 
+    /// `({ let __a = <read>; __a })` / `({ let __a = <read>; __a }).clone()` (one parenthesised block
+    /// spanning the whole argument) -> `{ let __a = <read>; __a }`.
+    fn unwrap_scoped_read(a: &str) -> Option<String> {
+        if !a.starts_with("({ let __a = ") { return None; }
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in a.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => { depth -= 1; if depth == 0 { end = Some(i); break; } }
+                _ => {}
+            }
+        }
+        let end = end?;
+        let tail = &a[end + 1..];
+        if !(tail.is_empty() || tail == ".clone()") || !a[..end].ends_with("; __a }") { return None; }
+        Some(a[1..end].to_string())
+    }
+
     /// An argument `release_guard_temps` wrapped: `{ let __a = ..; __a }` / `&{ let __a = ..; __a }`.
     fn is_guard_released_block(a: &str) -> bool {
         a.trim_start_matches('&').starts_with("{ let __a = ")
@@ -5168,6 +5187,9 @@ impl Transpiler {
     pub(crate) fn release_guard_temps(args: &mut [String]) {
         for a in args.iter_mut() {
             if a.starts_with('|') || a.starts_with("move |") || a.starts_with("&mut ") { continue; }
+            // An argument already scoped by `scoped_guard_read` (`({ let __a = ..; __a })`, possibly
+            // with a redundant `.clone()` of a Copy value) is normalised to the single block form.
+            if let Some(block) = Self::unwrap_scoped_read(a) { *a = block; continue; }
             let (prefix, core) = match a.strip_prefix('&') {
                 Some(rest) if rest.starts_with("Arc::clone(") || rest.starts_with("Rc::clone(") => ("&", rest),
                 Some(_) => continue,
