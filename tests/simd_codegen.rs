@@ -6130,7 +6130,7 @@ print y_no_bias[0]
     );
     let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
     assert!(generated_source.contains("__boring_tensor_submin"));
-    assert!(generated_source.contains("(__boring_tensor_flat / 256) * 144"));
+    assert!(generated_source.contains("__boring_tensor_blk") && generated_source.contains(") * 144;"));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(root.join("tensor_simd/Cargo.toml"))

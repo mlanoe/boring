@@ -305,7 +305,11 @@ fn __boring_simd_parallel_threshold() -> usize {
             .unwrap_or(268_435_456)
     })
 }
-#[allow(dead_code)] fn __boring_f16_to_f32(bits: u16) -> f32 {
+#[allow(dead_code)] #[inline(always)] fn __boring_f16_to_f32(bits: u16) -> f32 {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| (0..=u16::MAX).map(__boring_f16_to_f32_slow).collect())[bits as usize]
+}
+#[allow(dead_code)] fn __boring_f16_to_f32_slow(bits: u16) -> f32 {
     let sign = if bits & 0x8000 == 0 { 1.0f32 } else { -1.0f32 };
     let exponent = ((bits >> 10) & 0x1f) as i32;
     let fraction = (bits & 0x03ff) as u32;
