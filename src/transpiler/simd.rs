@@ -6136,12 +6136,12 @@ mod __coop {
         out
     }
 
-    #[cfg(all(target_arch = "aarch64", unix, not(boring_coop_threads)))]
+    #[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads)))]
     use fiber::Backend;
-    #[cfg(not(all(target_arch = "aarch64", unix, not(boring_coop_threads))))]
+    #[cfg(not(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads))))]
     use threads::Backend;
 
-    #[cfg(all(target_arch = "aarch64", unix, not(boring_coop_threads)))]
+    #[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads)))]
     mod fiber {
         use super::*;
         const CANARY: u64 = 0xB0121C57ACC0FFEE;
@@ -6151,6 +6151,22 @@ mod __coop {
             static B: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
             *B.get_or_init(|| std::env::var("BORING_SIMD_STACK_KB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(256).max(16) * 1024)
         }
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        unsafe extern "C" fn ctx_switch(_save: *mut *mut u8, _load: *mut u8) {
+            core::arch::naked_asm!(
+                "push rbp", "push rbx", "push r12", "push r13", "push r14", "push r15",
+                "mov [rdi], rsp", "mov rsp, rsi",
+                "pop r15", "pop r14", "pop r13", "pop r12", "pop rbx", "pop rbp",
+                "ret",
+            )
+        }
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        unsafe extern "C" fn trampoline() {
+            core::arch::naked_asm!("mov rdi, r12", "call r13", "ud2")
+        }
+        #[cfg(target_arch = "aarch64")]
         #[unsafe(naked)]
         unsafe extern "C" fn ctx_switch(_save: *mut *mut u8, _load: *mut u8) {
             core::arch::naked_asm!(
@@ -6166,6 +6182,7 @@ mod __coop {
                 "ret",
             )
         }
+        #[cfg(target_arch = "aarch64")]
         #[unsafe(naked)]
         unsafe extern "C" fn trampoline() {
             core::arch::naked_asm!("mov x0, x19", "blr x20", "brk #0")
@@ -6203,12 +6220,29 @@ mod __coop {
                     let len = stack.len();
                     stack[..8].copy_from_slice(&CANARY.to_le_bytes());
                     let top = (stack.as_mut_ptr() as usize + len) & !15usize;
-                    let frame = top - 160;
-                    unsafe {
-                        std::ptr::write_bytes(frame as *mut u8, 0, 160);
-                        *((frame + 8) as *mut usize) = fiber_main as extern "C" fn(usize) as usize;
-                        *((frame + 88) as *mut usize) = trampoline as unsafe extern "C" fn() as usize;
-                    }
+                    #[cfg(target_arch = "aarch64")]
+                    let frame = {
+                        let frame = top - 160;
+                        unsafe {
+                            std::ptr::write_bytes(frame as *mut u8, 0, 160);
+                            *((frame + 8) as *mut usize) = fiber_main as extern "C" fn(usize) as usize;
+                            *((frame + 88) as *mut usize) = trampoline as unsafe extern "C" fn() as usize;
+                        }
+                        frame
+                    };
+                    // x86-64: six callee-saved registers (r15 r14 r13 r12 rbx rbp) popped by
+                    // `ctx_switch`, then the return address; `top` is 16-byte aligned when the
+                    // trampoline starts, so its `call` enters `fiber_main` correctly aligned.
+                    #[cfg(target_arch = "x86_64")]
+                    let frame = {
+                        let frame = top - 56;
+                        unsafe {
+                            std::ptr::write_bytes(frame as *mut u8, 0, 56);
+                            *((frame + 16) as *mut usize) = fiber_main as extern "C" fn(usize) as usize;
+                            *((frame + 48) as *mut usize) = trampoline as unsafe extern "C" fn() as usize;
+                        }
+                        frame
+                    };
                     s.be.sp[i] = frame as *mut u8;
                 }
                 let mut panic = None;
@@ -6240,7 +6274,7 @@ mod __coop {
         }
     }
 
-    #[cfg(not(all(target_arch = "aarch64", unix, not(boring_coop_threads))))]
+    #[cfg(not(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads))))]
     mod threads {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
