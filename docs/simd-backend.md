@@ -70,8 +70,8 @@ Two lowerings implement barriers:
   accumulators carried across a `sync`, divergent control around a barrier,
   shuffles of computed values, ...) is emitted as one closure per work-item and
   run by a small block scheduler: each work-item is a stackful fiber
-  (hand-written AArch64 and x86-64 SysV context switches on Unix; on other targets,
-  such as Windows, one parked OS thread per work-item with strict baton passing). `sync` parks a work-item until every live
+  (hand-written AArch64 and x86-64 SysV context switches on Unix, Win32 fibers on Windows; on any
+  other target one parked OS thread per work-item with strict baton passing). `sync` parks a work-item until every live
   work-item of the block arrives; a work-item that `return`s early stops taking
   part, as on a GPU. A barrier reached by only part of its group aborts with a
   `deadlock` message instead of hanging. Fibers have 256 KiB stacks
@@ -79,9 +79,10 @@ Two lowerings implement barriers:
 
 The thread backend can be forced for testing with
 `RUSTFLAGS="--cfg boring_coop_threads"`. It is correct but much slower than fibers
-(blocks of 256 work-items cost one thread each). The AArch64 fibers are exercised by
+(blocks of 256 work-items cost one thread each; only unsupported targets use it by default). The AArch64 fibers are exercised by
 the test suite on Apple silicon; the x86-64 switch assembles and links
-(cross-compiled for `x86_64-apple-darwin`) but has not been run yet — run
+(cross-compiled for `x86_64-apple-darwin`) and the Windows fibers type-check
+(`cargo check --target x86_64-pc-windows-gnu`), but neither has been run yet — run
 `cargo test --test simd_codegen cooperative` on an x86-64 machine to validate it.
 
 ## Warp and tensors

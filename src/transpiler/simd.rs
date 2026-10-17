@@ -16,6 +16,9 @@ pub struct SimdOutput {
 }
 
 pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutput {
+    // Plain-data structs in kernel bodies / device functions are scalar-replaced first.
+    let struct_lowered = crate::desugar_gpu_struct::desugar(program);
+    let program = &struct_lowered;
     let kernel_names = program
         .items
         .iter()
@@ -6380,7 +6383,7 @@ fn is_warp_shuffle(method: &str) -> bool {
 /// and the shuffles do the same per warp, and a work-item that returns early
 /// simply stops taking part.
 const COOP_RUNTIME: &str = r#"
-#[allow(dead_code, unexpected_cfgs)]
+#[allow(dead_code, unexpected_cfgs, unused_imports)]
 mod __coop {
     use std::cell::{Cell, RefCell};
     use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -6397,6 +6400,7 @@ mod __coop {
         cur: usize,
         body: Body,
         scratch: Vec<u64>,
+        shuffles: Vec<u32>,
         panic: Option<Payload>,
         be: Backend,
     }
@@ -6413,7 +6417,7 @@ mod __coop {
         let body: Body = unsafe { std::mem::transmute::<&mut dyn FnMut(usize), Body>(body) };
         let mut s = Sched {
             n, warp: warp.max(1), st: vec![St::Ready; n], cur: 0, body,
-            scratch: vec![0; n], panic: None, be: Backend::new(n),
+            scratch: vec![0; 2 * n], shuffles: vec![0; n], panic: None, be: Backend::new(n),
         };
         let prev = CUR.with(|c| c.replace(&mut s));
         let panic = Backend::drive(&mut s);
@@ -6466,27 +6470,31 @@ mod __coop {
         let tid = sched().cur;
         let mut bits = 0u64;
         unsafe { std::ptr::copy_nonoverlapping(&v as *const T as *const u8, &mut bits as *mut u64 as *mut u8, std::mem::size_of::<T>()); }
-        sched().scratch[tid] = bits;
+        // Two scratch banks alternate per shuffle: a lane reaches the next shuffle's barrier only
+        // after its reads of this one, so a single barrier per shuffle is enough.
+        let (bank, n) = { let s = sched(); let bank = (s.shuffles[tid] & 1) as usize; s.shuffles[tid] += 1; (bank, s.n) };
+        sched().scratch[bank * n + tid] = bits;
         warp_sync();
         let s = sched();
         let base = tid - tid % s.warp;
         let lane = (tid - base) as i32;
         let target = match kind { 0 => arg, 1 => lane + arg, 2 => lane - arg, _ => lane ^ arg };
         let out = if target >= 0 && (target as usize) < s.warp && base + (target as usize) < s.n
-            && s.st[base + target as usize] != St::Done
+            && s.shuffles[base + target as usize] >= s.shuffles[tid]
         {
-            let bits = s.scratch[base + target as usize];
+            let bits = s.scratch[bank * n + base + target as usize];
             let mut out = v;
             unsafe { std::ptr::copy_nonoverlapping(&bits as *const u64 as *const u8, &mut out as *mut T as *mut u8, std::mem::size_of::<T>()); }
             out
         } else { v };
-        warp_sync();
         out
     }
 
     #[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads)))]
     use fiber::Backend;
-    #[cfg(not(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads))))]
+    #[cfg(all(windows, not(boring_coop_threads)))]
+    use fiber_win::Backend;
+    #[cfg(not(any(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads)), all(windows, not(boring_coop_threads)))))]
     use threads::Backend;
 
     #[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads)))]
@@ -6622,7 +6630,72 @@ mod __coop {
         }
     }
 
-    #[cfg(not(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads))))]
+    #[cfg(all(windows, not(boring_coop_threads)))]
+    mod fiber_win {
+        use super::*;
+        use std::ffi::c_void;
+        extern "system" {
+            fn ConvertThreadToFiber(parameter: *mut c_void) -> *mut c_void;
+            fn CreateFiber(stack: usize, start: extern "system" fn(*mut c_void), parameter: *mut c_void) -> *mut c_void;
+            fn SwitchToFiber(fiber: *mut c_void);
+            fn DeleteFiber(fiber: *mut c_void);
+        }
+        thread_local! { static MAIN: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) }; }
+        pub struct Backend { fibers: Vec<*mut c_void>, main: *mut c_void }
+        fn stack_bytes() -> usize {
+            static B: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            *B.get_or_init(|| std::env::var("BORING_SIMD_STACK_KB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(256).max(16) * 1024)
+        }
+        extern "system" fn fiber_main(_: *mut c_void) {
+            let s = sched();
+            let i = s.cur;
+            let body = s.body;
+            if let Err(p) = catch_unwind(AssertUnwindSafe(|| unsafe { (*body)(i) })) {
+                sched().panic = Some(p);
+            }
+            let s = sched();
+            s.st[i] = St::Done;
+            unsafe { Backend::suspend(s); }
+            unreachable!("finished SIMD fiber resumed");
+        }
+        impl Backend {
+            pub fn new(n: usize) -> Self {
+                let mut main = MAIN.with(|m| m.get());
+                if main.is_null() {
+                    main = unsafe { ConvertThreadToFiber(std::ptr::null_mut()) };
+                    MAIN.with(|m| m.set(main));
+                }
+                Backend { fibers: vec![std::ptr::null_mut(); n], main }
+            }
+            pub unsafe fn suspend(s: &mut Sched) {
+                SwitchToFiber(s.be.main);
+            }
+            pub fn drive(s: &mut Sched) -> Option<Payload> {
+                for i in 0..s.n {
+                    s.be.fibers[i] = unsafe { CreateFiber(stack_bytes(), fiber_main, std::ptr::null_mut()) };
+                    assert!(!s.be.fibers[i].is_null(), "cannot allocate a SIMD work-item fiber");
+                }
+                let mut panic = None;
+                'blocks: loop {
+                    let mut ran = false;
+                    for i in 0..s.n {
+                        if s.st[i] != St::Ready { continue; }
+                        s.cur = i;
+                        ran = true;
+                        unsafe { SwitchToFiber(s.be.fibers[i]); }
+                        if let Some(p) = s.panic.take() { panic = Some(p); break 'blocks; }
+                    }
+                    if s.finished() { break; }
+                    let released = s.release();
+                    if !ran && !released { s.deadlock(); }
+                }
+                for fiber in s.be.fibers.drain(..) { unsafe { DeleteFiber(fiber); } }
+                panic
+            }
+        }
+    }
+
+    #[cfg(not(any(all(any(target_arch = "aarch64", target_arch = "x86_64"), unix, not(boring_coop_threads)), all(windows, not(boring_coop_threads)))))]
     mod threads {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
