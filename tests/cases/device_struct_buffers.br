@@ -1,0 +1,23 @@
+struct Particle:
+    int a
+    float b
+    int c = 7
+
+mut [Particle]'kernel'unified ps = [Particle(a = 1, b = 2.0), Particle(a = 3, b = 4.0), Particle(a = 5, b = 6.0), Particle(a = 7, b = 8.0)]
+kernel O:
+    mut [Particle]'unified ps
+    init(mut [Particle]'unified p):
+        ps = p
+    def ():
+        let i = .thread.x
+        let q = ps[i]
+        ps[i].a = q.a + 10
+        ps[i].b = q.b * 2.0
+        if i == 2:
+            ps[i] = Particle(a = 100, b = 0.5, c = 3)
+mut o = O(ps)
+kernel:
+    o(block = 4)
+print "{o.ps[0].a} {o.ps[1].a} {o.ps[2].a} {o.ps[3].a}"
+print "{o.ps[0].b} {o.ps[1].b} {o.ps[2].b} {o.ps[3].b}"
+print "{o.ps[0].c} {o.ps[2].c}"

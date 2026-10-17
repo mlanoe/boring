@@ -130,3 +130,57 @@ fn struct_methods_run_correctly_on_metal() {
     assert!(ok, "{stderr}");
     assert_eq!(stdout, METHODS_EXPECTED);
 }
+
+// Struct buffers (`[P]'unified` kernel fields, init parameters and host arrays) are split into
+// one buffer per leaf field, so host and device agree without any struct layout.
+const BUFFERS_FIXTURE: &str = "tests/cases/device_struct_buffers.br";
+const BUFFERS_EXPECTED: &str = "11 13 100 17\n4 8 0.5 16\n7 3";
+const NESTED_BUFFERS_FIXTURE: &str = "tests/cases/device_struct_buffers_nested.br";
+const NESTED_BUFFERS_EXPECTED: &str = "20 50 4 10";
+
+#[test]
+fn device_backends_split_struct_buffers_per_leaf_field() {
+    for (target, kernel_file) in [
+        ("metal", "main_metal/kernels/main.metal"),
+        ("wgpu", "main_wgpu/shaders/main.wgsl"),
+        ("cuda", "main_cuda/kernels/main.cu"),
+        ("rocm", "main_rocm/kernels/main.hip"),
+    ] {
+        let dir = generate_from(BUFFERS_FIXTURE, target, "buffers_shape");
+        let source = std::fs::read_to_string(dir.join(kernel_file)).unwrap();
+        assert!(!source.contains("unsupported"), "{target}: {source}");
+        for needle in ["ps__a", "ps__b", "ps__c"] {
+            assert!(source.contains(needle), "{target}: missing {needle}: {source}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn struct_buffers_run_correctly_on_simd() {
+    for (fixture, expected, name) in [
+        (BUFFERS_FIXTURE, BUFFERS_EXPECTED, "buffers_run"),
+        (NESTED_BUFFERS_FIXTURE, NESTED_BUFFERS_EXPECTED, "nested_buffers_run"),
+    ] {
+        let dir = generate_from(fixture, "simd", name);
+        let (stdout, stderr, ok) = run(&dir, "main_simd", true);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ok, "{stderr}");
+        assert_eq!(stdout, expected);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn struct_buffers_run_correctly_on_metal() {
+    for (fixture, expected, name) in [
+        (BUFFERS_FIXTURE, BUFFERS_EXPECTED, "buffers_run"),
+        (NESTED_BUFFERS_FIXTURE, NESTED_BUFFERS_EXPECTED, "nested_buffers_run"),
+    ] {
+        let dir = generate_from(fixture, "metal", name);
+        let (stdout, stderr, ok) = run(&dir, "main_metal", false);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ok, "{stderr}");
+        assert_eq!(stdout, expected);
+    }
+}

@@ -1,0 +1,22 @@
+struct Pt:
+    int x
+    int y
+
+struct Body:
+    Pt pos
+    int mass
+
+mut [Body]'kernel'unified bs = [Body(pos = Pt(x = 1, y = 2), mass = 3), Body(pos = Pt(x = 4, y = 5), mass = 6)]
+kernel O:
+    mut [Body]'unified bs
+    init(mut [Body]'unified b):
+        bs = b
+    def ():
+        let i = .thread.x
+        let p = bs[i].pos
+        bs[i].pos.x = p.y * 10
+        bs[i].mass += p.x
+mut o = O(bs)
+kernel:
+    o(block = 2)
+print "{o.bs[0].pos.x} {o.bs[1].pos.x} {o.bs[0].mass} {o.bs[1].mass}"

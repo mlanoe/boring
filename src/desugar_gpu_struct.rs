@@ -27,8 +27,13 @@
 //!   next on the backends without an `Option`.
 //!
 //! Eligible structs have only scalar / `bool` / optional-scalar / nested-eligible-struct fields,
-//! no type parameters and no custom `init`. Methods are lowered as `S__m(self, ..)` (`req`, or a `def` returning nothing, which returns the updated `self`). Arrays inside structs and structs
-//! in kernel buffers are not lowered (left as written).
+//! no type parameters and no custom `init`. Methods are lowered as `S__m(self, ..)` (`req`, or a `def` returning nothing, which returns the updated `self`). Arrays inside structs are not lowered.
+//!
+//! Struct buffers (`[P]'unified` kernel fields, init parameters, top-level host arrays built
+//! from `P(..)` literals) are split into one buffer per leaf field (`ps__a`), so host and device
+//! share no struct layout; `ps[i].a` reads `ps__a[i]` on host and device, and `ps[i] = P(..)` /
+//! `let q = ps[i]` go leaf by leaf. Not handled: a whole struct buffer passed around as a value
+//! (to a function, printed), and buffers whose leaves are optional.
 
 use crate::ast::*;
 use crate::ast_walk::Walker;
@@ -41,7 +46,7 @@ pub fn desugar(program: &Program) -> Program {
     if structs.is_empty() {
         return program;
     }
-    let mut cx = Cx { structs, fns: HashMap::new(), env: HashMap::new() };
+    let mut cx = Cx { structs, fns: HashMap::new(), env: HashMap::new(), sbufs: HashMap::new() };
     for item in &program.items {
         if let Item::Fn(f) = item {
             if f.qualifier.is_none() && !f.task {
@@ -81,18 +86,72 @@ pub fn desugar(program: &Program) -> Program {
         let sig = cx.fns[&f.name].clone();
         clones.extend(cx.device_clones(f, &sig));
     }
-    let mut touched = false;
+    // Struct buffers (`[P]` kernel fields, init parameters, host arrays) are split into one
+    // buffer per leaf field (structure of arrays), so no struct layout crosses the host/device
+    // boundary: `ps[i].a` reads `ps__a[i]` everywhere.
+    let mut host_sbufs: HashMap<String, String> = HashMap::new();
+    let mut kernel_sbufs: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut field_names: HashMap<String, String> = HashMap::new();
+    let mut kernel_names: HashSet<String> = HashSet::new();
+    let mut items_out = Vec::with_capacity(program.items.len());
+    for item in std::mem::take(&mut program.items) {
+        match item {
+            Item::Let(l) => {
+                let split = l.ty.as_ref().and_then(|t| cx.buffer_struct(t)).and_then(|sn| {
+                    let value = l.value.as_ref()?;
+                    let leaves = cx.leaves(&sn);
+                    let mut lets = Vec::new();
+                    for (index, (path, ty)) in leaves.iter().enumerate() {
+                        lets.push(LetStmt {
+                            name: flat(&l.name, path),
+                            ty: l.ty.as_ref().map(|t| retype(t, ty)),
+                            value: Some(cx.buffer_leaf_value(value, &sn, index)?),
+                            ..l.clone()
+                        });
+                    }
+                    Some((sn, lets))
+                });
+                match split {
+                    Some((sn, lets)) => {
+                        host_sbufs.insert(l.name.clone(), sn);
+                        items_out.extend(lets.into_iter().map(Item::Let));
+                    }
+                    None => items_out.push(Item::Let(l)),
+                }
+            }
+            Item::Kernel(k) => {
+                kernel_names.insert(k.name.clone());
+                let mut map = HashMap::new();
+                for f in &k.fields {
+                    if let Some(sn) = cx.buffer_struct(&f.ty) {
+                        map.insert(f.name.clone(), sn.clone());
+                        field_names.insert(f.name.clone(), sn);
+                    }
+                }
+                kernel_sbufs.insert(k.name.clone(), map);
+                items_out.push(Item::Kernel(k));
+            }
+            other => items_out.push(other),
+        }
+    }
+    program.items = items_out;
     for item in &mut program.items {
         if let Item::Kernel(k) = item {
+            let sbufs = kernel_sbufs[&k.name].clone();
             for m in &mut k.methods {
-                let mut local = Cx { env: HashMap::new(), ..cx.clone() };
+                let mut local = Cx { env: HashMap::new(), sbufs: sbufs.clone(), ..cx.clone() };
                 m.body = block(std::mem::take(&mut m.body), &mut local);
                 rewrite_exprs(&mut m.body, &local);
-                touched = true;
+            }
+            if !sbufs.is_empty() {
+                cx.split_kernel_decl(k, &sbufs);
             }
         }
     }
-    let _ = touched;
+    if !host_sbufs.is_empty() || !field_names.is_empty() {
+        let host = HostSplit { cx: &cx, host: &host_sbufs, fields: &field_names, kernels: &kernel_names };
+        host.rewrite_items(&mut program.items);
+    }
     program.items.extend(clones.into_iter().map(Item::Fn));
     program
 }
@@ -117,6 +176,15 @@ struct Cx {
     fns: HashMap<String, Sig>,
     /// Struct-typed locals / parameters → struct name.
     env: HashMap<String, String>,
+    /// Struct buffers visible here (kernel fields / host arrays) → element struct name.
+    sbufs: HashMap<String, String>,
+}
+
+/// Where a struct value lives: a local, or an element of a struct buffer.
+#[derive(Clone)]
+enum Root {
+    Var(String),
+    Elem(String, Expr),
 }
 
 fn unwrap_ty(t: &Type) -> &Type {
@@ -252,16 +320,29 @@ impl Cx {
         out
     }
 
-    /// `(root variable, field path)` of a `Var` / `Field` chain.
-    fn path_of(e: &Expr) -> Option<(String, Vec<String>)> {
+    /// `(root, field path)` of a `Var` / `Field` chain, or of one rooted at an element `buf[i]`
+    /// of a struct buffer.
+    fn path_of(&self, e: &Expr) -> Option<(Root, Vec<String>)> {
         match &e.kind {
-            ExprKind::Var(v) => Some((v.clone(), Vec::new())),
+            ExprKind::Var(v) => Some((Root::Var(v.clone()), Vec::new())),
+            ExprKind::Index(base, idx) => match &base.kind {
+                ExprKind::Var(arr) if self.sbufs.contains_key(arr) => Some((Root::Elem(arr.clone(), (**idx).clone()), Vec::new())),
+                _ => None,
+            },
             ExprKind::Field(obj, f) => {
-                let (root, mut path) = Self::path_of(obj)?;
+                let (root, mut path) = self.path_of(obj)?;
                 path.push(f.clone());
                 Some((root, path))
             }
             _ => None,
+        }
+    }
+
+    /// The scalar leaf `root.path` as an expression: a local `p__a`, or `buf__a[i]`.
+    fn leaf_expr(root: &Root, path: &[String], at: &Expr) -> Expr {
+        match root {
+            Root::Var(r) => var(&flat(r, path), at),
+            Root::Elem(arr, idx) => mk(ExprKind::Index(Box::new(var(&flat(arr, path), at)), Box::new(idx.clone())), at),
         }
     }
 
@@ -333,7 +414,7 @@ impl Cx {
     }
 
     /// `recv.m(args);` where `m` is a `def` returning nothing: (root, path, struct, call).
-    fn mutating_method(&self, e: &Expr) -> Option<(String, Vec<String>, String, Expr)> {
+    fn mutating_method(&self, e: &Expr) -> Option<(Root, Vec<String>, String, Expr)> {
         let ExprKind::MethodCall(recv, _, _) = &e.kind else { return None };
         let call = self.method_call(e)?;
         let sname = self.struct_of(recv)?;
@@ -343,7 +424,7 @@ impl Cx {
         if self.fns.get(name)?.ret.as_deref() != Some(sname.as_str()) {
             return None;
         }
-        let (root, path) = Self::path_of(recv)?;
+        let (root, path) = self.path_of(recv)?;
         Some((root, path, sname, call))
     }
 
@@ -369,9 +450,12 @@ impl Cx {
                 ExprKind::Var(f) => self.fns.get(f).and_then(|s| s.ret.clone()),
                 _ => None,
             },
-            ExprKind::Var(_) | ExprKind::Field(..) => {
-                let (root, path) = Self::path_of(e)?;
-                let mut s = self.env.get(&root)?.clone();
+            ExprKind::Var(_) | ExprKind::Field(..) | ExprKind::Index(..) => {
+                let (root, path) = self.path_of(e)?;
+                let mut s = match &root {
+                    Root::Var(v) => self.env.get(v)?.clone(),
+                    Root::Elem(arr, _) => self.sbufs.get(arr)?.clone(),
+                };
                 for field in &path {
                     let ty = self.structs[&s].fields.iter().find(|(n, _, _)| n == field)?.1.clone();
                     s = self.struct_name(Some(&ty))?;
@@ -423,15 +507,15 @@ impl Cx {
                         .collect(),
                 )
             }
-            ExprKind::Var(_) | ExprKind::Field(..) => {
+            ExprKind::Var(_) | ExprKind::Field(..) | ExprKind::Index(..) => {
                 if self.struct_of(e).as_deref() != Some(s) {
                     return None;
                 }
-                let (root, path) = Self::path_of(e)?;
+                let (root, path) = self.path_of(e)?;
                 Some(self.leaves(s).iter().map(|(p, _)| {
                     let mut full = path.clone();
                     full.extend(p.iter().cloned());
-                    var(&flat(&root, &full), e)
+                    Self::leaf_expr(&root, &full, e)
                 }).collect())
             }
             _ => None,
@@ -464,7 +548,7 @@ impl Cx {
                 };
                 out.push(stmt_let(BindingKind::Var, &flat(name, path), ty.clone(), init, line, col));
             }
-            out.extend(self.store(name, &[], s, value)?);
+            out.extend(self.store(&Root::Var(name.to_string()), &[], s, value)?);
             return Some(out);
         }
         let values = self.field_values(value, s)?;
@@ -478,7 +562,7 @@ impl Cx {
     }
 
     /// Statements assigning the struct-valued `value` into `root.path` (a struct of type `s`).
-    fn store(&self, root: &str, path: &[String], s: &str, value: &Expr) -> Option<Vec<Stmt>> {
+    fn store(&self, root: &Root, path: &[String], s: &str, value: &Expr) -> Option<Vec<Stmt>> {
         if let ExprKind::If(i) = &value.kind {
             let lower = |body: &Vec<Stmt>| -> Option<Vec<Stmt>> {
                 let mut out = body.clone();
@@ -505,7 +589,7 @@ impl Cx {
                 .map(|((p, _), v)| {
                     let mut full = path.to_vec();
                     full.extend(p.iter().cloned());
-                    assign(var(&flat(root, &full), value), v)
+                    assign(Self::leaf_expr(root, &full, value), v)
                 })
                 .collect(),
         )
@@ -582,6 +666,180 @@ impl Cx {
     }
 }
 
+
+fn retype(t: &Type, leaf: &Type) -> Type {
+    match t {
+        Type::Mut(x) => Type::Mut(Box::new(retype(x, leaf))),
+        Type::Qualified(x, q) => Type::Qualified(Box::new(retype(x, leaf)), q.clone()),
+        Type::Array(_) => Type::Array(Box::new(leaf.clone())),
+        Type::ArrayN(_, n) => Type::ArrayN(Box::new(leaf.clone()), *n),
+        other => other.clone(),
+    }
+}
+
+impl Cx {
+    /// Element struct of a `[P]` / `[P, N]` buffer type whose leaves are all non-optional.
+    fn buffer_struct(&self, t: &Type) -> Option<String> {
+        match unwrap_ty(t) {
+            Type::Array(e) | Type::ArrayN(e, _) => {
+                let s = self.struct_name(Some(e))?;
+                self.leaves(&s).iter().all(|(_, ty)| !matches!(unwrap_ty(ty), Type::Optional(_))).then_some(s)
+            }
+            _ => None,
+        }
+    }
+
+    /// Leaf `index` of a struct-array initializer: `[P(..), P(..)]` or `[P(..) for ..<n]`.
+    fn buffer_leaf_value(&self, value: &Expr, s: &str, index: usize) -> Option<Expr> {
+        let leaf = |e: &Expr| self.field_values(e, s).and_then(|mut v| (index < v.len()).then(|| v.swap_remove(index)));
+        match &value.kind {
+            ExprKind::Array(elems) => {
+                Some(mk(ExprKind::Array(elems.iter().map(leaf).collect::<Option<Vec<_>>>()?), value))
+            }
+            ExprKind::ArrayFill { value: fill, count } => {
+                Some(mk(ExprKind::ArrayFill { value: Box::new(leaf(fill)?), count: count.clone() }, value))
+            }
+            _ => None,
+        }
+    }
+
+    /// Splits the struct-buffer fields / init parameters of a kernel into leaf buffers.
+    fn split_kernel_decl(&self, k: &mut KernelDecl, sbufs: &HashMap<String, String>) {
+        let mut fields = Vec::new();
+        for f in std::mem::take(&mut k.fields) {
+            match sbufs.get(&f.name) {
+                Some(sn) => {
+                    for (path, ty) in self.leaves(sn) {
+                        fields.push(KernelFieldDecl { name: flat(&f.name, &path), ty: retype(&f.ty, &ty), default: None, ..f.clone() });
+                    }
+                }
+                None => fields.push(f),
+            }
+        }
+        k.fields = fields;
+        for init in &mut k.inits {
+            let mut params = Vec::new();
+            let mut split: HashMap<String, String> = HashMap::new();
+            for p in std::mem::take(&mut init.params) {
+                match p.ty.as_ref().and_then(|t| self.buffer_struct(t)) {
+                    Some(sn) => {
+                        for (path, ty) in self.leaves(&sn) {
+                            params.push(InitParam { name: flat(&p.name, &path), ty: p.ty.as_ref().map(|t| retype(t, &ty)), ..p.clone() });
+                        }
+                        split.insert(p.name.clone(), sn);
+                    }
+                    None => params.push(p),
+                }
+            }
+            init.params = params;
+            let mut body = Vec::new();
+            for st in std::mem::take(&mut init.body) {
+                let expanded = match &st {
+                    Stmt::Expr(Expr { kind: ExprKind::Assign(lhs, rhs), .. }) => match (&lhs.kind, &rhs.kind) {
+                        (ExprKind::Var(f), ExprKind::Var(p)) if sbufs.contains_key(f) && split.contains_key(p) => Some(
+                            self.leaves(&sbufs[f])
+                                .iter()
+                                .map(|(path, _)| assign(var(&flat(f, path), lhs), var(&flat(p, path), rhs)))
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match expanded {
+                    Some(stmts) => body.extend(stmts),
+                    None => body.push(st),
+                }
+            }
+            init.body = body;
+        }
+    }
+}
+
+/// Host-side rewrites for split struct buffers: `ps[i].a` → `ps__a[i]`, `k.ps[i].a` →
+/// `k.ps__a[i]`, and a kernel constructed from `ps` receives its leaf arrays.
+struct HostSplit<'a> {
+    cx: &'a Cx,
+    host: &'a HashMap<String, String>,
+    fields: &'a HashMap<String, String>,
+    kernels: &'a HashSet<String>,
+}
+
+impl HostSplit<'_> {
+    fn rewrite_items(&self, items: &mut [Item]) {
+        for item in items {
+            match item {
+                Item::Fn(f) => self.walk(|w| w.stmts(&mut f.body)),
+                Item::Stmt(st) => self.walk(|w| w.stmt(st)),
+                Item::Let(l) => {
+                    if let Some(v) = &mut l.value {
+                        self.walk(|w| w.expr(v));
+                    }
+                }
+                Item::Mod(m) => self.rewrite_items(&mut m.items),
+                _ => {}
+            }
+        }
+    }
+
+    fn walk(&self, run: impl FnOnce(&mut Walker)) {
+        let mut on_expr = |e: &mut Expr| {
+            if let Some(new) = self.rewrite(e) {
+                *e = new;
+            }
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        run(&mut Walker { expr: &mut on_expr, stmt: &mut on_stmt });
+    }
+
+    fn rewrite(&self, e: &Expr) -> Option<Expr> {
+        match &e.kind {
+            ExprKind::Field(..) => {
+                let mut path = Vec::new();
+                let mut cur = e;
+                while let ExprKind::Field(obj, f) = &cur.kind {
+                    path.insert(0, f.clone());
+                    cur = obj;
+                }
+                let ExprKind::Index(base, idx) = &cur.kind else { return None };
+                let (sn, new_base) = match &base.kind {
+                    ExprKind::Var(x) => {
+                        let sn = self.host.get(x)?;
+                        (sn, var(&flat(x, &path), e))
+                    }
+                    ExprKind::Field(inner, fname) => {
+                        let sn = self.fields.get(fname)?;
+                        (sn, mk(ExprKind::Field(inner.clone(), flat(fname, &path)), e))
+                    }
+                    _ => return None,
+                };
+                self.cx.leaves(sn).iter().any(|(p, _)| *p == path).then(|| mk(ExprKind::Index(Box::new(new_base), idx.clone()), e))
+            }
+            ExprKind::Call(callee, args) => {
+                let ExprKind::Var(k) = &callee.kind else { return None };
+                if !self.kernels.contains(k) {
+                    return None;
+                }
+                let mut out = Vec::new();
+                let mut changed = false;
+                for a in args {
+                    match &a.value.kind {
+                        ExprKind::Var(x) if self.host.contains_key(x) && a.label.is_none() => {
+                            changed = true;
+                            for (path, _) in self.cx.leaves(&self.host[x]) {
+                                out.push(Arg { label: None, value: var(&flat(x, &path), &a.value), spread: false, default_rest: false });
+                            }
+                        }
+                        _ => out.push(a.clone()),
+                    }
+                }
+                changed.then(|| mk(ExprKind::Call(callee.clone(), out), e))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Rewrites `return e` (and the tail value) of a struct-returning function to leaf `index`.
 fn map_returns(body: &mut [Stmt], cx: &Cx, s: &str, index: usize, tail: bool) {
     let map = |e: &Expr| -> Expr {
@@ -642,7 +900,7 @@ fn block(stmts: Vec<Stmt>, cx: &mut Cx) -> Vec<Stmt> {
             }
             Stmt::Expr(Expr { kind: ExprKind::Assign(lhs, rhs), line, col, len }) => {
                 let lowered = cx.struct_of(&lhs).and_then(|s| {
-                    let (root, path) = Cx::path_of(&lhs)?;
+                    let (root, path) = cx.path_of(&lhs)?;
                     cx.store(&root, &path, &s, &rhs)
                 });
                 match lowered {
@@ -693,10 +951,12 @@ fn rewrite_exprs(body: &mut [Stmt], cx: &Cx) {
     Walker {
         expr: &mut |e| {
             let replacement: Option<Expr> = match &e.kind {
-                ExprKind::Field(..) => match Cx::path_of(e) {
-                    Some((root, path)) if cx.env.contains_key(&root) && cx.struct_of(e).is_none() => {
-                        Some(var(&flat(&root, &path), e))
-                    }
+                ExprKind::Field(..) => match cx.path_of(e) {
+                    Some((root, path)) if cx.struct_of(e).is_none() => match &root {
+                        Root::Var(v) if cx.env.contains_key(v) => Some(Cx::leaf_expr(&root, &path, e)),
+                        Root::Elem(..) => Some(Cx::leaf_expr(&root, &path, e)),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 ExprKind::MethodCall(..) => cx.method_call(e).and_then(|call| {
