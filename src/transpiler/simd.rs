@@ -102,13 +102,24 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
                             .iter()
                             .map(|param| param.ty.as_ref().and_then(host_numeric_ty))
                             .collect(),
-                        function.return_ty.as_ref().and_then(|ret| numeric_ty(ret)),
+                        function.return_ty.as_ref().and_then(|ret| match base(ret) {
+                            Type::Optional(inner) => numeric_ty(inner).map(|device| format!("Option<{device}>")),
+                            _ => numeric_ty(ret),
+                        }),
                         function
                             .params
                             .iter()
                             .map(|param| match &param.ty {
                                 Some(t) if is_array(t) => if matches!(t, Type::Qualified(..)) { 2 } else { 1 },
                                 _ => 0,
+                            })
+                            .collect(),
+                        function
+                            .params
+                            .iter()
+                            .map(|param| match param.ty.as_ref().map(base) {
+                                Some(Type::Optional(inner)) => Some(host_numeric_ty(inner)),
+                                _ => None,
                             })
                             .collect(),
                     ),
@@ -234,6 +245,49 @@ fn __boring_simd_lanes() -> usize {
 fn __boring_simd_name() -> &'static str {
     match __boring_simd_lanes() { 16 => "AVX-512", 8 => "AVX2", 4 => { #[cfg(target_arch="aarch64")] { return "NEON"; } #[cfg(not(target_arch="aarch64"))] { "SSE2" } }, _ => "scalar" }
 }
+#[inline(always)] fn __boring_fma(a: f32, b: f32, c: f32) -> f32 {
+    if cfg!(any(target_feature = "fma", target_arch = "aarch64")) { a.mul_add(b, c) } else { a * b + c }
+}
+/// Dot product with independent partial sums so LLVM can vectorize the reduction.
+#[inline(always)] fn __boring_dot(a: &[f32], b: &[f32], init: f32) -> f32 {
+    let n = a.len().min(b.len());
+    let (ca, cb) = (a[..n].chunks_exact(16), b[..n].chunks_exact(16));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    let mut acc = [0.0f32; 16];
+    for (x, y) in ca.zip(cb) { for l in 0..16 { acc[l] = __boring_fma(x[l], y[l], acc[l]); } }
+    let mut sum = init;
+    for l in 0..16 { sum += acc[l]; }
+    for (x, y) in ra.iter().zip(rb) { sum = __boring_fma(*x, *y, sum); }
+    sum
+}
+/// `out[j] += scale * row[j]`, contiguous in `j` so it vectorizes.
+#[inline(always)] fn __boring_axpy(out: &mut [f32], scale: f32, row: &[f32]) {
+    for (o, r) in out.iter_mut().zip(row) { *o = __boring_fma(scale, *r, *o); }
+}
+fn __boring_blocks(gx: usize, gy: usize, gz: usize, items_per_block: usize, run: &(dyn Fn(usize, usize, usize) + Sync)) {
+    static MIN_ITEMS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let min_items = *MIN_ITEMS.get_or_init(|| std::env::var("BORING_SIMD_PARALLEL_ITEMS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32768));
+    let total = gx * gy * gz;
+    let threads = __boring_simd_threads().min(total);
+    if threads <= 1 || total.saturating_mul(items_per_block) < min_items {
+        for bz in 0..gz { for by in 0..gy { for bx in 0..gx { run(bx, by, bz); } } }
+        return;
+    }
+    let chunk = (total / (threads * 8)).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let work = || loop {
+        let start = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
+        if start >= total { break; }
+        for id in start..(start + chunk).min(total) { run(id % gx, (id / gx) % gy, id / (gx * gy)); }
+    };
+    std::thread::scope(|scope| {
+        // The caller works too, so a refused thread spawn only costs parallelism.
+        for _ in 1..threads {
+            let _ = std::thread::Builder::new().spawn_scoped(scope, &work);
+        }
+        work();
+    });
+}
 fn __boring_simd_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THREADS.get_or_init(|| {
@@ -269,6 +323,11 @@ impl<T> std::ops::Deref for BoringKernelArg<T> { type Target = Vec<T>; fn deref(
 impl<T> std::ops::DerefMut for BoringKernelArg<T> { fn deref_mut(&mut self) -> &mut Vec<T> { match self { Self::Host(v) => v } } }
 "#;
 
+/// Per free function: host width of each numeric parameter, device type of the numeric
+/// (or `Option<numeric>`) return, array-parameter kinds, and for each `T?` parameter the
+/// host width of its numeric `T`.
+type FunctionSig = (Vec<Option<String>>, Option<String>, Vec<u8>, Vec<Option<Option<String>>>);
+
 struct Emitter {
     out: String,
     errors: Vec<crate::transpiler::TranspileError>,
@@ -280,7 +339,7 @@ struct Emitter {
     sets: std::collections::HashSet<String>,
     tuple_arities: std::collections::HashMap<String, usize>,
     function_names: std::collections::HashSet<String>,
-    function_sigs: std::collections::HashMap<String, (Vec<Option<String>>, Option<String>, Vec<u8>)>,
+    function_sigs: std::collections::HashMap<String, FunctionSig>,
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
@@ -1148,9 +1207,50 @@ impl Emitter {
                 self.emit_cooperative_body(k, m);
             }
         }
+        let block_method = self.parallelize_blocks(k, phase_out_mark);
         self.line(2, "Ok(())");
         self.line(1, "}");
+        self.raw(&block_method);
         self.line(0, "}");
+    }
+    /// Runs the grid's blocks on several cores: the per-block loop body becomes a method
+    /// that worker threads call through `__boring_blocks`. Kernels using atomics keep the
+    /// sequential loop (their read-modify-writes are plain on the CPU). Returns the text
+    /// of the extracted methods, empty when the body is left in place.
+    fn parallelize_blocks(&mut self, k: &KernelDecl, region_start: usize) -> String {
+        const OPEN: &str = "        for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {\n";
+        const CLOSE: &str = "        } } }\n";
+        if k.fields.iter().any(|f| matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified)) {
+            return String::new();
+        }
+        let region = self.out[region_start..].to_string();
+        let (Some(open), Some(close)) = (region.find(OPEN), region.rfind(CLOSE)) else {
+            return String::new();
+        };
+        if close <= open || !region[close + CLOSE.len()..].trim().is_empty() {
+            return String::new();
+        }
+        let body = &region[open + OPEN.len()..close];
+        let params = "gx: u32, gy: u32, gz: u32, dx: u32, dy: u32, dz: u32, bx: usize, by: usize, bz: usize, __block_dim: __BoringDim3, __grid_dim: __BoringDim3, __simd_lanes: i32";
+        let args = "gx, gy, gz, dx, dy, dz, bx, by, bz, __block_dim, __grid_dim, 32";
+        let mut call = String::new();
+        call.push_str("        let __addr = self as *mut Self as usize;\n");
+        call.push_str("        __boring_blocks(gx as usize, gy as usize, gz as usize, (dx as usize) * (dy as usize) * (dz as usize), &|bx, by, bz| {\n");
+        call.push_str("            let __this = unsafe { &mut *(__addr as *mut Self) };\n");
+        call.push_str("            #[cfg(any(target_arch=\"x86\", target_arch=\"x86_64\"))] unsafe { match __boring_simd_lanes() {\n");
+        for (lanes, feature) in [(16, "avx512"), (8, "avx2"), (4, "sse2")] {
+            call.push_str(&format!("                {lanes} => return __this.__block_{feature}({args}),\n"));
+        }
+        call.push_str("                _ => {}\n            } }\n");
+        call.push_str(&format!("            __this.__block({args})\n        }});\n"));
+        let mut methods = String::new();
+        methods.push_str(&format!("    #[inline(always)] #[allow(unused_variables, unused_mut, unused_parens)] fn __block(&mut self, {params}) {{\n{body}    }}\n"));
+        for (feature, name) in [("avx512f", "avx512"), ("avx2", "avx2"), ("sse2", "sse2")] {
+            methods.push_str(&format!("    #[cfg(any(target_arch=\"x86\", target_arch=\"x86_64\"))] #[target_feature(enable=\"{feature}\")] unsafe fn __block_{name}(&mut self, {params}) {{ self.__block({args}) }}\n"));
+        }
+        self.out.truncate(region_start + open);
+        self.out.push_str(&call);
+        methods
     }
     /// General fallback for kernels whose `sync`/`.warp` collectives the phase
     /// splitter cannot express (per-thread state carried across barriers,
@@ -2007,6 +2107,22 @@ impl Emitter {
                             &wrapped
                         } else {
                             x
+                        };
+                        // `[T?]` literal: wrap each element, as for a scalar `T?` destination.
+                        let array_wrapped;
+                        let x = match (v.ty.as_ref().map(base), &x.kind) {
+                            (Some(Type::Array(elem)), ExprKind::Array(elements))
+                                if matches!(base(elem), Type::Optional(_)) =>
+                            {
+                                array_wrapped = Expr {
+                                    kind: ExprKind::Array(
+                                        elements.iter().map(|element| self.implicit_some(element)).collect(),
+                                    ),
+                                    ..x.clone()
+                                };
+                                &array_wrapped
+                            }
+                            _ => x,
                         };
                         let value = self.expr(x);
                         if matches!(&x.kind, ExprKind::Var(source)
@@ -2981,7 +3097,7 @@ impl Emitter {
                     }
                 }
                 if let ExprKind::Var(name) = &c.kind {
-                    if let Some((params, ret, arrays)) = self.function_sigs.get(name).cloned() {
+                    if let Some((params, ret, arrays, optionals)) = self.function_sigs.get(name).cloned() {
                         // Host functions use host numeric widths (`int` = isize);
                         // kernels use device widths (`int` = i32): convert at the call.
                         let call = format!(
@@ -2996,6 +3112,19 @@ impl Emitter {
                                     _ if arrays.get(index).copied().unwrap_or(0) == 2 => {
                                         format!("({}).clone()", self.expr(&a.value))
                                     }
+                                    _ if a.label.is_none() && optionals.get(index).is_some_and(|o| o.is_some()) => {
+                                        // `T?` parameter: `some` is implicit, so wrap a plain value.
+                                        let host = optionals[index].clone().flatten();
+                                        let wrapped = self.implicit_some(&a.value);
+                                        match (&wrapped.kind, host) {
+                                            (ExprKind::Call(_, inner), Some(host))
+                                                if !matches!(&a.value.kind, ExprKind::Call(..)) =>
+                                            {
+                                                format!("Some(({}) as {host})", self.expr(&inner[0].value))
+                                            }
+                                            _ => self.expr(&wrapped),
+                                        }
+                                    }
                                     Some(host) if a.label.is_none() => {
                                         format!("({}) as {host}", self.expr(&a.value))
                                     }
@@ -3005,6 +3134,10 @@ impl Emitter {
                                 .join(", ")
                         );
                         return match ret {
+                            Some(device) if device.starts_with("Option<") => format!(
+                                "({call}).map(|__v| __v as {})",
+                                &device["Option<".len()..device.len() - 1]
+                            ),
                             Some(device) => format!("(({call}) as {device})"),
                             None => call,
                         };

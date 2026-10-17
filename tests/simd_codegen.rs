@@ -7866,6 +7866,18 @@ fn optional_destinations_wrap_plain_values_implicitly_in_simd_kernels() {
     assert_eq!(stdout, "99 101 124 136");
 }
 
+#[test]
+fn optional_arguments_returns_and_array_elements_wrap_plain_values_implicitly_in_simd_kernels() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "implicit_some_calls",
+        "mut [int]'kernel'unified out = [0 for ..<4]\nint f(int? a):\n    a else -1\nint? g(int i):\n    if i > 1:\n        return i * 10\n    nil\nint? g2():\n    7\nkernel O:\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        let i = .thread.x\n        let [int?] arr = [i, nil, 3]\n        out[i] = f(i) + f(nil) + (g(i) else 0) + (g2() else 0) + (arr[0] else 100) + (arr[1] else 200) + (arr[2] else 300)\nmut o = O(out)\nkernel:\n    o(block = 4)\nprint \"{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    // f(i) + f(nil) + g(i) + 7 + i + 200 + 3, e.g. i=2: 2 - 1 + 20 + 7 + 2 + 200 + 3
+    assert_eq!(stdout, "209 211 233 245");
+}
+
 // ---- GPU display (`Screen`, `Dimension`, `'surface`, `kernel: loop:`) ----------------
 
 /// Generates a simd crate from `source` (named `name`) and returns its project root.
@@ -8092,4 +8104,54 @@ fn device_introspection_matches_the_metal_surface() {
     );
     assert!(ok, "{stderr}");
     assert_eq!(stdout, "true\ntrue\n32 1024 32768 0\n2\nall 0");
+}
+
+#[test]
+fn blocks_run_in_parallel_with_identical_results_and_atomic_kernels_stay_sequential() {
+    let source = "let N = 4096\nmut [float32]'kernel'unified x = [1.0 as float32 for ..<N]\nmut [float32]'kernel'unified y = [0.0 as float32 for ..<N]\nmut [int]'kernel'unified counts = [0 for ..<1]\nkernel Work:\n    let [float32]'global x\n    mut [float32]'unified y\n    mut [float32, 64]'actor tile\n    init([float32]'global a, mut [float32]'unified b):\n        x = a\n        y = b\n    def ():\n        let i = .thread.x + .block.x * .block_dim.x\n        tile[.thread.x] = x[i] + i as float32\n        sync\n        y[i] = tile[63 - .thread.x] * 2.0\nkernel Count:\n    mut [int]'actor'global counts\n    init(mut [int]'actor'global c):\n        counts = c\n    def ():\n        counts[0] += 1\nmut w = Work(x, y)\nmut c = Count(counts)\nkernel:\n    w(block = 64, grid = N / 64)\n    c(block = 64, grid = N / 64)\nprint \"{w.y[0]} {w.y[4095]} {c.counts[0]}\"\n";
+    let (sequential, stderr, ok) = build_and_run_simd("parallel_blocks", source, None);
+    assert!(ok, "{stderr}");
+    assert_eq!(sequential, "128 8066 4096");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_parallel_blocks/parallel_blocks_simd/Cargo.toml");
+    let parallel = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_parallel_blocks/target"))
+        .env("BORING_SIMD_THREADS", "4")
+        .env("BORING_SIMD_PARALLEL_ITEMS", "0")
+        .output()
+        .unwrap();
+    assert!(parallel.status.success(), "{}", String::from_utf8_lossy(&parallel.stderr));
+    assert_eq!(String::from_utf8_lossy(&parallel.stdout).trim(), sequential);
+    let generated = fs::read_to_string(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_parallel_blocks/parallel_blocks_simd/src/main.rs"),
+    )
+    .unwrap();
+    assert!(generated.contains("__boring_blocks("));
+    // `Count` uses atomics: its block loop is not handed to worker threads.
+    assert_eq!(generated.matches("fn __block(").count(), 1);
+}
+
+#[test]
+fn dynamic_float_linear_matches_a_scalar_reference_after_vectorization() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "linear_vectorized",
+        "let m = 5\nlet n = 7\nlet k = 37\nlet [float32]'kernel'global x = [float32((i % 7) - 3) for i in 0..<185]\nlet [float32]'kernel'global w = [float32((i % 5) - 2) for i in 0..<259]\nlet [float32]'kernel'global bias = [1.0 as float32 for ..<7]\nmut [float32]'kernel'unified y = [0.0 as float32 for ..<35]\nkernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k)\nvar sum = 0.0 as float32\nwith y:\n    for i in 0..<35:\n        sum += y[i] * float32(i + 1)\n    print \"{y[0]} {y[34]} {sum}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    // Integer-valued inputs make every partial sum exact, so reassociation cannot change the result.
+    let mut expected = [0f32; 35];
+    for row in 0..5usize {
+        for col in 0..7usize {
+            let mut acc = 1f32;
+            for inner in 0..37usize {
+                acc += (((row * 37 + inner) % 7) as f32 - 3.0) * (((col * 37 + inner) % 5) as f32 - 2.0);
+            }
+            expected[row * 7 + col] = acc;
+        }
+    }
+    let weighted: f32 = expected.iter().enumerate().map(|(i, v)| v * (i as f32 + 1.0)).sum();
+    assert_eq!(stdout, format!("{} {} {}", expected[0], expected[34], weighted));
 }

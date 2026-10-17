@@ -37,8 +37,7 @@ shares the host-lowering boundary with GPU targets. Resident (`'kernel'unified`)
 function results and kernel-to-kernel buffer aliases are plain `Vec` copies.
 Thread-local kernel fields are per-work-item locals, and `'actor'global` /
 `'actor'unified` atomics (`+=`, `.min`, `.max`, `.swap`, `.cas`) are plain
-read-modify-writes that return the previous value, since general kernels run on one
-thread. `'surface` buffers are ordinary `Vec<u32>` fields (see "GPU display" below).
+read-modify-writes that return the previous value (such kernels never run blocks in parallel). `'surface` buffers are ordinary `Vec<u32>` fields (see "GPU display" below).
 Identity and runtime type-test operators are rejected by the SIMD code generator
 rather than emitted with altered semantics. Unsupported
 kernel statements and expressions likewise produce source diagnostics.
@@ -94,8 +93,9 @@ source lane is outside the block or has already returned yields the caller's own
 value, and shuffled values are limited to 8 bytes.
 
 Fixed-shape floating-point `kernel.tensors.matmul`, `mma`, and `linear` calls use
-the existing portable CPU loop lowering. Their contiguous inner loops remain
-eligible for release-mode auto-vectorization. Very large operations split output
+the existing portable CPU loop lowering. Dot-product forms (`linear`, whose weights are `[n, k]`) accumulate in 16 independent lanes and the
+k-major forms update whole output rows with a contiguous multiply-add, so both vectorize
+(partial sums are reassociated, so results can differ from a strict left-to-right sum in the last bit). Very large operations split output
 rows into disjoint mutable chunks across the available CPU cores; smaller ones
 run inline to avoid thread-spawn and cache-contention overhead.
 Backend-specific BLAS integration and quantized SIMD microkernels remain future
@@ -105,9 +105,14 @@ Very large operations use the host's available parallelism. Set
 `BORING_SIMD_THREADS=N` to cap them to `N` workers; `BORING_SIMD_THREADS=1`
 provides a single-worker reference path. The default parallel threshold is
 268,435,456 multiply-adds and can be changed with
-`BORING_SIMD_PARALLEL_THRESHOLD=N` (`0` forces the multicore path). General
-kernels remain single-threaded because their arbitrary indexed writes cannot be
-parallelized safely without dependence analysis.
+`BORING_SIMD_PARALLEL_THRESHOLD=N` (`0` forces the multicore path). Kernel grids are distributed over the same workers block by block, as on a GPU:
+blocks may run in any order and concurrently, so blocks that write the same element
+race exactly as they would on a GPU. A grid goes parallel once it has at least
+`BORING_SIMD_PARALLEL_ITEMS` work-items (default 32768; `0` forces it, handy in
+tests); smaller launches stay on the calling thread to avoid spawn cost. Kernels with
+`'actor'global` / `'actor'unified` atomic storage always run sequentially, because
+their read-modify-writes are plain on the CPU. `BORING_SIMD_THREADS=1` restores fully
+sequential execution.
 
 ## Build
 
