@@ -88,6 +88,9 @@ pub trait View:
     # facade's shape (see src/lower_view.rs); default: nothing to do.
     req void viewAct(string action, string arg):
         pass
+    # Whether this native control has a handler for the semantic `action` (so the runtime knows whether
+    # an Enter was consumed by a TextField's `onSubmit`); generated, default: no.
+    req bool viewHandles(string action): false
     # An `OnTask` view starting one run of its body (generated from the facade's `onTask` field).
     req void viewTask(TaskRun run):
         pass
@@ -232,9 +235,17 @@ pub view AccessibilityGroup:
 # Native controls: the runtime owns their interaction (focus, pointer, keyboard, accessibility
 # actions) and reaches the application through the `bind` slot (`Button`: its `onActivate` callback).
 
+# A button's semantic role: `Cancel` is the Escape action of its focus scope; the others inform
+# theme and platform behaviour.
+pub enum ButtonRole:
+    Normal
+    Destructive
+    Cancel
+
 pub view Button:
     string label
     UIAction onActivate
+    ButtonRole role = .Normal
     body(): native
 
 pub view Toggle:
@@ -246,6 +257,23 @@ pub view TextField:
     bind string value
     string label
     string placeholder = ""
+    # Enter's semantic action ("submit"); without one, Enter falls through to the scope's default action.
+    UIAction? onSubmit = nil
+    body(): native
+
+# ── Interaction modifiers (docs/design-notes/boring-ui-draft.md, "Button", "Event dispatch") ───────────
+#   Disabled        a disabled subtree accepts no activation, editing or keyboard focus and reports the
+#                   disabled state; layout, hit testing and the accessibility tree still see it
+#   DefaultAction   marks the wrapped Button as the Enter default of its scope (an enabled one)
+
+pub view Disabled:
+    bool value = true
+    [View] children
+    body(): native
+
+pub view DefaultAction:
+    bool enabled = true
+    [View] children
     body(): native
 
 # ── Lifecycle modifiers (docs/design-notes/boring-ui-draft.md, "Lifecycle and identity-scoped tasks") ──

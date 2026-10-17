@@ -488,6 +488,8 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
             let ty = strip_mut(&f.ty).clone();
             match &ty {
                 Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Fn(..) | Type::Tuple(_) => {}
+                // An optional callback (`TextField.onSubmit`) is not a printable prop.
+                Type::Optional(inner) if matches!(&**inner, Type::Named(n) if n == "UIAction" || n == "TaskAction") => {}
                 Type::Optional(inner) if !matches!(**inner, Type::Array(_)) => {
                     props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
                 }
@@ -501,8 +503,18 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         }
         // Semantic actions: a native control's reaction, derived from its facade's shape.
         let mut acts = String::new();
+        let mut handles = String::new();
         if s.fields.iter().any(|f| f.name == "onActivate" && is_named(strip_mut(&f.ty), "UIAction")) {
             acts.push_str("        if action == \"activate\":\n            onActivate()\n");
+            handles.push_str("        if action == \"activate\":\n            return true\n");
+        }
+        // An optional handler (`TextField.onSubmit`): the action only runs when one was supplied.
+        if s.fields.iter().any(|f| f.name == "onSubmit" && matches!(strip_mut(&f.ty), Type::Optional(t) if is_named(t, "UIAction"))) {
+            acts.push_str("        if action == \"submit\":\n            if let handler = onSubmit:\n                handler()\n");
+            handles.push_str("        if action == \"submit\":\n            return onSubmit != nil\n");
+        }
+        if !handles.is_empty() {
+            src.push_str(&format!("    req bool viewHandles(string action):\n{handles}        false\n"));
         }
         // Lifecycle modifiers (`OnMount`/`OnUnmount`): the runtime delivers the hook as an action.
         for (field, action) in [("onMount", "mount"), ("onUnmount", "unmount")] {

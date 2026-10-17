@@ -276,6 +276,17 @@ because `String.length` counts bytes in transpiled output and characters in the 
 write does not persist under `boring build`, so scroll offsets are written by rebuilding the tree. Still open for layer 3:
 baselines, device-pixel rounding, head/middle truncation, overlays, rounded/transformed clips, images.
 
+**Layer 4 interaction slice (2026-10-17).** `boring.ui` gained `Disabled`, `DefaultAction`, `ButtonRole` (`Button.role`) and
+`TextField.onSubmit` (an optional callback: `viewProps` skips it, the lowering generates `viewAct("submit")` and a new
+`View.viewHandles(action)`). `boring-ui/src/events.br`: disabled subtrees (no focus/capture/action, skipped by Tab,
+`SemNode.disabled`), pointer capture (`pointerDown` captures, `pointerUp` activates only over the captured control,
+`pointerCancel`, `click`; `Runtime.capture` is cleared on unmount), Enter (TextField `onSubmit`, else the `DefaultAction`
+button) and Escape (the `Cancel` button), TextField editing with caret and selection as mounted control state
+(`typeText`, Backspace/Delete/arrows/Home/End/Shift variants/SelectAll, caret from a click; ASCII only). Tests
+`events_extra_test.br`; `events_test`/`scroll_test`/`todo_test` now use `click` (a press alone no longer activates). The
+projection test no longer needs the double-read workaround (deadlock fix 876f5518). Still open: IME/undo, `.focused(...)`
+bindings, focus scopes, `focusOrder`/`focusable`, modal routing/`Sheet`, `List`, focus rings, callback error reporting.
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
