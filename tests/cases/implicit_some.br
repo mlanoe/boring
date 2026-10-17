@@ -1,0 +1,47 @@
+struct P:
+    int? a
+    int? b
+
+int f(int? a):
+    a else -1
+
+int? g():
+    7
+
+int? h(int c):
+    if c > 0:
+        return 3
+    nil
+
+int pick(int? x):
+    guard let q = x else return -1
+    q
+
+def run():
+    let int? x = 5
+    let int? y = nil
+    print "c1 {x else 0}"
+    print "c2 {y else 9}"
+    let c = true
+    let int? z = if c: 3 else: nil
+    let int? w = if !c: 3 else: nil
+    print "c3 {z else 0} {w else 0}"
+    var int? v = nil
+    v = 4
+    print "c4 {v else 0}"
+    print "c5 {f(3)} {f(nil)}"
+    print "c6 {g() else 0}"
+    print "c6b {h(1) else 0} {h(0) else 0}"
+    let p = P(a = 1, b = nil)
+    let p2 = P(1, 2)
+    print "c7 {p.a else 0} {p.b else 0} {p2.a else 0} {p2.b else 0}"
+    let [int?] arr = [1, nil, 3]
+    print "c8 {arr[0] else 0} {arr[1] else 0} {arr[2] else 0}"
+    if let q = x:
+        print "c9 x {q}"
+    if let q = y:
+        print "c9 y {q}"
+    else:
+        print "c9 none"
+    print "c10 {pick(x)} {pick(nil)} {pick(8)}"
+run()

@@ -2350,6 +2350,16 @@ impl Transpiler {
                 _ => {}
             }
         }
+        // `[T?]` array literal: `some` is implicit, so each element is wrapped (or `nil` →
+        // `None`) against the optional element type, like a plain `let T? x = ...`.
+        if let Some(Type::Array(elem_ty)) = declared_ty {
+            if matches!(elem_ty.without_mut(), Type::Optional(_)) {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let es: Vec<String> = elems.iter().map(|e| self.emit_let_value(Some(elem_ty), e)).collect();
+                    return format!("vec![{}]", es.join(", "));
+                }
+            }
+        }
         // Context-aware DotIdent: `.Variant` with a known Named enum type → `EnumType::Variant`.
         // This ensures `.South` resolves to `Direction::South` (not a later enum with same variant).
         // Also handles qualified types (e.g. Direction'inline inferred by cross-fn propagation).

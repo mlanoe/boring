@@ -359,8 +359,10 @@ impl Transpiler {
                         let dict_s = self.emit_expr(dict_obj);
                         let key_ref = self.emit_dict_key_borrow(key);
                         let dv = self.emit_else_default(e, default);
-                        return format!("{}.get({}).cloned().unwrap_or_else(|| {})",
-                            dict_s, key_ref, dv);
+                        // `{K: V?}`: a stored `nil` coalesces to the default too (as in the interpreter).
+                        let flat = if matches!(self.resolve_expr_type(e), Some(Type::Optional(_))) { ".flatten()" } else { "" };
+                        return format!("{}.get({}).cloned(){}.unwrap_or_else(|| {})",
+                            dict_s, key_ref, flat, dv);
                     }
                 }
                 // `vec[i] else default` — Vec::get returns Option<&T>, use .cloned().unwrap_or_else.
@@ -370,8 +372,10 @@ impl Transpiler {
                         let arr_s = self.emit_expr(arr_obj);
                         let idx_s = self.emit_expr(idx_expr);
                         let dv = self.emit_else_default(e, default);
-                        return format!("{}.get(({}) as usize).cloned().unwrap_or_else(|| {})",
-                            arr_s, idx_s, dv);
+                        // `[T?]`: an element that is `nil` coalesces to the default too.
+                        let flat = if matches!(self.resolve_expr_type(e), Some(Type::Optional(_))) { ".flatten()" } else { "" };
+                        return format!("{}.get(({}) as usize).cloned(){}.unwrap_or_else(|| {})",
+                            arr_s, idx_s, flat, dv);
                     }
                 }
                 // `expr else default` — nil coalescing / Option unwrap

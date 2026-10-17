@@ -1914,6 +1914,15 @@ fn register_string_and_math_builtins(e: &mut Env) {
             _ => Err(err("tanh: expected number", line)),
         },
     });
+    // `some(x)` is the explicit form of the implicit wrap: optionals are plain values
+    // (or nil) here, so it is the identity.
+    e.define("some", Value::NativeFn {
+        name: "some".into(),
+        func: |args, line| match args {
+            [value] => Ok(value.clone()),
+            _ => Err(err("some() expects 1 argument", line)),
+        },
+    });
     e.define("sum", Value::NativeFn {
         name: "sum".into(),
         func: |args, line| match args.first() {
