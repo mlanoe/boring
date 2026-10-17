@@ -3648,6 +3648,7 @@ impl Transpiler {
                         fields.iter().any(|(f, fty)| f == name && match fty.without_mut() {
                             Type::Fn(..) => true,
                             Type::Named(n) => self.fn_type_aliases.contains_key(n.as_str()),
+                            Type::Optional(_) => self.resolve_opt_fn_field_type(fty).is_some(),
                             _ => false,
                         })
                     });

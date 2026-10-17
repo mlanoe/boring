@@ -3093,7 +3093,7 @@ impl Transpiler {
     /// when it should fire. This normalizes a bare implicit-self-field receiver into
     /// the equivalent explicit `self.field` `Expr` shape up front, so the rest of
     /// the dispatch chain (and the fallback) can't tell the two forms apart.
-    fn normalize_implicit_self_field(&self, obj: &Expr) -> Option<Expr> {
+    pub(crate) fn normalize_implicit_self_field(&self, obj: &Expr) -> Option<Expr> {
         let ExprKind::Var(n) = &obj.kind else { return None };
         if n == "self" { return None; }
         if self.known_local_vars.contains(n.as_str()) { return None; }

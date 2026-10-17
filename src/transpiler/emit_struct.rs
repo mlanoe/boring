@@ -3244,6 +3244,10 @@ impl Transpiler {
     /// `Some(req)` when `e` reads an OPTIONAL function-typed struct field (`s.make`, `Seed?`):
     /// once unwrapped (`if let f = s.make`) the binding is that field's handle.
     pub(crate) fn opt_fn_handle_req(&self, e: &Expr) -> Option<bool> {
+        // A bare implicit-self field (`if let f = make` inside a method) reads as `self.make`.
+        if let Some(norm) = self.normalize_implicit_self_field(e) {
+            return self.opt_fn_handle_req(&norm);
+        }
         // `t.named["a"]` on a `{K=Seed}` field: the dict lookup is an optional handle.
         if let ExprKind::Index(obj, _) = &e.kind {
             return match self.fn_coll_expr(obj) { Some((true, req)) => Some(req), _ => None };
@@ -3301,14 +3305,19 @@ impl Transpiler {
         let sn = self.resolve_struct_name(obj)?;
         if self.struct_method_names.get(&sn).is_some_and(|m| m.contains(method)) { return None; }
         let fty = self.struct_fields.get(&sn)?.iter().find(|(n, _)| n == method)?.1.clone();
-        let Type::Fn(_, _, _, _, req) = self.resolve_fn_field_type(&fty)? else { return None };
+        // An optional field (`Seed? make`) called directly is a call through the force-unwrapped handle.
+        let (fnty, unwrap) = match self.resolve_fn_field_type(&fty) {
+            Some(t) => (t, ""),
+            None => (self.resolve_opt_fn_field_type(&fty)?, ".as_ref().unwrap()"),
+        };
+        let Type::Fn(_, _, _, _, req) = fnty else { return None };
         let recv = self.emit_expr(obj);
         let args_s = self.emit_args(args);
         let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
         Some(match (req, multi) {
-            (true, _) => format!("({}.{})({})", recv, method, args_s),
-            (false, false) => format!("({}.{}.borrow_mut())({})", recv, method, args_s),
-            (false, true) => format!("({}.{}.lock().unwrap())({})", recv, method, args_s),
+            (true, _) => format!("({}.{}{})({})", recv, method, unwrap, args_s),
+            (false, false) => format!("({}.{}{}.borrow_mut())({})", recv, method, unwrap, args_s),
+            (false, true) => format!("({}.{}{}.lock().unwrap())({})", recv, method, unwrap, args_s),
         })
     }
 }
