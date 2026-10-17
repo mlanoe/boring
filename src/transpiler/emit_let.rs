@@ -1074,6 +1074,18 @@ impl Transpiler {
                 }
             }
         }
+        // `let a = opt` / `var here = inherited` (a plain read of an optional local, param or
+        // field) is itself optional: without this a later `a` tail-return was wrapped in `Some`
+        // again and an assignment of a plain value to `here` was not wrapped at all.
+        if s.ty.is_none() && matches!(&s_value.kind, ExprKind::Var(_) | ExprKind::Field(..)) {
+            let src_optional = match &s_value.kind {
+                ExprKind::Var(v) => self.optional_vars.contains(v.as_str()),
+                _ => false,
+            } || matches!(self.resolve_expr_type(s_value).as_ref().map(Type::without_mut), Some(Type::Optional(_)));
+            if src_optional {
+                self.optional_vars.insert(s.name.clone());
+            }
+        }
         // Any method-call/pipe RHS that is_option_expr recognizes as Option-shaped
         // (first()/last()/find(), a 1-arg dict get(k), and_then/or_else/flatten/
         // as_ref/as_deref, or a map/filter/cloned/... chain rooted in one of those)

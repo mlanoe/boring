@@ -211,6 +211,9 @@ impl Transpiler {
             // `<T?-typed expr> else default` unwraps the optional to its inner `T`.
             ExprKind::Else(inner, _) => match self.resolve_expr_type(inner)? {
                 Type::Optional(t) => Some(*t),
+                // `dict[key] else d` / `arr[i] else d`: the index's own type is the
+                // (possibly missing) value type `V`, so the `else` yields `V`.
+                ty if matches!(&inner.kind, ExprKind::Index(..)) => Some(ty),
                 _ => None,
             },
             ExprKind::Var(v) if v == "self" => self.self_type.clone().map(Type::Named),
@@ -2234,6 +2237,12 @@ impl Transpiler {
                 in_string_set && not_collection && type_confirms
             }
             ExprKind::Str(_) | ExprKind::StringInterp(_) => true,
+            // `(d["k"] else ("1")).parseFloat()` / `valueOf(p, "k").parseFloat()`: a
+            // defaulted lookup or a call whose declared type is `string`.
+            ExprKind::Else(..) | ExprKind::Call(..) => self.resolve_expr_type(obj).is_some_and(|ty| {
+                matches!(ty.without_mut(), Type::Str)
+                    || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+            }),
             // A struct field whose declared type is `string` (`p.txt.parseFloat()`).
             ExprKind::Field(_, _) => self.resolve_expr_type(obj).is_some_and(|ty| {
                 matches!(ty.without_mut(), Type::Str)
@@ -4837,6 +4846,9 @@ impl Transpiler {
                     && !param_ty.is_some_and(|t| self.is_boxed_trait_type(t))
                     && !param_ty_is_copy(param_ty)
                     && !param_rebindable
+                    // A closure-typed parameter (`impl FnMut`) isn't `Clone`: forwarding moves it.
+                    && !matches!(&a.value.kind, ExprKind::Var(vname) if self.fn_current_params.get(vname.as_str())
+                        .is_some_and(|t| self.resolve_fn_field_type(t).is_some()))
                     // Borrow params take a reference — no clone needed, the Borrow branch adds `&`.
                     && !matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)));
                 let emitted = if emitted_needs_clone {

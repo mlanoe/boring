@@ -1,0 +1,44 @@
+# Returning a `let`-bound optional local returns it as is (no extra `Some`), and
+# assigning a plain value to an optional `var` wraps it in `Some`.
+struct Animation:
+    int id
+
+struct Slot:
+    var Animation? last = nil
+    def void put(Animation a):
+        last = a
+    def Animation? take():
+        let a = last
+        last = nil
+        a
+
+struct T:
+    Animation animation
+
+# `var here = inherited` (type inferred from an optional param) stays optional.
+def Animation? pick([T] ts, Animation? inherited):
+    var here = inherited
+    for t in ts:
+        here = t.animation
+    here
+
+def main():
+    mut s = Slot()
+    s.put(Animation(id = 4))
+    let t = s.take()
+    let u = s.take()
+    if let x = t:
+        print x.id
+    if u == nil:
+        print "empty"
+    let inherited = Animation(id = 1)
+    let tt = T(animation = Animation(id = 9))
+    var Animation? here = inherited
+    here = tt.animation
+    if let h = here:
+        print h.id
+    let ts = [T(animation = Animation(id = 7))]
+    if let p = pick(ts, nil):
+        print p.id
+    if let p = pick([], Animation(id = 2)):
+        print p.id

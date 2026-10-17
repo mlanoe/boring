@@ -2622,6 +2622,14 @@ impl Transpiler {
                 let s = self.emit_expr(expr);
                 self.str_from_expr(&format!("{}.to_string()", s))
             }
+            // A closure-typed PARAMETER (`impl FnMut(..)`, which is not `Clone`) forwarded to
+            // another function: move it (a later reuse is the caller's own problem, as in
+            // Rust), never `.clone()`.
+            ExprKind::Var(v) if self.fn_current_params.get(v.as_str())
+                .is_some_and(|t| self.resolve_fn_field_type(t).is_some()) =>
+            {
+                self.emit_expr(expr)
+            }
             // Struct variable in owned position: clone to avoid moving out.
             // In Boring, structs are copy-by-value semantics; Rust requires explicit .clone().
             // Exception: `var` params are `&mut T` — emit as-is (the &mut is already the reference).
@@ -3524,6 +3532,10 @@ impl Transpiler {
                 Type::Str | Type::Array(_) | Type::ArrayN(..) | Type::Dict(..) | Type::Set(_) | Type::Tuple(_) => true,
                 Type::Named(n) => n == "string"
                     || t.struct_fields.contains_key(n.as_str())
+                    || t.all_enum_types.contains(n.as_str()),
+                // A one-letter user struct/enum name (`V`) parses as a type param; it is still a
+                // concrete declared type when the program declares it.
+                Type::TypeParam(n) => t.struct_fields.contains_key(n.as_str())
                     || t.all_enum_types.contains(n.as_str()),
                 Type::Optional(inner) => needs(t, inner),
                 // `Rc`/`Arc`: an owned read is a (cheap) pointer clone, never a move out of the struct.

@@ -1,0 +1,18 @@
+# Regression: a by-value read of a struct-typed field through a borrowed
+# parameter must `.clone()`, also when the field's struct has a one-letter name
+# (`V` parses as a type param, which `field_read_needs_clone` ignored -> E0507).
+struct V:
+    int x
+    int y
+
+struct Body:
+    V pos
+    int mass
+    int? tag = nil
+
+Body heavier(Body b, int by):
+    Body(pos = b.pos, mass = b.mass + by, tag = 9)
+
+let b = Body(pos = V(x = 1, y = 2), mass = 5)
+let c = heavier(b, 3)
+print "{c.mass} {c.pos.x} {c.pos.y}"

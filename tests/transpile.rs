@@ -1493,3 +1493,6 @@ transpile_test!(guard_string_trim_temporary);
 transpile_test!(struct_param_nested_loop_call);
 transpile_test!(for_mut_elem_iter_mut);
 transpile_test!(closure_owned_captures);
+transpile_test!(parse_on_expr_receiver);
+transpile_test!(closure_param_forward);
+transpile_test!(optional_let_return);

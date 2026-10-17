@@ -1,0 +1,18 @@
+# `.parseFloat()` / `.parseInt()` on a non-variable string expression (parenthesised
+# `else`, call result, index) must use the string-parse codegen, not an unknown method.
+struct D:
+    var {string=string} props = {"x" = "2.5"}
+
+string valueOf(D d, string k):
+    k
+
+def main():
+    let d = D()
+    let a = (d.props["x"] else ("1")).parseFloat() else (1.0)
+    let b = valueOf(d, "2.5").parseFloat() else (0.0)
+    let c = valueOf(d, "oops").parseInt() else (7)
+    let e = (d.props["nope"] else ("3")).parseInt() else (0)
+    print a
+    print b
+    print c
+    print e
