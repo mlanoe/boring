@@ -513,8 +513,128 @@ struct Ctx<'a> {
 /// Marker prefix for names that pass 2 must not rewrite again; stripped by pass 3.
 const KEEP: char = '@';
 
+/// A closure bound with `let` and only ever passed along as a call argument
+/// (`let gone = (): ...` then `OnMount(onMount = gone)`) is moved into each argument position.
+/// Transpiled output builds a callback's `'static` capture list (cloned state handles, the
+/// `self` snapshot) and types its untyped parameters from the *field it is stored in* only
+/// where the closure literal itself is the argument; a plain `let` closure gets neither.
+fn inline_let_closures(body: &mut [Stmt]) -> Vec<(String, Expr)> {
+    fn is_closure_let(l: &LetStmt) -> bool {
+        matches!(&l.value, Some(Expr { kind: ExprKind::Closure(..), .. }))
+    }
+    let mut lets: HashMap<String, (Expr, usize)> = HashMap::new();
+    {
+        let mut on_expr = |_: &mut Expr| {};
+        let mut on_stmt = |st: &mut Stmt| {
+            if let Stmt::Let(l) = st {
+                if is_closure_let(l) {
+                    lets.entry(l.name.clone()).or_insert((l.value.clone().unwrap(), 0)).1 += 1;
+                }
+            }
+        };
+        Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(body);
+    }
+    if lets.is_empty() { return vec![]; }
+    // Any other binding of the same name (let, closure parameter, loop variable) is ambiguous.
+    let mut other_defs: HashSet<String> = HashSet::new();
+    let mut total: HashMap<String, usize> = HashMap::new();
+    let mut as_arg: HashMap<String, usize> = HashMap::new();
+    {
+        let (total, as_arg, other) = (
+            std::cell::RefCell::new(&mut total),
+            std::cell::RefCell::new(&mut as_arg),
+            std::cell::RefCell::new(&mut other_defs),
+        );
+        let mut on_expr = |e: &mut Expr| match &e.kind {
+            ExprKind::Var(n) => { *total.borrow_mut().entry(n.clone()).or_default() += 1; }
+            ExprKind::Closure(params, ..) => {
+                for p in params { other.borrow_mut().insert(p.name.clone()); }
+            }
+            ExprKind::Call(_, args) | ExprKind::GenericCall(_, _, args)
+            | ExprKind::MethodCall(_, _, args) | ExprKind::Pipe(_, _, args)
+            | ExprKind::OptionalMethodCall(_, _, args) | ExprKind::TrailingArrayBlock { args, .. } => {
+                for a in args.iter().filter(|a| !a.spread) {
+                    if let ExprKind::Var(n) = &a.value.kind {
+                        *as_arg.borrow_mut().entry(n.clone()).or_default() += 1;
+                    }
+                }
+            }
+            _ => {}
+        };
+        let mut on_stmt = |st: &mut Stmt| match st {
+            Stmt::Let(l) if !is_closure_let(l) => { other.borrow_mut().insert(l.name.clone()); }
+            Stmt::LetDestructure(l) => {
+                for b in &l.bindings { other.borrow_mut().insert(b.name.clone()); }
+            }
+            Stmt::For(f) => { for v in &f.vars { other.borrow_mut().insert(v.clone()); } }
+            _ => {}
+        };
+        Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(body);
+    }
+    // Bound closures that are passed as an argument but cannot be inlined (also called or read
+    // elsewhere): the caller reports the ones a stored callback could not use as they are.
+    let mut stuck: Vec<(String, Expr)> = lets.iter()
+        .filter(|(n, (_, defs))| as_arg.get(*n).copied().unwrap_or(0) > 0
+            && (*defs != 1 || other_defs.contains(*n) || total.get(*n) != as_arg.get(*n)))
+        .map(|(n, (c, _))| (n.clone(), c.clone()))
+        .collect();
+    stuck.sort_by_key(|(_, c)| (c.line, c.col));
+    lets.retain(|n, (_, defs)| {
+        *defs == 1 && !other_defs.contains(n)
+            && total.get(n).copied().unwrap_or(0) > 0
+            && total.get(n) == as_arg.get(n)
+    });
+    if lets.is_empty() { return stuck; }
+    let mut on_expr = |e: &mut Expr| match &mut e.kind {
+        ExprKind::Call(_, args) | ExprKind::GenericCall(_, _, args)
+        | ExprKind::MethodCall(_, _, args) | ExprKind::Pipe(_, _, args)
+        | ExprKind::OptionalMethodCall(_, _, args) | ExprKind::TrailingArrayBlock { args, .. } => {
+            for a in args.iter_mut().filter(|a| !a.spread) {
+                if let ExprKind::Var(n) = &a.value.kind {
+                    if let Some((c, _)) = lets.get(n) { a.value = c.clone(); }
+                }
+            }
+        }
+        _ => {}
+    };
+    let mut on_stmt = |st: &mut Stmt| {
+        if let Stmt::Let(l) = st {
+            if is_closure_let(l) && lets.contains_key(&l.name) {
+                *st = Stmt::Comment(format!("closure `{}` inlined at its use sites", l.name));
+            }
+        }
+    };
+    Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(body);
+    stuck
+}
+
 fn rewrite_body(body: &mut [Stmt], ctx: &Ctx, view: &str, failure: &mut Option<ParseError>) {
     let is_field = |n: &str| ctx.states.contains(n) || ctx.binds.contains(n) || ctx.envs.contains(n);
+    for (name, mut c) in inline_let_closures(body) {
+        if RUNTIME_METHODS.load(std::sync::atomic::Ordering::Relaxed) { break; }
+        let ExprKind::Closure(params, ..) = &c.kind else { continue };
+        let untyped = params.iter().any(|p| p.ty.is_none());
+        let mut captures = false;
+        {
+            let mut on_expr = |e: &mut Expr| {
+                if let ExprKind::Var(n) = &e.kind { captures |= n == "self" || is_field(n); }
+            };
+            let mut on_stmt = |_: &mut Stmt| {};
+            Walker { expr: &mut on_expr, stmt: &mut on_stmt }.expr(&mut c);
+        }
+        if untyped || captures {
+            failure.get_or_insert_with(|| err(
+                format!(
+                    "closure `{name}` is passed as a callback and also used elsewhere in view '{view}': a stored \
+                     callback must be built where it is passed (it captures the view's state handles and takes its \
+                     parameter types from the field) — write the closure inline at the call, or use it only as a \
+                     callback argument"
+                ),
+                c.line, c.col,
+            ));
+            return;
+        }
+    }
 
     // Pass 1 — on the untouched body: a binding that reuses a field name would be rewritten
     // by pass 2, silently changing what it refers to.
