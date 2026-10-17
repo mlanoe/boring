@@ -721,6 +721,7 @@ transpile_test!(dict_string_key_index);
 // `var_struct_type`. See tests/cases/dict_field_via_non_self_local.br's own
 // doc comment.
 transpile_test!(dict_field_via_non_self_local);
+transpile_test!(dict_field_param_var_key_else);
 
 // A top-level (main-body) call site passing a struct-typed local (a struct-
 // element array here) whose bare NAME collides with some other already-

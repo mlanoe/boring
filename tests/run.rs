@@ -481,6 +481,7 @@ interp_test!(dict_string_key_index);
 // kept here anyway so the runtime values stay pinned down too. See
 // tests/cases/dict_field_via_non_self_local.br's own doc comment.
 interp_test!(dict_field_via_non_self_local);
+interp_test!(dict_field_param_var_key_else);
 // A top-level call-site borrow drop from a stale `inferred_qualifiers` name
 // collision. The interpreter (this test) never caught this either -- it was
 // a `--emit-rust`-only codegen bug (see tests/transpile.rs). See

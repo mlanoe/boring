@@ -5975,9 +5975,10 @@ impl Transpiler {
             ExprKind::Field(obj, field_name) => {
                 let struct_name = match &obj.kind {
                     ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
-                    ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
-                        .or_else(|| self.var_struct_type.get(v.as_str()))
-                        .cloned(),
+                    // `resolve_expr_struct_type` (not just the two `var_struct_type(s)` maps)
+                    // so a param whose declared type isn't a bare `Named` (e.g. one that
+                    // `seed_param_locals` records only in `var_types`) still resolves.
+                    ExprKind::Var(_) => self.resolve_expr_struct_type(obj),
                     // `d[k].slots` / `xs[i].slots`: the element's struct type, when known.
                     ExprKind::Index(..) => self.resolve_expr_struct_type(obj),
                     // `make().props` / `obj.method().props`: the callee's declared return type.
