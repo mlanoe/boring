@@ -436,6 +436,7 @@ transpile_test!(view_state_lowering);
 transpile_test!(view_state_array_methods);
 transpile_test!(view_bind_env);
 transpile_test!(view_method_modifiers);
+transpile_test!(view_state_seed);
 transpile_test!(actor_field_through);
 transpile_test!(view_env_only);
 transpile_test!(view_act_str_args_trait_obj);

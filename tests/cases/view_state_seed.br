@@ -1,0 +1,25 @@
+# Parent-supplied state seeds: `Counter(count = 10)` seeds that identity's `state` at mount; a
+# description without the argument keeps the declaration's default. (Laziness — the argument being
+# evaluated once per mount and never on a rebuild — is checked in `view_state_seed_values`.)
+use boring.ui.*
+
+view Counter:
+    string title
+    state int count = 0
+
+    req int current():
+        count
+
+    body():
+        Text("{title}{count}")
+
+def int seedValue(int base):
+    base * 2 + 1
+
+def main():
+    let plain = Counter(title = "a")
+    let seeded = Counter(title = "b", count = seedValue(5))
+    mut a = plain.seededState()
+    mut b = seeded.seededState()
+    print plain.current(a)
+    print seeded.current(b)

@@ -125,25 +125,31 @@ fn rewrite_body(body: &mut [Stmt], mods: &Modifiers, views: &HashSet<String>) {
     }
 }
 
-fn rewrite_items(items: &mut [Item], mods: &Modifiers, views: &HashSet<String>) {
+/// Calls `f` on every statement list in `items`: function bodies, struct/view methods, inits,
+/// top-level `let`/statements (a top-level `let` is handed over as a one-statement list).
+pub fn walk_bodies(items: &mut [Item], f: &mut dyn FnMut(&mut [Stmt])) {
     for item in items {
         match item {
-            Item::Fn(f) => rewrite_body(&mut f.body, mods, views),
+            Item::Fn(func) => f(&mut func.body),
             Item::Struct(s) => {
-                for m in s.methods.iter_mut() { rewrite_body(&mut m.body, mods, views); }
-                for m in s.type_methods.iter_mut() { rewrite_body(&mut m.body, mods, views); }
-                for i in s.inits.iter_mut() { rewrite_body(&mut i.body, mods, views); }
+                for m in s.methods.iter_mut() { f(&mut m.body); }
+                for m in s.type_methods.iter_mut() { f(&mut m.body); }
+                for i in s.inits.iter_mut() { f(&mut i.body); }
             }
-            Item::Mod(m) => rewrite_items(&mut m.items, mods, views),
+            Item::Mod(m) => walk_bodies(&mut m.items, f),
             Item::Let(l) => {
                 let mut s = Stmt::Let(l.clone());
-                rewrite_body(std::slice::from_mut(&mut s), mods, views);
+                f(std::slice::from_mut(&mut s));
                 if let Stmt::Let(done) = s { *l = done; }
             }
-            Item::Stmt(s) => rewrite_body(std::slice::from_mut(s), mods, views),
+            Item::Stmt(s) => f(std::slice::from_mut(s)),
             _ => {}
         }
     }
+}
+
+fn rewrite_items(items: &mut [Item], mods: &Modifiers, views: &HashSet<String>) {
+    walk_bodies(items, &mut |body| rewrite_body(body, mods, views));
 }
 
 /// Rewrites every method-form modifier call in `program` (see the module doc).

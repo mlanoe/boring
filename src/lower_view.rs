@@ -163,7 +163,8 @@ fn lower_items(items: Vec<Item>, env: &Env) -> Result<Vec<Item>, ParseError> {
     for item in items {
         match item {
             Item::Struct(s) if s.is_view => {
-                let lowered = lower_view(s, env)?;
+                let (aliases, lowered) = lower_view(s, env)?;
+                out.extend(aliases.into_iter().map(Item::Alias));
                 out.extend(lowered.into_iter().map(Item::Struct));
             }
             Item::Mod(mut m) => { m.items = lower_items(m.items, env)?; out.push(Item::Mod(m)); }
@@ -252,7 +253,7 @@ fn find_bound_states(
     }
 }
 
-fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseError> {
+fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<StructDecl>), ParseError> {
     // A view automatically conforms to `View` — when the trait is in the program (`use boring.ui`).
     if env.view_trait && !s.protocols.iter().any(|p| p == "View") {
         s.protocols.push("View".to_string());
@@ -356,6 +357,33 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         }
         _ => None,
     }).collect();
+    // Every `state` can be seeded by the parent at construction: an optional lazy seed closure
+    // input per state field (see "parent-supplied state seeds" below).
+    let mut seeds: Vec<(String, bool)> = Vec::new();
+    let mut aliases: Vec<AliasDecl> = Vec::new();
+    if env.view_trait {
+        for f in &state_fields {
+            let mut seed = f.clone();
+            seed.name = seed_field_name(&f.name);
+            seed.view_kind = None;
+            seed.explicit_perm = false;
+            seed.is_pub = true;
+            seed.mutable = false;
+            // A named function-type alias per seed: a bare `def T()` field type is not a storable
+            // closure type in transpiled output, an alias is (like `UIAction`).
+            let alias = format!("{}__{}__Seed", s.name, f.name);
+            aliases.push(AliasDecl {
+                name: alias.clone(), type_params: vec![], newtype: false, line: f.line, col: f.col,
+                ty: Type::Fn(Some(Box::new(strip_mut(&f.ty).clone())), vec![], false, false, false),
+            });
+            // Its default seed IS the declaration's own initializer, so the closure is never absent.
+            seed.ty = Type::Named(alias);
+            let default_read = default_seed_read(&state_name, &f.name, slotted.contains(&f.name), f.line, f.col);
+            seed.default = Some(seed_closure(default_read));
+            s.fields.push(seed);
+            seeds.push((f.name.clone(), slotted.contains(&f.name)));
+        }
+    }
     s.is_view = false;
 
     let has_state = !state_fields.is_empty();
@@ -388,7 +416,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         if let Some(e) = failure { return Err(e); }
     }
     if env.view_trait {
-        s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name));
+        s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name, &seeds));
     }
     // Transpiled output: `body()` is the `<View>` opaque return the parser gave it, which Rust
     // can only satisfy with ONE concrete type — but a body may return `Row` on one branch and
@@ -401,14 +429,14 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<Vec<StructDecl>, ParseErro
         }
     }
     generated.push(s);
-    Ok(generated)
+    Ok((aliases, generated))
 }
 
 /// The `View` trait's methods for a lowered view (see `stdlib/ui.br`): kind, structural children
 /// of a native container, a native `KeyedGroup`'s key/site, and — for a composite view — the
 /// state seed and `expand`, which re-enters the lowered `body(__st)` with the node's own state.
 /// Parsed from source text so the generated methods are exactly what the parser would produce.
-fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, state_name: &str) -> Vec<FnDecl> {
+fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, state_name: &str, seeds: &[(String, bool)]) -> Vec<FnDecl> {
     let field_ty = |name: &str| s.fields.iter().find(|f| f.name == name).map(|f| strip_mut(&f.ty).clone());
     let mut src = format!("struct G:\n    req string viewKind(): \"{}\"\n", s.name);
     if native {
@@ -475,7 +503,20 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         // (A view with `env` is not expandable yet: the runtime has no environment to give it.)
         src.push_str("    req bool isComposite(): true\n");
         if has_state {
-            src.push_str(&format!("    req StateBox'shared newState(): {state_name}()\n"));
+            // The mount-time state, built from the seed closures — each one defaults to the
+            // declaration's own initializer, so a parent-supplied seed simply replaces it. Evaluated
+            // here, once (a rebuild of the same identity never calls `newState`). A constructor
+            // expression, not assignments: whole-field replacement is forbidden on `mut` fields, and
+            // transpiled output cannot return a mutated local as a `'shared` trait object. The
+            // by-value `seededState` is the same state before it is boxed.
+            let args: Vec<String> = seeds.iter().map(|(name, slotted)| {
+                let seed = seed_field_name(name);
+                if *slotted { format!("{name} = Slot(value = {seed}())") } else { format!("{name} = {seed}()") }
+            }).collect();
+            src.push_str(&format!(
+                "    req {state_name} seededState(): {state_name}({})\n    req StateBox'shared newState(): self.seededState()\n",
+                args.join(", ")
+            ));
             src.push_str(&format!(
                 "    req View expand(StateBox'shared st):\n        mut s = st as {state_name} else ({state_name}())\n        self.body(s)\n"
             ));
@@ -763,6 +804,9 @@ pub fn lower_views(mut program: Program) -> Result<Program, ParseError> {
         return Err(err(e.message, e.line, e.col));
     }
     crate::desugar_view_modifiers::desugar_view_modifiers(&mut program.items);
+    if declares(&program.items, &|i| matches!(i, Item::Trait(t) if t.name == "View")) || has_ui_use(&program.items) {
+        rewrite_seed_calls(&mut program.items);
+    }
     let mut bind_views = BindViews::new();
     collect_bind_views(&program.items, &mut bind_views);
     let env = Env {
@@ -790,4 +834,109 @@ fn has_ui_use(items: &[Item]) -> bool {
 /// loaders (`use` of a sibling file or `boring.*`) call this right after parsing.
 pub fn lower_module(program: Program) -> Result<Program, ParseError> {
     crate::view_perm::resolve_view_permissions(program).and_then(lower_views)
+}
+
+// ── parent-supplied state seeds ────────────────────────────────────────────────────────────────
+//
+// `Counter(title = t, count = expensive())` seeds the `state int count` of that identity on its
+// FIRST mount only (draft, "Initialization and seeds"). The description therefore carries each seed
+// as an optional lazy closure field `<state>__seed: Seed<T>?` (an alias of `def T()` in
+// `boring.ui`): the call site's argument is wrapped in `(): <expr>`, the generated `newState()`
+// evaluates it exactly once, and a later rebuild of the same identity never evaluates it, because
+// the runtime only calls `newState()` at mount and `expand` reuses the persistent state.
+
+const SEED_SUFFIX: &str = "__seed";
+
+fn seed_field_name(state: &str) -> String { format!("{state}{SEED_SUFFIX}") }
+
+fn collect_state_views(items: &[Item], out: &mut HashMap<String, HashMap<String, Type>>) {
+    for item in items {
+        match item {
+            Item::Struct(s) if s.is_view => {
+                let states: HashMap<String, Type> = s.fields.iter()
+                    .filter(|f| f.view_kind == Some(ViewFieldKind::State))
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect();
+                if !states.is_empty() { out.insert(s.name.clone(), states); }
+            }
+            Item::Mod(m) => collect_state_views(&m.items, out),
+            _ => {}
+        }
+    }
+}
+
+/// `(): <value>` — built from a parsed template so the closure's flags match source-written ones.
+/// (Transpiled output does not convert a string literal returned from a closure into the view's
+/// string type, typed `let` or not; a seed that is a bare string literal is therefore not
+/// supported there — the generated default seeds below avoid literals altogether.)
+fn seed_closure(value: Expr) -> Expr {
+    let tokens = crate::lexer::lex("let f = (): 0\n").expect("seed template lexes");
+    let mut program = crate::parser::parse(tokens).expect("seed template parses");
+    let mut template: Option<Expr> = None;
+    let mut grab = |e: &mut Expr| { if template.is_none() && matches!(e.kind, ExprKind::Closure(..)) { template = Some(e.clone()); } };
+    let mut noop = |_: &mut Stmt| {};
+    crate::desugar_view_modifiers::walk_bodies(&mut program.items, &mut |body| {
+        Walker { expr: &mut grab, stmt: &mut noop }.stmts(body);
+    });
+    let mut closure = template.expect("seed template has a closure");
+    let (line, col, len) = (value.line, value.col, value.len);
+    if let ExprKind::Closure(_, _, body, _, _) = &mut closure.kind {
+        *body = ClosureBody::Expr(Box::new(value));
+    }
+    closure.line = line;
+    closure.col = col;
+    closure.len = len;
+    closure
+}
+
+fn rewrite_seed_calls(items: &mut [Item]) {
+    let mut table = HashMap::new();
+    collect_state_views(items, &mut table);
+    if table.is_empty() { return; }
+    let wrap = |name: &str, args: &mut Vec<Arg>| {
+        let Some(states) = table.get(name) else { return };
+        for a in args.iter_mut() {
+            if let Some(l) = a.label.clone() {
+                if let Some(ty) = states.get(&l) {
+                    a.label = Some(seed_field_name(&l));
+                    let value = std::mem::replace(&mut a.value, Expr { kind: ExprKind::Nil, line: 0, col: 0, len: 0 });
+                    a.value = seed_closure(value);
+                }
+            }
+        }
+    };
+    let mut on_expr = |e: &mut Expr| match &mut e.kind {
+        ExprKind::Call(callee, args) => {
+            if let ExprKind::Var(n) = &callee.kind { wrap(n, args); }
+        }
+        ExprKind::TrailingArrayBlock { callee, args, .. } => {
+            if let ExprKind::Var(n) = &callee.kind { wrap(n, args); }
+        }
+        _ => {}
+    };
+    let mut noop = |_: &mut Stmt| {};
+    crate::desugar_view_modifiers::walk_bodies(items, &mut |body| {
+        Walker { expr: &mut on_expr, stmt: &mut noop }.stmts(body);
+    });
+}
+
+/// `V__State().<field>` (`.value` when the field is a shared slot): the default seed reads the state
+/// struct's own default for that field, so the declaration's initializer is never copied.
+fn default_seed_read(state_name: &str, field: &str, slotted: bool, line: usize, col: usize) -> Expr {
+    let tail = if slotted { format!("{field}.value") } else { field.to_string() };
+    let tokens = crate::lexer::lex(&format!("let f = {state_name}().{tail}\n")).expect("default seed lexes");
+    let program = crate::parser::parse(tokens).expect("default seed parses");
+    for item in program.items {
+        let value = match item {
+            Item::Let(l) => l.value,
+            Item::Stmt(Stmt::Let(l)) => l.value,
+            _ => None,
+        };
+        if let Some(mut e) = value {
+            e.line = line;
+            e.col = col;
+            return e;
+        }
+    }
+    unreachable!("default seed parses to a let")
 }

@@ -1,0 +1,33 @@
+# Laziness: the seed argument is evaluated once per mount (`newState()`), never when a description
+# is built and never when the same state is expanded again. Interpreter only: it counts evaluations
+# in a global `var` (a mutable global deadlocks in transpiled output — filed) and downcasts the state box.
+use boring.ui.*
+
+var evaluated = 0
+
+def int expensive():
+    evaluated += 1
+    10
+
+view Counter:
+    string title
+    state int count = 0
+
+    req int current():
+        count
+
+    body():
+        Text("{title}{count}")
+
+def main():
+    let plain = Counter(title = "a")
+    let seeded = Counter(title = "b", count = expensive())
+    let s1 = plain.newState()
+    let s2 = seeded.newState()
+    mut a = s1 as Counter__State else (Counter__State())
+    mut b = s2 as Counter__State else (Counter__State())
+    print plain.current(a)
+    print seeded.current(b)
+    _ = seeded.expand(s2)
+    _ = seeded.expand(s2)
+    print evaluated

@@ -748,6 +748,8 @@ interp_test!(view_sited_blocks);
 interp_test!(view_props);
 interp_test!(view_actions);
 interp_test!(view_lifecycle_actions);
+interp_test!(view_state_seed);
+interp_test!(view_state_seed_values);
 interp_test!(view_method_modifiers);
 interp_test!(view_array_block_closure_arg);
 interp_test!(view_bind_env);
