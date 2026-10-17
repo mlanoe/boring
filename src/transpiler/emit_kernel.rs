@@ -348,6 +348,12 @@ impl Transpiler {
             return false;
         }
         let Some(val) = &s.value else { return false };
+        // `kernel(device) Name(args)`: the CPU backend has a single device, so the
+        // placement wrapper is just the constructor call.
+        let val = match &val.kind {
+            ExprKind::New { ctor, .. } if self.config.is_simd_target => ctor.as_ref(),
+            _ => val,
+        };
         // Two call shapes construct a kernel: a plain `KernelName(args...)` (`ExprKind::
         // Call`), or a const-generic kernel's turbofish instantiation `KernelName<W, H>
         // (args...)` (`ExprKind::GenericCall`) -- the latter still spells the *original*
@@ -1388,6 +1394,9 @@ pub(crate) fn array_inner_type(ty: &Type) -> Type {
 /// GPU-buffer element type for a boring scalar type (matches
 /// `wgpu::host::host_scalar_type` — GPU buffers always use 32-bit elements).
 pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
+    if let Some(device) = crate::transpiler::simd::simd_scalar_ty(ty) {
+        return device;
+    }
     match ty {
         Type::Int   => "i32",
         Type::Uint  => "u32",

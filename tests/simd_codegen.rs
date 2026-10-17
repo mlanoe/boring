@@ -8070,3 +8070,15 @@ print "{m.wide[0]} {m.wide[3]} {m.narrow[0]} {m.narrow[3]}"
     // y=1: 1+1+1 = 3; y=4: 4+16+4 = 24
     assert_eq!(stdout, "6.5 31.5 3 24");
 }
+
+#[test]
+fn kernel_helper_methods_mixed_numeric_widths_and_placement_run_on_simd() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "metal_parity_misc",
+        "def float32 twice(float32 x):\n    x * 2.0\nuint8 low(uint8 b):\n    b\nfloat32 dequant_at([uint8]'global w, int idx):\n    (w[idx] as float32) * 0.5\n\nkernel K:\n    mut [uint32]'actor'global counts\n    mut [float]'unified wide\n    mut [float32]'unified narrow\n    let [uint8]'global bytes\n    init(mut [uint32]'actor'global c, [float]'unified w, [float32]'unified n, [uint8]'global b):\n        counts = c\n        wide = w\n        narrow = n\n        bytes = b\n    def float32 helper(float32 x):\n        x + 1.0\n    def ():\n        let tid = .thread.x\n        counts[0] += tid\n        let lane = .warp.lane\n        let shuffled = .warp.shuffle(narrow[tid], 0)\n        wide[tid] = shuffled + lane\n        narrow[tid] = self.helper(narrow[tid]) + dequant_at(bytes, tid)\n\nmut counts = [0 as uint32 for ..<1]\nmut wide = [0.0 for ..<4]\nmut narrow = [1.0 as float32, 2.0, 3.0, 4.0]\nlet bytes = [2 as uint8, 4, 6, 8]\nlet device = Device(index = 0)\nmut k = kernel(device) K(counts, wide, narrow, bytes)\nkernel:\n    k(block = 4)\nprint \"{k.counts[0]} {k.wide[3]} {k.narrow[3]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    // counts = 0+1+2+3; wide[3] = narrow[0] (1.0) + lane 3; narrow[3] = (4+1) + 8*0.5
+    assert_eq!(stdout, "6 4 9");
+}

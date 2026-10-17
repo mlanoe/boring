@@ -67,7 +67,9 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         is_simd_target: true,
         ..Default::default()
     };
+    SIMD_HOST_TYPES.with(|flag| flag.set(true));
     let general = crate::transpiler::transpile_with_config(&renamed, config);
+    SIMD_HOST_TYPES.with(|flag| flag.set(false));
     let (has_main, main_throws) = crate::transpiler::detect_boring_main(&renamed, &general);
 
     let mut e = Emitter {
@@ -101,6 +103,14 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
                             .map(|param| param.ty.as_ref().and_then(host_numeric_ty))
                             .collect(),
                         function.return_ty.as_ref().and_then(|ret| numeric_ty(ret)),
+                        function
+                            .params
+                            .iter()
+                            .map(|param| match &param.ty {
+                                Some(t) if is_array(t) => if matches!(t, Type::Qualified(..)) { 2 } else { 1 },
+                                _ => 0,
+                            })
+                            .collect(),
                     ),
                 )),
                 _ => None,
@@ -120,6 +130,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         work_item_return_uses_active_mask: None,
         coop: false,
         needs_coop: false,
+        written_fields: std::collections::HashSet::new(),
     };
     e.raw(PRELUDE);
     let mirrors = device_struct_mirrors(program, &kernels, &mut e.errors);
@@ -252,7 +263,7 @@ struct Emitter {
     sets: std::collections::HashSet<String>,
     tuple_arities: std::collections::HashMap<String, usize>,
     function_names: std::collections::HashSet<String>,
-    function_sigs: std::collections::HashMap<String, (Vec<Option<String>>, Option<String>)>,
+    function_sigs: std::collections::HashMap<String, (Vec<Option<String>>, Option<String>, Vec<u8>)>,
     global_consts: std::collections::HashMap<String, String>,
     locals: std::collections::HashSet<String>,
     value_types: std::collections::HashMap<String, String>,
@@ -267,6 +278,7 @@ struct Emitter {
     work_item_return_uses_active_mask: Option<bool>,
     coop: bool,
     needs_coop: bool,
+    written_fields: std::collections::HashSet<String>,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -281,6 +293,9 @@ impl Emitter {
         let auto_synced = auto_sync_kernel(k);
         let k = auto_synced.as_ref().unwrap_or(k);
         self.collective_uniform_locals.clear();
+        self.written_fields = entry_method(k)
+            .map(|method| written_buffers(&method.body))
+            .unwrap_or_default();
         self.fields = k
             .fields
             .iter()
@@ -333,7 +348,7 @@ impl Emitter {
             };
             self.value_types.insert(field.name.clone(), field_ty);
         }
-        if let Some(method) = k.methods.first() {
+        if let Some(method) = entry_method(k) {
             self.locals
                 .extend(method.params.iter().map(|param| param.name.clone()));
             for param in &method.params {
@@ -357,6 +372,9 @@ impl Emitter {
         }
         self.line(0, "}");
         self.line(0, &format!("impl {} {{", k.name));
+        for helper in k.methods.iter().filter(|method| !method.name.is_empty()) {
+            self.kernel_helper(helper);
+        }
         // A kernel with a `let Dimension` field is constructed as `K(Dimension(w, h))`:
         // `new` takes the flat extent and sizes every dynamic array field to w*h
         // (`'surface` buffers get the sparse random seed the GPU Screen hosts use).
@@ -451,7 +469,7 @@ impl Emitter {
         }
         let phase_out_mark = self.out.len();
         let phase_error_mark = self.errors.len();
-        if let Some(m) = k.methods.first() {
+        if let Some(m) = entry_method(k) {
             let has_top_level_sync = m
                 .body
                 .iter()
@@ -1107,7 +1125,7 @@ impl Emitter {
             .iter()
             .any(|error| is_cooperative_candidate_error(&error.message))
         {
-            if let Some(m) = k.methods.first() {
+            if let Some(m) = entry_method(k) {
                 self.out.truncate(phase_out_mark);
                 self.errors.truncate(phase_error_mark);
                 self.emit_cooperative_body(k, m);
@@ -1165,6 +1183,49 @@ impl Emitter {
         self.line(3, "__coop::run_block((dx * dy * dz) as usize, __simd_lanes as usize, __coop_body);");
         self.line(2, "} } }");
         self.coop = false;
+    }
+    /// A `def f(...)` helper inside a kernel: an ordinary method over the kernel's fields.
+    fn kernel_helper(&mut self, helper: &FnDecl) {
+        let saved_locals = self.locals.clone();
+        let saved_types = self.value_types.clone();
+        for param in &helper.params {
+            self.locals.insert(param.name.clone());
+            if let Some(param_ty) = &param.ty {
+                self.value_types.insert(param.name.clone(), ty(param_ty));
+            }
+        }
+        crate::transpiler::helpers::collect_local_decl_names(&helper.body, &mut self.locals);
+        let params = helper
+            .params
+            .iter()
+            .map(|param| {
+                format!(
+                    "{}: {}",
+                    param.name,
+                    param.ty.as_ref().map(ty).unwrap_or_else(|| "i32".into())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = helper
+            .return_ty
+            .as_ref()
+            .map(|ret| format!(" -> {}", ty(ret)))
+            .unwrap_or_default();
+        self.line(1, &format!("#[allow(unused_variables, unused_mut)] fn {}(&mut self, {params}){ret} {{", helper.name));
+        let last = helper.body.len().saturating_sub(1);
+        for (index, stmt) in helper.body.iter().enumerate() {
+            match stmt {
+                Stmt::Expr(value) if index == last && helper.return_ty.is_some() => {
+                    let text = self.expr(value);
+                    self.line(2, &text);
+                }
+                other => self.stmt(other, 2),
+            }
+        }
+        self.line(1, "}");
+        self.locals = saved_locals;
+        self.value_types = saved_types;
     }
     fn emit_barrier_phases(&mut self, k: &KernelDecl, body: &[Stmt], indent: usize) {
         self.emit_barrier_phases_seeded(k, body, indent, &[]);
@@ -2691,12 +2752,26 @@ impl Emitter {
                 };
                 let optional_destination = matches!(&a.kind, ExprKind::Var(name)
                     if self.value_types.get(name).is_some_and(|kind| kind.starts_with("Option<")));
-                let value = if optional_destination {
+                let mut value = if optional_destination {
                     let wrapped = self.implicit_some(b);
                     self.expr(&wrapped)
                 } else {
                     self.expr(b)
                 };
+                // Stores convert to the element type, as in C-like kernel languages.
+                if let ExprKind::Index(object, _) | ExprKind::LabeledIndex(object, _) = &a.kind {
+                    if let ExprKind::Var(name) = &object.kind {
+                        if let (Some(element), Some(source)) = (self.value_types.get(name).cloned(), self.expr_type(b)) {
+                            if numeric_rank(&element).is_some()
+                                && numeric_rank(&source).is_some()
+                                && element != source
+                                && !matches!(&b.kind, ExprKind::Int(_) | ExprKind::Float(_))
+                            {
+                                value = format!("(({value}) as {element})");
+                            }
+                        }
+                    }
+                }
                 let assignment = format!("{} = {}", self.lvalue(a), value);
                 if let ExprKind::Var(name) = &a.kind {
                     self.replayable_locals.remove(name);
@@ -2746,8 +2821,26 @@ impl Emitter {
                 }
                 let left_ty = self.expr_type(a);
                 let right_ty = self.expr_type(b);
-                let left = self.expr_as(a, right_ty.as_deref());
-                let right = self.expr_as(b, left_ty.as_deref());
+                let mut left = self.expr_as(a, right_ty.as_deref());
+                let mut right = self.expr_as(b, left_ty.as_deref());
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                    | BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq)
+                {
+                    // Kernel languages promote mixed numeric operands implicitly.
+                    let literal = |e: &Expr| matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
+                    if literal(a) || literal(b) {
+                        // `expr_as` already types literals against the other operand.
+                    } else if let (Some(l), Some(r)) = (&left_ty, &right_ty) {
+                        if let Some(common) = common_numeric(l, r) {
+                            if *l != common && !matches!(&a.kind, ExprKind::Int(_) | ExprKind::Float(_)) {
+                                left = format!("(({left}) as {common})");
+                            }
+                            if *r != common && !matches!(&b.kind, ExprKind::Int(_) | ExprKind::Float(_)) {
+                                right = format!("(({right}) as {common})");
+                            }
+                        }
+                    }
+                }
                 match binop(op) {
                     Some(op) => format!("({left} {op} {right})"),
                     None => unreachable!("is/is not handled above"),
@@ -2871,7 +2964,7 @@ impl Emitter {
                     }
                 }
                 if let ExprKind::Var(name) = &c.kind {
-                    if let Some((params, ret)) = self.function_sigs.get(name).cloned() {
+                    if let Some((params, ret, arrays)) = self.function_sigs.get(name).cloned() {
                         // Host functions use host numeric widths (`int` = isize);
                         // kernels use device widths (`int` = i32): convert at the call.
                         let call = format!(
@@ -2880,6 +2973,12 @@ impl Emitter {
                             args.iter()
                                 .enumerate()
                                 .map(|(index, a)| match params.get(index).and_then(|p| p.as_ref()) {
+                                    _ if arrays.get(index).copied().unwrap_or(0) == 1 => {
+                                        format!("&({})", self.expr(&a.value))
+                                    }
+                                    _ if arrays.get(index).copied().unwrap_or(0) == 2 => {
+                                        format!("({}).clone()", self.expr(&a.value))
+                                    }
                                     Some(host) if a.label.is_none() => {
                                         format!("({}) as {host}", self.expr(&a.value))
                                     }
@@ -3928,6 +4027,16 @@ impl Emitter {
             ));
             return "/* rejected non-replayable SIMD warp shuffle */ 0".into();
         }
+        // Replaying a buffer read in another lane sees later stores of this kernel;
+        // lockstep GPU lanes read first. Only the cooperative path orders that right.
+        if expr_reads_any(&args[0].value, &self.written_fields) {
+            self.errors.push(crate::errors::SourceError::at(
+                "SIMD warp shuffles require two arguments and a lane-replayable value (a shuffled buffer element is also written by the kernel)",
+                call.line,
+                call.col,
+            ));
+            return "/* rejected shuffle of a written buffer */ 0".into();
+        }
         let operand = self.expr(&args[1].value);
         self.thread_override = Some("__boring_warp_source_thread".into());
         let replayed = self.expr(&args[0].value);
@@ -4902,6 +5011,36 @@ impl Emitter {
     }
     fn expr_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
+            ExprKind::Field(object, field)
+                if matches!(gpu_builtin_name(object), Some("thread" | "block" | "block_dim" | "grid_dim" | "blockDim" | "gridDim"))
+                    && matches!(field.as_str(), "x" | "y" | "z") =>
+            {
+                Some("i32".into())
+            }
+            ExprKind::Field(object, field)
+                if gpu_builtin_name(object) == Some("warp")
+                    && matches!(field.as_str(), "size" | "lane") =>
+            {
+                Some("i32".into())
+            }
+            ExprKind::BinOp(op, left, right)
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) =>
+            {
+                let literal = |e: &Expr| matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
+                match (self.expr_type(left), self.expr_type(right)) {
+                    (Some(l), _) if literal(right) && numeric_rank(&l).is_some() => Some(l),
+                    (_, Some(r)) if literal(left) && numeric_rank(&r).is_some() => Some(r),
+                    (Some(l), Some(r)) => common_numeric(&l, &r),
+                    (Some(l), None) if numeric_rank(&l).is_some() && matches!(&right.kind, ExprKind::Int(_) | ExprKind::Float(_)) => Some(l),
+                    (None, Some(r)) if numeric_rank(&r).is_some() && matches!(&left.kind, ExprKind::Int(_) | ExprKind::Float(_)) => Some(r),
+                    _ => None,
+                }
+            }
+            ExprKind::MethodCall(receiver, method, args)
+                if is_warp_receiver(receiver) && is_warp_shuffle(method) && args.len() == 2 =>
+            {
+                self.expr_type(&args[0].value)
+            }
             ExprKind::Int(_) => Some("i32".into()),
             ExprKind::UInt64(_) => Some("u64".into()),
             ExprKind::Float(_) => Some("f64".into()),
@@ -5295,6 +5434,101 @@ fn simd_pattern(pattern: &Pattern) -> String {
     }
 }
 
+/// Bit width and kind rank of a numeric Rust type name: floats outrank ints.
+fn numeric_rank(name: &str) -> Option<(u8, u8, bool)> {
+    Some(match name {
+        "i8" => (0, 8, true),
+        "i16" => (0, 16, true),
+        "i32" => (0, 32, true),
+        "i64" => (0, 64, true),
+        "i128" => (0, 128, true),
+        "u8" => (0, 8, false),
+        "u16" => (0, 16, false),
+        "u32" => (0, 32, false),
+        "u64" => (0, 64, false),
+        "u128" => (0, 128, false),
+        "f32" => (1, 32, true),
+        "f64" => (1, 64, true),
+        _ => return None,
+    })
+}
+
+/// C-style usual arithmetic conversion of two numeric type names.
+fn common_numeric(left: &str, right: &str) -> Option<String> {
+    let (l, r) = (numeric_rank(left)?, numeric_rank(right)?);
+    if left == right {
+        return Some(left.to_string());
+    }
+    let pick = if l.0 != r.0 {
+        if l.0 > r.0 { left } else { right }
+    } else if l.1 != r.1 {
+        if l.1 > r.1 { left } else { right }
+    } else if !l.2 {
+        left
+    } else {
+        right
+    };
+    Some(pick.to_string())
+}
+
+thread_local! {
+    /// Set while the shared host pipeline runs for `--target simd`, so its buffer
+    /// element casts use the CPU kernel's own widths (`float` = f64, not wgpu's f32).
+    static SIMD_HOST_TYPES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn simd_scalar_ty(t: &Type) -> Option<&'static str> {
+    if !SIMD_HOST_TYPES.with(|flag| flag.get()) {
+        return None;
+    }
+    let name = numeric_ty(t).or_else(|| matches!(base(t), Type::Bool).then(|| "bool".to_string()))?;
+    ["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64", "bool"]
+        .into_iter()
+        .find(|candidate| *candidate == name)
+}
+
+/// `.thread` / `.warp` / ... — spelled `Field(Var(gpu), name)`, `DotIdent(name)` or a bare name.
+fn gpu_builtin_name(expr: &Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::DotIdent(name) | ExprKind::Var(name) => Some(name),
+        ExprKind::Field(root, name) if matches!(&root.kind, ExprKind::Var(v) if v == "gpu") => Some(name),
+        _ => None,
+    }
+}
+
+/// Names of buffers the statements store into (`name[i] = ...`).
+fn written_buffers(body: &[Stmt]) -> std::collections::HashSet<String> {
+    let mut written = std::collections::HashSet::new();
+    let mut owned = body.to_vec();
+    let mut on_expr = |e: &mut Expr| {
+        if let ExprKind::Assign(target, _) = &e.kind {
+            if let ExprKind::Index(object, _) | ExprKind::LabeledIndex(object, _) = &target.kind {
+                if let ExprKind::Var(name) = &object.kind {
+                    written.insert(name.clone());
+                }
+            }
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut owned);
+    written
+}
+
+fn expr_reads_any(expr: &Expr, names: &std::collections::HashSet<String>) -> bool {
+    let mut found = false;
+    let mut owned = expr.clone();
+    let mut on_expr = |e: &mut Expr| {
+        if let ExprKind::Index(object, _) | ExprKind::LabeledIndex(object, _) = &e.kind {
+            if matches!(&object.kind, ExprKind::Var(name) if names.contains(name)) {
+                found = true;
+            }
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.expr(&mut owned);
+    found
+}
+
 fn float_literal(value: f64) -> String {
     let text = format!("{value}");
     if text.contains(['.', 'e', 'E']) || !value.is_finite() {
@@ -5337,7 +5571,7 @@ fn auto_sync_kernel(k: &KernelDecl) -> Option<KernelDecl> {
         .filter(|field| matches!(field.qual, GpuQual::Actor))
         .map(|field| field.name.as_str())
         .collect::<Vec<_>>();
-    let method = k.methods.first()?;
+    let method = entry_method(k)?;
     if names.is_empty()
         || method
             .body
@@ -5403,6 +5637,11 @@ fn auto_sync_kernel(k: &KernelDecl) -> Option<KernelDecl> {
     let mut rewritten = k.clone();
     rewritten.methods[0].body = body;
     Some(rewritten)
+}
+
+/// The anonymous `def ()` entry point; any other method is a device helper.
+fn entry_method(k: &KernelDecl) -> Option<&FnDecl> {
+    k.methods.iter().find(|method| method.name.is_empty())
 }
 
 fn is_cooperative_candidate_error(message: &str) -> bool {
