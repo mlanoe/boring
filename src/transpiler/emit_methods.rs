@@ -3443,10 +3443,24 @@ impl Transpiler {
         }
         self.record_closure_param_hints(obj, method, args);
         if let Some(r) = self.try_emit_fn_field_call(obj, method, args) { return r; }
-        // `t.many.push(closure)` on a `[Seed]` field stores the closure behind its handle.
-        if method == "push" && args.len() == 1 {
-            if let (Some((false, _)), Some(fnty)) = (self.fn_coll_expr(obj), self.fn_coll_elem_type(obj)) {
-                return format!("{}.push({})", self.emit_expr(obj), self.emit_fn_field_value(&fnty, &args[0].value));
+        // `t.many.push(closure)` on a `[Seed]` field stores the closure behind its handle; the
+        // other mutators (`insert`/`set`/`put`/`append`/`extend`) wrap every closure the same way.
+        if let (Some((is_dict, _)), Some(fnty)) = (self.fn_coll_expr(obj), self.fn_coll_elem_type(obj)) {
+            let wrap = |a: &Arg| -> String {
+                match &a.value.kind {
+                    ExprKind::Array(es) => format!("{{ let __v: Vec<{}> = vec![{}]; __v }}", self.emit_fn_field_type(&fnty), es.iter().map(|e| self.emit_fn_field_value(&fnty, e)).collect::<Vec<_>>().join(", ")),
+                    _ => self.emit_fn_field_value(&fnty, &a.value),
+                }
+            };
+            let recv = self.emit_expr(obj);
+            match (is_dict, method, args.len()) {
+                (false, "push", 1) => return format!("{}.push({})", recv, self.emit_fn_field_value(&fnty, &args[0].value)),
+                (false, "insert", 2) => return format!("{}.insert(({}) as usize, {})", recv, self.emit_expr(&args[0].value), self.emit_fn_field_value(&fnty, &args[1].value)),
+                (false, "append" | "extend", 1) if matches!(args[0].value.kind, ExprKind::Array(_)) =>
+                    return format!("{}.extend({})", recv, wrap(&args[0])),
+                (false, "append", 1) => return format!("{}.push({})", recv, self.emit_fn_field_value(&fnty, &args[0].value)),
+                (true, "insert" | "set" | "put", 2) => return format!("{}.insert({}, {})", recv, self.emit_dict_key_owned(&args[0].value), self.emit_fn_field_value(&fnty, &args[1].value)),
+                _ => {}
             }
         }
         if let Some(r) = self.try_emit_host_tensor_cpu(obj, method, args) { return r; }

@@ -3248,6 +3248,20 @@ impl Transpiler {
                 }
             }
         }
+        // `t.named[k] = closure` / `t.many[i] = closure` on a `{K=Seed}` / `[Seed]` field: the
+        // closure is stored behind the field's handle.
+        if let ExprKind::Index(coll, idx) = &target.kind {
+            if !matches!(idx.kind, ExprKind::SliceRange { .. }) {
+                if let (Some((is_dict, _)), Some(fnty)) = (self.fn_coll_expr(coll), self.fn_coll_elem_type(coll)) {
+                    let val_s = self.emit_fn_field_value(&fnty, value);
+                    let coll_s = self.emit_expr(coll);
+                    if is_dict {
+                        return format!("{}.insert({}, {})", coll_s, self.emit_dict_key_owned(idx), val_s);
+                    }
+                    return format!("{}[({}) as usize] = {}", coll_s, self.emit_expr(idx), val_s);
+                }
+            }
+        }
         // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
         if let ExprKind::Index(dict_obj, key) = &target.kind {
             if let ExprKind::Var(dict_name) = &dict_obj.kind {

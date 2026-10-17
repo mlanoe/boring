@@ -440,6 +440,7 @@ transpile_test!(view_method_modifiers);
 transpile_test!(view_state_seed);
 transpile_test!(fn_field_optional_alias);
 transpile_test!(fn_field_collections);
+transpile_test!(fn_field_collection_writes);
 transpile_test!(closure_string_literal_result);
 transpile_test!(view_env_provide);
 transpile_test!(actor_field_through);
