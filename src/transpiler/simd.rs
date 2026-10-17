@@ -142,6 +142,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         coop: false,
         needs_coop: false,
         written_fields: std::collections::HashSet::new(),
+        atomic_fields: std::collections::HashMap::new(),
     };
     e.raw(PRELUDE);
     let mirrors = device_struct_mirrors(program, &kernels, &mut e.errors);
@@ -282,6 +283,22 @@ fn __boring_simd_name() -> &'static str {
     { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_axpy_fma(out, scale, row) }; } }
     __boring_axpy_with(out, scale, row, __boring_fma)
 }
+/// Splits an `m x n` row-major result into worker tasks `(first row, first column, slice)`:
+/// whole row bands when there are enough rows, otherwise column bands within each row.
+fn __boring_tensor_tasks<'a>(c: &'a mut [f32], m: usize, n: usize, workers: usize) -> Vec<(usize, usize, &'a mut [f32])> {
+    if workers > m {
+        let splits = workers.div_ceil(m).min(n).max(1);
+        let per = n.div_ceil(splits);
+        let mut tasks = Vec::new();
+        for (row, values) in c.chunks_mut(n).enumerate() {
+            for (part, slice) in values.chunks_mut(per).enumerate() { tasks.push((row, part * per, slice)); }
+        }
+        tasks
+    } else {
+        let rows = m.div_ceil(workers.max(1));
+        c.chunks_mut(rows * n).enumerate().map(|(index, slice)| (index * rows, 0, slice)).collect()
+    }
+}
 fn __boring_blocks(gx: usize, gy: usize, gz: usize, items_per_block: usize, run: &(dyn Fn(usize, usize, usize) + Sync)) {
     static MIN_ITEMS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let min_items = *MIN_ITEMS.get_or_init(|| std::env::var("BORING_SIMD_PARALLEL_ITEMS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32768));
@@ -377,6 +394,7 @@ struct Emitter {
     coop: bool,
     needs_coop: bool,
     written_fields: std::collections::HashSet<String>,
+    atomic_fields: std::collections::HashMap<String, String>,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -391,6 +409,12 @@ impl Emitter {
         let auto_synced = auto_sync_kernel(k);
         let k = auto_synced.as_ref().unwrap_or(k);
         self.collective_uniform_locals.clear();
+        self.atomic_fields = k
+            .fields
+            .iter()
+            .filter(|f| matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) && is_array(&f.ty))
+            .map(|f| (f.name.clone(), elem_ty(&f.ty)))
+            .collect();
         self.written_fields = entry_method(k)
             .map(|method| written_buffers(&method.body))
             .unwrap_or_default();
@@ -1242,7 +1266,10 @@ impl Emitter {
     fn parallelize_blocks(&mut self, k: &KernelDecl, region_start: usize) -> String {
         const OPEN: &str = "        for bz in 0..gz as usize { for by in 0..gy as usize { for bx in 0..gx as usize {\n";
         const CLOSE: &str = "        } } }\n";
-        if k.fields.iter().any(|f| matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified)) {
+        if k.fields.iter().any(|f| {
+            matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified)
+                && !matches!(elem_ty(&f.ty).as_str(), "i32" | "u32" | "i64" | "u64")
+        }) {
             return String::new();
         }
         let region = self.out[region_start..].to_string();
@@ -2905,6 +2932,27 @@ impl Emitter {
                 } else {
                     None
                 };
+                if let ExprKind::BinOp(op, left, right) = &b.kind {
+                    if let (Some((atomic, element)), Some(method)) = (
+                        self.hardware_atomic(a),
+                        match op {
+                            BinOp::Add => Some("fetch_add"),
+                            BinOp::Sub => Some("fetch_sub"),
+                            BinOp::BitAnd => Some("fetch_and"),
+                            BinOp::BitOr => Some("fetch_or"),
+                            BinOp::BitXor => Some("fetch_xor"),
+                            _ => None,
+                        },
+                    ) {
+                        let target = self.lvalue(a);
+                        if self.lvalue(left) == target {
+                            let operand = self.expr(right);
+                            return format!(
+                                "{{ let __boring_atomic_value = (({operand}) as {element}); unsafe {{ std::sync::atomic::{atomic}::from_ptr(&mut {target} as *mut {element}) }}.{method}(__boring_atomic_value, std::sync::atomic::Ordering::Relaxed); }}"
+                            );
+                        }
+                    }
+                }
                 let optional_destination = matches!(&a.kind, ExprKind::Var(name)
                     if self.value_types.get(name).is_some_and(|kind| kind.starts_with("Option<")));
                 let mut value = if optional_destination {
@@ -3819,6 +3867,17 @@ impl Emitter {
                         .iter()
                         .map(|arg| self.expr(&arg.value))
                         .collect::<Vec<_>>();
+                    if let Some((atomic, element)) = self.hardware_atomic(o) {
+                        let cast = |value: &String| format!("(({value}) as {element})");
+                        let head = format!("let __boring_atomic = unsafe {{ std::sync::atomic::{atomic}::from_ptr(&mut {target} as *mut {element}) }};");
+                        let relaxed = "std::sync::atomic::Ordering::Relaxed";
+                        return match m.as_str() {
+                            "min" => format!("{{ let __boring_atomic_value = {}; {head} __boring_atomic.fetch_min(__boring_atomic_value, {relaxed}) }}", cast(&values[0])),
+                            "max" => format!("{{ let __boring_atomic_value = {}; {head} __boring_atomic.fetch_max(__boring_atomic_value, {relaxed}) }}", cast(&values[0])),
+                            "swap" => format!("{{ let __boring_atomic_value = {}; {head} __boring_atomic.swap(__boring_atomic_value, {relaxed}) }}", cast(&values[0])),
+                            _ => format!("{{ let __boring_atomic_expected = {}; let __boring_atomic_desired = {}; {head} match __boring_atomic.compare_exchange(__boring_atomic_expected, __boring_atomic_desired, {relaxed}, {relaxed}) {{ Ok(previous) | Err(previous) => previous }} }}", cast(&values[0]), cast(&values[1])),
+                        };
+                    }
                     return match m.as_str() {
                         "min" => format!(
                             "{{ let __boring_atomic_value = {}; let __boring_atomic_target = &mut {target}; let __boring_atomic_old = (*__boring_atomic_target).clone(); *__boring_atomic_target = if __boring_atomic_old <= __boring_atomic_value {{ __boring_atomic_old.clone() }} else {{ __boring_atomic_value }}; __boring_atomic_old }}",
@@ -5372,6 +5431,21 @@ impl Emitter {
                 }),
             _ => None,
         }
+    }
+    /// Atomic type and element type when `target` indexes an `'actor'global` /
+    /// `'actor'unified` array of 32/64-bit integers (the widths real hardware atomics cover).
+    fn hardware_atomic(&self, target: &Expr) -> Option<(&'static str, String)> {
+        let (ExprKind::Index(object, _) | ExprKind::LabeledIndex(object, _)) = &target.kind else { return None };
+        let ExprKind::Var(name) = &object.kind else { return None };
+        let element = self.atomic_fields.get(name)?;
+        let atomic = match element.as_str() {
+            "i32" => "AtomicI32",
+            "u32" => "AtomicU32",
+            "i64" => "AtomicI64",
+            "u64" => "AtomicU64",
+            _ => return None,
+        };
+        Some((atomic, element.clone()))
     }
     fn lvalue(&mut self, e: &Expr) -> String {
         match &e.kind {

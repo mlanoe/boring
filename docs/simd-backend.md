@@ -97,7 +97,8 @@ the existing portable CPU loop lowering. Dot-product forms (`linear`, whose weig
 k-major forms update whole output rows with a contiguous multiply-add, so both vectorize
 (partial sums are reassociated, so results can differ from a strict left-to-right sum in the last bit).
 On x86-64 these loops have an AVX2+FMA twin selected at run time (baseline x86-64 has no FMA
-instruction). A one-row operation (`m = 1`, the decode shape) splits its columns across workers. Very large operations split output
+instruction). When there are fewer rows than workers (down to the one-row decode shape), each row's columns are split
+across workers instead. Very large operations split output
 rows into disjoint mutable chunks across the available CPU cores; smaller ones
 run inline to avoid thread-spawn and cache-contention overhead.
 Backend-specific BLAS integration and quantized SIMD microkernels remain future
@@ -111,9 +112,8 @@ provides a single-worker reference path. The default parallel threshold is
 blocks may run in any order and concurrently, so blocks that write the same element
 race exactly as they would on a GPU. A grid goes parallel once it has at least
 `BORING_SIMD_PARALLEL_ITEMS` work-items (default 32768; `0` forces it, handy in
-tests); smaller launches stay on the calling thread to avoid spawn cost. Kernels with
-`'actor'global` / `'actor'unified` atomic storage always run sequentially, because
-their read-modify-writes are plain on the CPU. `BORING_SIMD_THREADS=1` restores fully
+tests); smaller launches stay on the calling thread to avoid spawn cost. Kernels using atomics on element types without a hardware atomic (floats, 8/16-bit integers)
+run sequentially. `BORING_SIMD_THREADS=1` restores fully
 sequential execution.
 
 ## Build

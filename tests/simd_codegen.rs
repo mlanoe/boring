@@ -5748,9 +5748,9 @@ print linear[20]
     assert!(source.contains("for __boring_tensor_k in 0usize..5usize"));
     assert!(source.contains("fn __boring_simd_threads()"));
     assert!(source.contains("static THREADS: std::sync::OnceLock<usize>"));
-    assert!(source.contains("__boring_simd_threads().min(if 3usize == 1"));
+    assert!(source.contains("__boring_simd_threads().min(3usize * 7usize)"));
     assert!(source.contains("if __boring_tensor_work < __boring_simd_parallel_threshold()"));
-    assert!(source.contains("{ __boring_tensor_rows_per_worker * 7 }"));
+    assert!(source.contains("__boring_tensor_tasks(&mut"));
     assert!(source.contains("__boring_tensor_task();"));
     assert!(source.contains("__boring_tensor_scope.spawn(__boring_tensor_task)"));
     let run = Command::new("cargo")
@@ -5823,9 +5823,9 @@ print accumulated[3]
         String::from_utf8_lossy(&generated.stderr)
     );
     let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
-    assert!(generated_source.contains("__boring_simd_threads().min(if __boring_tensor_m == 1"));
+    assert!(generated_source.contains("__boring_simd_threads().min(__boring_tensor_m * __boring_tensor_n)"));
     assert!(generated_source
-        .contains("{ __boring_tensor_rows_per_worker * __boring_tensor_n }"));
+        .contains("__boring_tensor_tasks(&mut"));
     assert!(generated_source.contains("__boring_tensor_bias[__boring_tensor_col]"));
     assert!(generated_source.contains(".mul_add("));
     let run = Command::new("cargo")
@@ -7620,8 +7620,8 @@ print "{atomics.values[0]} {atomics.values[1]} {atomics.values[2]} {atomics.valu
         String::from_utf8_lossy(&generated.stderr)
     );
     let source = fs::read_to_string(root.join("atomic_methods_simd/src/main.rs")).unwrap();
-    assert!(source.contains("let __boring_atomic_target = &mut self.values"));
-    assert!(source.contains("let __boring_atomic_old = (*__boring_atomic_target).clone()"));
+    assert!(source.contains("AtomicI32::from_ptr(&mut self.values"));
+    assert!(source.contains("fetch_min(") && source.contains("compare_exchange("));
     for scalar in [false, true] {
         let mut command = Command::new("cargo");
         command
@@ -8107,7 +8107,7 @@ fn device_introspection_matches_the_metal_surface() {
 }
 
 #[test]
-fn blocks_run_in_parallel_with_identical_results_and_atomic_kernels_stay_sequential() {
+fn blocks_run_in_parallel_with_identical_results_and_atomics_stay_exact() {
     let source = "let N = 4096\nmut [float32]'kernel'unified x = [1.0 as float32 for ..<N]\nmut [float32]'kernel'unified y = [0.0 as float32 for ..<N]\nmut [int]'kernel'unified counts = [0 for ..<1]\nkernel Work:\n    let [float32]'global x\n    mut [float32]'unified y\n    mut [float32, 64]'actor tile\n    init([float32]'global a, mut [float32]'unified b):\n        x = a\n        y = b\n    def ():\n        let i = .thread.x + .block.x * .block_dim.x\n        tile[.thread.x] = x[i] + i as float32\n        sync\n        y[i] = tile[63 - .thread.x] * 2.0\nkernel Count:\n    mut [int]'actor'global counts\n    init(mut [int]'actor'global c):\n        counts = c\n    def ():\n        counts[0] += 1\nmut w = Work(x, y)\nmut c = Count(counts)\nkernel:\n    w(block = 64, grid = N / 64)\n    c(block = 64, grid = N / 64)\nprint \"{w.y[0]} {w.y[4095]} {c.counts[0]}\"\n";
     let (sequential, stderr, ok) = build_and_run_simd("parallel_blocks", source, None);
     assert!(ok, "{stderr}");
@@ -8129,8 +8129,10 @@ fn blocks_run_in_parallel_with_identical_results_and_atomic_kernels_stay_sequent
     )
     .unwrap();
     assert!(generated.contains("__boring_blocks("));
-    // `Count` uses atomics: its block loop is not handed to worker threads.
-    assert_eq!(generated.matches("fn __block(").count(), 1);
+    // `Count` uses 32-bit integer atomics, which are real hardware atomics, so its blocks
+    // are distributed too (the parallel run above sums to exactly 4096).
+    assert_eq!(generated.matches("fn __block(").count(), 2);
+    assert!(generated.contains("AtomicI32::from_ptr"));
 }
 
 #[test]
@@ -8177,4 +8179,30 @@ fn single_row_tensor_ops_split_columns_across_workers_with_identical_results() {
     let first: Vec<&str> = sequential.lines().next().unwrap().split(' ').collect();
     let expect_matmul: f32 = (0..4).map(|kk| (kk + 1) as f32 * (((kk * 6) % 5) as f32 - 2.0)).sum();
     assert_eq!(first[0].parse::<f32>().unwrap(), expect_matmul);
+}
+
+#[test]
+fn few_row_tensor_ops_use_column_bands_within_rows_with_identical_results() {
+    let source = "let n = 6\nlet k = 4\nlet m = 3\nlet [float32]'kernel'global da = [float32(i + 1) for i in 0..<12]\nlet [float32]'kernel'global db = [float32((i % 5) - 2) for i in 0..<24]\nlet [float32]'kernel'global dw = [float32((i % 3) - 1) for i in 0..<24]\nlet [float32]'kernel'global bias = [0.5 as float32 for ..<6]\nmut [float32]'kernel'unified dy = [0.0 as float32 for ..<18]\nmut [float32]'kernel'unified dm = [0.0 as float32 for ..<18]\nkernel.tensors.linear(da, dw, bias, dy, m = m, n = n, k = k)\nkernel.tensors.matmul(da, db, dm, m = m, n = n, k = k)\nwith dy:\n    with dm:\n        for i in 0..<18:\n            print \"{dy[i]} {dm[i]}\"\n";
+    let (sequential, stderr, ok) = build_and_run_simd("few_rows", source, None);
+    assert!(ok, "{stderr}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_few_rows/few_rows_simd/Cargo.toml");
+    let parallel = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_few_rows/target"))
+        .env("BORING_SIMD_THREADS", "8")
+        .env("BORING_SIMD_PARALLEL_THRESHOLD", "0")
+        .output()
+        .unwrap();
+    assert!(parallel.status.success(), "{}", String::from_utf8_lossy(&parallel.stderr));
+    assert_eq!(String::from_utf8_lossy(&parallel.stdout).trim(), sequential);
+    // Reference for the last row and column: dy = bias + dot(a row, w col), dm = dot(a row, b column).
+    let (row, col) = (2usize, 5usize);
+    let linear: f32 = 0.5 + (0..4).map(|i| (row * 4 + i + 1) as f32 * ((((col * 4 + i) % 3) as f32) - 1.0)).sum::<f32>();
+    let matmul: f32 = (0..4).map(|i| (row * 4 + i + 1) as f32 * ((((i * 6 + col) % 5) as f32) - 2.0)).sum::<f32>();
+    let last: Vec<&str> = sequential.lines().last().unwrap().split(' ').collect();
+    assert_eq!(last[0].parse::<f32>().unwrap(), linear);
+    assert_eq!(last[1].parse::<f32>().unwrap(), matmul);
 }
