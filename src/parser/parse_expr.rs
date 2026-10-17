@@ -14,6 +14,15 @@ use crate::ast::*;
 use crate::lexer::{lex, TokenKind, RawInterpPart};
 
 impl Parser {
+    /// A side-effect-free `a`, `a.b`, `self.a.b` path (safe to evaluate twice).
+    fn is_pure_path(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var(_) => true,
+            ExprKind::Field(o, _) => Self::is_pure_path(o),
+            _ => false,
+        }
+    }
+
     // ─── Expressions ────────────────────────────────────────────────────────
 
     pub(crate) fn parse_expr(&mut self) -> Result<Expr, ParseError> {
@@ -834,6 +843,30 @@ impl Parser {
                 TokenKind::QuestionDot => {
                     // Optional chaining: ?.field or ?.method(args)
                     self.advance();
+                    // Optional call of a function-typed value: `f?.(args)`. Desugars to
+                    // `if f != nil: f(args) else: nil` (callee must be a side-effect-free
+                    // variable/field path, since it is evaluated twice).
+                    if self.check(&TokenKind::LParen) {
+                        let args = self.parse_call_args()?;
+                        let mk = |kind| Expr { kind, line, col, len: 0 };
+                        let call_kind = match &expr.kind {
+                            ExprKind::Var(_) => ExprKind::Call(Box::new(expr.clone()), args),
+                            ExprKind::Field(obj, name) if Self::is_pure_path(obj) =>
+                                ExprKind::MethodCall(obj.clone(), name.clone(), args),
+                            _ => return Err(ParseError::Generic {
+                                line, col, len: self.tok_len(),
+                                msg: "optional call `?.(` requires a variable or field path on the left (e.g. `f?.(x)`, `s.make?.(x)`)".to_string(),
+                            }),
+                        };
+                        let cond = mk(ExprKind::BinOp(BinOp::NotEq, Box::new(expr.clone()), Box::new(mk(ExprKind::Nil))));
+                        let if_stmt = IfStmt {
+                            branches: vec![(cond, vec![Stmt::Expr(mk(call_kind))])],
+                            else_body: Some(vec![Stmt::Expr(mk(ExprKind::Nil))]),
+                            line, col,
+                        };
+                        expr = mk(ExprKind::If(Box::new(if_stmt)));
+                        continue;
+                    }
                     let field = self.expect_ident_or_keyword()?;
                     // Generic method call: `obj?.method<T1, T2>(args)`.
                     // Same disambiguation heuristic as the `.method<T>` case above —

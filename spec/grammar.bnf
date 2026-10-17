@@ -766,6 +766,7 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                   | "." IDENT "(" arg_list? ")"                             # method call
                   | "." IDENT "<" type_list ">" "(" arg_list? ")"          # generic method call: obj.method<T>(args)
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
+                  | "?." "(" arg_list? ")"                                  # optional call of a function-typed value: f?.(args) — sugar for `if f != nil: f(args) else: nil`; callee must be a variable/field path
                   | "?." IDENT "<" type_list ">" "(" arg_list? ")"        # optional chaining — generic method call: obj?.method<T>(args)
                   | "[" expr "]"                                             # index
                   | "[" IDENT "=" expr ("," IDENT "=" expr)* ","? "]"        # labeled index (2+ axes; see array-multidim-types.md):

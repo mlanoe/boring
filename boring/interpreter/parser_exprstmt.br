@@ -435,6 +435,19 @@ def Expr parse_unary_op(mut Parser p, int line) throws:
     let expr = parse_unary(p)
     make_unary("BitNot", expr, line)
 
+# `a` / `a.b.c` — side-effect-free, so safe to evaluate twice in the `?.(` desugar.
+def bool is_pure_path(Expr e):
+    match e.kind:
+        ExprKind.Var(_): true
+        ExprKind.Field(obj, _): is_pure_path(obj)
+        _: false
+
+def bool is_optional_call_callee(Expr e):
+    match e.kind:
+        ExprKind.Var(_): true
+        ExprKind.Field(obj, _): is_pure_path(obj)
+        _: false
+
 def Expr parse_postfix(mut Parser p) throws:
     parse_postfix_inner(p, true)
 
@@ -490,6 +503,21 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_field_expr(expr, field, line)
         elif parser_check(p, "QuestionDot"):
             parser_advance(p)
+            if parser_check(p, "LParen"):
+                # Optional call `f?.(args)` → `if f != nil: f(args) else: nil`
+                # (callee: a side-effect-free variable/field path, evaluated twice).
+                # Mirrors the Rust-hosted parser (`src/parser/parse_expr.rs`).
+                let args = parse_call_args(p)
+                if not is_optional_call_callee(expr):
+                    throw "optional call `?.(` requires a variable or field path on the left"
+                # (`Call(Field)` rather than `MethodCall`: this interpreter resolves
+                # a function-typed field through a call on the field value.)
+                let call = make_call(expr, args, line)
+                let cond = make_binop("NotEq", expr, make_nil_expr(line), line)
+                let branches = [IfBranch(cond= cond, body= [stmt_expr(call, line)])]
+                let if_stmt = make_if_stmt(branches, [stmt_expr(make_nil_expr(line), line)], line)
+                expr = make_if_expr(if_stmt, line)
+                continue
             let field = parser_expect_ident_or_keyword(p)
             if parser_peek_is_trailing_closure(p):
                 let args = parse_trailing_closure(p, [])
