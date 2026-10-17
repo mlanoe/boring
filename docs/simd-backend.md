@@ -36,8 +36,10 @@ host/device copy, although the generated API keeps explicit copy methods so it
 shares the host-lowering boundary with GPU targets. Resident (`'kernel'unified`)
 function results and kernel-to-kernel buffer aliases are plain `Vec` copies.
 Thread-local kernel fields are per-work-item locals, and `'actor'global` /
-`'actor'unified` atomics (`+=`, `.min`, `.max`, `.swap`, `.cas`) are plain
-read-modify-writes that return the previous value (such kernels never run blocks in parallel). `'surface` buffers are ordinary `Vec<u32>` fields (see "GPU display" below).
+`'actor'unified` atomics (`+= -= &= |= ^=`, `.min`, `.max`, `.swap`, `.cas`) on 32/64-bit integers are
+real hardware atomics (`Atomic*::from_ptr`, relaxed ordering) that return the previous value, so such
+kernels run their blocks in parallel like any other; other element types (floats, small integers) stay
+plain read-modify-writes and keep the kernel sequential. `'surface` buffers are ordinary `Vec<u32>` fields (see "GPU display" below).
 Identity and runtime type-test operators are rejected by the SIMD code generator
 rather than emitted with altered semantics. Unsupported
 kernel statements and expressions likewise produce source diagnostics.
