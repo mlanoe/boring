@@ -40,6 +40,7 @@ pub mod metal;
 pub mod wgpu;
 pub mod rocm;
 pub mod simd;
+mod simd_display;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 

@@ -2620,6 +2620,44 @@ impl Transpiler {
     /// assignment desugaring (`x += y`), dict/array-index writes, and the general
     /// fallback (GPU-resident materialization, actor auto-clone, Optional auto-wrap).
     fn emit_expr_assign(&self, target: &Expr, value: &Expr) -> String {
+        // CPU/SIMD: `render.cells = step.cells_in` copies one kernel buffer into another.
+        if self.config.is_simd_target {
+            if let (ExprKind::Field(to, to_field), ExprKind::Field(from, from_field)) = (&target.kind, &value.kind) {
+                if let (ExprKind::Var(a), ExprKind::Var(b)) = (&to.kind, &from.kind) {
+                    if self.kernel_vars.contains_key(a.as_str()) && self.kernel_vars.contains_key(b.as_str()) {
+                        return format!("{a}.{to_field} = {b}.{from_field}.clone()");
+                    }
+                }
+            }
+        }
+        // CPU/SIMD kernel buffers are plain `Vec` fields: `a.x, a.y = a.y, a.x`
+        // (the render-loop ping-pong) must assign to the places, not to clones.
+        if self.config.is_simd_target {
+            if let (ExprKind::Tuple(lhs), ExprKind::Tuple(rhs)) = (&target.kind, &value.kind) {
+                let place = |e: &Expr| match &e.kind {
+                    ExprKind::Field(obj, field) => match &obj.kind {
+                        ExprKind::Var(o) => Some(format!("{o}.{field}")),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let places: Vec<Option<String>> = lhs.iter().map(place).collect();
+                if lhs.len() == rhs.len() && places.iter().all(|p| p.is_some()) {
+                    let places: Vec<String> = places.into_iter().flatten().collect();
+                    if places.len() == 2 {
+                        if let (Some(r0), Some(r1)) = (place(&rhs[0]), place(&rhs[1])) {
+                            if r0 == places[1] && r1 == places[0] {
+                                return format!("std::mem::swap(&mut {}, &mut {})", places[0], places[1]);
+                            }
+                        }
+                    }
+                    let temps: Vec<String> = (0..places.len()).map(|i| format!("__t{i}")).collect();
+                    let values: Vec<String> = rhs.iter().map(|e| self.emit_expr_owned(e)).collect();
+                    let assigns: Vec<String> = places.iter().zip(&temps).map(|(p, t)| format!("{p} = {t};")).collect();
+                    return format!("{{ let ({}) = ({},); {} }}", temps.join(", "), values.join(", "), assigns.join(" "));
+                }
+            }
+        }
         if let ExprKind::Field(obj, field) = &target.kind {
             if let Some(value_access) = self.state_slot_value_expr(obj, field) {
                 return self.emit_expr_assign(&value_access, value);

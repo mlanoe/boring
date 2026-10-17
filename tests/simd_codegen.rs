@@ -106,7 +106,7 @@ fn warp_lane_and_size_run_on_cpu() {
         .unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     let generated = fs::read_to_string(root.join("warp_simd/src/main.rs")).unwrap();
-    assert!(generated.contains("let __simd_lanes = __boring_simd_lanes() as i32;"));
+    assert!(generated.contains("let __simd_lanes: i32 = 32;"));
     assert!(generated.contains("rem_euclid(__simd_lanes)"));
     for scalar in [false, true] {
         let mut command = Command::new("cargo");
@@ -123,10 +123,7 @@ fn warp_lane_and_size_run_on_cpu() {
             .map(|value| value.parse::<i32>().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(values[0], 7 % values[1]);
-        assert!(matches!(values[1], 1 | 4 | 8 | 16));
-        if scalar {
-            assert_eq!(values[1], 1);
-        }
+        assert_eq!(values[1], 32);
     }
 }
 
@@ -285,11 +282,8 @@ fn unchanged_mutable_local_warp_shuffle_runs_on_cpu() {
         let run = command.output().unwrap();
         assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
         let value = String::from_utf8_lossy(&run.stdout).trim().parse::<i32>().unwrap();
-        if scalar {
-            assert_eq!(value, 7);
-        } else {
-            assert!(matches!(value, 0 | 4 | 7));
-        }
+        // The logical warp is 32 lanes wide on every ISA path.
+        assert_eq!(value, 0);
     }
 }
 
@@ -321,16 +315,12 @@ fn straight_line_mutable_local_warp_shuffle_runs_on_cpu() {
         let run = command.output().unwrap();
         assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
         let value = String::from_utf8_lossy(&run.stdout).trim().parse::<i32>().unwrap();
-        if scalar {
-            assert_eq!(value, 9);
-        } else {
-            assert!(matches!(value, 2 | 6 | 9));
-        }
+        assert_eq!(value, 2);
     }
 }
 
 #[test]
-fn branched_mutable_local_warp_shuffle_fails_during_codegen() {
+fn branched_mutable_local_warp_shuffle_uses_cooperative_fallback() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_warp_branched_mutable_error");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -345,8 +335,9 @@ fn branched_mutable_local_warp_shuffle_fails_during_codegen() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("lane-replayable value"));
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -573,7 +564,7 @@ print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3
 }
 
 #[test]
-fn collective_for_with_nested_divergent_if_remains_rejected_on_simd() {
+fn collective_for_with_nested_divergent_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_for_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -589,9 +580,9 @@ fn collective_for_with_nested_divergent_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -696,7 +687,7 @@ print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3
 }
 
 #[test]
-fn collective_while_with_nested_divergent_if_remains_rejected_on_simd() {
+fn collective_while_with_nested_divergent_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_while_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -712,9 +703,9 @@ fn collective_while_with_nested_divergent_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -764,7 +755,7 @@ print "{looped.output[0]} {looped.output[1]} {looped.output[2]} {looped.output[3
 }
 
 #[test]
-fn thread_divergent_do_while_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_do_while_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_do_while");
     let _ = fs::remove_dir_all(&root);
@@ -780,9 +771,9 @@ fn thread_divergent_do_while_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -936,7 +927,7 @@ print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3
 }
 
 #[test]
-fn nested_divergent_if_with_sync_remains_rejected_on_simd() {
+fn nested_divergent_if_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -952,9 +943,9 @@ fn nested_divergent_if_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1131,7 +1122,7 @@ print "{matched.output[0]} {matched.output[1]} {matched.output[2]} {matched.outp
 }
 
 #[test]
-fn thread_divergent_tuple_match_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_tuple_match_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_tuple_match");
     let _ = fs::remove_dir_all(&root);
@@ -1147,9 +1138,9 @@ fn thread_divergent_tuple_match_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1214,9 +1205,9 @@ fn optional_call_with_thread_value_remains_divergent_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1262,7 +1253,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_optional_predicate_with_sync_remains_rejected_on_simd() {
+fn thread_optional_predicate_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_optional_predicate");
     let _ = fs::remove_dir_all(&root);
@@ -1278,9 +1269,9 @@ fn thread_optional_predicate_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1326,7 +1317,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_optional_fallback_with_sync_remains_rejected_on_simd() {
+fn thread_optional_fallback_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_optional_fallback");
     let _ = fs::remove_dir_all(&root);
@@ -1342,9 +1333,9 @@ fn thread_optional_fallback_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1455,7 +1446,7 @@ print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3
 }
 
 #[test]
-fn collective_match_with_nested_divergent_if_remains_rejected_on_simd() {
+fn collective_match_with_nested_divergent_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_match_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -1471,9 +1462,9 @@ fn collective_match_with_nested_divergent_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1576,7 +1567,7 @@ print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3
 }
 
 #[test]
-fn collective_if_let_with_nested_divergent_if_remains_rejected_on_simd() {
+fn collective_if_let_with_nested_divergent_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_if_let_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -1592,9 +1583,9 @@ fn collective_if_let_with_nested_divergent_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1763,7 +1754,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_if_expression_alias_with_sync_remains_rejected_on_simd() {
+fn thread_if_expression_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_if_expression_alias");
     let _ = fs::remove_dir_all(&root);
@@ -1779,9 +1770,9 @@ fn thread_if_expression_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1831,7 +1822,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_match_expression_alias_with_sync_remains_rejected_on_simd() {
+fn thread_match_expression_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_match_expression_alias");
     let _ = fs::remove_dir_all(&root);
@@ -1847,9 +1838,9 @@ fn thread_match_expression_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1897,7 +1888,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_do_expression_alias_with_sync_remains_rejected_on_simd() {
+fn thread_do_expression_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_do_expression_alias");
     let _ = fs::remove_dir_all(&root);
@@ -1913,9 +1904,9 @@ fn thread_do_expression_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -1966,7 +1957,7 @@ print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.outp
 }
 
 #[test]
-fn thread_indexed_collection_alias_with_sync_remains_rejected_on_simd() {
+fn thread_indexed_collection_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_collection_alias");
     let _ = fs::remove_dir_all(&root);
@@ -1982,9 +1973,9 @@ fn thread_indexed_collection_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2035,7 +2026,7 @@ print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.outp
 }
 
 #[test]
-fn thread_comprehension_alias_with_sync_remains_rejected_on_simd() {
+fn thread_comprehension_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_comprehension_alias");
     let _ = fs::remove_dir_all(&root);
@@ -2051,9 +2042,9 @@ fn thread_comprehension_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2100,7 +2091,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_sized_allocated_array_with_sync_remains_rejected_on_simd() {
+fn thread_sized_allocated_array_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_allocated_array_alias");
     let _ = fs::remove_dir_all(&root);
@@ -2116,9 +2107,9 @@ fn thread_sized_allocated_array_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2166,7 +2157,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_sliced_collection_alias_with_sync_remains_rejected_on_simd() {
+fn thread_sliced_collection_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_slice_alias");
     let _ = fs::remove_dir_all(&root);
@@ -2182,9 +2173,9 @@ fn thread_sliced_collection_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2293,7 +2284,7 @@ print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.outp
 }
 
 #[test]
-fn thread_set_contains_alias_with_sync_remains_rejected_on_simd() {
+fn thread_set_contains_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_set_contains_alias");
     let _ = fs::remove_dir_all(&root);
@@ -2309,9 +2300,9 @@ fn thread_set_contains_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2362,7 +2353,7 @@ print "{guarded.output[4]} {guarded.output[5]} {guarded.output[6]} {guarded.outp
 }
 
 #[test]
-fn thread_dict_get_alias_with_sync_remains_rejected_on_simd() {
+fn thread_dict_get_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_dict_get_alias");
     let _ = fs::remove_dir_all(&root);
@@ -2378,9 +2369,9 @@ fn thread_dict_get_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2427,7 +2418,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_collection_reduction_with_sync_remains_rejected_on_simd() {
+fn thread_collection_reduction_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_collection_reduction");
     let _ = fs::remove_dir_all(&root);
@@ -2443,9 +2434,9 @@ fn thread_collection_reduction_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2492,7 +2483,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_collection_predicate_with_sync_remains_rejected_on_simd() {
+fn thread_collection_predicate_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_collection_predicate");
     let _ = fs::remove_dir_all(&root);
@@ -2508,9 +2499,9 @@ fn thread_collection_predicate_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2559,7 +2550,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_collection_transformation_with_sync_remains_rejected_on_simd() {
+fn thread_collection_transformation_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_collection_transformation");
     let _ = fs::remove_dir_all(&root);
@@ -2575,9 +2566,9 @@ fn thread_collection_transformation_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -2624,7 +2615,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_collection_reduce_with_sync_remains_rejected_on_simd() {
+fn thread_collection_reduce_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_collection_reduce");
     let _ = fs::remove_dir_all(&root);
@@ -2640,9 +2631,9 @@ fn thread_collection_reduce_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -3951,7 +3942,7 @@ print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3
 }
 
 #[test]
-fn inherited_thread_alias_for_later_sync_remains_rejected_on_simd() {
+fn inherited_thread_alias_for_later_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_inherited_thread_alias");
     let _ = fs::remove_dir_all(&root);
@@ -3967,9 +3958,9 @@ fn inherited_thread_alias_for_later_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -4033,7 +4024,7 @@ print "{looped.output[0]} {looped.output[1]} {looped.output[2]} {looped.output[3
 }
 
 #[test]
-fn immutable_thread_alias_with_sync_remains_rejected_on_simd() {
+fn immutable_thread_alias_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_thread_alias");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -4048,11 +4039,9 @@ fn immutable_thread_alias_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -4483,7 +4472,7 @@ print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3
 }
 
 #[test]
-fn divergent_if_after_collective_match_remains_rejected_on_simd() {
+fn divergent_if_after_collective_match_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_match_then_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -4499,15 +4488,13 @@ fn divergent_if_after_collective_match_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn divergent_while_after_collective_if_remains_rejected_on_simd() {
+fn divergent_while_after_collective_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_if_then_divergent_while");
     let _ = fs::remove_dir_all(&root);
@@ -4523,13 +4510,13 @@ fn divergent_while_after_collective_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn divergent_for_after_collective_if_remains_rejected_on_simd() {
+fn divergent_for_after_collective_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_if_then_divergent_for");
     let _ = fs::remove_dir_all(&root);
@@ -4545,15 +4532,13 @@ fn divergent_for_after_collective_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn divergent_if_let_after_collective_if_remains_rejected_on_simd() {
+fn divergent_if_let_after_collective_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_if_then_divergent_if_let");
     let _ = fs::remove_dir_all(&root);
@@ -4569,15 +4554,13 @@ fn divergent_if_let_after_collective_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn divergent_guard_after_collective_if_remains_rejected_on_simd() {
+fn divergent_guard_after_collective_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_if_then_divergent_guard");
     let _ = fs::remove_dir_all(&root);
@@ -4593,15 +4576,13 @@ fn divergent_guard_after_collective_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn divergent_match_after_collective_if_remains_rejected_on_simd() {
+fn divergent_match_after_collective_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_if_then_divergent_match");
     let _ = fs::remove_dir_all(&root);
@@ -4617,15 +4598,13 @@ fn divergent_match_after_collective_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn divergent_if_after_collective_if_remains_rejected_on_simd() {
+fn divergent_if_after_collective_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_successive_if_divergence");
     let _ = fs::remove_dir_all(&root);
@@ -4641,11 +4620,9 @@ fn divergent_if_after_collective_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -4704,7 +4681,7 @@ print "{conditional.output[0]} {conditional.output[1]} {conditional.output[2]} {
 }
 
 #[test]
-fn thread_divergent_if_let_elif_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_if_let_elif_with_sync_uses_cooperative_fallback_on_simd() {
     let root =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_if_let_elif");
     let _ = fs::remove_dir_all(&root);
@@ -4720,15 +4697,13 @@ fn thread_divergent_if_let_elif_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_if_let_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_if_let_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_if_let");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -4743,11 +4718,9 @@ fn thread_divergent_if_let_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -4856,7 +4829,7 @@ print "{matched.output[0]} {matched.output[1]} {matched.output[2]} {matched.outp
 }
 
 #[test]
-fn pattern_bound_divergent_match_guard_with_sync_remains_rejected_on_simd() {
+fn pattern_bound_divergent_match_guard_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_bound_divergent_match_guard");
     let _ = fs::remove_dir_all(&root);
@@ -4872,15 +4845,13 @@ fn pattern_bound_divergent_match_guard_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_match_guard_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_match_guard_with_sync_uses_cooperative_fallback_on_simd() {
     let root =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_match_guard");
     let _ = fs::remove_dir_all(&root);
@@ -4896,11 +4867,9 @@ fn thread_divergent_match_guard_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5055,7 +5024,7 @@ print "{nested.output[0]} {nested.output[1]} {nested.output[2]} {nested.output[3
 }
 
 #[test]
-fn collective_guard_with_nested_divergent_if_remains_rejected_on_simd() {
+fn collective_guard_with_nested_divergent_if_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_guard_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -5071,9 +5040,9 @@ fn collective_guard_with_nested_divergent_if_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5171,7 +5140,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn collective_guard_let_binding_with_divergent_sync_remains_rejected_on_simd() {
+fn collective_guard_let_binding_with_divergent_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_guard_let_nested_divergent_if");
     let _ = fs::remove_dir_all(&root);
@@ -5187,9 +5156,9 @@ fn collective_guard_let_binding_with_divergent_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5294,7 +5263,7 @@ print "{guarded.output[0]} {guarded.output[1]} {guarded.output[2]} {guarded.outp
 }
 
 #[test]
-fn thread_divergent_multiclause_guard_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_multiclause_guard_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_guard_multiclause");
     let _ = fs::remove_dir_all(&root);
@@ -5310,15 +5279,13 @@ fn thread_divergent_multiclause_guard_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_guard_let_pattern_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_guard_let_pattern_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_sync_divergent_guard_let_pattern");
     let _ = fs::remove_dir_all(&root);
@@ -5334,15 +5301,13 @@ fn thread_divergent_guard_let_pattern_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_guard_let_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_guard_let_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_guard_let");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -5357,15 +5322,13 @@ fn thread_divergent_guard_let_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_guard_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_guard_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_guard");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -5380,15 +5343,13 @@ fn thread_divergent_guard_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_if_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_if_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_if");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -5403,15 +5364,13 @@ fn thread_divergent_if_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_match_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_match_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_match");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -5426,15 +5385,13 @@ fn thread_divergent_match_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
-fn thread_divergent_for_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_for_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_sync_divergent_for");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -5449,11 +5406,9 @@ fn thread_divergent_for_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(
-        String::from_utf8_lossy(&generated.stderr)
-            .contains("`sync` is not yet supported inside a --target simd kernel")
-    );
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5506,7 +5461,7 @@ print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3
 }
 
 #[test]
-fn thread_divergent_while_let_with_sync_remains_rejected_on_simd() {
+fn thread_divergent_while_let_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_divergent_while_let_sync");
     let _ = fs::remove_dir_all(&root);
@@ -5522,9 +5477,9 @@ fn thread_divergent_while_let_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5582,7 +5537,7 @@ print "{phased.output[4]} {phased.output[5]} {phased.output[6]} {phased.output[7
 }
 
 #[test]
-fn nested_thread_while_let_with_sync_remains_rejected_on_simd() {
+fn nested_thread_while_let_with_sync_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_nested_divergent_while_let_sync");
     let _ = fs::remove_dir_all(&root);
@@ -5598,9 +5553,9 @@ fn nested_thread_while_let_with_sync_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5651,7 +5606,7 @@ print "{phased.output[0]} {phased.output[1]} {phased.output[2]} {phased.output[3
 }
 
 #[test]
-fn collective_loop_with_thread_break_remains_rejected_on_simd() {
+fn collective_loop_with_thread_break_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_collective_loop_thread_break");
     let _ = fs::remove_dir_all(&root);
@@ -5667,9 +5622,9 @@ fn collective_loop_with_thread_break_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -5728,7 +5683,7 @@ print "{phased.output[4]} {phased.output[5]} {phased.output[6]} {phased.output[7
 }
 
 #[test]
-fn nested_collective_loop_with_thread_break_remains_rejected_on_simd() {
+fn nested_collective_loop_with_thread_break_uses_cooperative_fallback_on_simd() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("simd_nested_collective_loop_thread_break");
     let _ = fs::remove_dir_all(&root);
@@ -5744,9 +5699,9 @@ fn nested_collective_loop_with_thread_break_remains_rejected_on_simd() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr)
-        .contains("`sync` is not yet supported inside a --target simd kernel"));
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let generated_source = fs::read_to_string(input.with_extension("").with_file_name(format!("{}_simd", input.file_stem().unwrap().to_string_lossy())).join("src/main.rs")).unwrap();
+    assert!(generated_source.contains("__coop::run_block"));
 }
 
 #[test]
@@ -7773,4 +7728,324 @@ fn examples_with_top_level_scalar_constants_build_and_run() {
             String::from_utf8_lossy(&run.stdout)
         );
     }
+}
+
+// ── Cooperative fallback, struct kernel fields, implicit shared-memory barriers ──
+
+/// Builds `source` with `--target simd`, runs the generated crate in release mode and
+/// returns `(stdout, stderr, success)`.  `rustflags` is forwarded to the generated
+/// crate's own build (used to select the portable thread-based coop backend).
+fn build_and_run_simd(name: &str, source: &str, rustflags: Option<&str>) -> (String, String, bool) {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("simd_{name}"));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join(format!("{name}.br"));
+    fs::write(&input, source).unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let mut command = Command::new("cargo");
+    command
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(root.join(format!("{name}_simd/Cargo.toml")))
+        .arg("--target-dir")
+        .arg(root.join(if rustflags.is_some() { "target_alt" } else { "target" }));
+    if let Some(flags) = rustflags {
+        command.env("RUSTFLAGS", flags);
+    }
+    let run = command.output().unwrap();
+    (
+        String::from_utf8_lossy(&run.stdout).trim().to_string(),
+        String::from_utf8_lossy(&run.stderr).to_string(),
+        run.status.success(),
+    )
+}
+
+const COOP_STATE_SOURCE: &str = "mut [float32]'kernel'unified out = [0.0 for ..<8]\nmut [float32]'kernel'unified red = [0.0 for ..<8]\nkernel Tiles:\n    mut [float32, 8]'actor tile\n    mut [float32]'unified out\n    mut [float32]'unified red\n    init(mut [float32]'unified o, mut [float32]'unified r):\n        out = o\n        red = r\n    def ():\n        let t = .thread.x\n        var float32 acc = 0.0\n        for round in 0..<3:\n            tile[t] = (t + round) as float32\n            sync\n            acc += tile[7 - t] * 2.0\n            sync\n        out[t] = acc\n        var float32 partial = t as float32\n        var int offset = 4\n        while offset > 0:\n            partial += .warp.shuffle_xor(partial, offset)\n            offset = offset / 2\n        red[t] = partial\nmut tiles = Tiles(out, red)\nkernel:\n    tiles(block = 8)\nprint \"{tiles.out[0]} {tiles.out[1]} {tiles.out[7]}\"\nprint \"{tiles.red[0]} {tiles.red[7]}\"\n";
+
+#[test]
+fn per_thread_state_across_syncs_and_shuffle_reduction_use_the_cooperative_fallback() {
+    let (stdout, stderr, ok) = build_and_run_simd("coop_state", COOP_STATE_SOURCE, None);
+    assert!(ok, "{stderr}");
+    // acc = 2 * sum(7 - t + round); the butterfly reduces the 8 live lanes of the warp.
+    assert_eq!(stdout, "48 42 6\n28 28");
+    let generated = fs::read_to_string(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_coop_state/coop_state_simd/src/main.rs"),
+    )
+    .unwrap();
+    assert!(generated.contains("__coop::run_block"));
+    assert!(generated.contains("__coop::sync();"));
+    assert!(generated.contains("__coop::shuffle(3u8"));
+}
+
+#[test]
+fn cooperative_fallback_thread_backend_matches_the_fiber_backend() {
+    let (stdout, stderr, ok) =
+        build_and_run_simd("coop_threads", COOP_STATE_SOURCE, Some("--cfg boring_coop_threads"));
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "48 42 6\n28 28");
+}
+
+#[test]
+fn cooperative_fallback_lets_a_work_item_return_before_later_barriers() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "coop_early_return",
+        "mut [int]'kernel'unified out = [0 for ..<4]\nkernel Early:\n    mut [int, 4]'actor tile\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        let t = .thread.x\n        var int total = 0\n        tile[t] = t + 1\n        sync\n        if t == 3:\n            return\n        for round in 0..<2:\n            total += tile[(t + round) % 3]\n            sync\n        out[t] = total\nmut early = Early(out)\nkernel:\n    early(block = 4)\nprint \"{early.out[0]} {early.out[1]} {early.out[2]} {early.out[3]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "3 5 4 0");
+}
+
+#[test]
+fn cooperative_fallback_reports_barrier_deadlock_instead_of_hanging() {
+    let (_, stderr, ok) = build_and_run_simd(
+        "coop_deadlock",
+        "mut [int]'kernel'unified out = [0 for ..<4]\nkernel Stuck:\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        let t = .thread.x\n        var int carried = t\n        carried += 1\n        if t == 0:\n            .warp.sync()\n        else:\n            sync\n        out[t] = carried\nmut stuck = Stuck(out)\nkernel:\n    stuck(block = 4)\nprint \"{stuck.out[0]}\"\n",
+        None,
+    );
+    assert!(!ok);
+    assert!(stderr.contains("deadlock"), "{stderr}");
+}
+
+#[test]
+fn bare_actor_storage_without_sync_gets_implicit_loop_barriers() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "auto_sync",
+        "mut [int]'kernel'unified out = [0 for ..<8]\nkernel Reduce:\n    mut [int, 8]'actor shared\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        let tid = .thread.x\n        shared[tid] = tid + 1\n        for i in 0..<8:\n            if tid == 0:\n                out[0] += shared[i]\nmut r = Reduce(out)\nkernel:\n    r(block = 8)\nprint \"{r.out[0]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "36");
+}
+
+#[test]
+fn user_struct_kernel_fields_use_a_device_width_mirror() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "struct_field",
+        "struct Dim:\n    int width\n    int height\n\nmut [int]'kernel'unified out = [0 for ..<4]\nkernel S:\n    mut [int]'unified out\n    let Dim dim\n    init(mut [int]'unified o, Dim d):\n        out = o\n        dim = d\n    def ():\n        let i = .thread.x\n        out[i] = dim.width * i + dim.height\nmut s = S(out, Dim(3, 7))\nkernel:\n    s(block = 4)\nprint \"{s.out[2]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "13");
+}
+
+#[test]
+fn atomic_methods_accept_arguments_that_read_the_same_array() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "atomic_args",
+        "mut [int]'kernel'unified counts = [0 for ..<4]\nkernel Histogram:\n    mut [int]'actor'global counts\n    init(mut [int]'actor'global data):\n        counts = data\n    def ():\n        let bucket = .thread.x % 4\n        counts[bucket] += 1\n        counts[bucket].max(3)\n        let previous = counts[bucket].swap(counts[bucket] + 0)\n        let seen = counts[bucket].cas(counts[bucket], counts[bucket] + 1)\nmut h = Histogram(counts)\nkernel:\n    h(block = 16)\nprint \"{h.counts[0]} {h.counts[3]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "10 10");
+}
+
+#[test]
+fn host_functions_called_from_kernels_convert_between_host_and_device_widths() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "host_fn_widths",
+        "def int add3(int a):\n    a + 3\ndef float32 half(float32 x):\n    x / 2.0\nmut [int]'kernel'unified out = [0 for ..<4]\nmut [float32]'kernel'unified ratio = [0.0 for ..<4]\nkernel D:\n    mut [int]'unified out\n    mut [float32]'unified ratio\n    init(mut [int]'unified o, mut [float32]'unified r):\n        out = o\n        ratio = r\n    def ():\n        let i = .thread.x\n        out[i] = add3(i)\n        if i == 0:\n            ratio[i] = 0.0\n        else:\n            ratio[i] = half(i as float32)\nmut d = D(out, ratio)\nkernel:\n    d(block = 4)\nprint \"{d.out[3]} {d.ratio[0]} {d.ratio[3]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "6 0 1.5");
+}
+
+#[test]
+fn optional_destinations_wrap_plain_values_implicitly_in_simd_kernels() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "implicit_some",
+        "mut [int]'kernel'unified out = [0 for ..<4]\nkernel O:\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        let i = .thread.x\n        let int? maybe = if i > 1: i * 10 else: nil\n        let int? other = i\n        var int? later = nil\n        later = i + 100\n        if let v = maybe:\n            out[i] = v\n        else:\n            out[i] = -1\n        if let w = other:\n            out[i] += w\n        if let x = later:\n            out[i] += x\nmut o = O(out)\nkernel:\n    o(block = 4)\nprint \"{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "99 101 124 136");
+}
+
+// ---- GPU display (`Screen`, `Dimension`, `'surface`, `kernel: loop:`) ----------------
+
+/// Generates a simd crate from `source` (named `name`) and returns its project root.
+fn generate_simd_project(name: &str, source: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("simd_{name}"));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join(format!("{name}.br"));
+    fs::write(&input, source).unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{name}: {}", String::from_utf8_lossy(&built.stderr));
+    root.join(format!("{name}_simd"))
+}
+
+/// `cargo check` of a generated display crate. All display crates share one target dir so
+/// winit/softbuffer are compiled once. No window is opened.
+fn check_display_project(project: &std::path::Path) {
+    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_display_shared_target");
+    let check = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(shared)
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+}
+
+#[test]
+fn display_examples_build_for_simd_with_a_software_blit() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for example in ["plasma_metal", "game_of_life"] {
+        let source = fs::read_to_string(manifest_dir.join("examples").join(format!("{example}.br"))).unwrap();
+        let project = generate_simd_project(&format!("display_{example}"), &source);
+        let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+        let toml = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+        assert!(toml.contains("winit = \"0.28\""), "{example}: {toml}");
+        assert!(toml.contains("softbuffer = \"0.3\""), "{example}: {toml}");
+        // The window lives on the main thread; the user loop runs on a worker.
+        assert!(rs.contains("fn main() { __boring_display_run("), "{example}");
+        assert!(rs.contains("struct Screen {"), "{example}");
+        assert!(rs.contains("struct Dimension {"), "{example}");
+        // Dimension-sized kernels take the flat extent and infer a 2D grid from it.
+        assert!(rs.contains("fn new(width: i32, height: i32, _: __BoringCpu, _: __BoringCpu)"), "{example}");
+        assert!(rs.contains("dim: __DeviceDimension"), "{example}");
+        assert!(rs.contains(".dim.width as u32) + (16) as u32 - 1) / ((16) as u32)"), "{example}");
+        // Render-loop dispatch, present and key query are plain statements of a Rust `loop`.
+        assert!(rs.contains("    loop {\n"), "{example}");
+        assert!(rs.contains(".dispatch(("), "{example}");
+        assert!(rs.contains("screen.present(&"), "{example}");
+        assert!(rs.contains("screen.key("), "{example}");
+        check_display_project(&project);
+    }
+}
+
+#[test]
+fn display_game_of_life_swaps_kernel_buffers_in_place() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest_dir.join("examples/game_of_life.br")).unwrap();
+    let project = generate_simd_project("display_swap", &source);
+    let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert!(rs.contains("std::mem::swap(&mut step.cells_in, &mut step.cells_out);"), "{rs}");
+    assert!(rs.contains("render.cells = step.cells_in.clone();"));
+    // `'surface` buffers start with the sparse random seed the GPU hosts use.
+    assert!(rs.contains("__boring_surface_seed("));
+}
+
+#[test]
+fn display_screen_without_a_title_gets_a_default_and_compiles() {
+    let project = generate_simd_project(
+        "display_no_title",
+        r#"
+let screen = Screen(Dimension(64, 48))
+kernel Fill:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float32 t
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+        dim = d
+        t = 0.0
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = 0xFF000000 | uint(col + row)
+var mut k = Fill(Dimension(64, 48))
+kernel:
+    loop:
+        k.t = float32(screen.time)
+        k(block = (8, 8))
+        screen.present(k.pixels)
+        if screen.frame > 3 and screen.width == 64 and not screen.closed and not screen.resized:
+            break
+        if screen.key(" "):
+            break
+"#,
+    );
+    let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert!(rs.contains("Arc::<str>::from(\"boring\")"), "{rs}");
+    check_display_project(&project);
+}
+
+#[test]
+fn compute_only_simd_programs_have_no_display_dependencies() {
+    let project = generate_simd_project(
+        "display_none",
+        "kernel Paint:\n    mut [uint]'surface pixels\n    init():\n        pixels = [uint(0) for ..<4]\n    def ():\n        pixels[.thread.x] = uint(1)\nmut p = Paint()\nkernel:\n    p(block = 4)\nprint \"{p.pixels[0]}\"\n",
+    );
+    let toml = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert!(!toml.contains("winit") && !toml.contains("softbuffer"), "{toml}");
+    assert!(!rs.contains("__boring_display_run"));
+    assert!(rs.contains("fn main() { if let Err(e) = boring_main()"));
+}
+
+#[test]
+fn dimension_kernels_infer_a_2d_grid_and_allocate_buffers_without_a_screen() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "dimension_grid",
+        r#"
+kernel Index:
+    mut [uint]'surface pixels
+    mut [uint]'unified scratch
+    let Dimension dim
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+        scratch = [0 for ..<d.width * d.height]
+        dim = d
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = uint(row * 100 + col)
+            scratch[row * dim.width + col] = uint(dim.width * dim.height)
+mut k = Index(Dimension(10, 7))
+kernel:
+    k(block = (4, 4))
+let d = Dimension(3, 2)
+print "{k.pixels[0]} {k.pixels[69]} {k.pixels[9]} {k.scratch[33]} {d.width * d.height}"
+"#,
+        None,
+    );
+    assert!(ok, "{stderr}");
+    // Grid is ceil(10/4) x ceil(7/4); all 70 cells are written exactly once.
+    assert_eq!(stdout, "0 609 9 70 6");
+}
+
+#[test]
+fn free_math_functions_work_in_simd_kernels_at_both_float_widths() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "free_math",
+        r#"
+mut [float32]'kernel'unified wide = [0.0 as float32 for ..<4]
+mut [float32]'kernel'unified narrow = [0.0 as float32 for ..<4]
+kernel M:
+    mut [float32]'unified wide
+    mut [float32]'unified narrow
+    init(mut [float32]'unified w, mut [float32]'unified n):
+        wide = w
+        narrow = n
+    def ():
+        let i = .thread.x
+        let x = float(i) + 1.0
+        wide[i] = float32(sin(0.0) + cos(0.0) + sqrt(x * x) + pow(x, 2.0) + max(x, 2.5) - min(x, 1.5) + abs(0.0 - x) + floor(x + 0.5))
+        let y = float32(i) + float32(1.0)
+        narrow[i] = sqrt(y * y) + pow(y, float32(2.0)) + abs(float32(0.0) - y)
+mut m = M(wide, narrow)
+kernel:
+    m(block = 4)
+print "{m.wide[0]} {m.wide[3]} {m.narrow[0]} {m.narrow[3]}"
+"#,
+        None,
+    );
+    assert!(ok, "{stderr}");
+    // x=1: 0+1+1+1+2.5-1+1+1 = 6.5; x=4: 0+1+4+16+4-1.5+4+4 = 31.5
+    // y=1: 1+1+1 = 3; y=4: 4+16+4 = 24
+    assert_eq!(stdout, "6.5 31.5 3 24");
 }

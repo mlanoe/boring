@@ -4,6 +4,7 @@ examples/*/target/
 tests/cases/*_rust/
 examples/*_rust/
 examples/*_metal/
+examples/*_simd/
 examples/*_cuda/
 examples/*_rocm/
 examples/*_wgpu/

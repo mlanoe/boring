@@ -3371,6 +3371,14 @@ impl Transpiler {
         } else {
             obj
         };
+        // CPU/SIMD `screen.present(k.pixels)`: the pixel buffer is a plain `Vec<u32>`
+        // kernel field, lent to the display runtime by reference every frame.
+        if self.config.is_simd_target && method == "present" && args.len() == 1
+            && matches!(&obj.kind, ExprKind::Var(_))
+            && matches!(&args[0].value.kind, ExprKind::Field(_, _))
+        {
+            return format!("{}.present(&{})", self.emit_expr(obj), self.emit_expr(&args[0].value));
+        }
         self.record_closure_param_hints(obj, method, args);
         if let Some(r) = self.try_emit_fn_field_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_host_tensor_cpu(obj, method, args) { return r; }
@@ -4561,9 +4569,11 @@ impl Transpiler {
                         };
                         let host_ty = crate::transpiler::emit_kernel::kernel_host_element_type(&inner_ty);
                         let device_ty = crate::transpiler::emit_kernel::kernel_host_scalar_type(&inner_ty);
-                        let materialized = format!(
+                        let materialized = if self.config.is_simd_target {
+                            format!("match &{vname} {{ BoringKernelArg::Host(v) => v.clone() }}")
+                        } else { format!(
                             "match &{vname} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }}"
-                        );
+                        ) };
                         // Only wrap in an extra `&(...)` when the callee's declared
                         // parameter at this position is actually `T&` (Borrow/BorrowMut-
                         // qualified) — the general by-ref coercion further below does the

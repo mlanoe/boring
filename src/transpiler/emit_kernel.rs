@@ -570,7 +570,11 @@ impl Transpiler {
                 // identifier to emit at all, and an inline field read would otherwise go
                 // through `try_emit_kernel_field_read`'s unconditional download.
                 let resident_alias = self.resident_field_alias(&arg.value);
-                if let Some((src_kvar, src_field)) = resident_alias {
+                if let (true, Some((src_kvar, src_field))) = (self.config.is_simd_target, resident_alias.as_ref()) {
+                    // CPU buffers are ordinary vectors: an alias is a plain copy.
+                    self.line(&format!("{var_name}.{field_name} = {src_kvar}.{src_field}.clone();"));
+                    param_to_len.insert(param_name, format!("({src_kvar}.{src_field}.len())"));
+                } else if let Some((src_kvar, src_field)) = resident_alias {
                     // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that helper's
                     // doc for why a bare `Arc::clone` here used to silently alias
                     // the same `wgpu::Buffer` between both kernel structs instead
@@ -604,7 +608,15 @@ impl Transpiler {
                     let is_gpu_arg_param = matches!(&arg.value.kind, ExprKind::Var(pname)
                         if self.current_fn_gpu_arg_param_names.contains(pname.as_str())
                             || self.resident_call_vars.contains_key(pname.as_str()));
-                    if is_gpu_arg_param {
+                    if is_gpu_arg_param && self.config.is_simd_target {
+                        self.line(&format!("match &{a} {{"));
+                        self.line("    BoringKernelArg::Host(v) => {");
+                        self.line(&format!(
+                            "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                        ));
+                        self.line("    }");
+                        self.line("}");
+                    } else if is_gpu_arg_param {
                         self.line(&format!("match &{a} {{"));
                         self.line("    BoringKernelArg::Resident(buf, _len) => {");
                         if field.binding == FieldBinding::Let {
@@ -672,6 +684,13 @@ impl Transpiler {
                     self.line(&format!(
                         "{var_name}.{field_name} = {a}.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>().try_into().unwrap();"
                     ));
+                } else if let (true, Type::Named(struct_name)) = (self.config.is_simd_target, simd_struct_base(&field.ty)) {
+                    if self.struct_fields.contains_key(struct_name.as_str()) {
+                        self.line(&format!("{var_name}.{field_name} = __device_{struct_name}_from(&({a}));"));
+                    } else {
+                        let cast = kernel_host_scalar_type(&field.ty);
+                        self.line(&format!("{var_name}.{field_name} = ({a}) as {cast};"));
+                    }
                 } else {
                     let cast = kernel_host_scalar_type(&field.ty);
                     self.line(&format!("{var_name}.{field_name} = ({a}) as {cast};"));
@@ -965,12 +984,18 @@ impl Transpiler {
     fn kernel_derived_scalar_field_map(decl: &KernelDecl) -> std::collections::HashMap<String, Expr> {
         let mut map = std::collections::HashMap::new();
         if let Some(init) = decl.inits.first() {
+            // A bare `field = name` is only a constructor-argument passthrough when
+            // `name` is an init parameter; copying another *field* (an inline
+            // kernel's captured `rows` feeding its `__dst_axis0` shadow) is a
+            // derived value the host must assign itself.
+            let is_init_param = |e: &Expr| matches!(&e.kind, ExprKind::Var(name)
+                if init.params.iter().any(|param| &param.name == name));
             for stmt in &init.body {
                 if let Stmt::Expr(e) = stmt {
                     if let ExprKind::Assign(lhs, rhs) = &e.kind {
                         if let ExprKind::Var(field) = &lhs.kind {
-                            let is_passthrough = matches!(&rhs.kind, ExprKind::Var(_))
-                                || matches!(&rhs.kind, ExprKind::Cast(inner, _) if matches!(inner.kind, ExprKind::Var(_)));
+                            let is_passthrough = is_init_param(rhs)
+                                || matches!(&rhs.kind, ExprKind::Cast(inner, _) if is_init_param(inner));
                             let is_array_init = matches!(&rhs.kind,
                                 ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. }
                                     | ExprKind::Array(_) | ExprKind::ArrayComp { .. });
@@ -983,6 +1008,66 @@ impl Transpiler {
             }
         }
         map
+    }
+
+    /// CPU/SIMD `kernel: loop:` render loops: rewrites every bare `k(block = ..)`
+    /// statement (at any depth inside `loop`/`if`/`while`/`for` bodies) of a tracked
+    /// kernel variable into its own single-statement `kernel:` block so the ordinary
+    /// dispatch lowering (`try_emit_kernel_dispatch`) applies to it.
+    pub(crate) fn wrap_simd_kernel_dispatches(&self, stmts: &mut Vec<Stmt>) {
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                Stmt::Expr(e) => {
+                    let ExprKind::Call(callee, args) = &e.kind else { continue };
+                    let ExprKind::Var(name) = &callee.kind else { continue };
+                    if self.kernel_vars.contains_key(name.as_str())
+                        && args.iter().any(|a| a.label.as_deref() == Some("block"))
+                    {
+                        let (line, col) = (e.line, e.col);
+                        *stmt = Stmt::KernelBlock(KernelBlockStmt { body: vec![Stmt::Expr(e.clone())], line, col });
+                    }
+                }
+                Stmt::Loop(l) => self.wrap_simd_kernel_dispatches(&mut l.body),
+                Stmt::While(w) => self.wrap_simd_kernel_dispatches(&mut w.body),
+                Stmt::For(f) => self.wrap_simd_kernel_dispatches(&mut f.body),
+                Stmt::If(i) => {
+                    for (_, body) in i.branches.iter_mut() {
+                        self.wrap_simd_kernel_dispatches(body);
+                    }
+                    if let Some(body) = i.else_body.as_mut() {
+                        self.wrap_simd_kernel_dispatches(body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// See the `Dimension` grid branch in `try_emit_kernel_dispatch`.
+    fn simd_dimension_grid(&self, var_name: &str, args: &[Arg]) -> Option<(String, String, String)> {
+        if !self.config.is_simd_target {
+            return None;
+        }
+        let kname = self.kernel_vars.get(var_name)?;
+        let decl = self.kernel_decls.get(kname)?;
+        let dim = decl.fields.iter().find(|f| {
+            matches!(&f.ty, Type::Named(n) if n == "Dimension") && matches!(f.qual, GpuQual::Const)
+        })?;
+        let block = args.iter().find(|a| a.label.as_deref() == Some("block"));
+        let (bx, by) = match block.map(|b| &b.value.kind) {
+            Some(ExprKind::Tuple(elems)) => {
+                let get = |i: usize| elems.get(i).map(|e| self.emit_expr(e)).unwrap_or_else(|| "1".into());
+                (get(0), get(1))
+            }
+            Some(_) => (self.emit_expr(&block?.value), "1".to_string()),
+            None => ("1".to_string(), "1".to_string()),
+        };
+        let d = &dim.name;
+        Some((
+            format!("((({var_name}.{d}.width as u32) + ({bx}) as u32 - 1) / (({bx}) as u32))"),
+            format!("((({var_name}.{d}.height as u32) + ({by}) as u32 - 1) / (({by}) as u32))"),
+            "1".to_string(),
+        ))
     }
 
     /// If `block` is a single `k(block=.., grid=..)` dispatch call on a
@@ -1057,6 +1142,11 @@ impl Transpiler {
                 ("1".to_string(), "1".to_string(), "1".to_string())
             };
             shadow_grid_axes(var_name, &shadows, [bx.as_str(), by.as_str(), bz.as_str()])
+        } else if let Some(dim_grid) = self.simd_dimension_grid(var_name, args) {
+            // CPU/SIMD: a kernel with a `Dimension` field infers a 2D grid from it
+            // (`ceil(dim.width / block_x), ceil(dim.height / block_y)`), same rule as
+            // the wgpu/Metal Screen hosts (docs/gpu-display.md, "Dispatch grid").
+            dim_grid
         } else {
             // No explicit `grid=`, and no LabeledArray field (fixed- or
             // dynamic-shape) to auto-infer one from at transpile time — a
@@ -1235,6 +1325,11 @@ impl Transpiler {
             {
                 return None;
             }
+            if self.config.is_simd_target {
+                return Some(format!(
+                    "BoringKernelArg::Host({var_name}.copy_{field}_to_host())"
+                ));
+            }
             let inner_ty = array_inner_type(&field_decl.ty);
             let len_expr = if crate::transpiler::wgpu::uses_packed_buffer_elements(&inner_ty) {
                 format!("{var_name}.{field}_len")
@@ -1387,5 +1482,13 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
         },
         Type::Qualified(inner, _) => kernel_host_element_type(inner),
         _ => "i64",
+    }
+}
+
+/// The user-struct name behind a kernel field type (`mut`/qualifier wrappers stripped).
+fn simd_struct_base(ty: &Type) -> &Type {
+    match ty {
+        Type::Mut(inner) | Type::Qualified(inner, _) => simd_struct_base(inner),
+        other => other,
     }
 }

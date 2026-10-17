@@ -1,18 +1,20 @@
 # GPU display
 
-> **Status: Metal, wgpu, CUDA, and ROCm — implemented.** Simulation
-> (`boring run`) is pending. CUDA and ROCm take a software-blit path
-> (`softbuffer`, CPU-side presentation) since neither has a native
+> **Status: Metal, wgpu, CUDA, ROCm, and CPU SIMD — implemented.** Simulation
+> (`boring run`) is pending. CUDA, ROCm and SIMD take a software-blit path
+> (`softbuffer`, CPU-side presentation) since none has a native
 > presentation API — see their own backend docs
 > ([`cuda-module.md`](cuda-module.html#gpu-display-screen),
-> [`rocm-backend.md`](rocm-backend.html#gpu-display-screen)) for that
+> [`rocm-backend.md`](rocm-backend.html#gpu-display-screen),
+> [`simd-backend.md`](simd-backend.html#gpu-display)) for that
 > approach's specifics. CUDA is unverified on real hardware (none available
 > in this project's dev environment); ROCm was verified on real AMD
-> hardware.
+> hardware; SIMD is covered by generated-code tests (no window in CI) plus a
+> manual launch of both examples on macOS/Apple Silicon.
 
 Live GPU rendering to a native OS window: a `'surface` pixel buffer, a `Screen`
 object, and a `kernel: loop:` render loop. A single Boring source file is
-intended to compile unchanged across `--target metal`/`wgpu`/`cuda`/`rocm` —
+intended to compile unchanged across `--target metal`/`wgpu`/`cuda`/`rocm`/`simd` —
 the backend differences (GPU-native blit vs. software blit via `softbuffer`)
 are transparent.
 
@@ -69,6 +71,7 @@ buffer whose content will be presented to a window via `screen.present()`.
 | wgpu | `storage` buffer, `MAP_READ \| COPY_SRC` | `uint` (32-bit) | Fragment shader reads the storage buffer directly, renders to the swapchain (`BGRA8Unorm`) — no CPU readback |
 | CUDA | device buffer (same as `'unified`/`'global`) | host side: same as the field's declared element type (e.g. `usize` for `uint`) | D2H readback (`clone_dtoh`) each frame, narrowed to `u32` and blitted via [`softbuffer`](https://docs.rs/softbuffer) — pure-CPU presentation, no GPU-graphics interop |
 | ROCm | device buffer (same as `'unified`/`'global`) | same as CUDA | same software-blit path as CUDA (`clone_dtoh` equivalent + `softbuffer`) |
+| SIMD | `Vec<u32>` (plain CPU vector) | `u32` | frame handed to the main-thread event loop, blitted via `softbuffer` |
 | Simulation | `Vec<u32>` | `u32` | PPM write or `minifb` *(pending)* |
 
 ### Why not `'unified` directly
@@ -253,6 +256,20 @@ writeup. Summary:
 - **Verified on real hardware**: ROCm only (AMD Radeon RX 6600). CUDA has no
   NVIDIA hardware available in this project's dev environment — ships as a
   by-symmetry port plus codegen snapshot tests, unverified on real hardware.
+
+---
+
+## Backend notes (CPU SIMD)
+
+See [`simd-backend.md`](simd-backend.html#gpu-display) for the full writeup.
+Summary: software blit through winit **0.28** + `softbuffer` **0.3** like
+CUDA/ROCm, but because the CPU backend's `kernel: loop:` is an ordinary Rust
+`loop` (not a `run_return` closure), the program runs on a worker thread and
+`main` keeps the window's event loop; `screen.present()` passes the frame across
+and waits for the blit. A `let Dimension` kernel gets flat-extent construction,
+`w * h` array allocation, randomly seeded `'surface` buffers, and the inferred
+2D dispatch grid, exactly as on the other backends. Dependencies are added to the
+generated `Cargo.toml` only when the program uses `Screen`.
 
 ---
 

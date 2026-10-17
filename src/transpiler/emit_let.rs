@@ -3170,6 +3170,13 @@ impl Transpiler {
                 let device_ty = super::emit_kernel::kernel_host_scalar_type(&inner_ty);
                 let tmp = format!("__resid_tmp_{}", i);
                 let mut_kw = if s.binding.is_mutable() { "mut " } else { "" };
+                if self.config.is_simd_target {
+                    self.line(&format!(
+                        "let {mut_kw}{name} = match {tmp} {{ BoringKernelArg::Host(v) => v }};",
+                        name = b.name
+                    ));
+                    continue;
+                }
                 self.line(&format!(
                     "let {mut_kw}{name} = match {tmp} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v }};",
                     name = b.name

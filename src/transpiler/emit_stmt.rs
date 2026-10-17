@@ -373,7 +373,12 @@ impl Transpiler {
                     return;
                 }
                 self.line("// kernel: block");
-                let body = s.body.clone();
+                let mut body = s.body.clone();
+                if self.config.is_simd_target {
+                    // A render `loop:` inside a `kernel:` block dispatches kernels with
+                    // bare `k(block = ..)` statements; give each its own dispatch block.
+                    self.wrap_simd_kernel_dispatches(&mut body);
+                }
                 let last = body.len().saturating_sub(1);
                 for (i, stmt) in body.iter().enumerate() {
                     self.emit_stmt(stmt, i == last);
