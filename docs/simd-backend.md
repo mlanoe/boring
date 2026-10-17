@@ -95,7 +95,9 @@ value, and shuffled values are limited to 8 bytes.
 Fixed-shape floating-point `kernel.tensors.matmul`, `mma`, and `linear` calls use
 the existing portable CPU loop lowering. Dot-product forms (`linear`, whose weights are `[n, k]`) accumulate in 16 independent lanes and the
 k-major forms update whole output rows with a contiguous multiply-add, so both vectorize
-(partial sums are reassociated, so results can differ from a strict left-to-right sum in the last bit). Very large operations split output
+(partial sums are reassociated, so results can differ from a strict left-to-right sum in the last bit).
+On x86-64 these loops have an AVX2+FMA twin selected at run time (baseline x86-64 has no FMA
+instruction). A one-row operation (`m = 1`, the decode shape) splits its columns across workers. Very large operations split output
 rows into disjoint mutable chunks across the available CPU cores; smaller ones
 run inline to avoid thread-spawn and cache-contention overhead.
 Backend-specific BLAS integration and quantized SIMD microkernels remain future

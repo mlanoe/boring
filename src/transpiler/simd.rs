@@ -249,20 +249,38 @@ fn __boring_simd_name() -> &'static str {
     if cfg!(any(target_feature = "fma", target_arch = "aarch64")) { a.mul_add(b, c) } else { a * b + c }
 }
 /// Dot product with independent partial sums so LLVM can vectorize the reduction.
-#[inline(always)] fn __boring_dot(a: &[f32], b: &[f32], init: f32) -> f32 {
+#[inline(always)] fn __boring_dot_with(a: &[f32], b: &[f32], init: f32, fma: impl Fn(f32, f32, f32) -> f32) -> f32 {
     let n = a.len().min(b.len());
     let (ca, cb) = (a[..n].chunks_exact(16), b[..n].chunks_exact(16));
     let (ra, rb) = (ca.remainder(), cb.remainder());
     let mut acc = [0.0f32; 16];
-    for (x, y) in ca.zip(cb) { for l in 0..16 { acc[l] = __boring_fma(x[l], y[l], acc[l]); } }
+    for (x, y) in ca.zip(cb) { for l in 0..16 { acc[l] = fma(x[l], y[l], acc[l]); } }
     let mut sum = init;
     for l in 0..16 { sum += acc[l]; }
-    for (x, y) in ra.iter().zip(rb) { sum = __boring_fma(*x, *y, sum); }
+    for (x, y) in ra.iter().zip(rb) { sum = fma(*x, *y, sum); }
     sum
 }
 /// `out[j] += scale * row[j]`, contiguous in `j` so it vectorizes.
+#[inline(always)] fn __boring_axpy_with(out: &mut [f32], scale: f32, row: &[f32], fma: impl Fn(f32, f32, f32) -> f32) {
+    for (o, r) in out.iter_mut().zip(row) { *o = fma(scale, *r, *o); }
+}
+// Baseline x86-64 has no FMA instruction (`f32::mul_add` would be a libm call), so the
+// hot loops get an AVX2+FMA twin chosen at run time.
+#[cfg(target_arch = "x86_64")] #[target_feature(enable = "avx2,fma")] unsafe fn __boring_dot_fma(a: &[f32], b: &[f32], init: f32) -> f32 {
+    __boring_dot_with(a, b, init, |x, y, z| x.mul_add(y, z))
+}
+#[cfg(target_arch = "x86_64")] #[target_feature(enable = "avx2,fma")] unsafe fn __boring_axpy_fma(out: &mut [f32], scale: f32, row: &[f32]) {
+    __boring_axpy_with(out, scale, row, |x, y, z| x.mul_add(y, z))
+}
+#[inline(always)] fn __boring_dot(a: &[f32], b: &[f32], init: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_dot_fma(a, b, init) }; } }
+    __boring_dot_with(a, b, init, __boring_fma)
+}
 #[inline(always)] fn __boring_axpy(out: &mut [f32], scale: f32, row: &[f32]) {
-    for (o, r) in out.iter_mut().zip(row) { *o = __boring_fma(scale, *r, *o); }
+    #[cfg(target_arch = "x86_64")]
+    { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_axpy_fma(out, scale, row) }; } }
+    __boring_axpy_with(out, scale, row, __boring_fma)
 }
 fn __boring_blocks(gx: usize, gy: usize, gz: usize, items_per_block: usize, run: &(dyn Fn(usize, usize, usize) + Sync)) {
     static MIN_ITEMS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();

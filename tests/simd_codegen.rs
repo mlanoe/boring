@@ -5748,9 +5748,9 @@ print linear[20]
     assert!(source.contains("for __boring_tensor_k in 0usize..5usize"));
     assert!(source.contains("fn __boring_simd_threads()"));
     assert!(source.contains("static THREADS: std::sync::OnceLock<usize>"));
-    assert!(source.contains("__boring_simd_threads().min(3usize)"));
+    assert!(source.contains("__boring_simd_threads().min(if 3usize == 1"));
     assert!(source.contains("if __boring_tensor_work < __boring_simd_parallel_threshold()"));
-    assert!(source.contains(".chunks_mut(__boring_tensor_rows_per_worker * 7)"));
+    assert!(source.contains("{ __boring_tensor_rows_per_worker * 7 }"));
     assert!(source.contains("__boring_tensor_task();"));
     assert!(source.contains("__boring_tensor_scope.spawn(__boring_tensor_task)"));
     let run = Command::new("cargo")
@@ -5823,9 +5823,9 @@ print accumulated[3]
         String::from_utf8_lossy(&generated.stderr)
     );
     let generated_source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
-    assert!(generated_source.contains("__boring_simd_threads().min(__boring_tensor_m)"));
+    assert!(generated_source.contains("__boring_simd_threads().min(if __boring_tensor_m == 1"));
     assert!(generated_source
-        .contains("chunks_mut(__boring_tensor_rows_per_worker * __boring_tensor_n)"));
+        .contains("{ __boring_tensor_rows_per_worker * __boring_tensor_n }"));
     assert!(generated_source.contains("__boring_tensor_bias[__boring_tensor_col]"));
     assert!(generated_source.contains(".mul_add("));
     let run = Command::new("cargo")
@@ -8154,4 +8154,27 @@ fn dynamic_float_linear_matches_a_scalar_reference_after_vectorization() {
     }
     let weighted: f32 = expected.iter().enumerate().map(|(i, v)| v * (i as f32 + 1.0)).sum();
     assert_eq!(stdout, format!("{} {} {}", expected[0], expected[34], weighted));
+}
+
+#[test]
+fn single_row_tensor_ops_split_columns_across_workers_with_identical_results() {
+    let source = "let [float32, k = 4, m = 1]'kernel'global fa = [float32(i + 1) for i in 0..<4]\nlet [float32, n = 6, k = 4]'kernel'global fb = [float32((i % 5) - 2) for i in 0..<24]\nlet [float32, k = 4, n = 6]'kernel'global fw = [float32((i % 3) - 1) for i in 0..<24]\nmut [float32, n = 6, m = 1]'kernel'unified fc = [0.0 as float32 for ..<6]\nmut [float32, n = 6, m = 1]'kernel'unified fl = [0.0 as float32 for ..<6]\nmut [float32, n = 6, m = 1]'kernel'unified fm = [1.0 as float32 for ..<6]\nlet n = 6\nlet k = 4\nlet m = 1\nlet [float32]'kernel'global da = [float32(i + 1) for i in 0..<4]\nlet [float32]'kernel'global dw = [float32((i % 3) - 1) for i in 0..<24]\nlet [float32]'kernel'global db = [float32((i % 5) - 2) for i in 0..<24]\nlet [float32]'kernel'global bias = [0.5 as float32 for ..<6]\nmut [float32]'kernel'unified dy = [0.0 as float32 for ..<6]\nmut [float32]'kernel'unified dm = [0.0 as float32 for ..<6]\nkernel.tensors.matmul(fa, fb, fc)\nkernel.tensors.mma(fa, fb, fm)\nkernel.tensors.linear(fa, fw, fl)\nkernel.tensors.linear(da, dw, bias, dy, m = m, n = n, k = k)\nkernel.tensors.matmul(da, db, dm, m = m, n = n, k = k)\nwith fc:\n    with fm:\n        with fl:\n            with dy:\n                with dm:\n                    for i in 0..<6:\n                        print \"{fc[i]} {fm[i]} {fl[i]} {dy[i]} {dm[i]}\"\n";
+    let (sequential, stderr, ok) = build_and_run_simd("single_row_columns", source, None);
+    assert!(ok, "{stderr}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_single_row_columns/single_row_columns_simd/Cargo.toml");
+    let parallel = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_single_row_columns/target"))
+        .env("BORING_SIMD_THREADS", "4")
+        .env("BORING_SIMD_PARALLEL_THRESHOLD", "0")
+        .output()
+        .unwrap();
+    assert!(parallel.status.success(), "{}", String::from_utf8_lossy(&parallel.stderr));
+    assert_eq!(String::from_utf8_lossy(&parallel.stdout).trim(), sequential);
+    // 1*b0 + 2*b1 + 3*b2 + 4*b3 for column 0 of the k-major right operand (values -2, -1, 0, 1 down the column).
+    let first: Vec<&str> = sequential.lines().next().unwrap().split(' ').collect();
+    let expect_matmul: f32 = (0..4).map(|kk| (kk + 1) as f32 * (((kk * 6) % 5) as f32 - 2.0)).sum();
+    assert_eq!(first[0].parse::<f32>().unwrap(), expect_matmul);
 }
