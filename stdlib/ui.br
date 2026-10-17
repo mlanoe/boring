@@ -77,6 +77,8 @@ pub trait View:
     req View expand(StateBox'shared st): Text(content = "")
     # A view with `env` fields: the runtime then calls `expandIn` (the providers in scope for this node,
     # nearest ancestor first) instead of `expand`. Both are generated.
+    # Writes this view's bind projections back into their collections (by key); the number of stale ones.
+    req int commitProjectionsIn(StateBox'shared st): 0
     req bool usesEnv(): false
     req View expandIn(StateBox'shared st, [EnvValue] scope): Text(content = "")
     # What a `Provide` adds to its subtree's scope (generated from its `value` field).

@@ -1,0 +1,20 @@
+use boring.ui.*
+
+pub struct Todo:
+    pub int id
+    pub var string title
+
+view Row:
+    bind Todo item
+    body():
+        Text("x")
+
+view Parent:
+    state [Todo] items = [Todo(id = 1, title = "a")]
+    body():
+        Column(alignment = .Center, spacing = nil):
+            for item in items:
+                Row(item = item)
+
+def main():
+    print "unreachable"

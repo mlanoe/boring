@@ -757,6 +757,7 @@ interp_test!(view_bind_env);
 interp_test!(actor_field_through);
 interp_test!(view_env_only);
 error_test!(view_bind_literal_arg);
+error_test!(view_bind_projection_no_key);
 error_test!(view_bind_without_ui);
 error_test!(view_state_shadow);
 error_test!(view_state_no_initializer);

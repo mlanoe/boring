@@ -209,6 +209,7 @@ fn find_bound_states(
     states: &HashSet<String>,
     binds: &HashSet<String>,
     bind_views: &BindViews,
+    proj_vars: &HashMap<String, usize>,
 ) -> Result<HashSet<String>, ParseError> {
     let mut bound = HashSet::new();
     let mut failure: Option<ParseError> = None;
@@ -227,6 +228,7 @@ fn find_bound_states(
                 match &a.value.kind {
                     ExprKind::Var(n) if states.contains(n) => { bound.insert(n.clone()); }
                     ExprKind::Var(n) if binds.contains(n) => {}
+                    ExprKind::Var(n) if proj_vars.contains_key(n) => {}
                     // A projection (`item.completed`) is passed through untouched: it must evaluate
                     // to a `Slot` (an input struct's shared field) — typed element projections are
                     // not supported yet, so this is the application's responsibility.
@@ -301,7 +303,31 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
     let slot_all = env.has_slot && !RUNTIME_METHODS.load(std::sync::atomic::Ordering::Relaxed);
     let binds: HashSet<String> = bind_fields.iter().map(|f| f.name.clone()).collect();
     let envs: HashSet<String> = env_fields.iter().map(|f| f.name.clone()).collect();
-    let bound = find_bound_states(&s, &states, &binds, &env.bind_views)?;
+    // Keyed-loop elements handed to a child's `bind` (see "bind projections" below). Detected on the
+    // untouched view; the hidden `__proj` registry state is added before the field lists are read.
+    let state_tys: HashMap<String, Type> = state_fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+    let projections = if env.view_trait { find_projections(&s, &state_tys, &env.bind_views)? } else { vec![] };
+    let mut proj_vars: HashMap<String, usize> = HashMap::new();
+    for (k, p) in projections.iter().enumerate() {
+        if let Some(prev) = proj_vars.insert(p.loop_var.clone(), k) {
+            if projections[prev].coll != p.coll {
+                return Err(err(
+                    format!("loop variable `{}` projects two different collections (`{}` and `{}`) in view '{}'; rename one", p.loop_var, projections[prev].coll, p.coll, s.name),
+                    p.line, p.col,
+                ));
+            }
+        }
+    }
+    let mut state_fields = state_fields;
+    let mut states = states;
+    for (k, _) in projections.iter().enumerate() {
+        let registry = projection_registry_field(&s.name, k);
+        states.insert(registry.name.clone());
+        state_fields.push(registry);
+    }
+    let mut bound = find_bound_states(&s, &states, &binds, &env.bind_views, &proj_vars)?;
+    // A projected collection is a shared slot: the projections write back into it by key.
+    for p in &projections { bound.insert(p.coll.clone()); }
     if let Some(f) = state_fields.iter().find(|f| bound.contains(&f.name) && !f.mutable && !f.ty.is_mut()) {
         return Err(err(
             format!("`state {}` is read-only (`state let`) but is bound to a child's `bind`", f.name),
@@ -394,6 +420,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
             own_methods: s.methods.iter().map(|m| m.name.clone()).collect(),
             bind_views: &env.bind_views,
             has_state, has_env,
+            proj_vars: &proj_vars,
         };
         let mut failure: Option<ParseError> = None;
         let view_name = s.name.clone();
@@ -414,6 +441,19 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
             rewrite_body(&mut m.body, &ctx, &view_name, &mut failure);
         }
         if let Some(e) = failure { return Err(e); }
+    }
+    if !projections.is_empty() {
+        let registry_refs: Vec<String> = (0..projections.len()).map(|k| {
+            if slotted.contains(&format!("__proj{k}")) { format!("__st.__proj{k}.value") } else { format!("__st.__proj{k}") }
+        }).collect();
+        let (structs, methods) = projection_items(&s.name, &state_name, &projections, &registry_refs, slot_all)?;
+        generated.extend(structs);
+        // Each build of the body starts fresh registries: only the last build's projections are live.
+        for m in s.methods.iter_mut().filter(|m| m.name == "body") {
+            let reset: Vec<Stmt> = registry_refs.iter().flat_map(|r| parse_stmts(&format!("{r} = []"))).collect();
+            for (i, st) in reset.into_iter().enumerate() { m.body.insert(i, st); }
+        }
+        s.methods.extend(methods);
     }
     if env.view_trait {
         s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name, &seeds, &env_fields));
@@ -581,6 +621,8 @@ struct Ctx<'a> {
     bind_views: &'a BindViews,
     has_state: bool,
     has_env: bool,
+    /// Keyed-loop variables passed to a child's `bind`: loop var -> projection index.
+    proj_vars: &'a HashMap<String, usize>,
 }
 
 /// Marker prefix for names that pass 2 must not rewrite again; stripped by pass 3.
@@ -772,7 +814,20 @@ fn rewrite_body(body: &mut [Stmt], ctx: &Ctx, view: &str, failure: &mut Option<P
                     if !matches!(target, Some((_, true))) { continue; }
                     let ExprKind::Var(n) = &a.value.kind else { continue };
                     let (vl, vc, vn) = (a.value.line, a.value.col, a.value.len);
-                    if ctx.states.contains(n) {
+                    if let Some(k) = ctx.proj_vars.get(n) {
+                        // A keyed-loop element handed to a child's `bind`: a projection slot for it.
+                        let arg = |v: Expr| Arg { label: None, value: v, spread: false, default_rest: false };
+                        let item = var(n, vl, vc, vn);
+                        let made = Expr {
+                            kind: ExprKind::MethodCall(
+                                Box::new(var("self", vl, vc, vn)),
+                                format!("__project{k}"),
+                                vec![arg(item), arg(var(ST, vl, vc, vn))],
+                            ),
+                            line: vl, col: vc, len: vn,
+                        };
+                        a.value = field(made, "slot");
+                    } else if ctx.states.contains(n) {
                         let n = n.clone();
                         a.value = field(var(ST, vl, vc, vn), &n);
                     } else if ctx.binds.contains(n) {
@@ -978,4 +1033,217 @@ fn env_expandable(env_fields: &[FieldDecl]) -> bool {
     !env_fields.is_empty() && env_fields.iter().all(|f| {
         matches!(strip_mut(&f.ty), Type::Named(n) if !PRIMITIVES.contains(&n.as_str()))
     })
+}
+
+// ── bind projections (keyed collection elements) ───────────────────────────────────────────────
+//
+//     for item in items with item.id:        # `items` is a `state [Todo]` of this view
+//         TodoRow(item = item)               # TodoRow declares `bind Todo item`
+//
+// The child's `bind Todo item` stays an ordinary `Slot<Todo>'actor`. For a keyed-loop element passed to
+// it, the parent hands a *projection slot*: a fresh slot holding the element, registered in the
+// parent's hidden `__proj` state together with the collection slot and the element's KEY. At the end
+// of an event, before the update pass rebuilds anything, the runtime asks every mounted view to
+// `commitProjections`: a projection whose slot changed since it was made is written back into the
+// collection at the element whose key still matches (the index is never captured, so a reorder cannot
+// redirect a write); a key that is gone is a stale projection and the write is dropped and reported.
+// The registry is rebuilt by every `body()`.
+//
+// "Changed" is decided by comparing the printed form of the slot against the base copy taken at
+// projection time (`==` on structs is identity in the interpreter, content in transpiled output).
+//
+// Known limits: the write-back is transactional (the collection is updated at commit, not at the
+// child's write), a child's change wins over a parent change to the same element in the same event,
+// and the key expression may only use the loop variable.
+
+struct Projection {
+    coll: String,
+    elem: String,
+    loop_var: String,
+    key: Expr,
+    line: usize,
+    col: usize,
+}
+
+fn parse_stmts(body: &str) -> Vec<Stmt> {
+    let src = format!("def f():\n    {}\n", body.replace('\n', "\n    "));
+    let tokens = crate::lexer::lex(&src).expect("generated statements lex");
+    let program = crate::parser::parse(tokens).expect("generated statements parse");
+    for item in program.items {
+        if let Item::Fn(f) = item { return f.body; }
+    }
+    vec![]
+}
+
+fn projection_registry_field(view: &str, k: usize) -> FieldDecl {
+    let src = format!("view G:\n    state var mut [{view}__Proj{k}] __proj{k} = []\n");
+    let src = src.as_str();
+    let tokens = crate::lexer::lex(src).expect("registry field lexes");
+    let program = crate::parser::parse(tokens).expect("registry field parses");
+    for item in program.items {
+        if let Item::Struct(g) = item { return g.fields.into_iter().next().expect("registry field"); }
+    }
+    unreachable!("registry field parses to a view")
+}
+
+fn find_projections(
+    s: &StructDecl,
+    state_tys: &HashMap<String, Type>,
+    bind_views: &BindViews,
+) -> Result<Vec<Projection>, ParseError> {
+    let mut found: Vec<Projection> = Vec::new();
+    let mut failure: Option<ParseError> = None;
+    for m in &s.methods {
+        let mut body = m.body.clone();
+        let mut on_stmt = |st: &mut Stmt| {
+            let Stmt::For(f) = st else { return };
+            if f.vars.len() != 1 { return; }
+            let ExprKind::Var(coll) = &f.iterable.kind else { return };
+            let Some(ty) = state_tys.get(coll) else { return };
+            let Type::Array(elem) = strip_mut(ty) else { return };
+            let Type::Named(elem) = &**elem else { return };
+            let loop_var = f.vars[0].clone();
+            let mut inner = f.body.clone();
+            let mut uses = false;
+            let mut key: Option<Expr> = None;
+            let mut on_expr = |e: &mut Expr| {
+                let ExprKind::Call(callee, args) = &e.kind else { return };
+                let ExprKind::Var(name) = &callee.kind else { return };
+                if name == "KeyedGroup" {
+                    if key.is_none() { key = args.first().map(|a| a.value.clone()); }
+                } else if let Some(inputs) = bind_views.get(name) {
+                    for (i, a) in args.iter().enumerate() {
+                        let target = match &a.label {
+                            Some(l) => inputs.iter().find(|(n, _)| n == l),
+                            None => inputs.get(i),
+                        };
+                        if matches!(target, Some((_, true))) && matches!(&a.value.kind, ExprKind::Var(n) if *n == loop_var) {
+                            uses = true;
+                        }
+                    }
+                }
+            };
+            let mut noop = |_: &mut Stmt| {};
+            Walker { expr: &mut on_expr, stmt: &mut noop }.stmts(&mut inner);
+            if !uses { return; }
+            match key {
+                Some(key) => found.push(Projection {
+                    coll: coll.clone(), elem: elem.clone(), loop_var, key, line: f.line, col: f.col,
+                }),
+                None => {
+                    failure.get_or_insert_with(|| err(
+                        format!(
+                            "`{loop_var}` is passed to a child's `bind` but the loop has no identity key: write \
+                             `for {loop_var} in {coll} with <key>:` so the binding follows the element, not its index"
+                        ),
+                        f.line, f.col,
+                    ));
+                }
+            }
+        };
+        let mut noop = |_: &mut Expr| {};
+        Walker { expr: &mut noop, stmt: &mut on_stmt }.stmts(&mut body);
+    }
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(found),
+    }
+}
+
+/// The generated pieces of every projection: one concrete struct per site (the collection slot, the
+/// projection slot, a base copy to detect a change, the key, and `writeBack`), held in a typed array
+/// of the parent's hidden state — no trait objects and no closures, neither of which `boring build`
+/// can carry through a shared state — plus the view methods that make a projection slot and write
+/// them all back.
+fn projection_items(
+    view: &str,
+    state_name: &str,
+    projs: &[Projection],
+    registry: &[String],
+    shared: bool,
+) -> Result<(Vec<StructDecl>, Vec<FnDecl>), ParseError> {
+    // Transpiled output keeps every state in shared handles: pushing into one needs no `&mut` state,
+    // and demanding it would clash with the loop that is iterating the (locked) collection slot.
+    let st_param = if shared { "" } else { "mut " };
+    let mut structs = Vec::new();
+    let mut src = String::from("struct G:\n");
+    let mut key_patch: Vec<Expr> = Vec::new();
+    for (k, p) in projs.iter().enumerate() {
+        let (coll, elem, lv) = (&p.coll, &p.elem, &p.loop_var);
+        let site = format!("{view}__Proj{k}");
+        let struct_src = format!(
+            "struct {site}:\n\
+             \x20   pub Slot<[{elem}]>'actor coll\n\
+             \x20   pub Slot<{elem}>'actor slot\n\
+             \x20   pub Slot<{elem}> base\n\
+             \x20   pub string key\n\
+             \x20   req string keyOf({elem} {lv}):\n\
+             \x20       \"__KEY__\"\n\
+             \x20   req bool writeBack():\n\
+             \x20       if \"{{slot.value}}\" == \"{{base.value}}\":\n\
+             \x20           return true\n\
+             \x20       for i in 0..<coll.value.length:\n\
+             \x20           let candidate = coll.value[i]\n\
+             \x20           if self.keyOf(candidate) == key:\n\
+             \x20               coll.value[i] = slot.value\n\
+             \x20               return true\n\
+             \x20       false\n"
+        );
+        let tokens = crate::lexer::lex(&struct_src).expect("projection struct lexes");
+        let program = crate::parser::parse(tokens).expect("projection struct parses");
+        for item in program.items {
+            if let Item::Struct(mut g) = item {
+                for m in &mut g.methods { patch_key(&mut m.body, &p.key); }
+                structs.push(g);
+            }
+        }
+        // Returns the whole record: the call site reads `.slot` off it (a field of a shared handle is
+        // passed on as that handle, where a bare call result would be wrapped a second time).
+        src.push_str(&format!(
+            "    req {site} __project{k}({elem} {lv}, {st_param}{state_name} __st):\n\
+             \x20       let key = \"__KEY__\"\n\
+             \x20       let made = {site}(coll = __st.{coll}, slot = Slot(value = {lv}), base = Slot(value = {lv}), key = key)\n\
+             \x20       {reg}.push(made)\n\
+             \x20       made\n",
+            reg = registry[k],
+        ));
+        key_patch.push(p.key.clone());
+    }
+    src.push_str(&format!("    req int commitProjections({st_param}{state_name} __st):\n        var stale = 0\n"));
+    for reg in registry {
+        src.push_str(&format!("        for p in {reg}:\n            if !p.writeBack():\n                stale += 1\n"));
+    }
+    src.push_str(&format!(
+        "        stale\n\
+         \x20   req int commitProjectionsIn(StateBox'shared st):\n\
+         \x20       mut s = st as {state_name} else ({state_name}())\n\
+         \x20       self.commitProjections(s)\n"
+    ));
+    let tokens = crate::lexer::lex(&src).expect("projection methods lex");
+    let program = crate::parser::parse(tokens).expect("projection methods parse");
+    for item in program.items {
+        if let Item::Struct(mut g) = item {
+            // The per-site key expressions are patched into `__project<k>`, in order.
+            let mut idx = 0;
+            for m in &mut g.methods {
+                if m.name.starts_with("__project") {
+                    patch_key(&mut m.body, &key_patch[idx]);
+                    idx += 1;
+                }
+            }
+            return Ok((structs, g.methods));
+        }
+    }
+    Ok((structs, vec![]))
+}
+
+/// Replaces the `"__KEY__"` placeholder expression with the loop's key expression.
+fn patch_key(body: &mut [Stmt], key: &Expr) {
+    let mut on_expr = |e: &mut Expr| {
+        if matches!(&e.kind, ExprKind::Str(t) if t == "__KEY__") {
+            *e = key.clone();
+        }
+    };
+    let mut noop = |_: &mut Stmt| {};
+    Walker { expr: &mut on_expr, stmt: &mut noop }.stmts(body);
 }
