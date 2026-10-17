@@ -3748,7 +3748,7 @@ kernel TupleFunctions:
         let conditional = if i >= 0: typed else: stored
         let candidate = some(conditional)
         let values = candidate else (7, 8, 9)
-        guard let guarded = some(values) else:
+        guard let Some(guarded) = some(values) else:
             return
         let selected = match i:
             _: guarded
@@ -3759,7 +3759,7 @@ kernel TupleFunctions:
         let has_four = doubled.any((value): value == 4)
         if let unwrapped = some(doubled):
             output[i] = unwrapped.first() + unwrapped.last() + int(all_positive) + int(has_four) + i
-        while let loopTuple = some(doubled):
+        while let Some(loopTuple) = some(doubled):
             output[i] = loopTuple.first() + loopTuple.last() + int(all_positive) + int(has_four) + i
             break
 mut functions = TupleFunctions()

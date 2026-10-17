@@ -2085,10 +2085,19 @@ impl Emitter {
                                 "}"
                             };
                             self.line(n, ending);
-                            if let CondClause::Let(name, value) = clause {
-                                if let Some(arity) = self.optional_tuple_arity(value) {
-                                    self.tuple_arities.insert(name.clone(), arity);
+                            let bound_tuple = match clause {
+                                CondClause::Let(name, value) => self
+                                    .optional_tuple_arity(value)
+                                    .map(|arity| (name.clone(), arity)),
+                                CondClause::LetPat(pattern, value) => {
+                                    tuple_optional_pattern_binding(pattern)
+                                        .zip(self.optional_tuple_arity(value))
+                                        .map(|(name, arity)| (name.to_string(), arity))
                                 }
+                                CondClause::Expr(_) => None,
+                            };
+                            if let Some((name, arity)) = bound_tuple {
+                                self.tuple_arities.insert(name, arity);
                             }
                         }
                     }
@@ -2164,13 +2173,16 @@ impl Emitter {
                     .map(simd_pattern)
                     .unwrap_or_else(|| format!("Some({})", w.name));
                 self.line(n, &format!("while let {pattern} = {value} {{"));
-                let bound_tuple_arity = w
-                    .pattern
-                    .is_none()
-                    .then(|| self.optional_tuple_arity(&w.value))
-                    .flatten();
-                let previous_tuple_arity = bound_tuple_arity.and_then(|arity| {
-                    self.tuple_arities.insert(w.name.clone(), arity)
+                let bound_tuple = self.optional_tuple_arity(&w.value).map(|arity| {
+                    let name = w
+                        .pattern
+                        .as_ref()
+                        .and_then(tuple_optional_pattern_binding)
+                        .unwrap_or(&w.name);
+                    (name.to_string(), arity)
+                });
+                let previous_tuple_arity = bound_tuple.as_ref().and_then(|(name, arity)| {
+                    self.tuple_arities.insert(name.clone(), *arity)
                 });
                 let previous_break_sync = self.while_let_break_sync.take();
                 self.control_flow_depth += 1;
@@ -2179,11 +2191,11 @@ impl Emitter {
                 }
                 self.control_flow_depth -= 1;
                 self.while_let_break_sync = previous_break_sync;
-                if bound_tuple_arity.is_some() {
+                if let Some((name, _)) = &bound_tuple {
                     if let Some(previous) = previous_tuple_arity {
-                        self.tuple_arities.insert(w.name.clone(), previous);
+                        self.tuple_arities.insert(name.clone(), previous);
                     } else {
-                        self.tuple_arities.remove(&w.name);
+                        self.tuple_arities.remove(name);
                     }
                 }
                 self.line(n, "}");
@@ -2290,6 +2302,9 @@ impl Emitter {
             CondClause::Let(name, value) => self
                 .optional_tuple_arity(value)
                 .map(|arity| (name.clone(), arity)),
+            CondClause::LetPat(pattern, value) => tuple_optional_pattern_binding(pattern)
+                .zip(self.optional_tuple_arity(value))
+                .map(|(name, arity)| (name.to_string(), arity)),
             _ => None,
         };
         let previous_tuple_arity = bound_tuple.as_ref().and_then(|(name, arity)| {
@@ -4871,6 +4886,16 @@ fn collect_simd_pattern_bind_names(
         }
         Pattern::Some(inner) => collect_simd_pattern_bind_names(inner, names),
         Pattern::Wildcard | Pattern::Lit(_) | Pattern::None => {}
+    }
+}
+
+fn tuple_optional_pattern_binding(pattern: &Pattern) -> Option<&str> {
+    match pattern {
+        Pattern::Some(inner) => match inner.as_ref() {
+            Pattern::Bind(name) => Some(name),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
