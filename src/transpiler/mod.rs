@@ -302,6 +302,9 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
             .replace("std::sync::LazyLock::new(|| Rc::<str>::from(", "std::sync::LazyLock::new(|| Arc::<str>::from(")
             // Assignments to static string vars (through Mutex) also need Arc<str>.
             .replace(".unwrap_or_else(|e| e.into_inner()) = Rc::<str>::from(", ".unwrap_or_else(|e| e.into_inner()) = Arc::<str>::from(")
+            // Same, for the RHS-first form `{ let __gv = <rhs>; *G.lock()... = __gv; }`.
+            .replace("let __gv = Rc::<str>::from(", "let __gv = Arc::<str>::from(")
+            .replace("let __gv = Rc::from(", "let __gv = Arc::from(")
             // In single-thread mode, error types and BoringVal don't need Send + Sync.
             .replace("Box<dyn std::error::Error + Send + Sync>", "Box<dyn std::error::Error>")
             .replace("trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync", "trait BoringVal: std::fmt::Display + std::any::Any")

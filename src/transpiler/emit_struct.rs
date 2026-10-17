@@ -140,7 +140,7 @@ impl Transpiler {
             let needs_default = self.structs_needing_default.contains(&s.name);
             // A function-typed field is an `Rc<RefCell<dyn FnMut..>>`/`Rc<dyn Fn..>` handle: `Clone`
             // works (shared handle), but `dyn FnMut` has no `Debug`/`PartialEq`/`Default`.
-            let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some());
+            let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some() || self.resolve_opt_fn_field_type(&f.ty).is_some());
             let mut names: Vec<String> = if has_non_debug_trait_array_field || has_non_debug_shared_dyn || has_fn_field { vec![] } else { vec!["Debug".to_string()] };
             if has_fn_field {
                 names.push("Clone".to_string());
@@ -200,6 +200,13 @@ impl Transpiler {
                         f.name, s.name));
                 }
                 self.emit_fn_field_type(&fnty)
+            } else if let Some(fnty) = self.resolve_opt_fn_field_type(&f.ty) {
+                if matches!(fnty, Type::Fn(_, _, _, true, _)) {
+                    self.push_error(s.line, s.col, format!(
+                        "field `{}` of `{}` has a `task` function type, which is not supported in struct fields yet",
+                        f.name, s.name));
+                }
+                format!("Option<{}>", self.emit_fn_field_type(&fnty))
             } else if f.transient {
                 let inner = self.emit_type(&f.ty);
                 if Self::is_copy_type(&f.ty) {
@@ -2969,6 +2976,8 @@ impl Transpiler {
             if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) }
         } else if let Some(fnty) = self.resolve_fn_field_type(fty) {
             self.emit_fn_field_value(&fnty, def)
+        } else if let Some(fnty) = self.resolve_opt_fn_field_type(fty) {
+            self.emit_opt_fn_field_value(&fnty, def)
         } else {
             let val = self.emit_let_value(Some(fty), def);
             if self.transient_fields.contains_key(&key) {
@@ -2989,6 +2998,15 @@ impl Transpiler {
         match ty.without_mut() {
             t @ Type::Fn(..) => Some(t.clone()),
             Type::Named(n) => self.fn_type_aliases.get(n.as_str()).filter(|t| matches!(t, Type::Fn(..))).cloned(),
+            _ => None,
+        }
+    }
+
+    /// The inner `Type::Fn` when `ty` is an OPTIONAL function type (`Seed?` / `(def int())?`),
+    /// written inline or through a `use` alias. Such a field is `Option<handle>`.
+    pub(crate) fn resolve_opt_fn_field_type(&self, ty: &Type) -> Option<Type> {
+        match ty.without_mut() {
+            Type::Optional(inner) => self.resolve_fn_field_type(inner),
             _ => None,
         }
     }
@@ -3134,6 +3152,22 @@ impl Transpiler {
         }
     }
 
+    /// Value stored into an optional function-typed field: `nil` is `None`, a read of another
+    /// optional fn field is cloned, anything else is a handle wrapped in `Some`.
+    pub(crate) fn emit_opt_fn_field_value(&self, fnty: &Type, value: &Expr) -> String {
+        if matches!(value.kind, ExprKind::Nil) { return "None".into(); }
+        if let ExprKind::Field(obj, fname) = &value.kind {
+            if let Some(sn) = self.resolve_struct_name(obj) {
+                if self.struct_fields.get(&sn).and_then(|fs| fs.iter().find(|(n, _)| n == fname))
+                    .is_some_and(|(_, t)| self.resolve_opt_fn_field_type(t).is_some())
+                {
+                    return format!("{}.clone()", self.emit_expr(value));
+                }
+            }
+        }
+        format!("Some({})", self.emit_fn_field_value(fnty, value))
+    }
+
     /// `Some(req)` when `e` reads a function-typed struct field's handle (`r.onCommand`) or a local
     /// already bound to one; `req` is whether the callee is `Fn` (no lock) rather than `FnMut`.
     pub(crate) fn fn_handle_req(&self, e: &Expr) -> Option<bool> {
@@ -3147,6 +3181,30 @@ impl Transpiler {
                     _ => None,
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// `Some(req)` when `e` reads an OPTIONAL function-typed struct field (`s.make`, `Seed?`):
+    /// once unwrapped (`if let f = s.make`) the binding is that field's handle.
+    pub(crate) fn opt_fn_handle_req(&self, e: &Expr) -> Option<bool> {
+        let ExprKind::Field(obj, fname) = &e.kind else { return None };
+        let sn = self.resolve_struct_name(obj).or_else(|| match &obj.kind {
+            // A parameter whose struct type carries an ownership qualifier is not in
+            // `var_struct_types`; read its declared type directly.
+            ExprKind::Var(v) => match self.fn_current_params.get(v.as_str())?.without_mut() {
+                Type::Named(n) | Type::TypeParam(n) => Some(n.clone()),
+                Type::Qualified(inner, _) => match inner.without_mut() {
+                    Type::Named(n) | Type::TypeParam(n) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })?;
+        let fty = &self.struct_fields.get(&sn)?.iter().find(|(n, _)| n == fname)?.1;
+        match self.resolve_opt_fn_field_type(fty)? {
+            Type::Fn(_, _, _, false, req) => Some(req),
             _ => None,
         }
     }

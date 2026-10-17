@@ -1,0 +1,38 @@
+var evaluated = 0
+var total = 0
+var mut [int] items = [0]
+
+def int expensive():
+    evaluated += 1
+    10
+
+def int bump():
+    evaluated = evaluated + 1
+    evaluated
+
+def push_len_again():
+    items.push(items.len())
+
+def add_total(int n):
+    total -= 0
+    total += n
+    total = total * 2 + total
+
+def push_len():
+    items.push(items[0] + 1)
+
+def main():
+    print evaluated
+    _ = expensive()
+    print evaluated
+    print bump()
+    add_total(3)
+    print total
+    push_len()
+    push_len()
+    items[0] = items[1] + 5
+    print items.len()
+    print items[0]
+    print items
+    push_len_again()
+    print items

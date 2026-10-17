@@ -2779,6 +2779,9 @@ impl Transpiler {
         if let Some(fnty) = field_ty.and_then(|t| self.resolve_fn_field_type(t)) {
             return self.emit_fn_field_value(&fnty, value);
         }
+        if let Some(fnty) = field_ty.and_then(|t| self.resolve_opt_fn_field_type(t)) {
+            return self.emit_opt_fn_field_value(&fnty, value);
+        }
         if self.config.is_gpu_target
             && field_ty.is_some_and(|t| t.gpu_resident_qual().is_some())
         {

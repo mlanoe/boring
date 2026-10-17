@@ -173,6 +173,11 @@ impl Transpiler {
     /// `cargo build` the Boring source itself gives no hint of).
     pub(crate) fn register_optional_binding_type(&mut self, name: &str, expr: &Expr) {
         self.known_local_vars.insert(name.to_string());
+        // Unwrapping an optional function-typed field yields its handle: calls lock/borrow it.
+        match self.opt_fn_handle_req(expr) {
+            Some(req) => { self.fn_handle_vars.insert(name.to_string(), req); }
+            None => { self.fn_handle_vars.remove(name); }
+        }
         // If the expression is an optional actor field, track the binding as managed.
         let is_actor = self.expr_yields_actor(expr);
         if is_actor {
@@ -364,6 +369,7 @@ impl Transpiler {
     /// saves/restores around this call — see `emit_while_let`'s own doc comment).
     pub(crate) fn unregister_optional_binding_type(&mut self, name: &str) {
         self.known_local_vars.remove(name);
+        self.fn_handle_vars.remove(name);
         self.mut_checked_local_vars.remove(name);
         self.content_mutable_local_vars.remove(name);
         self.var_types.remove(name);

@@ -327,6 +327,7 @@ macro_rules! transpile_project_test {
 // Error/rejection tests are excluded (they test compile-time checks, not output).
 
 transpile_test!(basics);
+transpile_test!(global_assign_rhs_reads_global);
 transpile_test!(strings);
 transpile_test!(split_call_arg_then_split);
 transpile_test!(string_temporary_method_chains);
@@ -437,6 +438,8 @@ transpile_test!(view_state_array_methods);
 transpile_test!(view_bind_env);
 transpile_test!(view_method_modifiers);
 transpile_test!(view_state_seed);
+transpile_test!(fn_field_optional_alias);
+transpile_test!(closure_string_literal_result);
 transpile_test!(view_env_provide);
 transpile_test!(actor_field_through);
 transpile_test!(view_env_only);

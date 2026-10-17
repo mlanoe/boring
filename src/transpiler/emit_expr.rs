@@ -878,6 +878,16 @@ impl Transpiler {
         self.emit_expr_closure_inner(params, body, throws, task, observed_param)
     }
 
+    /// A closure's result value: a bare string literal / interpolated string is a Boring
+    /// `string` (`Arc<str>`/`Rc<str>`), not a Rust `&str`/`String`, so it goes through
+    /// `emit_expr_owned` — same conversion function bodies and typed lets already get.
+    fn emit_closure_result(sub: &Self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Str(_) | ExprKind::StringInterp(_) => sub.emit_expr_owned(e),
+            _ => sub.emit_expr(e),
+        }
+    }
+
     fn emit_expr_closure_inner(
         &self, params: &[Param], body: &ClosureBody, throws: bool, task: bool,
         observed_param: Option<(&str, (String, OwnerQual))>,
@@ -971,7 +981,7 @@ impl Transpiler {
 
             let body_s = match body {
                 ClosureBody::Expr(e) => {
-                    let val = sub.emit_expr(e);
+                    let val = Self::emit_closure_result(&sub, e);
                     if throws { format!("Ok({})", val) } else { val }
                 }
                 ClosureBody::Block(stmts) => {
@@ -1000,7 +1010,7 @@ impl Transpiler {
         }
         let closure_s = match body {
             ClosureBody::Expr(e) => {
-                let val = sub.emit_expr(e);
+                let val = Self::emit_closure_result(&sub, e);
                 if throws {
                     format!("|{}| Ok({})", ps.join(", "), val)
                 } else {
@@ -1030,6 +1040,7 @@ impl Transpiler {
                                 let result = std::mem::replace(&mut sub.out, prev_out);
                                 result.trim_end_matches('\n').to_string()
                             }
+                            Stmt::Expr(e) if matches!(&e.kind, ExprKind::Str(_) | ExprKind::StringInterp(_)) => sub.emit_expr_owned(e),
                             _ => sub.emit_stmt_inline(s),
                         }
                     } else {
@@ -2677,7 +2688,9 @@ impl Transpiler {
             if self.global_vars_used_in_fns.contains(var_name.as_str()) {
                 let static_name = var_name.to_uppercase();
                 let val_s = self.emit_expr_owned(value);
-                return format!("*{}.lock().unwrap_or_else(|e| e.into_inner()) = {}", static_name, val_s);
+                // Evaluate the RHS before taking the write lock: the RHS may read
+                // (lock) the same non-reentrant Mutex, which would deadlock.
+                return format!("{{ let __gv = {}; *{}.lock().unwrap_or_else(|e| e.into_inner()) = __gv; }}", val_s, static_name);
             }
             // `var` primitive param: `n = val` → `*n = val`.
             if self.var_primitive_params.contains(var_name.as_str()) {
@@ -3214,6 +3227,25 @@ impl Transpiler {
                 let obj_s = self.emit_expr(arr_obj);
                 let val_s = self.emit_expr_owned(value);
                 return format!("{}.splice({}, {})", obj_s, range_s, val_s);
+            }
+        }
+        // Subscript write on a top-level mutable `var` global: `G[i] = v` / `G[k] = v`. Index, key
+        // and value are all evaluated before the write lock is taken (they may read the same
+        // non-reentrant Mutex), then the write goes through the guard.
+        if let ExprKind::Index(g_obj, idx) = &target.kind {
+            if let ExprKind::Var(g) = &g_obj.kind {
+                if self.global_vars_used_in_fns.contains(g.as_str())
+                    && !matches!(idx.kind, ExprKind::SliceRange { .. })
+                {
+                    let lock = format!("{}.lock().unwrap_or_else(|e| e.into_inner())", g.to_uppercase());
+                    let val_s = self.emit_expr_owned(value);
+                    if self.dict_vars.contains(g.as_str()) {
+                        let key_owned = self.emit_dict_key_owned(idx);
+                        return format!("{{ let __k = {key_owned}; let __v = {val_s}; {lock}.insert(__k, __v); }}");
+                    }
+                    let raw_idx = self.emit_expr(idx);
+                    return format!("{{ let __i = ({raw_idx}) as usize; let __v = {val_s}; {lock}[__i] = __v; }}");
+                }
             }
         }
         // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
@@ -5478,9 +5510,15 @@ impl Transpiler {
             if is_optional {
                 return (expr_s, "{}");
             }
+            let is_global_array = matches!(&a.value.kind, ExprKind::Var(n)
+                if self.global_vars_used_in_fns.contains(n.as_str()))
+                && matches!(self.resolve_expr_type(&a.value).as_ref().map(|t| t.without_mut()),
+                    Some(Type::Array(_)));
             let is_vec_var = matches!(&a.value.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()))
-                || self.expr_field_is_array(&a.value);
-            let is_col = looks_like_collection(&expr_s)
+                || self.expr_field_is_array(&a.value)
+                || is_global_array;
+            let is_col =
+                is_global_array || looks_like_collection(&expr_s)
                 || matches!(&a.value.kind, ExprKind::Var(n) if self.collection_vars.contains(n.as_str()))
                 || matches!(&a.value.kind, ExprKind::Array(_))
                 || self.expr_returns_collection(&a.value);

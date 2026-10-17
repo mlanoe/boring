@@ -219,7 +219,8 @@ impl Transpiler {
                 .or_else(|| self.var_std_types.get(v.as_str()))
                 .cloned()
                 .or_else(|| self.var_struct_types.get(v.as_str()).cloned().map(Type::Named))
-                .or_else(|| self.bare_self_field_type(v)),
+                .or_else(|| self.bare_self_field_type(v))
+                .or_else(|| self.global_var_types.get(v.as_str()).cloned().flatten()),
             // `slot.value` of a `Slot<T>'actor` (a lowered view's `state`/`bind`) is the `T`.
             ExprKind::Field(inner, field) if field == "value" && matches!(
                 self.resolve_expr_type(inner).as_ref().map(slot_value_type), Some(Some(_))) =>
@@ -3356,7 +3357,68 @@ impl Transpiler {
         self.closure_param_hints.borrow_mut().insert((p.line, p.col), elem.without_mut().clone());
     }
 
+    /// An element argument to a mutating collection call (`xs.push(v)`), emitted owned. A
+    /// `.len()` argument is `usize` in Rust; into a `[int]` (`Vec<isize>`) it is cast to `isize`
+    /// (and `[uint]` keeps `usize`), so `xs.push(xs.len())` type-checks.
+    fn emit_collection_elem_arg(&self, obj: &Expr, value: &Expr) -> String {
+        let s = self.emit_expr_owned(value);
+        let is_len = matches!(&value.kind, ExprKind::MethodCall(_, m, a) if m == "len" && a.is_empty());
+        if is_len {
+            let int_elem = self.resolve_expr_type(obj).is_some_and(|t| match t.without_mut() {
+                Type::Array(e) => matches!(e.without_mut(), Type::Named(n) if n == "int"),
+                _ => false,
+            });
+            if int_elem {
+                if let Some(base) = s.strip_suffix(" as usize") {
+                    return format!("{base} as isize");
+                }
+            }
+        }
+        s
+    }
+
+    /// `G.push(x)` / `G.sort()` / ... on a top-level mutable `var` global. A global is read as
+    /// `G.lock()...clone()`, so the plain emission would mutate a throwaway clone (silent no-op).
+    /// Take the write guard once for the whole call instead, with every by-value argument
+    /// evaluated into a temporary *first* (an argument that reads the global would otherwise
+    /// re-lock the non-reentrant Mutex while the guard is held: deadlock).
+    fn try_emit_global_mutating_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        const MUTATING: &[&str] = &[
+            "append", "clear", "insert", "move", "pop", "push", "remove", "removeAt", "remove_at",
+            "removeAll", "remove_all", "removeIndices", "remove_indices", "reverse", "sort", "sortBy",
+            "sort_by", "add", "extend", "set", "put", "shuffle", "dedup", "retain", "truncate",
+            "drain", "swap", "fill",
+        ];
+        let ExprKind::Var(name) = &obj.kind else { return None };
+        if !MUTATING.contains(&method) || !self.global_vars_used_in_fns.contains(name.as_str()) {
+            return None;
+        }
+        let lock = format!("{}.lock().unwrap_or_else(|e| e.into_inner())", name.to_uppercase());
+        let clone_recv = format!("{{ let __a = {lock}.clone(); __a }}");
+        let mut prelude = String::new();
+        let mut new_args: Vec<Arg> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let simple = a.spread || matches!(a.value.kind,
+                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::Closure(..));
+            let simple = simple && !matches!(&a.value.kind, ExprKind::Var(v) if self.global_vars_used_in_fns.contains(v.as_str()));
+            if simple { new_args.push(a.clone()); continue; }
+            let tmp = format!("__garg{i}");
+            prelude.push_str(&format!("let {} = {}; ", tmp, self.emit_collection_elem_arg(obj, &a.value)));
+            let mut na = a.clone();
+            na.value.kind = ExprKind::Var(tmp);
+            new_args.push(na);
+        }
+        let call = self.emit_method_call_inner(obj, method, &new_args);
+        let rest = call.strip_prefix(&clone_recv)?;
+        Some(format!("{{ {prelude}let mut __g = {lock}; (*__g){rest} }}"))
+    }
+
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        if let Some(r) = self.try_emit_global_mutating_call(obj, method, args) { return r; }
+        self.emit_method_call_inner(obj, method, args)
+    }
+
+    fn emit_method_call_inner(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
         let normalized_self_field;
         let obj = if let Some(f) = self.normalize_implicit_self_field(obj) {
             normalized_self_field = f;
@@ -4185,7 +4247,7 @@ impl Transpiler {
             } else {
             match trait_name {
                 Some(tn) => args.iter().map(|a| self.box_if_trait_typed(&a.value, tn.as_str())).collect(),
-                None => args.iter().map(|a| self.emit_expr_owned(&a.value)).collect(),
+                None => args.iter().map(|a| self.emit_collection_elem_arg(obj, &a.value)).collect(),
             }
             }
         } else {
@@ -6392,7 +6454,14 @@ impl Transpiler {
             Stmt::Let(s) => {
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                 let ty = s.ty.as_ref().map(|t| format!(": {}", self.emit_type(t))).unwrap_or_default();
-                format!("{} {}{} = {};", kw, s.name, ty, self.emit_expr(s.value.as_ref().expect("invariant: Let statement in expression context must have an initializer value")))
+                let value = s.value.as_ref().expect("invariant: Let statement in expression context must have an initializer value");
+                // A declared type drives the same value conversion a non-closure typed `let`
+                // gets (string literal -> Arc/Rc<str>, `[]`, `nil`, ...).
+                let v = match &s.ty {
+                    Some(t) => self.emit_let_value(Some(t), value),
+                    None => self.emit_expr(value),
+                };
+                format!("{} {}{} = {};", kw, s.name, ty, v)
             }
             Stmt::If(s) => {
                 // Emit if-expression inline using a sub-transpiler
@@ -6639,7 +6708,10 @@ impl Transpiler {
                 // emit as `NAME.lock().unwrap().clone()`.
                 if self.global_vars_used_in_fns.contains(n) {
                     let static_name = n.to_uppercase();
-                    return format!("{}.lock().unwrap_or_else(|e| e.into_inner()).clone()", static_name);
+                    // Scoped read: the guard is dropped at the inner `;`, so an expression
+                    // that reads the same global twice (`g * 2 + g`) doesn't hold two
+                    // guards of one non-reentrant Mutex at once.
+                    return format!("{{ let __a = {}.lock().unwrap_or_else(|e| e.into_inner()).clone(); __a }}", static_name);
                 }
                 // GPU-target top-level scalar const, uppercased at emission (see
                 // `emit_item`'s `Item::Let` case) to avoid colliding with a same-named fn
