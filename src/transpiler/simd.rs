@@ -273,6 +273,108 @@ fn __boring_simd_name() -> &'static str {
 #[cfg(target_arch = "x86_64")] #[target_feature(enable = "avx2,fma")] unsafe fn __boring_axpy_fma(out: &mut [f32], scale: f32, row: &[f32]) {
     __boring_axpy_with(out, scale, row, |x, y, z| x.mul_add(y, z))
 }
+/// `out[r][c] += sum_k a[row0 + r][k] * b[k][col0 + c]` for a band of rows and columns, using a 4x16
+/// register tile so the inner loop is pure fused multiply-adds on in-register accumulators.
+#[inline(always)] fn __boring_gemm_with(a: &[f32], lda: usize, row0: usize, rows: usize, b: &[f32], ldb: usize, col0: usize, cols: usize, k: usize, out: &mut [f32], ldo: usize, fma: impl Fn(f32, f32, f32) -> f32 + Copy) {
+    const MR: usize = 4;
+    const NR: usize = 16;
+    let mut r = 0;
+    while r + MR <= rows {
+        let mut c = 0;
+        while c + NR <= cols {
+            let mut acc = [[0.0f32; NR]; MR];
+            for i in 0..MR {
+                acc[i].copy_from_slice(&out[(r + i) * ldo + c..(r + i) * ldo + c + NR]);
+            }
+            for kk in 0..k {
+                let brow: &[f32; NR] = b[kk * ldb + col0 + c..kk * ldb + col0 + c + NR].try_into().unwrap();
+                for i in 0..MR {
+                    let av = a[(row0 + r + i) * lda + kk];
+                    for l in 0..NR { acc[i][l] = fma(av, brow[l], acc[i][l]); }
+                }
+            }
+            for i in 0..MR {
+                out[(r + i) * ldo + c..(r + i) * ldo + c + NR].copy_from_slice(&acc[i]);
+            }
+            c += NR;
+        }
+        if c < cols {
+            for i in 0..MR {
+                for kk in 0..k {
+                    __boring_axpy_with(&mut out[(r + i) * ldo + c..(r + i) * ldo + cols], a[(row0 + r + i) * lda + kk], &b[kk * ldb + col0 + c..kk * ldb + col0 + cols], fma);
+                }
+            }
+        }
+        r += MR;
+    }
+    while r < rows {
+        for kk in 0..k {
+            __boring_axpy_with(&mut out[r * ldo..r * ldo + cols], a[(row0 + r) * lda + kk], &b[kk * ldb + col0..kk * ldb + col0 + cols], fma);
+        }
+        r += 1;
+    }
+}
+/// `out[r][c] = bias[col0 + c] + dot(a[row0 + r], w[col0 + c])` with weights stored `[n, k]`: a 4x4 tile of
+/// dot products keeps 16 four-lane accumulators in registers, so each loaded vector is reused four times.
+#[inline(always)] fn __boring_linear_with(a: &[f32], lda: usize, row0: usize, rows: usize, w: &[f32], ldw: usize, col0: usize, cols: usize, k: usize, bias: Option<&[f32]>, out: &mut [f32], ldo: usize, fma: impl Fn(f32, f32, f32) -> f32 + Copy) {
+    const MR: usize = 4;
+    const NR: usize = 4;
+    const L: usize = 4;
+    let init = |c: usize| bias.map_or(0.0f32, |b| b[col0 + c]);
+    let (mut r, kv) = (0usize, k / L * L);
+    while r < rows {
+        let tile_rows = (rows - r).min(MR);
+        let mut c = 0usize;
+        while c < cols {
+            let tile_cols = (cols - c).min(NR);
+            if tile_rows == MR && tile_cols == NR {
+                let mut acc = [[[0.0f32; L]; NR]; MR];
+                let mut kk = 0;
+                while kk < kv {
+                    let mut av = [[0.0f32; L]; MR];
+                    for i in 0..MR { av[i].copy_from_slice(&a[(row0 + r + i) * lda + kk..(row0 + r + i) * lda + kk + L]); }
+                    for j in 0..NR {
+                        let wv: &[f32; L] = w[(col0 + c + j) * ldw + kk..(col0 + c + j) * ldw + kk + L].try_into().unwrap();
+                        for i in 0..MR { for l in 0..L { acc[i][j][l] = fma(av[i][l], wv[l], acc[i][j][l]); } }
+                    }
+                    kk += L;
+                }
+                for i in 0..MR {
+                    for j in 0..NR {
+                        let mut sum = init(c + j);
+                        for l in 0..L { sum += acc[i][j][l]; }
+                        for t in kv..k { sum = fma(a[(row0 + r + i) * lda + t], w[(col0 + c + j) * ldw + t], sum); }
+                        out[(r + i) * ldo + c + j] = sum;
+                    }
+                }
+            } else {
+                for i in 0..tile_rows {
+                    for j in 0..tile_cols {
+                        out[(r + i) * ldo + c + j] = __boring_dot_with(&a[(row0 + r + i) * lda..(row0 + r + i) * lda + k], &w[(col0 + c + j) * ldw..(col0 + c + j) * ldw + k], init(c + j), fma);
+                    }
+                }
+            }
+            c += NR;
+        }
+        r += MR;
+    }
+}
+#[cfg(target_arch = "x86_64")] #[target_feature(enable = "avx2,fma")] unsafe fn __boring_linear_fma(a: &[f32], lda: usize, row0: usize, rows: usize, w: &[f32], ldw: usize, col0: usize, cols: usize, k: usize, bias: Option<&[f32]>, out: &mut [f32], ldo: usize) {
+    __boring_linear_with(a, lda, row0, rows, w, ldw, col0, cols, k, bias, out, ldo, |x, y, z| x.mul_add(y, z))
+}
+fn __boring_linear(a: &[f32], lda: usize, row0: usize, rows: usize, w: &[f32], ldw: usize, col0: usize, cols: usize, k: usize, bias: Option<&[f32]>, out: &mut [f32], ldo: usize) {
+    #[cfg(target_arch = "x86_64")]
+    { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_linear_fma(a, lda, row0, rows, w, ldw, col0, cols, k, bias, out, ldo) }; } }
+    __boring_linear_with(a, lda, row0, rows, w, ldw, col0, cols, k, bias, out, ldo, __boring_fma)
+}
+#[cfg(target_arch = "x86_64")] #[target_feature(enable = "avx2,fma")] unsafe fn __boring_gemm_fma(a: &[f32], lda: usize, row0: usize, rows: usize, b: &[f32], ldb: usize, col0: usize, cols: usize, k: usize, out: &mut [f32], ldo: usize) {
+    __boring_gemm_with(a, lda, row0, rows, b, ldb, col0, cols, k, out, ldo, |x, y, z| x.mul_add(y, z))
+}
+fn __boring_gemm(a: &[f32], lda: usize, row0: usize, rows: usize, b: &[f32], ldb: usize, col0: usize, cols: usize, k: usize, out: &mut [f32], ldo: usize) {
+    #[cfg(target_arch = "x86_64")]
+    { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_gemm_fma(a, lda, row0, rows, b, ldb, col0, cols, k, out, ldo) }; } }
+    __boring_gemm_with(a, lda, row0, rows, b, ldb, col0, cols, k, out, ldo, __boring_fma)
+}
 #[inline(always)] fn __boring_dot(a: &[f32], b: &[f32], init: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_dot_fma(a, b, init) }; } }

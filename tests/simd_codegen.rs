@@ -5745,7 +5745,7 @@ print linear[20]
         String::from_utf8_lossy(&generated.stderr)
     );
     let source = fs::read_to_string(root.join("tensor_simd/src/main.rs")).unwrap();
-    assert!(source.contains("for __boring_tensor_k in 0usize..5usize"));
+    assert!(source.contains("__boring_gemm(__boring_tensor_a, 5,"));
     assert!(source.contains("fn __boring_simd_threads()"));
     assert!(source.contains("static THREADS: std::sync::OnceLock<usize>"));
     assert!(source.contains("__boring_simd_threads().min(3usize * 7usize)"));
@@ -5826,7 +5826,7 @@ print accumulated[3]
     assert!(generated_source.contains("__boring_simd_threads().min(__boring_tensor_m * __boring_tensor_n)"));
     assert!(generated_source
         .contains("__boring_tensor_tasks(&mut"));
-    assert!(generated_source.contains("__boring_tensor_bias[__boring_tensor_col]"));
+    assert!(generated_source.contains("Some(&__boring_tensor_bias[..])"));
     assert!(generated_source.contains(".mul_add("));
     let run = Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
@@ -8205,4 +8205,36 @@ fn few_row_tensor_ops_use_column_bands_within_rows_with_identical_results() {
     let last: Vec<&str> = sequential.lines().last().unwrap().split(' ').collect();
     assert_eq!(last[0].parse::<f32>().unwrap(), linear);
     assert_eq!(last[1].parse::<f32>().unwrap(), matmul);
+}
+
+#[test]
+fn register_tiled_matmul_handles_row_and_column_remainders_and_accumulation() {
+    let source = "let m = 7\nlet n = 37\nlet k = 9\nlet [float32]'kernel'global a = [float32((i % 7) - 3) for i in 0..<63]\nlet [float32]'kernel'global b = [float32((i % 5) - 2) for i in 0..<333]\nmut [float32]'kernel'unified c = [0.0 as float32 for ..<259]\nmut [float32]'kernel'unified d = [1.0 as float32 for ..<259]\nkernel.tensors.matmul(a, b, c, m = m, n = n, k = k)\nkernel.tensors.mma(a, b, d, m = m, n = n, k = k)\nwith c:\n    with d:\n        print \"{c[0]} {c[36]} {c[37]} {c[200]} {c[258]} {d[0]} {d[36]} {d[37]} {d[200]} {d[258]}\"\n";
+    let (sequential, stderr, ok) = build_and_run_simd("tiled_matmul", source, None);
+    assert!(ok, "{stderr}");
+    let (m, n, k) = (7usize, 37usize, 9usize);
+    let a = |i: usize, j: usize| (((i * k + j) % 7) as f32) - 3.0;
+    let b = |j: usize, col: usize| (((j * n + col) % 5) as f32) - 2.0;
+    let mut c = vec![0f32; m * n];
+    for i in 0..m {
+        for col in 0..n {
+            c[i * n + col] = (0..k).map(|j| a(i, j) * b(j, col)).sum();
+        }
+    }
+    let picks = [0usize, 36, 37, 200, 258];
+    let mut expected = picks.iter().map(|&i| c[i].to_string()).collect::<Vec<_>>();
+    expected.extend(picks.iter().map(|&i| (c[i] + 1.0).to_string()));
+    assert_eq!(sequential, expected.join(" "));
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_tiled_matmul/tiled_matmul_simd/Cargo.toml");
+    let parallel = Command::new("cargo")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_tiled_matmul/target"))
+        .env("BORING_SIMD_THREADS", "5")
+        .env("BORING_SIMD_PARALLEL_THRESHOLD", "0")
+        .output()
+        .unwrap();
+    assert!(parallel.status.success(), "{}", String::from_utf8_lossy(&parallel.stderr));
+    assert_eq!(String::from_utf8_lossy(&parallel.stdout).trim(), sequential);
 }
