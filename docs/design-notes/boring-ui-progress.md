@@ -266,6 +266,16 @@ design uses concrete per-site structs; a field named `done` is mis-emitted; two 
 expression deadlock (task proposed). Field projections (`item.title` into a native control's `bind string`) remain the
 per-field `Slot` workaround.
 
+**Layer 3, fourth slice (2026-10-17).** `boring.ui` gained `Layer`, `Fill`, `Scroll`, `Border`, `Opacity`, `Shadow`, `Offset`, the
+`Alignment`/`ScrollAxis` enums and `Text.lineLimit`. `boring-ui`: layout for all of them (`Mounted.scroll` is mounted scroll
+state, clamped by layout; `Runtime.scrollTo`), `events.scrollBy` (deepest-first consumption, remainder bubbles), scene commands
+`StrokeRect`/`DrawShadow`/`PushOpacity`/`PopOpacity` and a clip for scroll viewports; tests `layout_extra_test`,
+`scene_effects_test`, `scroll_test` (interpreter and `boring build`). Notes: the two-axis `Alignment` middle row is
+`MiddleLeading`/`Middle`/`MiddleTrailing` (a `.Center` would clash with `AxisAlignment`); the fixture ellipsis is ASCII `...`
+because `String.length` counts bytes in transpiled output and characters in the interpreter; a recursive `mut Mounted`
+write does not persist under `boring build`, so scroll offsets are written by rebuilding the tree. Still open for layer 3:
+baselines, device-pixel rounding, head/middle truncation, overlays, rounded/transformed clips, images.
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is

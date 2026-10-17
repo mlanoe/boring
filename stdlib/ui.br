@@ -103,8 +103,29 @@ pub enum AxisAlignment:
     Center
     Trailing
 
+# Two-axis alignment for `Layer` and `Fill`.
+# (`Middle*` rather than `Center`/`Leading`/`Trailing`: those variant names belong to `AxisAlignment`
+# and a dot-prefix would become ambiguous everywhere.)
+pub enum Alignment:
+    TopLeading
+    Top
+    TopTrailing
+    MiddleLeading
+    Middle
+    MiddleTrailing
+    BottomLeading
+    Bottom
+    BottomTrailing
+
+pub enum ScrollAxis:
+    Vertical
+    Horizontal
+
 pub view Text:
     string content
+    # At most this many lines: the text wraps first, then the last visible line is truncated with an
+    # ellipsis (draft, "Text").
+    int? lineLimit = nil
     body(): native
 
 pub view Column:
@@ -262,4 +283,59 @@ pub view Provide:
 
 pub view EnvMissing:
     string what
+    body(): native
+
+# ── Composition and effects (docs/design-notes/boring-ui-draft.md, "Overflow, clipping, and scrolling",
+# "Paint order and modifier effects", "Layout primitives") ──────────────────────────────────────────
+#   Layer     overlay stack: every child gets the same proposal, the layer reports the union, later children
+#             paint above earlier ones
+#   Fill      accepts the finite size its parent proposes on the chosen axes (no manufactured space, never
+#             clips a larger child) and aligns its child in the extra room
+#   Scroll    a finite viewport over content that chooses its full extent on the scrolling axis; the offset is
+#             mounted control state, clamped after layout
+#   Border    an inside stroke painted over its child
+#   Opacity   composites the child's whole result with `value` (0...1)
+#   Shadow    an outer shadow of the child's result, painted under it
+#   Offset    a paint/hit-test translation that never changes sizes or siblings
+
+pub view Layer:
+    Alignment alignment = .Middle
+    [View] children
+    body(): native
+
+pub view Fill:
+    bool width = true
+    bool height = true
+    Alignment alignment = .Middle
+    [View] children
+    body(): native
+
+pub view Scroll:
+    ScrollAxis axis = .Vertical
+    [View] children
+    body(): native
+
+pub view Border:
+    string color
+    float lineWidth = 1.0
+    [View] children
+    body(): native
+
+pub view Opacity:
+    float value
+    [View] children
+    body(): native
+
+pub view Shadow:
+    string color = "black"
+    float radius = 4.0
+    float dx = 0.0
+    float dy = 2.0
+    [View] children
+    body(): native
+
+pub view Offset:
+    float x = 0.0
+    float y = 0.0
+    [View] children
     body(): native
