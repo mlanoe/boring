@@ -89,3 +89,60 @@ fn explicit_some_still_works_in_the_interpreter_and_std_codegen() {
     assert!(rust.contains("Some(5)"), "{rust}");
     let _ = std::fs::remove_file(&file);
 }
+
+// ---- optional locals inside device kernels (metal / wgpu / cuda / rocm) -------------------
+//
+// These backends have no `Option`; `src/desugar_gpu_optional.rs` lowers an optional local to a
+// presence flag plus a value. Expected per thread i (see the fixture): the `maybe` / `other` /
+// `later` branches, +1000 for the `n == nil` branch and +5 for `n else 5`.
+
+const KERNEL_FIXTURE: &str = "tests/cases/implicit_some_kernel.br";
+const KERNEL_EXPECTED: &str = "1104 1106 1129 1141";
+
+fn generate(target: &str, name: &str) -> std::path::PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("implicit_some_{name}_{target}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(KERNEL_FIXTURE, dir.join("main.br")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", target, "main.br"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{target}: {}", String::from_utf8_lossy(&out.stderr));
+    dir
+}
+
+#[test]
+fn device_backends_lower_optional_locals_in_kernels() {
+    for (target, kernel_file) in [
+        ("metal", "main_metal/kernels/main.metal"),
+        ("wgpu", "main_wgpu/shaders/main.wgsl"),
+        ("cuda", "main_cuda/kernels/main.cu"),
+        ("rocm", "main_rocm/kernels/main.hip"),
+    ] {
+        let dir = generate(target, "shape");
+        let source = std::fs::read_to_string(dir.join(kernel_file)).unwrap();
+        assert!(!source.contains("unsupported"), "{target}: {source}");
+        assert!(source.contains("maybe__has") && source.contains("n__has"), "{target}: {source}");
+        assert!(!source.contains("some("), "{target}: {source}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn optional_locals_in_kernels_run_correctly_on_metal() {
+    let dir = generate("metal", "run");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(dir.join("main_metal/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(dir.join("target"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(stdout, KERNEL_EXPECTED);
+}

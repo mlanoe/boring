@@ -21,6 +21,7 @@ pub mod desugar_inline_kernel;
 pub mod desugar_array_block;
 pub mod desugar_inject;
 pub mod desugar_view_modifiers;
+pub mod desugar_gpu_optional;
 pub mod view_perm;
 pub mod ast_walk;
 pub mod downcast;

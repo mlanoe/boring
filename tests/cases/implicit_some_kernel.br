@@ -1,0 +1,27 @@
+mut [int]'kernel'unified out = [0 for ..<4]
+kernel O:
+    mut [int]'unified out
+    init(mut [int]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        let int? maybe = if i > 1: i * 10 else: nil
+        let int? other = i
+        var int? later = nil
+        later = i + 100
+        if let v = maybe:
+            out[i] = v
+        else:
+            out[i] = -1
+        if let w = other:
+            out[i] += w
+        if let x = later:
+            out[i] += x
+        var int? n = nil
+        if n == nil:
+            out[i] += 1000
+        out[i] += (n else 5) + (later else 0) * 0
+mut o = O(out)
+kernel:
+    o(block = 4)
+print "{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}"

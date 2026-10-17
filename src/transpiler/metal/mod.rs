@@ -67,7 +67,8 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
     tensor_config.native_dynamic_float_linear = !matches!(tensor_config.matrix_algorithm.as_deref(), Some("scalar"));
     tensor_config.native_dynamic_q8_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
-    let program = &tensor_host.program;
+    let optional_lowered = crate::desugar_gpu_optional::desugar(&tensor_host.program);
+    let program = &optional_lowered;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }
     }).collect();
