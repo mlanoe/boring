@@ -27,7 +27,7 @@
 //!   next on the backends without an `Option`.
 //!
 //! Eligible structs have only scalar / `bool` / optional-scalar / nested-eligible-struct fields,
-//! no type parameters and no custom `init`. Struct methods, arrays inside structs and structs
+//! no type parameters and no custom `init`. Methods are lowered as `S__m(self, ..)` (`req`, or a `def` returning nothing, which returns the updated `self`). Arrays inside structs and structs
 //! in kernel buffers are not lowered (left as written).
 
 use crate::ast::*;
@@ -53,6 +53,22 @@ pub fn desugar(program: &Program) -> Program {
             }
         }
     }
+    // Struct methods become free functions `S__m(self: S, ..)` (a `def` returning nothing
+    // returns the updated `self`), then go through the same clone machinery.
+    let mut methods: Vec<FnDecl> = Vec::new();
+    for (sname, info) in &cx.structs {
+        for m in &info.methods {
+            if let Some(f) = cx.method_as_fn(sname, m) {
+                methods.push(f);
+            }
+        }
+    }
+    methods.sort_by(|a, b| a.name.cmp(&b.name));
+    for f in &methods {
+        let params: Vec<Option<String>> = f.params.iter().map(|p| cx.struct_name(p.ty.as_ref())).collect();
+        let ret = cx.struct_name(f.return_ty.as_ref());
+        cx.fns.insert(f.name.clone(), Sig { params, ret });
+    }
     let mut clones = Vec::new();
     for item in &program.items {
         if let Item::Fn(f) = item {
@@ -60,6 +76,10 @@ pub fn desugar(program: &Program) -> Program {
                 clones.extend(cx.device_clones(f, sig));
             }
         }
+    }
+    for f in &methods {
+        let sig = cx.fns[&f.name].clone();
+        clones.extend(cx.device_clones(f, &sig));
     }
     let mut touched = false;
     for item in &mut program.items {
@@ -88,6 +108,7 @@ struct Sig {
 #[derive(Clone)]
 struct StructInfo {
     fields: Vec<(String, Type, Option<Expr>)>,
+    methods: Vec<FnDecl>,
 }
 
 #[derive(Clone)]
@@ -152,7 +173,10 @@ fn eligible_structs(program: &Program) -> HashMap<String, StructInfo> {
             let s = decls[n];
             (
                 n.to_string(),
-                StructInfo { fields: s.fields.iter().map(|f| (f.name.clone(), f.ty.clone(), f.default.clone())).collect() },
+                StructInfo {
+                    fields: s.fields.iter().map(|f| (f.name.clone(), f.ty.clone(), f.default.clone())).collect(),
+                    methods: s.methods.clone(),
+                },
             )
         })
         .collect()
@@ -241,8 +265,104 @@ impl Cx {
         }
     }
 
+    /// `S.m` as the free function `S__m(self: S, ..)`; `None` for methods that cannot be lowered
+    /// (task / native / generic, or a `def` that returns a value).
+    fn method_as_fn(&self, sname: &str, m: &FnDecl) -> Option<FnDecl> {
+        if m.task || m.is_native || m.stream || !m.type_params.is_empty() || m.throws {
+            return None;
+        }
+        let unit_def = m.mutating && m.return_ty.as_ref().is_none_or(|t| matches!(unwrap_ty(t), Type::Void));
+        if m.mutating && !unit_def {
+            return None;
+        }
+        let at = Expr { kind: ExprKind::Nil, line: 0, col: 0, len: 0 };
+        // Bare field names read `self.field` unless shadowed by a parameter or a local.
+        let mut shadowed: HashSet<String> = m.params.iter().map(|p| p.name.clone()).collect();
+        let mut names = |stmts: &mut [Stmt]| {
+            Walker {
+                expr: &mut |_| {},
+                stmt: &mut |st| match st {
+                    Stmt::Let(l) => {
+                        shadowed.insert(l.name.clone());
+                    }
+                    Stmt::For(f) => shadowed.extend(f.vars.iter().cloned()),
+                    _ => {}
+                },
+            }
+            .stmts(stmts);
+        };
+        let mut body = m.body.clone();
+        names(&mut body);
+        let fields: HashSet<&str> = self.structs[sname].fields.iter().map(|(n, _, _)| n.as_str()).collect();
+        Walker {
+            expr: &mut |x| {
+                if let ExprKind::Var(n) = &x.kind {
+                    if fields.contains(n.as_str()) && !shadowed.contains(n) {
+                        *x = mk(ExprKind::Field(Box::new(var("self", x)), n.clone()), x);
+                    }
+                }
+            },
+            stmt: &mut |_| {},
+        }
+        .stmts(&mut body);
+        if unit_def {
+            body.push(Stmt::Expr(var("self", &at)));
+        }
+        let mut params = vec![Param {
+            name: "self".into(),
+            ty: Some(Type::Named(sname.to_string())),
+            mutable: false,
+            rebindable: false,
+            var_mut: false,
+            owned: false,
+            variadic: false,
+            default: None,
+            line: 0,
+            col: 0,
+        }];
+        params.extend(m.params.iter().cloned());
+        Some(FnDecl {
+            name: format!("{sname}__{}", m.name),
+            qualifier: None,
+            params,
+            return_ty: if unit_def { Some(Type::Named(sname.to_string())) } else { m.return_ty.clone() },
+            body,
+            mutating: false,
+            ..m.clone()
+        })
+    }
+
+    /// `recv.m(args);` where `m` is a `def` returning nothing: (root, path, struct, call).
+    fn mutating_method(&self, e: &Expr) -> Option<(String, Vec<String>, String, Expr)> {
+        let ExprKind::MethodCall(recv, _, _) = &e.kind else { return None };
+        let call = self.method_call(e)?;
+        let sname = self.struct_of(recv)?;
+        let ExprKind::Call(callee, _) = &call.kind else { return None };
+        let ExprKind::Var(name) = &callee.kind else { return None };
+        // Only the unit-`def` form returns its own struct type.
+        if self.fns.get(name)?.ret.as_deref() != Some(sname.as_str()) {
+            return None;
+        }
+        let (root, path) = Self::path_of(recv)?;
+        Some((root, path, sname, call))
+    }
+
+    /// `recv.m(args)` on a struct with a lowerable method → `S__m(recv, args)`.
+    fn method_call(&self, e: &Expr) -> Option<Expr> {
+        let ExprKind::MethodCall(recv, m, args) = &e.kind else { return None };
+        let sname = self.struct_of(recv)?;
+        let name = format!("{sname}__{m}");
+        self.fns.get(&name)?;
+        let mut all = vec![Arg { label: None, value: (**recv).clone(), spread: false, default_rest: false }];
+        all.extend(args.iter().cloned());
+        Some(mk(ExprKind::Call(Box::new(var(&name, e)), all), e))
+    }
+
     /// Struct name of an expression, when it is one.
     fn struct_of(&self, e: &Expr) -> Option<String> {
+        if let Some(call) = self.method_call(e) {
+            return self.struct_of(&call);
+        }
         match &e.kind {
             ExprKind::Call(c, _) => match &c.kind {
                 ExprKind::Var(n) if self.structs.contains_key(n) => Some(n.clone()),
@@ -264,6 +384,9 @@ impl Cx {
 
     /// One value per leaf of `s` (in `leaves` order) for the struct-valued expression `e`.
     fn field_values(&self, e: &Expr, s: &str) -> Option<Vec<Expr>> {
+        if let Some(call) = self.method_call(e) {
+            return self.field_values(&call, s);
+        }
         match &e.kind {
             ExprKind::Call(c, args) => {
                 let ExprKind::Var(name) = &c.kind else { return None };
@@ -420,7 +543,32 @@ impl Cx {
                 map_returns(&mut body, &cx, s, index, true);
             }
             rewrite_exprs(&mut body, &cx);
-            FnDecl { name, params: params.clone(), return_ty, body, qualifier: None, ..f.clone() }
+            // A leaf parameter the body assigns to (a `def` method updating `self`) is copied into
+            // a local first: WGSL parameters are immutable and a by-value Rust one needs `mut`.
+            let mut assigned: HashSet<String> = HashSet::new();
+            Walker {
+                expr: &mut |e| {
+                    if let ExprKind::Assign(lhs, _) = &e.kind {
+                        if let ExprKind::Var(n) = &lhs.kind {
+                            assigned.insert(n.clone());
+                        }
+                    }
+                },
+                stmt: &mut |_| {},
+            }
+            .stmts(&mut body);
+            let mut params = params.clone();
+            let mut prologue = Vec::new();
+            for p in &mut params {
+                if assigned.contains(&p.name) {
+                    let ty = p.ty.clone().unwrap_or(Type::Int);
+                    let at = Expr { kind: ExprKind::Nil, line: 0, col: 0, len: 0 };
+                    prologue.push(stmt_let(BindingKind::Var, &p.name, ty, var(&format!("{}__in", p.name), &at), 0, 0));
+                    p.name = format!("{}__in", p.name);
+                }
+            }
+            prologue.extend(body);
+            FnDecl { name, params, return_ty, body: prologue, qualifier: None, ..f.clone() }
         };
         match &sig.ret {
             Some(s) => self
@@ -485,6 +633,13 @@ fn block(stmts: Vec<Stmt>, cx: &mut Cx) -> Vec<Stmt> {
                     _ => out.push(Stmt::Let(l)),
                 }
             }
+            Stmt::Expr(e) if matches!(&e.kind, ExprKind::MethodCall(..)) && cx.mutating_method(&e).is_some() => {
+                let (root, path, sname, call) = cx.mutating_method(&e).unwrap();
+                match cx.store(&root, &path, &sname, &call) {
+                    Some(stmts) => out.extend(stmts),
+                    None => out.push(Stmt::Expr(e)),
+                }
+            }
             Stmt::Expr(Expr { kind: ExprKind::Assign(lhs, rhs), line, col, len }) => {
                 let lowered = cx.struct_of(&lhs).and_then(|s| {
                     let (root, path) = Cx::path_of(&lhs)?;
@@ -544,6 +699,12 @@ fn rewrite_exprs(body: &mut [Stmt], cx: &Cx) {
                     }
                     _ => None,
                 },
+                ExprKind::MethodCall(..) => cx.method_call(e).and_then(|call| {
+                    let ExprKind::Call(callee, args) = &call.kind else { return None };
+                    let ExprKind::Var(f) = &callee.kind else { return None };
+                    cx.fns.get(f).filter(|s| s.ret.is_none())?;
+                    Some(mk(ExprKind::Call(Box::new(var(&format!("{f}__dev"), callee)), cx.lower_args(f, args)), e))
+                }),
                 ExprKind::Call(callee, args) => match &callee.kind {
                     ExprKind::Var(f) if cx.fns.get(f).is_some_and(|s| s.ret.is_none()) => Some(mk(
                         ExprKind::Call(Box::new(var(&format!("{f}__dev"), callee)), cx.lower_args(f, args)),

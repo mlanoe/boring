@@ -1,0 +1,34 @@
+struct Vec2:
+    int x
+    int y
+
+    req int dot(Vec2 o):
+        x * o.x + y * o.y
+
+    req Vec2 plus(Vec2 o):
+        Vec2(x = x + o.x, y = y + o.y)
+
+    def shift(int dx):
+        x += dx
+        y = y + dx
+
+    req int sum():
+        let t = x + y
+        t
+
+mut [int]'kernel'unified out = [0 for ..<4]
+kernel O:
+    mut [int]'unified out
+    init(mut [int]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        var a = Vec2(x = i, y = 2)
+        let b = Vec2(x = 3, y = 4)
+        a.shift(10)
+        let c = a.plus(b)
+        out[i] = a.dot(b) + c.sum() + b.sum()
+mut o = O(out)
+kernel:
+    o(block = 4)
+print "{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}"
