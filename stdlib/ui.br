@@ -389,3 +389,37 @@ pub view Offset:
     float y = 0.0
     [View] children
     body(): native
+
+# ── Animation (docs/design-notes/boring-ui-draft.md, "Animation and transitions") ───────────────────
+#   AnimationScope  `.animation(curve, value = x)`: when `value` changes after the first mount, the
+#                   presentation differences inside use this animation (a string trigger here: write
+#                   `value = "{expanded}"`); it never animates because an ancestor merely rebuilt
+#   Transition      how a conditional / keyed subtree enters and leaves when the transaction that inserts or
+#                   removes it is animated: Identity, Fade, Scale (`amount`, e.g. 0.96) or Slide (`dx`, `dy`);
+#                   asymmetric by giving `insertion` and `removal` different kinds
+
+# (`Fade`/`Slide` rather than the draft's `Opacity`/`Offset`: an enum variant named like a view would
+# shadow `Opacity(...)` / `Offset(...)` in every program.)
+pub enum TransitionKind:
+    Identity
+    Fade
+    Scale
+    Slide
+
+pub view AnimationScope:
+    string curve = "EaseInOut"
+    float duration = 200.0
+    float response = 300.0
+    float damping = 0.8
+    string value = ""
+    [View] children
+    body(): native
+
+pub view Transition:
+    TransitionKind insertion = .Fade
+    TransitionKind removal = .Fade
+    float amount = 0.96
+    float dx = 0.0
+    float dy = 0.0
+    [View] children
+    body(): native

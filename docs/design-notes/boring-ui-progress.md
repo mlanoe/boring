@@ -298,6 +298,17 @@ hex-string colors, entry-list token tables (dictionary iteration differs under `
 `Theme.validate` is `issues` (the interpreter's checker infers mutability by method name; `Runtime.validate` is mutating).
 Still open: adaptive spacing pairs, text scale, per-token variants, custom style traits, inherited style providers.
 
+**Animation slice (2026-10-17).** `boring.ui` gained `AnimationScope`, `Transition` and `TransitionKind` (`Identity`/`Fade`/`Scale`/`Slide`).
+`boring-ui`: `src/anim.br` (curves, springs, reduced motion, linear-light premultiplied color blending), `src/animator.br`
+(deterministic presentation between two committed layouts: transactions, scopes, retargeting from the current presentation,
+transitions with presentation-only ghosts, reduced motion), core `animate`/`withoutAnimation`/`takeAnimation`/`takeTriggers`
+and `AnimationScope` triggers, `Placed.alpha`/`ghost`/`live`, `PushOpacity` for group alpha, ghosts skipped by hit testing and
+semantics. Tests `anim_test.br`, `animator_test.br` (interpreter and `boring build`, identical float results). Deviations: the
+runtime still unmounts immediately (only the display of a removal is retained), `Fade`/`Slide` variant names, string scope
+triggers. Transpiler gaps worked around (one task proposed): `.parseFloat()` on a non-variable string, forwarding a closure
+parameter, returning an optional bound by `let`, assigning a plain value to an optional `var`; and `channel` is a builtin name
+in the interpreter. Still open: completion callbacks, keyframes, matched geometry, `Sheet` transitions.
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
