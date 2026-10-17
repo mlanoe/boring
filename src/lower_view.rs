@@ -489,7 +489,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
             match &ty {
                 Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Fn(..) | Type::Tuple(_) => {}
                 // An optional callback (`TextField.onSubmit`) is not a printable prop.
-                Type::Optional(inner) if matches!(&**inner, Type::Named(n) if n == "UIAction" || n == "TaskAction") => {}
+                Type::Optional(inner) if matches!(&**inner, Type::Named(n) if n == "UIAction" || n == "TaskAction" || n == "MoveAction" || n == "DeleteAction") => {}
                 Type::Optional(inner) if !matches!(**inner, Type::Array(_)) => {
                     props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
                 }
@@ -513,6 +513,26 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
             acts.push_str("        if action == \"submit\":\n            if let handler = onSubmit:\n                handler()\n");
             handles.push_str("        if action == \"submit\":\n            return onSubmit != nil\n");
         }
+        // `Sheet.isPresented`: dismissal (Escape, a platform gesture) writes `false` through the binding.
+        if s.fields.iter().any(|f| f.name == "isPresented" && matches!(strip_mut(&f.ty), Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot"))) {
+            acts.push_str("        if action == \"dismiss\":\n            isPresented.value = false\n");
+            handles.push_str("        if action == \"dismiss\":\n            return true\n");
+        }
+        // `List.selection`: the runtime selects a row by its key (empty = none).
+        if s.fields.iter().any(|f| f.name == "selection" && matches!(strip_mut(&f.ty), Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot"))) {
+            acts.push_str("        if action == \"select\":\n            selection.value = arg\n");
+            handles.push_str("        if action == \"select\":\n            return true\n");
+        }
+        // `List.onMove` / `onDelete`: optional semantic callbacks; their arguments travel as text
+        // ("from,to" and a comma-separated ascending index list) through the action boundary.
+        if s.fields.iter().any(|f| f.name == "onMove" && matches!(strip_mut(&f.ty), Type::Optional(t) if is_named(t, "MoveAction"))) {
+            acts.push_str("        if action == \"move\":\n            if let handler = onMove:\n                let parts = arg.split(\",\")\n                handler(intOf(parts[0]), intOf(parts[1]))\n");
+            handles.push_str("        if action == \"move\":\n            return onMove != nil\n");
+        }
+        if s.fields.iter().any(|f| f.name == "onDelete" && matches!(strip_mut(&f.ty), Type::Optional(t) if is_named(t, "DeleteAction"))) {
+            acts.push_str("        if action == \"delete\":\n            if let handler = onDelete:\n                mut [int] indices = []\n                for part in arg.split(\",\"):\n                    if part.length > 0:\n                        indices.push(intOf(part))\n                handler(indices)\n");
+            handles.push_str("        if action == \"delete\":\n            return onDelete != nil\n");
+        }
         if !handles.is_empty() {
             src.push_str(&format!("    req bool viewHandles(string action):\n{handles}        false\n"));
         }
@@ -527,6 +547,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                 if let Type::Generic(g, args) = &**inner {
                     if g == "Slot" && args.len() == 1 && is_named(&args[0], "bool") {
                         acts.push_str("        if action == \"toggle\":\n            value.value = !value.value\n");
+                        acts.push_str("        if action == \"setBool\":\n            value.value = arg == \"true\"\n");
                     }
                     if g == "Slot" && args.len() == 1 && is_named(&args[0], "string") {
                         acts.push_str("        if action == \"setText\":\n            value.value = arg\n");

@@ -54,6 +54,16 @@ pub trait EnvValue:
 # A parameterless callback, as held by `Button.onActivate`.
 pub use UIAction as def void()
 
+# The integer in `text` (0 when it is not one): a typed entry point for the generated `List` actions, whose
+# arguments travel as text.
+pub def int intOf(string text):
+    text.parseInt() else (0)
+
+# `List`'s optional semantic callbacks: reorder (final index after the move) and delete (unique ascending
+# indices into one pre-event snapshot).
+pub use MoveAction as def void(int, int)
+pub use DeleteAction as def void([int])
+
 # One start of an `OnTask` body. Plain data: whether it is still current is the runtime's call
 # (`Runtime.isCurrent(run)`), because it is current only while BOTH the mounted node's generation
 # and the task-run generation still match — an `id` change or an unmount makes it stale.
@@ -421,5 +431,43 @@ pub view Transition:
     float amount = 0.96
     float dx = 0.0
     float dy = 0.0
+    [View] children
+    body(): native
+
+# ── Modal presentation, focus and collections (docs/design-notes/boring-ui-draft.md, "Modal presentation",
+# "Focus", "List, selection, deletion, and reordering") ──────────────────────────────────────────────────
+#   Sheet         contributes no bounds to its parent; presented (`isPresented` true) its child is mounted in the
+#                 window's presentation layer, modal: it traps focus and pointer input, Escape writes `false`
+#   DefaultFocus  the control that takes focus first when its scope (a presented Sheet) activates
+#   Focused       `.focused(flag)`: the wrapped control's focus state, both ways, through a bound bool
+#   FocusedAs     `.focused(focus, equals = token)`: several controls sharing one bound token (a string here)
+#   List          a scrolling collection of keyed rows with single selection (the row's key, "" for none) and
+#                 optional `onMove` / `onDelete` callbacks that enable reordering and deletion
+
+pub view Sheet:
+    bind bool isPresented
+    [View] children
+    body(): native
+
+pub view DefaultFocus:
+    bool enabled = true
+    [View] children
+    body(): native
+
+pub view Focused:
+    bind bool value
+    [View] children
+    body(): native
+
+pub view FocusedAs:
+    bind string value
+    string token
+    [View] children
+    body(): native
+
+pub view List:
+    bind string selection
+    MoveAction? onMove = nil
+    DeleteAction? onDelete = nil
     [View] children
     body(): native

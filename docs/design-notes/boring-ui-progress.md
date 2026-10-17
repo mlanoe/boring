@@ -309,6 +309,19 @@ triggers. Transpiler gaps worked around (one task proposed): `.parseFloat()` on 
 parameter, returning an optional bound by `let`, assigning a plain value to an optional `var`; and `channel` is a builtin name
 in the interpreter. Still open: completion callbacks, keyframes, matched geometry, `Sheet` transitions.
 
+**Sheet, focus bindings, List and the acceptance app (2026-10-17).** `boring.ui` gained `Sheet`, `DefaultFocus`, `Focused`, `FocusedAs`,
+`List`, `MoveAction`/`DeleteAction` and `intOf`; the lowering generates `viewAct` for `setBool`, `dismiss`, `select`, `move` and `delete`.
+`boring-ui`: a closed sheet mounts nothing, a presented one is laid out in a presentation layer (`withSheets`), painted last, modal for hit
+testing and semantics, traps focus and restores it (`Runtime.openSheets`/`focusReturn`/`syncModal`); `syncFocusBindings` reconciles native
+focus and `Focused`/`FocusedAs` values per pass (per-node `syncedOn` state: arrival, request, clear, loss, first-request-wins);
+`List` is a scrolling keyed-row viewport (`Placed.key`) with selection, `pruneSelection`, Up/Down/Delete/AltUp/AltDown and `onMove`/`onDelete`;
+`focusControl` moves focus as one event. `examples/todo` is now the draft's acceptance app on these pieces; tests `sheet_test`,
+`focus_binding_test`, `list_test`, `todo_test` (interpreter and `boring build`). Behaviour change: a press now focuses in its own event
+(two update passes per click). Transpiler/interpreter gaps worked around or proposed: a `Handle?` passed to a method is moved, `var T? x = nil`
+syntax, a derive-PartialEq decision that ignores field type derives and an interpreter bind-hop that loses slot writes (task proposed), and
+name collisions in the interpreter (a global function named like a struct field, enum variants named like views). Still open: IME/undo, non-modal
+focus scopes, multiple selection, focus rings, the renderer/host.
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
