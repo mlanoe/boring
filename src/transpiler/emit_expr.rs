@@ -2435,6 +2435,13 @@ impl Transpiler {
                 // examples/tokio.br's `all_users.length` on an `'actor'task` array).
                 let mapped = map_field(field);
                 let result = format!("{}.{}", access, mapped);
+                // A by-value scalar/string read is scoped so its guard is gone before the rest of
+                // the expression runs (`t.a + t.b` would otherwise hold two guards of one Mutex).
+                if mapped == field && !self.in_lhs_assign.get() {
+                    if let Some(fty) = self.var_mutex_field_type(v, field) {
+                        if let Some(scoped) = Self::scoped_guard_read(&result, &fty) { return scoped; }
+                    }
+                }
                 return if mapped.contains(" as ") { format!("({})", result) } else { result };
             }
             // RwLock var access: w.field → w.read().unwrap().field (multi) or w.borrow().field (single)
@@ -2465,12 +2472,24 @@ impl Transpiler {
         // lock the handle, then project. A non-`Copy` result is cloned out of the guard unless the
         // read is itself a place (assignment target / method receiver).
         if let Some(r) = self.resolve_lock_field_ref(obj) {
-            let access = self.lock_field_read(&r);
+            // A place (assignment target) needs the write guard (`borrow_mut` in single-thread).
+            let access = if self.in_lhs_assign.get() { self.lock_field_write(&r) } else { self.lock_field_read(&r) };
             let sub_ty = self.lock_subfield_type(&r, field);
             let proj = format!("{}.{}", access, field);
             let needs_clone = !self.in_lhs_assign.get()
                 && sub_ty.as_ref().is_some_and(|t| !t.is_copy());
-            return if needs_clone { format!("{}.clone()", proj) } else { proj };
+            // Scope the read: the guard is dropped at the inner `;`, so an expression that reads
+            // the same slot twice (`"{item.id}:{item.title}"`, `s.a + s.b`) never holds two guards
+            // of one non-reentrant Mutex (hang) / a `borrow()` over a `borrow_mut()` (panic).
+            if !self.in_lhs_assign.get() {
+                if needs_clone && !sub_ty.as_ref().is_some_and(|t| matches!(t.without_mut(), Type::Str)) {
+                    return format!("({{ let __a = {}.clone(); __a }})", proj);
+                }
+                if let Some(scoped) = sub_ty.as_ref().and_then(|t| Self::scoped_guard_read(&proj, t)) {
+                    return scoped;
+                }
+            }
+            return proj;
         }
         // Mutex struct field: self.worker.field → self.worker.lock().await.field (multi) / self.worker.borrow().field (single)
         if let ExprKind::Field(inner_obj, mutex_field) = &obj.kind {

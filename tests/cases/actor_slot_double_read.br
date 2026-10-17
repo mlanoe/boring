@@ -1,0 +1,77 @@
+# Two reads of one `'actor` slot inside a single expression (interpolation, binary op, call
+# argument, assignment RHS, compound assignment) used to each hold a `MutexGuard` until the end
+# of the statement and deadlock on the non-reentrant std Mutex. Passes only if it completes.
+use boring.ui.*
+
+pub struct Todo:
+    pub int id
+    pub var string title
+    pub var int n
+    pub var [int] hist
+
+def int add3(int a, int b, int c):
+    a + b + c
+
+view TodoRow:
+    bind Todo item
+    bind int count
+
+    req string label():
+        "{item.id}:{item.title}"
+
+    req int sum():
+        item.id + item.n
+
+    req int call():
+        add3(item.id, item.n, item.n)
+
+    req int slotsum():
+        count + count
+
+    def retitle():
+        item.title = "{item.title}!"
+        item.n += item.n
+        item.n = item.n + item.n
+        count = count + count
+        item.hist.push(item.n)
+        item.hist.push(item.n + item.id)
+
+    body():
+        Text("{item.id}:{item.title}")
+
+view Host:
+    state Todo item = Todo(id = 1, title = "a", n = 2, hist = [])
+    state int count = 5
+
+    body():
+        TodoRow(item = item, count = count)
+
+def string tag(Todo'actor t):
+    "{t.id}/{t.title}/{t.n + t.n}"
+
+def int psum(Todo'actor t):
+    t.id + t.n + t.n
+
+def pbump(Todo'actor t):
+    t.title = "{t.title}?"
+    t.n = t.n + t.n
+    t.hist.push(t.n)
+    t.hist.push(t.n + t.id)
+
+def main():
+    mut st = Host__State()
+    let row = TodoRow(item = st.item, count = st.count)
+    print row.label()
+    print row.sum()
+    print row.call()
+    print row.slotsum()
+    row.retitle()
+    print row.label()
+    print row.sum()
+    print st.count.value
+    let t'actor = Todo(id = 7, title = "p", n = 3, hist = [])
+    pbump(t)
+    print tag(t)
+    print psum(t)
+    print t.hist.length
+    print st.item.value.hist.length

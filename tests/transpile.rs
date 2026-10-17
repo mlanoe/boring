@@ -444,6 +444,7 @@ transpile_test!(fn_field_collection_writes);
 transpile_test!(closure_string_literal_result);
 transpile_test!(view_env_provide);
 transpile_test!(actor_field_through);
+transpile_test!(actor_slot_double_read);
 transpile_test!(view_env_only);
 transpile_test!(view_act_str_args_trait_obj);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]

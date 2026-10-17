@@ -1809,9 +1809,26 @@ impl Transpiler {
     fn try_emit_actor_field_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // `lock_field.sub.method(args)` — a method on a field *held inside* an `'actor`/`'guard`
         // struct field (`bind.value.rename(s)`): lock the handle, then call on the projected field.
-        if let ExprKind::Field(handle_obj, sub) = &obj.kind {
-            if let Some(r) = self.resolve_lock_field_ref(handle_obj) {
-                let sub_ty = self.lock_subfield_type(&r, sub);
+        // The path below the handle may be deeper than one field (`item.value.hist.push(..)`, a
+        // lowered `bind` slot's projected collection): peel field layers until a lock handle shows.
+        let mut peeled: Vec<&str> = Vec::new();
+        let mut cur = obj;
+        let lock_path = loop {
+            let ExprKind::Field(inner, f) = &cur.kind else { break None };
+            peeled.insert(0, f.as_str());
+            if let Some(r) = self.resolve_lock_field_ref(inner) { break Some(r); }
+            cur = inner;
+        };
+        if let Some(r) = lock_path {
+            {
+                let sub_path = peeled.join(".");
+                let sub = &sub_path;
+                let mut sub_ty = self.lock_subfield_type(&r, peeled[0]);
+                for f in &peeled[1..] {
+                    let sn = sub_ty.as_ref().and_then(receiver_type_name);
+                    sub_ty = sn.and_then(|n| self.struct_fields.get(n.as_str())
+                        .and_then(|fs| fs.iter().find(|(fname, _)| fname == f).map(|(_, t)| t.clone())));
+                }
                 let sub_struct = sub_ty.as_ref().and_then(receiver_type_name);
                 let is_known = sub_struct.as_deref().map(|n| self.is_known_user_type(n)).unwrap_or(false);
                 // A read-only builtin collection method (`join`, `contains`, `indexOf`, `map`, ...)
@@ -1969,9 +1986,11 @@ impl Transpiler {
                 if let ExprKind::Var(v) = &inner_obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                         let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
-                        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                        let mut args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                        // An argument reading `v` again must be evaluated before the write guard.
+                        let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                         let guard = self.mutex_var_write(v, v);
-                        let call = format!("{}.{}.{}({})", guard, field_name, rust_method, args_s.join(", "));
+                        let call = Self::with_hoisted_args(&hoisted, format!("{}.{}.{}({})", guard, field_name, rust_method, args_s.join(", ")));
                         let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                         return Some(call);
                     }
@@ -6069,6 +6088,30 @@ impl Transpiler {
     }
 
     /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.
+    /// Declared type of `field` on the struct behind the `'actor` local/param `var`.
+    pub(crate) fn var_mutex_field_type(&self, var: &str, field: &str) -> Option<Type> {
+        let tname = self.var_types.get(var).and_then(|t| {
+            let mut cur = t.without_mut();
+            while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+            if let Type::Named(n) = cur { Some(n.clone()) } else { None }
+        }).or_else(|| self.var_struct_types.get(var).cloned())?;
+        self.struct_fields.get(tname.as_str())?.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone())
+    }
+
+    /// `{ let __a = <read>; __a }` for a guard-taking read of a Copy / string value (cloned), so the
+    /// guard is a temporary of the inner `let` only. `None` for any other (maybe non-`Clone`) type.
+    pub(crate) fn scoped_guard_read(read: &str, ty: &Type) -> Option<String> {
+        let t = ty.without_mut();
+        let is_string = matches!(t, Type::Str) || matches!(t, Type::Named(n) if n == "string" || n == "str");
+        if is_string {
+            Some(format!("({{ let __a = {}.clone(); __a }})", read))
+        } else if Self::is_copy_type(t) {
+            Some(format!("({{ let __a = {}; __a }})", read))
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn lock_field_read(&self, r: &LockFieldRef) -> String {
         if r.rwlock { self.rwlock_field_read(&r.key, &r.handle) } else { self.mutex_field_read(&r.key, &r.handle) }
     }
