@@ -54,11 +54,6 @@ pub trait EnvValue:
 # A parameterless callback, as held by `Button.onActivate`.
 pub use UIAction as def void()
 
-# The integer in `text` (0 when it is not one): a typed entry point for the generated `List` actions, whose
-# arguments travel as text.
-pub def int intOf(string text):
-    text.parseInt() else (0)
-
 # `List`'s optional semantic callbacks: reorder (final index after the move) and delete (unique ascending
 # indices into one pre-event snapshot).
 pub use MoveAction as def void(int, int)

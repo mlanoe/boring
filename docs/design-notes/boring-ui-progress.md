@@ -310,7 +310,7 @@ parameter, returning an optional bound by `let`, assigning a plain value to an o
 in the interpreter. Still open: completion callbacks, keyframes, matched geometry, `Sheet` transitions.
 
 **Sheet, focus bindings, List and the acceptance app (2026-10-17).** `boring.ui` gained `Sheet`, `DefaultFocus`, `Focused`, `FocusedAs`,
-`List`, `MoveAction`/`DeleteAction` and `intOf`; the lowering generates `viewAct` for `setBool`, `dismiss`, `select`, `move` and `delete`.
+`List` and `MoveAction`/`DeleteAction`; the lowering generates `viewAct` for `setBool`, `dismiss`, `select`, `move` and `delete`.
 `boring-ui`: a closed sheet mounts nothing, a presented one is laid out in a presentation layer (`withSheets`), painted last, modal for hit
 testing and semantics, traps focus and restores it (`Runtime.openSheets`/`focusReturn`/`syncModal`); `syncFocusBindings` reconciles native
 focus and `Focused`/`FocusedAs` values per pass (per-node `syncedOn` state: arrival, request, clear, loss, first-request-wins);
@@ -321,6 +321,11 @@ focus and `Focused`/`FocusedAs` values per pass (per-node `syncedOn` state: arri
 syntax, a derive-PartialEq decision that ignores field type derives and an interpreter bind-hop that loses slot writes (task proposed), and
 name collisions in the interpreter (a global function named like a struct field, enum variants named like views). Still open: IME/undo, non-modal
 focus scopes, multiple selection, focus rings, the renderer/host.
+
+**Workarounds removed (2026-10-17).** With the four transpiler fixes on main (f9889c3a: `parseFloat`/`parseInt` on expression receivers, a closure
+parameter forwarded to another function, an optional returned from a `let`, assignment to an optional `var`), `core.br` and `animator.br` went back
+to the natural forms and the generated `List` actions parse their arguments inline (the `intOf` helper is gone). One workaround stays: an `if let`
+on an optional moves it under `boring build`, so `collectScopes` pushes after recursing.
 
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just

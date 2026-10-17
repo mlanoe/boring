@@ -526,11 +526,11 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         // `List.onMove` / `onDelete`: optional semantic callbacks; their arguments travel as text
         // ("from,to" and a comma-separated ascending index list) through the action boundary.
         if s.fields.iter().any(|f| f.name == "onMove" && matches!(strip_mut(&f.ty), Type::Optional(t) if is_named(t, "MoveAction"))) {
-            acts.push_str("        if action == \"move\":\n            if let handler = onMove:\n                let parts = arg.split(\",\")\n                handler(intOf(parts[0]), intOf(parts[1]))\n");
+            acts.push_str("        if action == \"move\":\n            if let handler = onMove:\n                let parts = arg.split(\",\")\n                let fromIndex = parts[0].parseInt() else (0)\n                let toIndex = parts[1].parseInt() else (0)\n                handler(fromIndex, toIndex)\n");
             handles.push_str("        if action == \"move\":\n            return onMove != nil\n");
         }
         if s.fields.iter().any(|f| f.name == "onDelete" && matches!(strip_mut(&f.ty), Type::Optional(t) if is_named(t, "DeleteAction"))) {
-            acts.push_str("        if action == \"delete\":\n            if let handler = onDelete:\n                mut [int] indices = []\n                for part in arg.split(\",\"):\n                    if part.length > 0:\n                        indices.push(intOf(part))\n                handler(indices)\n");
+            acts.push_str("        if action == \"delete\":\n            if let handler = onDelete:\n                mut [int] indices = []\n                for part in arg.split(\",\"):\n                    if part.length > 0:\n                        let index = part.parseInt() else (0)\n                        indices.push(index)\n                handler(indices)\n");
             handles.push_str("        if action == \"delete\":\n            return onDelete != nil\n");
         }
         if !handles.is_empty() {
