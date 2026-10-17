@@ -34,7 +34,7 @@ struct HostEmitter {
     /// Tracks which local variables hold a kernel struct instance and which type.
     /// Used to emit `k.read_buf()?` instead of `k.buf` for device-side fields.
     var_kernel_type: std::collections::HashMap<String, String>,
-    /// Variables that hold an `Arc<CudaContext>` (from `GPU(n)` or `new(g) ...`).
+    /// Variables that hold an `Arc<CudaContext>` (from `Device(index = n)` or `kernel(g) ...`).
     /// Used to map `.name()`, `.total_mem()` etc. to cudarc 0.19 methods.
     gpu_vars: std::collections::HashSet<String>,
     /// Local variables (by name, unscoped) whose declared type or initializer is a
@@ -549,7 +549,7 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // Multi-GPU context accessor: `GPU(n)` → `boring_gpu_ctx_n(n)?`.
+        // Multi-GPU context accessor: `Device(index = n)` → `boring_gpu_ctx_n(n)?`.
         self.line("fn boring_gpu_ctx_n(idx: usize) -> Result<Arc<CudaContext>, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         // `CudaContext::new` already returns `Arc<Self>` -- see `boring_gpu_init`'s
@@ -2774,7 +2774,7 @@ impl HostEmitter {
                 // preserving call passed as an argument to this outer call
                 // isn't incorrectly suppressed too. See its field doc.
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
-                // `GPU(n)` → `boring_gpu_ctx_n(n)?`
+                // `Device(index = n)` → `boring_gpu_ctx_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "Device" {
                         if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
@@ -3079,7 +3079,7 @@ impl HostEmitter {
                 format!("{k}.__boring_launch({block}, {grid}, {after_arg})?")
             }
             ExprKind::New { arena, ctor } => {
-                // `new(g) Scale(data)` → `Scale::new(<g>, data)?` (explicit device
+                // `kernel(g) Scale(data)` → `Scale::new(<g>, data)?` (explicit device
                 // placement) -- args go through the same buffer-upload handling as
                 // a plain `Scale(data)` call (see `emit_kernel_ctor_args`'s doc).
                 if let ExprKind::Call(callee, args) = &ctor.kind {
@@ -3212,7 +3212,7 @@ impl HostEmitter {
         if let Some(t) = ty {
             self.var_kernel_type.insert(name.to_string(), t);
         }
-        // Track GPU device variables: `GPU(n)` or `boring_gpu_ctx_n(...)`.
+        // Track GPU device variables: `Device(index = n)` or `boring_gpu_ctx_n(...)`.
         if self.is_gpu_expr(val) {
             self.gpu_vars.insert(name.to_string());
         }
@@ -3221,7 +3221,7 @@ impl HostEmitter {
     fn is_gpu_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Call(callee, _) => {
-                if let ExprKind::Var(n) = &callee.kind { n == "GPU" }
+                if let ExprKind::Var(n) = &callee.kind { n == "Device" }
                 else { false }
             }
             ExprKind::Var(n) => self.gpu_vars.contains(n.as_str()),
@@ -3266,7 +3266,7 @@ impl HostEmitter {
             }
             // `kernel(...) k` — launch; same type as the kernel variable
             ExprKind::KernelLaunch { kernel, .. } => self.resolve_kernel_type(kernel),
-            // `new(g) Scale(args)` — placement; same type as the constructor
+            // `kernel(g) Scale(args)` — placement; same type as the constructor
             ExprKind::New { ctor, .. } => self.resolve_kernel_type(ctor),
             // `expr |> .wait()` — unwrap handle; same type as the launch
             ExprKind::Pipe(lhs, method, _) if method == "wait" => self.resolve_kernel_type(lhs),
@@ -3320,7 +3320,7 @@ impl HostEmitter {
     /// `clone_htod` -- or sharing it when a read-only argument is already resident --
     /// exactly the way a plain `Scale(data)` constructor call has always
     /// worked. Shared by both constructor call sites: plain `Scale(data)`
-    /// (`ExprKind::Call`) and arena-qualified `new(g) Scale(data)`
+    /// (`ExprKind::Call`) and placed `kernel(g) Scale(data)`
     /// (`ExprKind::New`) -- the latter used to skip this entirely and just
     /// pass `data` straight through as a bare `Vec`, a real E0308 (`expected
     /// CudaSlice<f64>, found Vec<{float}>`) confirmed via `cargo check`

@@ -207,7 +207,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
 // and runs a tiny C probe (`__boring_hip_attr_probe.c`) against whatever
 // ROCm headers are installed on THIS build machine, and prints the real,
 // locally-correct numeric values of the three `hipDeviceAttribute_t` members
-// backing `GPU().warpSize()`/`.maxThreads()`/`.maxSharedMem()`. Those values
+// backing `Device().warpSize()`/`.maxThreads()`/`.maxSharedMem()`. Those values
 // get written to `OUT_DIR/boring_hip_attrs.rs`, which `host.rs`'s prelude
 // `include!()`s -- see rocm::mod's doc comment for why this, rather than a
 // hardcoded constant, is the only safe way to resolve those three properties
@@ -223,7 +223,7 @@ fn emit_build_rs() -> String {
 // makes the path available to main.rs through the BORING_HIP_CO_PATH env var,
 // wires up linking against libamdhip64 (ROCm's HIP runtime shared lib), and
 // probes the local ROCm install's hip_runtime_api.h for the real
-// hipDeviceAttribute_t values behind GPU().warpSize()/.maxThreads()/
+// hipDeviceAttribute_t values behind Device().warpSize()/.maxThreads()/
 // .maxSharedMem() (see rocm::mod's doc comment for why).
 
 use std::process::Command;
@@ -347,7 +347,7 @@ int main(void) {\n\
         .status();
     if !matches!(compiled, Ok(s) if s.success()) {
         eprintln!("cargo:warning=boring: could not compile the hipDeviceAttribute_t probe -- \
-                    GPU().warpSize()/.maxThreads()/.maxSharedMem() will report a runtime error");
+                    Device().warpSize()/.maxThreads()/.maxSharedMem() will report a runtime error");
         fallback();
         return;
     }
@@ -370,7 +370,7 @@ pub(crate) const BORING_HIP_ATTR_SHARED_MEM_PER_BLOCK: i32 = {shared_mem};\n\
         }
         None => {
             eprintln!("cargo:warning=boring: could not run the hipDeviceAttribute_t probe -- \
-                        GPU().warpSize()/.maxThreads()/.maxSharedMem() will report a runtime error");
+                        Device().warpSize()/.maxThreads()/.maxSharedMem() will report a runtime error");
             fallback();
         }
     }

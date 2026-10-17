@@ -692,7 +692,7 @@ impl Transpiler {
     }
 
     /// Built-in `fs`/`GPU` module namespace calls, and property access on a tracked
-    /// `GPU(n)` device handle — intercepted before any other method-call dispatch.
+    /// `Device(index = n)` device handle — intercepted before any other method-call dispatch.
     fn try_emit_builtin_namespace_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         if let ExprKind::Var(v) = &obj.kind {
             if v == "fs" {
@@ -706,10 +706,10 @@ impl Transpiler {
                 return Some("__boring_gpu_all()".to_string());
             }
         }
-        // `g.name()`/`.totalMem()`/etc on a tracked `GPU(n)` handle (`let g = GPU(0)`,
+        // `g.name()`/`.totalMem()`/etc on a tracked `Device(index = n)` handle (`let g = Device(index = 0)`,
         // or a `for g in GPU.all():` loop variable) — rewritten to the introspection
         // helpers `wgpu::host::emit_gpu_introspection_globals` emits, indexed by `g`
-        // itself (a plain `usize`, see `emit_expr.rs`'s `GPU(n)` handling) against the
+        // itself (a plain `usize`, see `emit_expr.rs`'s `Device(index = n)` handling) against the
         // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
         // startup. `.index()` is just the stored usize itself.
         if let ExprKind::Var(v) = &obj.kind {

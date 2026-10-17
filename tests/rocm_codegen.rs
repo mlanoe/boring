@@ -673,7 +673,7 @@ let devs = Device.all()
         "expected HipContext::device_count in Device.all() expansion;\ngot:\n{rs}");
 }
 
-// ─── Multi-GPU: new(g) Scale(data) ─────────────────────────────────────────────
+// ─── Multi-GPU: kernel(g) Scale(data) ─────────────────────────────────────────────
 
 #[test]
 fn new_with_arena_emits_scale_new_with_device() {
@@ -700,9 +700,9 @@ let k = kernel(g0) Scale(data)
     // `Scale(data)` call site does (see `emit_kernel_ctor_args`), not pass it
     // straight through as a bare Vec where Scale::new expects a
     // DeviceBuffer<f64> (mirrors the identical bug fixed in cuda::host's
-    // `new(g) Scale(data)` handling).
+    // `kernel(g) Scale(data)` handling).
     assert!(rs.contains("clone_htod"),
-        "expected clone_htod at the new(g0) Scale(data) call site;\ngot:\n{rs}");
+        "expected clone_htod at the kernel(g0) Scale(data) call site;\ngot:\n{rs}");
 }
 
 // ─── sequential kernel launches in kernel: block ───────────────────────────────
@@ -829,7 +829,7 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _name = g.name()
 "#);
     assert!(rs.contains(".name()?"),
@@ -845,7 +845,7 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _mem = g.totalMem()
 "#);
     assert!(rs.contains(".total_mem()?"),
@@ -861,14 +861,14 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _cc = g.computeCapability()
 "#);
     assert!(rs.contains(".compute_capability()?"),
         "expected .compute_capability()? for GPU compute property;\ngot:\n{rs}");
 }
 
-// ─── GPU().warpSize()/maxThreads()/maxSharedMem() via build-time header probe ──
+// ─── Device().warpSize()/maxThreads()/maxSharedMem() via build-time header probe ──
 
 #[test]
 fn gpu_device_attribute_queries_use_probed_constants() {
@@ -888,17 +888,17 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _ws = g.warpSize()
 let _mt = g.maxThreads()
 let _sm = g.maxSharedMem()
 "#);
     assert!(rs.contains(".warp_size()?"),
-        "expected .warp_size()? call site for GPU().warpSize();\ngot:\n{rs}");
+        "expected .warp_size()? call site for Device().warpSize();\ngot:\n{rs}");
     assert!(rs.contains(".max_threads()?"),
-        "expected .max_threads()? call site for GPU().maxThreads();\ngot:\n{rs}");
+        "expected .max_threads()? call site for Device().maxThreads();\ngot:\n{rs}");
     assert!(rs.contains(".max_shared_mem()?"),
-        "expected .max_shared_mem()? call site for GPU().maxSharedMem();\ngot:\n{rs}");
+        "expected .max_shared_mem()? call site for Device().maxSharedMem();\ngot:\n{rs}");
     assert!(rs.contains("include!(concat!(env!(\"OUT_DIR\"), \"/boring_hip_attrs.rs\"))"),
         "expected the prelude to include! the build-time-probed attribute constants;\ngot:\n{rs}");
     assert!(rs.contains("self.get_attribute(BORING_HIP_ATTR_WARP_SIZE"),

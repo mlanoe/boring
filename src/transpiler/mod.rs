@@ -1350,11 +1350,11 @@ struct Transpiler {
     /// branch, `emit_call`'s argument-wrapping), which don't have the enclosing
     /// `FnDecl`'s param list available to translate a position back to a name.
     pub(crate) current_fn_gpu_arg_param_names: std::collections::HashSet<String>,
-    /// Local variable names bound to a `GPU(n)` device handle (`let g = GPU(0)`), or a
+    /// Local variable names bound to a `Device(index = n)` device handle (`let g = Device(index = 0)`), or a
     /// `for` loop variable iterating `GPU.all()` — tracked so a later `g.name()`/
     /// `.totalMem()`/etc. method call can be rewritten to the introspection helpers
     /// emitted by `wgpu::host::emit_gpu_introspection_globals`. wgpu only ever has one
-    /// real adapter (see that function's doc comment), so every `GPU(n)` and every
+    /// real adapter (see that function's doc comment), so every `Device(index = n)` and every
     /// element of `GPU.all()` resolves to it regardless of index — matching the
     /// interpreter's own single mock `GpuDevice` in simulation mode. GPU targets only.
     pub(crate) gpu_device_vars: std::collections::HashSet<String>,
@@ -5799,7 +5799,7 @@ fn stmt_uses_gpu_device(stmt: &Stmt) -> bool {
 fn expr_constructs_kernel(e: &Expr, kernel_names: &std::collections::HashSet<String>) -> bool {
     match &e.kind {
         ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if kernel_names.contains(n.as_str())),
-        // `new(g) Scale(data)` — explicit-device kernel construction wraps the
+        // `kernel(g) Scale(data)` — explicit-device kernel construction wraps the
         // same constructor call in `ExprKind::New`.
         ExprKind::New { ctor, .. } => expr_constructs_kernel(ctor, kernel_names),
         _ => false,
@@ -5818,11 +5818,11 @@ fn expr_constructs_kernel(e: &Expr, kernel_names: &std::collections::HashSet<Str
 fn expr_uses_gpu_device(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Call(callee, _) => {
-            matches!(&callee.kind, ExprKind::Var(n) if n == "Device" || n == "GPU")
+            matches!(&callee.kind, ExprKind::Var(n) if n == "Device")
         }
         // `Device.all()` and the legacy `GPU.all()` spelling.
         ExprKind::MethodCall(obj, _, _) => {
-            matches!(&obj.kind, ExprKind::Var(n) if n == "Device" || n == "GPU")
+            matches!(&obj.kind, ExprKind::Var(n) if n == "Device")
         }
         _ => false,
     }

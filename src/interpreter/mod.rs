@@ -383,7 +383,7 @@ pub enum Value {
         decl: crate::ast::KernelDecl,
         captured: EnvRef,
     },
-    /// GPU device handle, produced by `GPU(n)` (simulation mode).
+    /// GPU device handle, produced by `Device(index = n)` (simulation mode).
     GpuDevice(usize),
     /// `Screen` built-in (simulation mode).
     /// Tracks the current virtual canvas size and key/resize state.

@@ -530,7 +530,7 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // Multi-GPU context accessor: `GPU(n)` → `boring_gpu_ctx_n(n)?`.
+        // Multi-GPU context accessor: `Device(index = n)` → `boring_gpu_ctx_n(n)?`.
         self.line("fn boring_gpu_ctx_n(idx: usize) -> Result<Arc<HipContext>, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         self.line("Ok(HipContext::new(idx)?)");
@@ -635,7 +635,7 @@ struct HostEmitter {
     /// Tracks which local variables hold a kernel struct instance and which type.
     /// Used to emit `k.read_buf()?` instead of `k.buf` for device-side fields.
     var_kernel_type: std::collections::HashMap<String, String>,
-    /// Variables that hold an `Arc<HipContext>` (from `GPU(n)` or `new(g) ...`).
+    /// Variables that hold an `Arc<HipContext>` (from `Device(index = n)` or `kernel(g) ...`).
     /// Used to map `.name()`, `.total_mem()` etc. to this backend's HipContext API.
     gpu_vars: std::collections::HashSet<String>,
     /// Local variables (by name, unscoped) whose declared type or initializer is a
@@ -2726,7 +2726,7 @@ impl HostEmitter {
             }
             ExprKind::Call(callee, args) => {
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
-                // `GPU(n)` → `boring_gpu_ctx_n(n)?`
+                // `Device(index = n)` → `boring_gpu_ctx_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "Device" {
                         if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
@@ -3115,7 +3115,7 @@ impl HostEmitter {
     fn is_gpu_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Call(callee, _) => {
-                if let ExprKind::Var(n) = &callee.kind { n == "GPU" }
+                if let ExprKind::Var(n) = &callee.kind { n == "Device" }
                 else { false }
             }
             ExprKind::Var(n) => self.gpu_vars.contains(n.as_str()),
@@ -3204,7 +3204,7 @@ impl HostEmitter {
     /// `clone_htod` -- or sharing it when a read-only argument is already resident --
     /// exactly the way a plain `Scale(data)` constructor call has always
     /// worked. Shared by both constructor call sites: plain `Scale(data)`
-    /// (`ExprKind::Call`) and arena-qualified `new(g) Scale(data)`
+    /// (`ExprKind::Call`) and placed `kernel(g) Scale(data)`
     /// (`ExprKind::New`) -- see `cuda::host`'s identical fix/doc for the bug
     /// this closes (the `New` arm used to skip this and pass `data` straight
     /// through as a bare `Vec` where `Scale::new` expects a `DeviceBuffer`).

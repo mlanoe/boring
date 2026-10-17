@@ -3587,16 +3587,16 @@ impl Transpiler {
             }
         }
         if let ExprKind::Var(name) = &callee.kind {
-            // `GPU(n)` — a device handle. Emitted as a plain `usize` index into the
+            // `Device(index = n)` — a device handle. Emitted as a plain `usize` index into the
             // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
             // startup (`instance.enumerate_adapters`) — `n` genuinely selects a
             // different physical adapter for `.name()`/`.maxThreads()`/etc when more
             // than one is present (2026-09-01). This is still introspection only:
             // every kernel still dispatches on the single global `device`/`queue`
-            // regardless of which `GPU(n)` it was constructed with — `new(g) K`
+            // regardless of which `Device(index = n)` it was constructed with — `kernel(g) K`
             // (placing actual kernel *dispatch* on a specific adapter) is not
             // implemented, unlike CUDA/Metal's real per-device dispatch. Must be
-            // checked before the `is_type` constructor branch below — "GPU" is
+            // checked before the `is_type` constructor branch below — "Device" is
             // capitalized like a type name, but no `struct GPU` exists to construct.
             if name == "Device" && self.is_gpu_target {
                 if self.config.is_simd_target {

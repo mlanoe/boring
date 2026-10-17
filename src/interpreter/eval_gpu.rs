@@ -33,7 +33,7 @@ type WarpCtx<'a> = (usize, &'a Arc<Barrier>, &'a Arc<Mutex<Vec<ThreadValue>>>);
 // Fixed warp/wavefront/SIMD-group/subgroup size for the CPU simulation. Real
 // hardware varies (32 on NVIDIA and RDNA AMD, 64 on CDNA AMD, adapter-reported
 // on wgpu) — 32 is the common case and matches the same fallback constant
-// already used for the unrelated host-side `GPU().warpSize()` introspection
+// already used for the unrelated host-side `Device().warpSize()` introspection
 // mock (`src/transpiler/wgpu/host.rs`'s `__boring_gpu_warp_size`).
 pub(crate) const WARP_SIZE: usize = 32;
 

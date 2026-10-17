@@ -217,25 +217,25 @@ impl<'a> HostEmitter<'a> {
         self.emit_gpu_introspection_globals();
     }
 
-    /// Backing storage + accessors for the `GPU` type (`GPU(n)`, `GPU.all()`,
+    /// Backing storage + accessors for the `GPU` type (`Device(index = n)`, `GPU.all()`,
     /// `.name()`/`.totalMem()`/etc — see `emit_expr.rs`'s `gpu_device_vars`
     /// handling). Real per-adapter introspection (2026-09-01): the full list of
     /// adapters the system actually exposes is enumerated once at startup
     /// (`instance.enumerate_adapters`, see `emit_main`/`emit_screen_main`) and
-    /// `GPU(n)` indexes into it directly, index 0 always being the adapter
+    /// `Device(index = n)` indexes into it directly, index 0 always being the adapter
     /// `device`/`queue` were actually created from. This is introspection
     /// only, same scope as CUDA/ROCm's own docs describe for the analogous
-    /// case — `new(g) K` (placing a kernel's actual dispatch on a specific
+    /// case — `kernel(g) K` (placing a kernel's actual dispatch on a specific
     /// non-default adapter) is still not implemented on this backend; every
     /// kernel still dispatches on the single global `device`/`queue`
-    /// regardless of which `GPU(n)` it was constructed with. See
+    /// regardless of which `Device(index = n)` it was constructed with. See
     /// docs/wgpu-backend.md's "`GPU` type on wgpu" section.
     fn emit_gpu_introspection_globals(&mut self) {
         self.line("static __BORING_GPU_ADAPTERS: std::sync::OnceLock<Vec<std::sync::Arc<wgpu::Adapter>>> = std::sync::OnceLock::new();");
         self.line("fn __boring_gpu_adapter(idx: usize) -> std::sync::Arc<wgpu::Adapter> {");
         self.line("    let adapters = __BORING_GPU_ADAPTERS.get().expect(\"GPU adapters not initialized\");");
         self.line("    adapters.get(idx).map(std::sync::Arc::clone)");
-        self.line("        .unwrap_or_else(|| panic!(\"GPU({}) out of range -- {} adapter(s) found\", idx, adapters.len()))");
+        self.line("        .unwrap_or_else(|| panic!(\"Device(index = {}) out of range -- {} adapter(s) found\", idx, adapters.len()))");
         self.line("}");
         self.line("fn __boring_gpu_all() -> Vec<usize> {");
         self.line("    (0..__BORING_GPU_ADAPTERS.get().map(|a| a.len()).unwrap_or(0)).collect()");
@@ -254,7 +254,7 @@ impl<'a> HostEmitter<'a> {
     }
 
     /// Builds the introspection adapter list for `__BORING_GPU_ADAPTERS`: the
-    /// adapter actually selected for `device`/`queue` goes first (so `GPU(0)`
+    /// adapter actually selected for `device`/`queue` goes first (so `Device(index = 0)`
     /// always means "the adapter your kernels actually run on"), followed by
     /// any other physical adapter `enumerate_adapters` finds.
     ///
@@ -1464,12 +1464,12 @@ impl<'a> HostEmitter<'a> {
         // introspection list below AND still moved into the `__App` struct literal
         // further down. This path used to skip GPU introspection entirely ("GPU
         // introspection is unsupported inside a Screen program"). Populating the
-        // adapters global here removes the panic a `GPU(n)` call anywhere reachable
+        // adapters global here removes the panic a `Device(index = n)` call anywhere reachable
         // would have hit against an uninitialized `OnceLock`. `emit_screen_main`'s
         // own top-level (`scalar_fields`/`kernel_fields` above) and render-loop
         // (`emit_render_stmt`) emitters are still narrow, hardcoded shape-matchers,
         // not a splice into the general per-statement pipeline the way a plain
-        // `def` function's body is -- but a bare `let g = GPU(0)` / `print`
+        // `def` function's body is -- but a bare `let g = Device(index = 0)` / `print`
         // statement at a Screen program's top level, or inside the render loop, no
         // longer vanishes silently: `check_screen_program_shape` (called from
         // `emit()`) and `emit_render_stmt`'s own error fallback both reject anything

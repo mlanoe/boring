@@ -730,7 +730,7 @@ let devs = Device.all()
         "expected CudaContext::device_count in Device.all() expansion;\ngot:\n{rs}");
 }
 
-// ─── Item 6 — Multi-GPU: new(g) Scale(data) ──────────────────────────────────
+// ─── Item 6 — Multi-GPU: kernel(g) Scale(data) ──────────────────────────────────
 
 #[test]
 fn item6_new_with_arena_emits_scale_new_with_device() {
@@ -761,7 +761,7 @@ let k = kernel(g0) Scale(data)
     // arm of `expr()` was fixed to route through `emit_kernel_ctor_args`
     // instead of emitting each arg raw.
     assert!(rs.contains("clone_htod"),
-        "expected clone_htod at the new(g0) Scale(data) call site;\ngot:\n{rs}");
+        "expected clone_htod at the kernel(g0) Scale(data) call site;\ngot:\n{rs}");
 }
 
 // ─── Item 4 — sequential kernel launches in kernel: block ───────────────────
@@ -866,11 +866,11 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g0 = GPU(0)
-let g1 = GPU(1)
+let g0 = Device(index = 0)
+let g1 = Device(index = 1)
 let data = [1.0, 2.0]
-mut ka = new(g0) Scale(data)
-mut kb = new(g1) Scale(data)
+mut ka = kernel(g0) Scale(data)
+mut kb = kernel(g1) Scale(data)
 kernel:
     ka(block = 2)
     kb(block = 2, after = ka)
@@ -931,7 +931,7 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _name = g.name()
 "#);
     assert!(rs.contains(".name()?"),
@@ -947,7 +947,7 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _mem = g.totalMem()
 "#);
     assert!(rs.contains(".total_mem()?"),
@@ -963,7 +963,7 @@ kernel Scale:
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
 
-let g = GPU(0)
+let g = Device(index = 0)
 let _cc = g.computeCapability()
 "#);
     assert!(rs.contains(".compute_capability()?"),

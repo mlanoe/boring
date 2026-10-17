@@ -1515,6 +1515,29 @@ impl Checker {
     // construction-only feature (see `Arg`'s own doc comment) that shouldn't
     // reach a plain function call at all; if one somehow does, this bails out
     // rather than guess what it means here.
+    /// `GPU(n)` and `new(device) Kernel(...)` were replaced by `Device(index = n)` and
+    /// `kernel(device) Kernel(...)`; rejected unless the program defines its own `GPU`
+    /// type or `new` function.
+    fn check_removed_device_syntax(&mut self, callee: &Expr, line: usize, col: usize) {
+        let ExprKind::Var(name) = &callee.kind else { return };
+        if self.lookup(name).is_some() || self.fn_arity.contains_key(name.as_str()) {
+            return;
+        }
+        match name.as_str() {
+            "GPU" if !self.struct_field_types.contains_key("GPU") => self.error(
+                "`GPU(n)` was removed; use `Device(index = n)` (or `Device(target = .METAL, index = n)`)",
+                line,
+                col,
+            ),
+            "new" => self.error(
+                "`new(device) Kernel(...)` was removed; use `kernel(device) Kernel(...)`",
+                line,
+                col,
+            ),
+            _ => {}
+        }
+    }
+
     fn check_call_arity(&mut self, callee: &Expr, args: &[Arg], line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
         let ExprKind::Var(name) = &callee.kind else { return };
@@ -2123,6 +2146,7 @@ impl Checker {
                 // call sites -- they parse as an ordinary `Call`, confirmed by
                 // grepping every parser file for `KernelLaunch` construction (none).
                 self.check_kernel_dispatch_qualifier(callee, expr.line, expr.col);
+                self.check_removed_device_syntax(callee, expr.line, expr.col);
                 self.check_call_arity(callee, args, expr.line, expr.col);
                 // A resident value passed as a bare argument at a position the callee
                 // is known to consume residently (`fn_gpu_arg_params`, populated by

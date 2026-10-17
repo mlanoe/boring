@@ -1064,7 +1064,7 @@ fn test_screen_program_gpu_adapters_global_now_populated() {
     // it can be shared between the introspection list and the `__App` struct's own
     // `adapter` field, which is moved into the struct literal further down.
     //
-    // A bare `let g = GPU(0)` / `print` statement at a Screen program's top level, or
+    // A bare `let g = Device(index = 0)` / `print` statement at a Screen program's top level, or
     // inside the render loop, used to be silently dropped by `emit_screen_main`'s own
     // narrow, hardcoded shape-matchers, confirmed against a real generated project --
     // that gap is now closed (see `check_screen_program_shape`'s and
@@ -1710,7 +1710,7 @@ def main() throws:
 }
 
 // ── `GPU` introspection (portable between the interpreter's simulation and
-// --target wgpu — see examples/saxpy.br's `GPU(0)`/`.name()`/`.totalMem()`) ────
+// --target wgpu — see examples/saxpy.br's `Device(index = 0)`/`.name()`/`.totalMem()`) ────
 
 #[test]
 fn test_gpu_device_handle_and_properties() {
@@ -2546,7 +2546,7 @@ kernel:
 fn wgpu_screen_unsupported_top_level_let_is_rejected_not_dropped() {
     // Same gap, `Let` side: a top-level `let` whose initializer isn't a
     // `Screen(...)`/kernel-constructor call or a scalar literal (here, real GPU
-    // introspection: `let g = GPU(0)`) used to vanish from the generated Rust
+    // introspection: `let g = Device(index = 0)`) used to vanish from the generated Rust
     // with no diagnostic, confirmed against a real generated project (see
     // `test_screen_program_gpu_adapters_global_now_populated`'s original doc
     // comment). It's rejected up front now instead.
@@ -2554,7 +2554,7 @@ fn wgpu_screen_unsupported_top_level_let_is_rejected_not_dropped() {
 let width = 4
 let height = 4
 let screen = Screen(Dimension(width, height), title = "test")
-let g = GPU(0)
+let g = Device(index = 0)
 
 kernel T:
     mut [uint]'surface pixels

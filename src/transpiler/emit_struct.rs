@@ -1830,7 +1830,7 @@ impl Transpiler {
         // structural data (names, fn pointers, booleans) never depends on any particular
         // instance, so computing the `Vec<Field>`/`Vec<Method>` once and handing back a
         // `&'static` reference from then on avoids reallocating both vecs (plus cloning every
-        // Field/Method name string) on every `.introspect()` call. Mirrors the `GPU(n)`
+        // Field/Method name string) on every `.introspect()` call. Mirrors the `Device(index = n)`
         // adapter-enumeration precedent (`src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration`)
         // — a static cache, not a Boring-language feature, since Boring already treats
         // every struct-typed value as reference-like (see the parameter-passing rules), this

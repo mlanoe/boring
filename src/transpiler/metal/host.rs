@@ -614,7 +614,7 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // GPU(n) → indexed device. Cache enumeration too, while preserving the
+        // Device(index = n) → indexed device. Cache enumeration too, while preserving the
         // existing index semantics and error for an out-of-range device.
         self.line("fn boring_metal_device_n(idx: usize) -> Result<Device, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
@@ -2784,7 +2784,7 @@ impl HostEmitter {
                 // preserving call passed as an argument to this outer call
                 // isn't incorrectly suppressed too. See its field doc.
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
-                // `GPU(n)` → `boring_metal_device_n(n)?`
+                // `Device(index = n)` → `boring_metal_device_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "Device" {
                         if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
@@ -3256,7 +3256,7 @@ impl HostEmitter {
     fn is_gpu_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Call(callee, _) => {
-                if let ExprKind::Var(n) = &callee.kind { n == "GPU" } else { false }
+                if let ExprKind::Var(n) = &callee.kind { n == "Device" } else { false }
             }
             ExprKind::Var(n) => self.gpu_vars.contains(n.as_str()),
             _ => false,
@@ -3386,7 +3386,7 @@ impl HostEmitter {
     /// it directly if already GPU-resident -- exactly the way a plain
     /// `Scale(data)` constructor call has always worked. Shared by both
     /// constructor call sites: plain `Scale(data)` (`ExprKind::Call`) and
-    /// arena-qualified `new(g) Scale(data)` (`ExprKind::New`) -- the latter
+    /// placed `kernel(g) Scale(data)` (`ExprKind::New`) -- the latter
     /// used to skip this entirely and pass `data` straight through as a bare
     /// `Vec`, the same E0308 `cuda::host`'s identical fix found and fixed
     /// there (see that module's `emit_kernel_ctor_args` doc).
