@@ -259,7 +259,7 @@ writeup. Summary:
 
 ---
 
-## Input (simd, Metal, CUDA, ROCm)
+## Input (simd, Metal, CUDA, ROCm, wgpu)
 
 Example: `examples/screen_input.br`.
 
@@ -268,7 +268,8 @@ Example: `examples/screen_input.br`.
 - `screen.mouse.x` / `.y` (`int`) — cursor position in **pixel-buffer** coordinates (window pixels are rescaled to the buffer, so HiDPI/resized windows are handled; the last position is kept when the cursor leaves the window) — and `screen.mouse.left` / `.right` / `.middle` (`bool`). Only the field forms are supported (not a bare `screen.mouse` value on the GPU hosts).
 - State is consistent within one loop iteration: simd snapshots it at the end of `screen.present(...)`; the winit-driven hosts update it from events delivered before the frame body, and clear the pressed set after it.
 - Caveat: kernel `int` fields are `i32` on simd but `isize` on Metal — pass a `float32(...)` (as the example does) to stay portable.
-- Only simd/Metal codegen is compile-checked here (`cargo check`); CUDA/ROCm have codegen snapshot tests only, no hardware verification of the new input path.
+- Only simd/Metal/wgpu codegen is compile-checked here (`cargo check`); CUDA/ROCm have codegen snapshot tests only, no hardware verification of the new input path.
+- wgpu: `screen.key(...)` / `key_pressed(...)` / `screen.mouse.*` are general host expressions (usable in any `if`/`elif`/`else` condition or scalar field assignment inside the render loop, via `self.__keys` / `self.__keys_pressed` / `self.__mouse_*` on the `ApplicationHandler`); the pressed set is cleared at the end of each `RedrawRequested` body.
 
 ---
 
@@ -292,6 +293,6 @@ generated `Cargo.toml` only when the program uses `Screen`.
 
 - **`boring run`**: `screen.present()` writes a PPM on loop exit; `--preview` opens a `minifb` window.
 - **Resize handling**: `screen.resized` detected but the kernel surface is not reallocated automatically — user code must reinitialise `k`. Same limitation on every implemented backend.
-- **`screen.key_pressed()`**, **`screen.mouse`**: implemented on simd, Metal, CUDA and ROCm with the same semantics (see "Input" below). **wgpu: not implemented** — its host only recognises `if screen.key("k"): break` as a statement pattern (`try_emit_screen_key_if`), there is no general `screen.key(...)` expression, so key queries and mouse state would first need real expression support (and a `__keys_pressed` / mouse state in the `ApplicationHandler`, `wgpu/host.rs` ~l.1268/1367).
+- **`screen.key_pressed()`**, **`screen.mouse`**: implemented on every target (simd, Metal, CUDA, ROCm, wgpu) with the same semantics — see "Input" above.
 - **`screen.pixels_rgba()`**: portable RGBA read from `'surface` buffer.
 - **CUDA real-hardware verification**: no NVIDIA GPU/CUDA toolkit available in this project's dev environment — see `cuda-module.md`'s Screen section.

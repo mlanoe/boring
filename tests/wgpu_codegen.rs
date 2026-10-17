@@ -4481,3 +4481,56 @@ def main() throws:
         "expected the GPU-computed `x[i] + 1.0` values;\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
 }
+
+#[test]
+fn screen_key_pressed_is_edge_triggered_and_mouse_is_exposed() {
+    let src = r#"
+let width  = 64
+let height = 48
+let screen = Screen(Dimension(width, height), title = "Test")
+
+kernel Fill:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float32 mx
+    var uint mode
+
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+        dim    = d
+        mx     = 0.0
+        mode   = 0
+
+    def ():
+        pixels[0] = 0xFF000000 | mode
+
+var mut k = Fill(Dimension(width, height))
+
+kernel:
+    loop:
+        k.mx = float32(screen.mouse.x)
+        if screen.key_pressed("c") or screen.mouse.left:
+            k.mode = 1
+        if screen.key("a") and screen.mouse.right and screen.mouse.middle and screen.mouse.y > 3:
+            k.mode = 2
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_, rs) = wgpu_codegen("screen_input", src);
+    // Edge-triggered: only a released -> pressed transition feeds the set, cleared after each frame body.
+    assert!(rs.contains("if self.__keys.insert(key_str.clone()) { self.__keys_pressed.insert(key_str); }"), "{rs}");
+    assert!(rs.contains("self.__keys_pressed.contains(\"c\")"), "{rs}");
+    assert!(rs.contains("self.__keys.contains(\"a\")"), "{rs}");
+    assert!(rs.contains("self.__keys_pressed.clear();"), "{rs}");
+    // Mouse: CursorMoved (scaled to buffer pixels) + MouseInput buttons.
+    assert!(rs.contains("WindowEvent::CursorMoved"), "{rs}");
+    assert!(rs.contains("inner_size()"), "{rs}");
+    assert!(rs.contains("winit::event::MouseButton::Middle => self.__mouse_middle = down"), "{rs}");
+    assert!(rs.contains("self.__mouse_x as f32"), "{rs}");
+    assert!(rs.contains("self.__mouse_left") && rs.contains("self.__mouse_right"), "{rs}");
+    assert!(rs.contains("self.__mouse_y > 3"), "{rs}");
+    // The existing `if screen.key(..): break` form still exits.
+    assert!(rs.contains("event_loop.exit()"), "{rs}");
+}

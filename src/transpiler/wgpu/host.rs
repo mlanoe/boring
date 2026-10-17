@@ -1266,6 +1266,14 @@ impl<'a> HostEmitter<'a> {
             self.line(&format!("    {var}: {kname},"));
         }
         self.line("    __keys: std::collections::HashSet<String>,");
+        // Edge-triggered `screen.key_pressed()` set (cleared after each frame body) and
+        // `screen.mouse` state in pixel-buffer coordinates.
+        self.line("    __keys_pressed: std::collections::HashSet<String>,");
+        self.line("    __mouse_x: isize,");
+        self.line("    __mouse_y: isize,");
+        self.line("    __mouse_left: bool,");
+        self.line("    __mouse_right: bool,");
+        self.line("    __mouse_middle: bool,");
         self.line("    __start_time: std::time::Instant,");
         self.line("    window: Option<std::sync::Arc<Window>>,");
         self.line("    surface: Option<wgpu::Surface<'static>>,");
@@ -1373,8 +1381,25 @@ impl<'a> HostEmitter<'a> {
         self.line("                    k => format!(\"{k:?}\"),");
         self.line("                };");
         self.line("                match key_event.state {");
-        self.line("                    ElementState::Pressed  => { self.__keys.insert(key_str); }");
+        self.line("                    ElementState::Pressed  => { if self.__keys.insert(key_str.clone()) { self.__keys_pressed.insert(key_str); } }");
         self.line("                    ElementState::Released => { self.__keys.remove(&key_str); }");
+        self.line("                    _ => {}");
+        self.line("                }");
+        self.line("            }");
+        // Window pixels -> pixel-buffer coordinates (the window may be HiDPI-scaled or resized).
+        self.line("            WindowEvent::CursorMoved { position, .. } => {");
+        self.line("                if let Some(w) = &self.window {");
+        self.line("                    let ws = w.inner_size();");
+        self.line(&format!("                    self.__mouse_x = (position.x * ({width}) as f64 / (ws.width.max(1) as f64)).floor() as isize;"));
+        self.line(&format!("                    self.__mouse_y = (position.y * ({height}) as f64 / (ws.height.max(1) as f64)).floor() as isize;"));
+        self.line("                }");
+        self.line("            }");
+        self.line("            WindowEvent::MouseInput { state, button, .. } => {");
+        self.line("                let down = state == ElementState::Pressed;");
+        self.line("                match button {");
+        self.line("                    winit::event::MouseButton::Left => self.__mouse_left = down,");
+        self.line("                    winit::event::MouseButton::Right => self.__mouse_right = down,");
+        self.line("                    winit::event::MouseButton::Middle => self.__mouse_middle = down,");
         self.line("                    _ => {}");
         self.line("                }");
         self.line("            }");
@@ -1387,6 +1412,7 @@ impl<'a> HostEmitter<'a> {
             self.emit_render_stmt(stmt, &w, &h, "                ");
         }
         self.in_method = false;
+        self.line("                self.__keys_pressed.clear();");
         self.line("                if let Some(w) = &self.window { w.request_redraw(); }");
         self.line("            }");
         self.line("            _ => {}");
@@ -1501,6 +1527,9 @@ impl<'a> HostEmitter<'a> {
             self.line(&format!("        {var},"));
         }
         self.line("        __keys: Default::default(),");
+        self.line("        __keys_pressed: Default::default(),");
+        self.line("        __mouse_x: 0, __mouse_y: 0,");
+        self.line("        __mouse_left: false, __mouse_right: false, __mouse_middle: false,");
         self.line("        __start_time: std::time::Instant::now(),");
         self.line("        window: None, surface: None,");
         self.line("        __blit_pipeline: None, __blit_bg: None, __blit_dim_buf: None,");
@@ -1590,9 +1619,20 @@ impl<'a> HostEmitter<'a> {
                 if let Some(s) = self.try_emit_screen_key_if(if_stmt) {
                     self.line(&format!("{indent}{s}"));
                 } else {
-                    self.push_error(if_stmt.line, if_stmt.col,
-                        "wgpu target: `if` inside a Screen render loop only supports \
-                         `if screen.key(\"...\"):  break` (a single, break-only branch)");
+                    // General `if`/`elif`/`else`: host-expression conditions
+                    // (`screen.key(...)`, `screen.key_pressed(...)`, `screen.mouse.*`, ...).
+                    let deeper = format!("{indent}    ");
+                    for (i, (cond, body)) in if_stmt.branches.iter().enumerate() {
+                        let kw = if i == 0 { "if" } else { "} else if" };
+                        let c = self.host_expr(cond);
+                        self.line(&format!("{indent}{kw} {c} {{"));
+                        for st in body { self.emit_render_stmt(st, width, height, &deeper); }
+                    }
+                    if let Some(eb) = &if_stmt.else_body {
+                        self.line(&format!("{indent}}} else {{"));
+                        for st in eb { self.emit_render_stmt(st, width, height, &deeper); }
+                    }
+                    self.line(&format!("{indent}}}"));
                 }
             }
             // A bare, unconditional `break` (no enclosing `if`) means "stop after this
@@ -1782,6 +1822,18 @@ impl<'a> HostEmitter<'a> {
         None
     }
 
+    /// `screen.key("k")` -> held set, `screen.key_pressed("k")` -> edge-triggered set.
+    fn screen_key_query(&self, method: &str, args: &[Arg]) -> String {
+        let pfx = if self.in_method { "self." } else { "" };
+        let set = if method == "key" { "__keys" } else { "__keys_pressed" };
+        let k = match args.first().map(|a| &a.value.kind) {
+            Some(ExprKind::Str(s)) => boring_key_to_rust(s),
+            Some(_) => format!("{}.as_str()", self.host_expr(&args[0].value)),
+            None => "\"\"".into(),
+        };
+        format!("{pfx}{set}.contains({k})")
+    }
+
     /// Translate a host-side Boring expression to a Rust string.
     /// Handles the subset of expressions that can appear in the top-level kernel loop
     /// (scalar assignments, screen.time, float() casts, arithmetic).
@@ -1797,8 +1849,40 @@ impl<'a> HostEmitter<'a> {
                 }
                 format!("{pfx}{}.{}", self.host_expr(obj), field)
             }
+            // `screen.mouse.x` / `.y` / `.left` / `.right` / `.middle`
+            ExprKind::Field(obj, field)
+                if matches!(&obj.kind, ExprKind::Field(sv, m) if m == "mouse"
+                    && matches!(&sv.kind, ExprKind::Var(n) if n == "screen"))
+                    && matches!(field.as_str(), "x" | "y" | "left" | "right" | "middle") =>
+            {
+                format!("{pfx}__mouse_{field}")
+            }
             ExprKind::Field(obj, field) => {
                 format!("{}.{}", self.host_expr(obj), field)
+            }
+            // `screen.key("k")` (level) / `screen.key_pressed("k")` (edge) as expressions.
+            ExprKind::MethodCall(obj, method, args)
+                if (method == "key" || method == "key_pressed")
+                    && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
+            {
+                self.screen_key_query(method, args)
+            }
+            ExprKind::Bool(b) => format!("{b}"),
+            ExprKind::UnaryOp(op, inner) => {
+                let o = match op { UnaryOp::Neg => "-", UnaryOp::Not => "!", UnaryOp::BitNot => "!" };
+                format!("({o}{})", self.host_expr(inner))
+            }
+            ExprKind::If(ifs) if ifs.else_body.is_some() => {
+                let val = |b: &Vec<Stmt>| b.last().map(|st| match st {
+                    Stmt::Expr(e) => self.host_expr(e),
+                    _ => "/* unsupported expr */".into(),
+                }).unwrap_or_default();
+                let mut out = String::new();
+                for (i, (c, b)) in ifs.branches.iter().enumerate() {
+                    out.push_str(&format!("{}if {} {{ {} }}", if i == 0 { "" } else { " else " }, self.host_expr(c), val(b)));
+                }
+                let ev = val(ifs.else_body.as_ref().unwrap());
+                format!("({out} else {{ {ev} }})")
             }
             // float32(expr) → expr as f32 (wgpu is f32-only on device, and this
             // host helper narrows the same way regardless of width). Bare
@@ -1820,6 +1904,13 @@ impl<'a> HostEmitter<'a> {
             // f64_not_f32` only asserts the generated *text*, not that the project
             // actually compiles, so it didn't catch this on its own).
             ExprKind::Call(callee, args) => {
+                if let ExprKind::Field(obj, method) = &callee.kind {
+                    if (method == "key" || method == "key_pressed")
+                        && matches!(&obj.kind, ExprKind::Var(n) if n == "screen")
+                    {
+                        return self.screen_key_query(method, args);
+                    }
+                }
                 if let ExprKind::Var(n) = &callee.kind {
                     if (n == "float32" || n == "float" || n == "float64") && args.len() == 1 {
                         return format!("({} as f32)", self.host_expr(&args[0].value));
@@ -1835,7 +1926,11 @@ impl<'a> HostEmitter<'a> {
             ExprKind::BinOp(op, l, r) => {
                 let op_s = match op {
                     BinOp::Add => "+", BinOp::Sub => "-",
-                    BinOp::Mul => "*", BinOp::Div => "/",
+                    BinOp::Mul => "*", BinOp::Div => "/", BinOp::Rem => "%",
+                    BinOp::Eq => "==", BinOp::NotEq => "!=",
+                    BinOp::Lt => "<", BinOp::Gt => ">", BinOp::LtEq => "<=", BinOp::GtEq => ">=",
+                    BinOp::And => "&&", BinOp::Or => "||",
+                    BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "^",
                     _ => "/* op */",
                 };
                 format!("({} {op_s} {})", self.host_expr(l), self.host_expr(r))
