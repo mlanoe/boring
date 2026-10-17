@@ -378,6 +378,11 @@ impl Transpiler {
                 while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
                 match cur { Type::Array(elem) => Some(elem.as_ref().clone()), _ => None }
             }));
+            // `[Seed]` field: the loop variable is an element handle, called through its lock.
+            match self.fn_coll_expr(&s.iterable) {
+                Some((false, req)) => { self.fn_handle_vars.insert(s.vars[0].clone(), req); }
+                _ => { self.fn_handle_vars.remove(s.vars[0].as_str()); }
+            }
             // `[mut T]` elements: the loop variable is a `T` as far as dispatch goes.
             let elem_ty = elem_ty.map(|t| t.without_mut().clone());
             // `[Trait]` element: the loop variable is a `&Box<dyn Trait>`.

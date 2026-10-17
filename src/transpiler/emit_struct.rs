@@ -140,7 +140,7 @@ impl Transpiler {
             let needs_default = self.structs_needing_default.contains(&s.name);
             // A function-typed field is an `Rc<RefCell<dyn FnMut..>>`/`Rc<dyn Fn..>` handle: `Clone`
             // works (shared handle), but `dyn FnMut` has no `Debug`/`PartialEq`/`Default`.
-            let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some() || self.resolve_opt_fn_field_type(&f.ty).is_some());
+            let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some() || self.resolve_opt_fn_field_type(&f.ty).is_some() || self.resolve_fn_coll_field_type(&f.ty).is_some());
             let mut names: Vec<String> = if has_non_debug_trait_array_field || has_non_debug_shared_dyn || has_fn_field { vec![] } else { vec!["Debug".to_string()] };
             if has_fn_field {
                 names.push("Clone".to_string());
@@ -207,6 +207,12 @@ impl Transpiler {
                         f.name, s.name));
                 }
                 format!("Option<{}>", self.emit_fn_field_type(&fnty))
+            } else if let Some((key, fnty)) = self.resolve_fn_coll_field_type(&f.ty) {
+                let h = self.emit_fn_field_type(&fnty);
+                match key {
+                    Some(k) => format!("HashMap<{}, {}>", self.emit_type(&k), h),
+                    None => format!("Vec<{}>", h),
+                }
             } else if f.transient {
                 let inner = self.emit_type(&f.ty);
                 if Self::is_copy_type(&f.ty) {
@@ -2978,6 +2984,8 @@ impl Transpiler {
             self.emit_fn_field_value(&fnty, def)
         } else if let Some(fnty) = self.resolve_opt_fn_field_type(fty) {
             self.emit_opt_fn_field_value(&fnty, def)
+        } else if let Some((key, fnty)) = self.resolve_fn_coll_field_type(fty) {
+            self.emit_fn_coll_field_value(key.as_ref(), &fnty, def)
         } else {
             let val = self.emit_let_value(Some(fty), def);
             if self.transient_fields.contains_key(&key) {
@@ -3008,6 +3016,54 @@ impl Transpiler {
         match ty.without_mut() {
             Type::Optional(inner) => self.resolve_fn_field_type(inner),
             _ => None,
+        }
+    }
+
+    /// `([key type], fn type)` when `ty` is a collection of function values: `[Seed]` (no key)
+    /// or `{K=Seed}`. Such a field is a `Vec<handle>` / `HashMap<K, handle>`.
+    pub(crate) fn resolve_fn_coll_field_type(&self, ty: &Type) -> Option<(Option<Type>, Type)> {
+        match ty.without_mut() {
+            Type::Array(e) => Some((None, self.resolve_fn_field_type(e)?)),
+            Type::Dict(k, v) => Some((Some((**k).clone()), self.resolve_fn_field_type(v)?)),
+            _ => None,
+        }
+    }
+
+    /// `(is_dict, req)` when `e` reads a `[Seed]` / `{K=Seed}` struct field: its elements are handles.
+    pub(crate) fn fn_coll_expr(&self, e: &Expr) -> Option<(bool, bool)> {
+        let ExprKind::Field(..) = &e.kind else { return None };
+        let ty = self.resolve_expr_type(e)?;
+        let (key, fnty) = self.resolve_fn_coll_field_type(&ty)?;
+        match fnty {
+            Type::Fn(_, _, _, false, req) => Some((key.is_some(), req)),
+            _ => None,
+        }
+    }
+
+    /// The fn type of the elements of the fn-collection field `e` (see `fn_coll_expr`).
+    pub(crate) fn fn_coll_elem_type(&self, e: &Expr) -> Option<Type> {
+        let ty = self.resolve_expr_type(e)?;
+        self.resolve_fn_coll_field_type(&ty).map(|(_, f)| f)
+    }
+
+    /// Value stored into a `[Seed]` / `{K=Seed}` field: literals wrap every closure in its handle.
+    pub(crate) fn emit_fn_coll_field_value(&self, fk: Option<&Type>, fnty: &Type, value: &Expr) -> String {
+        match &value.kind {
+            ExprKind::Array(elems) => {
+                let es: Vec<String> = elems.iter().map(|e| self.emit_fn_field_value(fnty, e)).collect();
+                format!("vec![{}]", es.join(", "))
+            }
+            ExprKind::Dict(pairs) if pairs.is_empty() => "HashMap::new()".into(),
+            ExprKind::Dict(pairs) => {
+                // Explicit value type: `Arc::new(..)` only coerces to the handle where it is known.
+                let h = self.emit_fn_field_type(fnty);
+                let k_ty = match fk { Some(k) => self.emit_type(k), None => "_".into() };
+                let ins: String = pairs.iter()
+                    .map(|(k, v)| format!("__m.insert({}, {}); ", self.emit_expr_owned(k), self.emit_fn_field_value(fnty, v)))
+                    .collect();
+                format!("{{ let mut __m = HashMap::<{}, {}>::new(); {}__m }}", k_ty, h, ins)
+            }
+            _ => self.emit_expr(value),
         }
     }
 
@@ -3188,6 +3244,10 @@ impl Transpiler {
     /// `Some(req)` when `e` reads an OPTIONAL function-typed struct field (`s.make`, `Seed?`):
     /// once unwrapped (`if let f = s.make`) the binding is that field's handle.
     pub(crate) fn opt_fn_handle_req(&self, e: &Expr) -> Option<bool> {
+        // `t.named["a"]` on a `{K=Seed}` field: the dict lookup is an optional handle.
+        if let ExprKind::Index(obj, _) = &e.kind {
+            return match self.fn_coll_expr(obj) { Some((true, req)) => Some(req), _ => None };
+        }
         let ExprKind::Field(obj, fname) = &e.kind else { return None };
         let sn = self.resolve_struct_name(obj).or_else(|| match &obj.kind {
             // A parameter whose struct type carries an ownership qualifier is not in

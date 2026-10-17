@@ -361,11 +361,17 @@ impl Parser {
             TokenKind::LParen => {
                 self.advance();
                 let mut types = Vec::new();
+                let mut saw_comma = false;
                 while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                     types.push(self.parse_type()?);
                     if !self.eat(&TokenKind::Comma) { break; }
+                    saw_comma = true;
                 }
                 self.expect(&TokenKind::RParen)?;
+                // `(def int())?` — a parenthesized function type is grouping, not a 1-tuple.
+                if types.len() == 1 && !saw_comma && matches!(types[0], Type::Fn(..)) {
+                    return Ok(types.pop().unwrap());
+                }
                 Ok(Type::Tuple(types))
             }
             TokenKind::LBrace => {

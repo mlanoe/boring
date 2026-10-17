@@ -3443,6 +3443,12 @@ impl Transpiler {
         }
         self.record_closure_param_hints(obj, method, args);
         if let Some(r) = self.try_emit_fn_field_call(obj, method, args) { return r; }
+        // `t.many.push(closure)` on a `[Seed]` field stores the closure behind its handle.
+        if method == "push" && args.len() == 1 {
+            if let (Some((false, _)), Some(fnty)) = (self.fn_coll_expr(obj), self.fn_coll_elem_type(obj)) {
+                return format!("{}.push({})", self.emit_expr(obj), self.emit_fn_field_value(&fnty, &args[0].value));
+            }
+        }
         if let Some(r) = self.try_emit_host_tensor_cpu(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_introspect_handle_call(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }

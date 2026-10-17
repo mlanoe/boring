@@ -3573,6 +3573,19 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_call(&self, callee: &Expr, args: &[Arg]) -> String {
+        // `t.many[i](x)` on a `[Seed]` field: lock/borrow the element handle, then call.
+        if let ExprKind::Index(coll, _) = &callee.kind {
+            if let Some((_, req)) = self.fn_coll_expr(coll) {
+                let h = self.emit_expr(callee);
+                let args_s = self.emit_args(args);
+                let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+                return match (req, multi) {
+                    (true, _) => format!("({})({})", h, args_s),
+                    (false, false) => format!("({}.borrow_mut())({})", h, args_s),
+                    (false, true) => format!("({}.lock().unwrap())({})", h, args_s),
+                };
+            }
+        }
         if let ExprKind::Var(name) = &callee.kind {
             // `GPU(n)` — a device handle. Emitted as a plain `usize` index into the
             // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
