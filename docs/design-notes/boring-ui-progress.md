@@ -244,6 +244,16 @@ receiver rule. Cases `view_method_modifiers` (interpreter + 4 transpile configs)
 draft's two order examples in method form. Not done: convenience modifiers (`width(200)` → `frame`), modifiers on
 helper-function results / `<View>` locals, generic `ext View` modifiers.
 
+**Layer 1 remainder (2026-10-17).** Parent-supplied state seeds (`Counter(count = expensive())`: each `state` field gets an
+optional-in-practice `<state>__seed` closure input whose default reads `V__State()`'s own default, `newState()` builds the
+state from the seeds; cases `view_state_seed`, `view_state_seed_values`) and `env` expansion (`EnvValue` marker trait,
+`Provide`/`EnvMissing` facades, generated `usesEnv`/`expandIn`/`viewProvides`; case `view_env_provide`, `boring-ui` test
+`core_env_test.br`) are done, interpreter and `boring build`. Still open: `bind` projections into keyed collection
+elements (design: pass the collection slot + key, rewrite the child's bare `item` to `coll.value[indexOf(key)]`; needs a
+stale-key policy) and write-site invalidation (conservative whole-window rebuild is allowed by the draft). A seed that is a
+bare string literal is not supported under `boring build` yet (string literals returned from closures are emitted as `&str`;
+transpiler task proposed).
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is

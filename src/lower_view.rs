@@ -416,7 +416,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
         if let Some(e) = failure { return Err(e); }
     }
     if env.view_trait {
-        s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name, &seeds));
+        s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name, &seeds, &env_fields));
     }
     // Transpiled output: `body()` is the `<View>` opaque return the parser gave it, which Rust
     // can only satisfy with ONE concrete type — but a body may return `Row` on one branch and
@@ -436,7 +436,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
 /// of a native container, a native `KeyedGroup`'s key/site, and — for a composite view — the
 /// state seed and `expand`, which re-enters the lowered `body(__st)` with the node's own state.
 /// Parsed from source text so the generated methods are exactly what the parser would produce.
-fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, state_name: &str, seeds: &[(String, bool)]) -> Vec<FnDecl> {
+fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, state_name: &str, seeds: &[(String, bool)], env_fields: &[FieldDecl]) -> Vec<FnDecl> {
     let field_ty = |name: &str| s.fields.iter().find(|f| f.name == name).map(|f| strip_mut(&f.ty).clone());
     let mut src = format!("struct G:\n    req string viewKind(): \"{}\"\n", s.name);
     if native {
@@ -452,7 +452,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                 Type::Optional(inner) if !matches!(**inner, Type::Array(_)) => {
                     props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
                 }
-                Type::Named(n) if n == "View" || n == "UIAction" || n == "TaskAction" => {}
+                Type::Named(n) if n == "View" || n == "UIAction" || n == "TaskAction" || n == "EnvValue" => {}
                 // A lowered `bind` field is a shared `Slot`: its prop is the current value.
                 Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot") => {
                     props.push_str(&format!("        p[\"{name}\"] = \"{{{name}.value}}\"\n", name = f.name));
@@ -493,14 +493,19 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         if !props.is_empty() {
             src.push_str(&format!("    req {{string=string}} viewProps():\n        mut {{string=string}} p = {{=}}\n{props}        p\n"));
         }
+        // `Provide`: the value it installs for its subtree's `env` fields.
+        if field_ty("value").is_some_and(|t| is_named(&t, "EnvValue")) {
+            src.push_str("    req EnvValue? viewProvides(): value\n");
+        }
         if field_ty("key").is_some_and(|t| is_named(&t, "string")) {
             src.push_str("    req string viewKey(): key\n");
         }
         if field_ty("site").is_some_and(|t| is_named(&t, "int")) {
             src.push_str("    req int viewSite(): site\n");
         }
-    } else if s.methods.iter().any(|m| m.name == "body") && !has_env {
-        // (A view with `env` is not expandable yet: the runtime has no environment to give it.)
+    } else if s.methods.iter().any(|m| m.name == "body") && (!has_env || env_expandable(env_fields)) {
+        // (A view with `env` is expandable when every `env` type is a named struct the runtime's
+        // provider scope can be searched for; a primitive `env` has nothing to look up by type.)
         src.push_str("    req bool isComposite(): true\n");
         if has_state {
             // The mount-time state, built from the seed closures — each one defaults to the
@@ -517,11 +522,38 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                 "    req {state_name} seededState(): {state_name}({})\n    req StateBox'shared newState(): self.seededState()\n",
                 args.join(", ")
             ));
-            src.push_str(&format!(
-                "    req View expand(StateBox'shared st):\n        mut s = st as {state_name} else ({state_name}())\n        self.body(s)\n"
-            ));
-        } else {
+            if !has_env {
+                src.push_str(&format!(
+                    "    req View expand(StateBox'shared st):\n        mut s = st as {state_name} else ({state_name}())\n        self.body(s)\n"
+                ));
+            }
+        } else if !has_env {
             src.push_str("    req View expand(StateBox'shared st):\n        self.body()\n");
+        }
+        if has_env {
+            // The runtime hands a composite the provider scope of its ancestors (nearest first); each
+            // `env` field is the first value in it that downcasts to the field's type. A missing
+            // provider renders an `EnvMissing` placeholder the runtime reports. `expand` is the same
+            // with no providers, so a bare `expand(st)` still works (and reports the missing env).
+            src.push_str("    req bool usesEnv(): true\n");
+            let mut body = String::from("    req View expandIn(StateBox'shared st, [EnvValue] scope):\n");
+            if has_state {
+                body.push_str(&format!("        mut s = st as {state_name} else ({state_name}())\n"));
+            }
+            let mut args = Vec::new();
+            for f in env_fields {
+                let Type::Named(ty) = strip_mut(&f.ty) else { continue };
+                let n = &f.name;
+                body.push_str(&format!(
+                    "        var {ty}? found__{n} = nil\n        for v in scope:\n            if found__{n} == nil:\n                if let t = v as {ty}:\n                    found__{n} = t\n        guard let {n} = found__{n} else:\n            return EnvMissing(what = \"{ty}\")\n"
+                ));
+                args.push(format!("{n} = {n}"));
+            }
+            let env_name = format!("{}__Env", s.name);
+            body.push_str(&format!("        let e = {env_name}({})\n", args.join(", ")));
+            body.push_str(if has_state { "        self.body(s, e)\n" } else { "        self.body(e)\n" });
+            src.push_str(&body);
+            src.push_str("    req View expand(StateBox'shared st): self.expandIn(st, [])\n");
         }
     }
     let tokens = crate::lexer::lex(&src).expect("generated View methods lex");
@@ -939,4 +971,11 @@ fn default_seed_read(state_name: &str, field: &str, slotted: bool, line: usize, 
         }
     }
     unreachable!("default seed parses to a let")
+}
+
+fn env_expandable(env_fields: &[FieldDecl]) -> bool {
+    const PRIMITIVES: &[&str] = &["int", "uint", "float", "double", "bool", "string", "char", "byte", "usize", "isize"];
+    !env_fields.is_empty() && env_fields.iter().all(|f| {
+        matches!(strip_mut(&f.ty), Type::Named(n) if !PRIMITIVES.contains(&n.as_str()))
+    })
 }

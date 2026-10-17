@@ -1,0 +1,33 @@
+# `env` views are expandable: `expandIn` searches the provider scope (nearest ancestor first) for the
+# first value of each `env` field's type; a missing provider renders `EnvMissing`.
+use boring.ui.*
+
+struct Theme as EnvValue:
+    string name
+
+struct Locale as EnvValue:
+    string code
+
+view Card:
+    env Theme theme
+    env Locale locale
+    state int taps = 0
+    string title
+
+    body():
+        Text("{title}/{theme.name}/{locale.code}/{taps}")
+
+def main():
+    let card = Card(title = "t")
+    let StateBox'shared st = card.newState()
+    # inner Theme shadows the outer one (nearest first); Locale comes from further out
+    let [EnvValue] scope = [Theme(name = "inner"), Locale(code = "fr"), Theme(name = "outer")]
+    print card.expandIn(st, scope).viewProps()["content"]
+    # no providers: a placeholder naming what is missing
+    let missing = card.expand(st)
+    print missing.viewKind()
+    print missing.viewProps()["what"]
+    let [EnvValue] onlyLocale = [Locale(code = "de")]
+    # only a Locale in scope: the first unmet type is reported
+    let partial = card.expandIn(st, onlyLocale)
+    print partial.viewProps()["what"]
