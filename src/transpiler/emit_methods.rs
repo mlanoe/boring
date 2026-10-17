@@ -1813,6 +1813,21 @@ impl Transpiler {
                 let sub_ty = self.lock_subfield_type(&r, sub);
                 let sub_struct = sub_ty.as_ref().and_then(receiver_type_name);
                 let is_known = sub_struct.as_deref().map(|n| self.is_known_user_type(n)).unwrap_or(false);
+                // A read-only builtin collection method (`join`, `contains`, `indexOf`, `map`, ...)
+                // on a collection held in the cell (`__st.log.value.join(",")`, a lowered
+                // `state [string]`): the name-keyed `map_method` below knows nothing of the
+                // receiver's element type (its `join`/`contains` args come out as owned `Arc<str>`
+                // instead of `&str`/`&Arc<str>`). Let the collection dispatchers handle it — they emit
+                // the cell as a locked, cloned read like `.length`/indexing do. Only mutating methods
+                // need the in-place guard below.
+                if !is_known
+                    && sub_ty.as_ref().is_some_and(|t| matches!(t.without_mut(), Type::Array(_) | Type::Dict(..) | Type::Set(_)))
+                    && !matches!(method, "push" | "pop" | "append" | "extend" | "insert" | "remove" | "add"
+                        | "set" | "put" | "clear" | "sort" | "sortBy" | "reverse" | "shuffle" | "dedup"
+                        | "retain" | "truncate" | "drain" | "swap" | "fill" | "move" | "removeIndices")
+                {
+                    return None;
+                }
                 let (rust_method, extra_wrap) = if is_known {
                     (method.to_string(), None)
                 } else {
@@ -3346,6 +3361,13 @@ impl Transpiler {
         let obj = if let Some(f) = self.normalize_implicit_self_field(obj) {
             normalized_self_field = f;
             &normalized_self_field
+        } else {
+            obj
+        };
+        let slot_value_receiver;
+        let obj = if let Some(v) = self.state_slot_receiver_value(obj) {
+            slot_value_receiver = v;
+            &slot_value_receiver
         } else {
             obj
         };
@@ -5936,6 +5958,15 @@ impl Transpiler {
             kind: ExprKind::Field(Box::new(inner), "value".to_string()),
             line: obj.line, col: obj.col, len: 0,
         })
+    }
+
+    /// `st.field` (a lowered `view` state cell read from outside the view) used as the *receiver*
+    /// of a further member access/call (`st.log.length`, `st.log.join(",")`): rewrite it to the
+    /// cell's content `st.log.value` so the member resolves against the plain collection — as
+    /// `boring run` sees it — instead of against the `Slot` handle.
+    pub(crate) fn state_slot_receiver_value(&self, obj: &Expr) -> Option<Expr> {
+        let ExprKind::Field(inner, field) = &obj.kind else { return None };
+        self.state_slot_value_expr(inner, field)
     }
 
     /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.

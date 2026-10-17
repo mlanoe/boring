@@ -2144,6 +2144,13 @@ impl Transpiler {
         if let Some(value_access) = self.state_slot_value_expr(obj, field) {
             return self.emit_expr(&value_access);
         }
+        // `st.cell.member` (`st.log.length`): resolve `member` against the cell's content.
+        // `st.cell.value` is the explicit spelling of the `Slot`'s own field: leave it.
+        if field != "value" {
+            if let Some(value_receiver) = self.state_slot_receiver_value(obj) {
+                return self.emit_expr_field(&value_receiver, field);
+            }
+        }
         // `.pointee` — explicit dereference for opaque/external Rust values (e.g.
         // Bevy's `Single<T>`, `Mut<T>`) that implement `Deref`/`DerefMut` but are
         // not structs Boring itself manages. Pure syntactic pass-through:

@@ -303,6 +303,27 @@ impl Transpiler {
             // determined purely by the receiver's own declared type (see
             // `is_option_expr`'s `ALWAYS_OPTION`/`get`-arity comment for the wider
             // "which builtin methods are unconditionally Option-shaped" context).
+            // A user-declared method returning `T?` (`if let node = self.find(id):`): record the
+            // inner type exactly like `guard let` does, so a later `node.field.method(...)` can
+            // resolve `field`'s declared type (a `View?` field's trait-object method args then
+            // get `Arc<str>` conversion instead of staying `&str`).
+            if let Some(sty) = self.resolve_expr_struct_type(recv) {
+                if let Some(crate::ast::Type::Optional(inner)) = self.struct_method_return_types
+                    .get(&format!("{}::{}", sty, method)).cloned()
+                {
+                    self.var_types.insert(name.to_string(), *inner.clone());
+                    if Self::is_string_type(&inner) {
+                        self.string_vars.insert(name.to_string());
+                    } else {
+                        self.string_vars.remove(name);
+                    }
+                    if let crate::ast::Type::Named(n) = inner.as_ref() {
+                        if self.is_known_user_type(n.as_str()) {
+                            self.var_struct_types.insert(name.to_string(), n.clone());
+                        }
+                    }
+                }
+            }
             if method == "get" && args.len() == 1 {
                 if let Some(crate::ast::Type::Dict(_, v)) = self.resolve_expr_declared_type(recv) {
                     if let crate::ast::Type::Named(n) = v.as_ref() {

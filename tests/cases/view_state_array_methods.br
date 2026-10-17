@@ -1,0 +1,48 @@
+# Array methods on a `state [T]` field inside the view's own methods: the field is a
+# `Slot`-wrapped `Vec` in `V__State`, so `join`/`length`/indexing/`push`/iteration must go
+# through the slot's lock + `.value`, with string args converted correctly.
+use boring.ui.*
+
+view P:
+    state [string] log = []
+    state [int] nums = []
+
+    def add(string s):
+        log.push(s)
+        nums.push(log.length)
+
+    req string lines():
+        log.join(",")
+
+    req int total():
+        var t = 0
+        for n in nums:
+            t += n
+        t
+
+    req string first():
+        log[0]
+
+    req int size():
+        log.length
+
+    req bool has_b():
+        log.contains("b")
+
+def main():
+    let p = P()
+    mut st = P__State()
+    p.add("a", st)
+    p.add("b", st)
+    p.add("c", st)
+    print p.lines(st)
+    print p.total(st)
+    print p.first(st)
+    print p.size(st)
+    print p.has_b(st)
+    print st.log.length
+    print st.log.join("-")
+    print st.log.contains("c")
+    assert_eq(st.log.length, 3)
+    st.log.push("d")
+    print st.log.length

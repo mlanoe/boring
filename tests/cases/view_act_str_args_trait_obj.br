@@ -1,0 +1,48 @@
+# String literals / `string` locals passed to a method on a trait-object value (`View`) held in an
+# optional field: the trait method takes owned shared strings, so the args must be converted.
+use boring.ui.*
+
+struct Node:
+    View? control
+    string kind = "x"
+
+def poke(Node node, int n):
+    if let control = node.control:
+        control.viewAct("mount", "")
+        let hookName = "tick"
+        let hookArg = "x{n}"
+        control.viewAct(hookName, hookArg)
+        for i in 0 ..< 2:
+            let nm = "loop"
+            control.viewAct(nm, "")
+            control.viewAct("again", hookArg)
+
+struct Host:
+    var [Node] nodes = []
+
+    def void run(int id):
+        if let node = self.find(id):
+            if node.kind == "x":
+                if let control = node.control:
+                    control.viewAct("mount", "")
+                    let hook = "unmount"
+                    for k in 0 ..< 2:
+                        let arg = "a{k}"
+                        control.viewAct(hook, arg)
+
+    req Node? find(int id):
+        nil
+
+view Counter:
+    state bool on = false
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Toggle(value = on, label = "on")
+
+def main():
+    let c = Counter()
+    let body = c.expand(c.newState())
+    let node = Node(control = body, kind = "x")
+    poke(node, 1)
+    print "done"

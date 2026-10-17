@@ -741,6 +741,7 @@ interp_test!(array_block_for);
 interp_test!(array_block_keyed_for);
 interp_test!(array_block_keyed_for_identifiable);
 interp_test!(view_state_lowering);
+interp_test!(view_state_array_methods);
 interp_test!(view_body_lowering);
 interp_test!(view_runtime_methods);
 interp_test!(view_sited_blocks);
