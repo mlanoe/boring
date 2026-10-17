@@ -38,6 +38,12 @@ enum __BoringCmd {
 struct __BoringDisplay {
     proxy: std::sync::Mutex<Option<winit::event_loop::EventLoopProxy<__BoringCmd>>>,
     keys: std::sync::Mutex<std::collections::HashSet<String>>,
+    // Keys that went from released to pressed since the last `Screen::present` returned.
+    just_pressed: std::sync::Mutex<std::collections::HashSet<String>>,
+    mouse_x: std::sync::atomic::AtomicI64,
+    mouse_y: std::sync::atomic::AtomicI64,
+    // Bit 0 = left, 1 = right, 2 = middle.
+    mouse_buttons: std::sync::atomic::AtomicU8,
     frame: std::sync::Mutex<Option<Vec<u32>>>,
     frame_taken: std::sync::Condvar,
     closed: std::sync::atomic::AtomicBool,
@@ -48,6 +54,10 @@ fn __boring_display() -> &'static __BoringDisplay {
     DISPLAY.get_or_init(|| __BoringDisplay {
         proxy: std::sync::Mutex::new(None),
         keys: std::sync::Mutex::new(Default::default()),
+        just_pressed: std::sync::Mutex::new(Default::default()),
+        mouse_x: std::sync::atomic::AtomicI64::new(0),
+        mouse_y: std::sync::atomic::AtomicI64::new(0),
+        mouse_buttons: std::sync::atomic::AtomicU8::new(0),
         frame: std::sync::Mutex::new(None),
         frame_taken: std::sync::Condvar::new(),
         closed: std::sync::atomic::AtomicBool::new(false),
@@ -59,8 +69,15 @@ fn __boring_send(cmd: __BoringCmd) {
     proxy.as_ref().expect("Screen needs the display event loop started by `main`").send_event(cmd).ok();
 }
 
+// `screen.mouse`: cursor position in pixel-buffer coordinates (the window's pixel count equals
+// the buffer's) and button state, snapshotted once per `Screen::present`.
+#[allow(dead_code)] #[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Mouse { x: isize, y: isize, left: bool, right: bool, middle: bool }
+
 #[allow(dead_code)]
 struct Screen {
+    mouse: Mouse,
+    pressed: std::collections::HashSet<String>,
     dimension: Dimension,
     width: isize,
     height: isize,
@@ -82,6 +99,8 @@ impl Screen {
         });
         wait.recv().expect("display thread closed before the window was created");
         Screen {
+            mouse: Mouse::default(),
+            pressed: Default::default(),
             dimension,
             width: dimension.width,
             height: dimension.height,
@@ -93,9 +112,15 @@ impl Screen {
         }
     }
     // `"\x1B"` reaches here either as the ESC character or as its 4-character escape text.
+    fn __norm_key(key: &str) -> &str {
+        match key { "\\x1B" | "\\x1b" => "\x1B", "\\r" => "\r", "\\n" => "\n", other => other }
+    }
     fn key(&self, key: &str) -> bool {
-        let key = match key { "\\x1B" | "\\x1b" => "\x1B", "\\r" => "\r", "\\n" => "\n", other => other };
-        __boring_display().keys.lock().unwrap().contains(key)
+        __boring_display().keys.lock().unwrap().contains(Self::__norm_key(key))
+    }
+    // True only for the frame in which `key` went from released to pressed (auto-repeat excluded).
+    fn key_pressed(&self, key: &str) -> bool {
+        self.pressed.contains(Self::__norm_key(key))
     }
     fn present(&mut self, pixels: &[u32]) {
         use std::sync::atomic::Ordering::SeqCst;
@@ -113,6 +138,15 @@ impl Screen {
         self.time = self.start.elapsed().as_secs_f64();
         self.resized = display.resized.swap(false, SeqCst);
         self.closed = false;
+        self.pressed = std::mem::take(&mut *display.just_pressed.lock().unwrap());
+        let buttons = display.mouse_buttons.load(SeqCst);
+        self.mouse = Mouse {
+            x: display.mouse_x.load(SeqCst) as isize,
+            y: display.mouse_y.load(SeqCst) as isize,
+            left: buttons & 1 != 0,
+            right: buttons & 2 != 0,
+            middle: buttons & 4 != 0,
+        };
     }
 }
 
@@ -218,9 +252,28 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                     let name = __boring_key_str(key);
                     let mut keys = display.keys.lock().unwrap();
                     match input.state {
-                        ElementState::Pressed => { keys.insert(name); }
+                        ElementState::Pressed => {
+                            // `insert` is false for an auto-repeat of a key already held.
+                            if keys.insert(name.clone()) { display.just_pressed.lock().unwrap().insert(name); }
+                        }
                         ElementState::Released => { keys.remove(&name); }
                     }
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+                display.mouse_x.store(position.x.floor() as i64, SeqCst);
+                display.mouse_y.store(position.y.floor() as i64, SeqCst);
+            }
+            Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
+                let bit = match button {
+                    winit::event::MouseButton::Left => 1u8,
+                    winit::event::MouseButton::Right => 2,
+                    winit::event::MouseButton::Middle => 4,
+                    _ => 0,
+                };
+                match state {
+                    ElementState::Pressed => { display.mouse_buttons.fetch_or(bit, SeqCst); }
+                    ElementState::Released => { display.mouse_buttons.fetch_and(!bit, SeqCst); }
                 }
             }
             _ => {}

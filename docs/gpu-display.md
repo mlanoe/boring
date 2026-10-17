@@ -259,6 +259,19 @@ writeup. Summary:
 
 ---
 
+## Input (simd, Metal, CUDA, ROCm)
+
+Example: `examples/screen_input.br`.
+
+- `screen.key("k")` — level-triggered: true while held.
+- `screen.key_pressed("k")` — edge-triggered: true only for the frame in which the key went from released to pressed (OS auto-repeat does not retrigger it). Previously an alias of `key()` on Metal/CUDA/ROCm.
+- `screen.mouse.x` / `.y` (`int`) — cursor position in **pixel-buffer** coordinates (window pixels are rescaled to the buffer, so HiDPI/resized windows are handled; the last position is kept when the cursor leaves the window) — and `screen.mouse.left` / `.right` / `.middle` (`bool`). Only the field forms are supported (not a bare `screen.mouse` value on the GPU hosts).
+- State is consistent within one loop iteration: simd snapshots it at the end of `screen.present(...)`; the winit-driven hosts update it from events delivered before the frame body, and clear the pressed set after it.
+- Caveat: kernel `int` fields are `i32` on simd but `isize` on Metal — pass a `float32(...)` (as the example does) to stay portable.
+- Only simd/Metal codegen is compile-checked here (`cargo check`); CUDA/ROCm have codegen snapshot tests only, no hardware verification of the new input path.
+
+---
+
 ## Backend notes (CPU SIMD)
 
 See [`simd-backend.md`](simd-backend.html#gpu-display) for the full writeup.
@@ -271,12 +284,14 @@ and waits for the blit. A `let Dimension` kernel gets flat-extent construction,
 2D dispatch grid, exactly as on the other backends. Dependencies are added to the
 generated `Cargo.toml` only when the program uses `Screen`.
 
+
+
 ---
 
 ## Pending
 
 - **`boring run`**: `screen.present()` writes a PPM on loop exit; `--preview` opens a `minifb` window.
 - **Resize handling**: `screen.resized` detected but the kernel surface is not reallocated automatically — user code must reinitialise `k`. Same limitation on every implemented backend.
-- **`screen.key_pressed()`**, **`screen.mouse`**: not yet implemented on Metal/wgpu. Implemented on CUDA/ROCm (mirrors `screen.key()`).
+- **`screen.key_pressed()`**, **`screen.mouse`**: implemented on simd, Metal, CUDA and ROCm with the same semantics (see "Input" below). **wgpu: not implemented** — its host only recognises `if screen.key("k"): break` as a statement pattern (`try_emit_screen_key_if`), there is no general `screen.key(...)` expression, so key queries and mouse state would first need real expression support (and a `__keys_pressed` / mouse state in the `ApplicationHandler`, `wgpu/host.rs` ~l.1268/1367).
 - **`screen.pixels_rgba()`**: portable RGBA read from `'surface` buffer.
 - **CUDA real-hardware verification**: no NVIDIA GPU/CUDA toolkit available in this project's dev environment — see `cuda-module.md`'s Screen section.

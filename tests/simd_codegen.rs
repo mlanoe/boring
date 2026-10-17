@@ -7926,6 +7926,27 @@ fn display_examples_build_for_simd_with_a_software_blit() {
 }
 
 #[test]
+fn display_screen_input_example_reads_mouse_and_key_pressed() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest_dir.join("examples/screen_input.br")).unwrap();
+    let project = generate_simd_project("display_input", &source);
+    let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    // Host-side queries are plain field reads / method calls on the runtime `Screen`.
+    assert!(rs.contains("screen.mouse.x as f32"), "{rs}");
+    assert!(rs.contains("screen.mouse.left"), "{rs}");
+    assert!(rs.contains("screen.key_pressed(\"c\")"), "{rs}");
+    // Runtime: edge-triggered key set (auto-repeat excluded), button mask fed by winit events.
+    assert!(rs.contains("struct Mouse {"));
+    assert!(rs.contains("fn key_pressed(&self, key: &str) -> bool"));
+    assert!(rs.contains("if keys.insert(name.clone())"));
+    assert!(rs.contains("WindowEvent::CursorMoved"));
+    assert!(rs.contains("WindowEvent::MouseInput"));
+    // Snapshotted once per frame, at the end of `present`.
+    assert!(rs.contains("self.pressed = std::mem::take("));
+    check_display_project(&project);
+}
+
+#[test]
 fn display_game_of_life_swaps_kernel_buffers_in_place() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source = fs::read_to_string(manifest_dir.join("examples/game_of_life.br")).unwrap();

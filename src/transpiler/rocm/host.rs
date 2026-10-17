@@ -991,6 +991,16 @@ impl HostEmitter {
         self.line(&format!("let mut boring_screen_height: isize = {h};"));
         self.line("let mut boring_screen_resized = false;");
         self.line("let mut boring_screen_closed = false;");
+        // Edge-triggered `screen.key_pressed()` set (cleared after each frame body) and
+        // `screen.mouse` state, in pixel-buffer coordinates.
+        self.line("let mut boring_keys_pressed: std::collections::HashSet<String> = Default::default();");
+        self.line("let mut boring_mouse_x: isize = 0;");
+        self.line("let mut boring_mouse_y: isize = 0;");
+        self.line("let mut boring_mouse_left = false;");
+        self.line("let mut boring_mouse_right = false;");
+        self.line("let mut boring_mouse_middle = false;");
+        self.line(&format!("let boring_buf_w: f64 = {w} as f64;"));
+        self.line(&format!("let boring_buf_h: f64 = {h} as f64;"));
     }
 
     fn emit_render_loop(&mut self, loop_body: &[Stmt]) {
@@ -1020,10 +1030,31 @@ impl HostEmitter {
         self.line("let __boring_ks = boring_key_str(__boring_key);");
         self.line("match __boring_ki.state {");
         self.indent += 1;
-        self.line("winit::event::ElementState::Pressed  => { boring_keys.insert(__boring_ks); }");
+        self.line("winit::event::ElementState::Pressed  => { if boring_keys.insert(__boring_ks.clone()) { boring_keys_pressed.insert(__boring_ks); } }");
         self.line("winit::event::ElementState::Released => { boring_keys.remove(&__boring_ks); }");
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::CursorMoved { position: __boring_pos, .. }, .. } => {");
+        self.indent += 1;
+        // Physical window pixels -> pixel-buffer coordinates (the window may be HiDPI-scaled or resized).
+        self.line("let __boring_ws = boring_window.inner_size();");
+        self.line("boring_mouse_x = (__boring_pos.x * boring_buf_w / (__boring_ws.width.max(1) as f64)).floor() as isize;");
+        self.line("boring_mouse_y = (__boring_pos.y * boring_buf_h / (__boring_ws.height.max(1) as f64)).floor() as isize;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::MouseInput { state: __boring_ms, button: __boring_mb, .. }, .. } => {");
+        self.indent += 1;
+        self.line("let __boring_down = __boring_ms == winit::event::ElementState::Pressed;");
+        self.line("match __boring_mb {");
+        self.indent += 1;
+        self.line("winit::event::MouseButton::Left => boring_mouse_left = __boring_down,");
+        self.line("winit::event::MouseButton::Right => boring_mouse_right = __boring_down,");
+        self.line("winit::event::MouseButton::Middle => boring_mouse_middle = __boring_down,");
+        self.line("_ => {}");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -1036,6 +1067,7 @@ impl HostEmitter {
             self.emit_render_loop_stmt(stmt);
         }
         self.in_render_loop = false;
+        self.line("boring_keys_pressed.clear();");
         self.line("boring_frame += 1;");
         self.indent -= 1;
         self.line("}");
@@ -2650,6 +2682,17 @@ impl HostEmitter {
                 // `screen.<field>` (Screen program only) → the matching local
                 // state var from `emit_screen_setup`/`emit_render_loop`.
                 // Mirrors `cuda::host`'s identical Field-case mapping.
+                // `screen.mouse.x` / `.y` / `.left` / `.right` / `.middle` (Screen program only).
+                if let ExprKind::Field(inner, mouse) = &obj.kind {
+                    if let ExprKind::Var(sv) = &inner.kind {
+                        if self.screen_var.as_deref() == Some(sv.as_str())
+                            && mouse == "mouse"
+                            && matches!(field.as_str(), "x" | "y" | "left" | "right" | "middle")
+                        {
+                            return format!("boring_mouse_{}", field);
+                        }
+                    }
+                }
                 if let ExprKind::Var(obj_name) = &obj.kind {
                     if self.screen_var.as_deref() == Some(obj_name.as_str()) {
                         match field.as_str() {
@@ -2830,7 +2873,8 @@ impl HostEmitter {
                     {
                         if let Some(arg) = args.first() {
                             let k = self.expr(&arg.value);
-                            return format!("boring_keys.contains({})", k);
+                            let set = if method == "key_pressed" { "boring_keys_pressed" } else { "boring_keys" };
+                            return format!("{}.contains({})", set, k);
                         }
                     }
                 }

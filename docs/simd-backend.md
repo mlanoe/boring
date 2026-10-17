@@ -181,5 +181,6 @@ checks generated code and `cargo check`s the crates but never opens a window.
 
 ## Not yet covered (relative to `--target metal`)
 
-* `screen.key_pressed()` and `screen.mouse` (also missing on Metal/wgpu).
+(`screen.key_pressed()` / `screen.mouse` are implemented here — see the Input section of [gpu-display.md](gpu-display.html).)
+
 * `Device(...)` reports the CPU name and total system memory; usage and telemetry queries return 0.

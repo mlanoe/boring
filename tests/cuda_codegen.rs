@@ -1810,3 +1810,54 @@ kernel W:
 }
 
 // ─── host — struct and constructor ───────────────────────────────────────────
+
+#[test]
+fn screen_key_pressed_is_edge_triggered_and_mouse_is_exposed() {
+    let src = r#"
+let width  = 64
+let height = 48
+let screen = Screen(Dimension(width, height), title = "Test")
+
+kernel Fill:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float32 mx
+    var uint mode
+
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+        dim    = d
+        mx     = 0.0
+        mode   = 0
+
+    def ():
+        pixels[0] = 0xFF000000 | mode
+
+var mut k = Fill(Dimension(width, height))
+
+kernel:
+    loop:
+        k.mx = float32(screen.mouse.x)
+        if screen.key_pressed("c") or screen.mouse.left:
+            k.mode = 1
+        if screen.key("a") and screen.mouse.right and screen.mouse.middle and screen.mouse.y > 3:
+            k.mode = 2
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (_, rs) = cuda_codegen("screen_input", src);
+    // Edge-triggered: only a released -> pressed transition feeds the set, cleared after each frame body.
+    assert!(rs.contains("if boring_keys.insert(__boring_ks.clone()) { boring_keys_pressed.insert(__boring_ks); }"), "{rs}");
+    assert!(rs.contains("boring_keys_pressed.contains(\"c\")"), "{rs}");
+    assert!(rs.contains("boring_keys.contains(\"a\")"), "{rs}");
+    assert!(rs.contains("boring_keys_pressed.clear();"), "{rs}");
+    // Mouse: CursorMoved (scaled to buffer pixels) + MouseInput buttons.
+    assert!(rs.contains("WindowEvent::CursorMoved"), "{rs}");
+    assert!(rs.contains("boring_buf_w"), "{rs}");
+    assert!(rs.contains("winit::event::MouseButton::Middle => boring_mouse_middle = __boring_down"), "{rs}");
+    assert!(rs.contains("boring_mouse_x as f32"), "{rs}");
+    assert!(rs.contains("boring_mouse_left") && rs.contains("boring_mouse_right"), "{rs}");
+    assert!(rs.contains("boring_mouse_y > 3"), "{rs}");
+}
