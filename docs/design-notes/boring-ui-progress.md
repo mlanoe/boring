@@ -244,7 +244,7 @@ receiver rule. Cases `view_method_modifiers` (interpreter + 4 transpile configs)
 draft's two order examples in method form. Not done: convenience modifiers (`width(200)` → `frame`), modifiers on
 helper-function results / `<View>` locals, generic `ext View` modifiers.
 
-**Layer 1 remainder (2026-10-17).** Parent-supplied state seeds (`Counter(count = expensive())`: each `state` field gets an
+**Layer 1 remainder (2026-10-17, projections below).** Parent-supplied state seeds (`Counter(count = expensive())`: each `state` field gets an
 optional-in-practice `<state>__seed` closure input whose default reads `V__State()`'s own default, `newState()` builds the
 state from the seeds; cases `view_state_seed`, `view_state_seed_values`) and `env` expansion (`EnvValue` marker trait,
 `Provide`/`EnvMissing` facades, generated `usesEnv`/`expandIn`/`viewProvides`; case `view_env_provide`, `boring-ui` test
@@ -253,6 +253,18 @@ elements (design: pass the collection slot + key, rewrite the child's bare `item
 stale-key policy) and write-site invalidation (conservative whole-window rebuild is allowed by the draft). A seed that is a
 bare string literal is not supported under `boring build` yet (string literals returned from closures are emitted as `&str`;
 transpiler task proposed).
+
+**`bind` projections of keyed elements (2026-10-17, voie A).** `for item in items with item.id: TodoRow(item = item)` with
+`bind Todo item` in the child: `lower_view` detects the keyed loop (the `KeyedGroup` key and the bind-target argument),
+adds a hidden typed registry per site to the parent's state (`<View>__Proj<k>` records: collection slot, projection slot,
+base copy, key) and rewrites the argument to a projection slot; `Runtime.commitProjections` runs before every update pass and
+writes changed projections back by key (stale key: dropped and reported). Cases `view_bind_projection_no_key` (error);
+`boring-ui/tests/core_projection_test.br` passes interpreted and under `boring build`. Findings: the interpreter aliases
+structs and compares them by identity where transpiled output copies and compares contents (the commit compares printed
+forms to be mode-independent); `boring build` cannot carry trait objects in a shared state or closures with loops, so the
+design uses concrete per-site structs; a field named `done` is mis-emitted; two reads of one `'actor` slot in a single
+expression deadlock (task proposed). Field projections (`item.title` into a native control's `bind string`) remain the
+per-field `Slot` workaround.
 
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
