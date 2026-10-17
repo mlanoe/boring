@@ -1,0 +1,38 @@
+mut [int]'kernel'unified out = [0 for ..<4]
+int f(int? a):
+    a else -1
+int? g(int i):
+    if i > 1:
+        return i * 10
+    nil
+int? g2():
+    7
+int chain(int? a):
+    if let v = a:
+        return v + 1
+    0
+kernel O:
+    mut [int]'unified out
+    init(mut [int]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        let [int?, 3] arr = [i, nil, 3]
+        var int? m = g(i)
+        arr[1] = 4
+        var total = f(i) + f(nil) + (g(i) else 0) + (g2() else 0)
+        total += (arr[0] else 100) + (arr[1] else 200) + (arr[2] else 300)
+        total += chain(g(i)) + chain(nil) + chain(5)
+        if let q = g(i):
+            total += q * 1000
+        if let r = arr[2]:
+            total += r
+        if arr[1] != nil:
+            total += 50000
+        if m == nil:
+            total += 7
+        out[i] = total
+mut o = O(out)
+kernel:
+    o(block = 4)
+print "{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}"

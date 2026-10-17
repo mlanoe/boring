@@ -99,11 +99,20 @@ fn explicit_some_still_works_in_the_interpreter_and_std_codegen() {
 const KERNEL_FIXTURE: &str = "tests/cases/implicit_some_kernel.br";
 const KERNEL_EXPECTED: &str = "1104 1106 1129 1141";
 
+const DEVICE_FNS_FIXTURE: &str = "tests/cases/implicit_some_device_fns.br";
+// i=2 by hand: f(2)+f(nil)+g(2)+g2() = 28; arr [2,4,3] = 9; chain(g(2))+chain(nil)+chain(5) = 27;
+// if-let on g(2) adds 20000, on arr[2] adds 3, `arr[1] != nil` adds 50000 (`m == nil` is false).
+const DEVICE_FNS_EXPECTED: &str = "50029 50031 70067 80089";
+
 fn generate(target: &str, name: &str) -> std::path::PathBuf {
+    generate_from(KERNEL_FIXTURE, target, name)
+}
+
+fn generate_from(fixture: &str, target: &str, name: &str) -> std::path::PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("implicit_some_{name}_{target}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(KERNEL_FIXTURE, dir.join("main.br")).unwrap();
+    std::fs::copy(fixture, dir.join("main.br")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["build", "--target", target, "main.br"])
         .current_dir(&dir)
@@ -145,4 +154,39 @@ fn optional_locals_in_kernels_run_correctly_on_metal() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(stdout, KERNEL_EXPECTED);
+}
+
+#[test]
+fn device_backends_lower_optional_parameters_returns_and_arrays() {
+    for (target, kernel_file) in [
+        ("metal", "main_metal/kernels/main.metal"),
+        ("wgpu", "main_wgpu/shaders/main.wgsl"),
+        ("cuda", "main_cuda/kernels/main.cu"),
+        ("rocm", "main_rocm/kernels/main.hip"),
+    ] {
+        let dir = generate_from(DEVICE_FNS_FIXTURE, target, "fns_shape");
+        let source = std::fs::read_to_string(dir.join(kernel_file)).unwrap();
+        assert!(!source.contains("unsupported"), "{target}: {source}");
+        for needle in ["f__dev", "g__dev_has", "arr__has"] {
+            assert!(source.contains(needle), "{target}: missing {needle}: {source}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn optional_parameters_returns_and_arrays_run_correctly_on_metal() {
+    let dir = generate_from(DEVICE_FNS_FIXTURE, "metal", "fns_run");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(dir.join("main_metal/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(dir.join("target"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(stdout, DEVICE_FNS_EXPECTED);
 }
