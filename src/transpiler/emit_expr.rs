@@ -3613,9 +3613,6 @@ impl Transpiler {
             // checked before the `is_type` constructor branch below — "Device" is
             // capitalized like a type name, but no `struct GPU` exists to construct.
             if name == "Device" && self.is_gpu_target {
-                if self.config.is_simd_target {
-                    return "__boring_gpu_device()".into();
-                }
                 let expected_target = if self.config.is_simd_target { "SIMD" } else { "WGPU" };
                 if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
                     if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {

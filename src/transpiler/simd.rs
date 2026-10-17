@@ -191,14 +191,31 @@ fn __boring_gpu_total_mem<T>(_: T) -> i64 {
     { if let Ok(text) = std::fs::read_to_string("/proc/meminfo") { if let Some(kb) = text.lines().find_map(|l| l.strip_prefix("MemTotal:")).and_then(|l| l.trim().trim_end_matches("kB").trim().parse::<i64>().ok()) { return kb * 1024; } } }
     0
 }
-fn __boring_gpu_used_mem<T>(_: T) -> i64 { 0 }
-fn __boring_gpu_free_mem<T>(_: T) -> i64 { 0 }
+fn __boring_gpu_free_mem<T>(_: T) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("vm_stat").output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let page = text.split("page size of ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(4096);
+            let pages = |label: &str| text.lines().find_map(|l| l.strip_prefix(label)).and_then(|v| v.trim().trim_end_matches('.').parse::<i64>().ok()).unwrap_or(0);
+            return (pages("Pages free:") + pages("Pages inactive:")) * page;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    { if let Ok(text) = std::fs::read_to_string("/proc/meminfo") { if let Some(kb) = text.lines().find_map(|l| l.strip_prefix("MemAvailable:")).and_then(|l| l.trim().trim_end_matches("kB").trim().parse::<i64>().ok()) { return kb * 1024; } } }
+    0
+}
+fn __boring_gpu_used_mem<T: Copy>(d: T) -> i64 { (__boring_gpu_total_mem(d) - __boring_gpu_free_mem(d)).max(0) }
+fn __boring_gpu_all() -> Vec<usize> { vec![0] }
+fn __boring_gpu_warp_size<T>(_: T) -> i64 { 32 }
+fn __boring_gpu_max_threads<T>(_: T) -> i64 { 1024 }
+fn __boring_gpu_max_shared_mem<T>(_: T) -> i64 { 32768 }
 fn __boring_gpu_utilization<T>(_: T) -> f64 { 0.0 }
 fn __boring_gpu_temperature<T>(_: T) -> f64 { 0.0 }
 fn __boring_gpu_power_usage<T>(_: T) -> f64 { 0.0 }
 fn __boring_gpu_power_limit<T>(_: T) -> f64 { 0.0 }
 fn __boring_gpu_memory_bandwidth<T>(_: T) -> f64 { 0.0 }
-fn __boring_gpu_compute_capability<T>(_: T) -> String { __boring_simd_name().into() }
+fn __boring_gpu_compute_capability<T>(_: T) -> Vec<i64> { vec![__boring_simd_lanes() as i64, 0] }
 
 #[derive(Clone, Copy, Debug)] struct __BoringDim3 { x: i32, y: i32, z: i32 }
 fn __boring_simd_lanes() -> usize {

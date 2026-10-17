@@ -8082,3 +8082,14 @@ fn kernel_helper_methods_mixed_numeric_widths_and_placement_run_on_simd() {
     // counts = 0+1+2+3; wide[3] = narrow[0] (1.0) + lane 3; narrow[3] = (4+1) + 8*0.5
     assert_eq!(stdout, "6 4 9");
 }
+
+#[test]
+fn device_introspection_matches_the_metal_surface() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "device_introspection",
+        "let g = Device(index = 0)\nprint \"{g.totalMem() > 0}\"\nprint \"{g.freeMem() > 0}\"\nprint \"{g.warpSize()} {g.maxThreads()} {g.maxSharedMem()} {g.index()}\"\nlet cc = g.computeCapability()\nprint \"{cc.length}\"\nfor d in Device.all():\n    print \"all {d.index()}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "true\ntrue\n32 1024 32768 0\n2\nall 0");
+}

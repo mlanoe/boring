@@ -181,8 +181,11 @@ Only a top-level `Screen` is supported (a `Screen` constructed inside a function
 not recognised). Display programs cannot be exercised headlessly, so the test suite
 checks generated code and `cargo check`s the crates but never opens a window.
 
-## Not yet covered (relative to `--target metal`)
+## Notes relative to `--target metal`
 
 (`screen.key_pressed()` / `screen.mouse` are implemented here — see the Input section of [gpu-display.md](gpu-display.html).)
 
-* `Device(...)` reports the CPU name and total system memory; usage and telemetry queries return 0.
+* `Device` introspection: `name()` is the CPU ISA, `totalMem()`/`freeMem()` the system
+  memory, `warpSize()` 32, `maxThreads()` 1024, `maxSharedMem()` 32768,
+  `computeCapability()` `[lane count, 0]`, `Device.all()` one device; GPU usage,
+  temperature and power read 0.
