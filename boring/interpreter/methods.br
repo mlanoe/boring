@@ -239,7 +239,7 @@ def Value clone_value(mut Interpreter interp, Value v):
         Value.Object(inner):
             let ref_val = inner.get_field("__ref_id")
             if let _rid = ref_val:
-                var [(string, Value)] copied = []
+                var mut [(string, Value)] copied = []
                 var i = 0
                 while i < inner.fields.length:
                     let name = inner.fields[i].0
@@ -251,7 +251,7 @@ def Value clone_value(mut Interpreter interp, Value v):
                         copied.push((name, clone_value(interp, inner.fields[i].1)))
                     i += 1
                 return Value.Object(ObjectInner(type_name= inner.type_name, fields= copied))
-            return Value.Object(inner)
+            return v
         _:
             return v
 

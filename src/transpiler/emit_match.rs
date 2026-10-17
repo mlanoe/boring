@@ -766,6 +766,24 @@ impl Transpiler {
         }
     }
 
+    /// True when any arm's guard or body mentions the variable `name`.
+    fn match_arms_mention_var(arms: &[MatchArm], name: &str) -> bool {
+        let found = std::cell::Cell::new(false);
+        let mut on_expr = |e: &mut Expr| {
+            if matches!(&e.kind, ExprKind::Var(n) if n == name) { found.set(true); }
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut w = crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+        for arm in arms {
+            if let Some(g) = &arm.guard { w.expr(&mut g.clone()); }
+            match &arm.body {
+                MatchBody::Expr(e) => w.expr(&mut e.clone()),
+                MatchBody::Block(b) => w.stmts(&mut b.clone()),
+            }
+        }
+        found.get()
+    }
+
     pub(crate) fn emit_match(&mut self, s: &MatchStmt, is_last: bool) {
         // ── Special case: `match error:` with qualified enum-variant patterns ────────
         //
@@ -1095,7 +1113,12 @@ impl Transpiler {
                 matches!(p, Pattern::Variant(_, subs) if !subs.is_empty())
                     || matches!(p, Pattern::Some(inner) if matches!(inner.as_ref(), Pattern::Variant(_, subs) if !subs.is_empty()))
             }));
-            if is_optional_var && has_binding_arm {
+            // Same hazard for a plain owned enum local/param: a binding arm moves the payload
+            // out of it, so an arm body (or guard) that mentions the subject again would hit
+            // E0382 (`return v` in the fallthrough of `match v { V.Obj(inner): ... }`).
+            let reused_in_arms = !is_optional_var && has_binding_arm && subj == *vname
+                && !is_smart_ptr && !is_arc_str && Self::match_arms_mention_var(arms_ref, vname);
+            if (is_optional_var && has_binding_arm) || reused_in_arms {
                 format!("{}.clone()", vname)
             } else {
                 subj

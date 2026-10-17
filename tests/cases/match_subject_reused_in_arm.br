@@ -1,0 +1,22 @@
+struct Inner:
+    string name
+
+enum V:
+    Obj(Inner'actor)
+    Num(int)
+
+V f(V v):
+    match v:
+        V.Obj(inner):
+            if inner.name == "x":
+                return V.Obj(inner)
+            return v
+        _:
+            return v
+
+def main():
+    let a = V.Num(1)
+    let b = f(a)
+    match b:
+        V.Num(n): print "{n}"
+        _: print "obj"
