@@ -384,3 +384,10 @@ cargo test --test transpile                              # full suite, ~10 min o
 - Deferred on purpose: precise (per-identity) invalidation — `flush` rebuilds the window; gain is only visible with
   large trees and needs write-site tracking in lowered code. Unicode text and throwing-callback boundary wait for
   the strings / throwing-closure cards.
+
+## 2026-10-18 — Unicode text in boring-ui
+
+- Caret/selection/marked text are grapheme indices; widths via `displayWidth`; `text_unicode_test.br` green in both modes.
+- Transpiler issues worked around in boring-ui (card candidates): `(x.displayWidth as float)` emits a string-parse cast
+  (`.trim().parse()` on an `isize`) — bind to a `let` first; `graphemeSlice` on a `var` receiver emits a non-existent
+  `grapheme_slice` — go through a function parameter.
