@@ -1,0 +1,29 @@
+# A `throws` task fn that actually throws: the throw must surface at the handle (`.value`),
+# where `try … else` / `try?` / `try: … else:` catch it — not at the spawn site.
+task int deliver(int x) throws:
+    if x < 0:
+        throw "neg"
+    x * 10
+
+task run():
+    let k = task: deliver(-1)
+    let b = try k.value else -1
+    print b
+    let k2 = task: deliver(-2)
+    let c = try? k2.value
+    print c
+    let k3 = task: deliver(-3)
+    let d = try:
+        k3.value
+    else:
+        -7
+    print d
+    let k5 = task: deliver(5)
+    let z = try k5.value else -1
+    print z
+    let k6 = task: deliver(6)
+    let y = try? k6.value
+    print y
+
+let t = task run()
+t.value

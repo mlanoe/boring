@@ -250,7 +250,16 @@ impl Transpiler {
                 let mut sub = self.make_sub();
                 sub.in_throws = false;
                 sub.in_try_body = false;
-                let inner = sub.emit_expr(e);
+                let mut inner = sub.emit_expr(e);
+                // `try k.value else d` / `try? k.value` on a `throws` JoinHandle: the plain
+                // (non-throws) `.value` form panics via `.expect("unhandled task error")` —
+                // strip it so the handle's inner `Result` reaches the `.ok()` /
+                // `.unwrap_or_else` below, which is the whole point of the `try`.
+                if matches!(&e.kind, ExprKind::Field(_, f) if f == "value") {
+                    if let Some(stripped) = inner.strip_suffix(".expect(\"unhandled task error\")") {
+                        inner = stripped.to_string();
+                    }
+                }
                 // The sub-transpiler's diagnostics (e.g. an argument-mutability error inside
                 // `try? sock.read(buf)`) belong to this compilation — don't drop them.
                 self.errors.borrow_mut().extend(sub.errors.take());
@@ -796,12 +805,14 @@ impl Transpiler {
             let mut sub = self.make_sub();
             sub.in_async = !blocking;
             sub.in_throws = false;
+            sub.in_try_body = false;
             sub.emit_body(stmts);
             format!("{{\n{}}}", sub.out)
         } else {
             let mut sub = self.make_sub();
             sub.in_async = !blocking;
             sub.in_throws = false;
+            sub.in_try_body = false;
             format!("{{ {} }}", sub.emit_expr(e))
         };
 
@@ -2148,7 +2159,7 @@ impl Transpiler {
             if is_throws_handle && in_throws_ctx {
                 if use_error_mapping {
                     let p = self.str_ptr();
-                    format!("{{ let _ = {obj_s}.await.map_err(|__e| Box::new(BoringError::String({p}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??.expect(\"unhandled task error\"); }}")
+                    format!("{{ let _ = {obj_s}.await.map_err(|__e| Box::new(BoringError::String({p}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??; }}")
                 } else {
                     format!("{{ let _ = {obj_s}.await.expect(\"task panicked\")?; }}")
                 }
@@ -2175,6 +2186,41 @@ impl Transpiler {
             } else {
                 format!("{obj_s}.await.expect(\"task panicked\")")
             }
+        }
+    }
+
+    /// Whether a spawned `task: expr` body is a call to a `throws` fn/method, i.e. the
+    /// resulting JoinHandle wraps `Result<T, BoringError>`. Shared by the `let k = task: f()`
+    /// tracking (`throws_join_handle_vars`) and the inline `(task: f()).value`/`.wait` path.
+    pub(crate) fn spawned_expr_throws(&self, inner: &Expr) -> bool {
+        match &inner.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(fn_name) => self.fn_throws.contains(fn_name.as_str()),
+                _ => false,
+            },
+            ExprKind::MethodCall(obj, method, _) => {
+                // Same resolution as a plain method call: the receiver struct's own
+                // method decides; a top-level `throws` fn only counts when the receiver
+                // struct has no method of that name.
+                let receiver_struct = self.resolve_expr_struct_type(obj)
+                    .or_else(|| match &obj.kind {
+                        ExprKind::Var(v) => self.var_struct_type.get(v.as_str()).cloned(),
+                        _ => None,
+                    });
+                match &receiver_struct {
+                    Some(sn) => {
+                        let has_method = self.struct_method_names.get(sn)
+                            .is_some_and(|ms| ms.contains(method.as_str()));
+                        if has_method {
+                            self.struct_method_throws.contains(&format!("{}::{}", sn, method))
+                        } else {
+                            self.fn_throws.contains(method.as_str())
+                        }
+                    }
+                    None => self.fn_throws.contains(method.as_str()),
+                }
+            }
+            _ => false,
         }
     }
 
@@ -2382,6 +2428,13 @@ impl Transpiler {
                 || obj_s.contains("tokio::spawn")
                 || obj_s.contains("async move");
             if is_future {
+                // Inline `(task: f()).value`/`.wait` on a `throws` body: same handling as a
+                // named throws handle (propagate under `throws`/`try`, else `.expect`).
+                if let ExprKind::Task(inner) = &obj.kind {
+                    if self.spawned_expr_throws(inner) {
+                        return self.emit_task_await(&obj_s, field, true, true, true);
+                    }
+                }
                 return self.emit_plain_task_await(&obj_s, field);
             }
             // Loop variable holding a JoinHandle: only treat as future if the var is

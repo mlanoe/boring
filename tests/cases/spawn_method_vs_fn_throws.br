@@ -1,0 +1,24 @@
+# `task: obj.method()` where a non-throwing task method shares its name with a top-level
+# `throws` task fn: the JoinHandle must not be treated as a throws handle (no double-unwrap),
+# and the free fn's handle still is.
+struct Runner:
+    var int n = 0
+
+    task req int deliver(int x):
+        x + 1
+
+task int deliver(int x) throws:
+    if x < 0:
+        throw "neg"
+    x * 10
+
+task run():
+    let Runner'shared r = Runner()
+    let h = task: r.deliver(4)
+    print h.value
+    let g = task: deliver(3)
+    let a = try g.value else -1
+    print a
+
+let t = task run()
+t.value

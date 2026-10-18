@@ -1975,9 +1975,14 @@ impl Interpreter {
                 // Collect owned vars captured by this task so we can invalidate them after
                 let owned_captures = Self::collect_owned_task_captures(inner, &env);
                 Self::check_task_captures(inner, &env, line)?;
-                let mut val = self.eval_expr(inner, Rc::clone(&env))?;
+                let mut val = match self.eval_expr(inner, Rc::clone(&env)) {
+                    Ok(v) => v,
+                    // A `throws` task body that threw: the Future carries it to `.value`.
+                    Err(Signal::Exception(exc)) => make_object(TASK_FAILURE.to_string(), vec![("exc".to_string(), exc)]),
+                    Err(e) => return Err(e),
+                };
                 // Auto-invoke `def ()` when `task obj` and obj is a callable struct with no params.
-                if let Value::Object(_) = &val {
+                if matches!(&val, Value::Object(o) if o.borrow().type_name != TASK_FAILURE) {
                     let mut out_self = None;
                     val = self.call_method(val, "", vec![], line, &mut out_self)?;
                 }
@@ -2035,7 +2040,7 @@ impl Interpreter {
                     let v = self.eval_expr(e, Rc::clone(&env))?;
                     // Unwrap Future wrappers produced by `task expr`
                     let v = match v {
-                        Value::Future(inner) => *inner,
+                        Value::Future(inner) => rethrow_task_failure(*inner)?,
                         other => other,
                     };
                     results.push(v);

@@ -1,0 +1,39 @@
+# A `throws` task that throws surfaces at `.value`/`.wait`, caught by `try: … catch …:` blocks.
+task int deliver(int x) throws:
+    if x < 0:
+        throw Error.NotFound
+    x * 10
+
+task int deliver_s(int x) throws:
+    if x < 0:
+        throw "neg"
+    x * 10
+
+task run():
+    let k = task: deliver(-1)
+    try:
+        let v = k.value
+        print "got {v}"
+    catch Error.NotFound:
+        print "variant caught"
+    let k2 = task: deliver(-2)
+    try:
+        let v = k2.value
+        print "got {v}"
+    catch Error:
+        print "error caught"
+    let k3 = task: deliver_s(-3)
+    try:
+        let v = k3.value
+        print "got {v}"
+    catch:
+        print "any caught: {error}"
+    let k4 = task: deliver(4)
+    try:
+        let v = k4.value
+        print "got {v}"
+    catch:
+        print "unexpected"
+
+let t = task run()
+t.value

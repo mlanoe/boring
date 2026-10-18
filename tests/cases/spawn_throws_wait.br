@@ -1,0 +1,53 @@
+# `.wait` on a `throws` task handle that throws: caught by try/catch, or propagated
+# through a `throws` task fn; `.value` propagated through a `throws` task fn into try-else/try?.
+task int deliver(int x) throws:
+    if x < 0:
+        throw "neg"
+    x * 10
+
+task int await_it(int x) throws:
+    let k = task: deliver(x)
+    k.wait
+    x
+
+task int via_value(int x) throws:
+    let k = task: deliver(x)
+    k.value
+
+task run():
+    let k2 = task: deliver(-2)
+    try:
+        k2.wait
+        print "no throw"
+    catch:
+        print "wait caught: {error}"
+    let k3 = task: deliver(3)
+    try:
+        k3.wait
+        print "ok wait"
+    catch:
+        print "unexpected"
+    let h1 = task: await_it(-3)
+    let b = try h1.value else -9
+    print b
+    let h2 = task: await_it(3)
+    let c = try h2.value else -9
+    print c
+    let h3 = task: via_value(-4)
+    let d = try h3.value else -8
+    print d
+    let h4 = task: via_value(4)
+    let e = try h4.value else -8
+    print e
+    let h5 = task: await_it(-5)
+    let f = try? h5.value
+    print f
+    let h6 = task: await_it(-6)
+    try:
+        let g = h6.value
+        print g
+    catch:
+        print "propagated: {error}"
+
+let t = task run()
+t.value

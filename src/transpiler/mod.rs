@@ -6159,7 +6159,7 @@ task def int work() throws: 42\n\ndef run() throws:\n    let f = task work()\n  
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(code.contains("map_err(|__e| Box::new(BoringError::String"),
             "throws-JoinHandle wait in a throws context must map_err the JoinError, got:\n{}", code);
-        assert!(code.contains("??.expect(\"unhandled task error\")"),
+        assert!(code.contains(")??; }"),
             "throws-JoinHandle wait in a throws context must double-`?` past both errors, got:\n{}", code);
     }
 

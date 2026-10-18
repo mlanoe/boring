@@ -1,0 +1,41 @@
+# Inline `(task: f()).value` / `.wait` (no `let`) on a `throws` body: throws at the await,
+# caught by try/catch, try?, try-else; propagated through a `throws` fn.
+task int deliver(int x) throws:
+    if x < 0:
+        throw "neg"
+    x * 10
+
+task int via_inline(int x) throws:
+    (task: deliver(x)).value
+
+task run():
+    let a = try (task: deliver(2)).value else -1
+    print a
+    let b = try (task: deliver(-2)).value else -1
+    print b
+    let c = try? (task: deliver(-3)).value
+    print c
+    try:
+        (task: deliver(-4)).wait
+        print "no throw"
+    catch:
+        print "wait caught: {error}"
+    try:
+        (task: deliver(4)).wait
+        print "ok wait"
+    catch:
+        print "unexpected"
+    let h = task: via_inline(-5)
+    let d = try h.value else -7
+    print d
+    let h2 = task: via_inline(5)
+    let e = try h2.value else -7
+    print e
+    try:
+        let g = (task: deliver(-6)).value
+        print g
+    catch:
+        print "caught: {error}"
+
+let t = task run()
+t.value

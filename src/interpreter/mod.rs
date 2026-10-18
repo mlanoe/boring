@@ -219,6 +219,23 @@ fn make_object(type_name: String, fields: Vec<(String, Value)>) -> Value {
     Value::Object(Rc::new(RefCell::new(ObjectInner { type_name, fields })))
 }
 
+/// Reserved object type a `Future` wraps when its (eagerly-run) task body threw: the throw
+/// must surface at `.value`/`.wait`/`.join`, not at the spawn site.
+const TASK_FAILURE: &str = "__TaskFailure";
+
+/// Re-raise a failed task's exception, or pass the task's result through.
+fn rethrow_task_failure(v: Value) -> Eval {
+    if let Value::Object(o) = &v {
+        let inner = o.borrow();
+        if inner.type_name == TASK_FAILURE {
+            if let Some((_, exc)) = inner.fields.first() {
+                return Err(Signal::Exception(exc.clone()));
+            }
+        }
+    }
+    Ok(v)
+}
+
 /// Opaque handle into a collection — the internal representation is hidden from
 /// user code.  Only `collection[index]`, `firstIndex()`, `nextIndex()` and
 /// `removeAt()` are valid operations on an `Index` value.

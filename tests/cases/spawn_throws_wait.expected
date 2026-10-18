@@ -1,0 +1,8 @@
+wait caught: neg
+ok wait
+-9
+3
+-8
+40
+nil
+propagated: neg

@@ -110,6 +110,13 @@ impl Transpiler {
     /// `Res<Score> score` resolves to `Score`, not to the unresolvable wrapper name
     /// `Res`, so `score.count` finds `Score`'s real `count` field instead of falling
     /// through to the `.count`/`.length` builtin.
+    /// True when local `v`'s struct type is known and declares a method named `method`.
+    fn var_struct_has_method(&self, v: &str, method: &str) -> bool {
+        self.var_struct_type.get(v).is_some_and(|sn| {
+            self.struct_method_names.get(sn).is_some_and(|ms| ms.contains(method))
+        })
+    }
+
     pub(crate) fn resolve_expr_struct_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
@@ -1714,7 +1721,7 @@ impl Transpiler {
                     let call = Self::with_hoisted_args(&hoisted, format!("{}.{}().{}({})", v, borrow_kind, rust_method, args_s.join(", ")));
                     let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                     let throws = (self.in_throws || self.in_try_body)
-                        && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
+                        && ((!self.var_struct_has_method(v, method) && self.fn_throws.contains(method)) || self.struct_method_throws.contains(method));
                     return Some(if throws { format!("{}?", call) } else { call });
                 }
                 let guard_expr = self.mutex_var_write(v, v);
@@ -1725,7 +1732,7 @@ impl Transpiler {
                 let needs_await = self.instance_task_methods.contains(method)
                     || TOKIO_ASYNC_INSTANCE.contains(&method);
                 let throws = (self.in_throws || self.in_try_body)
-                    && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
+                    && ((!self.var_struct_has_method(v, method) && self.fn_throws.contains(method)) || self.struct_method_throws.contains(method));
                 // `.await` must come before `?` — a `Future` isn't `Try`, only its
                 // resolved `Result` output is, so `call?.await` (await-after-throw)
                 // is invalid Rust (E0277); `call.await?` is what actually compiles.
@@ -4625,8 +4632,13 @@ impl Transpiler {
             Some(sn) => self.struct_method_throws.contains(&format!("{}::{}", sn, method)),
             None => self.struct_method_throws.contains(method),
         };
+        // A top-level `throws` fn only colours this call when the receiver's struct has no
+        // method of that name — otherwise the method's own throws-ness (`struct_throws`) rules.
+        let receiver_has_method = receiver_struct.as_ref().is_some_and(|sn| {
+            self.struct_method_names.get(sn).is_some_and(|ms| ms.contains(method))
+        });
         let propagates_throw = (self.in_throws || self.in_try_body)
-            && (self.fn_throws.contains(method) || struct_throws);
+            && ((!receiver_has_method && self.fn_throws.contains(method)) || struct_throws);
         if self.in_async && (self.instance_task_methods.contains(method) || is_tokio_async) {
             if propagates_throw { format!("{}.await?", call) } else { format!("{}.await", call) }
         } else if propagates_throw {

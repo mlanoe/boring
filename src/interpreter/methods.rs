@@ -111,12 +111,13 @@ impl Interpreter {
                     if !self.task_context {
                         return Err(err("'value()' requires a task context: the calling function must be marked 'task'", line));
                     }
-                    return Ok(*inner.clone());
+                    return rethrow_task_failure(*inner.clone());
                 }
                 "wait" => {
                     if !self.task_context {
                         return Err(err("'wait()' requires a task context: the calling function must be marked 'task'", line));
                     }
+                    rethrow_task_failure(*inner.clone())?;
                     return Ok(Value::Nil);
                 }
                 "done" => {
@@ -2026,13 +2027,14 @@ impl Interpreter {
                 if !self.task_context {
                     return Err(err("'.value' requires a task context: the calling function must be marked 'task'", line));
                 }
-                Ok(*inner)
+                rethrow_task_failure(*inner)
             }
-            Value::Future(_) if field == "wait" => {
+            Value::Future(inner) if field == "wait" => {
                 // wait: join the future and discard the result (void)
                 if !self.task_context {
                     return Err(err("'.wait' requires a task context: the calling function must be marked 'task'", line));
                 }
+                rethrow_task_failure(*inner)?;
                 Ok(Value::Nil)
             }
             Value::Object(ref inner_rc) => {

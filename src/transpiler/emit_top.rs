@@ -2493,6 +2493,13 @@ impl Transpiler {
                 {
                     return self.emit_expr(expr);
                 }
+                // Inline `(task: f()).value` / `.wait`: emit_expr's Field arm owns the
+                // throws-body handling (propagate / `.expect`) and the plain-task await.
+                if (field == "value" || field == "wait")
+                    && matches!(&obj.kind, ExprKind::Task(_))
+                {
+                    return self.emit_expr(expr);
+                }
                 // Field read through an `'actor`/`'guard` struct field: `emit_expr` locks and clones.
                 if self.resolve_lock_field_ref(obj).is_some() {
                     return self.emit_expr(expr);

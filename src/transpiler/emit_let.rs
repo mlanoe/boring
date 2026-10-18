@@ -766,14 +766,7 @@ impl Transpiler {
             self.join_handle_vars.insert(s.name.clone());
             // If the spawned function is `throws`, the JoinHandle wraps Result<T, BoringError>.
             // Track these separately so `.value` / `.wait` emit the correct double-unwrap.
-            let spawned_fn_throws = match &inner.kind {
-                ExprKind::Call(callee, _) => match &callee.kind {
-                    ExprKind::Var(fn_name) => self.fn_throws.contains(fn_name.as_str()),
-                    _ => false,
-                },
-                ExprKind::MethodCall(_, method, _) => self.fn_throws.contains(method.as_str()),
-                _ => false,
-            };
+            let spawned_fn_throws = self.spawned_expr_throws(inner);
             if spawned_fn_throws {
                 self.throws_join_handle_vars.insert(s.name.clone());
             }
@@ -2976,6 +2969,15 @@ impl Transpiler {
                 if binding.name == "_" { continue; }
                 let tmp = &tmp_vars[i];
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+                // A `task … throws` handle's join result is `Result<Result<T, E>, JoinError>`:
+                // the inner `Result` must be propagated (`?`) or unwrapped like `.value`.
+                let is_throws_handle = matches!(&handles[i].kind, ExprKind::Var(v)
+                    if self.throws_join_handle_vars.contains(v.as_str()));
+                if is_throws_handle {
+                    let tail = if self.in_throws || self.in_try_body { "?" } else { ".expect(\"unhandled task error\")" };
+                    self.line(&format!("{} {} = {}.expect(\"task panicked\"){};", kw, binding.name, tmp, tail));
+                    continue;
+                }
                 self.line(&format!("{} {} = {}{};", kw, binding.name, tmp, unwrap_or_q));
             }
             return;

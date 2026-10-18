@@ -368,6 +368,8 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
 
         LetDestructure(s):
             let val = eval_expr(interp, s.value)
+            if interp.has_pending_throw:
+                return ThrowSignal(interp.take_pending_throw())
             var elems = []
             match val:
                 Value.Tuple(items): elems = items

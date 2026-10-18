@@ -1,0 +1,31 @@
+# A top-level `throws` fn and a non-throwing struct method share a name: the method call must not
+# pick up `?` from the free fn, and the free fn call must not be affected by the method.
+struct Runner:
+    var int n = 0
+
+    def bool deliver(int x):
+        n += x
+        n > 1
+
+def void deliver(int x) throws:
+    if x < 0:
+        throw "neg"
+    print "free {x}"
+
+def void go() throws:
+    mut r = Runner()
+    let ok = r.deliver(1)
+    print "m {ok}"
+    deliver(3)
+    let ok2 = r.deliver(2)
+    print "m {ok2}"
+
+def void main():
+    try:
+        go()
+    catch:
+        print "caught {error}"
+    try:
+        deliver(-1)
+    catch:
+        print "caught {error}"

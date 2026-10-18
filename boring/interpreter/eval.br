@@ -319,6 +319,15 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Field access
         ExprKind.Field(obj_expr, field_name):
             let obj = eval_expr(interp, obj_expr)
+            # A failed `throws` task: the throw surfaces at `.value`/`.wait`, not at the spawn.
+            if task_obj_type_name(obj) == "__Task__" and (field_name == "value" or field_name == "wait"):
+                match obj.clone():
+                    Value.Object(tinner):
+                        let failed_opt = tinner.get_field("__failed")
+                        if let failed_val = failed_opt:
+                            interp.set_pending_throw(failed_val)
+                            return Value.Nil
+                    _: ()
             get_field(interp, obj, field_name)
 
         ExprKind.OptionalField(obj_expr, field_name):
@@ -756,6 +765,11 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         ExprKind.Task(inner):
             # Synchronous task: evaluate immediately, wrap in {value: result, wait: nil}
             let task_val = eval_expr(interp, inner)
+            if interp.has_pending_throw:
+                # `throws` task body threw: carry the exception inside the handle.
+                let failed_exc = interp.take_pending_throw()
+                let failed_obj = make_object("__Task__", [("value", Value.Nil), ("wait", Value.Nil), ("__failed", failed_exc)])
+                return Value.Object(failed_obj)
             let task_obj = make_object("__Task__", [("value", task_val), ("wait", Value.Nil)])
             Value.Object(task_obj)
 
@@ -771,6 +785,13 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 # Extract .value from task objects synchronously
                 let tn = task_obj_type_name(join_val)
                 if tn == "__Task__":
+                    match join_val.clone():
+                        Value.Object(jinner):
+                            let jfailed = jinner.get_field("__failed")
+                            if let jf = jfailed:
+                                interp.set_pending_throw(jf)
+                                return Value.Nil
+                        _: ()
                     results.push(task_obj_get_value(join_val))
                 else:
                     results.push(join_val)
