@@ -1,0 +1,37 @@
+# A struct (or lowered `view`) whose field is a USER struct that can't derive `PartialEq`
+# (it holds an `'actor` slot) must drop `PartialEq` too, transitively — `boring build` used to
+# emit `#[derive(.., PartialEq)]` and fail with E0369. An explicit `@derive(Clone)` on a `view`
+# carries over to the lowered struct instead of being ignored.
+use boring.ui.*
+
+pub struct Todo:
+    pub int id
+    pub var mut Slot<string>'actor title
+
+pub struct Wrapper:
+    pub Todo inner
+    pub int n
+
+pub struct Chain:
+    pub [Wrapper] items
+
+pub view TodoRow:
+    Todo item
+    body():
+        Text(item.title.value)
+
+@derive(Clone)
+pub view Plain:
+    int n
+    Todo item
+    body():
+        Text("{n}")
+
+@derive(Clone)
+pub view Simple:
+    int n
+    body():
+        Text("{n}")
+
+def main():
+    print "ok"

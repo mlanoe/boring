@@ -2430,6 +2430,9 @@ impl Transpiler {
             }
             // self.field in owned context → .clone() so Arc<T> fields don't move out of &self
             ExprKind::Field(obj, field) => {
+                if let Some(code) = self.try_emit_string_prop(obj, field) {
+                    return code;
+                }
                 // GPU kernel field read (e.g. a kernel wrapper's `.unified`/`.global` array
                 // field used as a throws function's tail expression, wrapped in `Ok(...)`
                 // via emit_expr_owned rather than emit_expr) — same conversion as emit_expr's

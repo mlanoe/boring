@@ -5283,16 +5283,31 @@ support internally.
 Dict literals use `=`, not `:` — `{"a" = 1, "b" = 2}`; a bare `{}` is an
 empty **set**, `{=}` is an empty **dict**.
 
-**String** — strings are immutable; every method returns a new value.
+**String** — strings are immutable; every method returns a new value. Text is UTF-8, but
+every offset and count Boring exposes is in **Unicode scalar values** (code points), in
+both `boring run` and `boring build`: `length`, `slice`, `s[i]`, `s[a..<b]`, `indexOf`
+and `chars()` all use the same unit (never UTF-8 bytes). `"héllo…😀é".length` is `8`, and
+`"e\u0301".length` is `2`. For user-perceived characters use the grapheme/width
+primitives below.
 
 | Method | Returns |
 |---|---|
 | `isEmpty()`, `contains(s)`, `startsWith(s)`, `endsWith(s)` | `bool` |
-| `indexOf(s)` | `int` (`-1` if absent) |
+| `indexOf(s)` | `int?` — scalar-value offset of the first match, `nil` if absent |
 | `trim()`, `upper()` (also `toUpper`/`toUpperCase`), `lower()` (also `toLower`/`toLowerCase`), `replace(old, new)`, `slice(from, to)`, `repeat(n)` | `string` |
 | `split(sep)`, `chars()`, `lines()` | `[string]` |
+| `graphemes()` | `[string]` — extended grapheme clusters (UAX #29) |
+| `graphemeSlice(from, to)` | `string` — cut by grapheme index, never splits a cluster; out-of-range bounds clamp to `0...graphemeCount`, an inverted range is `""` |
 | `parseInt()`, `parseFloat()`, `parseFloat32()` | `int?` / `float?` / `float32?` |
-| `.length` (property, not a call) | `int` |
+| `.length` (property, not a call) | `int` — number of Unicode scalar values |
+| `.graphemeCount` (property) | `int` — number of grapheme clusters (`"e\u0301".graphemeCount` is `1`) |
+| `.displayWidth` (property) | `int` — terminal cell width: the sum over grapheme clusters of the cluster's width capped at 2 (East Asian wide/fullwidth and emoji presentation = 2, combining marks and zero-width = 0, everything else 1) |
+
+`graphemes()`, `graphemeCount`, `displayWidth` and `graphemeSlice` use the
+`unicode-segmentation` and `unicode-width` crates, in the interpreter and in generated
+projects alike (the transpiler adds them to the generated `Cargo.toml` only when used), so
+both modes always agree. A text field's caret should step by grapheme (`graphemes()` /
+`graphemeSlice`), and column layout/truncation should measure with `displayWidth`.
 
 **Global functions** — pre-loaded, no `use` needed.
 

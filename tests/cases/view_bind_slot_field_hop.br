@@ -1,0 +1,44 @@
+# A keyed-loop element's slot FIELD handed to a child's `bind` (`TodoRow(title = item.title)`)
+# shares the field's `'actor` cell: a native control's write reaches `item.title`, exactly as when
+# the whole element is passed and the control binds `item.title` directly.
+use boring.ui.*
+
+pub struct Todo:
+    pub int id
+    pub var mut Slot<string>'actor title
+    pub var mut Slot<bool>'actor completed
+
+pub view TodoRow:
+    bind string title
+    bind bool completed
+    body():
+        Row(alignment = .Center, spacing = 8.0):
+            Toggle(value = completed, label = "done")
+            TextField(value = title, label = "t", placeholder = "")
+
+pub view TodoList:
+    state [Todo] items = [Todo(id = 1, title = Slot(value = "a"), completed = Slot(value = false))]
+    body():
+        Column(alignment = .Leading, spacing = 4.0):
+            for item in items with item.id:
+                TodoRow(title = item.title, completed = item.completed)
+
+def View rowNode(TodoList list, StateBox'shared st):
+    list.expand(st).viewChildren()[0].viewChildren()[0].viewChildren()[0].viewChildren()[0]
+
+def main():
+    let list = TodoList()
+    let st = list.newState()
+    let row = rowNode(list, st)
+    let rst = row.newState()
+    var parts = row.expand(rst).viewChildren()
+    mut toggle = parts[0]
+    toggle.viewAct("toggle", "")
+    mut field = parts[1]
+    field.viewAct("setText", "hello")
+    mut typed = st as TodoList__State else (TodoList__State())
+    let todo = typed.items[0]
+    print "{todo.title.value}/{todo.completed.value}"
+    # The rebuilt row shows the write.
+    let again = rowNode(list, st)
+    print again.expand(again.newState()).viewChildren()[1].viewProps()["value"]

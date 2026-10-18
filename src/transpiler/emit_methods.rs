@@ -2218,7 +2218,7 @@ impl Transpiler {
     /// Whether `obj` is confirmed to be a string receiver: in `string_vars`/`string_arc_vars`
     /// AND not also tracked as a collection (which would be a false positive), cross-checked
     /// against `var_types` — or a string/interpolation literal directly.
-    fn expr_is_string_receiver(&self, obj: &Expr) -> bool {
+    pub(crate) fn expr_is_string_receiver(&self, obj: &Expr) -> bool {
         match &obj.kind {
             ExprKind::Var(v) => {
                 // Must be in string_vars AND confirmed NOT a collection type.
@@ -2264,7 +2264,7 @@ impl Transpiler {
                     "trim", "trimStart", "trimEnd",
                     "upper", "toUpper", "toUpperCase", "uppercased",
                     "lower", "toLower", "toLowerCase", "lowercased",
-                    "replace",
+                    "replace", "slice", "repeat", "graphemeSlice",
                 ];
                 STRING_RETURNING_METHODS.contains(&m.as_str()) && self.expr_is_string_receiver(inner)
             }
@@ -2284,13 +2284,62 @@ impl Transpiler {
                 });
                 let builtin_string_collection = matches!(&inner.kind,
                     ExprKind::MethodCall(recv, m, _)
-                        if matches!(m.as_str(), "split" | "chars")
+                        if matches!(m.as_str(), "split" | "chars" | "graphemes")
                             && self.expr_is_string_receiver(recv)
                 );
                 declared_string || builtin_string_collection
             }
             _ => false,
         }
+    }
+
+    /// Rust expression for the Unicode-scalar-value count of the string expression `obj_s`
+    /// (`isize`, parenthesised). `str::len` would be the UTF-8 byte count.
+    pub(crate) fn str_scalar_len(obj_s: &str) -> String {
+        format!("(AsRef::<str>::as_ref(&{}).chars().count() as isize)", obj_s)
+    }
+
+    /// String pseudo-fields: `length` (scalar values), `graphemeCount` (UAX #29 clusters) and
+    /// `displayWidth` (terminal cells, each cluster 0..=2). `None` for a non-string receiver
+    /// (or a mutex-guarded one), which keeps the generic `map_field` path.
+    pub(crate) fn try_emit_string_prop(&self, obj: &Expr, field: &str) -> Option<String> {
+        if !matches!(field, "length" | "len" | "count" | "graphemeCount" | "displayWidth") { return None; }
+        if let ExprKind::Var(v) = &obj.kind {
+            if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                return None;
+            }
+        }
+        // A user struct field of this name on a struct-typed receiver is never a string builtin.
+        let resolved_str = || self.resolve_expr_type(obj).is_some_and(|ty| {
+            matches!(ty.without_mut(), Type::Str)
+                || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+        });
+        // Implicit-self struct field (`label.length` inside a method of the struct declaring
+        // a `string label`): not in the local string sets, but declared `string`.
+        let implicit_self_str = matches!(&obj.kind, ExprKind::Var(v)
+            if !self.known_local_vars.contains(v.as_str())
+                && self.self_type.as_deref()
+                    .and_then(|t| self.struct_fields.get(t))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == v))
+                    .is_some_and(|(_, ty)| matches!(ty.without_mut(), Type::Str)
+                        || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")));
+        let is_str = self.expr_is_string_receiver(obj)
+            || (matches!(&obj.kind, ExprKind::BinOp(..)) && self.is_string_expr(obj))
+            || implicit_self_str
+            || resolved_str();
+        if !is_str { return None; }
+        let obj_s = self.emit_expr(obj);
+        Some(match field {
+            "graphemeCount" => {
+                self.uses_unicode.set(true);
+                format!("(unicode_segmentation::UnicodeSegmentation::graphemes(AsRef::<str>::as_ref(&{}), true).count() as isize)", obj_s)
+            }
+            "displayWidth" => {
+                self.uses_unicode.set(true);
+                format!("(unicode_segmentation::UnicodeSegmentation::graphemes(AsRef::<str>::as_ref(&{}), true).map(|g| unicode_width::UnicodeWidthStr::width(g).min(2)).sum::<usize>() as isize)", obj_s)
+            }
+            _ => Self::str_scalar_len(&obj_s),
+        })
     }
 
     /// String-specific methods: `parseInt`/`parseFloat`, `chars`/`split` (threading-mode-aware
@@ -2322,8 +2371,37 @@ impl Transpiler {
             "indexOf" => {
                 let sub_s = args.first().map(|a| self.emit_expr(&a.value))
                     .unwrap_or_else(|| "\"\"".to_string());
-                // Use &* to coerce Arc<str>/Arc<str> argument to &str for str::find.
-                return Some(format!("{}.find(&*{}).map(|i| i as isize)", obj_s, sub_s));
+                // Use &* to coerce Arc<str>/Arc<str> argument to &str for str::find. `find`
+                // yields a UTF-8 byte offset; Boring offsets are Unicode scalar values (the
+                // unit of `length`/`slice`/`s[i]`), so convert by counting the prefix's chars.
+                return Some(format!(
+                    "{{ let __s: &str = &*{}; __s.find(&*{}).map(|i| __s[..i].chars().count() as isize) }}",
+                    obj_s, sub_s
+                ));
+            }
+            // `length` is the Unicode-scalar-value count (not `str::len`'s UTF-8 byte count).
+            "len" | "length" if args.is_empty() => {
+                return Some(Self::str_scalar_len(&obj_s));
+            }
+            "graphemes" if args.is_empty() => {
+                self.uses_unicode.set(true);
+                let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
+                let vec_ty = if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" };
+                return Some(format!(
+                    "unicode_segmentation::UnicodeSegmentation::graphemes(AsRef::<str>::as_ref(&{}), true).map(|g| {}::from(g)).collect::<Vec<{}>>()",
+                    obj_s, str_ty, vec_ty
+                ));
+            }
+            "graphemeSlice" if args.len() >= 2 => {
+                self.uses_unicode.set(true);
+                let from_s = self.emit_expr(&args[0].value);
+                let to_s   = self.emit_expr(&args[1].value);
+                let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
+                // Out-of-range bounds clamp to [0, graphemeCount]; an inverted range is "".
+                return Some(format!(
+                    "{{ let __s: &str = AsRef::<str>::as_ref(&{}); let __n = unicode_segmentation::UnicodeSegmentation::graphemes(__s, true).count() as i64; let __from = (({}) as i64).clamp(0, __n) as usize; let __to = (({}) as i64).clamp(0, __n) as usize; {}::from(unicode_segmentation::UnicodeSegmentation::graphemes(__s, true).skip(__from).take(__to.saturating_sub(__from)).collect::<String>().as_str()) }}",
+                    obj_s, from_s, to_s, str_ty
+                ));
             }
             "slice" if args.len() >= 2 => {
                 let start_s = self.emit_expr(&args[0].value);
@@ -6341,6 +6419,7 @@ impl Transpiler {
             struct_req_methods: self.struct_req_methods.clone(),
             struct_protocols: self.struct_protocols.clone(),
             struct_derives_clone: self.struct_derives_clone.clone(),
+            struct_decls: self.struct_decls.clone(),
             shared_dyn_traits: self.shared_dyn_traits.clone(),
             dyn_fact_pass: false,
             dyn_facts: Default::default(),
@@ -6433,6 +6512,7 @@ impl Transpiler {
             in_cancellable_fn: self.in_cancellable_fn,
             uses_tokio_util: std::rc::Rc::clone(&self.uses_tokio_util),
             uses_serde: std::rc::Rc::clone(&self.uses_serde),
+            uses_unicode: std::rc::Rc::clone(&self.uses_unicode),
             uses_introspect: std::rc::Rc::clone(&self.uses_introspect),
             uses_observed: std::rc::Rc::clone(&self.uses_observed),
             fn_overload_decls: self.fn_overload_decls.clone(),

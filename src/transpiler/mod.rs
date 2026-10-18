@@ -226,6 +226,9 @@ pub struct TranspileOutput {
     /// True when `json()` or `fromJson()` is used.
     /// The caller should add `serde` and `serde_json` to Cargo.toml.
     pub uses_serde: bool,
+    /// Set when a string `graphemes()`/`graphemeCount`/`displayWidth`/`graphemeSlice` is used —
+    /// Cargo.toml gets `unicode-segmentation` + `unicode-width`.
+    pub uses_unicode: bool,
     /// True when the program uses mpsc channels in single-thread mode (local_channel crate).
     /// The caller should add `local_channel` to Cargo.toml when threading is Single.
     pub uses_local_channel: bool,
@@ -332,7 +335,7 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     } else {
         code
     };
-    TranspileOutput { code, errors: t.errors.into_inner(), warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get() }
+    TranspileOutput { code, errors: t.errors.into_inner(), warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get() }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -809,6 +812,9 @@ struct Transpiler {
     /// (`emit_struct.rs`) to gate `FieldValue::Nested` on `'inline`/`'owned` fields —
     /// see that function's doc comment for the full "why Clone matters here" story.
     pub(crate) struct_derives_clone: std::collections::HashSet<String>,
+    /// Every struct declaration seen by `pre_scan`, for the transitive derive decision
+    /// (`struct_lacks_partial_eq`).
+    pub(crate) struct_decls: std::collections::HashMap<String, crate::ast::StructDecl>,
     /// Non-mutating traits held by structs, represented as `Trait'shared` (`Arc<dyn Trait>`)
     /// program-wide so the holding structs stay `Clone` — see `share_dyn_traits.rs`.
     pub(crate) shared_dyn_traits: std::collections::HashSet<String>,
@@ -1094,6 +1100,8 @@ struct Transpiler {
     pub(crate) uses_tokio_util: std::rc::Rc<std::cell::Cell<bool>>,
     /// Set when `json()` or `fromJson()` is used — triggers serde/serde_json deps.
     pub(crate) uses_serde: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Set when the unicode text primitives are used (see `TranspileOutput::uses_unicode`).
+    pub(crate) uses_unicode: std::rc::Rc<std::cell::Cell<bool>>,
     /// True when any struct/enum declares `as Introspect` — gates emission of the
     /// `Introspect` trait + `FieldValue` enum prelude (see `emit_introspect_prelude`).
     /// No external crate dependency (pure std), so unlike `uses_serde` this never
@@ -1558,6 +1566,7 @@ impl Transpiler {
             ]),
             struct_protocols: std::collections::HashMap::new(),
             struct_derives_clone: std::collections::HashSet::new(),
+            struct_decls: std::collections::HashMap::new(),
             shared_dyn_traits: std::collections::HashSet::new(),
             dyn_fact_pass: false,
             dyn_facts: share_dyn_traits::DynFacts::default(),
@@ -1641,6 +1650,7 @@ impl Transpiler {
             in_cancellable_fn: false,
             uses_tokio_util: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_serde: std::rc::Rc::new(std::cell::Cell::new(false)),
+            uses_unicode: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_introspect: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_observed: std::rc::Rc::new(std::cell::Cell::new(false)),
             fn_overload_decls: std::collections::HashMap::new(),
@@ -3517,6 +3527,7 @@ impl Transpiler {
         ext_setters_by_type: &std::collections::HashMap<&str, Vec<&crate::ast::SetDecl>>,
     ) {
         self.struct_protocols.insert(s.name.clone(), s.protocols.clone());
+        self.struct_decls.insert(s.name.clone(), s.clone());
         // Mirrors `emit_struct`'s own Clone-derivation decision exactly (see there for the
         // full rationale) — needed by `introspect_nested_field_value_expr` (emit_struct.rs)
         // to know whether `Box::new(access.clone())`/`access.clone()` will actually compile

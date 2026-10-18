@@ -470,7 +470,7 @@ impl Transpiler {
         // Track loop variables from Vec<Arc<str>> iterables so string methods dispatch correctly.
         let iterable_is_str_vec = match &s.iterable.kind {
             ExprKind::Var(v) => self.str_vec_vars.contains(v.as_str()),
-            ExprKind::MethodCall(_, m, _) => m == "split",
+            ExprKind::MethodCall(_, m, _) => m == "split" || m == "graphemes",
             _ => false,
         };
         if iterable_is_str_vec {

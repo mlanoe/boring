@@ -620,7 +620,7 @@ impl Transpiler {
             if matches!(inner.as_ref(), Type::Str)
             || matches!(inner.as_ref(), Type::Named(n) if n == "string" || n == "str"));
         let is_split_or_chars = matches!(&s_value.kind,
-            ExprKind::MethodCall(_, m, _) if m == "split" || m == "chars");
+            ExprKind::MethodCall(_, m, _) if m == "split" || m == "chars" || m == "graphemes");
         // An un-annotated array literal of string literals (`let names = ["x", "y"]`).
         let is_str_literal_array = s.ty.is_none() && matches!(&s_value.kind,
             ExprKind::Array(elems) if matches!(elems.first().map(|e| &e.kind),
@@ -1971,6 +1971,7 @@ impl Transpiler {
                 || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
             || inner_val.ends_with(".ok()")
             || inner_val.ends_with(".map(|i| i as isize)")
+            || inner_val.ends_with(".map(|i| __s[..i].chars().count() as isize) }")
             // Free-function call whose declared return type is Option<T>
             || matches!(&value.kind, ExprKind::Call(callee, _)
                 if matches!(&callee.kind, ExprKind::Var(fn_name)

@@ -27,4 +27,9 @@ rayon = "1"
 # default `Map` is a `BTreeMap` (alphabetical) — without this feature every struct's
 # fields would come out sorted instead of matching real serde's declaration order.
 serde_json = { version = "1", features = ["preserve_order"] }
+# String `graphemes()`/`graphemeCount`/`displayWidth`/`graphemeSlice` (UAX #29 clusters and
+# terminal cell width). The transpiled program pulls in the very same two crates (only
+# when used), so both modes agree on every text-segmentation/width answer.
+unicode-segmentation = "1"
+unicode-width = "0.2"
 

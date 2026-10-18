@@ -2156,6 +2156,9 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        if let Some(code) = self.try_emit_string_prop(obj, field) {
+            return code;
+        }
         if let Some(value_access) = self.state_slot_value_expr(obj, field) {
             return self.emit_expr(&value_access);
         }
@@ -5256,6 +5259,9 @@ impl Transpiler {
                     }
                 }
                 let a = self.emit_expr(&args[0].value);
+                if self.expr_is_string_receiver(&args[0].value) {
+                    return Self::str_scalar_len(&a);
+                }
                 format!("{}.len()", a)
             }
             // `int(x)`/`uint(x)`/`float(x)` on a string arg must parse, not `as`-cast --

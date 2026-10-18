@@ -299,6 +299,10 @@ impl Parser {
                     TokenKind::Req => Ok(Item::Fn(self.parse_fn_decl_with_attrs(is_pub, false, attrs)?)),
                     TokenKind::Struct => Ok(Item::Struct(self.parse_struct_decl_with_attrs(is_pub, attrs)?)),
                     TokenKind::Enum => Ok(Item::Enum(self.parse_enum_decl_with_attrs(is_pub, attrs)?)),
+                    // `@derive(..)` etc. on a `view` carry over to its lowered struct.
+                    _ if self.is_view_decl_start() => {
+                        Ok(Item::Struct(self.parse_struct_or_view(is_pub, attrs, true)?))
+                    }
                     // Return-type-first function shorthand with no explicit `def`/`req`
                     // (`NetworkClient'shared networkClient(): ...`) — previously fell through
                     // to the discard branch below, silently dropping any attribute written

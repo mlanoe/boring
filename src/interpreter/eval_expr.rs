@@ -415,8 +415,30 @@ impl Interpreter {
         {
             let b = env.borrow();
             if b.is_shared(name) || b.is_actor(name) { return v; }
+            // A bare name that resolves to a field of `self` (implicit self) is that field: an
+            // alias-declared one (`'actor` slot, `'shared`, ...) stays shared, same as `self.name`.
+            if b.resolves_to_self_field(name) {
+                if let Some(Value::Object(me)) = b.get("self") {
+                    if self.field_is_alias(&me.borrow().type_name, name) { return v; }
+                }
+            }
         }
         self.copy_struct_value(&v)
+    }
+
+    /// Whether field `field` of struct `type_name` is declared as an aliased handle
+    /// (`'shared`/`'actor`/`'guard`/`'weak`/borrow, or typed by a trait).
+    fn field_is_alias(&self, type_name: &str, field: &str) -> bool {
+        let global = self.global.borrow();
+        let Some(Value::Struct { decl, .. }) = global.get(type_name) else { return false };
+        decl.fields.iter().find(|f| f.name == field).map(|f| {
+            match self.resolve_type(&f.ty).without_mut() {
+                Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask
+                    | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Weak
+                    | OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared) => true,
+                other => Self::type_base_name(other).map(|n| self.traits.contains_key(&n)).unwrap_or(false),
+            }
+        }).unwrap_or(false)
     }
 
     /// Deep copy of a struct instance. Fields declared `'shared`/`'actor`/`'guard`/`'weak`/borrow

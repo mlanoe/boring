@@ -1210,12 +1210,30 @@ impl Interpreter {
             }
             "indexOf" => {
                 let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
+                // Offsets are in Unicode scalar values (same unit as `length`/`slice`/`s[i]`),
+                // not UTF-8 bytes.
                 match s.find(sub.as_str()) {
-                    Some(i) => Ok(Some(Value::Int(i as i64))),
+                    Some(i) => Ok(Some(Value::Int(s[..i].chars().count() as i64))),
                     None => Ok(Some(Value::Nil)),
                 }
             }
             "isEmpty" => Ok(Some(Value::Bool(s.is_empty()))),
+            "graphemes" => {
+                let parts: Vec<Value> = unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true)
+                    .map(|g| Value::Str(g.to_string())).collect();
+                Ok(Some(Value::Array(parts.into())))
+            }
+            "graphemeSlice" => {
+                let n = unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true).count();
+                let from = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
+                let to = self.expect_int(args.get(1).cloned().unwrap_or(Value::Int(n as i64)), line)?;
+                // Out-of-range bounds clamp to [0, graphemeCount]; an inverted range is "".
+                let from = from.clamp(0, n as i64) as usize;
+                let to = to.clamp(0, n as i64) as usize;
+                let result: String = unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true)
+                    .skip(from).take(to.saturating_sub(from)).collect();
+                Ok(Some(Value::Str(result)))
+            }
             _ => Ok(None),
         }
     }
@@ -2146,6 +2164,15 @@ impl Interpreter {
             }
             Value::Str(ref s) if field == "length" || field == "len" => {
                 Ok(Value::Int(s.chars().count() as i64))
+            }
+            Value::Str(ref s) if field == "graphemeCount" => {
+                Ok(Value::Int(unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true).count() as i64))
+            }
+            // Terminal cell width: each grapheme cluster is 0..=2 cells wide.
+            Value::Str(ref s) if field == "displayWidth" => {
+                let w: usize = unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true)
+                    .map(|g| unicode_width::UnicodeWidthStr::width(g).min(2)).sum();
+                Ok(Value::Int(w as i64))
             }
             other => Err(err(format!("cannot access field '{}' on {}", field, other.type_name()), line)),
         }

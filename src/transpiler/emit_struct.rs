@@ -2,7 +2,101 @@ use super::*;
 use super::Transpiler;
 use super::helpers::*;
 
+fn field_is_boxed_trait<'a>(
+    ty: &'a Type,
+    trait_method_names: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Option<&'a str> {
+    match ty {
+        Type::Optional(inner) => field_is_boxed_trait(inner.without_mut(), trait_method_names),
+        Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
+        Type::Qualified(inner, OwnerQual::Owned) => match inner.as_ref() {
+            Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 impl Transpiler {
+
+    /// True when some field of `s` has a type with no `Clone`/`PartialEq` (atomics, boxed trait
+    /// objects, dyn-holding structs) — such a struct drops those derives.
+    pub(crate) fn struct_has_non_clone_field(&self, s: &StructDecl) -> bool {
+        const NON_CLONE_TYPES: &[&str] = &[
+            "AtomicUsize", "AtomicIsize", "AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64",
+            "AtomicI8", "AtomicI16", "AtomicI32", "AtomicI64", "AtomicBool",
+        ];
+        s.fields.iter().any(|f| {
+            // `mut AtomicUsize` (docs/book.md) wraps the field type in
+            // `Type::Mut` to unlock `.fetch_add()`-style calls in Boring's own
+            // content-mutation bookkeeping — peel it off first so a `mut`-qualified
+            // atomic field is still recognized here, same as a bare one.
+            let mut ty = &f.ty;
+            while let Type::Mut(inner) = ty { ty = inner; }
+            matches!(ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
+                // `[Trait]` (dynamic dispatch, `Vec<Box<dyn Trait>>` — docs/book.md
+                // "Traits as types") — same non-Clone/non-PartialEq problem as an
+                // atomic field above: `Box<dyn Trait>` has no object-safe blanket
+                // `Clone`/`PartialEq` impl, so a struct holding one can't derive
+                // either without a compile error.
+                || matches!(ty, Type::Array(elem) if matches!(
+                    elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
+                || field_is_boxed_trait(ty, &self.trait_method_names).is_some()
+                || self.type_holds_dyn(ty, false, &mut vec![s.name.clone()])
+        })
+        }
+
+    /// True when the `#[derive(..)]` the struct `name` ends up with lacks `PartialEq` — decided
+    /// from its own fields (same rules `emit_struct` applies) and transitively from the structs
+    /// its fields hold. Recursive types are assumed derivable until a field proves otherwise.
+    pub(crate) fn struct_lacks_partial_eq(&self, name: &str, visiting: &mut Vec<String>) -> bool {
+        if visiting.iter().any(|v| v == name) { return false; }
+        let Some(s) = self.struct_decls.get(name) else { return false };
+        if s.attrs.iter().any(|a| a.name == "derive") {
+            return !s.attrs.iter().filter(|a| a.name == "derive")
+                .flat_map(|a| a.args.iter()).any(|a| a == "PartialEq")
+                && !s.protocols.iter().any(|p| p == "PartialEq");
+        }
+        if self.struct_local_drops_partial_eq(s) { return true; }
+        visiting.push(name.to_string());
+        let r = s.fields.iter().any(|f| self.type_lacks_partial_eq(&f.ty, visiting));
+        visiting.pop();
+        r
+    }
+
+    /// True when a value of type `ty` can't be compared with `==` because a user struct it
+    /// (transitively) holds doesn't derive `PartialEq`.
+    pub(crate) fn type_lacks_partial_eq(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::Set(i)
+            | Type::Qualified(i, _) => self.type_lacks_partial_eq(i, visiting),
+            Type::Dict(k, v) => self.type_lacks_partial_eq(k, visiting) || self.type_lacks_partial_eq(v, visiting),
+            Type::Tuple(es) => es.iter().any(|e| self.type_lacks_partial_eq(e, visiting)),
+            Type::Named(n) | Type::TypeParam(n) => self.struct_lacks_partial_eq(n, visiting),
+            _ => false,
+        }
+    }
+
+    /// The field-local reasons an auto-derived struct drops `PartialEq` (mirrors the branch
+    /// chain in `emit_struct`; the transitive reason is `struct_lacks_partial_eq`).
+    fn struct_local_drops_partial_eq(&self, s: &StructDecl) -> bool {
+        let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some() || self.resolve_opt_fn_field_type(&f.ty).is_some() || self.resolve_fn_coll_field_type(&f.ty).is_some());
+        if has_fn_field || self.struct_has_non_clone_field(s) { return true; }
+        let has_custom_cmp = ["eq", "ne", "lt", "le", "gt", "ge"].iter().any(|m| {
+            self.struct_operator_methods.contains(&format!("{}::{}", s.name, m))
+        });
+        let has_sync_mutex_field = !self.use_async_actors()
+            && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+            && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty)) || s.fields.iter().any(|f| {
+                self.observed_fields.get(&format!("{}::{}", s.name, f.name))
+                    .is_some_and(|(_, base)| matches!(base,
+                        OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+            }));
+        let has_shared_dyn_field = s.fields.iter()
+            .any(|f| self.type_holds_shared_dyn(&f.ty, false, &mut vec![s.name.clone()]));
+        has_custom_cmp || has_sync_mutex_field || has_shared_dyn_field
+    }
+
     pub(crate) fn emit_struct(&mut self, s: &StructDecl) {
         if s.is_view {
             // Parsed and checked, but not lowered yet (draft, "Implementation sequence", step 1):
@@ -18,10 +112,6 @@ impl Transpiler {
         // Auto-derive Clone (and Debug) for all structs so that Vec<Struct>.iter().cloned()
         // and {:?} format work without requiring explicit annotations.
         // Skip Clone when any field has a known non-Clone type (e.g. AtomicUsize/AtomicI64).
-        const NON_CLONE_TYPES: &[&str] = &[
-            "AtomicUsize", "AtomicIsize", "AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64",
-            "AtomicI8", "AtomicI16", "AtomicI32", "AtomicI64", "AtomicBool",
-        ];
         let has_derive = s.attrs.iter().any(|a| a.name == "derive");
         // Header protocols (`struct X as Trait1, Trait2:`) that are known derive macros
         // (built-in `KNOWN_DERIVABLE_TRAITS` or the project's `boring.toml` `[derives]`
@@ -48,7 +138,12 @@ impl Transpiler {
                 .filter(|a| a.name == "derive")
                 .flat_map(|a| a.args.iter().cloned())
                 .collect();
-            self.qualify_serde_derive_args(&raw, s.line, s.col)
+            let mut args = self.qualify_serde_derive_args(&raw, s.line, s.col);
+            // `Eq`/`Hash`/`Ord`/`PartialOrd` all need `PartialEq` on every field type too.
+            if s.fields.iter().any(|f| self.type_lacks_partial_eq(&f.ty, &mut vec![s.name.clone()])) {
+                args.retain(|a| !matches!(a.as_str(), "PartialEq" | "Eq" | "Hash" | "Ord" | "PartialOrd"));
+            }
+            args
         } else {
             // A single (non-array) field whose own type is a trait name — bare
             // (`Greeter greeter`) or `'owned`-qualified (`Greeter'owned greeter`) — also
@@ -57,38 +152,7 @@ impl Transpiler {
             // array field just below. Confirmed via a real `cargo build` on a plain
             // `Greeter'owned greeter` field: E0277 (`dyn Greeter: Clone`/`Debug` not
             // satisfied) and E0369 (`PartialEq`), same as the array case.
-            fn field_is_boxed_trait<'a>(
-                ty: &'a Type,
-                trait_method_names: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-            ) -> Option<&'a str> {
-                match ty {
-                    Type::Optional(inner) => field_is_boxed_trait(inner.without_mut(), trait_method_names),
-                    Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
-                    Type::Qualified(inner, OwnerQual::Owned) => match inner.as_ref() {
-                        Type::Named(n) if trait_method_names.contains_key(n.as_str()) => Some(n.as_str()),
-                        _ => None,
-                    },
-                    _ => None,
-                }
-            }
-            let has_non_clone_field = s.fields.iter().any(|f| {
-                // `mut AtomicUsize` (docs/book.md) wraps the field type in
-                // `Type::Mut` to unlock `.fetch_add()`-style calls in Boring's own
-                // content-mutation bookkeeping — peel it off first so a `mut`-qualified
-                // atomic field is still recognized here, same as a bare one.
-                let mut ty = &f.ty;
-                while let Type::Mut(inner) = ty { ty = inner; }
-                matches!(ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
-                    // `[Trait]` (dynamic dispatch, `Vec<Box<dyn Trait>>` — docs/book.md
-                    // "Traits as types") — same non-Clone/non-PartialEq problem as an
-                    // atomic field above: `Box<dyn Trait>` has no object-safe blanket
-                    // `Clone`/`PartialEq` impl, so a struct holding one can't derive
-                    // either without a compile error.
-                    || matches!(ty, Type::Array(elem) if matches!(
-                        elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
-                    || field_is_boxed_trait(ty, &self.trait_method_names).is_some()
-                    || self.type_holds_dyn(ty, false, &mut vec![s.name.clone()])
-            });
+            let has_non_clone_field = self.struct_has_non_clone_field(s);
             // `Box<dyn Trait>: Debug` (needed for the struct's own auto-derived `Debug`,
             // kept below even when `has_non_clone_field` drops `Clone`/`PartialEq`) only
             // holds when `Trait` itself requires `Debug` (directly or transitively via its
@@ -152,7 +216,11 @@ impl Transpiler {
             } else {
                 names.push("Clone".to_string());
                 if needs_default { names.push("Default".to_string()); }
-                names.push("PartialEq".to_string());
+                // A field whose own (user) struct can't derive `PartialEq` — it holds an
+                // actor/dyn/fn field, say — makes this struct's derive fail with E0369.
+                if !s.fields.iter().any(|f| self.type_lacks_partial_eq(&f.ty, &mut vec![s.name.clone()])) {
+                    names.push("PartialEq".to_string());
+                }
             }
             names
         };

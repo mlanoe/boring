@@ -1,0 +1,21 @@
+struct Slot<T>:
+    pub var mut T value
+struct Todo:
+    var mut Slot<string>'actor title
+struct Wrap:
+    var mut Slot<string>'actor value
+struct Row:
+    var mut Slot<string>'actor title
+    req Wrap wrapImplicit():
+        Wrap(value = title)
+    req Wrap wrapExplicit():
+        Wrap(value = self.title)
+def main():
+    let t = Todo(title = Slot(value = "a"))
+    let r = Row(title = t.title)
+    let w = r.wrapExplicit()
+    w.value.value = "e"
+    print t.title.value
+    let w2 = r.wrapImplicit()
+    w2.value.value = "i"
+    print t.title.value

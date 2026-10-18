@@ -2507,6 +2507,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     let uses_reqwest = transpile_out.uses_reqwest;
     let uses_tokio_util = transpile_out.uses_tokio_util;
     let uses_serde = transpile_out.uses_serde;
+    let uses_unicode = transpile_out.uses_unicode;
     let uses_local_channel = transpile_out.uses_local_channel;
     let extra_modules = transpile_out.modules;
 
@@ -2579,6 +2580,11 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     } else {
         ""
     };
+    let unicode_dep = if uses_unicode {
+        "\nunicode-segmentation = \"1\"\nunicode-width = \"0.2\"\n"
+    } else {
+        ""
+    };
     let local_channel_dep = if uses_local_channel {
         "\nlocal-channel = \"0.1\"\n"
     } else {
@@ -2604,7 +2610,7 @@ name = "{stem}"
 path = "src/main.rs"
 
 [dependencies]
-tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{local_channel_dep}{user_deps}"#
+tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{unicode_dep}{local_channel_dep}{user_deps}"#
     );
     let cargo_path = project_dir.join("Cargo.toml");
     if let Err(e) = std::fs::write(&cargo_path, cargo_toml) {
