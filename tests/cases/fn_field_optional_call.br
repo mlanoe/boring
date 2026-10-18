@@ -1,4 +1,4 @@
-# Optional call `f?.(args)` on optional function-typed values: calls only when non-nil,
+# Optional call `f?(args)` on optional function-typed values: calls only when non-nil,
 # otherwise nil; the result is optional. A void callee works as a statement.
 use MakeInt as def int(int)
 use Hook as def void()
@@ -7,9 +7,9 @@ struct S:
     MakeInt? make = nil
     Hook? hook = nil
     req int? viaField(int x):
-        make?.(x)
+        make?(x)
     req int viaOr(int x):
-        make?.(x) else -1
+        make?(x) else -1
 
 int addSeven(int x):
     x + 7
@@ -20,8 +20,8 @@ def sayHook():
 def main():
     let a = S(make = addSeven)
     let g = S()
-    let r1 = a.make?.(3)
-    let r2 = g.make?.(3)
+    let r1 = a.make?(3)
+    let r2 = g.make?(3)
     print r1
     print r2
     print a.viaField(1)
@@ -29,6 +29,6 @@ def main():
     print a.viaOr(2)
     print g.viaOr(2)
     let b = S(hook = sayHook)
-    b.hook?.()
-    g.hook?.()
+    b.hook?()
+    g.hook?()
     print "done"

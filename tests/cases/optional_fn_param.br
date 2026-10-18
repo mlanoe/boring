@@ -1,5 +1,5 @@
 # A function PARAMETER of optional function type (`Hook? h`, through a `use` alias): nil checks,
-# optional calls (`h?.()`), `if let` unwrapping, forwarding, and passing an optional fn field —
+# optional calls (`h?()`), `if let` unwrapping, forwarding, and passing an optional fn field —
 # for both throwing and non-throwing fn types.
 use Hook as def void()
 use Calc as def int(int)
@@ -13,7 +13,7 @@ struct S:
 def f(Hook? h):
     if h != nil:
         print "has"
-        h?.()
+        h?()
     else:
         print "none"
 

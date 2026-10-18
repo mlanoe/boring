@@ -4167,7 +4167,7 @@ let name = user?.profile?.name
 let name = user.and_then(|u| u.profile).map(|p| p.name);
 ```
 
-### Optional call — `f?.(args)`
+### Optional call — `f?(args)`
 
 Calls an optional function-typed value only when it is non-nil; otherwise the expression is `nil`. The result is optional (`int?` for a function returning `int`); with a `void` function it works as a plain statement.
 
@@ -4182,12 +4182,12 @@ struct S:
 def main():
     let s = S(make = (x):
         x + 7)
-    let r = s.make?.(3)      # 10 (an `int?`)
-    let n = S().make?.(3)    # nil
-    s.hook?.()               # no-op: hook is nil
+    let r = s.make?(3)      # 10 (an `int?`)
+    let n = S().make?(3)    # nil
+    s.hook?()               # no-op: hook is nil
 ```
 
-It is sugar for `if f != nil: f(args) else: nil`, so the callee must be a side-effect-free variable or field path (`f`, `s.make`, `self.a.make`); anything else (`getF()?.(x)`) is a parse error — bind it with `if let` first. Optional locals of function type are not yet supported by the transpiler independently of this syntax (`let MakeInt? f = ...`); use struct fields or parameters.
+It is sugar for `if f != nil: f(args) else: nil`, so the callee must be a side-effect-free variable or field path (`f`, `s.make`, `self.a.make`); anything else (`getF()?(x)`) is a parse error — bind it with `if let` first. Optional locals of function type are not yet supported by the transpiler independently of this syntax (`let MakeInt? f = ...`); use struct fields or parameters.
 
 ---
 
@@ -8057,7 +8057,7 @@ unreachable("variant {v} should have been handled above")
 | `1..=5`                     | `1isize..=5`                                |
 | `1..<5`                   | `1isize..5`                                 |
 | `x?.field`                 | `x.map(\|v\| v.field)`                      |
-| `f?.(args)`                | `if f.is_some() { Some((f.as_ref().unwrap().lock().unwrap())(args)) } else { None }` |
+| `f?(args)`                | `if f.is_some() { Some((f.as_ref().unwrap().lock().unwrap())(args)) } else { None }` |
 | `task fn(args)`            | `tokio::spawn(async move { fn(args).await })`  |
 | `future.value`             | `future.await.unwrap()`                     |
 | `future.wait`              | `future.await.unwrap()` (result discarded)  |

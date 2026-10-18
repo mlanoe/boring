@@ -305,6 +305,11 @@ def void parser_skip_to_offset(mut Parser p, int offset) throws:
     let cur = p.pos
     p.pos = cur + offset
 
+# `?(` — optional call. (Self-hosted tokens carry no column, so unlike the Rust parser
+# this cannot require the two to be adjacent.)
+def bool parser_question_paren_adjacent(mut Parser p):
+    parser_token_at_offset_is(p, 1, "LParen")
+
 def bool parser_peek_next_is(mut Parser p, string name):
     parser_check2(p, name)
 

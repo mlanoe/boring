@@ -840,14 +840,19 @@ impl Parser {
                         expr = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.span_len(line, col)};
                     }
                 }
-                TokenKind::QuestionDot => {
-                    // Optional chaining: ?.field or ?.method(args)
+                TokenKind::Question
+                    if self.tokens.get(self.pos + 1).map_or(false, |t| {
+                        matches!(t.kind, TokenKind::LParen)
+                            && t.line == self.tokens[self.pos].line
+                            && t.col == self.tokens[self.pos].col + 1
+                    }) =>
+                {
+                    // Optional call of a function-typed value: `f?(args)` (`?` directly
+                    // followed by `(`). Desugars to `if f != nil: f(args) else: nil`
+                    // (callee must be a side-effect-free variable/field path, since it
+                    // is evaluated twice).
                     self.advance();
-                    // Optional call of a function-typed value: `f?.(args)`. Desugars to
-                    // `if f != nil: f(args) else: nil` (callee must be a side-effect-free
-                    // variable/field path, since it is evaluated twice).
-                    if self.check(&TokenKind::LParen) {
-                        let args = self.parse_call_args()?;
+                    let args = self.parse_call_args()?;
                         let mk = |kind| Expr { kind, line, col, len: 0 };
                         let call_kind = match &expr.kind {
                             ExprKind::Var(_) => ExprKind::Call(Box::new(expr.clone()), args),
@@ -855,7 +860,7 @@ impl Parser {
                                 ExprKind::MethodCall(obj.clone(), name.clone(), args),
                             _ => return Err(ParseError::Generic {
                                 line, col, len: self.tok_len(),
-                                msg: "optional call `?.(` requires a variable or field path on the left (e.g. `f?.(x)`, `s.make?.(x)`)".to_string(),
+                                msg: "optional call `?(` requires a variable or field path on the left (e.g. `f?(x)`, `s.make?(x)`)".to_string(),
                             }),
                         };
                         let cond = mk(ExprKind::BinOp(BinOp::NotEq, Box::new(expr.clone()), Box::new(mk(ExprKind::Nil))));
@@ -866,6 +871,15 @@ impl Parser {
                         };
                         expr = mk(ExprKind::If(Box::new(if_stmt)));
                         continue;
+                }
+                TokenKind::QuestionDot => {
+                    // Optional chaining: ?.field or ?.method(args)
+                    self.advance();
+                    if self.check(&TokenKind::LParen) {
+                        return Err(ParseError::Generic {
+                            line, col, len: self.tok_len(),
+                            msg: "optional call is spelled `f?(args)`, not `f?.(args)`".to_string(),
+                        });
                     }
                     let field = self.expect_ident_or_keyword()?;
                     // Generic method call: `obj?.method<T1, T2>(args)`.

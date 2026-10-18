@@ -435,7 +435,7 @@ def Expr parse_unary_op(mut Parser p, int line) throws:
     let expr = parse_unary(p)
     make_unary("BitNot", expr, line)
 
-# `a` / `a.b.c` — side-effect-free, so safe to evaluate twice in the `?.(` desugar.
+# `a` / `a.b.c` — side-effect-free, so safe to evaluate twice in the `?(` desugar.
 def bool is_pure_path(Expr e):
     match e.kind:
         ExprKind.Var(_): true
@@ -501,15 +501,15 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_method_call(expr, field, args, line)
             else:
                 expr = make_field_expr(expr, field, line)
-        elif parser_check(p, "QuestionDot"):
+        elif parser_check(p, "Question") and parser_question_paren_adjacent(p):
             parser_advance(p)
-            if parser_check(p, "LParen"):
-                # Optional call `f?.(args)` → `if f != nil: f(args) else: nil`
+            if true:
+                # Optional call `f?(args)` → `if f != nil: f(args) else: nil`
                 # (callee: a side-effect-free variable/field path, evaluated twice).
                 # Mirrors the Rust-hosted parser (`src/parser/parse_expr.rs`).
                 let args = parse_call_args(p)
                 if not is_optional_call_callee(expr):
-                    throw "optional call `?.(` requires a variable or field path on the left"
+                    throw "optional call `?(` requires a variable or field path on the left"
                 # (`Call(Field)` rather than `MethodCall`: this interpreter resolves
                 # a function-typed field through a call on the field value.)
                 let call = make_call(expr, args, line)
