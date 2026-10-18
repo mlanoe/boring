@@ -327,6 +327,13 @@ parameter forwarded to another function, an optional returned from a `let`, assi
 to the natural forms and the generated `List` actions parse their arguments inline (the `intOf` helper is gone). One workaround stays: an `if let`
 on an optional moves it under `boring build`, so `collectScopes` pushes after recursing.
 
+**Error reporting (2026-10-18).** `boring-ui/src/core.br`: `ErrorReport` (kind, message, view path, node, task-run generation, source), `Runtime.reports`
+beside the unchanged `errors`, `report`/`reportAtPath`/`reportFailure`/`failTask`/`takeReports`/`pathOf`; every existing error site now reports a
+structured entry; a cancelled or superseded task run is not an error. Test `core_errors_test.br` (interpreter and `boring build`). Not wired yet: the
+dispatch boundary catching a throwing callback, which needs `boring build` to support throwing closures / function types (task proposed; the
+interpreter already does). Also proposed: consistent string `length` plus `graphemes()` / `displayWidth` (the interpreter counts scalar values, the
+transpiled output bytes).
+
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
 created in the same pass gets a fresh id); an invalid description refuses the *whole* update, not just
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
@@ -367,3 +374,13 @@ cargo test --test imported_array_block
 cargo test --test transpile -- array_move array_block_keyed boring_stdlib_identity   # quick subset
 cargo test --test transpile                              # full suite, ~10 min of test time + compile — run in background
 ```
+
+## 2026-10-18 — Separator / Slider / Image / IME
+
+- Added `Separator`, `Slider` (+ generated `setFloat` action), `Image` facades and boring-ui layout/scene/semantics/
+  events support; IME composition model (`Runtime.composition`, `imeUpdate/imeCommit/imeCancel`).
+- Transpiler quirk worked around in `scene.br`: `var x = value` where `value` is a `let` shared string moves it in
+  generated Rust (later borrow fails, E0382); `var x = "{value}"` copies. Candidate card.
+- Deferred on purpose: precise (per-identity) invalidation — `flush` rebuilds the window; gain is only visible with
+  large trees and needs write-site tracking in lowered code. Unicode text and throwing-callback boundary wait for
+  the strings / throwing-closure cards.

@@ -466,3 +466,39 @@ pub view List:
     DeleteAction? onDelete = nil
     [View] children
     body(): native
+
+# ── Components: Separator, Slider, Image (docs/design-notes/boring-ui-draft.md, "Layout primitives",
+# "Image, Video, and asynchronous media", "Common control rules") ────────────────────────────────────
+#   Separator  a thin line; inside a `Row` it is vertical, inside a `Column` (or a `List`) horizontal,
+#              elsewhere `axis` is required; thickness and color come from the theme
+#   Slider     `bind float value` between `min` and `max`, adjusted by pointer drag and the arrow / page /
+#              Home / End keys in steps of `step` (0 = a twentieth of the range)
+#   Image      a raster/vector image identified by `source` (a resource key). The headless toolkit decodes
+#              nothing: the intrinsic size is given by `width` / `height`; `label` is its accessible name
+#              (required unless `decorative`)
+
+# (`HorizontalRule`/`VerticalRule`: `.Horizontal`/`.Vertical` already belong to `ScrollAxis`.)
+pub enum SeparatorAxis:
+    Auto
+    HorizontalRule
+    VerticalRule
+
+pub view Separator:
+    SeparatorAxis axis = .Auto
+    body(): native
+
+pub view Slider:
+    bind float value
+    float min = 0.0
+    float max = 1.0
+    float step = 0.0
+    string label
+    body(): native
+
+pub view Image:
+    string source
+    float width = 0.0
+    float height = 0.0
+    string label = ""
+    bool decorative = false
+    body(): native

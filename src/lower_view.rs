@@ -552,6 +552,10 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                     if g == "Slot" && args.len() == 1 && is_named(&args[0], "string") {
                         acts.push_str("        if action == \"setText\":\n            value.value = arg\n");
                     }
+                    if g == "Slot" && args.len() == 1 && is_named(&args[0], "float") {
+                        // A `Slider`: the runtime delivers the new value as text (already clamped to its range).
+                        acts.push_str("        if action == \"setFloat\":\n            let current = value.value\n            value.value = arg.parseFloat() else (current)\n");
+                    }
                 }
             }
         }
