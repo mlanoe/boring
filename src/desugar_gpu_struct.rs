@@ -61,9 +61,11 @@ pub fn desugar(program: &Program) -> Program {
     // Struct methods become free functions `S__m(self: S, ..)` (a `def` returning nothing
     // returns the updated `self`), then go through the same clone machinery.
     let mut methods: Vec<FnDecl> = Vec::new();
+    let mut method_names: HashMap<String, String> = HashMap::new();
     for (sname, info) in &cx.structs {
         for m in &info.methods {
             if let Some(f) = cx.method_as_fn(sname, m) {
+                method_names.insert(f.name.clone(), m.name.clone());
                 methods.push(f);
             }
         }
@@ -74,15 +76,23 @@ pub fn desugar(program: &Program) -> Program {
         let ret = cx.struct_name(f.return_ty.as_ref());
         cx.fns.insert(f.name.clone(), Sig { params, ret });
     }
+    // Clones are only built for functions a kernel can reach; host-only functions keep their
+    // original, struct-typed form (and are not turned into dead, possibly ill-typed twins).
+    let (reach_fns, reach_methods) = device_reachable(&program);
     let mut clones = Vec::new();
     for item in &program.items {
         if let Item::Fn(f) = item {
             if let Some(sig) = cx.fns.get(&f.name) {
-                clones.extend(cx.device_clones(f, sig));
+                if reach_fns.contains(&f.name) {
+                    clones.extend(cx.device_clones(f, sig));
+                }
             }
         }
     }
     for f in &methods {
+        if !method_names.get(&f.name).is_some_and(|m| reach_methods.contains(m)) {
+            continue;
+        }
         let sig = cx.fns[&f.name].clone();
         clones.extend(cx.device_clones(f, &sig));
     }
@@ -154,6 +164,71 @@ pub fn desugar(program: &Program) -> Program {
     }
     program.items.extend(clones.into_iter().map(Item::Fn));
     program
+}
+
+/// Free functions and method names called, transitively, from kernel bodies.
+fn device_reachable(program: &Program) -> (HashSet<String>, HashSet<String>) {
+    fn calls(body: &[Stmt], fns: &mut HashSet<String>, methods: &mut HashSet<String>) {
+        let mut owned = body.to_vec();
+        let mut on_expr = |e: &mut Expr| match &e.kind {
+            ExprKind::Call(callee, _) => {
+                if let ExprKind::Var(name) = &callee.kind {
+                    fns.insert(name.clone());
+                }
+            }
+            ExprKind::MethodCall(_, name, _) | ExprKind::Pipe(_, name, _) => {
+                methods.insert(name.clone());
+            }
+            _ => {}
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut owned);
+    }
+    let mut fns = HashSet::new();
+    let mut methods = HashSet::new();
+    for item in &program.items {
+        if let Item::Kernel(k) = item {
+            for m in &k.methods {
+                calls(&m.body, &mut fns, &mut methods);
+            }
+        }
+    }
+    let by_name: HashMap<&str, &FnDecl> = program
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Fn(f) => Some((f.name.as_str(), f)), _ => None })
+        .collect();
+    let struct_methods: Vec<&FnDecl> = program
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Struct(s) => Some(s.methods.iter()), _ => None })
+        .flatten()
+        .collect();
+    let mut seen_fns: HashSet<String> = HashSet::new();
+    let mut seen_methods: HashSet<String> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for name in fns.clone() {
+            if seen_fns.insert(name.clone()) {
+                grew = true;
+                if let Some(f) = by_name.get(name.as_str()) {
+                    calls(&f.body, &mut fns, &mut methods);
+                }
+            }
+        }
+        for name in methods.clone() {
+            if seen_methods.insert(name.clone()) {
+                grew = true;
+                for m in struct_methods.iter().filter(|m| m.name == name) {
+                    calls(&m.body, &mut fns, &mut methods);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    (fns, methods)
 }
 
 #[derive(Clone)]

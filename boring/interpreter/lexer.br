@@ -227,6 +227,7 @@ struct Lexer:
     var int paren_depth
     var int inner_colon_blocks
     var [int] inner_block_base_indents
+    var [int] inner_block_paren_depths
 
     init([string] chars):
         self.chars = chars
@@ -238,6 +239,7 @@ struct Lexer:
         self.paren_depth = 0
         self.inner_colon_blocks = 0
         self.inner_block_base_indents = []
+        self.inner_block_paren_depths = []
 
     req bool at_end():
         self.pos >= self.chars.length
@@ -255,6 +257,23 @@ struct Lexer:
 
     def void push(TokenKind kind):
         self.tokens.push(Token(kind= kind, line= self.line))
+
+    # A closing delimiter ends any inner colon-block opened inside the paren it closes
+    # (`onTap = ():\n    body)`): the block's Dedents are emitted right before the
+    # delimiter, not at the next line's indentation drop (mirrors the Rust lexer).
+    def void close_delim(Token t):
+        self.paren_depth -= 1
+        while self.inner_block_paren_depths.length > 0:
+            let d = self.inner_block_paren_depths[self.inner_block_paren_depths.length - 1]
+            if self.paren_depth >= d:
+                break
+            let base = self.inner_block_base_indents[self.inner_block_base_indents.length - 1]
+            self.inner_block_base_indents.pop()
+            self.inner_block_paren_depths.pop()
+            self.inner_colon_blocks -= 1
+            while self.indent_stack.length > 1 and self.indent_stack[self.indent_stack.length - 1] > base:
+                self.indent_stack.pop()
+                self.push(TokenKind.Dedent)
 
     # ── Comment-start scanning (skips inside strings) ──────────────────────
     req int find_comment_start([string] line_chars):
@@ -681,6 +700,7 @@ struct Lexer:
         self.paren_depth = 0
         self.inner_colon_blocks = 0
         self.inner_block_base_indents = []
+        self.inner_block_paren_depths = []
         while i < all_lines.length:
             self.line = i + 1
             let raw = all_lines[i]
@@ -714,6 +734,7 @@ struct Lexer:
                     if line_indent <= base:
                         self.inner_colon_blocks -= 1
                         self.inner_block_base_indents.pop()
+                        self.inner_block_paren_depths.pop()
                     else:
                         break
                 let cur_indent = self.indent_stack[self.indent_stack.length - 1]
@@ -736,9 +757,9 @@ struct Lexer:
                     TokenKind.LParen: self.paren_depth += 1
                     TokenKind.LBracket: self.paren_depth += 1
                     TokenKind.LBrace: self.paren_depth += 1
-                    TokenKind.RParen: self.paren_depth -= 1
-                    TokenKind.RBracket: self.paren_depth -= 1
-                    TokenKind.RBrace: self.paren_depth -= 1
+                    TokenKind.RParen: self.close_delim(t)
+                    TokenKind.RBracket: self.close_delim(t)
+                    TokenKind.RBrace: self.close_delim(t)
                     _: nil
                 match t.kind:
                     TokenKind.Colon: last_is_colon = true
@@ -747,6 +768,7 @@ struct Lexer:
             if last_is_colon and self.paren_depth > 0:
                 self.inner_colon_blocks += 1
                 self.inner_block_base_indents.push(line_indent)
+                self.inner_block_paren_depths.push(self.paren_depth)
             if self.paren_depth == 0 or last_is_colon or self.inner_colon_blocks > 0:
                 self.push(TokenKind.Newline)
             i += 1

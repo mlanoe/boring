@@ -1591,6 +1591,15 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 # `upgrade()` on weak ref — in the interpreter all refs are strong, just return self
                 if method_name == "upgrade":
                     return Value.Object(inner)
+                # A function-typed field called with method syntax: `obj.onTap(args)`.
+                let fn_field_opt = inner.get_field(method_name)
+                if let fn_field = fn_field_opt:
+                    match fn_field:
+                        Value.Fn(_, _): return call_value(interp, fn_field, args)
+                        Value.Closure(_, _, _): return call_value(interp, fn_field, args)
+                        Value.NativeFn(_, _): return call_value(interp, fn_field, args)
+                        Value.OverloadedFn(_, _): return call_value(interp, fn_field, args)
+                        _: nil
                 throw "unknown method {method_name} on {type_name}"
 
         Value.StructDef(type_name):

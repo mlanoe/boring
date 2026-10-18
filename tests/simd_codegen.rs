@@ -8238,3 +8238,19 @@ fn register_tiled_matmul_handles_row_and_column_remainders_and_accumulation() {
     assert!(parallel.status.success(), "{}", String::from_utf8_lossy(&parallel.stderr));
     assert_eq!(String::from_utf8_lossy(&parallel.stdout).trim(), sequential);
 }
+
+#[test]
+fn host_only_functions_with_struct_values_are_not_cloned_for_device_code() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "host_struct_fns",
+        "struct Rng:\n    uint64 state\n\npub (int, Rng) pick(Rng rng, int a) throws:\n    if a > 0:\n        (a, rng)\n    else:\n        (0, Rng(rng.state + 1))\n\nkernel Noop:\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        out[.thread.x] = .thread.x\n\nmut out = [0 for ..<2]\nmut k = Noop(out)\nkernel:\n    k(block = 2)\nlet (value, next) = pick(Rng(7), 3)\nprint \"{value} {next.state} {k.out[1]}\"\n",
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "3 7 1");
+    let generated = fs::read_to_string(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_host_struct_fns/host_struct_fns_simd/src/main.rs"),
+    )
+    .unwrap();
+    assert!(!generated.contains("pick__dev"), "a function no kernel calls must not get a device clone");
+}

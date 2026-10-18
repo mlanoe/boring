@@ -195,6 +195,9 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let callee = eval_expr(interp, callee_expr)
             let hints = call_hint_types(interp, callee, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
+            # An argument that threw (`print early(1)`): propagate it, don't call with Nil.
+            if interp.has_pending_throw:
+                return Value.Nil
             interp.last_var_params = []
             let result = call_value(interp, callee, arg_vals)
             write_back_fn_var_args(interp, callee, args)

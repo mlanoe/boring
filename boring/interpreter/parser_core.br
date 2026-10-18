@@ -240,6 +240,10 @@ def void parser_expect_newline(mut Parser p) throws:
     if parser_check(p, "Newline") or parser_check(p, "Semicolon") or parser_check(p, "Eof"):
         if not parser_check(p, "Eof"):
             p.advance()
+    else if parser_check(p, "Dedent") and (parser_check2(p, "RParen") or parser_check2(p, "RBracket") or parser_check2(p, "RBrace")):
+        # Last statement of a multi-line closure body ended on the line's closing
+        # delimiter (`onTap = ():\n    foo())`): the Dedent precedes the delimiter.
+        return
     else:
         throw "expected newline, got {token_kind_name(p.peek())}"
 
