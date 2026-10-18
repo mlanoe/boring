@@ -35,6 +35,15 @@ def int early(int n) throws:
         throw "small {k}"
     f(n)
 
+def void runAction(Action a) throws:
+    a()
+
+struct Runner:
+    var int count = 0
+    def void perform(Action a) throws:
+        count += 1
+        a()
+
 def main():
     let f = () throws:
         throw "from closure"
@@ -71,3 +80,23 @@ def main():
         print early(1)
     catch:
         print "caught4 {error}"
+
+    # A plain closure / plain fn where a `throws` fn-typed parameter is expected (function and method).
+    try:
+        runAction(():
+            print "plain closure")
+        runAction(good)
+        runAction(bad)
+        print "not reached"
+    catch:
+        print "caught5 {error}"
+    mut r = Runner()
+    try:
+        r.perform(():
+            print "plain method closure")
+        r.perform(good)
+        r.perform(() throws:
+            throw "method boom")
+    catch:
+        print "caught6 {error}"
+    print r.count

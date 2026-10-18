@@ -7,3 +7,10 @@ ok3
 caught3 big
 10
 caught4 small 1
+plain closure
+good
+caught5 bad cb
+plain method closure
+good
+caught6 method boom
+3
