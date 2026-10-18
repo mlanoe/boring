@@ -1,0 +1,73 @@
+# Throwing closures / fn types: a `throws` block closure (throw, return, `?`-propagating calls),
+# calling one inside try/catch, a `throws` fn-typed struct field that holds a throwing fn, a plain
+# non-throwing fn or a plain closure literal, and the field's call propagating through a `throws` method.
+use Action as def void() throws
+
+struct Btn:
+    Action onActivate
+
+trait Ctl:
+    req void act() throws
+
+struct BtnCtl as Ctl:
+    Btn b
+    req void act() throws:
+        self.b.onActivate()
+
+def int boom(int x) throws:
+    if x > 1:
+        throw "big"
+    x
+
+def int runit(int f() throws) throws:
+    f()
+
+def void bad() throws:
+    throw "bad cb"
+
+def void good():
+    print "good"
+
+def int early(int n) throws:
+    let f = (int k) throws:
+        if k > 3:
+            return k * 2
+        throw "small {k}"
+    f(n)
+
+def main():
+    let f = () throws:
+        throw "from closure"
+    try:
+        f()
+    catch:
+        print "caught {error}"
+    let c = BtnCtl(b = Btn(onActivate = bad))
+    try:
+        c.act()
+    catch:
+        print "caught2 {error}"
+    let c2 = BtnCtl(b = Btn(onActivate = good))
+    try:
+        c2.act()
+        print "ok2"
+    catch:
+        print "no"
+    var hits = 0
+    let c3 = BtnCtl(b = Btn(onActivate = ():
+        print "closure"))
+    try:
+        c3.act()
+        print "ok3"
+    catch:
+        print "no"
+    try:
+        let v = runit(() throws: boom(5))
+        print v
+    catch:
+        print "caught3 {error}"
+    try:
+        print early(5)
+        print early(1)
+    catch:
+        print "caught4 {error}"

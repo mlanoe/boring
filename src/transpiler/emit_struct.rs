@@ -205,7 +205,9 @@ impl Transpiler {
             // A function-typed field is an `Rc<RefCell<dyn FnMut..>>`/`Rc<dyn Fn..>` handle: `Clone`
             // works (shared handle), but `dyn FnMut` has no `Debug`/`PartialEq`/`Default`.
             let has_fn_field = s.fields.iter().any(|f| self.resolve_fn_field_type(&f.ty).is_some() || self.resolve_opt_fn_field_type(&f.ty).is_some() || self.resolve_fn_coll_field_type(&f.ty).is_some());
-            let mut names: Vec<String> = if has_non_debug_trait_array_field || has_non_debug_shared_dyn || has_fn_field { vec![] } else { vec!["Debug".to_string()] };
+            // A field whose own (user) struct holds a function-typed field is just as `Debug`-less.
+            let holds_fn_struct = s.fields.iter().any(|f| self.type_holds_fn_field(&f.ty, &mut vec![s.name.clone()]));
+            let mut names: Vec<String> = if has_non_debug_trait_array_field || has_non_debug_shared_dyn || has_fn_field || holds_fn_struct { vec![] } else { vec!["Debug".to_string()] };
             if has_fn_field {
                 names.push("Clone".to_string());
             } else if has_non_clone_field {
@@ -3068,6 +3070,29 @@ impl Transpiler {
         }
     }
 
+    /// True when `ty` is (transitively, through user structs' fields) a user struct that has a
+    /// function-typed field: such a struct can't derive `Debug`, so neither can its holders.
+    pub(crate) fn type_holds_fn_field(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::Set(i)
+                | Type::Qualified(i, _) => self.type_holds_fn_field(i, visiting),
+            Type::Dict(k, v) => self.type_holds_fn_field(k, visiting) || self.type_holds_fn_field(v, visiting),
+            Type::Tuple(es) => es.iter().any(|e| self.type_holds_fn_field(e, visiting)),
+            Type::Named(n) | Type::TypeParam(n) => {
+                if visiting.iter().any(|v| v == n) { return false; }
+                let Some(fields) = self.struct_fields.get(n.as_str()) else { return false };
+                visiting.push(n.clone());
+                let r = fields.iter().any(|(_, t)| {
+                    self.resolve_fn_field_type(t).is_some() || self.resolve_opt_fn_field_type(t).is_some()
+                        || self.resolve_fn_coll_field_type(t).is_some() || self.type_holds_fn_field(t, visiting)
+                });
+                visiting.pop();
+                r
+            }
+            _ => false,
+        }
+    }
+
     /// The resolved `Type::Fn` when `ty` — a struct field's declared type — is a function type,
     /// written inline or through a `use Alias as def void()`-style alias (peeling `mut`).
     pub(crate) fn resolve_fn_field_type(&self, ty: &Type) -> Option<Type> {
@@ -3156,6 +3181,34 @@ impl Transpiler {
     /// Value stored into a function-typed field: a closure literal / fn value is boxed behind
     /// the handle `emit_fn_field_type` names; a read of another fn field is just cloned.
     pub(crate) fn emit_fn_field_value(&self, fnty: &Type, value: &Expr) -> String {
+        // A `throws` fn type also accepts a non-throwing callable: a closure literal is simply emitted
+        // as a throwing one, a plain top-level fn name is wrapped in `|a..| Ok(f(a..))`.
+        if let Type::Fn(_, ptys, true, false, _) = fnty {
+            match &value.kind {
+                ExprKind::Closure(params, ret, body, false, false) => {
+                    let typed = Expr {
+                        kind: ExprKind::Closure(params.clone(), ret.clone(), body.clone(), true, false),
+                        line: value.line, col: value.col, len: value.len,
+                    };
+                    return self.emit_fn_field_value(fnty, &typed);
+                }
+                ExprKind::Var(name) if self.fn_sigs.contains_key(name.as_str())
+                    && !self.fn_throws.contains(name.as_str())
+                    && !self.known_local_vars.contains(name.as_str()) => {
+                    let ps: Vec<String> = (0..ptys.len()).map(|i| format!("__a{i}")).collect();
+                    let call = format!("move |{}| Ok({}({}))", ps.join(", "), escape_rust_keyword(name), ps.join(", "));
+                    let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+                    let Type::Fn(_, _, _, _, req) = fnty else { unreachable!() };
+                    return match (*req, multi) {
+                        (true, false) => format!("Rc::new({})", call),
+                        (true, true) => format!("Arc::new({})", call),
+                        (false, false) => format!("Rc::new(RefCell::new({}))", call),
+                        (false, true) => format!("Arc::new(std::sync::Mutex::new({}))", call),
+                    };
+                }
+                _ => {}
+            }
+        }
         // An inline closure's untyped params take the field's declared parameter types, so the
         // body is emitted with them known (`(s): s.len()` -> `isize`, not a raw `usize`).
         if let (Type::Fn(_, ptys, ..), ExprKind::Closure(params, ret, body, throws, task)) = (fnty, &value.kind) {
@@ -3280,6 +3333,12 @@ impl Transpiler {
     /// optional fn field is cloned, anything else is a handle wrapped in `Some`.
     pub(crate) fn emit_opt_fn_field_value(&self, fnty: &Type, value: &Expr) -> String {
         if matches!(value.kind, ExprKind::Nil) { return "None".into(); }
+        // An optional fn parameter forwarded on is cloned (`Option<handle>`).
+        if matches!(&value.kind, ExprKind::Var(v) if self.fn_current_params.get(v.as_str())
+            .is_some_and(|t| self.resolve_opt_fn_field_type(t).is_some()))
+        {
+            return format!("{}.clone()", self.emit_expr(value));
+        }
         if let ExprKind::Field(obj, fname) = &value.kind {
             if let Some(sn) = self.resolve_struct_name(obj) {
                 if self.struct_fields.get(&sn).and_then(|fs| fs.iter().find(|(n, _)| n == fname))
@@ -3320,6 +3379,13 @@ impl Transpiler {
         if let ExprKind::Index(obj, _) = &e.kind {
             return match self.fn_coll_expr(obj) { Some((true, req)) => Some(req), _ => None };
         }
+        // A parameter of optional function type (`Hook? h`) is itself the optional handle.
+        if let ExprKind::Var(v) = &e.kind {
+            return match self.fn_current_params.get(v.as_str()).and_then(|t| self.resolve_opt_fn_field_type(t)) {
+                Some(Type::Fn(_, _, _, false, req)) => Some(req),
+                _ => None,
+            };
+        }
         let ExprKind::Field(obj, fname) = &e.kind else { return None };
         let sn = self.resolve_struct_name(obj).or_else(|| match &obj.kind {
             // A parameter whose struct type carries an ownership qualifier is not in
@@ -3358,7 +3424,7 @@ impl Transpiler {
 
     /// Call of a local holding a fn-field handle: lock/borrow, then call.
     pub(crate) fn emit_fn_handle_call(&self, name: &str, req: bool, args: &[Arg]) -> String {
-        let recv = escape_rust_keyword(name);
+        let recv = if name.contains('.') { name.to_string() } else { escape_rust_keyword(name) };
         let args_s = self.emit_args(args);
         let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
         match (req, multi) {
@@ -3378,14 +3444,16 @@ impl Transpiler {
             Some(t) => (t, ""),
             None => (self.resolve_opt_fn_field_type(&fty)?, ".as_ref().unwrap()"),
         };
-        let Type::Fn(_, _, _, _, req) = fnty else { return None };
+        let Type::Fn(_, _, throws, _, req) = fnty else { return None };
         let recv = self.emit_expr(obj);
         let args_s = self.emit_args(args);
         let multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+        // A `throws` fn-typed field returns a `Result`: propagate it like any throwing call.
+        let q = if throws && (self.in_throws || self.in_try_body) { "?" } else { "" };
         Some(match (req, multi) {
-            (true, _) => format!("({}.{}{})({})", recv, method, unwrap, args_s),
-            (false, false) => format!("({}.{}{}.borrow_mut())({})", recv, method, unwrap, args_s),
-            (false, true) => format!("({}.{}{}.lock().unwrap())({})", recv, method, unwrap, args_s),
+            (true, _) => format!("({}.{}{})({}){}", recv, method, unwrap, args_s, q),
+            (false, false) => format!("({}.{}{}.borrow_mut())({}){}", recv, method, unwrap, args_s, q),
+            (false, true) => format!("({}.{}{}.lock().unwrap())({}){}", recv, method, unwrap, args_s, q),
         })
     }
 }

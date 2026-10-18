@@ -156,6 +156,7 @@ itest!(control_flow);
 itest!(match_stmt);
 itest!(functions);
 itest!(closures);
+itest!(throwing_closures);
 itest!(fn_field_optional_call);
 itest!(structs);
 itest!(collections);

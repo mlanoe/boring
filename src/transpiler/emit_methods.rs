@@ -4877,6 +4877,15 @@ impl Transpiler {
                         continue;
                     }
                 }
+                // An optional function-typed parameter takes `Option<handle>`: nil → `None`, a closure
+                // → `Some(handle)`, an optional fn field / parameter is cloned.
+                if coerced.is_none() {
+                    if let Some(fnty) = param_ty.and_then(|t| self.resolve_opt_fn_field_type(t)) {
+                        result.push(self.emit_opt_fn_field_value(&fnty, &a.value));
+                        i += 1;
+                        continue;
+                    }
+                }
                 let emit_ty = borrow_inner.map(Some).unwrap_or(param_ty);
                 let emitted = coerced.unwrap_or_else(|| self.emit_let_value(emit_ty, &a.value));
                 // Strip a trailing `.clone()` added by emit_let_value for struct variables when
@@ -6558,7 +6567,7 @@ impl Transpiler {
             prelude_emitted: self.prelude_emitted,
             builtins_seeded: self.builtins_seeded,
             emitted_fn_sigs: self.emitted_fn_sigs.clone(),
-            fn_current_params: std::collections::HashMap::new(),
+            fn_current_params: self.fn_current_params.clone(),
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),

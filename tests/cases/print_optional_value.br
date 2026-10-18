@@ -1,0 +1,33 @@
+# `print` of an Option value (`try?` result, `T?` local, optional field, optional-returning call) shows
+# `nil` or the value, like the interpreter.
+struct P:
+    int? x = nil
+    string? name = nil
+
+def int f(int a) throws:
+    if a == 0:
+        throw "zero"
+    return a
+
+def int? g(int a):
+    if a > 0:
+        return a
+    nil
+
+def main():
+    let q = try? f(0)
+    print q
+    let r = try? f(5)
+    print r
+    let int? z = nil
+    print z
+    let int? w = 7
+    print w
+    let p = P()
+    print p.x
+    print p.name
+    let p2 = P(x = 3, name = "ann")
+    print p2.x
+    print p2.name
+    print g(1)
+    print g(0)

@@ -1012,6 +1012,41 @@ impl Transpiler {
                 format!("|{}| {{ {} async move {{ {} }} }}", ps.join(", "), pre_clones, body_s)
             };
         }
+        // A non-task `throws` block closure is emitted like a `throws` function body (so `throw`,
+        // `return` and `?`-propagating calls all work) with an explicit `Result` return type -- Rust
+        // can't infer the error type of a closure that only ever does `return Err(..)`.
+        if throws {
+            if let ClosureBody::Block(stmts) = body {
+                sub.in_throws = true;
+                sub.fn_returns_void = false;
+                sub.fn_declared_void = !matches!(stmts.last(), Some(Stmt::Expr(_) | Stmt::Return(_)));
+                sub.fn_return_ty = None;
+                sub.indent = 0;
+                sub.out.clear();
+                let n = stmts.len();
+                for (i, s) in stmts.iter().enumerate() {
+                    sub.emit_stmt(s, i + 1 == n);
+                }
+                let last_ends = match stmts.last() {
+                    Some(Stmt::Expr(_) | Stmt::Return(_) | Stmt::Throw(_) | Stmt::Match(_)) => true,
+                    Some(Stmt::If(i)) => i.else_body.is_some(),
+                    _ => false,
+                };
+                if !last_ends {
+                    sub.line("Ok(())");
+                }
+                let body_s = sub.out.trim().to_string();
+                // `_` lets Rust infer the success type from a value `return`/tail; with none, it is `()`.
+                let valued_return = body_s.matches("return Ok(").count() > body_s.matches("return Ok(());").count();
+                let ok_ty = if valued_return || matches!(stmts.last(), Some(Stmt::Expr(_))) { "_" } else { "()" };
+                self.errors.borrow_mut().extend(sub.errors.take());
+                self.warnings.borrow_mut().extend(sub.warnings.take());
+                return format!(
+                    "|{}| -> Result<{}, Box<dyn std::error::Error + Send + Sync>> {{ {} }}",
+                    ps.join(", "), ok_ty, body_s
+                );
+            }
+        }
         let closure_s = match body {
             ClosureBody::Expr(e) => {
                 let val = Self::emit_closure_result(&sub, e);
@@ -1294,10 +1329,10 @@ impl Transpiler {
             && self.resolve_field_or_index_type(e)
                 .map(|t| is_known_numeric_scalar_type(t.without_mut()))
                 .unwrap_or(false);
-        // `s.length` / `arr.count` — builtin integer-valued pseudo-fields (emitted as
+        // `s.length` / `s.graphemeCount` / `s.displayWidth` / `arr.count` — builtin integer-valued pseudo-fields (emitted as
         // `.len() as isize`) are numeric even when the receiver's own type is a string.
         // Skipped when a declared struct field of that name resolves to a string.
-        let src_is_builtin_len_field = matches!(&e.kind, ExprKind::Field(_, f) if f == "length" || f == "count")
+        let src_is_builtin_len_field = matches!(&e.kind, ExprKind::Field(_, f) if matches!(f.as_str(), "length" | "count" | "graphemeCount" | "displayWidth"))
             && !matches!(self.resolve_field_or_index_type(e).as_ref().map(Type::without_mut), Some(Type::Str));
         let src_is_known_numeric_access = src_is_known_numeric_access || src_is_builtin_len_field;
         if src_is_known_numeric_access && is_float_ty {
@@ -1800,14 +1835,20 @@ impl Transpiler {
             // `x is nil` / `x is not nil` — right side is Nil
             if matches!(r.kind, ExprKind::Nil) {
                 // Check if left side is an optional variable
+                // `.is_none()`/`.is_some()` (not `== None`) so payloads without
+                // `PartialEq` — closure handles, `dyn` trait objects — work too.
+                // A non-Var operand (`s.field is nil`) is classified by its resolved type.
                 let is_optional = matches!(&l.kind, ExprKind::Var(v) if
-                    self.optional_vars.contains(v.as_str()));
+                    self.optional_vars.contains(v.as_str()))
+                    || (!matches!(l.kind, ExprKind::Nil)
+                        && self.resolve_expr_type(l)
+                            .is_some_and(|ty| matches!(ty.without_mut(), Type::Optional(_))));
                 if is_optional {
                     let ls = self.emit_expr(l);
                     return if is_not {
-                        format!("({} != None)", ls)
+                        format!("{}.is_some()", ls)
                     } else {
-                        format!("({} == None)", ls)
+                        format!("{}.is_none()", ls)
                     };
                 }
                 // Left side is `None` literal — comparing nil to nil
@@ -3656,6 +3697,13 @@ impl Transpiler {
             let is_type = name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
             if is_type {
                 return self.emit_constructor(name, args);
+            }
+            // Call of an optional fn parameter (`h?.()` after its nil check): through the
+            // unwrapped handle.
+            if let Some(Type::Fn(_, _, _, false, req)) = self.fn_current_params.get(name.as_str())
+                .and_then(|t| self.resolve_opt_fn_field_type(t))
+            {
+                return self.emit_fn_handle_call(&format!("{}.as_ref().unwrap()", escape_rust_keyword(name)), req, args);
             }
             if self.known_local_vars.contains(name.as_str()) {
                 if let Some(req) = self.fn_handle_vars.get(name.as_str()).copied() {
@@ -5554,7 +5602,11 @@ impl Transpiler {
                                 .map(|t| matches!(t, Type::Optional(_)))
                                 .unwrap_or(false)
                         }).unwrap_or(false)));
-            let is_optional = is_optional_var || is_optional_call || is_optional_method_call;
+            let is_optional = is_optional_var || is_optional_call || is_optional_method_call
+                // Anything else whose resolved type is `T?` (`let q = try? f(0)`, `int? z`,
+                // an optional struct field): printed as `nil` or the value, like the interpreter.
+                || self.resolve_expr_type(&a.value)
+                    .is_some_and(|ty| matches!(ty.without_mut(), Type::Optional(_)));
             let expr_s = if is_optional {
                 let v = self.emit_expr(&a.value);
                 format!("{}.as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", v)

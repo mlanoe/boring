@@ -1,0 +1,51 @@
+# A function PARAMETER of optional function type (`Hook? h`, through a `use` alias): nil checks,
+# optional calls (`h?.()`), `if let` unwrapping, forwarding, and passing an optional fn field —
+# for both throwing and non-throwing fn types.
+use Hook as def void()
+use Calc as def int(int)
+use THook as def void() throws
+
+struct S:
+    Hook? maybe = nil
+    THook? tmaybe = nil
+    Calc? calc = nil
+
+def f(Hook? h):
+    if h != nil:
+        print "has"
+        h?.()
+    else:
+        print "none"
+
+def g(THook? h):
+    if h != nil:
+        print "has t"
+        try? h()
+    else:
+        print "none t"
+
+def int apply(Calc? c, int x):
+    if let k = c:
+        return k(x)
+    -1
+
+def forward(Hook? h):
+    f(h)
+    if h is nil:
+        print "forwarded nil"
+
+def main():
+    f(nil)
+    f((): print("called"))
+    let s = S()
+    f(s.maybe)
+    let u = S(maybe = (): print("field hook"), calc = (n): n * 10)
+    f(u.maybe)
+    forward(u.maybe)
+    forward(nil)
+    g(nil)
+    g(s.tmaybe)
+    print apply(nil, 4)
+    print apply((n): n + 1, 4)
+    print apply(u.calc, 4)
+    print apply(s.calc, 4)

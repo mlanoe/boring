@@ -1,0 +1,34 @@
+# `x.field is nil` / `is not nil` on optional struct fields (scalar and function-typed) must test the
+# real Option, not be constant-folded.
+use Hook as def void()
+
+struct S:
+    int? x = nil
+    Hook? maybe = nil
+
+    req string describe():
+        if x is nil:
+            return "empty"
+        "set"
+
+def main():
+    let s = S()
+    if s.x is nil:
+        print "nil"
+    if s.x is not nil:
+        print "notnil"
+    let t = S(x = 3)
+    if t.x is nil:
+        print "nil2"
+    if t.x is not nil:
+        print "notnil2"
+    if s.maybe is nil:
+        print "nohook"
+    let u = S(maybe = (): print("hook"))
+    if u.maybe is not nil:
+        print "hook set"
+
+    let w = S(x = 9)
+    print w.describe()
+    print s.describe()
+

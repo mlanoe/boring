@@ -2308,6 +2308,14 @@ impl Transpiler {
             if let Type::Named(n) = ty { self.fn_type_aliases.get(n.as_str()) } else { None }
         }).or(p.ty.as_ref());
         let is_fnmut = matches!(resolved_ty, Some(Type::Fn(_, _, _, _, req)) if !req);
+        // An optional function-typed parameter (`Hook? h`) is `Option<handle>` — the same shape as
+        // an optional fn field (`impl Trait` cannot sit inside `Option` in a parameter), so
+        // `s.maybe` is passed as-is and a call goes through the handle.
+        if !p.variadic {
+            if let Some(fnty) = p.ty.as_ref().and_then(|t| self.resolve_opt_fn_field_type(t)) {
+                return format!("{}: Option<{}>", escape_rust_keyword(&p.name), self.emit_fn_field_type(&fnty));
+            }
+        }
         // `mut` is added only when explicitly declared in Boring (`mut T param` or `var T param`).
         // FnMut closure params also need `mut` so the closure can be called.
         // Struct params do NOT get `mut` automatically — the developer must declare `mut`.

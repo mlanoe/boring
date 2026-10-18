@@ -371,6 +371,11 @@ impl Transpiler {
                 if !matches!(inner.as_ref(), Type::Qualified(_, _)));
             if is_bare_weak && val.starts_with("Arc::downgrade(") {
                 ": std::sync::Weak<_>".to_string()
+            } else if self.resolve_fn_field_type(ty).is_some() {
+                // A function-typed local (inline or `use Calc as def int(int)` alias) is a closure:
+                // `impl FnMut(..)` is illegal in a `let` annotation (E0562), so leave the type to
+                // inference — `emit_let_value` below already typed an untyped closure's parameters.
+                String::new()
             } else {
                 format!(": {}", self.emit_type(ty))
             }
@@ -593,6 +598,18 @@ impl Transpiler {
                     || matches!(&default.kind, ExprKind::Cast(_, ty) if Self::is_string_type(ty))
                     || self.resolve_expr_declared_type(default).is_some_and(|t| Self::is_string_type(&t)));
         if is_else_default_string {
+            self.string_vars.insert(s.name.clone());
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
+        }
+        // `var last = lines[i]` / `let t = p.title` — an un-annotated binding of an index or
+        // field access whose declared type is `string` is a string local too. Left untracked,
+        // string-only builtins on it (`last.graphemeSlice(..)`) fell through to the generic
+        // snake_case method emission (`last.grapheme_slice(..)`, E0599 on `Arc<str>`).
+        if s.ty.is_none()
+            && matches!(&s_value.kind, ExprKind::Index(..) | ExprKind::Field(..))
+            && self.resolve_expr_type(s_value).is_some_and(|t| Self::is_string_type(t.without_mut()))
+        {
             self.string_vars.insert(s.name.clone());
             self.vec_vars.remove(s.name.as_str());
             self.collection_vars.remove(s.name.as_str());
@@ -1060,6 +1077,12 @@ impl Transpiler {
         }
         // When value is nil (None), the var is always optional.
         if matches!(&s_value.kind, ExprKind::Nil) {
+            self.optional_vars.insert(s.name.clone());
+        }
+        // `let q = try? f(x)` (`try e else nil`) is an `Option<T>` too.
+        if s.ty.is_none() && matches!(&s_value.kind,
+            ExprKind::TryElse(_, d) if matches!(d.kind, ExprKind::Nil))
+        {
             self.optional_vars.insert(s.name.clone());
         }
         // Propagate optional through `.clone()` — `let x = opt_var.clone()` keeps x optional.
