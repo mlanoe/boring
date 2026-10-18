@@ -209,6 +209,22 @@ def Type? current_return_ty(Interpreter interp):
 
 # ─── val_to_string ────────────────────────────────────────────────────────────
 
+# `Display` text of the built-in `Error` enum's variants ("" for any other name); mirrors
+# the prelude's `impl Display for Error` (src/transpiler/mod.rs) so `"{error}"` prints
+# the same under `boring run` and `boring build`.
+string builtin_error_message(string variant):
+    if variant == "Expired":
+        return "timeout expired"
+    if variant == "Cancelled":
+        return "task cancelled"
+    if variant == "NotFound":
+        return "not found"
+    if variant == "InvalidInput":
+        return "invalid input"
+    if variant == "OutOfBounds":
+        return "index out of bounds"
+    ""
+
 def string val_to_string(Value v):
     match v:
         Value.Nil: "nil"
@@ -298,7 +314,9 @@ def string val_to_string(Value v):
                 result = "{result}{p}"
             result
         Value.EnumVariant(typeName, variant, fields):
-            if fields.length == 0:
+            if fields.length == 0 and typeName == "Error" and builtin_error_message(variant) != "":
+                builtin_error_message(variant)
+            elif fields.length == 0:
                 variant
             else:
                 mut parts = ["{variant}("]

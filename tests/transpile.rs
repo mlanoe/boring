@@ -342,6 +342,7 @@ transpile_test!(spawn_throws_caught_at_handle);
 transpile_test!(spawn_throws_join);
 transpile_test!(spawn_throws_wait);
 transpile_test!(spawn_throws_try_catch);
+transpile_test!(error_builtin_display);
 transpile_test!(spawn_throws_inline);
 transpile_test!(fn_field_struct);
 transpile_test!(structs);

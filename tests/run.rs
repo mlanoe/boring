@@ -162,6 +162,7 @@ interp_test!(spawn_throws_caught_at_handle);
 interp_test!(spawn_throws_join);
 interp_test!(spawn_throws_wait);
 interp_test!(spawn_throws_try_catch);
+interp_test!(error_builtin_display);
 interp_test!(spawn_throws_inline);
 interp_test!(fn_field_struct);
 interp_test!(structs);

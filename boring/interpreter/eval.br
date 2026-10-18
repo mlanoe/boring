@@ -2447,7 +2447,9 @@ req string display_value(Interpreter interp, Value val):
             else:
                 obj.type_name.clone()
         Value.EnumVariant(type_name, variant, fields):
-            if fields.length == 0:
+            if fields.length == 0 and type_name == "Error" and builtin_error_message(variant) != "":
+                builtin_error_message(variant)
+            elif fields.length == 0:
                 variant
             else:
                 var result = "{variant}("

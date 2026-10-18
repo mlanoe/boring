@@ -3761,7 +3761,7 @@ catch Error:
 ```
 
 `catch Error:` binds `error` as a typed `Error` value.  
-`{error}` in interpolation calls `Display` (e.g. `"timeout expired"`).  
+`{error}` in interpolation calls `Display` (e.g. `"timeout expired"`) — identically under `boring run` and the transpiled program.  
 `match error: Error.Variant:` dispatches on variants — `_:` catches the rest.
 
 **With a final `catch:` for other error types:**
@@ -5334,7 +5334,11 @@ reference:
   `f.value()` awaits and returns `T` (throws on task failure); `f.wait`
   awaits and discards; both take an optional `Duration`/`Instant` deadline,
   throwing `Error.Expired` if it elapses. `f.done()` polls without
-  blocking; `f.cancel()` signals cancellation.
+  blocking; `f.cancel()` signals cancellation. A `throws` task body's error
+  surfaces at `.value`/`.wait` (also on an inline `(task: f()).value`), where
+  `try`/`try?`/`try … else` catch it. `.wait` yields no value, so
+  `try f.wait else 0` is a checker error — use `try? f.wait`, a `try:`/`catch:`
+  block, or `try f.value else 0`.
 - `wait(duration_or_deadline)` pauses the current task.
   `timeout(duration_or_deadline, callable)` races a callable against a
   timer, throwing `Error.Expired` on expiry.

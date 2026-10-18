@@ -1,0 +1,13 @@
+# `try h.wait else <value>`: `.wait` has no value (unit), so a value default is a checker error.
+task int deliver(int x) throws:
+    if x < 0:
+        throw "neg"
+    x * 10
+
+task run():
+    let k = task: deliver(1)
+    let a = try k.wait else 0
+    print a
+
+let t = task run()
+t.value

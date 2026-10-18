@@ -674,6 +674,19 @@ fn debug_repr(v: &Value) -> String {
     }
 }
 
+/// `Display` text of the built-in `Error` enum's variants (mirrors the prelude's
+/// `impl Display for Error` in src/transpiler/mod.rs).
+fn builtin_error_message(variant: &str) -> Option<&'static str> {
+    match variant {
+        "Expired" => Some("timeout expired"),
+        "Cancelled" => Some("task cancelled"),
+        "NotFound" => Some("not found"),
+        "InvalidInput" => Some("invalid input"),
+        "OutOfBounds" => Some("index out of bounds"),
+        _ => None,
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -750,7 +763,14 @@ impl fmt::Display for Value {
             // prints an enum via its auto-generated `Display` -> derived `Debug`, so the
             // interpreter has to match Rust's Debug spelling here (quoted strings,
             // `1.0`-style floats, recursively) or `boring run` and `boring build` disagree.
-            Value::EnumVariant { variant, fields, .. } => {
+            Value::EnumVariant { type_name, variant, fields } => {
+                // The built-in `Error` enum prints its transpiled `Display` text
+                // (`"not found"`), same as `"{error}"` after `boring build`.
+                if fields.is_empty() && type_name == "Error" {
+                    if let Some(msg) = builtin_error_message(variant) {
+                        return write!(f, "{}", msg);
+                    }
+                }
                 if fields.is_empty() {
                     write!(f, "{}", variant)
                 } else {

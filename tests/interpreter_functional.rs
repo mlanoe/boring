@@ -163,6 +163,7 @@ itest!(spawn_throws_caught_at_handle);
 itest!(spawn_throws_join);
 itest!(spawn_throws_wait);
 itest!(spawn_throws_try_catch);
+itest!(error_builtin_display);
 itest!(spawn_throws_inline);
 itest!(fn_field_optional_call);
 itest!(structs);

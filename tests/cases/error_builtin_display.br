@@ -1,0 +1,28 @@
+# `"{error}"` / print of a built-in `Error` variant shows its Display text, the same
+# under `boring run` and the transpiled program.
+def fail(Error e) throws:
+    throw e
+
+try:
+    fail(Error.Expired)
+catch:
+    print "1 {error}"
+try:
+    fail(Error.Cancelled)
+catch:
+    print "2 {error}"
+try:
+    fail(Error.NotFound)
+catch:
+    print "3 {error}"
+try:
+    fail(Error.InvalidInput)
+catch:
+    print "4 {error}"
+try:
+    fail(Error.OutOfBounds)
+catch:
+    print "5 {error}"
+let e = Error.NotFound
+print "6 {e}"
+print e

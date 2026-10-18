@@ -235,6 +235,10 @@ struct Checker {
     /// not itself grant `mut`), so an unannotated `var v = make()` is known to bind a
     /// collection. Overloaded names are excluded (same reason as `fn_overloaded`).
     fn_returns_collection: std::collections::HashSet<String>,
+    /// Names last bound by a `let`/`var` to a `task` / `task(dur)` expression (a task handle).
+    /// Name-based and unscoped (a rebinding to anything else clears it): only used for the
+    /// `try h.wait else <value>` diagnostic, where a stale entry just means a missed warning.
+    task_handle_vars: std::collections::HashSet<String>,
     /// Field names of the struct whose inits/methods are being checked (empty outside one).
     /// A bare name that resolves only to a *global* binding but is also a field of the
     /// enclosing struct is the field (implicit `self`), not that global.
@@ -336,6 +340,7 @@ impl Checker {
             fn_arity: HashMap::new(),
             fn_overloaded: std::collections::HashSet::new(),
             fn_returns_collection: std::collections::HashSet::new(),
+            task_handle_vars: std::collections::HashSet::new(),
             current_struct_fields: std::collections::HashSet::new(),
             current_struct: None,
             user_types: std::collections::HashSet::new(),
@@ -395,6 +400,11 @@ impl Checker {
     }
 
     fn define_let(&mut self, name: &str, kind: BindingKind, var_mut: bool, ty: Option<Type>, value: Option<&Expr>) {
+        if value.is_some_and(|v| matches!(v.kind, ExprKind::Task(_) | ExprKind::TaskWithTimeout(..))) {
+            self.task_handle_vars.insert(name.to_string());
+        } else {
+            self.task_handle_vars.remove(name);
+        }
         let builtin_collection = match &ty {
             Some(t) => is_builtin_collection_type(t),
             None => value.is_some_and(|v| self.is_collection_valued_expr(v)),
@@ -751,6 +761,29 @@ impl Checker {
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
+
+    /// `try h.wait else 0`: `.wait` on a task handle produces no value (unit), so a value
+    /// default can never stand in for it — Rust can't type the two arms, and `boring run`
+    /// would silently yield `nil` on success. Flag a literal non-`nil` default; use
+    /// `try h.wait` as a statement, `try? h.wait`, or `try h.value else d` instead.
+    fn check_try_else_wait_default(&mut self, e: &Expr, d: &Expr) {
+        if !matches!(d.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::UnaryOp(..)) {
+            return;
+        }
+        let ExprKind::Field(obj, f) = &e.kind else { return };
+        if f != "wait" { return; }
+        let is_task = match &obj.kind {
+            ExprKind::Task(_) | ExprKind::TaskWithTimeout(..) => true,
+            ExprKind::Var(v) => self.task_handle_vars.contains(v.as_str()),
+            _ => false,
+        };
+        if is_task {
+            self.error(
+                "`try <task>.wait else <value>`: `.wait` yields no value (unit), so the default has nothing to replace; \
+                 use `try? <task>.wait`, a `try:`/`catch:` block, or `try <task>.value else <value>`",
+                e.line, e.col);
+        }
+    }
 
     fn error(&mut self, msg: impl Into<String>, line: usize, col: usize) {
         self.errors.push(CheckError::at(msg, line, col));
@@ -2244,8 +2277,16 @@ impl Checker {
                 self.check_trait_downcast(e, ty, expr.line, expr.col);
             }
             ExprKind::Else(e, d)  => { self.check_expr(e); self.check_expr(d); }
-            ExprKind::TryElse(e, d) => { self.check_expr(e); self.check_expr(d); }
+            ExprKind::TryElse(e, d) => {
+                self.check_try_else_wait_default(e, d);
+                self.check_expr(e);
+                self.check_expr(d);
+            }
             ExprKind::TryElseBlock(body, els) => {
+                // Inline `try e else d` parses to a one-statement body/else pair.
+                if let ([Stmt::Expr(e)], [Stmt::Expr(d)]) = (body.as_slice(), els.as_slice()) {
+                    self.check_try_else_wait_default(e, d);
+                }
                 self.check_block(body);
                 self.check_block(els);
             }
