@@ -561,10 +561,10 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
         }
         // `OnTask`: the runtime starts a task run by handing the body its `TaskRun`.
         if s.fields.iter().any(|f| f.name == "onTask" && is_named(strip_mut(&f.ty), "TaskAction")) {
-            src.push_str("    req void viewTask(TaskRun run):\n        onTask(run)\n");
+            src.push_str("    req void viewTask(TaskRun run) throws:\n        onTask(run)\n");
         }
         if !acts.is_empty() {
-            src.push_str(&format!("    req void viewAct(string action, string arg):\n{acts}"));
+            src.push_str(&format!("    req void viewAct(string action, string arg) throws:\n{acts}"));
         }
         if !props.is_empty() {
             src.push_str(&format!("    req {{string=string}} viewProps():\n        mut {{string=string}} p = {{=}}\n{props}        p\n"));

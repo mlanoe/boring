@@ -52,12 +52,12 @@ pub trait EnvValue:
 #   newState      once at mount (the declaration's default seed), and
 #   expand        on every build, with that node's persistent state, to get the body's view
 # A parameterless callback, as held by `Button.onActivate`.
-pub use UIAction as def void()
+pub use UIAction as def void() throws
 
 # `List`'s optional semantic callbacks: reorder (final index after the move) and delete (unique ascending
 # indices into one pre-event snapshot).
-pub use MoveAction as def void(int, int)
-pub use DeleteAction as def void([int])
+pub use MoveAction as def void(int, int) throws
+pub use DeleteAction as def void([int]) throws
 
 # One start of an `OnTask` body. Plain data: whether it is still current is the runtime's call
 # (`Runtime.isCurrent(run)`), because it is current only while BOTH the mounted node's generation
@@ -69,7 +69,7 @@ pub struct TaskRun:
     pub string id
 
 # The body of an `OnTask`, handed its own run.
-pub use TaskAction as def void(TaskRun)
+pub use TaskAction as def void(TaskRun) throws
 
 pub trait View:
     req string viewKind(): ""
@@ -91,13 +91,13 @@ pub trait View:
     # The runtime delivering a semantic action to a native control: "activate" (Button), "toggle"
     # (Toggle), "setText" with the new text as `arg` (TextField). Generated like the rest from the
     # facade's shape (see src/lower_view.rs); default: nothing to do.
-    req void viewAct(string action, string arg):
+    req void viewAct(string action, string arg) throws:
         pass
     # Whether this native control has a handler for the semantic `action` (so the runtime knows whether
     # an Enter was consumed by a TextField's `onSubmit`); generated, default: no.
     req bool viewHandles(string action): false
     # An `OnTask` view starting one run of its body (generated from the facade's `onTask` field).
-    req void viewTask(TaskRun run):
+    req void viewTask(TaskRun run) throws:
         pass
 
 # The shared storage cell behind `bind`: a parent's `state` that is handed to a child's `bind` is

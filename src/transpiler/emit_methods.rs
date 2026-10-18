@@ -3519,7 +3519,60 @@ impl Transpiler {
         Some(format!("{{ {prelude}let mut __g = {lock}; (*__g){rest} }}"))
     }
 
+    /// The `throws` fn type behind a parameter type (an inline fn type or an alias to one).
+    fn throws_fn_param_type<'a>(&'a self, ty: &'a Type) -> Option<&'a Type> {
+        let t = match ty.without_mut() {
+            Type::Named(n) => self.fn_type_aliases.get(n.as_str())?,
+            t => t,
+        };
+        match t { Type::Fn(_, _, true, false, _) => Some(t), _ => None }
+    }
+
+    /// Arguments passed to `throws` fn-typed parameters (`ptys[i]`): a non-throwing closure literal
+    /// is emitted as a throwing one, and a plain non-throwing top-level fn name is wrapped in a
+    /// throwing closure -- like a stored fn field (`emit_fn_field_value`), so a plain callable is
+    /// accepted wherever a `throws` callable is. `None` when nothing needs rewriting.
+    pub(crate) fn coerce_throws_fn_args(&self, ptys: &[Option<&Type>], args: &[Arg]) -> Option<Vec<Arg>> {
+        let mut out: Option<Vec<Arg>> = None;
+        for (i, a) in args.iter().enumerate() {
+            if a.label.is_some() || a.spread { continue; }
+            let Some(Some(pty)) = ptys.get(i) else { continue };
+            let Some(Type::Fn(_, fptys, ..)) = self.throws_fn_param_type(pty) else { continue };
+            let new_kind = match &a.value.kind {
+                ExprKind::Closure(params, ret, body, false, false) =>
+                    ExprKind::Closure(params.clone(), ret.clone(), body.clone(), true, false),
+                ExprKind::Var(name) if self.fn_sigs.contains_key(name.as_str())
+                    && !self.fn_throws.contains(name.as_str())
+                    && !self.known_local_vars.contains(name.as_str()) => {
+                    let mk = |kind| Expr { kind, line: a.value.line, col: a.value.col, len: a.value.len };
+                    let params: Vec<Param> = (0..fptys.len()).map(|k| Param {
+                        name: format!("__a{k}"), ty: None, mutable: false, rebindable: false, var_mut: false,
+                        owned: false, variadic: false, default: None, line: a.value.line, col: a.value.col,
+                    }).collect();
+                    let call_args: Vec<Arg> = params.iter().map(|p| Arg {
+                        label: None, value: mk(ExprKind::Var(p.name.clone())), spread: false, default_rest: false,
+                    }).collect();
+                    let call = mk(ExprKind::Call(Box::new(a.value.clone()), call_args));
+                    ExprKind::Closure(params, None, ClosureBody::Expr(Box::new(call)), true, false)
+                }
+                _ => continue,
+            };
+            let v = out.get_or_insert_with(|| args.to_vec());
+            v[i].value.kind = new_kind;
+        }
+        out
+    }
+
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        // A closure / plain fn passed to a `throws` fn-typed parameter of a user method.
+        if let Some(sn) = self.resolve_struct_name(obj) {
+            if let Some(m) = self.struct_decls.get(&sn).and_then(|d| d.methods.iter().find(|m| m.name == method)) {
+                let ptys: Vec<Option<&Type>> = m.params.iter().map(|p| p.ty.as_ref()).collect();
+                if let Some(new_args) = self.coerce_throws_fn_args(&ptys, args) {
+                    return self.emit_method_call(obj, method, &new_args);
+                }
+            }
+        }
         if let Some(r) = self.try_emit_global_mutating_call(obj, method, args) { return r; }
         self.emit_method_call_inner(obj, method, args)
     }
@@ -4630,6 +4683,14 @@ impl Transpiler {
     /// over them before assembling the call.
     pub(crate) fn emit_args_coerced_vec(&self, fn_name: &str, args: &[Arg]) -> Vec<String> {
         let sig = self.fn_sigs.get(fn_name).cloned().unwrap_or_default();
+        let coerced_args;
+        let args = {
+            let ptys: Vec<Option<&Type>> = sig.iter().map(Some).collect();
+            match self.coerce_throws_fn_args(&ptys, args) {
+                Some(v) => { coerced_args = v; &coerced_args[..] }
+                None => args,
+            }
+        };
         let rebindable_flags = self.fn_rebindable.get(fn_name).cloned().unwrap_or_default();
         let mutable_flags = self.fn_mutable.get(fn_name).cloned().unwrap_or_default();
         let defaults = self.fn_defaults.get(fn_name).cloned().unwrap_or_default();
