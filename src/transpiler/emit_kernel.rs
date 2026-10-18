@@ -1020,7 +1020,7 @@ impl Transpiler {
     /// statement (at any depth inside `loop`/`if`/`while`/`for` bodies) of a tracked
     /// kernel variable into its own single-statement `kernel:` block so the ordinary
     /// dispatch lowering (`try_emit_kernel_dispatch`) applies to it.
-    pub(crate) fn wrap_simd_kernel_dispatches(&self, stmts: &mut Vec<Stmt>) {
+    pub(crate) fn wrap_simd_kernel_dispatches(&self, stmts: &mut [Stmt]) {
         for stmt in stmts.iter_mut() {
             match stmt {
                 Stmt::Expr(e) => {

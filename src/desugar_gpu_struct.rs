@@ -539,7 +539,7 @@ impl Cx {
     /// Statements declaring the leaves of `name: s`, initialised from `value`.
     fn declare(&self, binding: &BindingKind, name: &str, s: &str, value: &Expr, line: usize, col: usize) -> Option<Vec<Stmt>> {
         let leaves = self.leaves(s);
-        if let ExprKind::If(i) = &value.kind {
+        if let ExprKind::If(_) = &value.kind {
             let mut out = Vec::new();
             for (path, ty) in &leaves {
                 let init = match unwrap_ty(ty) {

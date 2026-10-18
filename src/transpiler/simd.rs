@@ -5362,8 +5362,11 @@ impl Emitter {
             {
                 Some("i32".into())
             }
-            ExprKind::BinOp(op, left, right)
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) =>
+            ExprKind::BinOp(
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem,
+                left,
+                right,
+            ) =>
             {
                 let literal = |e: &Expr| matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
                 match (self.expr_type(left), self.expr_type(right)) {

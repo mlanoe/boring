@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — CPU SIMD target</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="cpu-simd-target">CPU SIMD target</h1>
+<p><code>boring build --target simd program.br</code> generates <code>program_simd/</code>, a standalone Rust crate that runs Boring kernels on the CPU and needs no GPU runtime.</p>
+<h2 id="execution-model">Execution model</h2>
+<p>The launch grid is unchanged. <code>block=(x,y,z)</code> describes work-items in one CPU block and <code>grid=(x,y,z)</code> describes the number of blocks. Every work-item sees the same implicit <code>.thread</code>, <code>.block</code>, and <code>.block_dim</code> coordinates as the GPU backends. The x dimension is a tight contiguous loop, allowing release-mode LLVM to choose its own vector width and tail strategy for independent work-items.</p>
+<p>Fixed-shape labeled arrays retain their row-major layout and support labeled kernel indexing. Fixed arrays and fixed-shape kernel outputs are allocated to their declared size even when <code>init</code> does not assign them explicitly. Kernel references to immutable top-level scalar constants preserve their device numeric type, including mixed integer/<code>float32</code> expressions and explicit scalar constructors such as <code>float32(value)</code>.</p>
+<p>At runtime the generated crate selects AVX-512, AVX2, SSE2, or AArch64 NEON. Unknown CPUs use the baseline ISA path, which is the correctness-preserving fallback. The x86 paths are separate <code>#[target_feature]</code> functions, allowing LLVM to emit instructions unavailable in the baseline binary without making that binary unsafe on older processors. Set <code>BORING_SIMD_SCALAR=1</code> to force the baseline ISA path for debugging, portability checks, or result comparison. LLVM may still auto-vectorize that baseline path when the architecture guarantees vector instructions (notably AArch64 NEON), so the variable does not promise scalar machine code. The output is one target-specific crate today; comma-separated targets such as <code>--target wgpu,simd</code> are intentionally not accepted yet.</p>
+<p><code>&#x27;kernel&#x27;unified</code> and <code>&#x27;kernel&#x27;global</code> are ordinary CPU vectors. There is no host/device copy, although the generated API keeps explicit copy methods so it shares the host-lowering boundary with GPU targets. Resident (<code>&#x27;kernel&#x27;unified</code>) function results and kernel-to-kernel buffer aliases are plain <code>Vec</code> copies. Thread-local kernel fields are per-work-item locals, and <code>&#x27;actor&#x27;global</code> /</p>
+<p><code>&#x27;actor&#x27;unified</code> atomics (<code>+= -= &amp;= |= ^=</code>, <code>.min</code>, <code>.max</code>, <code>.swap</code>, <code>.cas</code>) on 32/64-bit integers are real hardware atomics (<code>Atomic*::from_ptr</code>, relaxed ordering) that return the previous value, so such kernels run their blocks in parallel like any other; other element types (floats, small integers) stay plain read-modify-writes and keep the kernel sequential. <code>&#x27;surface</code> buffers are ordinary <code>Vec&lt;u32&gt;</code> fields (see &quot;GPU display&quot; below). Identity and runtime type-test operators are rejected by the SIMD code generator rather than emitted with altered semantics. Unsupported kernel statements and expressions likewise produce source diagnostics.</p>
+<p>Integer bitwise operators (<code>&amp;</code>, <code>|</code>, <code>^</code>, shifts, and <code>~</code>) preserve their scalar Rust semantics inside kernels. Free math functions (<code>sin cos tan asin acos atan sinh cosh tanh exp exp2 sqrt cbrt floor ceil round trunc log log2 log10 abs pow atan2 min max</code>) lower to the matching Rust method at the operand&#x27;s own float width.</p>
+<p>Kernel <code>int</code> is a 32-bit device integer; host <code>int</code> is <code>isize</code>. Calls from a kernel to an ordinary Boring function convert numeric arguments and results at the call. A user <code>struct</code> used as a kernel field type (numeric and <code>bool</code> fields only) is mirrored as <code>__Device_&lt;Name&gt;</code> at device widths and converted when the host assigns it.</p>
+<h2 id="barriers-and-shared-memory">Barriers and shared memory</h2>
+<p>Bare <code>&#x27;actor</code> storage is block-shared memory and <code>sync</code> is a block barrier, with the same implicit discipline as the GPU backends: with no explicit <code>sync</code>, one barrier is inserted before the first loop and another at the top of every loop iteration that touches shared storage.</p>
+<p>Two lowerings implement barriers:</p>
+<ul><li><strong>Phase splitting</strong> (fast path). When every barrier is block-uniform and the</li></ul>
+<p>  state carried across it is replayable, the work-item loop is split into   collective phases that LLVM can still vectorize. <em> </em><em>Cooperative fallback</em>*. Any kernel the phase splitter rejects (per-thread   accumulators carried across a <code>sync</code>, divergent control around a barrier,   shuffles of computed values, ...) is emitted as one closure per work-item and   run by a small block scheduler: each work-item is a stackful fiber   (hand-written AArch64 and x86-64 SysV context switches on Unix, Win32 fibers on Windows; on any   other target one parked OS thread per work-item with strict baton passing). <code>sync</code> parks a work-item until every live   work-item of the block arrives; a work-item that <code>return</code>s early stops taking   part, as on a GPU. A barrier reached by only part of its group aborts with a   <code>deadlock</code> message instead of hanging. Fibers have 256 KiB stacks   (<code>BORING_SIMD_STACK_KB</code>); an overflow is detected and aborts.</p>
+<p>The thread backend can be forced for testing with <code>RUSTFLAGS=&quot;--cfg boring_coop_threads&quot;</code>. It is correct but much slower than fibers (blocks of 256 work-items cost one thread each; only unsupported targets use it by default). The AArch64 fibers are exercised by the test suite on Apple silicon; the x86-64 switch assembles and links (cross-compiled for <code>x86_64-apple-darwin</code>) and the Windows fibers type-check (<code>cargo check --target x86_64-pc-windows-gnu</code>), but neither has been run yet — run <code>cargo test --test simd_codegen cooperative</code> on an x86-64 machine to validate it.</p>
+<h2 id="warp-and-tensors">Warp and tensors</h2>
+<p>The logical warp is <strong>32 lanes wide on every ISA path</strong>, matching Metal&#x27;s SIMD-group and CUDA&#x27;s warp so kernels written against <code>.warp.size</code> or assuming 32 behave identically. <code>.warp.size</code>, <code>.warp.lane</code>, <code>.warp.sync()</code> and the four shuffles (<code>shuffle</code>, <code>shuffle_down</code>, <code>shuffle_up</code>, <code>shuffle_xor</code>) are supported with any operand: a warp is 32 consecutive work-items by linear thread index, a shuffle whose source lane is outside the block or has already returned yields the caller&#x27;s own value, and shuffled values are limited to 8 bytes.</p>
+<p>Fixed-shape floating-point <code>kernel.tensors.matmul</code>, <code>mma</code>, and <code>linear</code> calls use the existing portable CPU loop lowering. Dot-product forms (<code>linear</code>, whose weights are <code>[n, k]</code>) accumulate in 16 independent lanes and the k-major forms update whole output rows with a contiguous multiply-add, so both vectorize (partial sums are reassociated, so results can differ from a strict left-to-right sum in the last bit). On x86-64 these loops have an AVX2+FMA twin selected at run time (baseline x86-64 has no FMA instruction). When there are fewer rows than workers (down to the one-row decode shape), each row&#x27;s columns are split across workers instead. Very large operations split output rows into disjoint mutable chunks across the available CPU cores; smaller ones run inline to avoid thread-spawn and cache-contention overhead. Backend-specific BLAS integration and quantized SIMD microkernels remain future work.</p>
+<p>Very large operations use the host&#x27;s available parallelism. Set <code>BORING_SIMD_THREADS=N</code> to cap them to <code>N</code> workers; <code>BORING_SIMD_THREADS=1</code> provides a single-worker reference path. The default parallel threshold is 268,435,456 multiply-adds and can be changed with <code>BORING_SIMD_PARALLEL_THRESHOLD=N</code> (<code>0</code> forces the multicore path). Kernel grids are distributed over the same workers block by block, as on a GPU: blocks may run in any order and concurrently, so blocks that write the same element race exactly as they would on a GPU. A grid goes parallel once it has at least <code>BORING_SIMD_PARALLEL_ITEMS</code> work-items (default 32768; <code>0</code> forces it, handy in tests); smaller launches stay on the calling thread to avoid spawn cost. Kernels using atomics on element types without a hardware atomic (floats, 8/16-bit integers) run sequentially. <code>BORING_SIMD_THREADS=1</code> restores fully sequential execution.</p>
+<h2 id="build">Build</h2>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target simd examples/saxpy.br
+cd examples/saxpy_simd
+cargo run --release</code></pre></div>
+<p>Use release mode for vectorization. Debug builds are intended for diagnostics, not performance measurements.</p>
+<p>For a like-for-like native/baseline comparison, build <code>examples/simd_saxpy_bench.br</code> once and run the generated release binary twice:</p>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target simd examples/simd_saxpy_bench.br
+cd examples/simd_saxpy_bench_simd
+cargo run --release
+BORING_SIMD_SCALAR=1 cargo run --release</code></pre></div>
+<p>Both commands execute the same binary and workload. The environment variable changes only the runtime-selected native-feature versus baseline dispatch path.</p>
+<p><code>examples/simd_matmul_bench.br</code> compares the default adaptive fixed-tensor path with <code>BORING_SIMD_PARALLEL_THRESHOLD=0</code>, which forces multicore execution using the same generated binary.</p>
+<h2 id="gpu-display">GPU display</h2>
+<p><code>Screen</code>, <code>Dimension</code>, the <code>&#x27;surface</code> qualifier and <code>kernel: loop:</code> work as described in <a href="gpu-display.html">`gpu-display.md`</a>, so <code>examples/plasma_metal.br</code> and <code>examples/game_of_life.br</code> build and run unchanged with <code>--target simd</code>:</p>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target simd examples/plasma_metal.br
+cd examples/plasma_metal_simd
+cargo build --release &amp;&amp; ./target/release/plasma-metal-simd</code></pre></div>
+<p>There is no GPU presentation path, so the window is a <strong>software blit</strong> (<a href="https://docs.rs/softbuffer">`softbuffer`</a> 0.3 on winit 0.28, the same pair the CUDA/ROCm backends use). <code>winit</code>/<code>softbuffer</code> are added to the generated <code>Cargo.toml</code> only when the program constructs a <code>Screen</code>; compute-only programs stay dependency-free.</p>
+<ul><li><code>&#x27;surface</code> is an ordinary <code>Vec&lt;u32&gt;</code> (pixels <code>0xAARRGGBB</code>; softbuffer ignores the</li></ul>
+<p>  alpha byte). <em> A kernel with a <code>let Dimension</code> field is constructed as <code>K(Dimension(w, h))</code>. The   generated <code>new</code> takes the flat extent, sizes every array field to `w </em> h<code>, and   seeds </code>&#x27;surface<code> buffers with the same sparse random 0/1 pattern the GPU Screen   hosts use (</code>game_of_life<code> relies on it). Without an explicit </code>grid=<code>, a dispatch   infers </code>ceil(w / block_x) x ceil(h / block_y)<code> from that field. </code>dim.width/height<code>   are </code>i32<code> inside kernels, like </code>.thread<code>/</code>.block<code>. * The user&#x27;s </code>loop:<code> is an ordinary Rust </code>loop<code> (bare </code>k(block = ..)<code> statements   inside it are dispatches; </code>a.x, a.y = a.y, a.x<code> swaps the buffers in place;   </code>b.x = a.y<code> copies). So the whole program runs on a worker thread while </code>main<code>   keeps the OS event loop (required on macOS). </code>screen.present(k.pixels)<code> hands the   frame over by reference and blocks until it has been blitted. * </code>screen.time/frame/width/height/dimension/closed/resized<code> are plain fields refreshed   by each </code>present<code>; </code>screen.key(&quot;...&quot;)<code> uses the same key table as the other   software-blit backends. Closing the window ends the process with exit code 0. * The window is created with </code>PhysicalSize<code>, so its pixel count matches the buffer   on any DPI scale. If the user resizes it, rows are clipped/padded rather than   stretched; the kernel surface is not reallocated (same limitation as every   backend). * </code>Screen(Dimension(w, h))<code> without </code>title =<code> uses the title </code>boring`.</p>
+<p>Only a top-level <code>Screen</code> is supported (a <code>Screen</code> constructed inside a function is not recognised). Display programs cannot be exercised headlessly, so the test suite checks generated code and <code>cargo check</code>s the crates but never opens a window.</p>
+<h2 id="notes-relative-to---target-metal">Notes relative to <code>--target metal</code></h2>
+<p>(<code>screen.key_pressed()</code> / <code>screen.mouse</code> are implemented here — see the Input section of <a href="gpu-display.html">gpu-display.md</a>.)</p>
+<ul><li><code>Device</code> introspection: <code>name()</code> is the CPU ISA, <code>totalMem()</code>/<code>freeMem()</code> the system</li></ul>
+<p>  memory, <code>warpSize()</code> 32, <code>maxThreads()</code> 1024, <code>maxSharedMem()</code> 32768,   <code>computeCapability()</code> <code>[lane count, 0]</code>, <code>Device.all()</code> one device; GPU usage,   temperature and power read 0.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

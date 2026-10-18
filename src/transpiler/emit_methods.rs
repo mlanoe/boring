@@ -3652,18 +3652,10 @@ impl Transpiler {
                 "__boring_tensor_inner * __boring_tensor_n + __boring_tensor_col"
             };
             if self.config.is_simd_target {
-                let (bias_ref, chunk_initial) = if method == "linear" && operand_count == 4 {
-                    (
-                        format!("let __boring_tensor_bias = &{};", names[2]),
-                        "__boring_tensor_bias[__boring_tensor_col]".to_string(),
-                    )
-                } else if method == "mma" {
-                    (
-                        String::new(),
-                        "__boring_tensor_chunk[__boring_tensor_local_row * __boring_tensor_cols + (__boring_tensor_col - __boring_tensor_col0)]".to_string(),
-                    )
+                let bias_ref = if method == "linear" && operand_count == 4 {
+                    format!("let __boring_tensor_bias = &{};", names[2])
                 } else {
-                    (String::new(), "0.0f32".to_string())
+                    String::new()
                 };
                 let row_body = if method == "linear" {
                     let bias_arg = if operand_count == 4 { "Some(&__boring_tensor_bias[..])" } else { "None" };
@@ -3726,11 +3718,6 @@ impl Transpiler {
             format!("__boring_tensor_k * {n} + __boring_tensor_col")
         };
         if self.config.is_simd_target {
-            let chunk_initial = if method == "mma" {
-                format!("__boring_tensor_chunk[__boring_tensor_local_row * __boring_tensor_cols + (__boring_tensor_col - __boring_tensor_col0)]")
-            } else {
-                "0.0f32".to_string()
-            };
             let chunk_body = if transpose_b {
                 format!("            __boring_linear(__boring_tensor_a, {k}, __boring_tensor_row_base, __boring_tensor_chunk.len() / __boring_tensor_cols, __boring_tensor_b, {k}, __boring_tensor_col0, __boring_tensor_cols, {k}, None, &mut __boring_tensor_chunk[..], __boring_tensor_cols);")
             } else {

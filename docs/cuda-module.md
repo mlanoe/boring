@@ -32,7 +32,7 @@ transpiler to handle.
 GPU qualifiers appear in two contexts with different syntax:
 
 - **Host context** — allocations and bindings outside a `kernel` struct. Full `'kernel'..` prefix is mandatory.
-- **Kernel context** — fields inside a `kernel` struct. The `'gpu` prefix is dropped; short forms `'unified`, `'global`, bare `'actor`, `'local`, `'const` are used.
+- **Kernel context** — fields inside a `kernel` struct. The `'kernel` prefix is dropped; short forms `'unified`, `'global`, bare `'actor`, `'local`, `'const` are used.
 
 ### Host-context qualifiers
 

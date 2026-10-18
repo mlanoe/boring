@@ -1028,7 +1028,7 @@ fn rewrite_seed_calls(items: &mut [Item]) {
         let Some(states) = table.get(name) else { return };
         for a in args.iter_mut() {
             if let Some(l) = a.label.clone() {
-                if let Some(ty) = states.get(&l) {
+                if states.contains_key(&l) {
                     a.label = Some(seed_field_name(&l));
                     let value = std::mem::replace(&mut a.value, Expr { kind: ExprKind::Nil, line: 0, col: 0, len: 0 });
                     a.value = seed_closure(value);

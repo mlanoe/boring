@@ -137,7 +137,7 @@ li { margin-bottom: 0.3rem; }
 <hr>
 <h2 id="qualifier-model">Qualifier model</h2>
 <p>GPU qualifiers appear in two contexts with different syntax:</p>
-<ul><li><strong>Host context</strong> — allocations and bindings outside a <code>kernel</code> struct. Full <code>&#x27;kernel&#x27;..</code> prefix is mandatory.</li><li><strong>Kernel context</strong> — fields inside a <code>kernel</code> struct. The <code>&#x27;gpu</code> prefix is dropped; short forms <code>&#x27;unified</code>, <code>&#x27;global</code>, bare <code>&#x27;actor</code>, <code>&#x27;local</code>, <code>&#x27;const</code> are used.</li></ul>
+<ul><li><strong>Host context</strong> — allocations and bindings outside a <code>kernel</code> struct. Full <code>&#x27;kernel&#x27;..</code> prefix is mandatory.</li><li><strong>Kernel context</strong> — fields inside a <code>kernel</code> struct. The <code>&#x27;kernel</code> prefix is dropped; short forms <code>&#x27;unified</code>, <code>&#x27;global</code>, bare <code>&#x27;actor</code>, <code>&#x27;local</code>, <code>&#x27;const</code> are used.</li></ul>
 <h3 id="host-context-qualifiers">Host-context qualifiers</h3>
 <table><thead><tr><th>Qualifier</th><th>Location</th><th>CUDA</th></tr></thead><tbody><tr><td><code>&#x27;kernel&#x27;unified</code></td><td>unified host + device DRAM</td><td><code>cudaMallocManaged</code></td></tr><tr><td><code>&#x27;kernel&#x27;global</code></td><td>device-only DRAM</td><td>device pointer</td></tr></tbody></table>
 <p><code>&#x27;const</code> has no host-context form — it has no host access at all (see below), so a host-side binding could never be read from or written to. It&#x27;s only meaningful as a kernel-struct field qualifier.</p>
