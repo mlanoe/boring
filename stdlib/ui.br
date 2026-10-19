@@ -489,6 +489,35 @@ pub view DefaultFocus:
     [View] children
     body(): native
 
+# Non-modal focus scopes (draft, "Focus scopes and traversal"):
+#   FocusScope  groups its descendants as one traversal unit; Tab leaves it for its parent's next control, unless
+#               `trap` (reserved for genuine modal semantics), which wraps traversal inside the scope
+#   FocusOrder  `.focusOrder(value)`: orders the wrapped control among its siblings (ascending, ties keep structural
+#               order, default 0, negative = earlier)
+#   FocusSection `.focusSection()`: a group directional (arrow) navigation searches first, and that moving between
+#               sections treats as one box (the union of its controls' bounds)
+#   Focusable   `.focusable(false)`: the wrapped subtree is skipped by keyboard traversal; layout, hit testing,
+#               pointer focus and accessibility are unchanged
+
+pub view FocusScope:
+    bool trap = false
+    [View] children
+    body(): native
+
+pub view FocusOrder:
+    float value = 0.0
+    [View] children
+    body(): native
+
+pub view FocusSection:
+    [View] children
+    body(): native
+
+pub view Focusable:
+    bool enabled = true
+    [View] children
+    body(): native
+
 pub view Focused:
     bind bool value
     [View] children
