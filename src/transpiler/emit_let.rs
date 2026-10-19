@@ -614,6 +614,17 @@ impl Transpiler {
             self.vec_vars.remove(s.name.as_str());
             self.collection_vars.remove(s.name.as_str());
         }
+        // `let g = s.graphemeSlice(..)` / `let t = s.trim()` — a string-returning builtin on a
+        // string receiver gives a string local; untracked, `g.displayWidth` fell through to a
+        // generic field access (`g.displayWidth.clone()`, E0609 on `Arc<str>`).
+        if s.ty.is_none()
+            && matches!(&s_value.kind, ExprKind::MethodCall(..))
+            && self.expr_is_string_receiver(s_value)
+        {
+            self.string_vars.insert(s.name.clone());
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
+        }
         // The declared type with a bare-`mut` marker looked through: `mut {K=V} x = other` parses
         // to `Type::Mut(Dict(..))` (`wrap_type_mut`, an owned permission with no Rust type of its
         // own), which none of the `Type::Dict`/`Array`/`Set`/`Tuple` shape checks below would match

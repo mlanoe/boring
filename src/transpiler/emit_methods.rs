@@ -2405,8 +2405,11 @@ impl Transpiler {
                 let to_s   = self.emit_expr(&args[1].value);
                 let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
                 // Out-of-range bounds clamp to [0, graphemeCount]; an inverted range is "".
+                // `let __o = &recv` extends a temporary receiver's lifetime (a field receiver renders as
+                // `c.text.clone()`; borrowing it inside the `let __s` call would drop it, E0716) without
+                // moving a plain variable receiver.
                 return Some(format!(
-                    "{{ let __s: &str = AsRef::<str>::as_ref(&{}); let __n = unicode_segmentation::UnicodeSegmentation::graphemes(__s, true).count() as i64; let __from = (({}) as i64).clamp(0, __n) as usize; let __to = (({}) as i64).clamp(0, __n) as usize; {}::from(unicode_segmentation::UnicodeSegmentation::graphemes(__s, true).skip(__from).take(__to.saturating_sub(__from)).collect::<String>().as_str()) }}",
+                    "{{ let __o = &{}; let __s: &str = AsRef::<str>::as_ref(__o); let __n = unicode_segmentation::UnicodeSegmentation::graphemes(__s, true).count() as i64; let __from = (({}) as i64).clamp(0, __n) as usize; let __to = (({}) as i64).clamp(0, __n) as usize; {}::from(unicode_segmentation::UnicodeSegmentation::graphemes(__s, true).skip(__from).take(__to.saturating_sub(__from)).collect::<String>().as_str()) }}",
                     obj_s, from_s, to_s, str_ty
                 ));
             }

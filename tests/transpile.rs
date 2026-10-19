@@ -1519,4 +1519,5 @@ transpile_test!(closure_param_forward);
 transpile_test!(optional_let_return);
 transpile_test!(string_unicode_length);
 transpile_test!(string_graphemes);
+transpile_test!(string_grapheme_untyped);
 transpile_test!(string_grapheme_cast_var);

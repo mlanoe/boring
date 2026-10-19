@@ -909,5 +909,6 @@ interp_test!(guard_string_trim_temporary);
 interp_test!(struct_param_nested_loop_call);
 interp_test!(closure_owned_captures);
 interp_test!(string_unicode_length);
+interp_test!(string_grapheme_untyped);
 interp_test!(string_graphemes);
 interp_test!(string_grapheme_cast_var);
