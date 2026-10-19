@@ -1,0 +1,22 @@
+# `assert_eq(f(...).field.length, n)` — a field access then `.length` on a function-call result,
+# inside an assert_eq argument. Used to transpile to `f(..).field::length` (path separator
+# instead of a method call) and fail with "no rules expected ::" inside the assert_eq! macro.
+
+struct Raster:
+    var [int] pixels
+
+def Raster make(int n):
+    return Raster(pixels = [1, 2, 3, 4, 5][0..<n])
+
+def main():
+    assert_eq(make(4).pixels.length, 4)
+    assert_eq(make(3).pixels.length + 1, 4)
+    let r = make(2)
+    assert_eq(r.pixels.length, 2)
+    print(make(5).pixels.length)
+    # A string literal in the call's arguments emits `Arc::<str>::from(..)`, whose `::` used to
+    # make the `.pixels` receiver look like a module path.
+    assert_eq(tag("x", [1, 2]).pixels.length, 2)
+
+def Raster tag(string s, [int] list):
+    Raster(pixels = list)

@@ -1179,6 +1179,15 @@ impl Transpiler {
     /// `e as ty` — user-defined `into_type()` conversions, newtype wrap/unwrap,
     /// Optional-type parse, numeric/bool/string coercions, and the `'actor` wrap.
     fn emit_expr_cast(&self, e: &Expr, ty: &Type) -> String {
+        // `{} as {T}` (emitted by view-state lowering): a typed empty set.
+        if let (ExprKind::Set(elems), Type::Set(elem)) = (&e.kind, ty.without_mut()) {
+            if elems.is_empty() {
+                return format!("HashSet::<{}>::new()", self.emit_type(elem));
+            }
+        }
+        if let (ExprKind::Set(elems), Type::Dict(..)) = (&e.kind, ty.without_mut()) {
+            if elems.is_empty() { return "HashMap::new()".into(); }
+        }
         let src = self.emit_expr(e);
         if let Some(code) = self.emit_trait_downcast(e, &src, ty) {
             return code;
@@ -2646,7 +2655,9 @@ impl Transpiler {
             }
             // A field access on another field/call is a path only if the receiver is also
             // a plain path (contains `::` but is NOT a call result ending with `)`)
-            _ => obj_s.contains("::") && !obj_s.ends_with(')'),
+            // Only a `::` at bracket depth 0 counts: one nested inside a call's argument list
+            // (`f(Arc::<str>::from(..)).field`) says nothing about the receiver being a path.
+            _ => Self::has_top_level_path_sep(&obj_s) && !obj_s.ends_with(')'),
         };
         if is_path_receiver {
             return format!("{}::{}", obj_s, field);

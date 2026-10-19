@@ -1,0 +1,24 @@
+# `state {string} x = {}` / `{string=int}` seeds: the empty literal must take the declared state
+# type (not a default `HashSet<isize>`) once the state is wrapped in a `Slot`.
+# (Only reads here: `add`/index-assign through a Slot-wrapped set/dict is a separate transpiler gap.)
+use boring.ui.*
+
+view P:
+    state {string} picked = {}
+    state {string=int} counts = {=}
+
+    req int size():
+        picked.length
+
+    req bool has(string s):
+        picked.contains(s)
+
+    req int total():
+        counts.length
+
+def main():
+    let p = P()
+    mut st = P__State()
+    print p.size(st)
+    print p.has("z", st)
+    print p.total(st)

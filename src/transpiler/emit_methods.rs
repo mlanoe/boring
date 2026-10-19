@@ -5930,6 +5930,23 @@ impl Transpiler {
         self.emit_expr(e)
     }
 
+    /// True if `s` contains a `::` outside every `()`/`[]`/`{}` group — i.e. the emitted
+    /// receiver text is itself a path, not merely a call/macro whose arguments mention one.
+    pub(crate) fn has_top_level_path_sep(s: &str) -> bool {
+        let b = s.as_bytes();
+        let (mut depth, mut i) = (0i32, 0);
+        while i < b.len() {
+            match b[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b':' if depth == 0 && b.get(i + 1) == Some(&b':') => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// Emit the two operands of `assert_eq`/`assert_neq`. A bare string literal
     /// opposite a non-literal operand is promoted to `Rc/Arc::<str>::from(..)` — same
     /// rule as the `==` operator — because the other side is typically an owned

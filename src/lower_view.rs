@@ -182,8 +182,16 @@ fn slot_type(inner: &Type) -> Type {
     )))
 }
 
-fn slot_seed(default: &Expr) -> Expr {
+fn slot_seed(default: &Expr, inner: &Type) -> Expr {
     let (line, col, len) = (default.line, default.col, default.len);
+    // An empty `{}` carries no element type of its own; pin it to the declared state type so the
+    // transpiler doesn't fall back to a `HashSet<isize>` seed.
+    let inner = match inner { Type::Mut(t) => (**t).clone(), t => t.clone() };
+    let default = &match (&default.kind, &inner) {
+        (ExprKind::Set(e), Type::Set(_) | Type::Dict(..)) if e.is_empty() =>
+            Expr { kind: ExprKind::Cast(Box::new(default.clone()), inner.clone()), line, col, len },
+        _ => default.clone(),
+    };
     Expr {
         kind: ExprKind::Call(
             Box::new(Expr { kind: ExprKind::Var("Slot".to_string()), line, col, len }),
@@ -347,7 +355,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
             f.explicit_perm = false;
             f.is_pub = true;
             if slot_all || bound.contains(&f.name) {
-                let seed = slot_seed(f.default.as_ref().expect("checked above"));
+                let seed = slot_seed(f.default.as_ref().expect("checked above"), &f.ty);
                 f.ty = slot_type(&f.ty);
                 f.mutable = true;
                 f.default = Some(seed);
@@ -362,7 +370,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
             f.explicit_perm = false;
             f.is_pub = true;
             if slot_all {
-                let seed = slot_seed(f.default.as_ref().expect("owner default"));
+                let seed = slot_seed(f.default.as_ref().expect("owner default"), &f.ty);
                 f.ty = slot_type(&f.ty);
                 f.mutable = true;
                 f.default = Some(seed);
