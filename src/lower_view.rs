@@ -504,6 +504,11 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
 /// of a native container, a native `KeyedGroup`'s key/site, and — for a composite view — the
 /// state seed and `expand`, which re-enters the lowered `body(__st)` with the node's own state.
 /// Parsed from source text so the generated methods are exactly what the parser would produce.
+/// `Slot<{T}>`: a lowered `bind {T}` field (a bound set).
+fn is_slot_of_set(t: &Type) -> bool {
+    matches!(t, Type::Generic(g, args) if g == "Slot" && args.len() == 1 && matches!(strip_mut(&args[0]), Type::Set(_)))
+}
+
 fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, owner_slot: bool, state_name: &str, seeds: &[(String, bool, Type)], env_fields: &[FieldDecl]) -> Vec<FnDecl> {
     let field_ty = |name: &str| s.fields.iter().find(|f| f.name == name).map(|f| strip_mut(&f.ty).clone());
     let mut src = format!("struct G:\n    req string viewKind(): \"{}\"\n", s.name);
@@ -523,6 +528,10 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, ow
                     props.push_str(&format!("        if let v = {name}:\n            p[\"{name}\"] = \"{{v}}\"\n", name = f.name));
                 }
                 Type::Named(n) if n == "View" || n == "UIAction" || n == "TaskAction" || n == "EnvValue" => {}
+                // A bound set of keys (`MultiList.selection`): its prop is the keys, newline-separated.
+                Type::Qualified(inner, OwnerQual::Actor) if is_slot_of_set(inner) => {
+                    props.push_str(&format!("        mut [string] {name}Keys = []\n        for k in {name}.value:\n            {name}Keys.push(k)\n        p[\"{name}\"] = {name}Keys.join(\"\\n\")\n", name = f.name));
+                }
                 // A lowered `bind` field is a shared `Slot`: its prop is the current value.
                 Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot") => {
                     props.push_str(&format!("        p[\"{name}\"] = \"{{{name}.value}}\"\n", name = f.name));
@@ -547,8 +556,13 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, ow
             acts.push_str("        if action == \"dismiss\":\n            isPresented.value = false\n");
             handles.push_str("        if action == \"dismiss\":\n            return true\n");
         }
+        // `MultiList.selection`: the runtime writes the whole new set of selected keys (newline-separated).
+        if s.fields.iter().any(|f| f.name == "selection" && matches!(strip_mut(&f.ty), Type::Qualified(inner, OwnerQual::Actor) if is_slot_of_set(inner))) {
+            acts.push_str("        if action == \"setSelection\":\n            mut {string} chosen = {}\n            for part in arg.split(\"\\n\"):\n                if part.length > 0:\n                    _ = chosen.add(part)\n            selection.value = chosen\n");
+            handles.push_str("        if action == \"setSelection\":\n            return true\n");
+        }
         // `List.selection`: the runtime selects a row by its key (empty = none).
-        if s.fields.iter().any(|f| f.name == "selection" && matches!(strip_mut(&f.ty), Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot"))) {
+        if s.fields.iter().any(|f| f.name == "selection" && matches!(strip_mut(&f.ty), Type::Qualified(inner, OwnerQual::Actor) if matches!(&**inner, Type::Generic(g, _) if g == "Slot") && !is_slot_of_set(inner))) {
             acts.push_str("        if action == \"select\":\n            selection.value = arg\n");
             handles.push_str("        if action == \"select\":\n            return true\n");
         }

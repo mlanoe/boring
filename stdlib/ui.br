@@ -536,6 +536,16 @@ pub view List:
     [View] children
     body(): native
 
+# MultiList: a `List` with multiple selection — `bind {string} selection` holds the selected row keys. The runtime
+# computes the new set (plain click replaces, a toggle click adds/removes, a range click spans from the anchor)
+# and writes it whole through the "setSelection" action; a key that disappears is dropped on the next update.
+pub view MultiList:
+    bind {string} selection
+    MoveAction? onMove = nil
+    DeleteAction? onDelete = nil
+    [View] children
+    body(): native
+
 # ── Components: Separator, Slider, Image (docs/design-notes/boring-ui-draft.md, "Layout primitives",
 # "Image, Video, and asynchronous media", "Common control rules") ────────────────────────────────────
 #   Separator  a thin line; inside a `Row` it is vertical, inside a `Column` (or a `List`) horizontal,
