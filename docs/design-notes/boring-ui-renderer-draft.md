@@ -33,6 +33,20 @@ Rationale, in short:
 - It is the most demanding real test the kernels will have had outside LLM inference (atomics, workgroup
   memory, barriers, packed bytes).
 
+## Status (2026-10-20)
+
+- **Step 0 done**: `boring-ui/render/src/raster.br` (+ `raster_font.br`) draws `FillRect`, `StrokeRect`, `DrawShadow`,
+  `DrawText` (5x7 fixture font), `PushClip`/`PopClip`, `PushOpacity`/`PopOpacity`. `DrawImage` and `MarkedText` are
+  not drawn yet. The colour pipeline is still sRGB-encoded source-over; only `blend` changes when it is decided.
+- **Step 1 done**: `raster_gpu.br` is the one-thread-per-pixel kernel; `encode` bakes clips, expands text to glyph
+  commands and bounds opacity nesting to 4. It matches the CPU reference within one LSB on the test corpus under
+  `boring run`, `--target simd` and `--target wgpu` (Metal). Not yet measured: speed.
+- The renderer lives in its own project (`render/`) so it can be built for kernel targets: they cannot yet
+  compile the view runtime. Gaps found on the way, each filed as a compiler task: kernel targets do not add the
+  unicode crates nor read `[dependencies]`; reading a `[uint]` kernel field back is mistyped on the host; kernel
+  struct helper methods work under `boring run` only (top-level functions work everywhere); a kernel local named
+  like a host function pulls that function into the WGSL.
+
 ## What stays outside Boring kernels
 
 Even on this route the platform host depends on existing crates; none of them is a rendering technology:
