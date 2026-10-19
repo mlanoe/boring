@@ -52,10 +52,15 @@ pub fn desugar(program: &Program) -> Program {
         }
     }
     let cx = Cx { fns, ..Cx::default() };
+    // As with struct scalar replacement, host-only functions must keep their original
+    // optional representation. Besides producing dead code, lowering every optional
+    // function creates ill-typed Rust twins whose bodies still contain host-only forms
+    // such as `None` and enum payloads.
+    let (reach_fns, _) = crate::desugar_gpu_struct::device_reachable(&program);
     let mut clones = Vec::new();
     for item in &program.items {
         if let Item::Fn(f) = item {
-            if let Some(sig) = cx.fns.get(&f.name) {
+            if let Some(sig) = cx.fns.get(&f.name).filter(|_| reach_fns.contains(&f.name)) {
                 clones.extend(cx.device_clones(f, sig));
             }
         }

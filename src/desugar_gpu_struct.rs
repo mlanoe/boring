@@ -167,7 +167,7 @@ pub fn desugar(program: &Program) -> Program {
 }
 
 /// Free functions and method names called, transitively, from kernel bodies.
-fn device_reachable(program: &Program) -> (HashSet<String>, HashSet<String>) {
+pub(crate) fn device_reachable(program: &Program) -> (HashSet<String>, HashSet<String>) {
     fn calls(body: &[Stmt], fns: &mut HashSet<String>, methods: &mut HashSet<String>) {
         let mut owned = body.to_vec();
         let mut on_expr = |e: &mut Expr| match &e.kind {

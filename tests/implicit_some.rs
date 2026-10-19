@@ -174,6 +174,33 @@ fn device_backends_lower_optional_parameters_returns_and_arrays() {
     }
 }
 
+#[test]
+fn device_backends_do_not_clone_host_only_optional_functions() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("implicit_some_host_only_optional");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.br"),
+        "mut [int]'kernel'unified out = [0]\n\
+         int? host_only(int x):\n    if x > 0:\n        return x\n    nil\n\
+         int? on_device(int x):\n    if x > 0:\n        return x\n    nil\n\
+         kernel O:\n    mut [int]'unified out\n    init(mut [int]'unified o):\n        out = o\n    def ():\n        out[0] = on_device(1) else 0\n\
+         mut o = O(out)\nkernel:\n    o(block = 1)\nprint \"{host_only(1) else 0}\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal", "main.br"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let host = std::fs::read_to_string(dir.join("main_metal/src/main.rs")).unwrap();
+    let device = std::fs::read_to_string(dir.join("main_metal/kernels/main.metal")).unwrap();
+    assert!(!host.contains("host_only__dev"), "{host}");
+    assert!(device.contains("on_device__dev"), "{device}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn optional_parameters_returns_and_arrays_run_correctly_on_metal() {
