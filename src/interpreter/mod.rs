@@ -2244,10 +2244,12 @@ fn register_misc_globals(e: &mut Env) {
     for name in &["Box", "Rc", "Arc", "Option", "Result"] {
         e.define(name, Value::RustType { name: name.to_string() });
     }
-    // Time types — opaque in the interpreter (no real async runtime).
+    // Time types. Duration/Instant remain opaque for scheduling (there is no
+    // real async runtime); SystemTime's wall-clock operations are implemented
+    // by the interpreter so timestamp-producing programs retain parity.
     //   Duration.fromSecs(5)    →  RustType (ignored by wait/timeout stubs)
     //   Instant.now()           →  RustType (opaque deadline; ignored by timeout stubs)
-    for name in &["Duration", "Instant"] {
+    for name in &["Duration", "Instant", "SystemTime", "UNIX_EPOCH"] {
         e.define(name, Value::RustType { name: name.to_string() });
     }
     // Semaphore(n) — opaque in the interpreter (no real concurrency to limit).

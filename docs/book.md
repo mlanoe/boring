@@ -6051,6 +6051,28 @@ wait(deadline)   # explicit form recommended for Instant variables
 
 ---
 
+### Wall-clock time — `SystemTime`
+
+`Instant` is monotonic and is suitable for elapsed durations and deadlines, but
+it deliberately has no Unix timestamp. Use Rust's wall-clock `SystemTime` and
+`UNIX_EPOCH` when an external protocol needs seconds since 1970:
+
+```boring
+use std.time.SystemTime
+use std.time.UNIX_EPOCH
+
+def uint64 unixTimestamp() throws:
+    SystemTime.now().durationSince(UNIX_EPOCH).asSecs()
+```
+
+This maps directly to
+`(SystemTime::now().duration_since(UNIX_EPOCH)?).as_secs()`. As for other
+operations known to return `Result`, Boring inserts the Rust propagation `?`
+inside a `throws` function; source-level `?.` remains the optional-chaining
+operator.
+
+---
+
 ### Task with built-in timeout — `task(Duration): body`
 
 Pass a `Duration` directly to `task` to spawn a task that automatically expires:

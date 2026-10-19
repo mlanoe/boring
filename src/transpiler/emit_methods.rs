@@ -4637,12 +4637,23 @@ impl Transpiler {
         let receiver_has_method = receiver_struct.as_ref().is_some_and(|sn| {
             self.struct_method_names.get(sn).is_some_and(|ms| ms.contains(method))
         });
+        // `std::time::SystemTime::duration_since` returns Result. Treat its
+        // camelCase spelling like a declared Boring `throws` method so normal
+        // Boring call sites propagate it automatically in a throws context.
+        let external_throws = method == "durationSince" && match &obj.kind {
+            ExprKind::MethodCall(base, static_method, _) if static_method == "now" =>
+                matches!(&base.kind, ExprKind::Var(type_name) if type_name == "SystemTime"),
+            ExprKind::Var(name) => matches!(self.var_types.get(name.as_str()),
+                Some(Type::Named(type_name)) if type_name == "SystemTime"),
+            _ => false,
+        };
         let propagates_throw = (self.in_throws || self.in_try_body)
-            && ((!receiver_has_method && self.fn_throws.contains(method)) || struct_throws);
+            && (((!receiver_has_method && self.fn_throws.contains(method)) || struct_throws)
+                || external_throws);
         if self.in_async && (self.instance_task_methods.contains(method) || is_tokio_async) {
             if propagates_throw { format!("{}.await?", call) } else { format!("{}.await", call) }
         } else if propagates_throw {
-            format!("{}?", call)
+            if external_throws { format!("({}?)", call) } else { format!("{}?", call) }
         } else {
             call
         }

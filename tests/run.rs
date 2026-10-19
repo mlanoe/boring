@@ -378,6 +378,7 @@ interp_test!(builtin_error_enum);
 interp_test!(multi_variant_catch_dispatch);
 interp_test!(type_def_typed_throws);
 interp_test!(type_method_throws_untyped);
+interp_test!(system_time);
 interp_test!(untyped_string_lit_local_to_type_method);
 interp_test!(ref_identity);
 interp_test!(mut_scalar);

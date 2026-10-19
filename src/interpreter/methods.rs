@@ -139,6 +139,15 @@ impl Interpreter {
 
         // RustType method dispatch — `HashMap.new()`, `Vec.with_capacity(n)`, etc.
         if let Value::RustType { ref name } = obj {
+            if name == "SystemTime" && method == "now" {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| err(format!("SystemTime.now: {e}"), line))?
+                    .as_nanos();
+                return Ok(make_object("SystemTime".to_string(), vec![
+                    ("unixNanos".to_string(), Value::Uint128(nanos)),
+                ]));
+            }
             // `new` → same as calling the constructor
             if method == "new" {
                 return Self::construct_rust_type(name, args, line);
@@ -564,6 +573,41 @@ impl Interpreter {
                     let inner = inner_rc.borrow();
                     (inner.type_name.clone(), inner.fields.clone())
                 };
+                if type_name == "SystemTime" && method == "durationSince" {
+                    let current = fields.iter().find_map(|(name, value)| {
+                        if name == "unixNanos" {
+                            if let Value::Uint128(nanos) = value { Some(*nanos) } else { None }
+                        } else { None }
+                    }).ok_or_else(|| err("invalid SystemTime value", line))?;
+                    let earlier = match args.first() {
+                        Some(Value::RustType { name }) if name == "UNIX_EPOCH" => 0,
+                        Some(Value::Object(value)) => {
+                            let value = value.borrow();
+                            if value.type_name != "SystemTime" {
+                                return Err(err("durationSince expects a SystemTime", line));
+                            }
+                            value.fields.iter().find_map(|(name, value)| {
+                                if name == "unixNanos" {
+                                    if let Value::Uint128(nanos) = value { Some(*nanos) } else { None }
+                                } else { None }
+                            }).ok_or_else(|| err("invalid SystemTime value", line))?
+                        }
+                        _ => return Err(err("durationSince expects a SystemTime", line)),
+                    };
+                    let nanos = current.checked_sub(earlier)
+                        .ok_or_else(|| err("the second SystemTime is later than the first", line))?;
+                    return Ok(make_object("Duration".to_string(), vec![
+                        ("nanos".to_string(), Value::Uint128(nanos)),
+                    ]));
+                }
+                if type_name == "Duration" && method == "asSecs" {
+                    let nanos = fields.iter().find_map(|(name, value)| {
+                        if name == "nanos" {
+                            if let Value::Uint128(nanos) = value { Some(*nanos) } else { None }
+                        } else { None }
+                    }).ok_or_else(|| err("invalid Duration value", line))?;
+                    return Ok(Value::Uint64((nanos / 1_000_000_000) as u64));
+                }
                 let struct_val = self.global.borrow().get(&type_name);
                 if let Some(Value::Struct { decl, captured }) = struct_val {
                     // Push type-param bindings inferred from this object's field values,

@@ -542,6 +542,7 @@ transpile_test!(typed_catch_match_error);
 // impls) the same way a regular throwing function's typed throws_ty already is.
 transpile_test!(type_def_typed_throws);
 transpile_test!(type_method_throws_untyped);
+transpile_test!(system_time);
 // An untyped `let x = "literal"` local (no `let string x = ...` annotation) was left as
 // a raw `&'static str` instead of Boring's normal `Arc<str>`/`Rc<str>` `string`
 // representation -- fine at the `let` site itself (a literal has `'static` lifetime),
