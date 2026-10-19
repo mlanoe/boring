@@ -788,6 +788,7 @@ interp_test!(fn_field_bare_call);
 interp_test!(array_move_remove_indices);
 interp_test!(array_block_for_transpile);
 error_test!(array_block_wrong_type);
+error_test!(error_dot_variant_unknown);
 error_test!(trait_downcast_not_implementor);
 
 // A multiline trailing closure/trailing body used as a bare expression-statement

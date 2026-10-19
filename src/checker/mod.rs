@@ -310,6 +310,9 @@ struct Checker {
     /// `check_fn` call so a nested `fn` (via `Stmt::Fn`) doesn't inherit `main`'s
     /// authorization.
     in_authorized_static_site: bool,
+    /// Declared return type of the enclosing fn/method; `None` at top level and inside
+    /// closures (which must not inherit it). Used by `return .X` variant checking.
+    current_return_ty: Option<Type>,
     /// Statement-nesting recursion-depth counter — incremented on every `check_stmt`
     /// entry, decremented on exit. The parser already bounds nested-block depth
     /// (`parser::MAX_EXPR_DEPTH`, see `tests_recursion_depth::block_nesting_is_bounded`),
@@ -354,6 +357,7 @@ impl Checker {
             // `check_fn` — this default is what makes them authorized without either
             // arm needing to set it explicitly.
             in_authorized_static_site: true,
+            current_return_ty: None,
             depth: 0,
         }
     }
@@ -1426,6 +1430,7 @@ impl Checker {
         // otherwise wrongly inherit the saved `true` below through this same call).
         let prev_static_site = self.in_authorized_static_site;
         self.in_authorized_static_site = f.name == "main";
+        let prev_return_ty = std::mem::replace(&mut self.current_return_ty, f.return_ty.clone());
         for p in &f.params {
             if p.mutable {
                 self.check_qualifier_constraint(&BindingKind::Mut, false, &p.ty, p.line, p.col);
@@ -1449,6 +1454,7 @@ impl Checker {
         for stmt in &f.body { self.check_stmt(stmt); }
         self.check_kernel_copy_writes(f);
         self.in_authorized_static_site = prev_static_site;
+        self.current_return_ty = prev_return_ty;
         self.pop_scope();
         self.check_missing_return(f);
     }
@@ -1571,6 +1577,60 @@ impl Checker {
         }
     }
 
+    /// `.Variant` shorthand against a known expected enum type: reject a variant the enum
+    /// doesn't declare. Without this `boring run` accepted it (the interpreter degrades an
+    /// unresolved `.X` to a string marker) while `boring build` failed later in rustc with
+    /// E0599. Silent for an unknown/native/generic-erased enum (empty variant list), where
+    /// the true variant set isn't visible here.
+    fn check_dot_variant(&mut self, value: &Expr, expected: &Type) {
+        if self.kernel_dispatch_only { return; }
+        let ExprKind::DotIdent(variant) = &value.kind else { return };
+        let name = match Self::strip_qualifiers(expected.without_mut()) {
+            Type::Named(n) => n,
+            _ => return,
+        };
+        let Some(variants) = self.enums.get(name) else { return };
+        if variants.is_empty() || variants.iter().any(|v| v == variant) { return; }
+        let msg = format!(
+            "enum '{}' has no variant '{}' (variants: {})",
+            name, variant, variants.join(", "),
+        );
+        self.error(msg, value.line, value.col);
+    }
+
+    /// Apply `check_dot_variant` to the arguments of a call whose callee is a struct/view
+    /// constructor (labeled args, by field type) or a non-overloaded free function
+    /// (positional or labeled, by parameter type).
+    fn check_call_dot_variants(&mut self, callee: &Expr, args: &[Arg]) {
+        if self.kernel_dispatch_only { return; }
+        let ExprKind::Var(name) = &callee.kind else { return };
+        if self.lookup(name).is_some() { return; }
+        let mut checks: Vec<(&Expr, Type)> = Vec::new();
+        if let Some(fields) = self.struct_field_types.get(name.as_str()) {
+            for a in args {
+                if a.spread || a.default_rest { continue; }
+                let Some(label) = &a.label else { continue };
+                if let Some((_, ty)) = fields.iter().find(|(f, _)| f == label) {
+                    checks.push((&a.value, ty.clone()));
+                }
+            }
+        } else if !self.fn_overloaded.contains(name.as_str()) {
+            let (Some(tys), Some(arity)) = (self.fn_param_types.get(name.as_str()), self.fn_arity.get(name.as_str())) else { return };
+            if args.iter().any(|a| a.spread || a.default_rest) { return; }
+            let mut pos = 0;
+            for a in args {
+                let idx = match &a.label {
+                    Some(l) => arity.param_names.iter().position(|n| n == l),
+                    None => { pos += 1; Some(pos - 1) }
+                };
+                let Some(i) = idx else { continue };
+                if arity.param_names.len() != tys.len() { continue; }
+                if let Some(Some(ty)) = tys.get(i) { checks.push((&a.value, ty.clone())); }
+            }
+        }
+        for (v, ty) in checks { self.check_dot_variant(v, &ty); }
+    }
+
     fn check_call_arity(&mut self, callee: &Expr, args: &[Arg], line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
         let ExprKind::Var(name) = &callee.kind else { return };
@@ -1652,7 +1712,12 @@ impl Checker {
             Stmt::Let(s) => self.check_let_stmt(s),
             Stmt::LetDestructure(s) => self.check_let_destructure(s),
             Stmt::Expr(e)      => self.check_expr(e),
-            Stmt::Return(r)    => { if let Some(v) = &r.value { self.check_expr(v); } }
+            Stmt::Return(r)    => {
+                if let Some(v) = &r.value {
+                    self.check_expr(v);
+                    if let Some(rt) = self.current_return_ty.clone() { self.check_dot_variant(v, &rt); }
+                }
+            }
             Stmt::Throw(t)     => { if let Some(v) = &t.value { self.check_expr(v); } }
             Stmt::If(s)        => self.check_if(s),
             Stmt::IfLet(s)     => self.check_if_let(s),
@@ -1736,6 +1801,7 @@ impl Checker {
         self.check_atomic_compatibility(&s.ty, s.line, s.col);
         self.check_observed_compatibility(&s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
+        if let (Some(ty), Some(v)) = (&s.ty, &s.value) { self.check_dot_variant(v, ty); }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
         if let (Some(target_ty), Some(v)) = (&s.ty, &s.value) {
@@ -2181,6 +2247,7 @@ impl Checker {
                 self.check_kernel_dispatch_qualifier(callee, expr.line, expr.col);
                 self.check_removed_device_syntax(callee, expr.line, expr.col);
                 self.check_call_arity(callee, args, expr.line, expr.col);
+                self.check_call_dot_variants(callee, args);
                 // A resident value passed as a bare argument at a position the callee
                 // is known to consume residently (`fn_gpu_arg_params`, populated by
                 // `scan_fn_gpu_arg_params`) is legal without `with` first — that's the
@@ -2375,6 +2442,7 @@ impl Checker {
                 if let Some(g) = &config.grid  { self.check_expr(g); }
             }
             ExprKind::Closure(params, _, body, _, _) => {
+                let prev_return_ty = self.current_return_ty.take();
                 self.push_scope();
                 for p in params { self.define_param(p); }
                 match body {
@@ -2382,6 +2450,7 @@ impl Checker {
                     ClosureBody::Block(stmts) => self.check_block_in_current_scope(stmts),
                 }
                 self.pop_scope();
+                self.current_return_ty = prev_return_ty;
             }
             ExprKind::MacroCall { args, .. } => {
                 for a in args { self.check_expr(a); }
@@ -4044,5 +4113,74 @@ mod view_tests {
     fn body_with_parameters_and_duplicate_body_are_rejected() {
         assert!(has(&errors_for("view V:\n    body(int x): native\n"), "takes no parameters"));
         assert!(has(&errors_for("view V:\n    body(): native\n    body(): native\n"), "more than once"));
+    }
+}
+
+#[cfg(test)]
+mod dot_variant_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    const ENUM: &str = "enum Axis:\n    Leading\n    Center\n    Trailing\n\n";
+
+    fn assert_names_enum(src: &str) {
+        let errs = errors_for(&format!("{ENUM}{src}"));
+        assert!(
+            errs.iter().any(|e| e.contains("enum 'Axis' has no variant 'Top'") && e.contains("Leading, Center, Trailing")),
+            "expected an unknown-variant error naming the enum and its variants, got {errs:?}"
+        );
+    }
+
+    fn assert_clean(src: &str) {
+        let errs = errors_for(&format!("{ENUM}{src}"));
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn unknown_variant_in_labeled_ctor_arg_is_rejected() {
+        assert_names_enum("struct Box:\n    Axis alignment = .Center\n\ndef main():\n    let b = Box(alignment = .Top)\n");
+    }
+
+    #[test]
+    fn unknown_variant_in_view_ctor_arg_is_rejected() {
+        assert_names_enum("view Row:\n    Axis alignment = .Center\n    body(): native\n\ndef main():\n    let r = Row(alignment = .Top)\n");
+    }
+
+    #[test]
+    fn unknown_variant_in_fn_arg_is_rejected() {
+        assert_names_enum("def f(Axis a):\n    print \"{a}\"\n\ndef main():\n    f(.Top)\n    f(a = .Top)\n");
+    }
+
+    #[test]
+    fn unknown_variant_in_typed_let_is_rejected() {
+        assert_names_enum("def main():\n    let Axis a = .Top\n");
+    }
+
+    #[test]
+    fn unknown_variant_in_return_is_rejected() {
+        assert_names_enum("Axis pick():\n    return .Top\n\ndef main():\n    print \"{pick()}\"\n");
+    }
+
+    #[test]
+    fn valid_return_variant_and_closure_return_are_fine() {
+        assert_clean("Axis pick():\n    return .Center\n\ndef main():\n    print \"{pick()}\"\n");
+    }
+
+    #[test]
+    fn nested_fn_and_closure_do_not_inherit_enclosing_return_type() {
+        assert_clean("enum Other:\n    Top\n\nAxis pick():\n    def Other inner():\n        return .Top\n    let f = (int n): inner()\n    return .Center\n\ndef main():\n    print \"{pick()}\"\n");
+    }
+
+    #[test]
+    fn valid_variants_and_unknown_expected_types_are_fine() {
+        assert_clean("struct Box:\n    Axis alignment = .Center\n\ndef f(Axis a):\n    print \"{a}\"\n\ndef main():\n    let b = Box(alignment = .Leading)\n    f(.Trailing)\n    let Axis a = .Center\n");
+        // Expected type is not a known enum: nothing to check against.
+        assert_clean("struct Box:\n    int n\n\ndef main():\n    let x = .Top\n");
     }
 }

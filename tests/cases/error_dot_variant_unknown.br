@@ -1,0 +1,15 @@
+# Negative test: `.Top` is not a variant of `AxisAlignment`. `boring run` used to accept it
+# (degrading to a string marker) while `boring build` failed in rustc with E0599; the checker
+# now rejects it for both with a message naming the enum and its variants.
+
+enum AxisAlignment:
+    Leading
+    Center
+    Trailing
+
+struct Box:
+    AxisAlignment alignment = .Center
+
+def main():
+    let b = Box(alignment = .Top)
+    print "{b.alignment}"
