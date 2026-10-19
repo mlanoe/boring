@@ -2313,7 +2313,15 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
     }
 
     if let Err(e) = interp.exec_program(&program) {
-        report_error(&path, &source, e.line, e.col, e.len, &e.message);
+        // An error raised inside an imported module carries that module's file: report
+        // against it (and its own source line), not the entry file.
+        match e.file.as_ref().filter(|f| !f.as_os_str().is_empty()) {
+            Some(file) => {
+                let file_source = std::fs::read_to_string(file).unwrap_or_default();
+                report_error(file, &file_source, e.line, e.col, e.len, &e.message);
+            }
+            None => report_error(&path, &source, e.line, e.col, e.len, &e.message),
+        }
         process::exit(1);
     }
 

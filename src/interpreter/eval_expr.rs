@@ -1777,7 +1777,7 @@ impl Interpreter {
 
             ExprKind::ArrayFill { value, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0, file: None })) };
                 check_alloc_count(n, expr.line)?;
                 let v = self.eval_expr(value, Rc::clone(&env))?;
                 Ok(Value::Array(vec![v; n].into()))
@@ -1785,14 +1785,14 @@ impl Interpreter {
 
             ExprKind::ArrayAlloc { count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0, file: None })) };
                 check_alloc_count(n, expr.line)?;
                 Ok(Value::Array(vec![Value::Int(0); n].into()))
             }
 
             ExprKind::ArrayComp { expr, var, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n.max(0) as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0, file: None })) };
                 check_alloc_count(n, expr.line)?;
                 let mut vals = Vec::with_capacity(n);
                 for i in 0..n {
@@ -1807,7 +1807,7 @@ impl Interpreter {
                 let col = self.eval_expr(iter, Rc::clone(&env))?;
                 let elems: Vec<Value> = match col {
                     Value::Array(v) => Rc::try_unwrap(v).unwrap_or_else(|rc| (*rc).clone()),
-                    _ => return Err(Signal::Error(RuntimeError { message: "array comprehension source must be an array".into(), line: expr.line, col: 0, len: 0 })),
+                    _ => return Err(Signal::Error(RuntimeError { message: "array comprehension source must be an array".into(), line: expr.line, col: 0, len: 0, file: None })),
                 };
                 let mut vals = Vec::with_capacity(elems.len());
                 for item in elems {

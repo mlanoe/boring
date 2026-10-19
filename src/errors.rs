@@ -30,22 +30,25 @@ pub struct SourceError {
     /// (see `main.rs`'s `report_error`/`report_warning`). `1` is a reasonable
     /// default for a call site that doesn't track the real span.
     pub len: usize,
+    /// Source file the error occurred in when it is *not* the entry file (an imported
+    /// module's function/top-level raised it). `None` = the file being run/compiled.
+    pub file: Option<std::path::PathBuf>,
 }
 
 impl SourceError {
     pub fn new(message: impl Into<String>, line: usize, col: usize, len: usize) -> Self {
-        SourceError { message: message.into(), line, col, len }
+        SourceError { message: message.into(), line, col, len, file: None }
     }
 
     /// Column/span unknown — e.g. an error attributed to a whole line/statement
     /// rather than a specific token.
     pub fn at_line(message: impl Into<String>, line: usize) -> Self {
-        SourceError { message: message.into(), line, col: 0, len: 0 }
+        SourceError { message: message.into(), line, col: 0, len: 0, file: None }
     }
 
     /// Column known, span not tracked — underlines a single character.
     pub fn at(message: impl Into<String>, line: usize, col: usize) -> Self {
-        SourceError { message: message.into(), line, col, len: 1 }
+        SourceError { message: message.into(), line, col, len: 1, file: None }
     }
 }
 

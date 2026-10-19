@@ -1668,7 +1668,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
-                    _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line, col: 0, len: 0 })),
+                    _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line, col: 0, len: 0, file: None })),
                 }
             } else {
                 // min(a, b)
@@ -1682,7 +1682,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     (Value::Float64(x), Value::Int(y)) => Ok(if *x <= (*y as f64) { a } else { b }),
                     (Value::Int(x), Value::Float32(y)) => Ok(if (*x as f32) <= *y { a } else { b }),
                     (Value::Float32(x), Value::Int(y)) => Ok(if *x <= (*y as f32) { a } else { b }),
-                    _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0 })),
+                    _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0, file: None })),
                 }
             }
         },
@@ -1698,7 +1698,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
-                    _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0 })),
+                    _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0, file: None })),
                 }
             } else {
                 let a = args.first().cloned().unwrap_or(Value::Nil);
@@ -1711,7 +1711,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     (Value::Float64(x), Value::Int(y)) => Ok(if *x >= (*y as f64) { a } else { b }),
                     (Value::Int(x), Value::Float32(y)) => Ok(if (*x as f32) >= *y { a } else { b }),
                     (Value::Float32(x), Value::Int(y)) => Ok(if *x >= (*y as f32) { a } else { b }),
-                    _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0 })),
+                    _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0, file: None })),
                 }
             }
         },
@@ -1726,7 +1726,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
             // free-function form (as opposed to `x.abs()`, handled in methods.rs) must
             // keep its width, not error out as "not a number".
             Some(Value::Float32(f)) => Ok(Value::Float32(f.abs())),
-            _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line, col: 0, len: 0 })),
+            _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line, col: 0, len: 0, file: None })),
         },
     });
     e.define("floor", Value::NativeFn {
@@ -1738,7 +1738,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
             // `validator::kernel`'s doc comment on FLOAT_MATH_FNS) — a float32
             // input truncates to an Int the same way a float64 one does.
             Some(Value::Float32(f)) => Ok(Value::Int(f.floor() as i64)),
-            _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line, col: 0, len: 0 })),
+            _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line, col: 0, len: 0, file: None })),
         },
     });
     e.define("ceil", Value::NativeFn {
@@ -1747,7 +1747,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
             Some(Value::Float64(f)) => Ok(Value::Int(f.ceil() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             Some(Value::Float32(f)) => Ok(Value::Int(f.ceil() as i64)),
-            _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0 })),
+            _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0, file: None })),
         },
     });
     e.define("round", Value::NativeFn {
@@ -1756,7 +1756,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
             Some(Value::Float64(f)) => Ok(Value::Int(f.round() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             Some(Value::Float32(f)) => Ok(Value::Int(f.round() as i64)),
-            _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0 })),
+            _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0, file: None })),
         },
     });
     e.define("sqrt", Value::NativeFn {
@@ -1767,7 +1767,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
             // See the `abs` free function above — preserve float32 width instead of
             // rejecting it as "not a number".
             Some(Value::Float32(f)) => Ok(Value::Float32(f.sqrt())),
-            _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line, col: 0, len: 0 })),
+            _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line, col: 0, len: 0, file: None })),
         },
     });
     e.define("readLine", Value::NativeFn {
@@ -2313,6 +2313,9 @@ pub struct Interpreter {
     /// constants have no such fallback). See `exec_use`/`exec_boring_stdlib_use`/
     /// `exec_named_dep_use`, which all share this cache.
     loaded_modules: HashMap<PathBuf, (Rc<Program>, EnvRef)>,
+    /// Scope env of every module loaded from a real `.br` file, so a runtime error can be
+    /// attributed to the file whose code raised it (see `tag_error_file`).
+    module_files: Vec<(EnvRef, PathBuf)>,
     /// Named dependencies on other Boring projects, declared in the current project's
     /// `boring.toml` `[deps]` section (see `docs/cross-project-code-sharing-gap.md`) and
     /// resolved by `main.rs::run_file` before `exec_program` runs. Maps a dependency name
@@ -2524,6 +2527,7 @@ impl Interpreter {
             search_paths: Vec::new(),
             loaded: HashSet::new(),
             loaded_modules: HashMap::new(),
+            module_files: Vec::new(),
             deps: HashMap::new(),
             task_context: true,  // top-level is implicitly task context
             kernel_context: false,
@@ -2572,6 +2576,7 @@ impl Interpreter {
             search_paths: Vec::new(),
             loaded: HashSet::new(),
             loaded_modules: HashMap::new(),
+            module_files: Vec::new(),
             deps: HashMap::new(),
             task_context: false,
             kernel_context: false,
@@ -2702,7 +2707,7 @@ impl Interpreter {
                     Signal::Error(e) => return Err(e),
                     Signal::Exception(v) => return Err(RuntimeError {
                         message: format!("unhandled exception: {}", v),
-                        line: 0, col: 0, len: 0,
+                        line: 0, col: 0, len: 0, file: None,
                     }),
                     _ => {}
                 }
@@ -2731,7 +2736,7 @@ impl Interpreter {
                         // at the program level — just give a clear message.
                         return Err(RuntimeError {
                             message: format!("unhandled exception in main: {}", v),
-                            line: 0, col: 0, len: 0,
+                            line: 0, col: 0, len: 0, file: None,
                         });
                     }
                     _ => {}
@@ -2828,6 +2833,31 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Attribute a runtime error to the file whose code raised it. The innermost frame to see
+    /// the error wins: an imported module's file when `scope` descends from that module's env,
+    /// else an empty path (= the entry file). Without this, a line number from an imported
+    /// module was printed against the entry file.
+    pub(crate) fn tag_error_file<T>(&self, scope: &EnvRef, result: Result<T, Signal>) -> Result<T, Signal> {
+        match result {
+            Err(Signal::Error(mut e)) if e.file.is_none() => {
+                e.file = Some(self.file_for_env(scope).unwrap_or_default());
+                Err(Signal::Error(e))
+            }
+            other => other,
+        }
+    }
+
+    fn file_for_env(&self, scope: &EnvRef) -> Option<PathBuf> {
+        let mut cur = Some(Rc::clone(scope));
+        while let Some(env) = cur {
+            if let Some((_, path)) = self.module_files.iter().find(|(m, _)| Rc::ptr_eq(m, &env)) {
+                return Some(path.clone());
+            }
+            cur = env.borrow().parent.clone();
+        }
+        None
+    }
+
     fn exec_use(&mut self, decl: &UseDecl, env: EnvRef) -> Result<(), Signal> {
         // Convert `use a.b.c` → relative path `a/b/c.br`
         let rel: PathBuf = decl.path.iter().collect::<PathBuf>().with_extension("br");
@@ -2912,8 +2942,10 @@ impl Interpreter {
         let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
+        self.module_files.push((Rc::clone(&module_env), canonical.clone()));
         for item in &program.items {
-            self.exec_item(item, Rc::clone(&module_env))?;
+            let r = self.exec_item(item, Rc::clone(&module_env));
+            self.tag_error_file(&module_env, r)?;
         }
         self.loaded.remove(&canonical);
         let program = Rc::new(program);
@@ -3076,8 +3108,10 @@ impl Interpreter {
         let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
+        self.module_files.push((Rc::clone(&module_env), canonical.clone()));
         for item in &program.items {
-            self.exec_item(item, Rc::clone(&module_env))?;
+            let r = self.exec_item(item, Rc::clone(&module_env));
+            self.tag_error_file(&module_env, r)?;
         }
         self.loaded.remove(&canonical);
         let program = Rc::new(program);
@@ -3531,7 +3565,7 @@ impl Interpreter {
                         func: |args, line| {
                             args.first().cloned().ok_or_else(|| Signal::Error(RuntimeError {
                                 line,
-                                message: "newtype constructor requires one argument".into(), col: 0, len: 0,
+                                message: "newtype constructor requires one argument".into(), col: 0, len: 0, file: None,
                             }))
                         },
                     });

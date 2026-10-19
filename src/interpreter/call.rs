@@ -22,10 +22,12 @@ impl Interpreter {
             self.call_depth -= 1;
             return Err(Signal::Error(RuntimeError {
                 message: format!("call stack overflow: function calls nested too deeply (limit: {})", MAX_CALL_DEPTH),
-                line, col: 0, len: 0,
+                line, col: 0, len: 0, file: None,
             }));
         }
+        let scope = Rc::clone(&captured);
         let result = self.call_fn_inner(decl, captured, args, line, in_throws_context);
+        let result = self.tag_error_file(&scope, result);
         self.call_depth -= 1;
         if is_singleton {
             if let Ok(val) = &result {
@@ -372,10 +374,12 @@ impl Interpreter {
             self.call_depth -= 1;
             return Err(Signal::Error(RuntimeError {
                 message: format!("call stack overflow: function calls nested too deeply (limit: {})", MAX_CALL_DEPTH),
-                line, col: 0, len: 0,
+                line, col: 0, len: 0, file: None,
             }));
         }
+        let scope = Rc::clone(&captured);
         let result = self.call_closure_inner(params, body, captured, args, line);
+        let result = self.tag_error_file(&scope, result);
         self.call_depth -= 1;
         result
     }
@@ -415,7 +419,7 @@ impl Interpreter {
             self.call_depth -= 1;
             return Err(Signal::Error(RuntimeError {
                 message: format!("call stack overflow: function calls nested too deeply (limit: {})", MAX_CALL_DEPTH),
-                line, col: 0, len: 0,
+                line, col: 0, len: 0, file: None,
             }));
         }
         let result = self.call_type_method_inner(type_name, method, args, captured, line);
