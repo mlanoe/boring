@@ -250,6 +250,15 @@ pub struct TranspileOutput {
     pub gpu_main_emitted: bool,
 }
 
+/// True when `code` contains a `Box<dyn` that isn't path-qualified (`std::boxed::Box<dyn`) —
+/// i.e. one that would resolve to a user-declared `Box` type instead of std's.
+fn contains_bare_box_dyn(code: &str) -> bool {
+    code.match_indices("Box<dyn").any(|(i, _)| {
+        let before = &code[..i];
+        !before.ends_with("::") && !before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+    })
+}
+
 pub fn transpile(program: &Program) -> String {
     transpile_full(program).code
 }
@@ -330,12 +339,29 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
         .chain(t.modules.iter().map(|(_, c)| c.as_str()))
         .collect::<Vec<_>>()
         .concat();
+    // A user `struct Box` shadows `std::boxed::Box` in the single generated Rust namespace.
+    // The few sites that know about it (`user_defines_box`) emit `std::boxed::Box`, but trait
+    // objects (`Box<dyn Trait>`), `throws`, and friends still emit a bare `Box<dyn ...>`, which
+    // rustc rejects as E0107 far from the cause. Name the clash instead.
+    let mut box_clash: Option<TranspileError> = None;
+    if t.user_defines_box && contains_bare_box_dyn(&all_code_combined) {
+        let (line, col) = program.items.iter().find_map(|i| match i {
+            Item::Struct(s) if s.name == "Box" => Some((s.line, s.col)),
+            _ => None,
+        }).unwrap_or((0, 0));
+        box_clash = Some(TranspileError::at(
+            "the type name `Box` collides with Rust's `std::boxed::Box`, which the generated code \
+             uses for trait objects and errors (`Box<dyn ...>`); rename this struct (for example \
+             `Area` instead of `Box`)", line, col));
+    }
     let code = if all_code_combined.contains("enum Value {") && all_code_combined.contains("fn value_equals(") {
         code + "\nimpl PartialEq for Value {\n    fn eq(&self, other: &Self) -> bool { value_equals(self.clone(), other.clone()) }\n}\nimpl Eq for Value {}\n"
     } else {
         code
     };
-    TranspileOutput { code, errors: t.errors.into_inner(), warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get() }
+    let mut errors = t.errors.into_inner();
+    errors.extend(box_clash);
+    TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get() }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────

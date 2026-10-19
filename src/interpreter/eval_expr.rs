@@ -472,10 +472,17 @@ impl Interpreter {
         }
     }
 
+    /// True when `name` resolves to a user-defined function/closure rather
+    /// than the interpreter's own native builtin — a user `def channel(...)`
+    /// must win over the special-cased `channel`/`timeout` handling.
+    fn user_shadows_builtin(env: &EnvRef, name: &str) -> bool {
+        matches!(env.borrow().get(name), Some(Value::Fn { .. } | Value::Closure { .. }))
+    }
+
     fn eval_expr_call(&mut self, callee_expr: &Expr, args: &[Arg], env: EnvRef, line: usize) -> Eval {
         // channel/oneshot/broadcast/watch without type args: return (Sender, Receiver) pair
         if let ExprKind::Var(name) = &callee_expr.kind {
-            if matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
+            if !Self::user_shadows_builtin(&env, name) && matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
                 let buf = Rc::new(RefCell::new(VecDeque::new()));
                 let closed = Rc::new(RefCell::new(false));
                 let sender = Value::Channel { buf: Rc::clone(&buf), closed: Rc::clone(&closed), is_sender: true };
@@ -486,7 +493,7 @@ impl Interpreter {
             // Two forms:
             //   timeout(dur, task f(args))  — second arg is already a Future expression
             //   timeout(dur, f)             — second arg is a Callable<T>: call it to get Future
-            if name.as_str() == "timeout" {
+            if !Self::user_shadows_builtin(&env, name) && name.as_str() == "timeout" {
                 if let Some(fut_arg) = args.get(1) {
                     let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
                     // If the second arg is a Fn/Closure (Callable<T>), call it with no args.
@@ -1380,14 +1387,14 @@ impl Interpreter {
         // Special built-ins that need type info (like `channel`) return a pair of arrays
         // as a synchronous simulation: (sender_items, receiver_items) backed by a Vec.
         if let ExprKind::Var(name) = &callee.kind {
-            if matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
+            if !Self::user_shadows_builtin(&env, name) && matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
                 let buf = Rc::new(RefCell::new(VecDeque::new()));
                 let closed = Rc::new(RefCell::new(false));
                 let sender = Value::Channel { buf: Rc::clone(&buf), closed: Rc::clone(&closed), is_sender: true };
                 let receiver = Value::Channel { buf, closed, is_sender: false };
                 return Ok(Value::Tuple(vec![sender, receiver]));
             }
-            if name.as_str() == "timeout" {
+            if !Self::user_shadows_builtin(&env, name) && name.as_str() == "timeout" {
                 if let Some(fut_arg) = args.get(1) {
                     let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
                     return match val {

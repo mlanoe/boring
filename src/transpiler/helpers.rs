@@ -2307,7 +2307,19 @@ pub(crate) fn infer_overload_expr_type(
         ExprKind::Bool(_)                             => Some(Type::Bool),
         ExprKind::Nil                                 => Some(Type::Optional(Box::new(Type::Void))),
         ExprKind::Str(_) | ExprKind::StringInterp(_) => Some(Type::Str),
-        ExprKind::Array(_) | ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. } | ExprKind::ArrayComp { .. } | ExprKind::ArrayCompIter { .. } => Some(Type::Array(Box::new(Type::Int))),
+        // Element type from the first element / fill value (a hardcoded `[int]` made every array
+        // literal fail to match a `[float]`/`[string]` overload, silently falling back to the
+        // first declared overload). Unknown (empty literal, alloc, comprehension) stays `None`
+        // so the caller's optimistic-match default applies.
+        ExprKind::Array(elems) => {
+            let first = elems.first()?;
+            infer_overload_expr_type(first, var_types, fn_return_types, struct_fields)
+                .map(|t| Type::Array(Box::new(t)))
+        }
+        ExprKind::ArrayFill { value, .. } => {
+            infer_overload_expr_type(value, var_types, fn_return_types, struct_fields)
+                .map(|t| Type::Array(Box::new(t)))
+        }
         ExprKind::Var(name) => var_types.get(name.as_str()).cloned(),
         ExprKind::Call(callee, _) => {
             if let ExprKind::Var(fn_name) = &callee.kind {
@@ -2394,7 +2406,9 @@ pub(crate) fn overloads_conflict(a: &crate::ast::FnDecl, b: &crate::ast::FnDecl)
 
 fn strip_qual_helper(ty: &Type) -> &Type {
     match ty {
-        Type::Qualified(inner, _) => strip_qual_helper(inner),
+        // `mut [float] cur` is `Type::Mut(..)`: the `mut` modifier is part of the parameter
+        // declaration, not of the type an argument expression infers to.
+        Type::Qualified(inner, _) | Type::Mut(inner) => strip_qual_helper(inner),
         other => other,
     }
 }
