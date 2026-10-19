@@ -1,0 +1,20 @@
+# A trailing array block (`for` inside) whose call carries a multi-line callback closure: the `do:` block's tail is
+# still recognised as an already-shared pointer (it used to be wrapped a second time: Arc<Arc<List>>).
+use boring.ui.*
+
+view Plain:
+    state string selection = ""
+    state [string] items = ["a"]
+
+    def dropAt(int i):
+        selection = "x"
+
+    body():
+        List(selection = selection, onDelete = (indices):
+            self.dropAt(1)
+            self.dropAt(2)):
+            for item in items with item:
+                Text(item)
+
+def main():
+    print "ok"

@@ -354,8 +354,26 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
             }
             f
         }).collect();
+        let mut fields: Vec<FieldDecl> = fields;
+        if env.view_trait {
+            // The hidden owner link the runtime attaches at mount (see `StateOwner` in stdlib/ui.br).
+            let mut f = owner_field();
+            f.view_kind = None;
+            f.explicit_perm = false;
+            f.is_pub = true;
+            if slot_all {
+                let seed = slot_seed(f.default.as_ref().expect("owner default"));
+                f.ty = slot_type(&f.ty);
+                f.mutable = true;
+                f.default = Some(seed);
+            }
+            fields.push(f);
+        }
         let mut state = plain_struct(state_name.clone(), s.is_pub, fields, s.line, s.col);
-        if env.view_trait { state.protocols.push("StateBox".to_string()); }
+        if env.view_trait {
+            state.protocols.push("StateBox".to_string());
+            state.methods.extend(owner_touch_methods(slot_all));
+        }
         generated.push(state);
     }
     if !env_fields.is_empty() {
@@ -370,6 +388,14 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
         generated.push(plain_struct(env_name.clone(), s.is_pub, fields, s.line, s.col));
     }
 
+    // Names a callback must not reach if it is to be owner-local: inputs, `bind`s and `env`s.
+    let mut outside_names: HashSet<String> = s.fields.iter()
+        .filter(|f| f.view_kind.is_none())
+        .map(|f| f.name.clone())
+        .collect();
+    outside_names.extend(binds.iter().cloned());
+    outside_names.extend(envs.iter().cloned());
+    outside_names.insert(ENV.to_string());
     // The description keeps inputs; a `bind` input becomes a shared slot handle.
     s.fields = s.fields.iter().filter_map(|f| match f.view_kind {
         None => Some(f.clone()),
@@ -440,6 +466,9 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
             rewrite_body(&mut m.body, &ctx, &view_name, &mut failure);
         }
         if let Some(e) = failure { return Err(e); }
+        if env.view_trait && has_state && !native {
+            report_callbacks(&mut s.methods, &outside_names);
+        }
     }
     if !projections.is_empty() {
         let registry_refs: Vec<String> = (0..projections.len()).map(|k| {
@@ -455,7 +484,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
         s.methods.extend(methods);
     }
     if env.view_trait {
-        s.methods.extend(view_methods(&s, native, has_state, has_env, &state_name, &seeds, &env_fields));
+        s.methods.extend(view_methods(&s, native, has_state, has_env, slot_all, &state_name, &seeds, &env_fields));
     }
     // Transpiled output: `body()` is the `<View>` opaque return the parser gave it, which Rust
     // can only satisfy with ONE concrete type — but a body may return `Row` on one branch and
@@ -475,7 +504,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
 /// of a native container, a native `KeyedGroup`'s key/site, and — for a composite view — the
 /// state seed and `expand`, which re-enters the lowered `body(__st)` with the node's own state.
 /// Parsed from source text so the generated methods are exactly what the parser would produce.
-fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, state_name: &str, seeds: &[(String, bool, Type)], env_fields: &[FieldDecl]) -> Vec<FnDecl> {
+fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, owner_slot: bool, state_name: &str, seeds: &[(String, bool, Type)], env_fields: &[FieldDecl]) -> Vec<FnDecl> {
     let field_ty = |name: &str| s.fields.iter().find(|f| f.name == name).map(|f| strip_mut(&f.ty).clone());
     let mut src = format!("struct G:\n    req string viewKind(): \"{}\"\n", s.name);
     if native {
@@ -599,6 +628,19 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, st
                     seed_field_name(name)
                 ));
                 args.push(if *slotted { format!("{name} = Slot(value = self.{name}__initial())") } else { format!("{name} = self.{name}__initial()") });
+            }
+            // The runtime's own mount: the same state, already linked to its owner (see `StateOwner`).
+            // (Built in one constructor expression: a shared trait object cannot be mutated after boxing.)
+            let owned = if owner_slot { "__owner = Slot(value = owner)" } else { "__owner = owner" };
+            let mut owned_args = args.clone();
+            owned_args.push(owned.to_string());
+            src.push_str(&format!(
+                "    req StateBox'shared newOwnedState(StateOwner owner): {state_name}({})\n",
+                owned_args.join(", ")
+            ));
+            if owner_slot {
+                // (A shared slot has no `Default`: the detached owner is seeded explicitly.)
+                args.push("__owner = Slot(value = StateOwner(id = -1, generation = -1, sink = DirtySink()))".to_string());
             }
             src.push_str(&format!(
                 "    req {state_name} seededState(): {state_name}({})\n    req StateBox'shared newState(): self.seededState()\n",
@@ -1273,4 +1315,130 @@ fn patch_key(body: &mut [Stmt], key: &Expr) {
     };
     let mut noop = |_: &mut Stmt| {};
     Walker { expr: &mut on_expr, stmt: &mut noop }.stmts(body);
+}
+
+
+// ── callback owner reports ─────────────────────────────────────────────────────────────────────
+//
+// A callback a view's body hands to a constructor (`Button(onActivate = (): taps += 1)`) reports to the
+// owner of the `state` it closes over before it runs: `__st.touch__()` when it provably touches nothing
+// but that view's own state (the runtime then re-expands only that composite — the owner is the view
+// whose body *wrote* the closure, wherever the closure ends up placed), `__st.escalate__()` when it
+// reaches anything else (an input, a `bind`, an `env`, a free function), which keeps the runtime's
+// whole-window rebuild. Method-call closures (`items.map((x): ..)`) are not callbacks and run during
+// the body itself, so they are left alone.
+
+/// The hidden `state` field holding the owner link; a detached one (id -1) until the runtime attaches one.
+fn owner_field() -> FieldDecl {
+    let src = "view G:\n    state var mut StateOwner __owner = StateOwner(id = -1, generation = -1, sink = DirtySink())\n";
+    let tokens = crate::lexer::lex(src).expect("owner field lexes");
+    let program = crate::parser::parse(tokens).expect("owner field parses");
+    for item in program.items {
+        if let Item::Struct(g) = item { return g.fields.into_iter().next().expect("owner field"); }
+    }
+    unreachable!("owner field parses to a view")
+}
+
+fn owner_touch_methods(slot: bool) -> Vec<FnDecl> {
+    let owner = if slot { "__owner.value" } else { "__owner" };
+    let src = format!(
+        "struct G:\n    req void touch__():\n        {owner}.touch()\n    req void escalate__():\n        {owner}.escalate()\n"
+    );
+    let tokens = crate::lexer::lex(&src).expect("owner methods lex");
+    let program = crate::parser::parse(tokens).expect("owner methods parse");
+    for item in program.items {
+        if let Item::Struct(g) = item { return g.methods; }
+    }
+    vec![]
+}
+
+/// Whether `body` (with `params` in scope) touches nothing outside the view's own `state` and the
+/// `own` methods it calls; the second value is the own methods it calls.
+fn stays_in_state(body: &mut [Stmt], params: &[String], outside: &HashSet<String>, own: &HashSet<String>) -> (bool, HashSet<String>) {
+    use std::cell::{Cell, RefCell};
+    let locals: RefCell<HashSet<String>> = RefCell::new(params.iter().cloned().collect());
+    let bad = Cell::new(false);
+    let self_ok = Cell::new(0usize);
+    let calls: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    let mut on_expr = |e: &mut Expr| match &e.kind {
+        ExprKind::Closure(ps, ..) => { for p in ps { locals.borrow_mut().insert(p.name.clone()); } }
+        ExprKind::MethodCall(obj, m, _) if matches!(&obj.kind, ExprKind::Var(n) if n == "self") => {
+            if own.contains(m) {
+                self_ok.set(self_ok.get() + 1);
+                calls.borrow_mut().insert(m.clone());
+            } else {
+                bad.set(true);
+            }
+        }
+        ExprKind::Call(callee, _) | ExprKind::GenericCall(callee, ..) => {
+            if let ExprKind::Var(n) = &callee.kind {
+                if n != "print" && n.chars().next().is_some_and(|c| c.is_lowercase()) && !locals.borrow().contains(n) {
+                    bad.set(true);
+                }
+            }
+        }
+        ExprKind::Var(n) => {
+            if n == ST || locals.borrow().contains(n) { return; }
+            if n == "self" {
+                if self_ok.get() > 0 { self_ok.set(self_ok.get() - 1); } else { bad.set(true); }
+            } else if outside.contains(n) {
+                bad.set(true);
+            }
+        }
+        _ => {}
+    };
+    let mut on_stmt = |st: &mut Stmt| match st {
+        Stmt::Let(l) => { locals.borrow_mut().insert(l.name.clone()); }
+        Stmt::LetDestructure(l) => { for b in &l.bindings { locals.borrow_mut().insert(b.name.clone()); } }
+        Stmt::For(f) => { for v in &f.vars { locals.borrow_mut().insert(v.clone()); } }
+        _ => {}
+    };
+    Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(body);
+    let calls = calls.into_inner();
+    (!bad.get(), calls)
+}
+
+fn report_callbacks(methods: &mut [FnDecl], outside: &HashSet<String>) {
+    let own: HashSet<String> = methods.iter().filter(|m| m.name != "body").map(|m| m.name.clone()).collect();
+    // Which own methods stay in state: a fixpoint, since they call each other.
+    let mut info: HashMap<String, (bool, HashSet<String>)> = HashMap::new();
+    for m in methods.iter().filter(|m| own.contains(&m.name)) {
+        let params: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
+        let mut body = m.body.clone();
+        info.insert(m.name.clone(), stays_in_state(&mut body, &params, outside, &own));
+    }
+    let mut local: HashSet<String> = info.iter().filter(|(_, (ok, _))| *ok).map(|(n, _)| n.clone()).collect();
+    loop {
+        let before = local.len();
+        let snapshot = local.clone();
+        local.retain(|n| info[n].1.iter().all(|c| snapshot.contains(c)));
+        if local.len() == before { break; }
+    }
+    let mut on_expr = |e: &mut Expr| {
+        let args = match &mut e.kind {
+            ExprKind::Call(callee, args) if matches!(&callee.kind, ExprKind::Var(n) if n.chars().next().is_some_and(|c| c.is_uppercase())) => args,
+            ExprKind::TrailingArrayBlock { callee, args, .. } if matches!(&callee.kind, ExprKind::Var(n) if n.chars().next().is_some_and(|c| c.is_uppercase())) => args,
+            _ => return,
+        };
+        for a in args.iter_mut().filter(|a| !a.spread) {
+            let ExprKind::Closure(params, _, body, _, _) = &mut a.value.kind else { continue };
+            let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            let mut probe = match &*body {
+                ClosureBody::Block(b) => b.clone(),
+                ClosureBody::Expr(x) => vec![Stmt::Expr((**x).clone())],
+            };
+            let (ok, calls) = stays_in_state(&mut probe, &names, outside, &own);
+            let precise = ok && calls.iter().all(|c| local.contains(c));
+            let mut stmts = parse_stmts(if precise { "__st.touch__()" } else { "__st.escalate__()" });
+            match std::mem::replace(body, ClosureBody::Block(vec![])) {
+                ClosureBody::Block(b) => stmts.extend(b),
+                ClosureBody::Expr(x) => stmts.push(Stmt::Expr(*x)),
+            }
+            *body = ClosureBody::Block(stmts);
+        }
+    };
+    let mut noop = |_: &mut Stmt| {};
+    for m in methods.iter_mut() {
+        Walker { expr: &mut on_expr, stmt: &mut noop }.stmts(&mut m.body);
+    }
 }

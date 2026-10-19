@@ -1,0 +1,60 @@
+# A callback a view's body hands to a constructor reports to the owner of the state it closes over:
+# `touch` when it only reaches its own `state` (directly or through its own methods), `escalate` when
+# it reaches an input / bind / free function. The owner is the view whose body wrote the closure, even
+# when the button ends up under another composite (slot content).
+use boring.ui.*
+
+def log(string s):
+    print "log {s}"
+
+view Panel:
+    string title
+    state int taps = 0
+
+    def bump():
+        taps += 1
+
+    def noisy():
+        log("noisy")
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Button(label = "inc", onActivate = ():
+                taps += 1)
+            Button(label = "method", onActivate = ():
+                self.bump())
+            Button(label = "title", onActivate = ():
+                print title)
+            Button(label = "free", onActivate = ():
+                log("x"))
+            Button(label = "viamethod", onActivate = ():
+                self.noisy())
+            Button(label = "mapped", onActivate = ():
+                let xs = [1, 2].map((x): x + taps)
+                print xs.length)
+
+view Shell:
+    View content
+    state int own = 0
+    body():
+        Column(alignment = .Center, spacing = nil):
+            content
+
+def main():
+    mut DirtySink'actor sink = DirtySink()
+    let panel = Panel(title = "t")
+    let st = panel.newOwnedState(StateOwner(id = 7, generation = 3, sink = sink))
+    let col = panel.expand(st)
+    # No report happens while the body expands.
+    print sink.reports
+    for i in 0..<6:
+        let before = sink.reports
+        let all = sink.all
+        col.viewChildren()[i].viewAct("activate", "")
+        print "{i}: reports+{sink.reports - before} all={sink.all}"
+        sink.clear()
+    # A node with no owner attached: the report is a no-op.
+    let loose = Panel(title = "u")
+    let lst = loose.newState()
+    loose.expand(lst).viewChildren()[0].viewAct("activate", "")
+    print sink.reports

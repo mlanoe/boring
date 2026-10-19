@@ -755,6 +755,7 @@ interp_test!(view_state_lowering);
 interp_test!(view_state_array_methods);
 interp_test!(view_body_lowering);
 interp_test!(view_runtime_methods);
+interp_test!(view_state_owner_report);
 interp_test!(view_sited_blocks);
 interp_test!(view_props);
 interp_test!(view_actions);

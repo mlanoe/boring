@@ -71,6 +71,44 @@ pub struct TaskRun:
 # The body of an `OnTask`, handed its own run.
 pub use TaskAction as def void(TaskRun) throws
 
+# Where a mounted node's state reports that a callback is about to (maybe) change it: the runtime owns
+# one `DirtySink` and hands each composite's state a `StateOwner` (its own id + generation, and the
+# sink) at mount. Every callback a view's body passes to a constructor (`Button(onActivate = ...)`)
+# is lowered to report first: `touch` when it provably only touches its own `state` (that composite
+# alone is re-expanded), `escalate` when it also reaches anything else (an input, a `bind`, an `env`,
+# a free function) so the runtime keeps the whole-window rebuild. A callback that reports nothing
+# (not built by a lowered view) is treated as unknown by the runtime.
+pub struct DirtySink:
+    pub var mut [int] ids = []
+    pub var mut [int] generations = []
+    pub var bool all = false
+    pub var int reports = 0
+
+    def void touch(int id, int generation):
+        ids.push(id)
+        generations.push(generation)
+        reports += 1
+
+    def void escalate():
+        all = true
+        reports += 1
+
+    def void clear():
+        ids = []
+        generations = []
+        all = false
+
+pub struct StateOwner:
+    pub int id
+    pub int generation
+    pub mut DirtySink'actor sink
+
+    req void touch():
+        sink.touch(id, generation)
+
+    req void escalate():
+        sink.escalate()
+
 pub trait View:
     req string viewKind(): ""
     req [View] viewChildren(): []
@@ -84,6 +122,8 @@ pub trait View:
     # nearest ancestor first) instead of `expand`. Both are generated.
     # Writes this view's bind projections back into their collections (by key); the number of stale ones.
     req int commitProjectionsIn(StateBox'shared st): 0
+    # The mount-time state already linked to its owner (generated when the view has `state`).
+    req StateBox'shared newOwnedState(StateOwner owner): NoState()
     req bool usesEnv(): false
     req View expandIn(StateBox'shared st, [EnvValue] scope): Text(content = "")
     # What a `Provide` adds to its subtree's scope (generated from its `value` field).

@@ -2034,7 +2034,19 @@ impl Transpiler {
                 if_stmt.branches.iter().any(|(_, b)| body_ends_optional(b))
                     || if_stmt.else_body.as_ref().map(|b| body_ends_optional(b)).unwrap_or(false)
             });
-        if already_opt { return inner_val; }
+        if already_opt {
+            // An optional field read of a local/param (`Desc(view = n.view)`) is a partial move out of
+            // the struct unless it is cloned (an `Option<Arc<dyn Trait>>` is a cheap pointer clone).
+            if let ExprKind::Field(obj, _) = &value.kind {
+                if matches!(&obj.kind, ExprKind::Var(v) if v != "self")
+                    && !inner_val.ends_with(".clone()")
+                    && self.field_read_needs_clone(value)
+                {
+                    return format!("{}.clone()", inner_val);
+                }
+            }
+            return inner_val;
+        }
         // `T'? (Box<T>?)` or managed-mode `T'?`: wrap the value appropriately.
         let wrapped = if self.is_boxed_trait_type(inner) {
             // `Trait?` field/local = `Option<Box<dyn Trait>>`: box the concrete value.
@@ -2195,9 +2207,47 @@ impl Transpiler {
     /// again would build an `Arc<Arc<T>>`.
     fn do_block_tail_is_shared_pointer(value: &Expr, emitted: &str) -> bool {
         if !matches!(&value.kind, ExprKind::Do(_)) { return false; }
-        let tail = emitted.trim_end().strip_suffix('}').unwrap_or(emitted).trim_end()
-            .lines().last().unwrap_or("").trim_start();
-        ["Arc::new(", "Arc::clone(", "Rc::new(", "Rc::clone("].iter().any(|p| tail.starts_with(p))
+        let body = emitted.trim_end().strip_suffix('}').unwrap_or(emitted).trim_end();
+        // The block's last statement is a shared-pointer constructor when some line starts one whose
+        // closing paren is the very end of the body. (Not just "the last line starts with it": a tail
+        // call's multi-line closure argument puts other text on the last lines.)
+        let mut start = body.len();
+        for line in body.lines().rev() {
+            start -= line.len();
+            if ["Arc::new(", "Arc::clone(", "Rc::new(", "Rc::clone("].iter().any(|p| line.trim_start().starts_with(p)) {
+                let at = start + (line.len() - line.trim_start().len());
+                if Self::call_spans_to_end(&body[at..]) { return true; }
+            }
+            start = start.saturating_sub(1);
+        }
+        false
+    }
+
+    /// Whether the call expression `text` begins with closes (its first `(` matches) exactly at the
+    /// end of `text`. Parens inside string literals are skipped.
+    fn call_spans_to_end(text: &str) -> bool {
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut escaped = false;
+        let mut opened = false;
+        for (i, c) in text.char_indices() {
+            if in_str {
+                if escaped { escaped = false; }
+                else if c == '\\' { escaped = true; }
+                else if c == '"' { in_str = false; }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '(' => { depth += 1; opened = true; }
+                ')' => {
+                    depth -= 1;
+                    if opened && depth == 0 { return text[i + 1..].trim().is_empty(); }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     pub(crate) fn expr_is_inferred_shared_local(&self, value: &Expr) -> bool {

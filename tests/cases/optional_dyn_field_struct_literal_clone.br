@@ -1,0 +1,30 @@
+# `Desc(view = n.view, control = n.control)` built from the optional trait-object fields of a param
+# cloned the pointers (a cheap Arc clone) instead of moving them out of the borrowed struct (E0507).
+trait Shape:
+    req int area(): 0
+
+struct Sq as Shape:
+    int side
+    req int area(): side * side
+
+struct Mounted:
+    pub string kind
+    pub var Shape? view = nil
+    pub var Shape? control = nil
+
+struct Desc:
+    pub string kind
+    pub Shape? view = nil
+    pub Shape? control = nil
+
+def Desc rebuild(Mounted n):
+    Desc(kind = n.kind, view = n.view, control = n.control)
+
+def main():
+    let m = Mounted(kind = "k", view = Sq(side = 3), control = Sq(side = 2))
+    let d = rebuild(m)
+    let again = rebuild(m)
+    if let v = d.view:
+        print v.area()
+    if let v = again.control:
+        print v.area()

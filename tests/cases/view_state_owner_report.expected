@@ -1,0 +1,12 @@
+0
+0: reports+1 all=false
+1: reports+1 all=false
+t
+2: reports+1 all=true
+log x
+3: reports+1 all=true
+log noisy
+4: reports+1 all=true
+2
+5: reports+1 all=false
+6
