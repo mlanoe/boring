@@ -2751,6 +2751,14 @@ impl Transpiler {
     /// assignment desugaring (`x += y`), dict/array-index writes, and the general
     /// fallback (GPU-resident materialization, actor auto-clone, Optional auto-wrap).
     fn emit_expr_assign(&self, target: &Expr, value: &Expr) -> String {
+        // `_ = arr.pop()` discards the result: emit the raw `Option<T>` so `T`
+        // needs no `Default` (map_method's default `.unwrap_or_default()` would).
+        if matches!(&target.kind, ExprKind::Var(n) if n == "_") && is_bare_pop_call(value) {
+            self.want_raw_option_pop.set(true);
+            let raw = self.emit_expr_owned(value);
+            self.want_raw_option_pop.set(false);
+            return format!("let _ = {raw}");
+        }
         // CPU/SIMD: `render.cells = step.cells_in` copies one kernel buffer into another.
         if self.config.is_simd_target {
             if let (ExprKind::Field(to, to_field), ExprKind::Field(from, from_field)) = (&target.kind, &value.kind) {

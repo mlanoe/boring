@@ -1,0 +1,7 @@
+struct Area:
+    int x
+
+def main():
+    mut [Area] clips = [Area(x = 1), Area(x = 2)]
+    _ = clips.pop()
+    print(clips.length)
