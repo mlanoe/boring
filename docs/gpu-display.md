@@ -87,6 +87,14 @@ is also valid but carries minor coherency overhead and is less explicit.
 - A kernel may have at most one `'surface` field.
 - `'surface` cannot be combined with other GPU qualifiers.
 
+### Initial contents
+
+The contents of a `'surface` buffer before the kernel has written it are **unspecified**: on most hosts a
+`Dimension`-only kernel (`K(Dimension(w, h))`) starts from a sparse random pattern, never from zeros, and nothing
+guarantees either. Zero-filling costs a pass over the whole buffer, so no host does it for you: a kernel that
+reads `'surface` pixels it has not written itself (e.g. a Game-of-Life seed) must not rely on their value, and
+one that needs a defined starting picture writes it (a first dispatch, or an `init` that assigns the field).
+
 ### Pixel format
 
 All backends use `BGRA8Unorm`. Pixels are packed as 32-bit `uint` values:
