@@ -821,6 +821,18 @@ impl BoringToml {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod boring_toml_tests {
+    /// Per-call unique suffix for scratch dirs: PID alone can be reused after a crashed run
+    /// that left its dir behind, so also mix in a timestamp and a process-wide counter.
+    fn unique_suffix() -> String {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}_{}_{}", std::process::id(), nanos, COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
     use super::{BoringToml, DepSpec, GitRef};
     use std::path::{Path, PathBuf};
 
@@ -926,7 +938,7 @@ mod boring_toml_tests {
     fn resolve_external_types_includes_folds_in_shared_declarations() {
         let dir = std::env::temp_dir().join(format!(
             "boring_toml_include_test_{}",
-            std::process::id()
+            unique_suffix()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -952,7 +964,7 @@ mod boring_toml_tests {
     fn resolve_external_types_includes_reports_missing_file_without_exiting() {
         let dir = std::env::temp_dir().join(format!(
             "boring_toml_include_missing_test_{}",
-            std::process::id()
+            unique_suffix()
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -969,7 +981,7 @@ mod boring_toml_tests {
         // single-level, see `resolve_external_types_includes`'s doc comment.
         let dir = std::env::temp_dir().join(format!(
             "boring_toml_include_no_recurse_test_{}",
-            std::process::id()
+            unique_suffix()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1015,7 +1027,7 @@ mod boring_toml_tests {
     fn resolve_derive_includes_folds_in_shared_declarations() {
         let dir = std::env::temp_dir().join(format!(
             "boring_toml_derives_include_test_{}",
-            std::process::id()
+            unique_suffix()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1039,7 +1051,7 @@ mod boring_toml_tests {
     fn resolve_derive_includes_reports_missing_file_without_exiting() {
         let dir = std::env::temp_dir().join(format!(
             "boring_toml_derives_include_missing_test_{}",
-            std::process::id()
+            unique_suffix()
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1056,7 +1068,7 @@ mod boring_toml_tests {
         // single-level, see `resolve_derive_includes`'s doc comment.
         let dir = std::env::temp_dir().join(format!(
             "boring_toml_derives_no_recurse_test_{}",
-            std::process::id()
+            unique_suffix()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1243,7 +1255,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_external_fns_includes_folds_in_shared_declarations() {
-        let dir = std::env::temp_dir().join(format!("boring_test_external_fns_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("boring_test_external_fns_{}", unique_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         let shared_path = dir.join("shared_external_fns.toml");
         std::fs::write(&shared_path, "[external_fns]\n\"Shared::sharedMethod\" = [\"&\"]\n").unwrap();
@@ -1275,7 +1287,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_follows_transitive_dependency_with_no_collision() {
-        let tmp = std::env::temp_dir().join(format!("boring_transitive_chain_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_chain_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let b = make_canonical_dir(&tmp.join("b"));
@@ -1293,7 +1305,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_terminates_on_a_dependency_cycle() {
-        let tmp = std::env::temp_dir().join(format!("boring_transitive_cycle_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_cycle_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let b = make_canonical_dir(&tmp.join("b"));
@@ -1311,7 +1323,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_diamond_with_matching_targets_is_not_a_collision() {
-        let tmp = std::env::temp_dir().join(format!("boring_transitive_diamond_ok_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_diamond_ok_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let b = make_canonical_dir(&tmp.join("b"));
@@ -1330,7 +1342,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_diamond_with_conflicting_transitive_targets_is_an_error() {
-        let tmp = std::env::temp_dir().join(format!("boring_transitive_diamond_conflict_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_diamond_conflict_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let b = make_canonical_dir(&tmp.join("b"));
@@ -1352,7 +1364,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_top_level_entry_overrides_a_conflicting_transitive_one() {
-        let tmp = std::env::temp_dir().join(format!("boring_transitive_override_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_transitive_override_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let b = make_canonical_dir(&tmp.join("b"));
@@ -1375,7 +1387,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_version_requirement_satisfied_by_dependency_is_not_an_error() {
-        let tmp = std::env::temp_dir().join(format!("boring_version_ok_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_version_ok_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let numlib = make_canonical_dir(&tmp.join("numlib"));
@@ -1390,7 +1402,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_version_requirement_unsatisfied_by_dependency_is_an_error() {
-        let tmp = std::env::temp_dir().join(format!("boring_version_unsatisfied_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_version_unsatisfied_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let numlib = make_canonical_dir(&tmp.join("numlib"));
@@ -1407,7 +1419,7 @@ mod boring_toml_tests {
 
     #[test]
     fn resolve_deps_version_requirement_with_no_nested_boring_toml_is_an_error() {
-        let tmp = std::env::temp_dir().join(format!("boring_version_no_toml_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_version_no_toml_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         // No boring.toml written for "numlib" -- just a bare directory, same as an ordinary
@@ -1426,7 +1438,7 @@ mod boring_toml_tests {
     fn resolve_deps_without_a_version_key_is_unaffected() {
         // No `version` key at all -- the check must not run, and a dependency with no
         // boring.toml (or an unparseable one) must resolve exactly as before this feature.
-        let tmp = std::env::temp_dir().join(format!("boring_version_absent_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("boring_version_absent_{}", unique_suffix()));
         let _ = std::fs::remove_dir_all(&tmp);
         let a = make_canonical_dir(&tmp.join("a"));
         let numlib = make_canonical_dir(&tmp.join("numlib"));

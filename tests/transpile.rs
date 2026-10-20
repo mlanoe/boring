@@ -74,6 +74,18 @@ fn shared_target_dir() -> PathBuf {
 // `--test-threads=1`, just automatic. This keeps the shared directory (and its disk
 // savings) exactly as-is; it only removes the concurrency that triggers either failure
 // mode.
+/// Removes a generated fixture directory when dropped, so it is cleaned up even when an
+/// assertion in the test panics. Set `BORING_KEEP_GENERATED=1` to keep them for debugging.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if std::env::var_os("BORING_KEEP_GENERATED").is_none() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 static TRANSPILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &str) {
@@ -87,6 +99,7 @@ fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &st
     let expected_file = case_dir.join(format!("{}.expected", name));
     let rust_dir_name = format!("{}_{}_{}_rust", name, mode_str, threading_str);
     let rust_dir      = case_dir.join(&rust_dir_name);
+    let _cleanup      = RemoveOnDrop(rust_dir.clone());
 
     // ── Step 1: emit Rust ─────────────────────────────────────────────────────
     let emit = Command::new(bin)
@@ -110,6 +123,9 @@ fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &st
         .arg(rust_dir.join("Cargo.toml"))
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_TARGET_DIR", shared_target_dir())
+        // Throwaway fixture projects: incremental artifacts are pure disk cost (~3GB
+        // across the suite) and never reused.
+        .env("CARGO_INCREMENTAL", "0")
         .output()
         .unwrap_or_else(|e| panic!("[{}@{}+{}] failed to invoke cargo: {}", name, mode_str, threading_str, e));
 
@@ -257,6 +273,7 @@ fn run_transpile_project_case(name: &str, mode_str: &str, threading_str: &str) {
         _ => panic!("[{}] unknown mode/threading combo: {}+{}", name, mode_str, threading_str),
     };
     let rust_dir = project_dir.join("src").join(rust_dir_name);
+    let _cleanup = RemoveOnDrop(rust_dir.clone());
 
     // ── Step 1: emit Rust (project mode: no file arg, cwd = the project dir) ───────────
     let emit = Command::new(bin)
@@ -280,6 +297,9 @@ fn run_transpile_project_case(name: &str, mode_str: &str, threading_str: &str) {
         .arg(rust_dir.join("Cargo.toml"))
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_TARGET_DIR", shared_target_dir())
+        // Throwaway fixture projects: incremental artifacts are pure disk cost (~3GB
+        // across the suite) and never reused.
+        .env("CARGO_INCREMENTAL", "0")
         .output()
         .unwrap_or_else(|e| panic!("[{}@{}+{}] failed to invoke cargo: {}", name, mode_str, threading_str, e));
 
