@@ -1,0 +1,34 @@
+struct KeyEvent:
+    var int code = 0
+    var bool stop = false
+
+trait KeyHandler:
+    req void onKey(mut KeyEvent e) throws
+
+struct Boom as KeyHandler:
+    req void onKey(mut KeyEvent e) throws:
+        throw "observer failed"
+
+struct Fine as KeyHandler:
+    req void onKey(mut KeyEvent e) throws:
+        e.stop = true
+
+struct Observer:
+    KeyHandler handler
+
+def void main():
+    let obs = [Observer(handler = Fine()), Observer(handler = Boom())]
+    for o in obs:
+        mut ev = KeyEvent(code = 1)
+        try:
+            o.handler.onKey(ev)
+            print("ok {ev.stop}")
+        catch:
+            print("caught {error}")
+    for o in obs:
+        mut ev = KeyEvent(code = 2)
+        try:
+            let r = o.handler.onKey(ev)
+            print("ok2 {ev.stop}")
+        catch:
+            print("caught2 {error}")

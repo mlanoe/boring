@@ -4549,6 +4549,19 @@ impl Transpiler {
                             self.struct_method_return_types.insert(format!("{}::{}", t.name, d.name), rt.clone());
                         }
                     }
+                    // A throwing method called through a trait object (`o.handler.onKey(ev)`,
+                    // receiver typed as the trait) must propagate with `?` in a throws/try
+                    // context, same as a call on a concrete struct.
+                    for sig in &t.signatures {
+                        if sig.throws {
+                            self.struct_method_throws.insert(format!("{}::{}", t.name, sig.name));
+                        }
+                    }
+                    for d in &t.defaults {
+                        if d.throws {
+                            self.struct_method_throws.insert(format!("{}::{}", t.name, d.name));
+                        }
+                    }
                     let type_names: std::collections::HashSet<String> = t.type_signatures.iter()
                         .map(|sig| sig.name.clone())
                         .collect();
