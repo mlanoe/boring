@@ -11,6 +11,8 @@ use crate::ast::*;
 pub struct SimdOutput {
     pub host_rs: String,
     pub cargo_toml: String,
+    /// Host code uses the grapheme / display-width string methods (needs `unicode-*` crates).
+    pub uses_unicode: bool,
     pub kernel_names: Vec<String>,
     pub errors: Vec<crate::transpiler::TranspileError>,
 }
@@ -73,6 +75,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
     SIMD_HOST_TYPES.with(|flag| flag.set(true));
     let general = crate::transpiler::transpile_with_config(&renamed, config);
     SIMD_HOST_TYPES.with(|flag| flag.set(false));
+    let uses_unicode = general.uses_unicode;
     let (has_main, main_throws) = crate::transpiler::detect_boring_main(&renamed, &general);
 
     let mut e = Emitter {
@@ -186,6 +189,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
     SimdOutput {
         host_rs: e.out,
         cargo_toml,
+        uses_unicode,
         kernel_names,
         errors: e.errors,
     }

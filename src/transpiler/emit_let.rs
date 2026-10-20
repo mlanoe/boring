@@ -857,7 +857,7 @@ impl Transpiler {
                     }
             }
         }
-        if let ExprKind::Call(callee, _) = &s_value.kind {
+        if let ExprKind::Call(callee, call_args) = &s_value.kind {
             if let ExprKind::Var(type_name) = &callee.kind {
                 if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     if self.is_known_user_type(type_name.as_str()) {
@@ -870,7 +870,7 @@ impl Transpiler {
                 }
                 // If the callee is a function with an Optional return type, mark the var as optional.
                 if s.ty.is_none() {
-                    if let Some(ret_ty) = self.fn_return_types.get(type_name.as_str()).cloned() {
+                    if let Some(ret_ty) = self.call_return_type(type_name, call_args) {
                         match &ret_ty {
                             Type::Optional(_) => {
                                 self.optional_vars.insert(s.name.clone());

@@ -3235,7 +3235,7 @@ fn emit_wgpu(path: &str, version: &str) {
 
     // Cargo.toml
     let cargo_toml = project_dir.join("Cargo.toml");
-    if let Err(e) = std::fs::write(&cargo_toml, &wgpu_out.cargo_toml) {
+    if let Err(e) = std::fs::write(&cargo_toml, kernel_target_cargo_toml(&wgpu_out.cargo_toml, wgpu_out.uses_unicode, &path)) {
         eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
         process::exit(1);
     }
@@ -3247,6 +3247,45 @@ fn emit_wgpu(path: &str, version: &str) {
         eprintln!("  Kernels: {}", wgpu_out.kernel_names.join(", "));
     }
 }
+/// Cargo.toml for a `--target simd|wgpu` project: the transpiler's own manifest plus what the std
+/// target adds around it — the unicode crates the grapheme / display-width methods lower to, and
+/// `boring.toml`'s `[dependencies]` (of the project owning `source`). A crate the manifest
+/// already names is not added twice; the project's own declarations win over the inferred ones.
+fn kernel_target_cargo_toml(base: &str, uses_unicode: bool, source: &Path) -> String {
+    let crate_name = |line: &str| line.split('=').next().unwrap_or("").trim().to_string();
+    let mut project_deps: Vec<String> = Vec::new();
+    if let Some(root) = find_project_root(source) {
+        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
+            project_deps = BoringToml::parse(&toml_src).dependencies;
+        }
+    }
+    let mut extra: Vec<String> = Vec::new();
+    if uses_unicode {
+        extra.push("unicode-segmentation = \"1\"".to_string());
+        extra.push("unicode-width = \"0.2\"".to_string());
+    }
+    extra.retain(|l| !project_deps.iter().any(|p| crate_name(p) == crate_name(l)));
+    extra.extend(project_deps);
+    let declared: std::collections::HashSet<String> = base.lines().map(crate_name).collect();
+    extra.retain(|l| !declared.contains(&crate_name(l)));
+    if extra.is_empty() {
+        return base.to_string();
+    }
+    let mut out = base.to_string();
+    if !out.contains("[dependencies]") {
+        if !out.ends_with('\n') { out.push('\n'); }
+        out.push_str("\n[dependencies]\n");
+    } else if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    // `[dependencies]` is the last section in both manifests, so appending lands inside it.
+    for line in extra {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
 fn emit_simd(path: &str, version: &str) {
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
@@ -3260,7 +3299,7 @@ fn emit_simd(path: &str, version: &str) {
     let src = project_dir.join("src");
     if let Err(e) = std::fs::create_dir_all(&src) { eprintln!("error: cannot create '{}': {}", src.display(), e); process::exit(1); }
     if let Err(e) = std::fs::write(src.join("main.rs"), out.host_rs) { eprintln!("error: cannot write SIMD source: {}", e); process::exit(1); }
-    if let Err(e) = std::fs::write(project_dir.join("Cargo.toml"), out.cargo_toml) { eprintln!("error: cannot write SIMD manifest: {}", e); process::exit(1); }
+    if let Err(e) = std::fs::write(project_dir.join("Cargo.toml"), kernel_target_cargo_toml(&out.cargo_toml, out.uses_unicode, &path)) { eprintln!("error: cannot write SIMD manifest: {}", e); process::exit(1); }
     eprintln!("Generated CPU SIMD project at '{}'", project_dir.display());
     eprintln!("  Runtime dispatch: AVX-512 / AVX2 / SSE2 / NEON, with scalar fallback.");
     eprintln!("  cd {} && cargo build --release", project_dir.display());

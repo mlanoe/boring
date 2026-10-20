@@ -177,6 +177,44 @@ impl Transpiler {
         }
     }
 
+    /// Declared return type of a call to the free function `name`, resolving overloads by argument.
+    pub(crate) fn call_return_type(&self, name: &str, args: &[Arg]) -> Option<Type> {
+        if self.overloaded_fn_names.contains(name) {
+            return self.overloaded_call_return_type(name, args);
+        }
+        self.fn_return_types.get(name).cloned()
+    }
+
+    /// Return type of a call to an overloaded free function: the overloads whose arity and
+    /// (inferable) argument types match the call. `fn_return_types` holds only the last
+    /// registered overload's return type, which is wrong for a call that resolves to another
+    /// one. Several matching overloads with different return types yield `None`.
+    fn overloaded_call_return_type(&self, name: &str, args: &[Arg]) -> Option<Type> {
+        let decls = self.fn_overload_decls.get(name)?;
+        let matching: Vec<&FnDecl> = decls.iter().filter(|decl| {
+            let min_a = decl.params.iter().filter(|p| p.default.is_none() && !p.variadic).count();
+            let max_a = decl.params.len();
+            if args.len() < min_a || (args.len() > max_a && !decl.params.iter().any(|p| p.variadic)) { return false; }
+            decl.params.iter().zip(args.iter()).all(|(p, a)| match &p.ty {
+                None => true,
+                Some(expected) => {
+                    if let ExprKind::DotIdent(variant) = &a.value.kind {
+                        self.dotident_matches_enum_type(variant, expected)
+                    } else {
+                        let actual = infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types, &self.struct_fields)
+                            .or_else(|| self.resolve_expr_type(&a.value));
+                        match actual {
+                            Some(actual) => types_compatible(expected, &actual),
+                            None => true,
+                        }
+                    }
+                }
+            })
+        }).collect();
+        let first = matching.first()?.return_ty.clone();
+        if matching.iter().all(|d| d.return_ty == first) { first } else { None }
+    }
+
     /// The static type of `expr` when it can be read off declarations alone: a local/parameter's
     /// declared type, a struct field's declared type (through any receiver
     /// `resolve_expr_struct_type` can resolve), the element/value type of an indexed collection,
@@ -263,11 +301,14 @@ impl Transpiler {
             ExprKind::LabeledIndex(inner, _) => {
                 indexed_elem_type(&self.resolve_expr_type(inner)?).cloned()
             }
-            ExprKind::Call(callee, _) => {
+            ExprKind::Call(callee, call_args) => {
                 let ExprKind::Var(name) = &callee.kind else { return None };
                 if self.known_local_vars.contains(name.as_str()) { return None; }
                 if self.struct_fields.contains_key(name.as_str()) {
                     return Some(Type::Named(name.clone()));
+                }
+                if self.overloaded_fn_names.contains(name.as_str()) {
+                    return self.overloaded_call_return_type(name, call_args);
                 }
                 self.fn_return_types.get(name.as_str()).cloned()
             }
@@ -6200,9 +6241,9 @@ impl Transpiler {
                 DICT_RETURNING.contains(&m.as_str()) && self.expr_is_dict(inner)
             }
             // Function call whose return type is Dict(…)
-            ExprKind::Call(callee, _) => {
+            ExprKind::Call(callee, call_args) => {
                 if let ExprKind::Var(fn_name) = &callee.kind {
-                    matches!(self.fn_return_types.get(fn_name.as_str()), Some(Type::Dict(..)))
+                    matches!(self.call_return_type(fn_name, call_args), Some(Type::Dict(..)))
                 } else {
                     false
                 }

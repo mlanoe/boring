@@ -44,6 +44,8 @@ pub struct WgpuOutput {
     pub kernel_names: Vec<String>,
     /// Generated Cargo.toml content (no build.rs — wgpu/naga compile WGSL at runtime).
     pub cargo_toml: String,
+    /// Host code uses the grapheme / display-width string methods (needs `unicode-*` crates).
+    pub uses_unicode: bool,
     /// Errors accumulated while transpiling non-kernel code through the general pass
     /// (see `transpile_wgpu`'s `general_out`) — e.g. an unsupported kernel constructor
     /// call, or top-level `task`/stream usage. Callers must check this and report
@@ -119,6 +121,7 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     // it exists only in `general_out.code` -- so `general_out.gpu_main_emitted` is the
     // only way to know; see `emit_program_items`). Shared with cuda/metal, which need the
     // identical derivation -- see `crate::transpiler::detect_boring_main`.
+    let uses_unicode = general_out.uses_unicode;
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
     let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some());
@@ -128,7 +131,7 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     errors.extend(device_errors);
     errors.extend(host_errors);
     errors.extend(tensor_host.errors);
-    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors }
+    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, errors }
 }
 
 /// Does this kernel's body use `.warp.*` anywhere? WGSL subgroup builtins
