@@ -47,6 +47,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
             _ => None,
         })
         .collect();
+    let redraw_on_demand = crate::transpiler::helpers::screen_redraw_on_demand(program);
     let mut renamed = crate::transpiler::rename_top_level_main(program, "boring_main");
     // `Screen::present` advances the frame counter/clock, so its binding must be mutable.
     for item in renamed.items.iter_mut() {
@@ -54,6 +55,8 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
             if let Some(Expr { kind: ExprKind::Call(callee, args), .. }) = &mut binding.value {
                 if matches!(&callee.kind, ExprKind::Var(name) if name == "Screen") {
                     binding.binding = BindingKind::Var;
+                    // `redraw = "demand"` is a host-side mode, not a constructor argument.
+                    args.retain(|a| a.label.as_deref() != Some("redraw"));
                     // `Screen(Dimension(w, h))` without a title: the runtime constructor
                     // always takes one.
                     if args.len() == 1 {
@@ -168,6 +171,11 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
     }
     if uses_screen {
         e.raw(super::simd_display::SCREEN_RUNTIME);
+        e.raw(if redraw_on_demand {
+            "#[allow(dead_code)] fn __boring_redraw_on_demand() -> bool { true }\n"
+        } else {
+            "#[allow(dead_code)] fn __boring_redraw_on_demand() -> bool { false }\n"
+        });
     }
     e.raw(&general.code);
     if has_main {

@@ -2783,6 +2783,42 @@ impl Transpiler {
                 }
             }
         }
+        // CPU/SIMD: `k.colors = <host array>` re-uploads the whole array through the
+        // kernel's own `copy_<field>_to_device` (element-converted to the field's width),
+        // so a render loop can replace an array of any length between frames.
+        if self.config.is_simd_target {
+            if let ExprKind::Field(obj, field) = &target.kind {
+                if let ExprKind::Var(kvar) = &obj.kind {
+                    let field_decl = self.kernel_vars.get(kvar.as_str())
+                        .and_then(|kname| self.kernel_decls.get(kname))
+                        .and_then(|decl| decl.fields.iter().find(|f| f.name == *field));
+                    // `k.n = enc.n`: an `int`/`uint` host value (`isize`/`usize`) narrows to the
+                    // kernel field's 32-bit mirror, as `k.t = float(..)` already does for floats.
+                    if let Some(f) = field_decl {
+                        if matches!(&f.ty, Type::Int | Type::Uint)
+                            || matches!(&f.ty, Type::Named(n) if n == "int" || n == "uint")
+                        {
+                            if !matches!(&value.kind, ExprKind::Int(_)) {
+                                let t = super::emit_kernel::kernel_host_scalar_type(&f.ty);
+                                return format!("{kvar}.{field} = (({}) as {t})", self.emit_expr(value));
+                            }
+                        }
+                    }
+                    let field_ty = field_decl
+                        .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified))
+                        .map(|f| f.ty.clone());
+                    if let Some(fty) = field_ty {
+                        if matches!(&fty, Type::Array(_) | Type::ArrayN(_, _)) || fty.as_labeled_array().is_some() {
+                            let inner = super::emit_kernel::kernel_host_scalar_type(&super::emit_kernel::array_inner_type(&fty));
+                            let v = self.emit_expr(value);
+                            return format!(
+                                "{{ let __v = &({v}); {kvar}.copy_{field}_to_device(&__v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>()); }}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // CPU/SIMD kernel buffers are plain `Vec` fields: `a.x, a.y = a.y, a.x`
         // (the render-loop ping-pong) must assign to the places, not to clones.
         if self.config.is_simd_target {

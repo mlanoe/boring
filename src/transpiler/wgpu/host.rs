@@ -1197,6 +1197,7 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn emit_screen_main(&mut self) {
+        let on_demand = crate::transpiler::helpers::screen_redraw_on_demand(self.program);
         let (w_expr, h_expr, title, _) = self.extract_screen_info();
         let scalars     = self.extract_top_level_scalars();
         let width       = resolve_scalar_expr(&w_expr, &scalars);
@@ -1275,6 +1276,8 @@ impl<'a> HostEmitter<'a> {
         self.line("    __mouse_right: bool,");
         self.line("    __mouse_middle: bool,");
         self.line("    __start_time: std::time::Instant,");
+        self.line("    __frame: isize,");
+        self.line("    __redraw: bool,");
         self.line("    window: Option<std::sync::Arc<Window>>,");
         self.line("    surface: Option<wgpu::Surface<'static>>,");
         self.line("    __blit_pipeline: Option<wgpu::RenderPipeline>,");
@@ -1365,11 +1368,21 @@ impl<'a> HostEmitter<'a> {
         self.line("        self.__blit_pipeline = Some(blit_pipeline);");
         self.line("        self.__blit_bg = Some(blit_bg);");
         self.line("        self.__blit_dim_buf = Some(blit_dim_buf);");
+        if on_demand {
+            self.line("        event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);");
+        }
         self.line("        window.request_redraw();");
         self.line("    }");
         self.blank();
         // window_event(): handle all window events
         self.line("    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {");
+        if on_demand {
+            // Input and resize invalidate the window; everything else (including the
+            // frame's own RedrawRequested) does not.
+            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_)) {");
+            self.line("            if let Some(w) = &self.window { w.request_redraw(); }");
+            self.line("        }");
+        }
         self.line("        match event {");
         self.line("            WindowEvent::CloseRequested => { event_loop.exit(); }");
         self.line("            WindowEvent::KeyboardInput { event: ref key_event, .. } => {");
@@ -1413,7 +1426,15 @@ impl<'a> HostEmitter<'a> {
         }
         self.in_method = false;
         self.line("                self.__keys_pressed.clear();");
-        self.line("                if let Some(w) = &self.window { w.request_redraw(); }");
+        self.line("                self.__frame += 1;");
+        if on_demand {
+            // On-demand: only schedule another frame when the body asked for one
+            // (`screen.requestRedraw()`); input/resize/expose events schedule their own.
+            self.line("                if std::mem::take(&mut self.__redraw) { if let Some(w) = &self.window { w.request_redraw(); } }");
+        } else {
+            self.line("                self.__redraw = false;");
+            self.line("                if let Some(w) = &self.window { w.request_redraw(); }");
+        }
         self.line("            }");
         self.line("            _ => {}");
         self.line("        }");
@@ -1531,6 +1552,7 @@ impl<'a> HostEmitter<'a> {
         self.line("        __mouse_x: 0, __mouse_y: 0,");
         self.line("        __mouse_left: false, __mouse_right: false, __mouse_middle: false,");
         self.line("        __start_time: std::time::Instant::now(),");
+        self.line("        __frame: 0, __redraw: false,");
         self.line("        window: None, surface: None,");
         self.line("        __blit_pipeline: None, __blit_bg: None, __blit_dim_buf: None,");
         self.line("    };");
@@ -1604,6 +1626,8 @@ impl<'a> HostEmitter<'a> {
             Stmt::Expr(e) => {
                 if let Some(s) = self.try_emit_screen_present(e, width, height) {
                     self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_request_redraw(e) {
+                    self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_render_dispatch(e, width, height) {
                     self.line(&format!("{indent}{s};"));
                 } else if let Some(s) = self.try_emit_field_swap(e) {
@@ -1614,6 +1638,12 @@ impl<'a> HostEmitter<'a> {
                     self.push_error(e.line, e.col,
                         "wgpu target: expression not supported inside a Screen render loop");
                 }
+            }
+            // Per-frame host local (`let enc = encodeFrame()`), usable by later statements
+            // of the same frame body (e.g. `k.f = enc.f`).
+            Stmt::Let(ls) if ls.value.is_some() => {
+                let v = self.host_expr(ls.value.as_ref().unwrap());
+                self.line(&format!("{indent}let {} = {v};", ls.name));
             }
             Stmt::If(if_stmt) => {
                 if let Some(s) = self.try_emit_screen_key_if(if_stmt) {
@@ -1681,6 +1711,15 @@ impl<'a> HostEmitter<'a> {
         } else {
             Some("__boring_present_buffer(&device, &queue, &surface, &__blit_pipeline, &__blit_bg);".into())
         }
+    }
+
+    /// `screen.requestRedraw()` -- schedule another frame when the window redraws on demand.
+    fn try_emit_request_redraw(&self, e: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
+        if method != "requestRedraw" || !args.is_empty() { return None; }
+        if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") { return None; }
+        let pfx = if self.in_method { "self." } else { "" };
+        Some(format!("{pfx}__redraw = true;"))
     }
 
     fn try_emit_render_dispatch(&self, e: &Expr, width: &str, height: &str) -> Option<String> {
@@ -1777,7 +1816,10 @@ impl<'a> HostEmitter<'a> {
             if let ExprKind::Var(obj_name) = &obj.kind {
                 // `step.cells_in = step.cells_out` â†' bind buffer alias
                 if let ExprKind::Field(robj, rfield) = &rhs.kind {
-                    if let ExprKind::Var(robj_name) = &robj.kind {
+                    // Only a *kernel* on the right is a buffer alias; `k.f = enc.f` with a
+                    // host local `enc` is an ordinary (array) assignment, handled below.
+                    if let (ExprKind::Var(robj_name), true) = (&robj.kind,
+                        matches!(&robj.kind, ExprKind::Var(rn) if self.find_kernel_decl_for_var(rn).is_some())) {
                         // Try to find the target kernel decl to rebuild its bind group.
                         if let Some(target_decl) = self.find_kernel_decl_for_var(obj_name) {
                             let pfx = if self.in_method { "self." } else { "" };
@@ -1813,9 +1855,41 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 }
-                // Scalar field assignment: `k.t = expr` → update the host-side field.
                 let pfx = if self.in_method { "self." } else { "" };
-                let rhs_str = self.host_expr(rhs);
+                // Array field assignment: `k.colors = palette(screen.frame)` re-uploads the
+                // whole array through the kernel's own `copy_<field>_to_device`, which
+                // reallocates the buffer (and rebuilds the bind group) when the length changed.
+                if let Some(decl) = self.find_kernel_decl_for_var(obj_name) {
+                    if let Some(f) = decl.fields.iter().find(|f| f.name == field.as_str()
+                        && matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
+                        && is_buffer_array_ty(&f.ty))
+                    {
+                        let host_ty = host_scalar_type(&array_inner(&f.ty));
+                        let rhs_str = self.host_expr(rhs);
+                        let conv = if host_ty == "bool" { "x".to_string() } else { format!("x as {host_ty}") };
+                        return Some(format!(
+                            "{{ let __v = &({rhs_str}); {pfx}{obj_name}.copy_{field}_to_device(&__v.iter().map(|&x| {conv}).collect::<Vec<{host_ty}>>()); }}"));
+                    }
+                }
+                // Scalar field assignment: `k.t = expr` → update the host-side field.
+                let mut rhs_str = self.host_expr(rhs);
+                // `int`/`uint` host values are `isize`/`usize`; the kernel's host mirror is 32-bit.
+                if let Some(f) = self.find_kernel_decl_for_var(obj_name)
+                    .and_then(|d| d.fields.iter().find(|f| f.name == field.as_str()))
+                {
+                    let mut fty = &f.ty;
+                    while let Type::Mut(inner) = fty { fty = inner; }
+                    let host = match fty {
+                        Type::Int => Some("i32"),
+                        Type::Uint => Some("u32"),
+                        Type::Named(n) if n == "int" => Some("i32"),
+                        Type::Named(n) if n == "uint" => Some("u32"),
+                        _ => None,
+                    };
+                    if let Some(host) = host {
+                        rhs_str = format!("({rhs_str}) as {host}");
+                    }
+                }
                 return Some(format!("{pfx}{obj_name}.{field} = {rhs_str};"));
             }
         }
@@ -1848,6 +1922,12 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
                 format!("{pfx}{}.{}", self.host_expr(obj), field)
+            }
+            // `screen.frame` -> the frame counter (`int`)
+            ExprKind::Field(obj, field)
+                if field == "frame" && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
+            {
+                format!("{pfx}__frame")
             }
             // `screen.mouse.x` / `.y` / `.left` / `.right` / `.middle`
             ExprKind::Field(obj, field)

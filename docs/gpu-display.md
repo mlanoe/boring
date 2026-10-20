@@ -175,6 +175,42 @@ kernel:
             break
 ```
 
+### Updating arrays between frames
+
+Inside the render loop a kernel's array field (`'unified`/`'global`) can be assigned a host array, and the
+length may change from frame to frame:
+
+```boring
+kernel:
+    loop:
+        let enc = encodeFrame(screen.frame)   # per-frame host local (a user function)
+        k.f = enc.f                           # whole-array upload
+        k.count = enc.count                   # int scalar, narrowed to the field's 32-bit mirror
+        k(block = (16, 16))
+        screen.present(k.out)
+```
+
+The assignment lowers to the kernel's own upload: wgpu `copy_<f>_to_device` (reallocates the buffer and rebuilds
+the bind group when the length changed), SIMD `copy_<f>_to_device`, Metal a fresh `MTLBuffer` of exactly the
+array's length, CUDA/ROCm a fresh device buffer (`Arc`-wrapped for a `let` field). Elements are converted to the
+field's width. `a.x = b.y` with a *kernel* on the right stays the zero-copy buffer handoff. `screen.frame` is
+readable in loop expressions on every target. Re-uploading a `'surface` field this way is not supported (the
+presenting bind group keeps the old buffer). Metal and its siblings still read `.count`/`.length` on a value as the
+array-length builtin: name a struct field `count` only if you read it through a typed path (wgpu does).
+
+### On-demand redraw
+
+```boring
+let screen = Screen(Dimension(640, 360), title = "UI", redraw = "demand")
+```
+
+With `redraw = "demand"` the loop body runs once at start and afterwards only when the window is invalidated: a
+keyboard, mouse or resize event, or `screen.requestRedraw()` called in the body (to schedule one more frame, e.g.
+for an animation). The loop otherwise sleeps (wgpu `ControlFlow::Wait`; Metal/CUDA/ROCm `Wait` with `Poll` only
+while a redraw is pending; SIMD blocks inside `screen.present` on a condition variable). `screen.requestRedraw()`
+is a no-op in the default continuous mode. Regression tests: `tests/screen_render_loop_arrays.rs`.
+
+
 ### Dispatch grid
 
 When a kernel has a `Dimension` field alongside a `'surface` field, the

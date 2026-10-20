@@ -2911,3 +2911,23 @@ mod labeled_array_tests {
         assert_eq!(desugared_labeled_array_shadow_fields("other", &fields), None);
     }
 }
+
+// ── Screen redraw mode ────────────────────────────────────────────────────────
+
+/// True when the program's top-level `Screen(...)` constructor asks for on-demand
+/// redraw (`Screen(Dimension(w, h), redraw = "demand")`): the `kernel: loop:` body then
+/// runs once at startup and afterwards only when the window was invalidated by an
+/// input/resize/expose event or the body itself called `screen.requestRedraw()`,
+/// instead of every frame. Shared by every Screen host (wgpu, Metal, CUDA, ROCm, SIMD).
+pub(crate) fn screen_redraw_on_demand(program: &Program) -> bool {
+    program.items.iter().any(|item| {
+        let Item::Let(s) = item else { return false };
+        let Some(val) = &s.value else { return false };
+        let ExprKind::Call(callee, args) = &val.kind else { return false };
+        matches!(&callee.kind, ExprKind::Var(n) if n == "Screen")
+            && args.iter().any(|a| {
+                a.label.as_deref() == Some("redraw")
+                    && matches!(&a.value.kind, ExprKind::Str(v) if v == "demand")
+            })
+    })
+}

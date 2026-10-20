@@ -48,6 +48,12 @@ struct __BoringDisplay {
     frame_taken: std::sync::Condvar,
     closed: std::sync::atomic::AtomicBool,
     resized: std::sync::atomic::AtomicBool,
+    // Set by input/resize/close events; `Screen::present` waits on it in on-demand mode.
+    dirty: std::sync::Mutex<bool>,
+    dirty_cv: std::sync::Condvar,
+}
+impl __BoringDisplay {
+    fn invalidate(&self) { *self.dirty.lock().unwrap() = true; self.dirty_cv.notify_all(); }
 }
 fn __boring_display() -> &'static __BoringDisplay {
     static DISPLAY: std::sync::OnceLock<__BoringDisplay> = std::sync::OnceLock::new();
@@ -62,6 +68,8 @@ fn __boring_display() -> &'static __BoringDisplay {
         frame_taken: std::sync::Condvar::new(),
         closed: std::sync::atomic::AtomicBool::new(false),
         resized: std::sync::atomic::AtomicBool::new(false),
+        dirty: std::sync::Mutex::new(false),
+        dirty_cv: std::sync::Condvar::new(),
     })
 }
 fn __boring_send(cmd: __BoringCmd) {
@@ -86,6 +94,7 @@ struct Screen {
     frame: isize,
     time: f64,
     start: std::time::Instant,
+    redraw_requested: bool,
 }
 #[allow(dead_code)]
 impl Screen {
@@ -109,8 +118,13 @@ impl Screen {
             frame: 0,
             time: 0.0,
             start: std::time::Instant::now(),
+            redraw_requested: false,
         }
     }
+    // On-demand mode (`Screen(..., redraw = "demand")`): run the next frame without waiting
+    // for an input/resize event. A no-op in the default continuous mode.
+    // (`screen.requestRedraw()` in Boring source; method names are snake_cased on this target.)
+    fn request_redraw(&mut self) { self.redraw_requested = true; }
     // `"\x1B"` reaches here either as the ESC character or as its 4-character escape text.
     fn __norm_key(key: &str) -> &str {
         match key { "\\x1B" | "\\x1b" => "\x1B", "\\r" => "\r", "\\n" => "\n", other => other }
@@ -134,6 +148,17 @@ impl Screen {
         }
         drop(slot);
         if display.closed.load(SeqCst) { std::process::exit(0); }
+        if __boring_redraw_on_demand() {
+            // Sleep until something invalidates the window (or the body asked for a frame).
+            let mut dirty = display.dirty.lock().unwrap();
+            while !*dirty && !self.redraw_requested && !display.closed.load(SeqCst) {
+                dirty = display.dirty_cv.wait(dirty).unwrap();
+            }
+            *dirty = false;
+            drop(dirty);
+            self.redraw_requested = false;
+            if display.closed.load(SeqCst) { std::process::exit(0); }
+        }
         self.frame += 1;
         self.time = self.start.elapsed().as_secs_f64();
         self.resized = display.resized.swap(false, SeqCst);
@@ -241,11 +266,13 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 display.closed.store(true, SeqCst);
                 display.frame_taken.notify_all();
+                display.invalidate();
                 *flow = ControlFlow::Exit;
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 win_size = (size.width, size.height);
                 display.resized.store(true, SeqCst);
+                display.invalidate();
             }
             Event::WindowEvent { event: WindowEvent::KeyboardInput { input, .. }, .. } => {
                 if let Some(key) = input.virtual_keycode {
@@ -258,11 +285,13 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                         }
                         ElementState::Released => { keys.remove(&name); }
                     }
+                    display.invalidate();
                 }
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 display.mouse_x.store(position.x.floor() as i64, SeqCst);
                 display.mouse_y.store(position.y.floor() as i64, SeqCst);
+                display.invalidate();
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 let bit = match button {
@@ -275,6 +304,7 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                     ElementState::Pressed => { display.mouse_buttons.fetch_or(bit, SeqCst); }
                     ElementState::Released => { display.mouse_buttons.fetch_and(!bit, SeqCst); }
                 }
+                display.invalidate();
             }
             _ => {}
         }

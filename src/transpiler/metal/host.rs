@@ -39,6 +39,7 @@ struct HostEmitter {
     screen_width_expr: String,
     screen_height_expr: String,
     screen_title: String,
+    screen_on_demand: bool,
     // true while emitting render loop body (? → .expect() for kernel launches)
     in_render_loop: bool,
     /// Local variables (by name, unscoped) whose declared type or initializer is a
@@ -215,6 +216,7 @@ impl HostEmitter {
             screen_width_expr: String::new(),
             screen_height_expr: String::new(),
             screen_title: String::new(),
+            screen_on_demand: false,
             in_render_loop: false,
             dict_vars: std::collections::HashSet::new(),
             dict_fields: std::collections::HashSet::new(),
@@ -447,22 +449,15 @@ impl HostEmitter {
                         self.emit_fn(f, None);
                     }
                 }
-                Item::Struct(s) if self.screen_var.is_some() => {
-                    self.blank();
-                    self.emit_struct(s);
-                }
-                Item::Enum(e) if self.screen_var.is_some() => {
-                    self.blank();
-                    self.emit_enum(e);
-                }
                 _ => {}
             }
         }
 
-        if self.screen_var.is_none() {
-            self.blank();
-            self.out.push_str(general_code);
-        }
+        // The general pass renders every plain fn/struct/enum (a Screen program's own
+        // top level stays with this driver, see `metal::mod`), so a per-frame host helper
+        // called from the render loop gets the same codegen as in any other program.
+        self.blank();
+        self.out.push_str(general_code);
         self.blank();
 
         if self.screen_var.is_some() || top_level_kernel_touching || !kernel_names.is_empty() || has_boring_main || program.items.iter().any(|i| matches!(i, Item::Stmt(_) | Item::Let(_))) {
@@ -1038,6 +1033,8 @@ impl HostEmitter {
                                 self.screen_width_expr = w;
                                 self.screen_height_expr = h;
                                 self.screen_title = title_str;
+                                self.screen_on_demand = args.iter().any(|a| a.label.as_deref() == Some("redraw")
+                                    && matches!(&a.value.kind, ExprKind::Str(v) if v == "demand"));
                                 return;
                             }
                         }
@@ -1050,6 +1047,15 @@ impl HostEmitter {
     fn emit_screen_prelude(&mut self) {
         // `#[macro_use] extern crate objc;` now lives in `emit_prelude` (always
         // emitted, not just here) -- see its own comment.
+        self.blank();
+        // Whole-array upload used by `k.field = <host array>` in the render loop.
+        self.line("fn boring_screen_upload<T: Copy>(dev: &Device, data: &[T]) -> Buffer {");
+        self.indent += 1;
+        self.line("let bytes = (data.len() * std::mem::size_of::<T>()) as u64;");
+        self.line("if bytes == 0 { return dev.new_buffer(4, MTLResourceOptions::StorageModeShared); }");
+        self.line("dev.new_buffer_with_data(data.as_ptr() as *const _, bytes, MTLResourceOptions::StorageModeShared)");
+        self.indent -= 1;
+        self.line("}");
         self.blank();
         self.line("fn boring_screen_present(");
         self.indent += 1;
@@ -1144,6 +1150,9 @@ impl HostEmitter {
         self.line("}");
         self.line("let boring_queue = boring_device.new_command_queue();");
         self.line("let mut boring_frame: isize = 0;");
+        // On-demand redraw (`Screen(..., redraw = \"demand\")`): the loop body runs only while
+        // this is set -- initially, on input/resize events, and after `screen.requestRedraw()`.
+        self.line("let mut boring_dirty = true;");
         self.line("let boring_start = std::time::Instant::now();");
         self.line("let mut boring_keys: std::collections::HashSet<String> = Default::default();");
         self.line(&format!("let mut boring_screen_width: isize = {w};"));
@@ -1165,8 +1174,16 @@ impl HostEmitter {
     fn emit_render_loop(&mut self, loop_body: &[Stmt]) {
         self.line("boring_event_loop.run_return(|__boring_event, _, __boring_cf| {");
         self.indent += 1;
-        self.line("*__boring_cf = winit::event_loop::ControlFlow::Poll;");
+        let on_demand = self.screen_on_demand;
+        self.line(if on_demand {
+            "*__boring_cf = winit::event_loop::ControlFlow::Wait;"
+        } else {
+            "*__boring_cf = winit::event_loop::ControlFlow::Poll;"
+        });
         self.line("boring_screen_resized = false;");
+        if on_demand {
+            self.line("if matches!(__boring_event, winit::event::Event::WindowEvent { event: winit::event::WindowEvent::KeyboardInput { .. } | winit::event::WindowEvent::CursorMoved { .. } | winit::event::WindowEvent::MouseInput { .. } | winit::event::WindowEvent::Resized(_), .. }) { boring_dirty = true; }");
+        }
         self.line("match __boring_event {");
         self.indent += 1;
         self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::CloseRequested, .. } => {");
@@ -1221,6 +1238,10 @@ impl HostEmitter {
         self.line("}");
         self.line("winit::event::Event::MainEventsCleared => {");
         self.indent += 1;
+        if on_demand {
+            self.line("if !boring_dirty { return; }");
+            self.line("boring_dirty = false;");
+        }
         self.in_render_loop = true;
         let stmts: Vec<Stmt> = loop_body.to_vec();
         for stmt in &stmts {
@@ -1229,6 +1250,10 @@ impl HostEmitter {
         self.in_render_loop = false;
         self.line("boring_keys_pressed.clear();");
         self.line("boring_frame += 1;");
+        if on_demand {
+            // `screen.requestRedraw()` in the body: spin one more iteration without an event.
+            self.line("if boring_dirty { *__boring_cf = winit::event_loop::ControlFlow::Poll; }");
+        }
         self.indent -= 1;
         self.line("}");
         self.line("_ => {}");
@@ -1279,7 +1304,19 @@ impl HostEmitter {
                         }
                     }
                 }
+                if let ExprKind::MethodCall(obj, method, margs) = &e.kind {
+                    if method == "requestRedraw" && margs.is_empty()
+                        && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
+                    {
+                        self.line("boring_dirty = true;");
+                        return;
+                    }
+                }
                 if let ExprKind::Assign(lhs, rhs) = &e.kind {
+                    if let Some(upload) = self.try_emit_array_field_upload(lhs, rhs) {
+                        self.line(&upload);
+                        return;
+                    }
                     let l = self.emit_assign_target(lhs);
                     let r = self.emit_assign_rhs(lhs, rhs);
                     self.line(&format!("{l} = {r};"));
@@ -1311,6 +1348,30 @@ impl HostEmitter {
             }
             other => self.emit_stmt(other),
         }
+    }
+
+    /// `k.colors = <host array>` inside the render loop: upload the whole array into a
+    /// fresh `MTLBuffer` of exactly its length and swap it in (the kernel struct binds
+    /// buffers per launch, so a different size needs no further bookkeeping). A kernel
+    /// field on the right (`a.x = b.y`, the zero-copy buffer handoff) is not an upload.
+    fn try_emit_array_field_upload(&mut self, lhs: &Expr, rhs: &Expr) -> Option<String> {
+        let ExprKind::Field(obj, field) = &lhs.kind else { return None };
+        let ExprKind::Var(var) = &obj.kind else { return None };
+        if self.is_kernel_field_ref(rhs) { return None; }
+        let kernel_type = self.var_kernel_type.get(var.as_str())?;
+        let decl = self.kernel_decls.get(kernel_type)?;
+        let kf = decl.fields.iter().find(|f| f.name == *field)?;
+        if !matches!(kf.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified) {
+            return None;
+        }
+        if !matches!(&kf.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) {
+            return None;
+        }
+        let device_ty = elem_rust_type(&kf.ty);
+        let value = self.expr(rhs);
+        Some(format!(
+            "{var}.{field} = {{ let __v = &({value}); boring_screen_upload(&{var}.__device, &__v.iter().map(|&x| x as {device_ty}).collect::<Vec<{device_ty}>>()) }};"
+        ))
     }
 
     /// Renders an assignment *target* (LHS) as a plain Rust place expression —
@@ -2584,6 +2645,7 @@ impl HostEmitter {
             screen_width_expr: self.screen_width_expr.clone(),
             screen_height_expr: self.screen_height_expr.clone(),
             screen_title: self.screen_title.clone(),
+            screen_on_demand: self.screen_on_demand,
             in_render_loop: self.in_render_loop,
             dict_vars: self.dict_vars.clone(),
             dict_fields: self.dict_fields.clone(),

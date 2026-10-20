@@ -1942,11 +1942,13 @@ def main() throws:
 
 // ─── host — struct `count`/`length` field & method shadowing ─────────────────
 //
-// A plain (non-kernel) struct's own methods are only ever custom-emitted by
+// A plain (non-kernel) struct's own methods used to be custom-emitted by
 // this backend's `HostEmitter` (as opposed to the already-correct general/std
-// pipeline splice) for a `Screen`-driven program — see `metal::mod`'s doc
-// comment. That's the one path that exercises the `self.count`/`self.count()`
-// guard added to `host.rs`'s `expr()` (`Field` and `MethodCall` cases): before
+// pipeline splice) for a `Screen`-driven program; a Screen program now takes the
+// general pipeline's output for plain fn/struct/enum too (so render-loop host
+// helpers work), and these tests pin that neither path shadows a real
+// `count`/`length` field or method. The `self.count`/`self.count()`
+// guard in `host.rs`'s `expr()` (`Field` and `MethodCall` cases) covers: before
 // the fix, a real user field or method literally named `count`/`length`
 // (Boring's builtin array-length shortcut) was unconditionally rewritten to
 // `.len() as isize` even on `self`, producing `self.len() as isize` — nonsense
@@ -1984,10 +1986,12 @@ kernel:
         screen.present(k.pixels)
         break
 "#);
-    assert!(rs.contains("fn get(&self) -> isize {\n        self.count\n    }"),
+    assert!(rs.contains("fn get(&self) -> isize {\n        self.count.clone()\n    }"),
         "expected `self.count` to read the real declared field, not the `.length`/`.count` \
          array-length builtin;\ngot:\n{rs}");
-    assert!(!rs.contains("self.len() as isize"),
+    let user_impl = &rs[rs.find("impl Counter {").expect("user impl")..];
+    let user_impl = &user_impl[..user_impl.find("\n}\n").unwrap_or(user_impl.len())];
+    assert!(!user_impl.contains("self.len() as isize"),
         "`self.count` must not be shadowed by the `.len() as isize` builtin shortcut;\ngot:\n{rs}");
 }
 
@@ -2026,7 +2030,9 @@ kernel:
     assert!(rs.contains("(self.count() * 2)"),
         "expected `self.count()` to call the real declared method, not the `.length`/`.count` \
          array-length builtin;\ngot:\n{rs}");
-    assert!(!rs.contains("self.len() as isize"),
+    let user_impl = &rs[rs.find("impl Ledger {").expect("user impl")..];
+    let user_impl = &user_impl[..user_impl.find("\n}\n").unwrap_or(user_impl.len())];
+    assert!(!user_impl.contains("self.len() as isize"),
         "`self.count()` must not be shadowed by the `.len() as isize` builtin shortcut;\ngot:\n{rs}");
 }
 
