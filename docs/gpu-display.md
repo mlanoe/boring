@@ -95,6 +95,15 @@ guarantees either. Zero-filling costs a pass over the whole buffer, so no host d
 reads `'surface` pixels it has not written itself (e.g. a Game-of-Life seed) must not rely on their value, and
 one that needs a defined starting picture writes it (a first dispatch, or an `init` that assigns the field).
 
+### Setup code before the window opens
+
+A `Screen` program's top-level `let`s and statements (other than the `Screen(...)` itself and the render loop)
+are ordinary code that runs once before the window opens. A kernel built there with constructor arguments
+(`var mut k = TileKernel(frame.f, ...)`) runs its `init(...)` on every host (array uploads, scalar fields,
+`Dimension` sizing); the render loop then reads the kernel and any host values it uses. On wgpu this code is
+the synthesized `fn __boring_screen_setup()`. Module-level constants of imported modules are emitted as
+module-level `const`s, visible to the functions that use them. Covered by `tests/screen_setup.rs`.
+
 ### Pixel format
 
 All backends use `BGRA8Unorm`. Pixels are packed as 32-bit `uint` values:
