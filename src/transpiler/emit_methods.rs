@@ -1903,6 +1903,26 @@ impl Transpiler {
                 {
                     return None;
                 }
+                // A set/dict held in the cell (`state {T}` / `state {K=V}`): `add`/`set`/`put` are
+                // `insert`, and `remove` takes the key by reference.
+                let coll_op = if is_known { None } else {
+                    match (sub_ty.as_ref().map(|t| t.without_mut()), method) {
+                        (Some(Type::Set(_)), "add" | "insert") if args.len() == 1 => Some(("insert", false)),
+                        (Some(Type::Dict(..)), "set" | "put" | "insert") if args.len() == 2 => Some(("insert", false)),
+                        (Some(Type::Set(_) | Type::Dict(..)), "remove") if args.len() == 1 => Some(("remove", true)),
+                        _ => None,
+                    }
+                };
+                if let Some((op, by_ref)) = coll_op {
+                    let mut args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                    if by_ref { args_s[0] = format!("&{}", args_s[0]); }
+                    let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
+                    let guard = self.lock_field_write(&r);
+                    let call = format!("{}.{}.{}({})", guard, sub, op, args_s.join(", "));
+                    let call = Self::with_hoisted_args(&hoisted, call);
+                    // `insert`/`remove` return a value; the statement form discards it.
+                    return Some(format!("{{ {}; }}", call));
+                }
                 let (rust_method, extra_wrap) = if is_known {
                     (method.to_string(), None)
                 } else {
@@ -1944,26 +1964,6 @@ impl Transpiler {
                             self.var_types.get(v.as_str()).and_then(|t| {
                                 match t {
                                     crate::ast::Type::Named(n) => Some(n.clone()),
-                // A set/dict held in the cell (`state {T}` / `state {K=V}`): `add`/`set`/`put` are
-                // `insert`, and `remove` takes the key by reference.
-                let coll_op = if is_known { None } else {
-                    match (sub_ty.as_ref().map(|t| t.without_mut()), method) {
-                        (Some(Type::Set(_)), "add" | "insert") if args.len() == 1 => Some(("insert", false)),
-                        (Some(Type::Dict(..)), "set" | "put" | "insert") if args.len() == 2 => Some(("insert", false)),
-                        (Some(Type::Set(_) | Type::Dict(..)), "remove") if args.len() == 1 => Some(("remove", true)),
-                        _ => None,
-                    }
-                };
-                if let Some((op, by_ref)) = coll_op {
-                    let mut args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                    if by_ref { args_s[0] = format!("&{}", args_s[0]); }
-                    let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
-                    let guard = self.lock_field_write(&r);
-                    let call = format!("{}.{}.{}({})", guard, sub, op, args_s.join(", "));
-                    let call = Self::with_hoisted_args(&hoisted, call);
-                    // `insert`/`remove` return a value; the statement form discards it.
-                    return Some(format!("{{ {}; }}", call));
-                }
                                     crate::ast::Type::Qualified(inner, _) => {
                                         if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
                                     }
@@ -6216,6 +6216,9 @@ impl Transpiler {
                     .unwrap_or(false)
             }
             ExprKind::Dict(_) => true,
+            // `slot.value` of a lowered view's `Slot<{K=V}>` state cell.
+            ExprKind::Field(_, f) if f == "value"
+                && matches!(self.resolve_expr_type(expr).as_ref().map(|t| t.without_mut()), Some(Type::Dict(..))) => true,
             // Field access: look up the field type in struct_fields
             ExprKind::Field(obj, field_name) => {
                 let struct_name = match &obj.kind {
@@ -6257,9 +6260,6 @@ impl Transpiler {
             // without this (docs/dict-index-optional-return-bug.md's sibling bug).
             ExprKind::Index(obj, _) => {
                 self.resolve_expr_declared_type(obj)
-            // `slot.value` of a lowered view's `Slot<{K=V}>` state cell.
-            ExprKind::Field(_, f) if f == "value"
-                && matches!(self.resolve_expr_type(expr).as_ref().map(|t| t.without_mut()), Some(Type::Dict(..))) => true,
                     .and_then(|t| t.without_mut().index_element_type().cloned())
                     .map(|elem_ty| matches!(elem_ty.without_mut(), Type::Dict(..)))
                     .unwrap_or(false)
@@ -6480,6 +6480,9 @@ impl Transpiler {
                     .unwrap_or(false)
             }
             ExprKind::Set(_) => true,
+            // `slot.value` of a lowered view's `Slot<{T}>` state cell.
+            ExprKind::Field(_, f) if f == "value"
+                && matches!(self.resolve_expr_type(expr).as_ref().map(|t| t.without_mut()), Some(Type::Set(_))) => true,
             // Field access: look up the field type in struct_fields
             ExprKind::Field(obj, field_name) => {
                 let struct_name = match &obj.kind {
@@ -6521,9 +6524,6 @@ impl Transpiler {
             in_throws: self.in_throws,
             in_async: self.in_async,
             in_iter_stream: self.in_iter_stream,
-            // `slot.value` of a lowered view's `Slot<{T}>` state cell.
-            ExprKind::Field(_, f) if f == "value"
-                && matches!(self.resolve_expr_type(expr).as_ref().map(|t| t.without_mut()), Some(Type::Set(_))) => true,
             self_type: self.self_type.clone(),
             collection_vars: self.collection_vars.clone(),
             vec_vars: self.vec_vars.clone(),
