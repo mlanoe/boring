@@ -423,15 +423,15 @@ impl<T> Clone for DeviceBuffer<T> {
 /// only for the duration of the enclosing `hipModuleLaunchKernel` call, which
 /// happens synchronously inside `LaunchBuilder::launch` while the borrows are
 /// still alive -- see that method's safety doc.
-trait BoringKernelArg { fn boring_kernel_ptr(self) -> *mut c_void; }
+trait BoringLaunchArg { fn boring_kernel_ptr(self) -> *mut c_void; }
 
-impl<'a, T> BoringKernelArg for &'a DeviceBuffer<T> {
+impl<'a, T> BoringLaunchArg for &'a DeviceBuffer<T> {
     fn boring_kernel_ptr(self) -> *mut c_void {
         &self.ptr as *const *mut c_void as *mut c_void
     }
 }
 
-impl<'a, T> BoringKernelArg for &'a mut DeviceBuffer<T> {
+impl<'a, T> BoringLaunchArg for &'a mut DeviceBuffer<T> {
     fn boring_kernel_ptr(self) -> *mut c_void {
         &mut self.ptr as *mut *mut c_void as *mut c_void
     }
@@ -439,7 +439,7 @@ impl<'a, T> BoringKernelArg for &'a mut DeviceBuffer<T> {
 
 macro_rules! boring_impl_scalar_kernel_arg {
     ($($t:ty),*) => { $(
-        impl<'a> BoringKernelArg for &'a $t {
+        impl<'a> BoringLaunchArg for &'a $t {
             fn boring_kernel_ptr(self) -> *mut c_void { self as *const $t as *mut c_void }
         }
     )* };
@@ -449,7 +449,7 @@ boring_impl_scalar_kernel_arg!(i8, u8, i16, u16, i32, u32, i64, u64, isize, usiz
 // `Dimension` (boring's built-in 2-D kernel-size type, see `DIMENSION_STRUCT_RUST`
 // below) is a `#[repr(C)] Copy` struct passed by value as a kernel parameter --
 // same by-address treatment as the scalar impls above.
-impl<'a> BoringKernelArg for &'a Dimension {
+impl<'a> BoringLaunchArg for &'a Dimension {
     fn boring_kernel_ptr(self) -> *mut c_void { self as *const Dimension as *mut c_void }
 }
 
@@ -458,7 +458,7 @@ struct LaunchConfig { block_dim: (u32, u32, u32), grid_dim: (u32, u32, u32), sha
 struct LaunchBuilder<'a> { func: &'a HipFunction, stream: &'a HipStream, ptrs: Vec<*mut c_void> }
 
 impl<'a> LaunchBuilder<'a> {
-    fn arg<A: BoringKernelArg>(&mut self, a: A) -> &mut Self {
+    fn arg<A: BoringLaunchArg>(&mut self, a: A) -> &mut Self {
         self.ptrs.push(a.boring_kernel_ptr());
         self
     }
@@ -684,6 +684,10 @@ struct HostEmitter {
     /// but every call site, in either emitter, must agree on every function's
     /// signature for cross-calls between the two to type-check.
     fn_ref_params: std::collections::HashMap<String, Vec<bool>>,
+    /// The general pass's own code (signatures of the ordinary functions a loop body may call).
+    general_code_text: String,
+    /// Loop variables of `for k in screen.key_events:` in scope (they are `String`s here).
+    event_vars: Vec<String>,
     /// Declared struct AND enum names (both, despite the field name) — a
     /// `Type::Named(n)` parameter is by-ref-worthy when `n` names either.
     struct_names: std::collections::HashSet<String>,
@@ -810,6 +814,8 @@ impl HostEmitter {
             in_throws: false,
             variant_to_enum: std::collections::HashMap::new(),
             fn_ref_params: std::collections::HashMap::new(),
+            general_code_text: String::new(),
+            event_vars: Vec::new(),
             struct_names: std::collections::HashSet::new(),
             struct_field_names: std::collections::HashMap::new(),
             struct_method_names: std::collections::HashMap::new(),
@@ -913,6 +919,9 @@ impl HostEmitter {
         self.indent -= 1;
         self.line(") {");
         self.indent += 1;
+        // The surface follows the presented buffer (it changes when the program reallocates its
+        // kernel after a window resize).
+        self.line("if let (Some(w), Some(h)) = (std::num::NonZeroU32::new(width), std::num::NonZeroU32::new(height)) { let _ = surface.resize(w, h); }");
         self.line("let mut buf = match surface.buffer_mut() { Ok(b) => b, Err(_) => return };");
         self.line("let n = ((width as usize) * (height as usize)).min(pixels.len()).min(buf.len());");
         self.line("buf[..n].copy_from_slice(&pixels[..n]);");
@@ -923,36 +932,10 @@ impl HostEmitter {
         // Same key table as the Metal/CUDA backends' identical helper --
         // keeps `screen.key(...)` string literals meaning the same thing
         // across every backend.
-        self.line("fn boring_key_str(key: winit::event::VirtualKeyCode) -> String {");
-        self.indent += 1;
-        self.line("use winit::event::VirtualKeyCode::*;");
-        self.line("match key {");
-        self.indent += 1;
-        self.line("Escape => \"\\x1B\".into(),");
-        self.line("Space => \" \".into(),");
-        self.line("Return => \"\\r\".into(),");
-        self.line("Up => \"\\x1B[A\".into(),");
-        self.line("Down => \"\\x1B[B\".into(),");
-        self.line("Left => \"\\x1B[D\".into(),");
-        self.line("Right => \"\\x1B[C\".into(),");
-        self.line("A => \"a\".into(), B => \"b\".into(), C => \"c\".into(),");
-        self.line("D => \"d\".into(), E => \"e\".into(), F => \"f\".into(),");
-        self.line("G => \"g\".into(), H => \"h\".into(), I => \"i\".into(),");
-        self.line("J => \"j\".into(), K => \"k\".into(), L => \"l\".into(),");
-        self.line("M => \"m\".into(), N => \"n\".into(), O => \"o\".into(),");
-        self.line("P => \"p\".into(), Q => \"q\".into(), R => \"r\".into(),");
-        self.line("S => \"s\".into(), T => \"t\".into(), U => \"u\".into(),");
-        self.line("V => \"v\".into(), W => \"w\".into(), X => \"x\".into(),");
-        self.line("Y => \"y\".into(), Z => \"z\".into(),");
-        self.line("Key1 => \"1\".into(), Key2 => \"2\".into(), Key3 => \"3\".into(),");
-        self.line("Key4 => \"4\".into(), Key5 => \"5\".into(), Key6 => \"6\".into(),");
-        self.line("Key7 => \"7\".into(), Key8 => \"8\".into(), Key9 => \"9\".into(),");
-        self.line("Key0 => \"0\".into(),");
-        self.line("_ => format!(\"{:?}\", key).to_lowercase(),");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
+        for chunk in [crate::transpiler::screen_input::INPUT_RUNTIME, crate::transpiler::screen_input::KEY_NAMES_WINIT_028] {
+            for l in chunk.lines() { self.line(l); }
+        }
+        self.line("fn boring_key_str(key: winit::event::VirtualKeyCode) -> String { __boring_vk_name(key) }");
     }
 
     fn emit_screen_setup(&mut self) {
@@ -1009,8 +992,11 @@ impl HostEmitter {
         self.line("let mut boring_mouse_left = false;");
         self.line("let mut boring_mouse_right = false;");
         self.line("let mut boring_mouse_middle = false;");
-        self.line(&format!("let boring_buf_w: f64 = {w} as f64;"));
-        self.line(&format!("let boring_buf_h: f64 = {h} as f64;"));
+        self.line(&format!("let mut boring_buf_w: f64 = {w} as f64;"));
+        self.line(&format!("let mut boring_buf_h: f64 = {h} as f64;"));
+        // Shared input state (typed text, IME, modifiers, wheel, focus, key/button edges).
+        self.line("let mut boring_input = __BoringInput::new();");
+        self.line("boring_window.set_ime_allowed(true);");
     }
 
     fn emit_render_loop(&mut self, loop_body: &[Stmt]) {
@@ -1024,7 +1010,7 @@ impl HostEmitter {
         });
         self.line("boring_screen_resized = false;");
         if on_demand {
-            self.line("if matches!(__boring_event, winit::event::Event::WindowEvent { event: winit::event::WindowEvent::KeyboardInput { .. } | winit::event::WindowEvent::CursorMoved { .. } | winit::event::WindowEvent::MouseInput { .. } | winit::event::WindowEvent::Resized(_), .. }) { boring_dirty = true; }");
+            self.line(&format!("if matches!(__boring_event, winit::event::Event::WindowEvent {{ event: winit::event::WindowEvent::KeyboardInput {{ .. }} | winit::event::WindowEvent::CursorMoved {{ .. }} | winit::event::WindowEvent::MouseInput {{ .. }} | winit::event::WindowEvent::Resized(_) | {}, .. }}) {{ boring_dirty = true; }}", crate::transpiler::screen_input::WINIT028_INVALIDATING));
         }
         self.line("match __boring_event {");
         self.indent += 1;
@@ -1048,8 +1034,8 @@ impl HostEmitter {
         self.line("let __boring_ks = boring_key_str(__boring_key);");
         self.line("match __boring_ki.state {");
         self.indent += 1;
-        self.line("winit::event::ElementState::Pressed  => { if boring_keys.insert(__boring_ks.clone()) { boring_keys_pressed.insert(__boring_ks); } }");
-        self.line("winit::event::ElementState::Released => { boring_keys.remove(&__boring_ks); }");
+        self.line("winit::event::ElementState::Pressed  => { boring_input.key_down(&__boring_ks); if boring_keys.insert(__boring_ks.clone()) { boring_keys_pressed.insert(__boring_ks); } }");
+        self.line("winit::event::ElementState::Released => { boring_input.key_up(&__boring_ks); boring_keys.remove(&__boring_ks); }");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -1067,6 +1053,7 @@ impl HostEmitter {
         self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::MouseInput { state: __boring_ms, button: __boring_mb, .. }, .. } => {");
         self.indent += 1;
         self.line("let __boring_down = __boring_ms == winit::event::ElementState::Pressed;");
+        self.line(&crate::transpiler::screen_input::mouse_button_feed("boring_input", "__boring_mb", "__boring_down"));
         self.line("match __boring_mb {");
         self.indent += 1;
         self.line("winit::event::MouseButton::Left => boring_mouse_left = __boring_down,");
@@ -1077,6 +1064,13 @@ impl HostEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        for (__pat, __body) in crate::transpiler::screen_input::winit028_arms("boring_input") {
+            self.line(&format!("winit::event::Event::WindowEvent {{ event: {__pat}, .. }} => {{"));
+            self.indent += 1;
+            for l in &__body { self.line(l); }
+            self.indent -= 1;
+            self.line("}");
+        }
         self.line("winit::event::Event::MainEventsCleared => {");
         self.indent += 1;
         if on_demand {
@@ -1090,6 +1084,7 @@ impl HostEmitter {
         }
         self.in_render_loop = false;
         self.line("boring_keys_pressed.clear();");
+        self.line("boring_input.end_frame();");
         self.line("boring_frame += 1;");
         if on_demand {
             // `screen.requestRedraw()` in the body: spin one more iteration without an event.
@@ -1138,6 +1133,9 @@ impl HostEmitter {
                                         self.line(&format!(
                                             "boring_screen_present(&mut boring_sb_surface, &__boring_px, {w_expr}, {h_expr});"
                                         ));
+                                        // Mouse coordinates are pixel-buffer coordinates: follow a reallocated buffer.
+                                        self.line(&format!("boring_buf_w = ({w_expr}) as f64;"));
+                                        self.line(&format!("boring_buf_h = ({h_expr}) as f64;"));
                                         return;
                                     }
                                 }
@@ -1152,6 +1150,17 @@ impl HostEmitter {
                 // see `emit_assign_target`'s doc comment (mirrors
                 // `cuda::host`'s identical fix for the same two statements).
                 if let ExprKind::MethodCall(obj, method, margs) = &e.kind {
+                    // `screen.setImeArea(x, y, w, h)`: where the input method may put its candidate
+                    // window (buffer coordinates, scaled like the mouse; winit 0.28 only takes a point: just below the area).
+                    if method == "setImeArea" && margs.len() == 4
+                        && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
+                    {
+                        let x = self.expr(&margs[0].value);
+                        let y = format!("({}) + ({})", self.expr(&margs[1].value), self.expr(&margs[3].value));
+                        self.line("let __boring_ws = boring_window.inner_size();");
+                        self.line(&format!("boring_window.set_ime_position(winit::dpi::PhysicalPosition::new(({x}) as f64 * (__boring_ws.width.max(1) as f64) / boring_buf_w, ({y}) as f64 * (__boring_ws.height.max(1) as f64) / boring_buf_h));"));
+                        return;
+                    }
                     if method == "requestRedraw" && margs.is_empty()
                         && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
                     {
@@ -1163,6 +1172,14 @@ impl HostEmitter {
                     if let Some(upload) = self.try_emit_array_field_upload(lhs, rhs) {
                         self.line(&upload);
                         return;
+                    }
+                    // `k = K(...)`: reallocate a kernel (render-loop kernel vars are `Option`-wrapped).
+                    if let ExprKind::Var(kvar) = &lhs.kind {
+                        if self.var_kernel_type.contains_key(kvar.as_str()) {
+                            let r = self.expr(rhs);
+                            self.line(&format!("{kvar} = Some({r});"));
+                            return;
+                        }
                     }
                     let l = self.emit_assign_target(lhs);
                     let r = self.emit_assign_rhs(lhs, rhs);
@@ -1183,6 +1200,22 @@ impl HostEmitter {
             // `break`/kernel-field assignment/dispatch NESTED inside an `if`
             // still gets this render loop's own translation — see
             // `cuda::host`'s identical arm for the full rationale.
+            // `for k in screen.key_events:` / `key_up_events`: the frame's key events in order.
+            Stmt::For(fs) if fs.vars.len() == 1 && matches!(&fs.iterable.kind, ExprKind::Field(o, m)
+                if matches!(&o.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
+                    && crate::transpiler::screen_input::event_list_field(m).is_some()) =>
+            {
+                let ExprKind::Field(_, m) = &fs.iterable.kind else { unreachable!() };
+                let field = crate::transpiler::screen_input::event_list_field(m).unwrap();
+                self.line(&format!("for {} in boring_input.{field}.clone() {{", fs.vars[0]));
+                self.indent += 1;
+                self.event_vars.push(fs.vars[0].clone());
+                let body_clone: Vec<Stmt> = fs.body.to_vec();
+                for s in &body_clone { self.emit_render_loop_stmt(s); }
+                self.event_vars.pop();
+                self.indent -= 1;
+                self.line("}");
+            }
             Stmt::If(i) => {
                 for (idx, (cond, body)) in i.branches.iter().enumerate() {
                     let c = self.expr(cond);
@@ -1529,6 +1562,7 @@ impl HostEmitter {
         }
 
         self.blank();
+        self.general_code_text = general_code.to_string();
         self.out.push_str(general_code);
         self.blank();
 
@@ -2623,6 +2657,8 @@ impl HostEmitter {
             in_throws: self.in_throws,
             variant_to_enum: self.variant_to_enum.clone(),
             fn_ref_params: self.fn_ref_params.clone(),
+            general_code_text: self.general_code_text.clone(),
+            event_vars: self.event_vars.clone(),
             struct_names: self.struct_names.clone(),
             struct_field_names: self.struct_field_names.clone(),
             struct_method_names: self.struct_method_names.clone(),
@@ -2683,7 +2719,8 @@ impl HostEmitter {
                 if s.contains('.') || s.contains('e') { s } else { format!("{}.0", s) }
             }
             ExprKind::Bool(b)   => if *b { "true".into() } else { "false".into() },
-            ExprKind::Str(s)    => format!("\"{}\"", s),
+            // A bare CR is not allowed inside a Rust string literal (`"\r"` arrives decoded).
+            ExprKind::Str(s)    => format!("\"{}\"", s.replace('\r', "\\r")),
             ExprKind::Nil       => "None".into(),
             ExprKind::Void      => "()".into(),
 
@@ -2770,6 +2807,23 @@ impl HostEmitter {
                 // `screen.<field>` (Screen program only) → the matching local
                 // state var from `emit_screen_setup`/`emit_render_loop`.
                 // Mirrors `cuda::host`'s identical Field-case mapping.
+                // Input members of the shared runtime (`screen.text`, `.shift`, `.focused`, `screen.mouse.scroll_y`, ...).
+                if let ExprKind::Field(inner, mouse) = &obj.kind {
+                    if let ExprKind::Var(sv) = &inner.kind {
+                        if self.screen_var.as_deref() == Some(sv.as_str()) && mouse == "mouse" {
+                            if let Some((e, _)) = crate::transpiler::screen_input::mouse_property(field, "boring_input") { return e; }
+                        }
+                    }
+                }
+                if let ExprKind::Var(sv) = &obj.kind {
+                    if self.screen_var.as_deref() == Some(sv.as_str()) {
+                        // String-valued members are plain `String`s here: this host's own string
+                        // literals are `&str`, so `screen.text == "x"` compares like for like.
+                        if let Some((e, _)) = crate::transpiler::screen_input::property(field, "boring_input") {
+                            return e;
+                        }
+                    }
+                }
                 // `screen.mouse.x` / `.y` / `.left` / `.right` / `.middle` (Screen program only).
                 if let ExprKind::Field(inner, mouse) = &obj.kind {
                     if let ExprKind::Var(sv) = &inner.kind {
@@ -2840,13 +2894,25 @@ impl HostEmitter {
                     }
                 }
                 // `Scale(data)` → `Scale::new(boring_gpu_ctx(), data)?`.
+                // `Dimension(screen.width, screen.height)` in the render loop: host ints are `isize`.
+                if self.in_render_loop {
+                    if let ExprKind::Var(name) = &callee.kind {
+                        if name == "Dimension" && args.len() == 2 {
+                            return format!("Dimension(({}) as u32, ({}) as u32)", self.expr(&args[0].value), self.expr(&args[1].value));
+                        }
+                    }
+                }
                 if let ExprKind::Var(name) = &callee.kind {
                     if self.kernel_names.contains(name.as_str()) {
                         let args_s = self.emit_kernel_ctor_args(name, args);
                         let all = std::iter::once("boring_gpu_ctx()".to_string())
                             .chain(args_s)
                             .collect::<Vec<_>>();
-                        return format!("{}::new({})?", name, all.join(", "));
+                        return if self.in_render_loop {
+                            format!("{}::new({}).expect(\"kernel construction failed\")", name, all.join(", "))
+                        } else {
+                            format!("{}::new({})?", name, all.join(", "))
+                        };
                     }
                 }
                 // `print(expr)` → `println!(...)`
@@ -2913,6 +2979,17 @@ impl HostEmitter {
                         return format!("BoringKernelArg::Host(({}).clone())", self.expr(&a.value));
                     }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                    // A `string` parameter takes the generated crate's own string type; this host's
+                    // literals and `screen.text` are `&str`/`String`.
+                    let str_ty = callee_name
+                        .and_then(|n| crate::transpiler::screen_input::string_params(&self.general_code_text, n).get(i).copied().flatten());
+                    if let Some(ty) = str_ty {
+                        if crate::transpiler::screen_input::is_host_str(&a.value, self.screen_var.as_deref(), &self.event_vars) {
+                            let v = self.expr(&a.value);
+                            let v = if matches!(&a.value.kind, ExprKind::Str(_)) { v } else if matches!(&a.value.kind, ExprKind::Var(_)) { format!("{v}.as_str()") } else { format!("{v}.as_str()") };
+                            return crate::transpiler::screen_input::to_string_type(ty, &v);
+                        }
+                    }
                     self.coerce_call_arg(&a.value, expects_ref)
                 }).collect();
                 let fn_s = self.expr(callee);
@@ -2952,6 +3029,11 @@ impl HostEmitter {
                 })
             }
             ExprKind::MethodCall(obj, method, args) => {
+                if let ExprKind::Var(name) = &obj.kind {
+                    if self.screen_var.as_deref() == Some(name.as_str()) && args.len() == 1 {
+                        if let Some(q) = crate::transpiler::screen_input::method(method, &self.expr(&args[0].value), "boring_input") { return q; }
+                    }
+                }
                 // `screen.key(k)` / `screen.key_pressed(k)` (Screen program
                 // only) → is `k` currently held down. Mirrors `cuda::host`'s
                 // identical mapping.
@@ -2962,7 +3044,7 @@ impl HostEmitter {
                         if let Some(arg) = args.first() {
                             let k = self.expr(&arg.value);
                             let set = if method == "key_pressed" { "boring_keys_pressed" } else { "boring_keys" };
-                            return format!("{}.contains({})", set, k);
+                            return format!("{}.contains(&__boring_key_name(&*({})))", set, k);
                         }
                     }
                 }
@@ -3083,7 +3165,11 @@ impl HostEmitter {
                                 .unwrap_or_else(|| "boring_gpu_ctx()".into());
                             let args_s = self.emit_kernel_ctor_args(name, args);
                             let all = std::iter::once(dev).chain(args_s).collect::<Vec<_>>();
-                            return format!("{}::new({})?", name, all.join(", "));
+                            return if self.in_render_loop {
+                            format!("{}::new({}).expect(\"kernel construction failed\")", name, all.join(", "))
+                        } else {
+                            format!("{}::new({})?", name, all.join(", "))
+                        };
                         }
                     }
                 }

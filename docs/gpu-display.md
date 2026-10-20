@@ -147,30 +147,43 @@ let screen = Screen(Dimension(800, 600), title = "My app")
 | Property | Type | Description |
 |---|---|---|
 | `screen.dimension` | `Dimension` | window size at creation |
-| `screen.width` | `int` | shorthand for `screen.dimension.width` |
-| `screen.height` | `int` | shorthand for `screen.dimension.height` |
-| `screen.resized` | `bool` | true on the frame the window was resized |
+| `screen.width` | `int` | **current** window width in pixels (follows resizes) |
+| `screen.height` | `int` | **current** window height in pixels |
+| `screen.resized` | `bool` | true for the frame that follows a resize — see [Resizing](#resizing) |
 | `screen.closed` | `bool` | true if the user closed the window |
 | `screen.frame` | `int` | frame counter, starts at 0 |
 | `screen.time` | `float` | seconds elapsed since loop start |
+
+The input members (`screen.key…`, `screen.mouse…`, `screen.text`, …) are listed under [Input](#input-simd-metal-cuda-rocm-wgpu).
 
 ### Methods
 
 | Method | Description |
 |---|---|
 | `screen.present(pixels)` | blit the pixel buffer to the window; called once per frame |
-| `screen.key(k)` | `bool` — true while key `k` is held (string literal) |
+| `screen.key(k)` | `bool` — true while key `k` is held |
+| `screen.key_pressed(k)` / `key_repeat(k)` / `key_released(k)` | key edges — see [Input](#input-simd-metal-cuda-rocm-wgpu) |
+| `screen.mouse_pressed(b)` / `mouse_released(b)` | mouse-button edges |
 
 ### Key strings
 
-`screen.key()` accepts a string literal for the key name:
+Every key query takes a string — a literal or any string expression — and every host maps it to the same
+**canonical key name**, so a source file means the same thing on every target:
 
-| Key | String |
-|---|---|
-| Escape | `"\x1B"` |
-| Space | `" "` |
-| Enter | `"\r"` |
-| Letters / digits | `"a"`, `"1"`, … |
+| Key | Canonical name | Also accepted |
+|---|---|---|
+| letters, digits, punctuation | the lowercase character (`"a"`, `"1"`, `"-"`) | any letter case (`"A"`) |
+| Space | `" "` | `"Space"` |
+| Escape | `"Escape"` | `"\x1B"`, `"Esc"` |
+| Enter / Return | `"Enter"` | `"\r"`, `"\n"`, `"Return"` |
+| Tab, Backspace, Delete, Insert | `"Tab"`, `"Backspace"`, `"Delete"`, `"Insert"` | `"\t"`, `"\x08"`, `"\x7F"` |
+| Arrows | `"Left"`, `"Right"`, `"Up"`, `"Down"` | `"ArrowLeft"`…, the ANSI `"\x1B[D"`… |
+| Home, End, PageUp, PageDown | same | any letter case |
+| `F1`…`F12` | `"F1"`…`"F12"` | `"f5"` |
+| modifiers | `"Shift"`, `"Control"`, `"Alt"`, `"Meta"` | `"Ctrl"`, `"Cmd"`, `"Super"`, `"Win"` |
+| CapsLock | `"CapsLock"` | |
+
+Left and right modifier keys share one name; named keys are matched case-insensitively.
 
 ---
 
@@ -211,8 +224,7 @@ The assignment lowers to the kernel's own upload: wgpu `copy_<f>_to_device` (rea
 the bind group when the length changed), SIMD `copy_<f>_to_device`, Metal a fresh `MTLBuffer` of exactly the
 array's length, CUDA/ROCm a fresh device buffer (`Arc`-wrapped for a `let` field). Elements are converted to the
 field's width. `a.x = b.y` with a *kernel* on the right stays the zero-copy buffer handoff. `screen.frame` is
-readable in loop expressions on every target. Re-uploading a `'surface` field this way is not supported (the
-presenting bind group keeps the old buffer). `.count`/`.length` on a value whose struct type declares a real field or method of that name (typed
+readable in loop expressions on every target. Re-uploading a `'surface` field this way works on wgpu only (it reallocates the blit too, see [Resizing](#resizing)); on the other hosts reassign the kernel instead. `.count`/`.length` on a value whose struct type declares a real field or method of that name (typed
 locals/params, `fn`/method return types, struct field chains, and `self`) reads that member on every backend
 (Metal/CUDA/ROCm/wgpu share a receiver-type resolver, `src/transpiler/host_types.rs`); only a receiver whose type is not
 resolvable as a user struct (or a real array) still gets the array-length builtin. Pinned by
@@ -259,7 +271,7 @@ k(block = (16, 16))
 - Window: winit 0.28 + `CAMetalLayer` attached to the `NSView`.
 - Pixel format: `BGRA8Unorm` — pixels packed as `0xAARRGGBB`.
 - Blit: `MTLBlitCommandEncoder.copyFromBuffer(toTexture:)` each frame.
-- Drawable size: fixed at the kernel's surface dimensions — not updated on window resize.
+- Drawable size: the presented buffer's dimensions (set when the kernel is reallocated, see [Resizing](#resizing)).
 - Dependencies: `winit = "0.28"`, `objc = "0.2"`, `core-graphics = "0.23"`.
 - Requires macOS 11+ with a Metal-capable GPU.
 
@@ -270,7 +282,7 @@ k(block = (16, 16))
 - Window: winit 0.30 + `wgpu::Surface` tied to the window handle. No platform-specific bindings.
 - Pixel format: `BGRA8Unorm` — same packing as Metal (`0xAARRGGBB`). Requested explicitly so pixel code is portable across `--target metal` and `--target wgpu`.
 - Present: a full-screen-quad render pipeline whose fragment shader reads the `'surface` storage buffer directly and writes to the swapchain texture — no CPU readback, no `copy_buffer_to_texture`.
-- Drawable size: fixed at the kernel's surface dimensions — not updated on window resize.
+- Swapchain size: the presented buffer's dimensions (reconfigured when the kernel is reallocated, see [Resizing](#resizing)).
 - Dependencies: `wgpu = "22"`, `winit = "0.30"` (added to the generated `Cargo.toml` only when the program uses `Screen`).
 - Requires a DX12 (Windows), Vulkan (Windows / Linux), or Metal (macOS) capable GPU.
 
@@ -296,7 +308,7 @@ writeup. Summary:
 - Pixel format: same `0xAARRGGBB` packing; softbuffer's own `0RGB` format
   ignores the top byte, so no conversion is needed beyond narrowing the D2H
   read to `u32`.
-- Drawable size: fixed at the kernel's surface dimensions, requested via
+- Drawable size: the presented buffer's dimensions (initially the kernel's surface size), requested via
   `winit::dpi::PhysicalSize` (not `LogicalSize`) so the window's physical
   pixel count matches the pixel buffer regardless of the display's DPI scale
   factor — a real bug on a >100%-scaled display otherwise (see
@@ -317,15 +329,95 @@ writeup. Summary:
 
 ## Input (simd, Metal, CUDA, ROCm, wgpu)
 
-Example: `examples/screen_input.br`.
+Examples: `examples/screen_input.br` (mouse + key edges); the members below are exercised by
+`tests/screen_input_events.rs` on every target.
 
-- `screen.key("k")` — level-triggered: true while held.
-- `screen.key_pressed("k")` — edge-triggered: true only for the frame in which the key went from released to pressed (OS auto-repeat does not retrigger it). Previously an alias of `key()` on Metal/CUDA/ROCm.
-- `screen.mouse.x` / `.y` (`int`) — cursor position in **pixel-buffer** coordinates (window pixels are rescaled to the buffer, so HiDPI/resized windows are handled; the last position is kept when the cursor leaves the window) — and `screen.mouse.left` / `.right` / `.middle` (`bool`). Only the field forms are supported (not a bare `screen.mouse` value on the GPU hosts).
-- State is consistent within one loop iteration: simd snapshots it at the end of `screen.present(...)`; the winit-driven hosts update it from events delivered before the frame body, and clear the pressed set after it.
-- Caveat: kernel `int` fields are `i32` on simd but `isize` on Metal — pass a `float32(...)` (as the example does) to stay portable.
-- Only simd/Metal/wgpu codegen is compile-checked here (`cargo check`); CUDA/ROCm have codegen snapshot tests only, no hardware verification of the new input path.
-- wgpu: `screen.key(...)` / `key_pressed(...)` / `screen.mouse.*` are general host expressions (usable in any `if`/`elif`/`else` condition or scalar field assignment inside the render loop, via `self.__keys` / `self.__keys_pressed` / `self.__mouse_*` on the `ApplicationHandler`); the pressed set is cleared at the end of each `RedrawRequested` body.
+**Model.** Events accumulate between frames and the frame body sees them as a *per-frame snapshot*: held state
+(`key`, `mouse.*` buttons, modifiers, `focused`, `marked`) is the state when the frame starts, and edge/event
+members (`key_pressed`, `text`, `scroll_*`, …) cover everything that happened since the previous frame and are cleared
+after it (simd snapshots at the end of `screen.present(...)`, the winit-driven hosts clear after the body). There is
+no unbounded queue: a frame that is slow to start sees all its events at once — use `screen.text` (the whole string
+typed) rather than assuming one character per frame. All members work in any `if`/`elif`/`else` condition or scalar
+field assignment in the render loop, and in `redraw = "demand"` mode every input event invalidates the window.
+
+| Member | Type | Meaning |
+|---|---|---|
+| `screen.key(k)` | `bool` | held — level-triggered |
+| `screen.key_pressed(k)` | `bool` | went down this frame (OS auto-repeat does **not** retrigger it) |
+| `screen.key_repeat(k)` | `bool` | went down this frame **or** an OS auto-repeat of it arrived (use for held-key editing: Backspace, arrows) |
+| `screen.key_released(k)` | `bool` | released this frame |
+| `screen.last_key` | `string` | canonical name of the last key that went down or repeated this frame, `""` if none |
+| `for k in screen.key_events:` / `screen.key_up_events` | statement | every key-down (**including auto-repeats**) / key-up event of the frame as a canonical name, **in arrival order and with duplicates** — the event queue; nothing is lost when a frame is slow. `k` is a `string`; `break` inside is not supported |
+| `screen.setImeArea(x, y, w, h)` | statement | tell the input method where the text caret is (buffer coordinates, scaled like the mouse) so its candidate window opens next to it. winit 0.30 (wgpu) passes the rectangle; the winit 0.28 hosts pass the point just below it |
+| `screen.mouse.x`, `.y` | `int` | cursor position in **pixel-buffer** coordinates (window pixels are rescaled to the buffer, so HiDPI and resized windows work; the last position is kept when the cursor leaves the window) |
+| `screen.mouse.left`, `.right`, `.middle` | `bool` | button held |
+| `screen.mouse_pressed(b)`, `screen.mouse_released(b)` | `bool` | button `"left"`/`"right"`/`"middle"` went down / up this frame (a click shorter than a frame is both) |
+| `screen.mouse.scroll_x`, `.scroll_y` | `float32` | wheel / trackpad movement accumulated this frame, in **pixels** (a wheel notch is 40). `scroll_y > 0` = rolled away from the user (content moves down) |
+| `screen.shift`, `.ctrl`, `.alt`, `.meta` | `bool` | modifier state (`meta` = Command on macOS, the Windows key elsewhere) |
+| `screen.text` | `string` | text typed this frame: printable characters and IME-committed text, in order. No control characters (Enter/Backspace/Tab are keys, not text) and none while Ctrl (without Alt) or Meta is held, so shortcuts do not type |
+| `screen.marked` | `string` | the IME **composition** (marked / pre-edit) text being edited, `""` when none |
+| `screen.marked_start`, `.marked_end` | `int` | the caret/selection inside `marked` as byte offsets, `-1` when there is no composition or the IME gave none |
+| `screen.focused` | `bool` | the window has keyboard focus (true until the first focus change) |
+| `screen.focus_gained`, `.focus_lost` | `bool` | focus changed this frame |
+
+- **Key names** are the canonical names under [Key strings](#key-strings): `screen.key(name)` works with any string
+  expression, e.g. a key table read from data.
+- **IME.** The window opts in to input-method events at creation (`set_ime_allowed(true)`). While a composition is
+  active, what the input method consumes arrives as `marked`/`text` (winit does not report those key presses to the app). An
+  input method reports the same characters through two channels; the runtime delivers them once. Candidate-window
+  placement (a cursor-area hint) is not exposed yet.
+- **Strings.** `screen.text`, `.marked`, `.last_key` and the loop variable of `for k in screen.key_events:` can be
+  passed to an ordinary Boring function taking a `string` on every target (on Metal/CUDA/ROCm, whose own string
+  literals are `&str`, they and string literals are converted to the function's `string` type at the call; in a
+  comparison they are plain `String`s: `screen.text == "x"`).
+- Only the field forms of `screen.mouse` are supported (not a bare `screen.mouse` value on the GPU hosts).
+- State is consistent within one loop iteration on every host.
+- Caveat: kernel `int` fields are `i32` on simd/wgpu (the host narrows what you assign) but `isize` on Metal.
+- Verification: the simd, wgpu, Metal (on macOS), CUDA (against `tools/fake-nvcc`) and ROCm (build script stubbed)
+  generated crates are `cargo check`ed. No test opens a window; real-IME behaviour (macOS Pinyin/Kotoeri, Windows IME,
+  ibus) was not exercised here.
+- wgpu: `self.__keys`/`self.__keys_pressed`/`self.__input` on the `ApplicationHandler`; Metal/CUDA/ROCm/simd keep the
+  same state in `boring_input`/`display.input`. A text-input event is `KeyEvent.text` on winit 0.30 (wgpu) and
+  `ReceivedCharacter` on winit 0.28 (the others); both are filtered through the same rules.
+
+### Resizing
+
+`screen.width` / `screen.height` are the window's **current** size in pixels and `screen.resized` is true for the
+frame that follows a resize. The pixel buffer is allocated once, by the kernel's constructor, and is not resized behind
+your back: to follow the window, **reallocate the kernel for the new size** in the loop:
+
+```boring
+var mut k = Plasma(Dimension(800, 600))
+
+kernel:
+    loop:
+        if screen.resized:
+            k = Plasma(Dimension(screen.width, screen.height))   # new surface buffer, window-sized
+        k(block = (16, 16))
+        screen.present(k.pixels)
+```
+
+After `k = K(Dimension(screen.width, screen.height))` the presentation follows the new buffer: the wgpu swapchain is
+reconfigured to the window's size and the blit is re-pointed at the new buffer (`__App::__reblit`), the Metal drawable and
+the CUDA/ROCm softbuffer surface are resized to the presented buffer's `Dimension`, and the simd blit uses the frame's
+size. `screen.mouse.x/y` then map window pixels to the **new** buffer. The inferred dispatch grid also follows the buffer
+(wgpu). The new kernel starts from its constructor's contents (the old picture is dropped), so a program that keeps state
+in the surface must redraw it. Sizes in `Dimension(...)` are `int`s: the hosts narrow them to the kernel's 32-bit
+fields. Reassignment covers a kernel the program constructs as `K(Dimension(w, h))` on every target. On **wgpu** it also
+covers a kernel built in the program's top-level setup code from real constructor arguments (uploaded data, sizes):
+`k = Tiles(pal, screen.width, screen.height)` runs a generated function (`__boring_screen_rebuild_k`) that repeats the
+construction for the current window size, reading the setup values the arguments mention (`pal`) as they were left by
+the setup code.
+
+**wgpu, alternatively.** On wgpu you can instead re-upload the `'surface` field (and update the size fields the kernel
+reads) from a host array of the new length — the swapchain/blit follow as above:
+
+```boring
+        if screen.resized:
+            k.width  = screen.width
+            k.height = screen.height
+            k.out    = blank(screen.width * screen.height)     # `def [uint] blank(int n)`: a host array
+```
 
 ---
 
@@ -348,7 +440,9 @@ generated `Cargo.toml` only when the program uses `Screen`.
 ## Pending
 
 - **`boring run`**: `screen.present()` writes a PPM on loop exit; `--preview` opens a `minifb` window.
-- **Resize handling**: `screen.resized` detected but the kernel surface is not reallocated automatically — user code must reinitialise `k`. Same limitation on every implemented backend.
-- **`screen.key_pressed()`**, **`screen.mouse`**: implemented on every target (simd, Metal, CUDA, ROCm, wgpu) with the same semantics — see "Input" above.
+- **Resize handling**: resizing is explicit — read `screen.resized`/`screen.width`/`screen.height` and reallocate the
+  kernel (see [Resizing](#resizing)); nothing reallocates automatically.
+- **`screen.key_pressed()`**, **`screen.mouse`** and the rest of the input members: implemented on every target
+  (simd, Metal, CUDA, ROCm, wgpu) with the same semantics — see [Input](#input-simd-metal-cuda-rocm-wgpu).
 - **`screen.pixels_rgba()`**: portable RGBA read from `'surface` buffer.
 - **CUDA real-hardware verification**: no NVIDIA GPU/CUDA toolkit available in this project's dev environment — see `cuda-module.md`'s Screen section.

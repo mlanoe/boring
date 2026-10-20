@@ -774,6 +774,13 @@ impl Transpiler {
             {
                 format!("{}.iter().cloned()", iter)
             }
+            // `for k in screen.key_events:` (simd): a `Vec<Arc<str>>` field of the long-lived `screen`.
+            ExprKind::Field(o, f) if self.config.is_simd_target
+                && matches!(&o.kind, ExprKind::Var(v) if v == "screen")
+                && matches!(f.as_str(), "key_events" | "key_up_events") =>
+            {
+                format!("{}.iter().cloned()", iter)
+            }
             _ => format!("{}.into_iter()", iter),
         };
         // Inject the index: `<base>.enumerate()` yields `(usize, T)`, cast to

@@ -170,6 +170,8 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         e.raw(super::simd_display::DIMENSION_RUNTIME);
     }
     if uses_screen {
+        e.raw(super::screen_input::INPUT_RUNTIME);
+        e.raw(super::screen_input::KEY_NAMES_WINIT_028);
         e.raw(super::simd_display::SCREEN_RUNTIME);
         e.raw(if redraw_on_demand {
             "#[allow(dead_code)] fn __boring_redraw_on_demand() -> bool { true }\n"

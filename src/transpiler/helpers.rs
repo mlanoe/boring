@@ -2995,6 +2995,59 @@ pub(crate) fn render_loop_var_names(program: &Program) -> std::collections::Hash
     used
 }
 
+/// `k = K(args)` in a Screen render loop where `k` is a kernel the program's setup code built
+/// (its constructor has real arguments, so it runs `init`): `(k, K(args))`. The setup pass
+/// synthesizes `fn __boring_screen_rebuild_<k>(..)` from each, and the wgpu host calls it when
+/// the loop reassigns `k` (see `rebuild_captures`).
+pub(crate) fn loop_kernel_rebuilds(program: &Program, kernel_names: &std::collections::HashSet<String>) -> Vec<(String, Expr)> {
+    let mut loop_body: Vec<Stmt> = Vec::new();
+    for item in &program.items {
+        if let Item::Stmt(Stmt::KernelBlock(block)) = item {
+            for st in &block.body {
+                if let Stmt::Loop(ls) = st { loop_body.extend(ls.body.iter().cloned()); }
+            }
+        }
+    }
+    let setup_kernels: Vec<&str> = program.items.iter().filter_map(|item| match item {
+        Item::Let(s) if classify_screen_let(s, kernel_names) == ScreenLet::Setup
+            && matches!(s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Call(c, _))
+                if matches!(&c.kind, ExprKind::Var(n) if kernel_names.contains(n))) => Some(s.name.as_str()),
+        _ => None,
+    }).collect();
+    let mut found: Vec<(String, Expr)> = Vec::new();
+    {
+        let mut on_expr = |e: &mut Expr| {
+            if let ExprKind::Assign(lhs, rhs) = &e.kind {
+                if let (ExprKind::Var(n), ExprKind::Call(c, _)) = (&lhs.kind, &rhs.kind) {
+                    if setup_kernels.contains(&n.as_str())
+                        && matches!(&c.kind, ExprKind::Var(k) if kernel_names.contains(k))
+                        && !found.iter().any(|(f, _)| f == n)
+                    {
+                        found.push((n.clone(), (**rhs).clone()));
+                    }
+                }
+            }
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut w = crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+        w.stmts(&mut loop_body);
+    }
+    found
+}
+
+/// The setup values (`returns`: what `__boring_screen_setup` hands the host) a rebuild
+/// expression reads, in order of first mention: the parameters of its rebuild function after
+/// `screen: &__ScreenSize`. The kernel being rebuilt is not one of them.
+pub(crate) fn rebuild_captures(var: &str, rhs: &Expr, returns: &[String]) -> Vec<String> {
+    let mut vars = Vec::new();
+    collect_vars_in(rhs, &mut vars);
+    let mut out: Vec<String> = Vec::new();
+    for v in vars {
+        if v != var && returns.contains(&v) && !out.contains(&v) { out.push(v); }
+    }
+    out
+}
+
 pub(crate) fn screen_setup_returns(program: &Program, kernel_names: &std::collections::HashSet<String>) -> Vec<String> {
     let used = render_loop_var_names(program);
     let mut out = Vec::new();

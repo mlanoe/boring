@@ -42,6 +42,7 @@ pub mod wgpu;
 pub mod rocm;
 pub mod simd;
 mod simd_display;
+mod screen_input;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 
@@ -2794,7 +2795,8 @@ impl Transpiler {
         // user main -- `gpu_main_emitted` tells the caller (which can't see this
         // function in the source AST, only in this emitted text) that it now exists.
         if screen_setup {
-            self.emit_screen_setup_fn(&setup_items, &screen_kernel_names);
+            let rebuilds = helpers::loop_kernel_rebuilds(program, &screen_kernel_names);
+            self.emit_screen_setup_fn(&setup_items, &screen_kernel_names, &rebuilds);
             return;
         }
         if self.is_gpu_target {
@@ -2918,7 +2920,7 @@ impl Transpiler {
     /// `fn __boring_screen_setup()`: a wgpu Screen program's top-level `let`s/statements (see
     /// `TranspileConfig::screen_setup`), run in order once before the window opens, returning the
     /// values the host keeps (kernels and whatever the render loop reads) as a tuple.
-    fn emit_screen_setup_fn(&mut self, setup_items: &[&Item], kernel_names: &std::collections::HashSet<String>) {
+    fn emit_screen_setup_fn(&mut self, setup_items: &[&Item], kernel_names: &std::collections::HashSet<String>, rebuilds: &[(String, Expr)]) {
         let returns = self.config.screen_setup.clone().unwrap_or_default();
         if setup_items.is_empty() && returns.is_empty() { return; }
         let result_ty = if self.user_defines_result { "std::result::Result" } else { "Result" };
@@ -2965,6 +2967,36 @@ impl Transpiler {
         self.in_throws = was_throws;
         self.indent -= 1;
         self.line("}");
+        // `k = K(args)` in the render loop (a kernel with constructor arguments): one function per
+        // kernel that runs the same construction again, for the current window size. Its parameters
+        // are `screen` and every setup value the arguments read (`helpers::rebuild_captures`).
+        if !rebuilds.is_empty() {
+            self.line("struct __ScreenSize { width: isize, height: isize }");
+        }
+        for (var, rhs) in rebuilds {
+            let Some(orig) = setup_items.iter().find_map(|i| match i { Item::Let(s) if &s.name == var => Some(s), _ => None }) else { continue };
+            let captured = helpers::rebuild_captures(var, rhs, &returns);
+            let mut params = vec!["screen: &__ScreenSize".to_string()];
+            for c in &captured {
+                match fields.iter().find(|(n, _)| n == c) {
+                    Some((_, ty)) => params.push(format!("{c}: &{ty}")),
+                    None => self.push_error(orig.line, orig.col, format!(
+                        "wgpu target: `{var} = ...` in the render loop reads `{c}`, which is not a value of the program's top-level setup code")),
+                }
+            }
+            let ret_ty = fields.iter().find(|(n, _)| n == var).map(|(_, t)| t.clone()).unwrap_or_default();
+            self.line(&format!("fn __boring_screen_rebuild_{var}({}) -> {result_ty}<{ret_ty}, {box_ty}<dyn std::error::Error + Send + Sync>> {{", params.join(", ")));
+            self.indent += 1;
+            let was_throws = self.in_throws;
+            self.in_throws = true;
+            let mut again = orig.clone();
+            again.value = Some(rhs.clone());
+            self.emit_let(&again, false);
+            self.line(&format!("{ok_ty}({var})"));
+            self.in_throws = was_throws;
+            self.indent -= 1;
+            self.line("}");
+        }
         let tys: Vec<String> = fields.iter().map(|(_, t)| t.clone()).collect();
         let tuple_ty = format!("({}{})", tys.join(", "), if tys.len() == 1 { "," } else { "" });
         let header = format!("fn __boring_screen_setup() -> {result_ty}<{tuple_ty}, {box_ty}<dyn std::error::Error + Send + Sync>> {{\n");

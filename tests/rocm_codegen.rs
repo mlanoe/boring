@@ -1270,7 +1270,7 @@ kernel:
     assert!(rs.contains("k.as_ref().unwrap().read_pixels()"), "present call should read back via the Option-wrapped kernel var;\ngot:\n{rs}");
     assert!(rs.contains("boring_screen_present(&mut boring_sb_surface, &__boring_px,"), "missing present call;\ngot:\n{rs}");
 
-    let escape_check = "boring_keys.contains(\"\\x1B\")";
+    let escape_check = "boring_keys.contains(&__boring_key_name(&*(\"\\x1B\")))";
     assert!(rs.contains(escape_check), "missing Escape key check;\ngot:\n{rs}");
 
     assert!(rs.contains("let mut k = Some(Plasma::new("), "kernel var must be Option-wrapped;\ngot:\n{rs}");
@@ -1718,8 +1718,8 @@ kernel:
     let (_, rs) = rocm_codegen("screen_input", src);
     // Edge-triggered: only a released -> pressed transition feeds the set, cleared after each frame body.
     assert!(rs.contains("if boring_keys.insert(__boring_ks.clone()) { boring_keys_pressed.insert(__boring_ks); }"), "{rs}");
-    assert!(rs.contains("boring_keys_pressed.contains(\"c\")"), "{rs}");
-    assert!(rs.contains("boring_keys.contains(\"a\")"), "{rs}");
+    assert!(rs.contains("boring_keys_pressed.contains(&__boring_key_name(&*(\"c\")))"), "{rs}");
+    assert!(rs.contains("boring_keys.contains(&__boring_key_name(&*(\"a\")))"), "{rs}");
     assert!(rs.contains("boring_keys_pressed.clear();"), "{rs}");
     // Mouse: CursorMoved (scaled to buffer pixels) + MouseInput buttons.
     assert!(rs.contains("WindowEvent::CursorMoved"), "{rs}");

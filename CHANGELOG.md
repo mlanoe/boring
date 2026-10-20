@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added and changed
+
+- **`Screen` input now covers what an interactive UI needs, on every Screen target (simd, Metal, CUDA, ROCm, wgpu).** New per-frame members: typed text (`screen.text`), IME composition (`screen.marked`, `.marked_start`/`.marked_end`), modifier keys (`screen.shift`/`.ctrl`/`.alt`/`.meta`), mouse wheel (`screen.mouse.scroll_x`/`.scroll_y`, pixels), mouse-button edges (`screen.mouse_pressed(b)`/`mouse_released(b)`), key repeat and release (`screen.key_repeat(k)`/`key_released(k)`, `screen.last_key`) and focus (`screen.focused`/`.focus_gained`/`.focus_lost`). Every key query takes any string expression and maps it to one canonical key name on every host (`"Escape"`, `"Enter"`, `"Left"`, `"F5"`, ...; the old `"\x1B"`/`"\r"`/ANSI-arrow spellings still work), replacing the per-host key tables. The windows opt in to IME events. The shared state and key naming live in `src/transpiler/screen_input.rs` and are pasted into each generated crate. Documented in `docs/gpu-display.md` ("Input"); tests `screen_input_events`.
+
+- **`screen.width`/`screen.height`/`screen.resized` are live, and a resized window can be followed.** `screen.resized` in a loop condition used to emit a bare `screen` on wgpu (E0425); it and the live window size now work on every target. Reassigning a kernel in the loop (`k = K(Dimension(screen.width, screen.height))`) now compiles on every target (Metal: `Dimension` fields narrowed, no `?` inside the event closure; CUDA/ROCm: the `Option`-wrapped kernel var; simd: constructed like the top-level `let`) and the presentation follows the new buffer (wgpu swapchain + blit, Metal drawable, softbuffer surface, simd blit, mouse coordinates, the inferred dispatch grid). On wgpu a `'surface` field can also be re-uploaded from a host array, which does the same for kernels built any way. Documented under "Resizing".
+
+- **Key-event queue, IME cursor area, strings, setup-built kernels.** `for k in screen.key_events:` / `screen.key_up_events` iterate the frame's key events in order with auto-repeats (on every target); `screen.setImeArea(x, y, w, h)` places the input method's candidate window; the string-valued members and string literals can be passed to Boring functions on Metal/CUDA/ROCm (converted to the callee's `string`); on wgpu, `k = K(args)` in the loop rebuilds a kernel the setup code built from real constructor arguments (a generated `__boring_screen_rebuild_<k>` function). A raw CR in a string literal is now escaped on Metal/CUDA/ROCm (it produced invalid Rust), and ROCm's launch-argument trait is renamed `BoringLaunchArg` — it collided with the `BoringKernelArg` enum, so no ROCm program with a kernel call compiled. The ROCm generated host code is now `cargo check`ed in tests.
+
+---
+
 ## [0.9.10] — 2026-10-18 *(cargo test: 3570/3570 passing across 80 suites, 14 ignored · clippy: clean · self-hosted interpreter functional: 143/143)*
 
 ### Added and changed

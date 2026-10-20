@@ -1044,7 +1044,7 @@ kernel:
     assert!(rs.contains("event_loop.create_window(WindowAttributes::default()"), "window created via create_window");
     assert!(rs.contains("fn __boring_present_buffer("), "missing present buffer helper");
     assert!(rs.contains("__boring_present_buffer(&self.device, &self.queue, self.surface.as_ref().unwrap()"), "present call");
-    assert!(rs.contains("if self.__keys.contains(\"Escape\") { event_loop.exit(); }"), "Escape key exits");
+    assert!(rs.contains("if self.__keys.contains(&__boring_key_name(\"\\\\x1B\")) { event_loop.exit(); }"), "Escape key exits");
     assert!(rs.contains("surface.get_capabilities(&self.adapter)"), "adapter used for surface caps");
     assert!(rs.contains("surface.configure(&self.device,"), "surface configured");
     assert!(rs.contains("EventLoop::new()"), "event loop created");
@@ -4520,13 +4520,13 @@ kernel:
     let (_, rs) = wgpu_codegen("screen_input", src);
     // Edge-triggered: only a released -> pressed transition feeds the set, cleared after each frame body.
     assert!(rs.contains("if self.__keys.insert(key_str.clone()) { self.__keys_pressed.insert(key_str); }"), "{rs}");
-    assert!(rs.contains("self.__keys_pressed.contains(\"c\")"), "{rs}");
-    assert!(rs.contains("self.__keys.contains(\"a\")"), "{rs}");
+    assert!(rs.contains("self.__keys_pressed.contains(&__boring_key_name(\"c\"))"), "{rs}");
+    assert!(rs.contains("self.__keys.contains(&__boring_key_name(\"a\"))"), "{rs}");
     assert!(rs.contains("self.__keys_pressed.clear();"), "{rs}");
     // Mouse: CursorMoved (scaled to buffer pixels) + MouseInput buttons.
     assert!(rs.contains("WindowEvent::CursorMoved"), "{rs}");
     assert!(rs.contains("inner_size()"), "{rs}");
-    assert!(rs.contains("winit::event::MouseButton::Middle => self.__mouse_middle = down"), "{rs}");
+    assert!(rs.contains("winit::event::MouseButton::Middle => { self.__mouse_middle = down;"), "{rs}");
     assert!(rs.contains("self.__mouse_x as f32"), "{rs}");
     assert!(rs.contains("self.__mouse_left") && rs.contains("self.__mouse_right"), "{rs}");
     assert!(rs.contains("self.__mouse_y > 3"), "{rs}");

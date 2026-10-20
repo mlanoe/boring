@@ -54,6 +54,10 @@ struct HostEmitter<'a> {
     /// a plain statement — the two aren't interchangeable, calling a `()`-returning
     /// fn through the `Err` pattern is a real `cargo check` E0308, not just style.
     boring_main_throws: bool,
+    /// The `kernel.field_buf` the loop presents (`screen.present(k.pixels)`), as a path on `__App`.
+    screen_pixels_buf: String,
+    /// Loop variables of `for k in screen.key_events:` in scope (`Arc<str>`s: passed by clone).
+    event_vars: std::cell::RefCell<Vec<String>>,
     /// Whether a second, shared-memory-emulated WGSL module was emitted
     /// alongside the real-subgroup one (`shaders/main_emulated.wgsl`) — only
     /// true when some kernel uses `.warp.*` (see `device::WarpMode`). Gates
@@ -90,7 +94,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), errors: Vec::new() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -1191,6 +1195,7 @@ impl<'a> HostEmitter<'a> {
         let height      = resolve_scalar_expr(&h_expr, &scalars);
         let loop_body   = self.find_render_loop_body();
         let pixels_buf  = self.find_present_buffer();
+        self.screen_pixels_buf = pixels_buf.clone();
 
         let items: Vec<Item> = self.program.items.clone();
 
@@ -1248,6 +1253,11 @@ impl<'a> HostEmitter<'a> {
             None
         }).collect();
 
+        // Shared input runtime (typed text, IME, modifiers, wheel, focus, key edges) + key naming.
+        for chunk in [crate::transpiler::screen_input::INPUT_RUNTIME, crate::transpiler::screen_input::KEY_NAMES_WINIT_030] {
+            for l in chunk.lines() { self.line(l); }
+        }
+        self.blank();
         // ── __App struct ──────────────────────────────────────────────────────
         self.line("struct __App {");
         self.line("    instance: wgpu::Instance,");
@@ -1275,6 +1285,15 @@ impl<'a> HostEmitter<'a> {
         self.line("    __mouse_left: bool,");
         self.line("    __mouse_right: bool,");
         self.line("    __mouse_middle: bool,");
+        // Shared input state, the live window size (`screen.width`/`height`/`resized`) and the
+        // size the pixel buffer was allocated for (mouse coordinates are buffer coordinates).
+        self.line("    __input: __BoringInput,");
+        self.line("    __win_w: isize,");
+        self.line("    __win_h: isize,");
+        self.line("    __resized: bool,");
+        self.line("    __buf_w: f64,");
+        self.line("    __buf_h: f64,");
+        self.line("    __surface_cfg: Option<wgpu::SurfaceConfiguration>,");
         self.line("    __start_time: std::time::Instant,");
         self.line("    __frame: isize,");
         self.line("    __redraw: bool,");
@@ -1286,6 +1305,33 @@ impl<'a> HostEmitter<'a> {
         self.line("}");
         self.blank();
 
+        // After the kernel was reallocated for the window's current size (`k = K(...)` in the loop):
+        // resize the swapchain to that size and point the blit at the new pixel buffer.
+        self.line("impl __App {");
+        self.line("    fn __reblit(&mut self) {");
+        self.line("        let (w, h) = (self.__win_w.max(1) as u32, self.__win_h.max(1) as u32);");
+        self.line("        self.__buf_w = w as f64;");
+        self.line("        self.__buf_h = h as f64;");
+        self.line("        if let (Some(cfg), Some(surface)) = (self.__surface_cfg.as_mut(), self.surface.as_ref()) {");
+        self.line("            cfg.width = w; cfg.height = h;");
+        self.line("            surface.configure(&self.device, cfg);");
+        self.line("        }");
+        self.line("        let Some(pipeline) = self.__blit_pipeline.as_ref() else { return };");
+        self.line("        let layout = pipeline.get_bind_group_layout(0);");
+        self.line("        let dim_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {");
+        self.line("            label: Some(\"blit_dim\"), contents: bytemuck::cast_slice(&[w, h]), usage: wgpu::BufferUsages::UNIFORM,");
+        self.line("        });");
+        self.line("        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {");
+        self.line("            label: None, layout: &layout, entries: &[");
+        self.line(&format!("                wgpu::BindGroupEntry {{ binding: 0, resource: self.{pixels_buf}.as_entire_binding() }},"));
+        self.line("                wgpu::BindGroupEntry { binding: 1, resource: dim_buf.as_entire_binding() },");
+        self.line("            ],");
+        self.line("        });");
+        self.line("        self.__blit_bg = Some(bg);");
+        self.line("        self.__blit_dim_buf = Some(dim_buf);");
+        self.line("    }");
+        self.line("}");
+        self.blank();
         // ── ApplicationHandler impl ───────────────────────────────────────────
         self.line("impl ApplicationHandler for __App {");
         // resumed(): create window + surface + blit pipeline
@@ -1296,13 +1342,16 @@ impl<'a> HostEmitter<'a> {
         self.line("        let surface: wgpu::Surface<'static> = self.instance.create_surface(window.clone()).unwrap();");
         self.line("        let caps = surface.get_capabilities(&self.adapter);");
         self.line("        let fmt  = caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Bgra8Unorm).copied().unwrap_or(caps.formats[0]);");
-        self.line("        surface.configure(&self.device, &wgpu::SurfaceConfiguration {");
+        self.line("        window.set_ime_allowed(true);");
+        self.line("        let cfg = wgpu::SurfaceConfiguration {");
         self.line("            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt,");
         self.line(&format!("            width: {width}, height: {height},"));
         self.line("            present_mode: wgpu::PresentMode::Fifo,");
         self.line("            desired_maximum_frame_latency: 2,");
         self.line("            alpha_mode: caps.alpha_modes[0], view_formats: vec![],");
-        self.line("        });");
+        self.line("        };");
+        self.line("        surface.configure(&self.device, &cfg);");
+        self.line("        self.__surface_cfg = Some(cfg);");
         // Blit pipeline (inline shader)
         self.line("        let blit_shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {");
         self.line("            label: Some(\"blit\"),");
@@ -1379,40 +1428,62 @@ impl<'a> HostEmitter<'a> {
         if on_demand {
             // Input and resize invalidate the window; everything else (including the
             // frame's own RedrawRequested) does not.
-            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_)) {");
+            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_) | WindowEvent::Ime(_) | WindowEvent::ModifiersChanged(_) | WindowEvent::MouseWheel { .. } | WindowEvent::Focused(_)) {");
             self.line("            if let Some(w) = &self.window { w.request_redraw(); }");
             self.line("        }");
         }
         self.line("        match event {");
         self.line("            WindowEvent::CloseRequested => { event_loop.exit(); }");
+        self.line("            WindowEvent::Resized(size) => {");
+        self.line("                self.__win_w = size.width as isize;");
+        self.line("                self.__win_h = size.height as isize;");
+        self.line("                self.__resized = true;");
+        self.line("            }");
         self.line("            WindowEvent::KeyboardInput { event: ref key_event, .. } => {");
-        self.line("                let key_str = match &key_event.logical_key {");
-        self.line("                    Key::Named(NamedKey::Escape) => \"Escape\".to_string(),");
-        self.line("                    Key::Named(NamedKey::Enter)  => \"Enter\".to_string(),");
-        self.line("                    Key::Named(NamedKey::Space)  => \" \".to_string(),");
-        self.line("                    Key::Character(c) => c.to_string(),");
-        self.line("                    k => format!(\"{k:?}\"),");
-        self.line("                };");
+        self.line("                let key_str = __boring_logical_key_name(&key_event.logical_key);");
         self.line("                match key_event.state {");
-        self.line("                    ElementState::Pressed  => { if self.__keys.insert(key_str.clone()) { self.__keys_pressed.insert(key_str); } }");
-        self.line("                    ElementState::Released => { self.__keys.remove(&key_str); }");
+        self.line("                    ElementState::Pressed  => {");
+        self.line("                        self.__input.key_down(&key_str);");
+        self.line("                        // Text the key produced (an input method's own commit arrives as `Ime::Commit`).");
+        self.line("                        if let Some(t) = &key_event.text { if self.__input.mods & 8 == 0 && (self.__input.mods & 2 == 0 || self.__input.mods & 4 != 0) { for c in t.chars() { self.__input.typed(c); } } }");
+        self.line("                        if self.__keys.insert(key_str.clone()) { self.__keys_pressed.insert(key_str); }");
+        self.line("                    }");
+        self.line("                    ElementState::Released => { self.__input.key_up(&key_str); self.__keys.remove(&key_str); }");
         self.line("                    _ => {}");
+        self.line("                }");
+        self.line("            }");
+        self.line("            WindowEvent::ModifiersChanged(m) => {");
+        self.line("                let st = m.state();");
+        self.line("                self.__input.set_mods(st.shift_key(), st.control_key(), st.alt_key(), st.super_key());");
+        self.line("            }");
+        self.line("            WindowEvent::Focused(f) => { self.__input.set_focus(f); }");
+        self.line("            WindowEvent::Ime(ime) => {");
+        self.line("                match ime {");
+        self.line("                    winit::event::Ime::Preedit(s, cur) => self.__input.ime_preedit(&s, cur),");
+        self.line("                    winit::event::Ime::Commit(s) => self.__input.ime_commit(&s),");
+        self.line("                    _ => self.__input.ime_preedit(\"\", None),");
+        self.line("                }");
+        self.line("            }");
+        self.line("            WindowEvent::MouseWheel { delta, .. } => {");
+        self.line("                match delta {");
+        self.line("                    winit::event::MouseScrollDelta::LineDelta(x, y) => self.__input.scroll(x * 40.0, y * 40.0),");
+        self.line("                    winit::event::MouseScrollDelta::PixelDelta(p) => self.__input.scroll(p.x as f32, p.y as f32),");
         self.line("                }");
         self.line("            }");
         // Window pixels -> pixel-buffer coordinates (the window may be HiDPI-scaled or resized).
         self.line("            WindowEvent::CursorMoved { position, .. } => {");
         self.line("                if let Some(w) = &self.window {");
         self.line("                    let ws = w.inner_size();");
-        self.line(&format!("                    self.__mouse_x = (position.x * ({width}) as f64 / (ws.width.max(1) as f64)).floor() as isize;"));
-        self.line(&format!("                    self.__mouse_y = (position.y * ({height}) as f64 / (ws.height.max(1) as f64)).floor() as isize;"));
+        self.line("                    self.__mouse_x = (position.x * self.__buf_w / (ws.width.max(1) as f64)).floor() as isize;");
+        self.line("                    self.__mouse_y = (position.y * self.__buf_h / (ws.height.max(1) as f64)).floor() as isize;");
         self.line("                }");
         self.line("            }");
         self.line("            WindowEvent::MouseInput { state, button, .. } => {");
         self.line("                let down = state == ElementState::Pressed;");
         self.line("                match button {");
-        self.line("                    winit::event::MouseButton::Left => self.__mouse_left = down,");
-        self.line("                    winit::event::MouseButton::Right => self.__mouse_right = down,");
-        self.line("                    winit::event::MouseButton::Middle => self.__mouse_middle = down,");
+        self.line("                    winit::event::MouseButton::Left => { self.__mouse_left = down; self.__input.mouse_button(1, down); }");
+        self.line("                    winit::event::MouseButton::Right => { self.__mouse_right = down; self.__input.mouse_button(2, down); }");
+        self.line("                    winit::event::MouseButton::Middle => { self.__mouse_middle = down; self.__input.mouse_button(4, down); }");
         self.line("                    _ => {}");
         self.line("                }");
         self.line("            }");
@@ -1426,6 +1497,8 @@ impl<'a> HostEmitter<'a> {
         }
         self.in_method = false;
         self.line("                self.__keys_pressed.clear();");
+        self.line("                self.__input.end_frame();");
+        self.line("                self.__resized = false;");
         self.line("                self.__frame += 1;");
         if on_demand {
             // On-demand: only schedule another frame when the body asked for one
@@ -1565,6 +1638,9 @@ impl<'a> HostEmitter<'a> {
         self.line("        __keys_pressed: Default::default(),");
         self.line("        __mouse_x: 0, __mouse_y: 0,");
         self.line("        __mouse_left: false, __mouse_right: false, __mouse_middle: false,");
+        self.line("        __input: __BoringInput::new(),");
+        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false,"));
+        self.line(&format!("        __buf_w: ({width}) as f64, __buf_h: ({height}) as f64, __surface_cfg: None,"));
         self.line("        __start_time: std::time::Instant::now(),");
         self.line("        __frame: 0, __redraw: false,");
         self.line("        window: None, surface: None,");
@@ -1640,6 +1716,8 @@ impl<'a> HostEmitter<'a> {
             Stmt::Expr(e) => {
                 if let Some(s) = self.try_emit_screen_present(e, width, height) {
                     self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_ime_area(e) {
+                    self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_request_redraw(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_render_dispatch(e, width, height) {
@@ -1647,6 +1725,8 @@ impl<'a> HostEmitter<'a> {
                 } else if let Some(s) = self.try_emit_field_swap(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_field_assign(e) {
+                    self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_kernel_realloc(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if matches!(&e.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(f)
                     if self.general_fn_param_modes(f).is_some())) {
@@ -1664,6 +1744,24 @@ impl<'a> HostEmitter<'a> {
                 let v = self.host_expr(ls.value.as_ref().unwrap());
                 let mutability = if ls.binding.is_mutable() { "mut " } else { "" };
                 self.line(&format!("{indent}let {mutability}{} = {v};", ls.name));
+            }
+            // `for k in screen.key_events:` / `key_up_events`: the frame's key events in order.
+            Stmt::For(fs) if fs.vars.len() == 1 && matches!(&fs.iterable.kind, ExprKind::Field(o, m)
+                if matches!(&o.kind, ExprKind::Var(n) if n == "screen")
+                    && crate::transpiler::screen_input::event_list_field(m).is_some()) =>
+            {
+                let ExprKind::Field(_, m) = &fs.iterable.kind else { unreachable!() };
+                let field = crate::transpiler::screen_input::event_list_field(m).unwrap();
+                if crate::transpiler::screen_input::body_has_break(&fs.body) {
+                    self.push_error(fs.line, fs.col, "wgpu target: `break` inside a `for ... in screen.key_events` loop is not supported");
+                }
+                let deeper = format!("{indent}    ");
+                self.line(&format!("{indent}for __ev in self.__input.{field}.clone() {{"));
+                self.line(&format!("{deeper}let {} = std::sync::Arc::<str>::from(__ev.as_str());", fs.vars[0]));
+                self.event_vars.borrow_mut().push(fs.vars[0].clone());
+                for st in &fs.body { self.emit_render_stmt(st, width, height, &deeper); }
+                self.event_vars.borrow_mut().pop();
+                self.line(&format!("{indent}}}"));
             }
             Stmt::If(if_stmt) => {
                 if let Some(s) = self.try_emit_screen_key_if(if_stmt) {
@@ -1733,6 +1831,77 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
+    /// `k = K(Dimension(screen.width, screen.height))` / `k = makeKernel(screen.width, screen.height)`
+    /// in the render loop: build the new kernel, then resize the swapchain to the window's current
+    /// size and re-point the blit at the new pixel buffer (`__App::__reblit`).
+    fn try_emit_kernel_realloc(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Assign(lhs, rhs) = &e.kind else { return None };
+        let ExprKind::Var(name) = &lhs.kind else { return None };
+        let pfx = if self.in_method { "self." } else { "" };
+        // `k` must be a kernel the host owns: a host-constructed one or a setup value of a kernel type.
+        let host_kernel = self.program.items.iter().find_map(|item| match item {
+            Item::Let(s) if &s.name == name => match s.value.as_ref().map(|v| &v.kind) {
+                Some(ExprKind::Call(c, _)) => match &c.kind {
+                    ExprKind::Var(k) if self.kernel_names.contains(k) => Some(k.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        });
+        // A kernel the setup code built from real constructor arguments: run its generated rebuild
+        // function (`__boring_screen_rebuild_<k>`, see `helpers::loop_kernel_rebuilds`).
+        if self.in_method && self.setup_fields.iter().any(|(f, _)| f == name) {
+            let kernel_set = self.kernel_name_set();
+            let rebuilds = crate::transpiler::helpers::loop_kernel_rebuilds(self.program, &kernel_set);
+            if let Some((_, rebuild_rhs)) = rebuilds.iter().find(|(v, _)| v == name) {
+                let returns: Vec<String> = self.setup_fields.iter().map(|(n, _)| n.clone()).collect();
+                { let _ = rebuild_rhs;
+                    let captured = crate::transpiler::helpers::rebuild_captures(name, rhs, &returns);
+                    let mut args = vec![format!("&__ScreenSize {{ width: {pfx}__win_w, height: {pfx}__win_h }}")];
+                    args.extend(captured.iter().map(|c| format!("&{pfx}{c}")));
+                    return Some(format!(
+                        "{pfx}{name} = __boring_screen_rebuild_{name}({}).expect(\"kernel rebuild failed\"); {pfx}__reblit();",
+                        args.join(", ")));
+                }
+            }
+        }
+        let new_value = match (&rhs.kind, host_kernel) {
+            (ExprKind::Call(c, args), Some(kname)) if matches!(&c.kind, ExprKind::Var(k) if *k == kname)
+                && !self.setup_fields.iter().any(|(f, _)| f == name) =>
+            {
+                let decl = self.effective_kernels.iter().find(|d| d.name == kname);
+                let dim_args = if decl.is_some_and(kernel_has_dim_field) {
+                    match args.first().map(|a| &a.value.kind) {
+                        Some(ExprKind::Call(dc, da)) if matches!(&dc.kind, ExprKind::Var(n) if n == "Dimension") && da.len() == 2 => {
+                            format!("({}) as i32, ({}) as i32, ", self.host_expr(&da[0].value), self.host_expr(&da[1].value))
+                        }
+                        _ => return None,
+                    }
+                } else { String::new() };
+                format!("{kname}::new({dim_args}std::sync::Arc::clone(&{pfx}device), std::sync::Arc::clone(&{pfx}queue))")
+            }
+            (ExprKind::Call(c, _), _) if matches!(&c.kind, ExprKind::Var(f) if self.general_fn_param_modes(f).is_some()) => {
+                self.host_expr(rhs)
+            }
+            _ => return None,
+        };
+        if !self.in_method { return None; }
+        Some(format!("{pfx}{name} = {new_value}; {pfx}__reblit();"))
+    }
+
+    /// `screen.setImeArea(x, y, w, h)` -- where the input method may put its candidate window,
+    /// in buffer coordinates (scaled like the mouse).
+    fn try_emit_ime_area(&self, e: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
+        if method != "setImeArea" || args.len() != 4 { return None; }
+        if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
+        let a: Vec<String> = args.iter().map(|a| self.host_expr(&a.value)).collect();
+        Some(format!(
+            "if let Some(w) = &self.window {{ let ws = w.inner_size(); let (sx, sy) = (ws.width.max(1) as f64 / self.__buf_w, ws.height.max(1) as f64 / self.__buf_h); w.set_ime_cursor_area(winit::dpi::PhysicalPosition::new(({}) as f64 * sx, ({}) as f64 * sy), winit::dpi::PhysicalSize::new(({}) as f64 * sx, ({}) as f64 * sy)); }}",
+            a[0], a[1], a[2], a[3]))
+    }
+
     /// `screen.requestRedraw()` -- schedule another frame when the window redraws on demand.
     fn try_emit_request_redraw(&self, e: &Expr) -> Option<String> {
         let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
@@ -1754,9 +1923,16 @@ impl<'a> HostEmitter<'a> {
             }
             _ => (host_expr(&ba.value), "1".into()),
         };
+        let pfx = if self.in_method { "self." } else { "" };
+        // After a reallocation (`k = K(Dimension(screen.width, screen.height))`) the inferred grid
+        // follows the buffer's current size, not the window's initial one.
+        let (width, height) = if self.in_method {
+            (format!("({pfx}__buf_w as u32)"), format!("({pfx}__buf_h as u32)"))
+        } else {
+            (width.to_string(), height.to_string())
+        };
         let gx = format!("({width} + {bx} - 1) / {bx}");
         let gy = format!("({height} + {by} - 1) / {by}");
-        let pfx = if self.in_method { "self." } else { "" };
         // Inside the render loop's `event_loop.run(...)` closure, not a
         // `Result`-returning context -- `.expect()`, not `?`. Matches
         // `metal::host`'s identical carve-out for its own render-loop dispatch.
@@ -1881,14 +2057,17 @@ impl<'a> HostEmitter<'a> {
                 // reallocates the buffer (and rebuilds the bind group) when the length changed.
                 if let Some(decl) = self.find_kernel_decl_for_var(obj_name) {
                     if let Some(f) = decl.fields.iter().find(|f| f.name == field.as_str()
-                        && matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
+                        && matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
                         && is_buffer_array_ty(&f.ty))
                     {
                         let host_ty = host_scalar_type(&array_inner(&f.ty));
                         let rhs_str = self.host_expr(rhs);
                         let conv = if host_ty == "bool" { "x".to_string() } else { format!("x as {host_ty}") };
+                        // A re-uploaded `'surface` buffer is a new buffer: the swapchain and the
+                        // blit follow it (sized to the window, see `__App::__reblit`).
+                        let reblit = if matches!(f.qual, GpuQual::Surface) && self.in_method { format!(" {pfx}__reblit();") } else { String::new() };
                         return Some(format!(
-                            "{{ let __v = &({rhs_str}); {pfx}{obj_name}.copy_{field}_to_device(&__v.iter().map(|&x| {conv}).collect::<Vec<{host_ty}>>()); }}"));
+                            "{{ let __v = &({rhs_str}); {pfx}{obj_name}.copy_{field}_to_device(&__v.iter().map(|&x| {conv}).collect::<Vec<{host_ty}>>()); }}{reblit}"));
                     }
                 }
                 // Scalar field assignment: `k.t = expr` → update the host-side field.
@@ -1922,7 +2101,7 @@ impl<'a> HostEmitter<'a> {
         let set = if method == "key" { "__keys" } else { "__keys_pressed" };
         let k = match args.first().map(|a| &a.value.kind) {
             Some(ExprKind::Str(s)) => boring_key_to_rust(s),
-            Some(_) => format!("{}.as_str()", self.host_expr(&args[0].value)),
+            Some(_) => format!("&__boring_key_name(&*({}))", self.host_expr(&args[0].value)),
             None => "\"\"".into(),
         };
         format!("{pfx}{set}.contains({k})")
@@ -1948,6 +2127,33 @@ impl<'a> HostEmitter<'a> {
                 if field == "frame" && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
             {
                 format!("{pfx}__frame")
+            }
+            // `screen.width` / `.height` (live window size in pixels) / `.resized` (this frame follows a resize)
+            ExprKind::Field(obj, field)
+                if matches!(field.as_str(), "width" | "height" | "resized")
+                    && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
+            {
+                match field.as_str() {
+                    "width" => format!("{pfx}__win_w"),
+                    "height" => format!("{pfx}__win_h"),
+                    _ => format!("{pfx}__resized"),
+                }
+            }
+            // Input members of the shared runtime: `screen.text`, `.marked`, `.shift`, `.focused`, ...
+            ExprKind::Field(obj, field)
+                if matches!(&obj.kind, ExprKind::Var(n) if n == "screen")
+                    && crate::transpiler::screen_input::property(field, "").is_some() =>
+            {
+                let (e, kind) = crate::transpiler::screen_input::property(field, &format!("{pfx}__input")).unwrap();
+                if kind == crate::transpiler::screen_input::InKind::Str { crate::transpiler::screen_input::str_to_string(&e) } else { e }
+            }
+            // `screen.mouse.scroll_x` / `.scroll_y`
+            ExprKind::Field(obj, field)
+                if matches!(&obj.kind, ExprKind::Field(sv, m) if m == "mouse"
+                    && matches!(&sv.kind, ExprKind::Var(n) if n == "screen"))
+                    && crate::transpiler::screen_input::mouse_property(field, "").is_some() =>
+            {
+                crate::transpiler::screen_input::mouse_property(field, &format!("{pfx}__input")).unwrap().0
             }
             // `screen.mouse.x` / `.y` / `.left` / `.right` / `.middle`
             ExprKind::Field(obj, field)
@@ -1988,9 +2194,6 @@ impl<'a> HostEmitter<'a> {
                 let args_s: Vec<_> = args.iter().map(|a| self.host_expr(&a.value)).collect();
                 format!("{}.{}({})", self.host_expr(obj), method, args_s.join(", "))
             }
-            ExprKind::Field(obj, field) => {
-                format!("{}.{}", self.host_expr(obj), field)
-            }
             // `screen.key("k")` (level) / `screen.key_pressed("k")` (edge) as expressions.
             ExprKind::MethodCall(obj, method, args)
                 if (method == "key" || method == "key_pressed")
@@ -1998,6 +2201,14 @@ impl<'a> HostEmitter<'a> {
             {
                 self.screen_key_query(method, args)
             }
+            // `screen.key_repeat(k)` / `key_released(k)` / `mouse_pressed(b)` / `mouse_released(b)`
+            ExprKind::MethodCall(obj, method, args)
+                if matches!(&obj.kind, ExprKind::Var(n) if n == "screen") && args.len() == 1
+                    && crate::transpiler::screen_input::method(method, "", "").is_some() =>
+            {
+                crate::transpiler::screen_input::method(method, &self.host_expr(&args[0].value), &format!("{pfx}__input")).unwrap()
+            }
+            ExprKind::Str(v) => crate::transpiler::screen_input::str_to_string(&format!("{v:?}")),
             ExprKind::Bool(b) => format!("{b}"),
             ExprKind::UnaryOp(op, inner) => {
                 let o = match op { UnaryOp::Neg => "-", UnaryOp::Not => "!", UnaryOp::BitNot => "!" };
@@ -2041,6 +2252,11 @@ impl<'a> HostEmitter<'a> {
                     {
                         return self.screen_key_query(method, args);
                     }
+                    if matches!(&obj.kind, ExprKind::Var(n) if n == "screen") && args.len() == 1 {
+                        if let Some(q) = crate::transpiler::screen_input::method(method, &self.host_expr(&args[0].value), &format!("{pfx}__input")) {
+                            return q;
+                        }
+                    }
                 }
                 if let ExprKind::Var(n) = &callee.kind {
                     if (n == "float32" || n == "float" || n == "float64") && args.len() == 1 {
@@ -2055,7 +2271,7 @@ impl<'a> HostEmitter<'a> {
                             let args_s: Vec<_> = args.iter().zip(&modes).map(|(a, mode)| {
                                 let v = self.host_expr(&a.value);
                                 let is_field = matches!(&a.value.kind, ExprKind::Var(n)
-                                    if self.setup_fields.iter().any(|(f, _)| f == n));
+                                    if self.setup_fields.iter().any(|(f, _)| f == n) || self.event_vars.borrow().contains(n));
                                 match *mode {
                                     "&mut" => format!("&mut {v}"),
                                     "&" => format!("&{v}"),
@@ -2429,12 +2645,8 @@ fn resolve_scalar_expr(expr: &str, scalars: &std::collections::HashMap<String, i
 }
 
 fn boring_key_to_rust(s: &str) -> String {
-    match s {
-        "\x1B" | "\\x1B" | "Escape" | "escape" => "\"Escape\"".into(),
-        " " | "Space" | "space"                 => "\" \"".into(),
-        "\n" | "\\n" | "Enter" | "enter"        => "\"Enter\"".into(),
-        other => format!("\"{}\"", other),
-    }
+    // The runtime normalizer (screen_input.rs) maps every accepted spelling to the canonical name.
+    format!("&__boring_key_name({s:?})")
 }
 
 /// True when `decl` declares a `Dimension`-typed `'const` field (inferred for a bare

@@ -33,6 +33,7 @@ pub(super) const SCREEN_RUNTIME: &str = r#"
 enum __BoringCmd {
     Create { width: u32, height: u32, title: String, done: std::sync::mpsc::Sender<()> },
     Present,
+    ImeArea { x: i32, y: i32, w: u32, h: u32 },
     Exit,
 }
 struct __BoringDisplay {
@@ -44,7 +45,13 @@ struct __BoringDisplay {
     mouse_y: std::sync::atomic::AtomicI64,
     // Bit 0 = left, 1 = right, 2 = middle.
     mouse_buttons: std::sync::atomic::AtomicU8,
+    // Typed text, IME composition, modifiers, focus, wheel, key repeat/release, button edges.
+    input: std::sync::Mutex<__BoringInput>,
+    // Current window size in pixels.
+    size: (std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU32),
     frame: std::sync::Mutex<Option<Vec<u32>>>,
+    // (width, height) of the presented frame; follows a kernel reallocated after a resize.
+    frame_dims: std::sync::Mutex<(usize, usize)>,
     frame_taken: std::sync::Condvar,
     closed: std::sync::atomic::AtomicBool,
     resized: std::sync::atomic::AtomicBool,
@@ -64,7 +71,10 @@ fn __boring_display() -> &'static __BoringDisplay {
         mouse_x: std::sync::atomic::AtomicI64::new(0),
         mouse_y: std::sync::atomic::AtomicI64::new(0),
         mouse_buttons: std::sync::atomic::AtomicU8::new(0),
+        input: std::sync::Mutex::new(__BoringInput::new()),
+        size: (std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0)),
         frame: std::sync::Mutex::new(None),
+        frame_dims: std::sync::Mutex::new((0, 0)),
         frame_taken: std::sync::Condvar::new(),
         closed: std::sync::atomic::AtomicBool::new(false),
         resized: std::sync::atomic::AtomicBool::new(false),
@@ -80,12 +90,29 @@ fn __boring_send(cmd: __BoringCmd) {
 // `screen.mouse`: cursor position in pixel-buffer coordinates (the window's pixel count equals
 // the buffer's) and button state, snapshotted once per `Screen::present`.
 #[allow(dead_code)] #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct Mouse { x: isize, y: isize, left: bool, right: bool, middle: bool }
+struct Mouse { x: isize, y: isize, left: bool, right: bool, middle: bool, scroll_x: f32, scroll_y: f32 }
 
 #[allow(dead_code)]
 struct Screen {
     mouse: Mouse,
     pressed: std::collections::HashSet<String>,
+    input: __BoringInput,
+    // `screen.text` & co.: the frame's input snapshot (see docs/gpu-display.md, "Input").
+    text: std::sync::Arc<str>,
+    marked: std::sync::Arc<str>,
+    last_key: std::sync::Arc<str>,
+    // `for k in screen.key_events:` / `screen.key_up_events`: this frame's key events in order.
+    key_events: Vec<std::sync::Arc<str>>,
+    key_up_events: Vec<std::sync::Arc<str>>,
+    marked_start: isize,
+    marked_end: isize,
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    meta: bool,
+    focused: bool,
+    focus_gained: bool,
+    focus_lost: bool,
     dimension: Dimension,
     width: isize,
     height: isize,
@@ -110,6 +137,21 @@ impl Screen {
         Screen {
             mouse: Mouse::default(),
             pressed: Default::default(),
+            input: __BoringInput::new(),
+            text: "".into(),
+            marked: "".into(),
+            last_key: "".into(),
+            key_events: Vec::new(),
+            key_up_events: Vec::new(),
+            marked_start: -1,
+            marked_end: -1,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+            focused: true,
+            focus_gained: false,
+            focus_lost: false,
             dimension,
             width: dimension.width,
             height: dimension.height,
@@ -125,21 +167,35 @@ impl Screen {
     // for an input/resize event. A no-op in the default continuous mode.
     // (`screen.requestRedraw()` in Boring source; method names are snake_cased on this target.)
     fn request_redraw(&mut self) { self.redraw_requested = true; }
-    // `"\x1B"` reaches here either as the ESC character or as its 4-character escape text.
-    fn __norm_key(key: &str) -> &str {
-        match key { "\\x1B" | "\\x1b" => "\x1B", "\\r" => "\r", "\\n" => "\n", other => other }
+    // `screen.setImeArea(x, y, w, h)`: where the input method may put its candidate window, in window
+    // (= buffer) pixels.
+    fn set_ime_area(&self, x: isize, y: isize, w: isize, h: isize) {
+        __boring_send(__BoringCmd::ImeArea { x: x as i32, y: y as i32, w: w.max(0) as u32, h: h.max(0) as u32 });
     }
-    fn key(&self, key: &str) -> bool {
-        __boring_display().keys.lock().unwrap().contains(Self::__norm_key(key))
+    // `"\x1B"` reaches here either as the ESC character or as its 4-character escape text.
+    fn key<T: AsRef<str>>(&self, key: T) -> bool {
+        __boring_display().keys.lock().unwrap().contains(&__boring_key_name(key.as_ref()))
     }
     // True only for the frame in which `key` went from released to pressed (auto-repeat excluded).
-    fn key_pressed(&self, key: &str) -> bool {
-        self.pressed.contains(Self::__norm_key(key))
+    fn key_pressed<T: AsRef<str>>(&self, key: T) -> bool {
+        self.pressed.contains(&__boring_key_name(key.as_ref()))
     }
+    // True on the frame `key` went down and on every frame an OS auto-repeat of it arrived.
+    fn key_repeat<T: AsRef<str>>(&self, key: T) -> bool { self.input.key_repeat(key.as_ref()) }
+    // True on the frame `key` was released.
+    fn key_released<T: AsRef<str>>(&self, key: T) -> bool { self.input.key_released(key.as_ref()) }
+    // True on the frame mouse button "left" / "right" / "middle" went down (up).
+    fn mouse_pressed<T: AsRef<str>>(&self, button: T) -> bool { self.input.mouse_pressed(button.as_ref()) }
+    fn mouse_released<T: AsRef<str>>(&self, button: T) -> bool { self.input.mouse_released(button.as_ref()) }
     fn present(&mut self, pixels: &[u32]) {
         use std::sync::atomic::Ordering::SeqCst;
         let display = __boring_display();
         if display.closed.load(SeqCst) { std::process::exit(0); }
+        // A buffer allocated for the window's current size (`k = K(Dimension(screen.width, screen.height))`
+        // after a resize) is `width * height` long; otherwise it is the size the window opened with.
+        let dims = if pixels.len() == (self.width.max(0) * self.height.max(0)) as usize { (self.width as usize, self.height as usize) }
+            else { (self.dimension.width as usize, self.dimension.height as usize) };
+        *display.frame_dims.lock().unwrap() = dims;
         *display.frame.lock().unwrap() = Some(pixels.to_vec());
         __boring_send(__BoringCmd::Present);
         let mut slot = display.frame.lock().unwrap();
@@ -164,6 +220,23 @@ impl Screen {
         self.resized = display.resized.swap(false, SeqCst);
         self.closed = false;
         self.pressed = std::mem::take(&mut *display.just_pressed.lock().unwrap());
+        let (ww, wh) = (display.size.0.load(SeqCst), display.size.1.load(SeqCst));
+        if ww > 0 && wh > 0 { self.width = ww as isize; self.height = wh as isize; }
+        self.input = display.input.lock().unwrap().snapshot();
+        self.text = self.input.text().into();
+        self.marked = self.input.marked.as_str().into();
+        self.last_key = self.input.last_key.as_str().into();
+        self.key_events = self.input.key_repeat.iter().map(|k| k.as_str().into()).collect();
+        self.key_up_events = self.input.key_released.iter().map(|k| k.as_str().into()).collect();
+        self.marked_start = self.input.marked_start;
+        self.marked_end = self.input.marked_end;
+        self.shift = self.input.mods & 1 != 0;
+        self.ctrl = self.input.mods & 2 != 0;
+        self.alt = self.input.mods & 4 != 0;
+        self.meta = self.input.mods & 8 != 0;
+        self.focused = self.input.focused;
+        self.focus_gained = self.input.focus_gained;
+        self.focus_lost = self.input.focus_lost;
         let buttons = display.mouse_buttons.load(SeqCst);
         self.mouse = Mouse {
             x: display.mouse_x.load(SeqCst) as isize,
@@ -171,34 +244,9 @@ impl Screen {
             left: buttons & 1 != 0,
             right: buttons & 2 != 0,
             middle: buttons & 4 != 0,
+            scroll_x: self.input.scroll_x,
+            scroll_y: self.input.scroll_y,
         };
-    }
-}
-
-fn __boring_key_str(key: winit::event::VirtualKeyCode) -> String {
-    use winit::event::VirtualKeyCode::*;
-    match key {
-        Escape => "\x1B".into(),
-        Space => " ".into(),
-        Return => "\r".into(),
-        Up => "\x1B[A".into(),
-        Down => "\x1B[B".into(),
-        Left => "\x1B[D".into(),
-        Right => "\x1B[C".into(),
-        A => "a".into(), B => "b".into(), C => "c".into(),
-        D => "d".into(), E => "e".into(), F => "f".into(),
-        G => "g".into(), H => "h".into(), I => "i".into(),
-        J => "j".into(), K => "k".into(), L => "l".into(),
-        M => "m".into(), N => "n".into(), O => "o".into(),
-        P => "p".into(), Q => "q".into(), R => "r".into(),
-        S => "s".into(), T => "t".into(), U => "u".into(),
-        V => "v".into(), W => "w".into(), X => "x".into(),
-        Y => "y".into(), Z => "z".into(),
-        Key1 => "1".into(), Key2 => "2".into(), Key3 => "3".into(),
-        Key4 => "4".into(), Key5 => "5".into(), Key6 => "6".into(),
-        Key7 => "7".into(), Key8 => "8".into(), Key9 => "9".into(),
-        Key0 => "0".into(),
-        _ => format!("{:?}", key).to_lowercase(),
     }
 }
 
@@ -236,12 +284,16 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                 let surface = unsafe { softbuffer::Surface::new(&context, &built) }.expect("softbuffer surface");
                 frame_size = (width as usize, height as usize);
                 win_size = (width, height);
+                display.size.0.store(width, SeqCst);
+                display.size.1.store(height, SeqCst);
+                built.set_ime_allowed(true);
                 window = Some(built);
                 blit = Some((context, surface));
                 let _ = done.send(());
             }
             Event::UserEvent(__BoringCmd::Present) => {
                 let pixels = display.frame.lock().unwrap().take();
+                { let d = *display.frame_dims.lock().unwrap(); if d.0 > 0 { frame_size = d; } }
                 if let (Some(pixels), Some((_, surface))) = (pixels, blit.as_mut()) {
                     let (ww, wh) = win_size;
                     if let (Some(nw), Some(nh)) = (std::num::NonZeroU32::new(ww), std::num::NonZeroU32::new(wh)) {
@@ -262,6 +314,12 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                 }
                 display.frame_taken.notify_all();
             }
+            Event::UserEvent(__BoringCmd::ImeArea { x, y, w, h }) => {
+                if let Some(window) = &window {
+                    window.set_ime_position(winit::dpi::PhysicalPosition::new(x, y + h as i32));
+                    let _ = w;
+                }
+            }
             Event::UserEvent(__BoringCmd::Exit) => { *flow = ControlFlow::Exit; }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 display.closed.store(true, SeqCst);
@@ -271,19 +329,22 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 win_size = (size.width, size.height);
+                display.size.0.store(size.width, SeqCst);
+                display.size.1.store(size.height, SeqCst);
                 display.resized.store(true, SeqCst);
                 display.invalidate();
             }
             Event::WindowEvent { event: WindowEvent::KeyboardInput { input, .. }, .. } => {
                 if let Some(key) = input.virtual_keycode {
-                    let name = __boring_key_str(key);
+                    let name = __boring_vk_name(key);
                     let mut keys = display.keys.lock().unwrap();
                     match input.state {
                         ElementState::Pressed => {
+                            display.input.lock().unwrap().key_down(&name);
                             // `insert` is false for an auto-repeat of a key already held.
                             if keys.insert(name.clone()) { display.just_pressed.lock().unwrap().insert(name); }
                         }
-                        ElementState::Released => { keys.remove(&name); }
+                        ElementState::Released => { keys.remove(&name); display.input.lock().unwrap().key_up(&name); }
                     }
                     display.invalidate();
                 }
@@ -300,10 +361,44 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                     winit::event::MouseButton::Middle => 4,
                     _ => 0,
                 };
+                display.input.lock().unwrap().mouse_button(bit, state == ElementState::Pressed);
                 match state {
                     ElementState::Pressed => { display.mouse_buttons.fetch_or(bit, SeqCst); }
                     ElementState::Released => { display.mouse_buttons.fetch_and(!bit, SeqCst); }
                 }
+                display.invalidate();
+            }
+            Event::WindowEvent { event: WindowEvent::ReceivedCharacter(c), .. } => {
+                display.input.lock().unwrap().typed(c);
+                display.invalidate();
+            }
+            Event::WindowEvent { event: WindowEvent::Ime(ime), .. } => {
+                {
+                    let mut input = display.input.lock().unwrap();
+                    match ime {
+                        winit::event::Ime::Preedit(text, cursor) => input.ime_preedit(&text, cursor),
+                        winit::event::Ime::Commit(text) => input.ime_commit(&text),
+                        _ => input.ime_preedit("", None),
+                    }
+                }
+                display.invalidate();
+            }
+            Event::WindowEvent { event: WindowEvent::ModifiersChanged(m), .. } => {
+                display.input.lock().unwrap().set_mods(m.shift(), m.ctrl(), m.alt(), m.logo());
+                display.invalidate();
+            }
+            Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
+                {
+                    let mut input = display.input.lock().unwrap();
+                    match delta {
+                        winit::event::MouseScrollDelta::LineDelta(x, y) => input.scroll(x * 40.0, y * 40.0),
+                        winit::event::MouseScrollDelta::PixelDelta(p) => input.scroll(p.x as f32, p.y as f32),
+                    }
+                }
+                display.invalidate();
+            }
+            Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
+                display.input.lock().unwrap().set_focus(focused);
                 display.invalidate();
             }
             _ => {}

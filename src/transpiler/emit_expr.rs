@@ -2773,6 +2773,25 @@ impl Transpiler {
             self.want_raw_option_pop.set(false);
             return format!("let _ = {raw}");
         }
+        // CPU/SIMD: `k = K(Dimension(w, h))` reallocates a Dimension-sized kernel (a render loop
+        // does it when the window was resized), constructed exactly like the top-level `let`.
+        if self.config.is_simd_target {
+            if let (ExprKind::Var(kvar), ExprKind::Call(callee, cargs)) = (&target.kind, &value.kind) {
+                if let (Some(kname), ExprKind::Var(cname)) = (self.kernel_vars.get(kvar.as_str()), &callee.kind) {
+                    let decl = self.kernel_decls.get(cname.as_str());
+                    let has_dim = decl.is_some_and(|d| d.fields.iter().any(|f|
+                        matches!(&f.ty, Type::Named(n) if n == "Dimension") && matches!(f.qual, GpuQual::Const)));
+                    if kname == cname && has_dim {
+                        if let Some(ExprKind::Call(dc, dargs)) = cargs.first().map(|a| &a.value.kind) {
+                            if matches!(&dc.kind, ExprKind::Var(n) if n == "Dimension") && dargs.len() == 2 && cargs.len() == 1 {
+                                return format!("{kvar} = {cname}::new(({}) as i32, ({}) as i32, __boring_gpu_device(), __boring_gpu_queue())",
+                                    self.emit_expr(&dargs[0].value), self.emit_expr(&dargs[1].value));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // CPU/SIMD: `render.cells = step.cells_in` copies one kernel buffer into another.
         if self.config.is_simd_target {
             if let (ExprKind::Field(to, to_field), ExprKind::Field(from, from_field)) = (&target.kind, &value.kind) {

@@ -7949,7 +7949,7 @@ fn display_screen_input_example_reads_mouse_and_key_pressed() {
     assert!(rs.contains("screen.key_pressed(\"c\")"), "{rs}");
     // Runtime: edge-triggered key set (auto-repeat excluded), button mask fed by winit events.
     assert!(rs.contains("struct Mouse {"));
-    assert!(rs.contains("fn key_pressed(&self, key: &str) -> bool"));
+    assert!(rs.contains("fn key_pressed<T: AsRef<str>>(&self, key: T) -> bool"));
     assert!(rs.contains("if keys.insert(name.clone())"));
     assert!(rs.contains("WindowEvent::CursorMoved"));
     assert!(rs.contains("WindowEvent::MouseInput"));
