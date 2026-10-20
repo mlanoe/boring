@@ -20,9 +20,11 @@ pub(super) fn emit_host_rs(
     has_boring_main: bool,
     boring_main_throws: bool,
     has_emulated_shader: bool,
+    screen_setup_fields: &[(String, String)],
 ) -> (String, Vec<TranspileError>) {
     let mut e = HostEmitter::new(program, kernel_names, effective_kernels, general_code, has_boring_main, boring_main_throws);
     e.has_emulated_shader = has_emulated_shader;
+    e.setup_fields = screen_setup_fields.to_vec();
     e.emit();
     (e.out, e.errors)
 }
@@ -56,6 +58,8 @@ struct HostEmitter<'a> {
     /// the `wgpu::Features::SUBGROUP` runtime detection and dual-shader-module
     /// dispatch in `emit_pipeline_init`/wherever the shader module is created.
     has_emulated_shader: bool,
+    /// `(name, type)` of the values `__boring_screen_setup` returns (`__App` fields).
+    setup_fields: Vec<(String, String)>,
     /// Errors found while checking a `Screen` program's shape (see
     /// `check_screen_program_shape`/`emit_render_stmt`'s error fallbacks).
     /// Non-empty means `out` is incomplete/wrong and must not be written out
@@ -84,7 +88,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws, has_emulated_shader: false, errors: Vec::new() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), errors: Vec::new() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -127,35 +131,16 @@ impl<'a> HostEmitter<'a> {
     fn check_screen_program_shape(&mut self) {
         let items = self.program.items.clone();
         for item in &items {
-            match item {
-                Item::Let(s) if s.is_static => {} // real `const`, emitted by the general pass.
-                Item::Let(s) if !self.is_recognized_screen_let(s) => {
-                    self.push_error(s.line, s.col, format!(
-                        "wgpu target: top-level `let {}` is not supported inside a Screen program -- \
-                         only a `Screen(...)`/kernel-constructor call or an int/float/bool literal \
-                         initializer is recognized at the top level here",
-                        s.name
-                    ));
-                }
-                Item::Let(_) => {} // recognized shape — emit_screen_main handles it.
-                Item::Stmt(stmt) => self.check_screen_top_level_stmt(stmt),
-                // Fn/Struct/Enum/Kernel/Mod/Use/Alias/Trait/Ext: fully handled by the
-                // general pass regardless of `host_owns_top_level` -- nothing to check.
-                _ => {}
+            // Every other top-level `let`/statement is ordinary code of `__boring_screen_setup`
+            // (general pass); only the `kernel:` block has a shape of its own.
+            if let Item::Stmt(stmt @ Stmt::KernelBlock(_)) = item {
+                self.check_screen_top_level_stmt(stmt);
             }
         }
     }
 
-    /// Mirrors exactly what `emit_screen_main`'s `scalar_fields`/`kernel_fields`
-    /// filters (and `extract_screen_info`) accept for a top-level `let`.
-    fn is_recognized_screen_let(&self, s: &LetStmt) -> bool {
-        let Some(val) = &s.value else { return false; };
-        match &val.kind {
-            ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n)
-                if n == "Screen" || self.kernel_names.contains(n)),
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
-            _ => false,
-        }
+    fn kernel_name_set(&self) -> std::collections::HashSet<String> {
+        self.kernel_names.iter().cloned().collect()
     }
 
     /// A top-level statement is only recognized as the `kernel:` render block
@@ -809,7 +794,7 @@ impl<'a> HostEmitter<'a> {
             // 'actor'unified needs the same accessors for the same reason (host-visible),
             // plus `kernel_output_fill_map`'s unconditional `copy_{field}_to_device` call
             // for any `field = [value for ..<count]` init — see `emit_kernel.rs`.
-            if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified) && is_buffer_array_ty(&f.ty) {
+            if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified | GpuQual::Surface) && is_buffer_array_ty(&f.ty) {
                 let inner_ty = array_inner(&f.ty);
                 let host_ty = host_scalar_type(&inner_ty);
                 let packed = is_packed_byte_field(&inner_ty);
@@ -1208,12 +1193,18 @@ impl<'a> HostEmitter<'a> {
         let items: Vec<Item> = self.program.items.clone();
 
         // Collect scalar names and kernel instantiations for the app struct.
+        let loop_vars = crate::transpiler::helpers::render_loop_var_names(self.program);
         let scalar_fields: Vec<(String, String)> = items.iter().filter_map(|item| {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
                     let is_screen = matches!(&val.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(n) if n == "Screen"));
                     let is_kernel = matches!(&val.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(kn) if self.kernel_names.contains(kn)));
-                    if !is_screen && !is_kernel && matches!(val.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) {
+                    // Only the constants the window size or the render loop read: every other
+                    // scalar `let` (including imported modules' constants) is a module-level `const`.
+                    let needed = loop_vars.contains(&s.name)
+                        || w_expr.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == s.name)
+                        || h_expr.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == s.name);
+                    if needed && !is_screen && !is_kernel && matches!(val.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) {
                         return Some((s.name.clone(), host_expr(val)));
                     }
                 }
@@ -1221,12 +1212,16 @@ impl<'a> HostEmitter<'a> {
             None
         }).collect();
 
+        let kernel_set = self.kernel_name_set();
         let kernel_fields: Vec<(String, String, String)> = items.iter().filter_map(|item| {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
                     if let ExprKind::Call(callee, args) = &val.kind {
                         if let ExprKind::Var(kname) = &callee.kind {
-                            if self.kernel_names.contains(kname) {
+                            if self.kernel_names.contains(kname)
+                                && crate::transpiler::helpers::classify_screen_let(s, &kernel_set)
+                                    == crate::transpiler::helpers::ScreenLet::HostKernel
+                            {
                                 // Only pass width/height through to `Kernel::new(...)` when
                                 // the kernel actually declares a `Dimension` field --
                                 // `emit_kernel_new` only adds those parameters in that case,
@@ -1265,6 +1260,9 @@ impl<'a> HostEmitter<'a> {
         }
         for (var, kname, _) in &kernel_fields {
             self.line(&format!("    {var}: {kname},"));
+        }
+        for (name, ty) in &self.setup_fields.clone() {
+            self.line(&format!("    {name}: {ty},"));
         }
         self.line("    __keys: std::collections::HashSet<String>,");
         // Edge-triggered `screen.key_pressed()` set (cleared after each frame body) and
@@ -1503,6 +1501,17 @@ impl<'a> HostEmitter<'a> {
         for (name, val) in &scalar_fields {
             self.line(&format!("    let {name}: i64 = {val};"));
         }
+        // The program's own top-level code (`__boring_screen_setup`): kernels with constructor
+        // arguments (their `init` runs here), view runtimes, display lists... Needs the global
+        // device/queue set above.
+        if !self.setup_fields.is_empty() {
+            let names: Vec<String> = self.setup_fields.iter().map(|(n, _)| n.clone()).collect();
+            let tuple = format!("({}{})", names.join(", "), if names.len() == 1 { "," } else { "" });
+            self.line(&format!("    let {tuple} = match __boring_screen_setup() {{"));
+            self.line("        Ok(v) => v,");
+            self.line("        Err(e) => { eprintln!(\"error: {}\", e); std::process::exit(1); }");
+            self.line("    };");
+        }
         // Kernel instantiations in main() (need device/queue before struct init)
         for (var, kname, new_args) in &kernel_fields {
             // new_args may be "width, height, " — cast to i32 for the kernel constructor.
@@ -1546,6 +1555,9 @@ impl<'a> HostEmitter<'a> {
         }
         for (var, _, _) in &kernel_fields {
             self.line(&format!("        {var},"));
+        }
+        for (name, _) in &self.setup_fields.clone() {
+            self.line(&format!("        {name},"));
         }
         self.line("        __keys: Default::default(),");
         self.line("        __keys_pressed: Default::default(),");
@@ -1634,16 +1646,21 @@ impl<'a> HostEmitter<'a> {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_field_assign(e) {
                     self.line(&format!("{indent}{s}"));
+                } else if matches!(&e.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(f)
+                    if self.general_fn_param_modes(f).is_some())) {
+                    // an ordinary Boring function called for its effect
+                    let call = self.host_expr(e);
+                    self.line(&format!("{indent}{call};"));
                 } else {
                     self.push_error(e.line, e.col,
                         "wgpu target: expression not supported inside a Screen render loop");
                 }
             }
-            // Per-frame host local (`let enc = encodeFrame()`), usable by later statements
-            // of the same frame body (e.g. `k.f = enc.f`).
+            // A per-frame local (`let c = palette(screen.frame)`), visible to the rest of the frame body.
             Stmt::Let(ls) if ls.value.is_some() => {
                 let v = self.host_expr(ls.value.as_ref().unwrap());
-                self.line(&format!("{indent}let {} = {v};", ls.name));
+                let mutability = if ls.binding.is_mutable() { "mut " } else { "" };
+                self.line(&format!("{indent}let {mutability}{} = {v};", ls.name));
             }
             Stmt::If(if_stmt) => {
                 if let Some(s) = self.try_emit_screen_key_if(if_stmt) {
@@ -1996,10 +2013,32 @@ impl<'a> HostEmitter<'a> {
                         return format!("({} as f32)", self.host_expr(&args[0].value));
                     }
                 }
+                // A call to an ordinary Boring function: pass each argument the way the function's
+                // generated signature takes it (`&x`, `&mut x`, or by value).
+                if let ExprKind::Var(fname) = &callee.kind {
+                    if let Some(modes) = self.general_fn_param_modes(fname) {
+                        if modes.len() == args.len() {
+                            let args_s: Vec<_> = args.iter().zip(&modes).map(|(a, mode)| {
+                                let v = self.host_expr(&a.value);
+                                let is_field = matches!(&a.value.kind, ExprKind::Var(n)
+                                    if self.setup_fields.iter().any(|(f, _)| f == n));
+                                match *mode {
+                                    "&mut" => format!("&mut {v}"),
+                                    "&" => format!("&{v}"),
+                                    _ if is_field => format!("{v}.clone()"),
+                                    _ => v,
+                                }
+                            }).collect();
+                            return format!("{fname}({})", args_s.join(", "));
+                        }
+                    }
+                }
                 // Generic call (best effort)
                 let args_s: Vec<_> = args.iter().map(|a| self.host_expr(&a.value)).collect();
                 format!("{}({})", self.host_expr(callee), args_s.join(", "))
             }
+            // A value built by `__boring_screen_setup` lives on `__App`.
+            ExprKind::Var(n) if self.setup_fields.iter().any(|(f, _)| f == n) => format!("{pfx}{n}"),
             ExprKind::Var(n) => n.clone(),
             ExprKind::Int(v)   => format!("{v}"),
             ExprKind::Float(v) => format!("{v}f32"),
@@ -2017,6 +2056,51 @@ impl<'a> HostEmitter<'a> {
             }
             _ => "/* unsupported expr */".into(),
         }
+    }
+
+    /// How the general pass's `fn name(...)` takes each parameter: `"&mut"`, `"&"` or `""` (by
+    /// value), read back from the generated signature. `None` when `name` isn't one of its functions.
+    fn general_fn_param_modes(&self, name: &str) -> Option<Vec<&'static str>> {
+        let needle = format!("fn {name}(");
+        let at = self.general_code.lines().find_map(|l| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            if t.starts_with(&needle) { Some(t.to_string()) } else { None }
+        })?;
+        let rest = &at[needle.len()..];
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '(' | '<' | '[' => depth += 1,
+                '>' | ']' => depth -= 1,
+                ')' if depth == 0 => { end = Some(i); break; }
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        let params = &rest[..end?];
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut cur = String::new();
+        let flush = |cur: &mut String, out: &mut Vec<&'static str>| {
+            let t = cur.trim();
+            if !t.is_empty() {
+                let ty = t.split_once(':').map(|(_, ty)| ty.trim()).unwrap_or("");
+                out.push(if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" } else { "" });
+            }
+            cur.clear();
+        };
+        for c in params.chars() {
+            match c {
+                '(' | '<' | '[' => { depth += 1; cur.push(c); }
+                ')' | '>' | ']' => { depth -= 1; cur.push(c); }
+                ',' if depth == 0 => flush(&mut cur, &mut out),
+                _ => cur.push(c),
+            }
+        }
+        flush(&mut cur, &mut out);
+        Some(out)
     }
 
     /// Find the KernelDecl for a top-level kernel variable (e.g. `var render = Render(...)`).

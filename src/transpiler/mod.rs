@@ -124,6 +124,11 @@ pub struct TranspileConfig {
     /// construction convention a render-loop kernel commonly uses, so trying anyway
     /// would panic rather than silently duplicate already-correct behavior.
     pub gpu_top_level_handled_by_host: bool,
+    /// wgpu `Screen` programs only: when `Some(names)`, the program's top-level setup (everything
+    /// but the `Screen(...)` window, `Dimension`-only kernels, scalar constants and the `kernel:`
+    /// render block) is emitted as a `fn __boring_screen_setup()` returning `names`, which the
+    /// host turns into `__App` fields (see `TranspileOutput::screen_setup_fields`).
+    pub screen_setup: Option<Vec<String>>,
     /// Project-declared supplement to `KNOWN_EXTERNAL_TUPLE_STRUCTS` (see that const's doc
     /// comment below), sourced from `boring.toml`'s `[external_types]` `tuple_structs`
     /// array. Lets a project register its own hand-verified external types (e.g. a bevy
@@ -190,6 +195,7 @@ impl Default for TranspileConfig {
             is_gpu_target: false,
             is_simd_target: false,
             gpu_top_level_handled_by_host: false,
+            screen_setup: None,
             external_tuple_structs: Vec::new(),
             external_const_fns: Vec::new(),
             external_optional_fields: Vec::new(),
@@ -248,6 +254,9 @@ pub struct TranspileOutput {
     /// own generated entry point -- a synthesized wrapper exists only in `code`, not as
     /// an `Item::Fn` in the source `Program`, so it can't be detected by AST inspection.
     pub gpu_main_emitted: bool,
+    /// `(name, rust type)` of every value `__boring_screen_setup` returns, in order (empty unless
+    /// `TranspileConfig::screen_setup` was set).
+    pub screen_setup_fields: Vec<(String, String)>,
 }
 
 /// True when `code` contains a `Box<dyn` that isn't path-qualified (`std::boxed::Box<dyn`) —
@@ -361,7 +370,7 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     };
     let mut errors = t.errors.into_inner();
     errors.extend(box_clash);
-    TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get() }
+    TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get(), screen_setup_fields: t.screen_setup_fields.into_inner() }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -1425,6 +1434,7 @@ struct Transpiler {
     /// its own generated entry point, without re-deriving it from AST inspection
     /// (which can't see a function that exists only in the emitted text).
     pub(crate) gpu_main_emitted: std::cell::Cell<bool>,
+    pub(crate) screen_setup_fields: std::cell::RefCell<Vec<(String, String)>>,
     /// Original (lowercase, boring-source) names of GPU-target top-level scalar `let`s
     /// promoted to a Rust `const` -- the actual emitted Rust identifier is uppercased
     /// (see `emit_item`'s `Item::Let` case) to avoid colliding with a same-named local
@@ -1748,6 +1758,7 @@ impl Transpiler {
             currently_in_main: false,
             static_backing_names: std::collections::HashSet::new(),
             gpu_main_emitted: std::cell::Cell::new(false),
+            screen_setup_fields: std::cell::RefCell::new(Vec::new()),
             gpu_top_level_const_names: std::collections::HashSet::new(),
         };
         // v2 Introspect handle types (`IntrospectInfo`/`Field`/`Method`) are hand-emitted
@@ -2639,8 +2650,20 @@ impl Transpiler {
         // construction) isn't a pattern `emit_kernel.rs` understands. Skip every
         // top-level statement/let entirely instead of emitting or falling through.
         let host_owns_top_level = self.is_gpu_target && self.config.gpu_top_level_handled_by_host;
+        // wgpu Screen programs: the host still owns the window, the `kernel:` render block,
+        // `Dimension`-only kernels and scalar constants, but everything else at the top level is
+        // ordinary code run once before the loop (`__boring_screen_setup`).
+        let screen_setup = host_owns_top_level && self.config.screen_setup.is_some();
+        let screen_kernel_names: std::collections::HashSet<String> = if screen_setup {
+            self.config.gpu_kernels.iter().map(|k| k.name.clone())
+                .chain(self.config.gpu_kernel_generic_names.keys().cloned())
+                .collect()
+        } else { std::collections::HashSet::new() };
+        let mut setup_items: Vec<&Item> = Vec::new();
         for item in &program.items {
             match item {
+                Item::Stmt(Stmt::KernelBlock(_) | Stmt::Comment(_)) if screen_setup => {}
+                Item::Stmt(_) if screen_setup => setup_items.push(item),
                 Item::Stmt(_) if host_owns_top_level => {}
                 Item::Stmt(_) => stmts.push(item),
                 // A mutable top-level binding referenced by a function was already
@@ -2653,6 +2676,26 @@ impl Transpiler {
                     // Top-level `static let` (keyword) or `T'static` (qualifier) →
                     // always promoted to module scope, regardless of in-file usage or
                     // `pub` — see `let_type_is_static`'s doc comment.
+                    self.emit_item(item);
+                    self.blank();
+                }
+                Item::Let(s) if screen_setup => {
+                    match helpers::classify_screen_let(s, &screen_kernel_names) {
+                        helpers::ScreenLet::Window | helpers::ScreenLet::HostKernel => {}
+                        // Module-level `const`s, like any other GPU target (the host keeps a copy
+                        // of the ones it needs itself).
+                        helpers::ScreenLet::Scalar if self.top_level_let_is_const_safe(s) => {
+                            self.emit_item(item);
+                            self.blank();
+                        }
+                        helpers::ScreenLet::Scalar | helpers::ScreenLet::Setup => setup_items.push(item),
+                    }
+                }
+                // cuda/rocm/metal Screen and kernel programs: the host keeps its own copy of the
+                // scalar constants as locals of `main`, but the functions the general pass emits
+                // read them as module-level `const`s (like on every other target).
+                Item::Let(s) if host_owns_top_level && self.top_level_let_is_const_safe(s)
+                    && s.value.as_ref().is_some_and(|v| helpers::is_scalar_let_value(v, None)) => {
                     self.emit_item(item);
                     self.blank();
                 }
@@ -2749,6 +2792,10 @@ impl Transpiler {
         // GPU target's own generated entry point can call it exactly like an explicit
         // user main -- `gpu_main_emitted` tells the caller (which can't see this
         // function in the source AST, only in this emitted text) that it now exists.
+        if screen_setup {
+            self.emit_screen_setup_fn(&setup_items, &screen_kernel_names);
+            return;
+        }
         if self.is_gpu_target {
             if !stmts.is_empty() && !has_explicit_main {
                 self.emit_gpu_boring_main(&stmts);
@@ -2867,6 +2914,63 @@ impl Transpiler {
     /// panic at runtime ("no reactor running") even if this function were made `async`
     /// and awaited. Fail at transpile time instead of generating code that compiles
     /// but panics the first time it actually runs.
+    /// `fn __boring_screen_setup()`: a wgpu Screen program's top-level `let`s/statements (see
+    /// `TranspileConfig::screen_setup`), run in order once before the window opens, returning the
+    /// values the host keeps (kernels and whatever the render loop reads) as a tuple.
+    fn emit_screen_setup_fn(&mut self, setup_items: &[&Item], kernel_names: &std::collections::HashSet<String>) {
+        let returns = self.config.screen_setup.clone().unwrap_or_default();
+        if setup_items.is_empty() && returns.is_empty() { return; }
+        let result_ty = if self.user_defines_result { "std::result::Result" } else { "Result" };
+        let box_ty = if self.user_defines_box { "std::boxed::Box" } else { "Box" };
+        let ok_ty = if self.user_defines_result { "std::result::Result::Ok" } else { "Ok" };
+        let header_at = self.out.len();
+        self.indent += 1;
+        let was_throws = self.in_throws;
+        self.in_throws = true;
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for item in setup_items {
+            match item {
+                Item::Let(s) => {
+                    if s.binding.is_mutable() && self.global_vars_used_in_fns.contains(&s.name) {
+                        // already a `LazyLock<Mutex<T>>` static
+                    } else {
+                        self.emit_let(s, false);
+                    }
+                    if returns.contains(&s.name) {
+                        let ty = match (&s.ty, s.value.as_ref().map(|v| &v.kind)) {
+                            (Some(t), _) => Some(self.emit_type(t)),
+                            (None, Some(ExprKind::Call(c, _))) if matches!(&c.kind, ExprKind::Var(n) if kernel_names.contains(n)) => {
+                                if let ExprKind::Var(n) = &c.kind { Some(n.clone()) } else { None }
+                            }
+                            (None, Some(_)) => s.value.as_ref()
+                                .and_then(|v| self.resolve_expr_type(v))
+                                .map(|t| self.emit_type(&t)),
+                            _ => None,
+                        };
+                        match ty {
+                            Some(ty) => fields.push((s.name.clone(), ty)),
+                            None => self.push_error(s.line, s.col, format!(
+                                "wgpu target: cannot infer the type of top-level `{}` in a Screen program -- \
+                                 the render loop reads it, so declare it (`let Type {} = ...`)", s.name, s.name)),
+                        }
+                    }
+                }
+                Item::Stmt(st) => self.emit_stmt(st, false),
+                _ => {}
+            }
+        }
+        let tuple = returns.join(", ");
+        self.line(&format!("{ok_ty}(({tuple}{}))", if returns.len() == 1 { "," } else { "" }));
+        self.in_throws = was_throws;
+        self.indent -= 1;
+        self.line("}");
+        let tys: Vec<String> = fields.iter().map(|(_, t)| t.clone()).collect();
+        let tuple_ty = format!("({}{})", tys.join(", "), if tys.len() == 1 { "," } else { "" });
+        let header = format!("fn __boring_screen_setup() -> {result_ty}<{tuple_ty}, {box_ty}<dyn std::error::Error + Send + Sync>> {{\n");
+        self.out.insert_str(header_at, &header);
+        *self.screen_setup_fields.borrow_mut() = fields;
+    }
+
     fn emit_gpu_boring_main(&mut self, stmts: &[&Item]) {
         let top_stmts: Vec<Stmt> = stmts.iter().filter_map(|i| {
             if let Item::Stmt(s) = i { Some((*s).clone()) } else { None }

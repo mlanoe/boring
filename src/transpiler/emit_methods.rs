@@ -6779,6 +6779,7 @@ impl Transpiler {
             static_backing_names: self.static_backing_names.clone(),
             user_top_level_names: self.user_top_level_names.clone(),
             gpu_main_emitted: std::cell::Cell::new(false),
+            screen_setup_fields: std::cell::RefCell::new(Vec::new()),
             gpu_top_level_const_names: self.gpu_top_level_const_names.clone(),
         }
     }

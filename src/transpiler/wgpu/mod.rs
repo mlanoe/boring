@@ -112,6 +112,11 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
         // instances become `__App` struct fields; see that function) -- the general pass
         // must leave that untouched rather than trying to reconstruct it a second time.
         gpu_top_level_handled_by_host: has_screen,
+        screen_setup: if has_screen {
+            let names: std::collections::HashSet<String> = kernel_names.iter().cloned()
+                .chain(gpu_kernel_generic_names.keys().cloned()).collect();
+            Some(crate::transpiler::helpers::screen_setup_returns(program, &names))
+        } else { None },
         ..crate::transpiler::TranspileConfig::default()
     };
     let general_out = crate::transpiler::transpile_with_config(&renamed_program, general_config);
@@ -124,7 +129,7 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     let uses_unicode = general_out.uses_unicode;
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
-    let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some());
+    let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some(), &general_out.screen_setup_fields);
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
     let mut errors = general_out.errors;

@@ -2931,3 +2931,82 @@ pub(crate) fn screen_redraw_on_demand(program: &Program) -> bool {
             })
     })
 }
+
+// ── Screen program top-level classification ───────────────────────────────────
+
+/// `K()` / `K(Dimension(w, h))`: a kernel constructor the Screen host builds itself
+/// (`K::new(w, h, device, queue)` -- no `init`), as opposed to one that takes real
+/// constructor arguments, which must run its `init` like any other construction.
+fn is_dimension_only_ctor_args(args: &[Arg]) -> bool {
+    match args {
+        [] => true,
+        [a] => matches!(&a.value.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(n) if n == "Dimension")),
+        _ => false,
+    }
+}
+
+/// How a Screen program's top-level `let` is lowered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ScreenLet {
+    /// `let screen = Screen(...)`: the window itself, owned by the host.
+    Window,
+    /// A kernel built from nothing but a `Dimension` (or nothing): the host builds it.
+    HostKernel,
+    /// A scalar literal: a module-level `const` (and a host-side copy for the render loop).
+    Scalar,
+    /// Everything else (a kernel with constructor arguments, a view runtime, an array...):
+    /// an ordinary statement of the synthesized `__boring_screen_setup` function.
+    Setup,
+}
+
+pub(crate) fn classify_screen_let(s: &LetStmt, kernel_names: &std::collections::HashSet<String>) -> ScreenLet {
+    let Some(val) = &s.value else { return ScreenLet::Setup };
+    match &val.kind {
+        ExprKind::Call(callee, args) => match &callee.kind {
+            ExprKind::Var(n) if n == "Screen" => ScreenLet::Window,
+            ExprKind::Var(n) if kernel_names.contains(n) && is_dimension_only_ctor_args(args) => ScreenLet::HostKernel,
+            _ => ScreenLet::Setup,
+        },
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => ScreenLet::Scalar,
+        _ => ScreenLet::Setup,
+    }
+}
+
+/// Names the synthesized `__boring_screen_setup` hands to the Screen host (they become
+/// `__App` fields): every kernel built by it, plus every other setup `let` the render
+/// loop mentions. A setup `let` the loop never reads stays a local of the setup function.
+/// Every variable name the Screen program's `kernel: loop:` body mentions.
+pub(crate) fn render_loop_var_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut loop_body: Vec<Stmt> = Vec::new();
+    for item in &program.items {
+        if let Item::Stmt(Stmt::KernelBlock(block)) = item {
+            for st in &block.body {
+                if let Stmt::Loop(ls) = st { loop_body.extend(ls.body.iter().cloned()); }
+            }
+        }
+    }
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut on_expr = |e: &mut Expr| { if let ExprKind::Var(n) = &e.kind { used.insert(n.clone()); } };
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut w = crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+        w.stmts(&mut loop_body);
+    }
+    used
+}
+
+pub(crate) fn screen_setup_returns(program: &Program, kernel_names: &std::collections::HashSet<String>) -> Vec<String> {
+    let used = render_loop_var_names(program);
+    let mut out = Vec::new();
+    for item in &program.items {
+        if let Item::Let(s) = item {
+            if classify_screen_let(s, kernel_names) != ScreenLet::Setup { continue; }
+            let is_kernel = matches!(s.value.as_ref().map(|v| &v.kind),
+                Some(ExprKind::Call(c, _)) if matches!(&c.kind, ExprKind::Var(n) if kernel_names.contains(n)));
+            if (is_kernel || used.contains(&s.name)) && !out.contains(&s.name) {
+                out.push(s.name.clone());
+            }
+        }
+    }
+    out
+}
