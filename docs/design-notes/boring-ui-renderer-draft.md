@@ -54,6 +54,13 @@ Rationale, in short:
   struct helper methods work under `boring run` only (top-level functions work everywhere); a kernel local named
   like a host function pulls that function into the WGSL.
 
+## Status: window (2026-10-20)
+
+`boring-ui/examples/todo_window` shows the Todo application in a native window drawn by the tiled kernel through
+`screen.present` (wgpu, no readback). It is the first step-4 probe; the gaps it found in `Screen` (host code at
+top level and in the loop, module constants, replacing array buffers per frame, input events, redraw on demand) are
+tabulated in `boring-ui/README.md`, "Window", and filed as compiler tasks.
+
 ## What stays outside Boring kernels
 
 Even on this route the platform host depends on existing crates; none of them is a rendering technology:
