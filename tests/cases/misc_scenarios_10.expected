@@ -1,0 +1,10 @@
+== mem_borrow_builtins ==
+2
+1
+10
+20
+5
+0
+== monomorphize_fn ==
+42
+hi

@@ -141,14 +141,14 @@ interp_test!(guard_let_mut_field_escape);
 interp_test!(if_let_mut_field_escape);
 interp_test!(strings);
 interp_test!(range_bound_through_lock);
-interp_test!(mut_param_if_let_field_forward);
+interp_test!(mut_scenarios_3);
 interp_test!(overload_trait_vs_struct_loop_var);
 interp_test!(vec_contains_string_literal);
 interp_test!(downcast_else_local);
-interp_test!(optional_field_else_keeps_field);
-interp_test!(dict_index_else_on_call_result);
+interp_test!(optional_scenarios_2);
+interp_test!(dict_scenarios);
 interp_test!(shared_trait_do_block_return);
-interp_test!(fn_named_rust_keyword);
+interp_test!(fn_scenarios_3);
 interp_test!(join_returns_string);
 interp_test!(control_flow);
 interp_test!(match_stmt);
@@ -211,7 +211,7 @@ interp_test!(var_rebind_owned);
 interp_test!(struct_scenarios);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);
-interp_test!(trait_downcast_shared_actor_state);
+interp_test!(trait_scenarios_4);
 interp_test!(trait_enum_param);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);
@@ -369,10 +369,8 @@ interp_test!(builtin_error_enum);
 interp_test!(multi_variant_catch_dispatch);
 interp_test!(type_def_typed_throws);
 interp_test!(type_method_throws_untyped);
-interp_test!(system_time);
 interp_test!(misc_scenarios_5);
 interp_test!(ref_identity);
-interp_test!(mut_scalar);
 interp_test!(int_float_literal_compare);
 interp_test!(float32_math_builtins);
 interp_test!(pow_method_float_width);
@@ -432,7 +430,6 @@ interp_test!(pub_top_level_string_const);
 // `.length`/`.count` collection-length builtin. The interpreter's `get_field`
 // was never affected (its Array/Set/Dict shortcuts are gated by value type,
 // never reached for a struct/Object); this is here to lock that in.
-interp_test!(struct_count_field);
 // A stored field and a method may share a name: bare access reads the field,
 // while call syntax dispatches the method. Method-first field lookup used to
 // make the method's `self.uid` recursively call itself until stack overflow.
@@ -473,7 +470,6 @@ interp_test!(dict_index_nil_context);
 // `--emit-rust` output (see tests/transpile.rs's registration for the real
 // regression coverage) -- kept here anyway so the runtime *values* stay
 // pinned down too. See tests/cases/dict_string_key_index.br's own doc comment.
-interp_test!(dict_string_key_index);
 // `local_var.dict_field[key]` read through a struct-typed local OTHER than
 // `self` (here a `for`-loop-bound value). The interpreter (this test) never
 // caught the underlying bug -- it was `--emit-rust`-only codegen (see
@@ -598,7 +594,7 @@ interp_test!(shared_dyn_def_trait_stays_boxed);
 
 // Same case as the transpile_test of the same name (last-use move analysis) -- identical output.
 interp_test!(last_use_move);
-interp_test!(field_by_value_reuse);
+interp_test!(misc_scenarios_8);
 interp_test!(misc_scenarios);
 interp_test!(destructured_slice_by_value_reuse);
 interp_test!(assert_eq_call_field_length);
@@ -611,7 +607,6 @@ interp_test!(actor_field_arg_no_deadlock);
 // Same for a `mut` user-struct parameter (free function and struct method): the callee's field
 // writes are visible to the caller. Same case as the transpile_test of the same name.
 interp_test!(mut_scenarios);
-interp_test!(mut_param_unresolved_receiver);
 
 // Same for a `mut` parameter of an associated function (`type def`): the callee's writes are
 // visible to the caller. Same case as the transpile_test of the same name.
@@ -690,7 +685,6 @@ error_test!(error_string_repeat_cap);
 // (non-Optional) type — the interpreter path (`boring run`) for this file,
 // see tests/transpile.rs's `optional_let_throws_non_optional_return` for the
 // transpiler-side real-compile regression (audit finding #6).
-interp_test!(optional_let_throws_non_optional_return);
 
 // `guard let ... else: panic(...)` inside a `throws` function — the
 // interpreter path (`boring run`) for this file, see tests/transpile.rs's
@@ -703,7 +697,6 @@ interp_test!(guard_let_else_panic_throws);
 // `init_bare_field_assign`/`init_bare_field_assign_qualified` for the
 // transpiler-side real-compile regression (`emit_init`'s general-case
 // zero-prefill emitting `Default::default()` for non-`Default` field types).
-interp_test!(init_bare_field_assign_qualified);
 
 // A plain function call to an `'owned` parameter is not a move — the
 // interpreter (`boring run`) path for these files, see tests/transpile.rs's
@@ -855,14 +848,12 @@ interp_test!(var_mut_collection_ok);
 // see tests/cases/single_letter_struct_holds_dyn.br.
 
 interp_test!(parse_scenarios);
-interp_test!(trait_method_casing_unknown_receiver);
-interp_test!(stored_closure_captures_self_and_loop_item);
+interp_test!(misc_scenarios_9);
 interp_test!(view_callbacks_capture_state_handles);
 interp_test!(clone_deep_copy);
 interp_test!(trait_object_no_rebox);
 interp_test!(trait_object_fallback_optional);
 interp_test!(misc_scenarios_3);
-interp_test!(fn_field_handle_call);
 interp_test!(fn_field_optional_call);
 interp_test!(fn_handle_pass_and_str_arg);
 interp_test!(fn_scenarios);

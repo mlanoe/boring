@@ -1,3 +1,26 @@
+# ---- dict_index_else_on_call_result ----
+struct DictIndexElseOnCallResultP:
+    int id
+    var mut {string=string} props = {=}
+
+def DictIndexElseOnCallResultP dict_index_else_on_call_result_mk():
+    mut p = DictIndexElseOnCallResultP(id = 1)
+    p.props["value"] = "v"
+    p
+
+def [DictIndexElseOnCallResultP] dict_index_else_on_call_result_all():
+    [dict_index_else_on_call_result_mk()]
+
+def DictIndexElseOnCallResultP dict_index_else_on_call_result_nth(int n):
+    let a = dict_index_else_on_call_result_all()
+    a[n]
+
+def run_dict_index_else_on_call_result() throws:
+    print(dict_index_else_on_call_result_mk().props["value"] else (""))
+    print(dict_index_else_on_call_result_nth(0).props["value"] else (""))
+    print(dict_index_else_on_call_result_nth(0).props["zzz"] else ("none"))
+
+# ---- dict_string_key_index ----
 # Regression test: `dict[key]` indexing (read via `else`, write via `=`) with a
 # non-integer (string) key, for every shape the transpiler dispatches
 # differently:
@@ -37,21 +60,14 @@
 # src/transpiler/emit_methods.rs (`expr_is_dict`'s `.without_mut()`).
 
 # ── Free function, `var` param (changes visible at the call site) ───────────
-def set_in(mut {string=int} table, string k, int v):
+def dict_string_key_index_set_in(mut {string=int} table, string k, int v):
     table[k] = v
 
-def int get_in(var {string=int} table, string k):
+def int dict_string_key_index_get_in(var {string=int} table, string k):
     table[k] else -1
 
-var {string=int} scores = {=}
-set_in(scores, "alice", 10)
-set_in(scores, "bob", 20)
-print get_in(scores, "alice")
-print get_in(scores, "bob")
-print get_in(scores, "carol")
-
 # ── Struct field, implicit self (no `self.` prefix) ──────────────────────────
-struct ScoreBoard:
+struct DictStringKeyIndexScoreBoard:
     var mut {string=int} table
 
     req int get(string id):
@@ -60,9 +76,23 @@ struct ScoreBoard:
     def set(string id, int v):
         table[id] = v
 
-mut board = ScoreBoard(table = {=})
-board.set("x", 100)
-board.set("y", 200)
-print board.get("x")
-print board.get("y")
-print board.get("z")
+def run_dict_string_key_index() throws:
+    var {string=int} scores = {=}
+    dict_string_key_index_set_in(scores, "alice", 10)
+    dict_string_key_index_set_in(scores, "bob", 20)
+    print dict_string_key_index_get_in(scores, "alice")
+    print dict_string_key_index_get_in(scores, "bob")
+    print dict_string_key_index_get_in(scores, "carol")
+
+    mut board = DictStringKeyIndexScoreBoard(table = {=})
+    board.set("x", 100)
+    board.set("y", 200)
+    print board.get("x")
+    print board.get("y")
+    print board.get("z")
+
+def main() throws:
+    print "== dict_index_else_on_call_result =="
+    run_dict_index_else_on_call_result()
+    print "== dict_string_key_index =="
+    run_dict_string_key_index()

@@ -1,0 +1,69 @@
+# ---- try_else_nil_if_let ----
+# Regression test.
+#
+# `try EXPR else nil` (spelled-out form) is documented (book.md) as exactly
+# equivalent to `try? EXPR`. The parser used to always fold the spelled-out
+# form into `ExprKind::TryElseBlock` regardless of what the else branch was,
+# producing a `match` whose `Ok` arm is the raw success value and whose `Err`
+# arm is `None` -- never unified into a single `Option<T>` -- while `try?`
+# built a dedicated `ExprKind::TryElse(expr, Nil)` node with correct `.ok()`
+# codegen. Covers both a plain `let` binding and use as an `if let`
+# condition (the shape from the original bug report), plus a control case
+# confirming `try? expr` still works exactly as before.
+
+enum TryElseNilIfLetMyErr:
+    Bad
+
+int try_else_nil_if_let_risky(int v) throws TryElseNilIfLetMyErr:
+    guard v > 0 else throw TryElseNilIfLetMyErr.Bad
+    v * 2
+
+def try_else_nil_if_let_use_try_else_nil(int v):
+    if let r = (try try_else_nil_if_let_risky(v) else nil):
+        print "{r}"
+    else:
+        print "none"
+
+def try_else_nil_if_let_use_try_question(int v):
+    if let r = (try? try_else_nil_if_let_risky(v)):
+        print "{r}"
+    else:
+        print "none"
+
+def try_else_nil_if_let_run():
+    try_else_nil_if_let_use_try_else_nil(5)
+    try_else_nil_if_let_use_try_else_nil(-5)
+    try_else_nil_if_let_use_try_question(5)
+    try_else_nil_if_let_use_try_question(-5)
+
+    # Plain `let` binding (not inside if let) -- same desugaring, must also work.
+    let x = try try_else_nil_if_let_risky(5) else nil
+    let y = try try_else_nil_if_let_risky(-5) else nil
+    if let xx = x:
+        print "{xx}"
+    else:
+        print "plain-none"
+    if let yy = y:
+        print "{yy}"
+    else:
+        print "plain-none"
+
+def run_try_else_nil_if_let():
+    try_else_nil_if_let_run()
+
+# ---- uint_int_cross_eq ----
+def run_uint_int_cross_eq() throws:
+    let uint x = 5
+    let int y = 5
+    print x == y
+    print x == 5
+    print 5 == x
+    print x != y
+    let uint six = 6
+    print x == six
+
+def main() throws:
+    print "== try_else_nil_if_let =="
+    run_try_else_nil_if_let()
+    print "== uint_int_cross_eq =="
+    run_uint_int_cross_eq()

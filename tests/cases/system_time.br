@@ -1,9 +1,0 @@
-use std.time.SystemTime
-use std.time.UNIX_EPOCH
-
-def uint64 unixTimestamp() throws:
-    SystemTime.now().durationSince(UNIX_EPOCH).asSecs()
-
-let timestamp = unixTimestamp()
-assert timestamp > 1700000000
-print "system time: ok"

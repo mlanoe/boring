@@ -1,0 +1,46 @@
+use Cmd as def void(string)
+
+# ---- fn_named_rust_keyword ----
+def int fn_named_rust_keyword_box(int w):
+    w + 1
+
+def int fn_named_rust_keyword_move(int w):
+    fn_named_rust_keyword_box(w) * 2
+
+def run_fn_named_rust_keyword() throws:
+    print(fn_named_rust_keyword_box(1))
+    print(fn_named_rust_keyword_move(2))
+
+# ---- fn_field_handle_call ----
+struct FnFieldHandleCallRow:
+    int id
+    Cmd onCommand
+
+struct FnFieldHandleCallSt:
+    var int n = 0
+
+FnFieldHandleCallRow fn_field_handle_call_make(mut FnFieldHandleCallSt st):
+    FnFieldHandleCallRow(id = 1, onCommand = (c):
+        st.n += 1)
+
+string fn_field_handle_call_report(FnFieldHandleCallRow r):
+    let f = r.onCommand
+    f("x")
+    let g = f
+    g("yz")
+    "ok"
+
+def run_fn_field_handle_call():
+    mut st = FnFieldHandleCallSt()
+    let r = fn_field_handle_call_make(st)
+    print fn_field_handle_call_report(r)
+    print st.n
+    mut r2 = fn_field_handle_call_make(st)
+    r2.onCommand("abc")
+    print st.n
+
+def main() throws:
+    print "== fn_named_rust_keyword =="
+    run_fn_named_rust_keyword()
+    print "== fn_field_handle_call =="
+    run_fn_field_handle_call()

@@ -410,7 +410,7 @@ transpile_test!(trait_borrow_contract_impls);
 transpile_test!(struct_scenarios);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);
-transpile_test!(trait_downcast_shared_actor_state);
+transpile_test!(trait_scenarios_4);
 
 // `do: ...` used as a value (`let x = do: ...`) whose body contains a `for`
 // loop must evaluate to its tail expression, not silently degrade to `()`
@@ -439,7 +439,6 @@ transpile_test!(array_block_multiline_closure_arg_transpile);
 transpile_test!(implicit_self_field_over_global);
 transpile_test!(fn_field_bare_call);
 transpile_test!(numeric);
-transpile_test!(uint_int_cross_eq);
 transpile_test!(float_width_cross_eq);
 transpile_test!(int_width_cross_assert_eq);
 transpile_test!(assert_eq_string_literal);
@@ -513,14 +512,14 @@ transpile_test!(closure_colon);
 transpile_test!(collections2);
 transpile_test!(join_handle);
 transpile_test!(join_returns_string);
-transpile_test!(fn_named_rust_keyword);
+transpile_test!(fn_scenarios_3);
 transpile_test!(shared_trait_do_block_return);
-transpile_test!(dict_index_else_on_call_result);
-transpile_test!(optional_field_else_keeps_field);
+transpile_test!(dict_scenarios);
+transpile_test!(optional_scenarios_2);
 transpile_test!(downcast_else_local);
 transpile_test!(vec_contains_string_literal);
 transpile_test!(overload_trait_vs_struct_loop_var);
-transpile_test!(mut_param_if_let_field_forward);
+transpile_test!(mut_scenarios_3);
 transpile_test!(range_bound_through_lock);
 transpile_test!(task_timeout);
 transpile_test!(select);
@@ -531,9 +530,8 @@ transpile_test!(qualifiers_actor);
 // builtin fallback -- see tests/cases/actor_guard_camel_case_method.br's own
 // doc comment and try_emit_mutex_method/try_emit_rwlock_method's fix.
 transpile_test!(actor_guard_camel_case_method);
-transpile_test!(qualified_ctor_positional_args);
+transpile_test!(qualified_scenarios);
 transpile_test!(assert_eq_call_field_length);
-transpile_test!(qualified_struct_literal_positional_args);
 transpile_test!(pipe);
 transpile_test!(inline_match);
 transpile_test!(supertraits);
@@ -551,7 +549,6 @@ transpile_test!(typed_catch_match_error);
 // impls) the same way a regular throwing function's typed throws_ty already is.
 transpile_test!(type_def_typed_throws);
 transpile_test!(type_method_throws_untyped);
-transpile_test!(system_time);
 // An untyped `let x = "literal"` local (no `let string x = ...` annotation) was left as
 // a raw `&'static str` instead of Boring's normal `Arc<str>`/`Rc<str>` `string`
 // representation -- fine at the `let` site itself (a literal has `'static` lifetime),
@@ -570,7 +567,6 @@ transpile_test!(misc_scenarios_5);
 transpile_test!(enum_type_def);
 transpile_test!(enum_type_def_throws);
 transpile_test!(ref_identity);
-transpile_test!(mut_scalar);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);
 transpile_test!(pow_method_float_width);
@@ -649,7 +645,6 @@ transpile_test!(const_promotion_known_fn);
 // no `.len()` method at all, so this used to fail to compile outright; this
 // case's real value is exactly that real `cargo run` compile, same rationale
 // as `top_level_const` above.
-transpile_test!(struct_count_field);
 transpile_test!(field_scenarios);
 // String-interpolating a struct field whose type is an array (`[int]`,
 // `[string]`, and one level of field chaining) emitted a bare
@@ -726,7 +721,6 @@ transpile_test!(dict_index_nil_context);
 // the way the read path already did) -- neither compiles as real Rust, which
 // only `cargo run` (this test), not `boring run`, catches. See tests/cases/
 // dict_string_key_index.br's own doc comment.
-transpile_test!(dict_string_key_index);
 // `local_var.dict_field[key]` read through a struct-typed local OTHER than
 // `self` -- a `for`-loop-bound value here, the shape that actually surfaced
 // this downstream (scratch-boring's `check_touching_object_hats`). The
@@ -775,7 +769,7 @@ transpile_test!(narrowing_cast_if_let);
 // `TryFrom<Arc<str>>`/`Rc<str>` isn't implemented for `isize`) instead of the correct
 // string-parse codegen. See the file's own doc comment for the full writeup.
 transpile_test!(guard_let_cast_struct_field);
-transpile_test!(try_else_nil_if_let);
+transpile_test!(misc_scenarios_11);
 // `try`/`try?` used to only be recognized as a prefix inside `parse_else_expr`,
 // one precedence level above where `guard let x = EXPR`/`if let x = EXPR`
 // clauses parse their RHS (`parse_or`) -- so a bare (unparenthesized)
@@ -908,7 +902,7 @@ transpile_project_test!(clear_color_construct);
 // mem_borrow_builtins.br's own doc comment. Zero external Cargo dependency (std::mem
 // only), so single-file mode is enough -- no boring.toml/[external_fns] needed here,
 // since this exercises the compiler's *built-in* table, not a project-declared one.
-transpile_test!(mem_borrow_builtins);
+transpile_test!(misc_scenarios_10);
 
 // A mutable array binding passed to a `std::io::Read`-family method (`sock.read(buf)`) is
 // lent as `&mut` instead of moved, and a non-`Clone` std type (`TcpStream`) passed by value
@@ -940,7 +934,6 @@ transpile_test!(mut_scenarios);
 // `'actor`/`'shared` receivers -- was a by-value argument against the `&mut T` signature (E0308). See
 // tests/cases/mut_param_unresolved_receiver.br's own doc comment; the interpreter side is the same case
 // in tests/run.rs.
-transpile_test!(mut_param_unresolved_receiver);
 
 // A `mut` parameter of an associated function (`type def`/`type req`) is lent as `&mut` too:
 // the signature is `&mut T`, the `Type.f(x)` call site lends `&mut place`. Interpreter side:
@@ -967,7 +960,7 @@ transpile_test!(mut_scenarios_2);
 // last use is a Rust move, every other read (loop body, other branch, later closure/defer, same
 // statement as a borrow, ...) must still clone -- compile+run in all four configs.
 transpile_test!(last_use_move);
-transpile_test!(field_by_value_reuse);
+transpile_test!(misc_scenarios_8);
 transpile_test!(misc_scenarios);
 transpile_test!(destructured_slice_by_value_reuse);
 transpile_test!(lend_and_read_same_local);
@@ -1111,7 +1104,6 @@ transpile_test!(enum_variant_shadow);
 transpile_test!(monomorphize_struct);
 // `monomorphize_fn`: a free generic function called via turbofish at two
 // different concrete instantiations (int, string) in the same file.
-transpile_test!(monomorphize_fn);
 // `monomorphize_mut_arg`: a generic struct instantiated with a `mut`-qualified
 // concrete type argument (`Container<mut Point>(...)`) -- the docs/book.md
 // "Generic structs" known gap (propagating `mut` through generic
@@ -1175,7 +1167,6 @@ transpile_test!(monomorphize_enum_method);
 // with no check of the callee's actual return type, generating
 // `let x: Option<isize> = compute()?;` (E0308: expected `Option<isize>`,
 // found `isize`) instead of wrapping in `Some(...)` (audit finding #6).
-transpile_test!(optional_let_throws_non_optional_return);
 // `guard_let_else_panic_throws`: `guard let ... else: panic(...)` (both the
 // multi-line `else:` block form and the single-line `else panic(...)` form)
 // inside a `throws`-declared function used to fail real `cargo build` with
@@ -1194,7 +1185,6 @@ transpile_test!(guard_let_else_panic_throws);
 // `Default`. See `emit_init` in `src/transpiler/emit_struct.rs`.
 // `init_bare_field_assign_qualified`: same bug as `init_bare_field_assign`,
 // for 'shared/'actor/'guard-qualified fields assigned via bare names.
-transpile_test!(init_bare_field_assign_qualified);
 // `labeled_ctor_init_call`: a labeled-argument constructor call
 // (`Name(label = value, ...)`) on a struct whose init() has a body used to
 // always build a struct literal keyed by the *label*, ignoring
@@ -1466,13 +1456,11 @@ transpile_test!(var_mut_collection_ok);
 // not derive Debug/Clone/PartialEq (E0277/E0369 before `type_holds_dyn` saw through `TypeParam`).
 
 transpile_test!(parse_scenarios);
-transpile_test!(trait_method_casing_unknown_receiver);
-transpile_test!(stored_closure_captures_self_and_loop_item);
+transpile_test!(misc_scenarios_9);
 transpile_test!(view_callbacks_capture_state_handles);
 transpile_test!(trait_object_no_rebox);
 transpile_test!(trait_object_fallback_optional);
 transpile_test!(misc_scenarios_3);
-transpile_test!(fn_field_handle_call);
 transpile_test!(fn_field_optional_call);
 transpile_test!(fn_handle_pass_and_str_arg);
 transpile_test!(fn_scenarios);

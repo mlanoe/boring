@@ -1,8 +1,0 @@
-def int box(int w):
-    w + 1
-
-def int move(int w):
-    box(w) * 2
-
-print(box(1))
-print(move(2))

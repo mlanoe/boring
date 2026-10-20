@@ -1,0 +1,78 @@
+# ---- trait_downcast_shared_actor_state ----
+# Typed view state behind a `'shared` trait object: a struct holding an `'actor` handle is
+# recovered with `as ... else (default)`, and the `'actor` field is lent to a `mut ...'actor`
+# parameter. The downcast clones the struct, but the clone's `'actor` field is an `Arc`/`Rc`
+# clone, so mutations through the clone are visible through the original.
+
+trait TraitDowncastSharedActorStateStateBox:
+    pass
+
+struct TraitDowncastSharedActorStateNoState as TraitDowncastSharedActorStateStateBox:
+    pass
+
+struct TraitDowncastSharedActorStateCell as TraitDowncastSharedActorStateStateBox:
+    var mut TraitDowncastSharedActorStateCounter'actor st = TraitDowncastSharedActorStateCounter()
+
+struct TraitDowncastSharedActorStateCounter:
+    var int n = 0
+
+struct TraitDowncastSharedActorStateOwner:
+    req int bump(TraitDowncastSharedActorStateStateBox'shared box):
+        let cell = box as TraitDowncastSharedActorStateCell else (TraitDowncastSharedActorStateCell())
+        self.add(cell.st)
+        self.add(cell.st)
+        cell.st.n
+    req void add(mut TraitDowncastSharedActorStateCounter'actor c):
+        c.n += 1
+
+def run_trait_downcast_shared_actor_state():
+    let TraitDowncastSharedActorStateStateBox'shared b = TraitDowncastSharedActorStateCell()
+    let owner = TraitDowncastSharedActorStateOwner()
+    print owner.bump(b)
+    print owner.bump(b)
+    # a different implementor takes the `else` default: a fresh Cell, not shared with `b`
+    let TraitDowncastSharedActorStateStateBox'shared other = TraitDowncastSharedActorStateNoState()
+    print owner.bump(other)
+    print owner.bump(other)
+
+# ---- trait_method_casing_unknown_receiver ----
+# A camelCase trait method called through a local whose type is only reachable via
+# `opt else (...)` + `if let` keeps its casing (no snake_case rewrite).
+trait TraitMethodCasingUnknownReceiverControl:
+    req string viewAct(string action)
+
+struct TraitMethodCasingUnknownReceiverButton as TraitMethodCasingUnknownReceiverControl:
+    req string viewAct(string action):
+        "button:{action}"
+
+struct TraitMethodCasingUnknownReceiverMounted:
+    int id
+    TraitMethodCasingUnknownReceiverControl'shared? control
+
+[TraitMethodCasingUnknownReceiverMounted] trait_method_casing_unknown_receiver_mountedList():
+    [TraitMethodCasingUnknownReceiverMounted(id = 1, control = TraitMethodCasingUnknownReceiverButton())]
+
+TraitMethodCasingUnknownReceiverMounted? trait_method_casing_unknown_receiver_find(int id):
+    for m in trait_method_casing_unknown_receiver_mountedList():
+        if m.id == id:
+            return m
+    nil
+
+string trait_method_casing_unknown_receiver_act(int id, string action):
+    let found = trait_method_casing_unknown_receiver_find(id)
+    if found == nil:
+        return "stale"
+    let node = found else (TraitMethodCasingUnknownReceiverMounted(id = -1, control = nil))
+    if let control = node.control:
+        return control.viewAct(action)
+    "none"
+
+def run_trait_method_casing_unknown_receiver() throws:
+    print trait_method_casing_unknown_receiver_act(1, "go")
+    print trait_method_casing_unknown_receiver_act(2, "go")
+
+def main() throws:
+    print "== trait_downcast_shared_actor_state =="
+    run_trait_downcast_shared_actor_state()
+    print "== trait_method_casing_unknown_receiver =="
+    run_trait_method_casing_unknown_receiver()

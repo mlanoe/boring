@@ -1,0 +1,107 @@
+# ---- field_by_value_reuse ----
+struct FieldByValueReuseHolder:
+    pub var [int] xs
+
+struct FieldByValueReuseInner:
+    pub var int n
+
+struct FieldByValueReuseOuter:
+    pub var string name
+    pub var FieldByValueReuseInner inner
+    pub var {string=int} table
+    pub var int count
+
+enum FieldByValueReuseWrapper:
+    List([int] items)
+    Named(string name)
+    Boxed(FieldByValueReuseInner inner)
+    Table({string=int} t)
+
+def int field_by_value_reuse_len_of(FieldByValueReuseHolder h):
+    h.xs.length
+
+def int field_by_value_reuse_total(FieldByValueReuseWrapper w):
+    match w:
+        List(items): items.length
+        Named(name): name.length
+        Boxed(inner): inner.n
+        Table(t): t.length
+
+def int field_by_value_reuse_f():
+    let h = FieldByValueReuseHolder([4, 5, 6])
+    let w = FieldByValueReuseWrapper.List(h.xs)
+    match w:
+        List(items): items.length + field_by_value_reuse_len_of(h)
+        _: 0
+
+def int field_by_value_reuse_g():
+    let o = FieldByValueReuseOuter("abc", FieldByValueReuseInner(7), {"a" = 1, "b" = 2}, 3)
+    let a = FieldByValueReuseWrapper.Named(o.name)
+    let b = FieldByValueReuseWrapper.Boxed(o.inner)
+    let c = FieldByValueReuseWrapper.Table(o.table)
+    field_by_value_reuse_total(a) + field_by_value_reuse_total(b) + field_by_value_reuse_total(c) + o.name.length + o.inner.n + o.table.length + o.count
+
+def run_field_by_value_reuse() throws:
+    print field_by_value_reuse_f()
+    print field_by_value_reuse_g()
+
+# ---- init_bare_field_assign_qualified ----
+# Same "general case" zero-prefill bug as init_bare_field_assign.br, but for
+# 'shared/'actor/'guard-qualified struct fields assigned via bare (non-`self.`)
+# names in init() — a variant of qualified_ctor_positional_args.br with
+# `self.field = ...` replaced by bare `field = ...`. Before the fix, this fell
+# into the same buggy general case and failed to compile: `Rc<Counter>`/
+# `Arc<Mutex<Counter>>`/`Arc<RwLock<Store>>` only implement `Default` when
+# their inner type does, and neither `Counter` nor `Store` does.
+
+struct InitBareFieldAssignQualifiedCounter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct InitBareFieldAssignQualifiedStore:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+struct InitBareFieldAssignQualifiedHolder:
+    let InitBareFieldAssignQualifiedCounter'shared shared_c
+    let InitBareFieldAssignQualifiedCounter'actor actor_c
+    let InitBareFieldAssignQualifiedStore'guard guard_s
+
+    init(InitBareFieldAssignQualifiedCounter'shared s, InitBareFieldAssignQualifiedCounter'actor a, InitBareFieldAssignQualifiedStore'guard g):
+        shared_c = s
+        actor_c = a
+        guard_s = g
+
+def run_init_bare_field_assign_qualified() throws:
+    let InitBareFieldAssignQualifiedCounter'shared sc = InitBareFieldAssignQualifiedCounter()
+    mut InitBareFieldAssignQualifiedCounter'actor ac = InitBareFieldAssignQualifiedCounter()
+    mut InitBareFieldAssignQualifiedStore'guard gs = InitBareFieldAssignQualifiedStore()
+
+    ac.inc()
+    gs.write(1)
+
+    let h = InitBareFieldAssignQualifiedHolder(sc, ac, gs)
+
+    # sc/ac/gs must all still be usable here — the constructor call must have cloned
+    # (bumped the refcount), not moved them out.
+    ac.inc()
+    let cur = gs.read()
+    gs.write(cur + 1)
+    print ac.get()
+    print gs.read()
+
+def main() throws:
+    print "== field_by_value_reuse =="
+    run_field_by_value_reuse()
+    print "== init_bare_field_assign_qualified =="
+    run_init_bare_field_assign_qualified()

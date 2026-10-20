@@ -1,0 +1,108 @@
+# ---- qualified_ctor_positional_args ----
+# Constructor-argument codegen for 'shared/'actor/'guard-qualified struct fields, on a
+# struct with a custom init() body, called with positional args (see book.md's implicit-
+# alias guarantee: "both bindings stay valid. No .clone() needed."). The source variable
+# passed into the constructor must remain usable afterward — the transpiler must emit
+# Arc::clone/Rc::clone at the call site, not a bare move.
+
+struct QualifiedCtorPositionalArgsCounter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct QualifiedCtorPositionalArgsStore:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+struct QualifiedCtorPositionalArgsHolder:
+    let QualifiedCtorPositionalArgsCounter'shared shared_c
+    let QualifiedCtorPositionalArgsCounter'actor actor_c
+    let QualifiedCtorPositionalArgsStore'guard guard_s
+
+    init(QualifiedCtorPositionalArgsCounter'shared s, QualifiedCtorPositionalArgsCounter'actor a, QualifiedCtorPositionalArgsStore'guard g):
+        self.shared_c = s
+        self.actor_c = a
+        self.guard_s = g
+
+def run_qualified_ctor_positional_args() throws:
+    let QualifiedCtorPositionalArgsCounter'shared sc = QualifiedCtorPositionalArgsCounter()
+    mut QualifiedCtorPositionalArgsCounter'actor ac = QualifiedCtorPositionalArgsCounter()
+    mut QualifiedCtorPositionalArgsStore'guard gs = QualifiedCtorPositionalArgsStore()
+
+    ac.inc()
+    gs.write(1)
+
+    let h = QualifiedCtorPositionalArgsHolder(sc, ac, gs)
+
+    # sc/ac/gs must all still be usable here — the constructor call must have cloned
+    # (bumped the refcount), not moved them out.
+    ac.inc()
+    let cur = gs.read()
+    gs.write(cur + 1)
+    print ac.get()
+    print gs.read()
+
+# ---- qualified_struct_literal_positional_args ----
+# Same underlying bug as `qualified_ctor_positional_args`, but for the OTHER positional-
+# args code path: a struct with NO custom init() body, so the transpiler emits a plain
+# struct literal (`Name { field: value, ... }`) instead of routing through `::new(args)`.
+# 'shared/'actor/'guard-qualified fields must still get an owned Arc::clone/Rc::clone at
+# each field position, not a bare borrow (`&x`) -- the field's declared type is an owned
+# `Arc<Mutex<T>>`/`Arc<RwLock<T>>`, not a reference. The source variable passed in must
+# also remain usable afterward (the implicit-alias guarantee from book.md).
+
+struct QualifiedStructLiteralPositionalArgsCounter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct QualifiedStructLiteralPositionalArgsStore:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+struct QualifiedStructLiteralPositionalArgsHolder:
+    let QualifiedStructLiteralPositionalArgsCounter'shared shared_c
+    let QualifiedStructLiteralPositionalArgsCounter'actor actor_c
+    let QualifiedStructLiteralPositionalArgsStore'guard guard_s
+
+def run_qualified_struct_literal_positional_args() throws:
+    let QualifiedStructLiteralPositionalArgsCounter'shared sc = QualifiedStructLiteralPositionalArgsCounter()
+    mut QualifiedStructLiteralPositionalArgsCounter'actor ac = QualifiedStructLiteralPositionalArgsCounter()
+    mut QualifiedStructLiteralPositionalArgsStore'guard gs = QualifiedStructLiteralPositionalArgsStore()
+
+    ac.inc()
+    gs.write(1)
+
+    let h = QualifiedStructLiteralPositionalArgsHolder(sc, ac, gs)
+
+    # sc/ac/gs must all still be usable here -- the struct literal must have cloned
+    # (bumped the refcount), not moved them out.
+    ac.inc()
+    let cur = gs.read()
+    gs.write(cur + 1)
+    print ac.get()
+    print gs.read()
+
+def main() throws:
+    print "== qualified_ctor_positional_args =="
+    run_qualified_ctor_positional_args()
+    print "== qualified_struct_literal_positional_args =="
+    run_qualified_struct_literal_positional_args()

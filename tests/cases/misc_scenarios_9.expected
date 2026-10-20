@@ -1,0 +1,12 @@
+== stored_closure_captures_self_and_loop_item ==
+2
+tap:11:a:seed
+tap:12:b:seed
+== struct_count_field ==
+42
+42
+7
+100
+9
+== system_time ==
+system time: ok

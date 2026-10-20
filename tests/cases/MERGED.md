@@ -37,3 +37,13 @@ with its top-level items prefixed by that name, and prints a `== name ==` header
 | view_scenarios_2 | view_field_struct_no_partial_eq, view_act_str_args_trait_obj, view_let_bound_callbacks, view_state_owner_report_build, view_trailing_block_multiline_callback |
 | misc_scenarios_6 | closure_string_literal_result, external_read_buffer |
 | misc_scenarios_7 | method_name_collides_builtin, optional_dyn_field_struct_literal_clone, split_call_arg_then_split, throws_method_name_collision, unwrap_or_struct_local_by_value |
+| dict_scenarios | dict_index_else_on_call_result, dict_string_key_index |
+| fn_scenarios_3 | fn_named_rust_keyword, fn_field_handle_call |
+| mut_scenarios_3 | mut_param_if_let_field_forward, mut_scalar, mut_param_unresolved_receiver |
+| optional_scenarios_2 | optional_field_else_keeps_field, optional_let_throws_non_optional_return |
+| trait_scenarios_4 | trait_downcast_shared_actor_state, trait_method_casing_unknown_receiver |
+| misc_scenarios_8 | field_by_value_reuse, init_bare_field_assign_qualified |
+| misc_scenarios_9 | stored_closure_captures_self_and_loop_item, struct_count_field, system_time |
+| qualified_scenarios | qualified_ctor_positional_args, qualified_struct_literal_positional_args |
+| misc_scenarios_10 | mem_borrow_builtins, monomorphize_fn |
+| misc_scenarios_11 | try_else_nil_if_let, uint_int_cross_eq |

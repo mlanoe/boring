@@ -1,0 +1,106 @@
+use Notify as def void(string)
+use std.time.SystemTime
+use std.time.UNIX_EPOCH
+
+# ---- stored_closure_captures_self_and_loop_item ----
+struct StoredClosureCapturesSelfAndLoopItemTodo:
+    int id
+    string title
+
+struct StoredClosureCapturesSelfAndLoopItemRow:
+    StoredClosureCapturesSelfAndLoopItemTodo item
+    int prefix
+    Notify onTap
+
+struct StoredClosureCapturesSelfAndLoopItemBoard:
+    int base = 10
+    StoredClosureCapturesSelfAndLoopItemTodo seed = StoredClosureCapturesSelfAndLoopItemTodo(id = 0, title = "seed")
+
+    req [StoredClosureCapturesSelfAndLoopItemRow] rows([StoredClosureCapturesSelfAndLoopItemTodo] items):
+        mut out = []
+        for item in items:
+            out.push(StoredClosureCapturesSelfAndLoopItemRow(item = item, prefix = item.id, onTap = (what):
+                print "{what}:{base + item.id}:{item.title}:{seed.title}"))
+        out
+
+def run_stored_closure_captures_self_and_loop_item():
+    let board = StoredClosureCapturesSelfAndLoopItemBoard()
+    let rows = board.rows([StoredClosureCapturesSelfAndLoopItemTodo(id = 1, title = "a"), StoredClosureCapturesSelfAndLoopItemTodo(id = 2, title = "b")])
+    print rows.length
+    for r in rows:
+        r.onTap("tap")
+
+# ---- struct_count_field ----
+# Regression test: a struct field literally named `count` was hijacked by the
+# `.length`/`.count` builtin-collection shortcut (`map_field`, "count" -> "len()
+# as isize") in the transpiler's field-access emitter, `emit_expr_field`.
+#
+# The guard meant to stop this (`is_user_field` in emit_expr.rs) only resolved
+# the receiver's struct type for the literal `self` receiver -- any OTHER
+# variable (a function parameter, or a plain local `let`/`var`) fell straight
+# through to `map_field`, so `t.count` on a `Thing` with a real `count` field
+# emitted `t.len() as isize` -- which doesn't even compile (`Thing` has no
+# `.len()`), or silently reads the wrong value if it coincidentally does.
+#
+# Covers every receiver shape `emit_expr_field` distinguishes: a function
+# parameter, a plain local binding, and (for confirmation it kept working)
+# `self` inside a method.
+
+struct StructCountFieldThing:
+    pub int count
+    pub int score
+
+struct StructCountFieldHolder:
+    var StructCountFieldThing item
+
+    req show_self_count():
+        # `self.count` -- the receiver shape that already worked before this
+        # fix; kept here so a future regression on this path shows up too.
+        print "{self.item.count}"
+
+# Bare (non-interpolated) field read, returned as a function's tail
+# expression -- a function parameter receiver.
+int struct_count_field_get_count(StructCountFieldThing t):
+    t.count
+
+# Field read inside string interpolation -- same parameter receiver, the
+# other expression context from the original bug report.
+def struct_count_field_show_count(StructCountFieldThing t):
+    print "{t.count}"
+
+# A field with a different name must be unaffected either way (control case).
+def struct_count_field_show_score(StructCountFieldThing t):
+    print "{t.score}"
+
+def struct_count_field_run():
+    let t = StructCountFieldThing(count = 42, score = 7)
+    print "{struct_count_field_get_count(t)}"
+    struct_count_field_show_count(t)
+    struct_count_field_show_score(t)
+
+    # Plain local binding (not a parameter, not `self`).
+    let local_thing = StructCountFieldThing(count = 100, score = 1)
+    print "{local_thing.count}"
+
+    let h = StructCountFieldHolder(item = StructCountFieldThing(count = 9, score = 0))
+    h.show_self_count()
+
+def run_struct_count_field() throws:
+    struct_count_field_run()
+
+# ---- system_time ----
+def uint64 system_time_unixTimestamp() throws:
+    SystemTime.now().durationSince(UNIX_EPOCH).asSecs()
+
+def run_system_time() throws:
+    let timestamp = system_time_unixTimestamp()
+    assert timestamp > 1700000000
+    print "system time: ok"
+
+def main() throws:
+    print "== stored_closure_captures_self_and_loop_item =="
+    run_stored_closure_captures_self_and_loop_item()
+    print "== struct_count_field =="
+    run_struct_count_field()
+    print "== system_time =="
+    run_system_time()
