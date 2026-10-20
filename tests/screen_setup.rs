@@ -64,7 +64,7 @@ kernel Fill:
         if col < w and row < h:
             pixels[row * w + col] = colors[0] + uint(total)
 
-var mut k = Fill(seeds, width, height, total(base))
+var mut k = Fill(seeds, 4, 2, total(base))
 kernel:
     loop:
         let n = limit()
@@ -141,5 +141,41 @@ fn cuda_and_rocm_screen_programs_keep_module_level_constants() {
         assert!(rs.contains("pub const SCALE: f64 = 2.0;"), "[{target}] {rs}");
         assert!(rs.contains("pub const LIMIT: isize = 3;"), "[{target}] {rs}");
         assert!(rs.contains("fn limit()"), "[{target}] {rs}");
+        assert!(!rs.contains("let LIMIT"), "[{target}] a local would shadow the const as a pattern:\n{rs}");
+        screen_setup_text_checks(target, &rs);
+    }
+}
+
+/// What every non-wgpu Screen host must also get right: constructor arguments evaluated and passed
+/// to `new`, `init` parameters read as parameters (an `init(.., int width)` next to `let width = 8`
+/// must not read the constant), top-level `let`s and loop locals/calls emitted.
+fn screen_setup_text_checks(target: &str, rs: &str) {
+    assert!(rs.contains("let seeds = palette(total(&(base)));"), "[{target}] {rs}");
+    assert!(rs.contains("Fill::new("), "[{target}] {rs}");
+    assert!(rs.contains(", 4, 2, total(&(base)))"), "[{target}] constructor arguments:\n{rs}");
+    assert!(rs.contains("let w: isize = width;"), "[{target}] init param shadowed by a top-level const:\n{rs}");
+    assert!(rs.contains("let h: isize = height;"), "[{target}] {rs}");
+    assert!(rs.contains("let n = limit();"), "[{target}] {rs}");
+    assert!(rs.contains("let fr = makeFrame(n);"), "[{target}] {rs}");
+    assert!(rs.contains("total(&(fr))"), "[{target}] {rs}");
+}
+
+#[test]
+fn metal_screen_program_keeps_module_level_constants() {
+    let (project, rs) = build("metal");
+    assert!(rs.contains("pub const LIMIT: isize = 3;"), "{rs}");
+    assert!(!rs.contains("let LIMIT"), "{rs}");
+    screen_setup_text_checks("metal", &rs);
+    if cfg!(target_os = "macos") {
+        let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_setup_metal_target");
+        let out = Command::new("cargo")
+            .args(["check", "--quiet", "--manifest-path"])
+            .arg(project.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(shared)
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
     }
 }

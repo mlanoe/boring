@@ -1575,7 +1575,7 @@ impl HostEmitter {
                             if self.screen_var.is_some() && self.var_kernel_type.contains_key(s.name.as_str()) {
                                 self.line(&format!("{} {}{} = Some({});", binding, s.name, ty_ann, rhs));
                             } else {
-                                self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
+                                if !(is_scalar && crate::transpiler::helpers::is_scalar_let_value(val, None) && s.name == s.name.to_uppercase()) { self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs)); }
                             }
                         }
                     }
@@ -1677,7 +1677,17 @@ impl HostEmitter {
         self.line("}");
     }
 
+    /// An `init` parameter shadows a same-named top-level scalar (`init(..., int width)` next to
+    /// `let width = 8`): the constructor must read its argument, not the inlined constant.
     fn emit_kernel_new(&mut self, name: &str, fields: &[KernelFieldDecl], init: &InitDecl) {
+        let shadowed: Vec<(String, String)> = init.params.iter()
+            .filter_map(|p| self.top_level_scalars.remove(&p.name).map(|v| (p.name.clone(), v)))
+            .collect();
+        self.emit_kernel_new_inner(name, fields, init);
+        self.top_level_scalars.extend(shadowed);
+    }
+
+    fn emit_kernel_new_inner(&mut self, name: &str, fields: &[KernelFieldDecl], init: &InitDecl) {
         let buffer_flags = self.kernel_ctor_buffer_flags(name).unwrap_or_default();
         let params: Vec<String> = init.params.iter().enumerate().map(|(i, p)| {
             // A buffer-passthrough param (see `kernel_ctor_buffer_flags`) takes
