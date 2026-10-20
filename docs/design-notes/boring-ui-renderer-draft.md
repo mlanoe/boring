@@ -35,6 +35,13 @@ Rationale, in short:
 
 ## Status (2026-10-20)
 
+- **Step 2 done (without atomics)**: `raster_tile.br` bins inside the dispatch: a workgroup per 16 x 16 tile compacts the
+  commands touching it in rounds of 256 with a workgroup-memory scan (paint order preserved by construction), then
+  draws only those. Bit-identical to the per-pixel kernel (checked up to 1920 x 1080 on real Metal). Measured on a
+  UI-like scene at 1280 x 720 / 1925 commands: CPU reference 26 ms, per-pixel kernel 222 ms, tiled kernel 13 ms (wgpu);
+  see `boring-ui/README.md` for the table. Atomics were not needed: the scan keeps order, which atomic appends
+  would not. `simd` emulates workgroups on CPU threads and stays far slower than the CPU reference.
+
 - **Step 0 done**: `boring-ui/render/src/raster.br` (+ `raster_font.br`) draws `FillRect`, `StrokeRect`, `DrawShadow`,
   `DrawText` (5x7 fixture font), `PushClip`/`PopClip`, `PushOpacity`/`PopOpacity`. `DrawImage` and `MarkedText` are
   not drawn yet. The colour pipeline is still sRGB-encoded source-over; only `blend` changes when it is decided.
