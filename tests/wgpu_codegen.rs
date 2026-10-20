@@ -1069,7 +1069,7 @@ fn test_screen_program_gpu_adapters_global_now_populated() {
     // narrow, hardcoded shape-matchers, confirmed against a real generated project --
     // that gap is now closed (see `check_screen_program_shape`'s and
     // `emit_render_stmt`'s error fallbacks below, and
-    // `wgpu_screen_unsupported_top_level_statement_is_rejected_not_dropped` /
+    // `wgpu_screen_top_level_statement_runs_in_setup` /
     // `wgpu_screen_unsupported_render_loop_statement_is_rejected_not_dropped`) --
     // this test only verifies the adapters global itself is populated and available.
     let src = r#"
@@ -2500,7 +2500,7 @@ kernel:
 }
 
 #[test]
-fn wgpu_screen_unsupported_top_level_statement_is_rejected_not_dropped() {
+fn wgpu_screen_top_level_statement_runs_in_setup() {
     // Before this fix, a bare top-level statement in a `Screen` program (here: a
     // `print` call) was silently dropped from the generated Rust -- the general
     // pass skips every top-level `Stmt`/non-static `Let` for a `Screen` program
@@ -2535,15 +2535,15 @@ kernel:
         if screen.key("\x1B"):
             break
 "#;
-    let stderr = run_wgpu_expect_failure("screen_unsupported_top_level_print", src);
-    assert!(
-        stderr.contains("wgpu target") && stderr.contains("top-level statement"),
-        "expected a clear diagnostic naming the unsupported top-level statement, got:\n{stderr}"
-    );
+    // Top-level statements of a Screen program are ordinary code of `__boring_screen_setup`.
+    let (_wgsl, rs) = wgpu_codegen("screen_top_level_print", src);
+    let setup = &rs[rs.find("fn __boring_screen_setup").expect("setup fn")..];
+    assert!(setup.contains("this line has nowhere to go on the wgpu Screen backend"), "print dropped:\n{rs}");
+    assert!(rs.contains("__boring_screen_setup()"), "setup not called:\n{rs}");
 }
 
 #[test]
-fn wgpu_screen_unsupported_top_level_let_is_rejected_not_dropped() {
+fn wgpu_screen_top_level_let_runs_in_setup() {
     // Same gap, `Let` side: a top-level `let` whose initializer isn't a
     // `Screen(...)`/kernel-constructor call or a scalar literal (here, real GPU
     // introspection: `let g = Device(index = 0)`) used to vanish from the generated Rust
@@ -2575,11 +2575,10 @@ kernel:
         if screen.key("\x1B"):
             break
 "#;
-    let stderr = run_wgpu_expect_failure("screen_unsupported_top_level_gpu_let", src);
-    assert!(
-        stderr.contains("wgpu target") && stderr.contains("let g"),
-        "expected a clear diagnostic naming the unsupported `let g`, got:\n{stderr}"
-    );
+    // An ordinary top-level `let` is a statement of `__boring_screen_setup` (never dropped).
+    let (_wgsl, rs) = wgpu_codegen("screen_top_level_gpu_let", src);
+    let setup = &rs[rs.find("fn __boring_screen_setup").expect("setup fn")..];
+    assert!(setup.contains("let g = "), "`let g` dropped:\n{rs}");
 }
 
 #[test]
