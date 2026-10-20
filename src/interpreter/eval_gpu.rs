@@ -709,6 +709,7 @@ fn run_kernel_parallel(
             gpu_profile.clone(),
         );
         ti.current_kernel_fields = decl_fields.to_vec();
+        ti.kernel_thread = true;
         if let Some((sync_fields, barrier)) = sync_ctx {
             ti.sync_fields = sync_fields.clone();
             ti.kernel_barrier = Some(Arc::clone(barrier));

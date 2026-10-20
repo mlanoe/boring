@@ -42,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 /// Returns `program` with device-side structs scalar-replaced.
 pub fn desugar(program: &Program) -> Program {
     let mut program = program.clone();
+    qualify_kernel_helper_calls(&mut program.items);
     let structs = eligible_structs(&program);
     if structs.is_empty() {
         return program;
@@ -1056,4 +1057,39 @@ fn rewrite_exprs(body: &mut [Stmt], cx: &Cx) {
         stmt: &mut |_| {},
     }
     .stmts(body);
+}
+
+/// A device helper declared inside a `kernel` struct (`def float32 twice(float32 x)`) may be
+/// called bare (`twice(x)`) from the kernel's `def ()` or from another helper, as the
+/// interpreter allows. Every GPU backend only resolves helpers through `self.twice(x)`, so
+/// rewrite the bare form to that one before any backend sees it.
+fn qualify_kernel_helper_calls(items: &mut [Item]) {
+    for item in items {
+        match item {
+            Item::Kernel(k) => {
+                let names: HashSet<String> = k.methods.iter().filter(|m| !m.name.is_empty()).map(|m| m.name.clone()).collect();
+                if names.is_empty() {
+                    continue;
+                }
+                for m in &mut k.methods {
+                    Walker {
+                        expr: &mut |e| {
+                            let ExprKind::Call(callee, args) = &e.kind else { return };
+                            let ExprKind::Var(f) = &callee.kind else { return };
+                            if !names.contains(f) {
+                                return;
+                            }
+                            let recv = var("self", callee);
+                            let call = ExprKind::MethodCall(Box::new(recv), f.clone(), args.clone());
+                            *e = mk(call, e);
+                        },
+                        stmt: &mut |_| {},
+                    }
+                    .stmts(&mut m.body);
+                }
+            }
+            Item::Mod(m) => qualify_kernel_helper_calls(&mut m.items),
+            _ => {}
+        }
+    }
 }

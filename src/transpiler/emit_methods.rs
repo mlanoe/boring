@@ -237,6 +237,12 @@ impl Transpiler {
             {
                 slot_value_type(&self.resolve_expr_type(inner)?)
             }
+            // `k.out` on a tracked kernel instance: the field's declared type (an array
+            // field reads back as a host `Vec` of that element type, see
+            // `try_emit_kernel_field_read`), so `k.out[i] as uint` is a numeric cast.
+            ExprKind::Field(inner, field) if self.kernel_field_decl(inner, field).is_some() => {
+                self.kernel_field_decl(inner, field).map(|f| f.ty.clone())
+            }
             ExprKind::Field(inner, field) => {
                 let owner = self.resolve_expr_struct_type(inner)?;
                 self.struct_fields.get(owner.as_str())?

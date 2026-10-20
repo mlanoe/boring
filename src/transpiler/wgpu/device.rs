@@ -6,7 +6,6 @@
 use crate::ast::*;
 use crate::transpiler::TranspileError;
 use crate::transpiler::helpers::{
-    collect_vars_in_stmt,
     labeled_array_at_index, labeled_array_dim_literal,
     first_loop_index,
 };
@@ -2082,17 +2081,23 @@ fn const_array_count(e: &Expr) -> Option<usize> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-/// Collect every identifier referenced anywhere in `body` (variable reads and call
-/// callees alike — `collect_vars_in_stmt` doesn't distinguish them) into `out`. Used to
-/// find which free functions a kernel's device code actually calls, so WGSL emission for
-/// merged-in host-only helpers (unreachable from any kernel) can be skipped. Harmless
-/// over-approximation: plain variable names that happen to collide with a free function's
-/// name would also be swept in, but that only makes the reachable set too large, never
-/// too small.
+/// Collect the callee name of every plain call (`name(...)`) anywhere in `body` into `out`. Used
+/// to find which free functions a kernel's device code actually calls, so WGSL emission for
+/// merged-in host-only helpers (unreachable from any kernel) can be skipped. Only call
+/// callees count, never bare variable reads: a kernel-local that merely shares a host
+/// function's name (`var [float32, 5] fade` next to a host `fade(...)`) must not drag the
+/// host function into the shader.
 fn collect_called_fn_names(body: &[Stmt], out: &mut Vec<String>) {
-    for stmt in body {
-        collect_vars_in_stmt(stmt, out);
-    }
+    let mut body = body.to_vec();
+    let mut on_expr = |e: &mut Expr| {
+        if let ExprKind::Call(callee, _) = &e.kind {
+            if let ExprKind::Var(name) = &callee.kind {
+                out.push(name.clone());
+            }
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
 }
 
 /// Returns true if the field goes into a storage buffer binding.

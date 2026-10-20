@@ -173,6 +173,16 @@ fn coerce_float_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr) -> (Val
     }
 }
 
+/// Inside a simulated kernel thread only: a `Float64` mixed with a `Float32` becomes `Float32`
+/// whatever the `Float64`'s source expression (see `Interpreter::kernel_thread`).
+fn narrow_mixed_floats(l: Value, r: Value) -> (Value, Value) {
+    match (&l, &r) {
+        (Value::Float32(_), Value::Float64(f)) => (l, Value::Float32(*f as f32)),
+        (Value::Float64(f), Value::Float32(_)) => (Value::Float32(*f as f32), r),
+        _ => (l, r),
+    }
+}
+
 /// Builds the right `Signal` for a `checked_rem` failure: division-by-zero
 /// (`is_zero`) or the one other case `checked_rem` rejects, `MIN % -1`, which
 /// mathematically equals `0` but overflows because computing it goes through
@@ -2246,6 +2256,7 @@ impl Interpreter {
         let l = self.eval_expr(lhs, Rc::clone(&env))?;
         let r = self.eval_expr(rhs, env)?;
         let (l, r) = coerce_float_literal_pair(l, r, lhs, rhs);
+        let (l, r) = if self.kernel_thread { narrow_mixed_floats(l, r) } else { (l, r) };
 
         match op {
             // Each arithmetic/bitwise op is dispatched to its own method rather than inlined
@@ -2942,6 +2953,11 @@ impl Interpreter {
     pub(crate) fn call_value(&mut self, callee: Value, args: Vec<Value>, line: usize, in_throws_context: bool) -> Eval {
         match callee {
             Value::NativeFn { func, .. } => {
+                if self.kernel_thread && args.len() == 2 {
+                    let mut it = args.into_iter();
+                    let (a, b) = narrow_mixed_floats(it.next().unwrap(), it.next().unwrap());
+                    return func(&[a, b], line);
+                }
                 func(&args, line)
             }
             Value::Fn { decl, captured } => {

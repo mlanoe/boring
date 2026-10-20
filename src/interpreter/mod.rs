@@ -2328,6 +2328,10 @@ pub struct Interpreter {
     /// True while inside a `kernel:` execution block.
     /// Enables implicit `.wait()` on KernelHandle bare expressions.
     pub(crate) kernel_context: bool,
+    /// True inside a simulated kernel thread (`run_one_kernel_thread`): a resolved `float`
+    /// (Float64, e.g. from `var sum = 0.0` or a literal argument) mixed with a `float32` is
+    /// narrowed to `float32`, matching the f32 inference the compiled GPU/SIMD targets do.
+    pub(crate) kernel_thread: bool,
     /// Defer stack: one entry per active function call frame.
     /// Each entry is a list of deferred statement blocks (inner Vec = one `defer:` body).
     /// Blocks are pushed in order and executed in reverse (LIFO) on function exit.
@@ -2531,6 +2535,7 @@ impl Interpreter {
             deps: HashMap::new(),
             task_context: true,  // top-level is implicitly task context
             kernel_context: false,
+            kernel_thread: false,
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
             return_ty_stack: Vec::new(),
@@ -2580,6 +2585,7 @@ impl Interpreter {
             deps: HashMap::new(),
             task_context: false,
             kernel_context: false,
+            kernel_thread: false,
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
             return_ty_stack: Vec::new(),

@@ -1221,6 +1221,13 @@ impl Transpiler {
     }
 
 
+    /// The declaration of `field` on the kernel behind `obj`, when `obj` is a tracked kernel variable.
+    pub(crate) fn kernel_field_decl(&self, obj: &Expr, field: &str) -> Option<&KernelFieldDecl> {
+        let ExprKind::Var(var_name) = &obj.kind else { return None };
+        let kname = self.kernel_vars.get(var_name.as_str())?;
+        self.kernel_decls.get(kname)?.fields.iter().find(|f| f.name == field)
+    }
+
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked
     /// kernel variable, emit the GPU read-back call (converted back to the
     /// host's f64/i64 element type) instead of a plain field access.
@@ -1452,13 +1459,14 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
 }
 
 /// Host-side (non-GPU) element type a value read back from a GPU buffer
-/// should be converted to — boring `int`/`float` are `i64`/`f64` everywhere
-/// outside a kernel buffer. Explicit fixed-width types keep their own exact
+/// should be converted to — boring `int`/`uint`/`float` are `isize`/`usize`/`f64`
+/// everywhere outside a kernel buffer. Explicit fixed-width types keep their own exact
 /// width (there's no "narrow for GPU-buffer efficiency" concept once the
 /// width is already explicit).
 pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
     match ty {
-        Type::Int | Type::Uint => "i64",
+        Type::Int => "isize",
+        Type::Uint => "usize",
         Type::Uint8 => "u8",
         Type::Int8   => "i8",
         Type::Int16  => "i16",
@@ -1473,7 +1481,8 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
         Type::Float64 => "f64",
         Type::Bool => "bool",
         Type::Named(n) => match n.as_str() {
-            "int" | "uint" => "i64",
+            "int"          => "isize",
+            "uint"         => "usize",
             "uint8"        => "u8",
             "int8"         => "i8",
             "int16"        => "i16",
