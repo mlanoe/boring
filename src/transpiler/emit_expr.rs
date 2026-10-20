@@ -3539,7 +3539,9 @@ impl Transpiler {
         let target_s = if let ExprKind::Index(arr_obj, idx_expr) = &target.kind {
             let raw_idx = self.emit_expr(idx_expr);
             let idx_s = match &idx_expr.kind {
-                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) => format!("({}) as usize", raw_idx),
+                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
+                // Nested index read (`list[cursor[c]] = v`): the element is an `int` (`isize`).
+                | ExprKind::Index(..) => format!("({}) as usize", raw_idx),
                 _ => raw_idx,
             };
             match &arr_obj.kind {

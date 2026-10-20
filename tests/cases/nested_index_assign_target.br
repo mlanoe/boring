@@ -1,0 +1,14 @@
+# Regression fixture: an indexed assignment whose index is itself an indexed
+# read (`list[cursor[c]] = v`) — see tests/nested_index_assign_target.rs.
+
+def [uint] fill():
+    mut [int] cursor = [0, 2]
+    mut [uint] list = [0 as uint for ..<4]
+    for i in 0..<2:
+        list[cursor[0]] = i as uint
+        cursor[0] += 1
+    list[cursor[1]] = 7 as uint
+    list
+
+def main():
+    print "{fill()}"
