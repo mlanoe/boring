@@ -1,0 +1,30 @@
+== trait_dynamic_dispatch ==
+circle
+square
+circle
+circle
+9
+== trait_param_forwarding ==
+5
+5
+5
+== trait_param_return ==
+6
+5
+11
+9
+== trait_method_return ==
+5
+5
+11
+11
+5
+5
+== trait_borrow_param ==
+5
+6
+5
+11
+11
+12
+22

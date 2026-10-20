@@ -1,0 +1,15 @@
+== cast_lhs_of_lt ==
+false true
+194
+true
+true
+true
+true
+true
+true
+true
+true
+== cast_float_lit_to_int ==
+3
+2
+-3

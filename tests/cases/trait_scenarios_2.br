@@ -1,0 +1,146 @@
+# ---- trait_borrow_infer ----
+# Bare-trait params of free functions are inferred borrowed (`&dyn Trait`) unless the body
+# consumes them; a borrowed arg can then be reused after the call.
+trait TraitBorrowInferBuilder:
+    req int build(int x)
+
+struct TraitBorrowInferFour as TraitBorrowInferBuilder:
+    req int build(int x): x + 4
+
+struct TraitBorrowInferTwo as TraitBorrowInferBuilder:
+    req int build(int x): x + 2
+
+# receiver-only -> borrowed
+int trait_borrow_infer_leaf(TraitBorrowInferBuilder b, int n):
+    b.build(n)
+
+# forwards to a borrowed param -> borrowed (3 deep)
+int trait_borrow_infer_mid(TraitBorrowInferBuilder b):
+    trait_borrow_infer_leaf(b, 1) + trait_borrow_infer_leaf(b, 2)
+
+int trait_borrow_infer_top(TraitBorrowInferBuilder b):
+    trait_borrow_infer_mid(b) + trait_borrow_infer_mid(b)
+
+# mutual recursion with no consumer stays borrowed
+int trait_borrow_infer_ping(TraitBorrowInferBuilder b, int n):
+    if n <= 0:
+        return b.build(0)
+    trait_borrow_infer_pong(b, n - 1)
+
+int trait_borrow_infer_pong(TraitBorrowInferBuilder b, int n):
+    trait_borrow_infer_ping(b, n)
+
+# forwards to an explicit `Trait&`
+int trait_borrow_infer_viaExplicit(TraitBorrowInferBuilder& b):
+    trait_borrow_infer_leaf(b, 5)
+
+int trait_borrow_infer_fwdExplicit(TraitBorrowInferBuilder b):
+    trait_borrow_infer_viaExplicit(b)
+
+# consumed: stored in a struct field -> stays by value
+struct TraitBorrowInferHolder:
+    TraitBorrowInferBuilder b
+
+TraitBorrowInferHolder trait_borrow_infer_store(TraitBorrowInferBuilder b):
+    TraitBorrowInferHolder(b)
+
+# consumed: captured by a closure
+int trait_borrow_infer_viaClosure(TraitBorrowInferBuilder b):
+    let f = (n):
+        b.build(n)
+    f(7)
+
+# consumed: forwarded to a by-value param
+int trait_borrow_infer_viaStore(TraitBorrowInferBuilder b):
+    let h = trait_borrow_infer_store(b)
+    h.b.build(1)
+
+# arg produced by a call -> that position stays by value (call-site guard)
+TraitBorrowInferBuilder trait_borrow_infer_make():
+    TraitBorrowInferFour()
+
+int trait_borrow_infer_takesMade(TraitBorrowInferBuilder b):
+    b.build(100)
+
+def run_trait_borrow_infer():
+    let TraitBorrowInferBuilder local = TraitBorrowInferFour()
+    print trait_borrow_infer_leaf(local, 1)
+    print trait_borrow_infer_leaf(local, 2)
+    print trait_borrow_infer_leaf(TraitBorrowInferTwo(), 3)
+    print trait_borrow_infer_top(local)
+    print trait_borrow_infer_top(TraitBorrowInferTwo())
+    print trait_borrow_infer_ping(local, 3)
+    print trait_borrow_infer_fwdExplicit(local)
+    print trait_borrow_infer_fwdExplicit(TraitBorrowInferTwo())
+    let h = trait_borrow_infer_store(TraitBorrowInferTwo())
+    print h.b.build(1)
+    print trait_borrow_infer_viaClosure(TraitBorrowInferTwo())
+    print trait_borrow_infer_viaStore(TraitBorrowInferFour())
+    print trait_borrow_infer_takesMade(trait_borrow_infer_make())
+    print trait_borrow_infer_leaf(h.b, 9)
+
+# ---- trait_borrow_method_infer ----
+# Bare-trait params of struct methods are inferred borrowed (`&dyn Trait`) unless the body
+# consumes them; the caller keeps ownership, whatever the receiver (typed local, self, field,
+# untyped closure parameter).
+trait TraitBorrowMethodInferBuilder:
+    req int build(int x)
+
+struct TraitBorrowMethodInferFour as TraitBorrowMethodInferBuilder:
+    req int build(int x): x + 4
+
+struct TraitBorrowMethodInferTwo as TraitBorrowMethodInferBuilder:
+    req int build(int x): x + 2
+
+int trait_borrow_method_infer_helper(TraitBorrowMethodInferBuilder b, int n):
+    b.build(n)
+
+struct TraitBorrowMethodInferHolder:
+    TraitBorrowMethodInferBuilder b
+
+struct TraitBorrowMethodInferRunner:
+    var int n = 0
+    # receiver-only -> borrowed
+    def int flush(TraitBorrowMethodInferBuilder b):
+        n += 1
+        b.build(n)
+    # forwards to a borrowed method param -> borrowed
+    def int endEvent(TraitBorrowMethodInferBuilder b):
+        self.flush(b)
+    # forwards to a borrowed free-function param -> borrowed
+    def int viaFree(TraitBorrowMethodInferBuilder b):
+        trait_borrow_method_infer_helper(b, 10)
+    # consumed: moved into a struct -> stays by value
+    def int keep(TraitBorrowMethodInferBuilder b):
+        let h = TraitBorrowMethodInferHolder(b)
+        h.b.build(1)
+    # read-only, reached below through an untyped closure parameter
+    req int probe(TraitBorrowMethodInferBuilder b):
+        b.build(100)
+
+struct TraitBorrowMethodInferWrapper:
+    var mut TraitBorrowMethodInferRunner inner = TraitBorrowMethodInferRunner()
+    def int drive(TraitBorrowMethodInferBuilder b):
+        inner.flush(b)
+
+def run_trait_borrow_method_infer():
+    mut r = TraitBorrowMethodInferRunner()
+    let TraitBorrowMethodInferBuilder first = TraitBorrowMethodInferFour()
+    print r.endEvent(first)
+    print r.endEvent(first)
+    print r.flush(TraitBorrowMethodInferTwo())
+    print r.viaFree(first)
+    print r.keep(TraitBorrowMethodInferTwo())
+    var mut w = TraitBorrowMethodInferWrapper()
+    print w.drive(first)
+    print w.drive(first)
+    let runners = [TraitBorrowMethodInferRunner()]
+    let results = runners.map((x): x.probe(first))
+    print results[0]
+    print results[0]
+
+def main() throws:
+    print "== trait_borrow_infer =="
+    run_trait_borrow_infer()
+    print "== trait_borrow_method_infer =="
+    run_trait_borrow_method_infer()

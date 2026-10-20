@@ -1,0 +1,84 @@
+== string_temporary_method_chains ==
+outside
+42
+WHILE
+direct
+twice
+== string_len_cast_parse_field ==
+10
+1.5
+-1
+7
+2.5
+7
+6
+3
+a|b
+7,y
+a-b
+== string_methods_after_index ==
+hello
+Mixed Case
+ Lower Case 
+true
+ mixed case 
+== string_unicode_length ==
+8
+2
+8
+8
+false
+5
+1
+6
+él
+él
+…
+true
+3
+héllo…😀é
+8
+8
+8
+5
+9
+8
+3
+8
+== string_graphemes ==
+2
+1
+1
+14
+12
+16
+12
+2
+true
+h|é|l|l|o| |日|本| |😀| |🇫🇷
+él
+2
+日本 
+llo 日本 😀 🇫🇷
+hé
+[]
+4
+2
+0
+0
+3
+2
+1
+2
+16
+== string_grapheme_untyped ==
+5
+== string_grapheme_cast_var ==
+13
+5
+10
+13
+2.5
+1
+héllo 日
+7

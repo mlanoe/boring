@@ -174,7 +174,7 @@ interp_test!(channels);
 interp_test!(protocols);
 interp_test!(optionals);
 interp_test!(enums);
-interp_test!(for_loop_enum_array_camel_case_method);
+interp_test!(for_scenarios);
 interp_test!(streams);
 interp_test!(newtypes);
 interp_test!(guard);
@@ -201,22 +201,14 @@ interp_test!(trait_type_level_methods);
 // `boring run` (this interpreter path) already worked; tests/transpile.rs's
 // registration of the same case is what actually guards the bug (a real
 // `cargo build`). See tests/cases/trait_dynamic_dispatch.br's own doc comment.
-interp_test!(trait_dynamic_dispatch);
-interp_test!(trait_param_forwarding);
-interp_test!(self_lent_reborrow);
-interp_test!(trait_param_return);
-interp_test!(trait_method_return);
-interp_test!(trait_borrow_param);
-interp_test!(trait_borrow_infer);
-interp_test!(trait_borrow_method_infer);
-interp_test!(trait_borrow_contract);
+interp_test!(trait_scenarios);
+interp_test!(self_scenarios);
+interp_test!(trait_scenarios_2);
+interp_test!(trait_scenarios_3);
 interp_test!(trait_borrow_contract_impls);
-interp_test!(var_param_bare_trait_assign);
-interp_test!(var_rebind_alias_independent);
+interp_test!(var_scenarios);
 interp_test!(var_rebind_owned);
-interp_test!(struct_borrow_method_param);
-interp_test!(trait_borrow_mut);
-interp_test!(trait_borrow_method_param);
+interp_test!(struct_scenarios);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);
 interp_test!(trait_downcast_shared_actor_state);
@@ -234,7 +226,6 @@ interp_test!(modules);
 interp_test!(boring_stdlib_collections);
 interp_test!(boring_stdlib_identity);
 interp_test!(boring_stdlib_ui);
-interp_test!(struct_default_labeled);
 error_test!(boring_stdlib_identity_float_key);
 
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
@@ -346,11 +337,11 @@ interp_test!(closure_break);
 interp_test!(transpiler_coerce);
 interp_test!(pattern_some);
 interp_test!(string_len_chars);
+interp_test!(string_scenarios);
 interp_test!(mixed_modulo);
 interp_test!(range_unary);
 interp_test!(closure_colon);
 interp_test!(for_destructure);
-interp_test!(for_mut_elem_iter_mut);
 interp_test!(numeric_separators);
 interp_test!(task_timeout);
 interp_test!(try_else_block);
@@ -379,7 +370,7 @@ interp_test!(multi_variant_catch_dispatch);
 interp_test!(type_def_typed_throws);
 interp_test!(type_method_throws_untyped);
 interp_test!(system_time);
-interp_test!(untyped_string_lit_local_to_type_method);
+interp_test!(misc_scenarios_5);
 interp_test!(ref_identity);
 interp_test!(mut_scalar);
 interp_test!(int_float_literal_compare);
@@ -445,12 +436,11 @@ interp_test!(struct_count_field);
 // A stored field and a method may share a name: bare access reads the field,
 // while call syntax dispatches the method. Method-first field lookup used to
 // make the method's `self.uid` recursively call itself until stack overflow.
-interp_test!(field_method_same_name);
+interp_test!(field_scenarios);
 // String-interpolating a struct field whose type is an array (`[int]`,
 // `[string]`, and one level of field chaining). The interpreter never had
 // this bug (see tests/transpile.rs's registration for the real regression
 // coverage) -- kept here anyway so the runtime values stay locked in.
-interp_test!(struct_field_array_interp);
 // `.add()`/`.contains()`/`.remove()` on a `{T}` (Set) struct field, called both
 // as a bare field name from inside the struct's own methods (`seen.add(x)`)
 // and from outside it (`f.seen.contains(...)`). The interpreter never had this
@@ -491,7 +481,6 @@ interp_test!(dict_string_key_index);
 // kept here anyway so the runtime values stay pinned down too. See
 // tests/cases/dict_field_via_non_self_local.br's own doc comment.
 interp_test!(dict_field_via_non_self_local);
-interp_test!(dict_field_param_var_key_else);
 // A top-level call-site borrow drop from a stale `inferred_qualifiers` name
 // collision. The interpreter (this test) never caught this either -- it was
 // a `--emit-rust`-only codegen bug (see tests/transpile.rs). See
@@ -545,16 +534,13 @@ interp_test!(option_owned_methods);
 // compiled program uses derived `Debug`. Both fixed; all three fixtures are registered
 // in tests/transpile.rs against the SAME .expected files, which is what pins the
 // interpreter/compiled parity these bugs were about.
-interp_test!(json_untagged_enum);
-interp_test!(json_serde_shapes);
-interp_test!(enum_derive_no_debug);
 
 // tests/cases/json_serde_rename.br's own doc comment covers the two `@derive(Serialize,
 // Deserialize)` transpiler bugs it pins; it was transpile-only because the interpreter's
 // `json(v)` was still a stub printing its own Value repr instead of real JSON (see
 // eval_json in src/interpreter/json.rs). Now that `json(v)` really serializes, this
 // registers here too, against the same .expected file as tests/transpile.rs.
-interp_test!(json_serde_rename);
+interp_test!(json_scenarios);
 
 // docs/try-wrap-double-handling-bug.md -- transpiler-only until now, because its
 // `fromJson<Thing>` lines depended on the interpreter's stub. With a real `fromJson`
@@ -574,10 +560,8 @@ interp_test!(self_field_loop_match_borrow);
 // matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
 interp_test!(qualifier_group_param);
 interp_test!(cast_bare_field_index);
-interp_test!(explicit_borrow_field_type_cast);
-interp_test!(cast_lhs_of_lt);
+interp_test!(cast_scenarios);
 interp_test!(if_else_cast_numeric);
-interp_test!(string_len_cast_parse_field);
 
 // Regression: `boring run` (the interpreter) had the analogous bug to the
 // transpiler's `in_instance_setter` recursion guard (see
@@ -602,8 +586,6 @@ interp_test!(mut_array_shared_element);
 // them), including through a struct-field argument. Same case as the transpile_test of the
 // same name -- both backends must print the identical output.
 interp_test!(mut_collection_param);
-interp_test!(mut_local_trait_array_push);
-interp_test!(mut_elem_trait_array_literal);
 interp_test!(dyn_struct_fields_optional);
 interp_test!(dyn_struct_transitive_iflet);
 interp_test!(dyn_return_borrowed_field_req_trait);
@@ -613,17 +595,13 @@ interp_test!(shared_dyn_def_trait_stays_boxed);
 
 // Same case as the transpile_test of the same name (a `mut`/`var mut` collection passed by value is
 // never invalidated for the caller) -- the interpreter must print the identical output.
-interp_test!(mut_collection_by_value_reuse);
 
 // Same case as the transpile_test of the same name (last-use move analysis) -- identical output.
 interp_test!(last_use_move);
 interp_test!(field_by_value_reuse);
-interp_test!(by_value_arg_then_reuse);
+interp_test!(misc_scenarios);
 interp_test!(destructured_slice_by_value_reuse);
-interp_test!(actor_call_result_ctor_arg);
 interp_test!(assert_eq_call_field_length);
-interp_test!(actor_inferred_param_caller_reuse);
-interp_test!(actor_field_method_via_call_local);
 interp_test!(lend_and_read_same_local);
 interp_test!(lend_and_read_same_local_lock_wrapper);
 // Interpreter side of tests/actor_field_arg_no_deadlock.rs (the compiled binaries run under a
@@ -632,8 +610,7 @@ interp_test!(actor_field_arg_no_deadlock);
 
 // Same for a `mut` user-struct parameter (free function and struct method): the callee's field
 // writes are visible to the caller. Same case as the transpile_test of the same name.
-interp_test!(mut_struct_param);
-interp_test!(req_method_mut_param_write);
+interp_test!(mut_scenarios);
 interp_test!(mut_param_unresolved_receiver);
 
 // Same for a `mut` parameter of an associated function (`type def`): the callee's writes are
@@ -726,7 +703,6 @@ interp_test!(guard_let_else_panic_throws);
 // `init_bare_field_assign`/`init_bare_field_assign_qualified` for the
 // transpiler-side real-compile regression (`emit_init`'s general-case
 // zero-prefill emitting `Default::default()` for non-`Default` field types).
-interp_test!(init_bare_field_assign);
 interp_test!(init_bare_field_assign_qualified);
 
 // A plain function call to an `'owned` parameter is not a move — the
@@ -745,7 +721,7 @@ interp_test!(new_owned_no_double_or_missing_box);
 // generalizes the existing trailing-closure sugar to a trailing `[dyn Trait]`
 // array argument. See src/parser/parse_array_block.rs and
 // src/desugar_array_block.rs for the implementation.
-interp_test!(do_expr_value_for_loop);
+interp_test!(misc_scenarios_2);
 interp_test!(array_block_flat);
 interp_test!(array_block_nested);
 interp_test!(array_block_if);
@@ -765,13 +741,12 @@ interp_test!(view_actions);
 interp_test!(view_bind_slot_field_hop);
 interp_test!(implicit_self_actor_field_alias);
 interp_test!(view_lifecycle_actions);
-interp_test!(view_state_seed);
 interp_test!(view_state_seed_values);
 interp_test!(view_env_provide);
-interp_test!(view_method_modifiers);
+interp_test!(view_scenarios);
 interp_test!(view_array_block_closure_arg);
 interp_test!(view_bind_env);
-interp_test!(actor_field_through);
+interp_test!(actor_scenarios);
 interp_test!(view_env_only);
 error_test!(view_bind_literal_arg);
 error_test!(view_bind_projection_no_key);
@@ -872,44 +847,24 @@ interp_test!(conditional_cast_boundaries);
 interp_test!(collection_named_methods);
 
 // Same cases as the transpile_tests of the same name -- both backends print identical output.
-interp_test!(set_param_methods);
+interp_test!(misc_scenarios_4);
 interp_test!(array_param_length_only);
-interp_test!(self_sibling_method_call);
 interp_test!(var_mut_collection_ok);
-interp_test!(field_mut_content_mutation);
-interp_test!(field_mut_param_content_mutation);
-interp_test!(cast_float_lit_to_int);
-interp_test!(zero_arg_ctor_defaults_with_optional);
 
 // A single-uppercase-letter struct name (`struct M`) parses its uses as `Type::TypeParam`;
 // see tests/cases/single_letter_struct_holds_dyn.br.
-interp_test!(single_letter_struct_holds_dyn);
 
-interp_test!(parse_float_if_let_dict_index);
-interp_test!(self_field_collection_return_by_value);
+interp_test!(parse_scenarios);
 interp_test!(trait_method_casing_unknown_receiver);
 interp_test!(stored_closure_captures_self_and_loop_item);
 interp_test!(view_callbacks_capture_state_handles);
 interp_test!(clone_deep_copy);
 interp_test!(trait_object_no_rebox);
 interp_test!(trait_object_fallback_optional);
-interp_test!(nested_dict_field_assign_in_place);
-interp_test!(actor_collection_field_derive);
+interp_test!(misc_scenarios_3);
 interp_test!(fn_field_handle_call);
 interp_test!(fn_field_optional_call);
-interp_test!(parse_on_expr_receiver);
-interp_test!(closure_param_forward);
-interp_test!(optional_let_return);
 interp_test!(fn_handle_pass_and_str_arg);
-interp_test!(fn_handle_inline_closure_ctor);
-interp_test!(optional_field_is_nil);
-interp_test!(optional_fn_param);
-interp_test!(fn_typed_local_alias);
-interp_test!(print_optional_value);
-interp_test!(guard_string_trim_temporary);
-interp_test!(struct_param_nested_loop_call);
-interp_test!(closure_owned_captures);
-interp_test!(string_unicode_length);
-interp_test!(string_grapheme_untyped);
-interp_test!(string_graphemes);
-interp_test!(string_grapheme_cast_var);
+interp_test!(fn_scenarios);
+interp_test!(optional_scenarios);
+interp_test!(closure_scenarios);

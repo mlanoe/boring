@@ -1,0 +1,84 @@
+# ---- labeled_ctor_init_call ----
+# A labeled-argument constructor call (`Name(label = value)`) on a struct
+# whose init() has a body used to always build a struct literal keyed by the
+# argument's *label* (`Name { label: value, ... }`), regardless of whether the
+# struct even has a field of that name — completely skipping the init() body's
+# real logic (arbitrary field assignment/computation) and, whenever an init
+# param name doesn't match the real field name, emitting a bogus struct
+# literal with a nonexistent field that doesn't compile at all.
+#
+# `Wrapper` here has init param `a` but field `arr` — the label `a` used to
+# get emitted as a nonexistent `arr: ...`... no, as `Wrapper { a: ... }`
+# (field `a` doesn't exist on Wrapper, only `arr` does).
+#
+# `Point` covers the reordering case: two labeled args given out of
+# declaration order (`y` before `x`), with param names (`x`/`y`) that also
+# differ from the real field names (`px`/`py`) — the fix must resolve each
+# label against the init()'s own parameter name (not the struct's field
+# name) and reorder into the init's declared parameter order before calling
+# `::new(...)`.
+
+struct LabeledCtorInitCallWrapper:
+    var [float] arr
+
+    init([float] a):
+        arr = a
+
+struct LabeledCtorInitCallPoint:
+    var int px
+    var int py
+
+    init(int x, int y):
+        px = x
+        py = y
+
+def run_labeled_ctor_init_call():
+    var ys = [1.0, 2.0, 3.0]
+    let w = LabeledCtorInitCallWrapper(a = ys)
+    print w.arr[0]
+
+    let p = LabeledCtorInitCallPoint(y = 20, x = 10)
+    print p.px
+    print p.py
+
+# ---- labeled_ctor_init_call_qualified ----
+# Same bug as labeled_ctor_init_call.br, for a 'actor-qualified field whose
+# init() parameter name differs from the field name (`a` vs `actor_c`). Before
+# the fix, `Holder(a = ac)` emitted a bogus struct literal
+# (`Holder { a: Arc::clone(&ac), actor_c: Arc::new(...) }`) — a nonexistent
+# `a` field plus a spurious wrong-default `actor_c` — never calling
+# `Holder::new(...)`.
+#
+# `ac` must still be usable after the constructor call (the labeled-arg path
+# must clone/alias it the same way the already-fixed positional-arg path
+# does, not move it out).
+
+struct LabeledCtorInitCallQualifiedCounter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+struct LabeledCtorInitCallQualifiedHolder:
+    let LabeledCtorInitCallQualifiedCounter'actor actor_c
+
+    init(LabeledCtorInitCallQualifiedCounter'actor a):
+        actor_c = a
+
+def run_labeled_ctor_init_call_qualified():
+    mut LabeledCtorInitCallQualifiedCounter'actor ac = LabeledCtorInitCallQualifiedCounter(0)
+    ac.inc()
+
+    let h = LabeledCtorInitCallQualifiedHolder(a = ac)
+
+    ac.inc()
+    print h.actor_c.get()
+
+def main() throws:
+    print "== labeled_ctor_init_call =="
+    run_labeled_ctor_init_call()
+    print "== labeled_ctor_init_call_qualified =="
+    run_labeled_ctor_init_call_qualified()

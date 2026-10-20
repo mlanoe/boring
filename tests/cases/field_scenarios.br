@@ -1,0 +1,51 @@
+# ---- field_method_same_name ----
+struct FieldMethodSameNameItem:
+    pub int uid
+
+    req int uid(): self.uid
+
+def run_field_method_same_name():
+    let t = FieldMethodSameNameItem(uid = 4)
+    print t.uid()
+    print t.uid
+
+# ---- field_mut_content_mutation ----
+struct FieldMutContentMutationS:
+    mut [string] log = []
+    mut {string = int} counts = {=}
+
+struct FieldMutContentMutationV:
+    int a
+    req int f(mut FieldMutContentMutationS st):
+        st.log.push("x")
+        st.log.length
+
+def run_field_mut_content_mutation():
+    mut s = FieldMutContentMutationS()
+    print s.log.length
+    print FieldMutContentMutationV(a = 1).f(s)
+    s.log[0] = "y"
+    s.counts["k"] = 3
+    print s.log[0]
+    print s.counts["k"]
+    print s.log.length
+
+# ---- field_mut_param_content_mutation ----
+struct FieldMutParamContentMutationS:
+    mut [string] log = []
+
+def field_mut_param_content_mutation_add(mut FieldMutParamContentMutationS s):
+    s.log.push("x")
+
+def run_field_mut_param_content_mutation():
+    mut s = FieldMutParamContentMutationS()
+    field_mut_param_content_mutation_add(s)
+    print s.log.length
+
+def main() throws:
+    print "== field_method_same_name =="
+    run_field_method_same_name()
+    print "== field_mut_content_mutation =="
+    run_field_mut_content_mutation()
+    print "== field_mut_param_content_mutation =="
+    run_field_mut_param_content_mutation()

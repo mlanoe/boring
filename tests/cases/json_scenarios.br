@@ -1,0 +1,178 @@
+# ---- json_serde_rename ----
+# Regression test for two real bugs found while investigating
+# docs/json-deserialize-rename-gap.md, plus the field-level @serde(rename=...)
+# fix that gap actually needed:
+#
+# 1. `@derive(Serialize, Deserialize)` -- the exact bare spelling docs/book.md's
+#    "JSON serialization" section documents -- failed to compile at all: no
+#    `use serde::{Serialize, Deserialize};` is ever emitted, so the derive
+#    macro name didn't resolve. Fixed by qualifying bare Serialize/Deserialize
+#    to serde::Serialize/serde::Deserialize in the emitted #[derive(...)],
+#    mirroring the existing thiserror::Error auto-qualification.
+# 2. The auto-generated `impl Display` (delegates to `{:?}`/Debug) was emitted
+#    unconditionally, even for a struct whose explicit @derive(...) list (used
+#    verbatim, unlike the no-@derive-at-all auto path) doesn't include Debug --
+#    book.md's own fromJson example never derives Debug, so it never actually
+#    compiled either. Fixed by gating that impl on Debug actually being in the
+#    final derive list.
+#
+# Field names themselves are never case-converted (verified: they transpile
+# byte-for-byte into the Rust struct) -- so a Boring field written camelCase
+# already matches a camelCase JSON key with no rename needed at all. The only
+# real per-field gap is a JSON key that isn't a valid Boring identifier in the
+# first place (here, "1") -- @serde(rename = "...") on the field covers that.
+
+@derive(Serialize, Deserialize)
+struct JsonSerdeRenameCostume:
+    string dataFormat
+    bool isStage
+    @serde(rename = "1")
+    int assetIndex
+
+def run_json_serde_rename():
+    let src = "{{\"dataFormat\": \"png\", \"isStage\": true, \"1\": 7}}"
+    guard let c = fromJson<JsonSerdeRenameCostume>(src) else:
+        print "parse failed"
+        return
+    print "{c.dataFormat} {c.isStage} {c.assetIndex}"
+    print json(c)
+
+# ---- json_untagged_enum ----
+# docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and
+# `boring build` used to print *completely different* things for a
+# `@serde(untagged)` enum round-tripped through `fromJson<T>`:
+#
+#   1. The interpreter's `fromJson<T>(s)` was a no-op stub that returned its
+#      string argument unchanged, for EVERY `T` (not just enums) -- so this
+#      printed the original JSON text back. It now really deserializes, via
+#      `serde_json::Value` as the generic JSON tree plus a type-directed
+#      materializer driven by Boring's own `Type`/`EnumDecl`/`StructDecl`
+#      (src/interpreter/json.rs).
+#   2. The interpreter's `Display for Value` formatted enum payload fields
+#      with `Display` recursively, but the *compiled* program prints an enum
+#      through the transpiler's auto-generated `Display` -> derived `Debug`.
+#      Debug quotes strings and keeps a whole-number float's `.0` -- so
+#      `JStr(two)`/`JNum(1)` had to become `JStr("two")`/`JNum(1.0)`,
+#      recursively through nested arrays/dicts/variants.
+#
+# Registered in BOTH tests/run.rs and tests/transpile.rs on purpose: the same
+# .expected file pinned for both backends is exactly what proves the parity
+# this bug was about.
+#
+# Variant declaration order is load-bearing under `untagged` -- serde tries
+# each variant's Deserialize in order and takes the first that succeeds, and
+# so does the interpreter. Every JSON object below has exactly one key: a
+# multi-key `{string=JVal}` is a Rust `HashMap`, whose Debug iteration order
+# is nondeterministic, so it could never be pinned in an .expected file.
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(untagged)
+enum JsonUntaggedEnumJVal:
+    JNull()
+    JBool(bool)
+    JNum(float)
+    JStr(string)
+    JArr([JsonUntaggedEnumJVal])
+    JObj({string=JsonUntaggedEnumJVal})
+
+def run_json_untagged_enum():
+    let s = "[1, \"two\", true, null, [3,4], {{\"a\": 5}}]"
+    let v = fromJson<JsonUntaggedEnumJVal>(s)
+    if let v:
+        print "parsed ok: {v}"
+    else:
+        print "parse FAILED"
+
+    # Each scalar shape on its own, so a regression tells you *which* variant
+    # stopped matching rather than just "the big one differs".
+    for one in ["null", "false", "7", "-2.5", "\"hi\"", "[]", "{{}}"]:
+        let p = fromJson<JsonUntaggedEnumJVal>(one)
+        if let p:
+            print "  {one} -> {p}"
+        else:
+            print "  {one} -> FAILED"
+
+    # A syntax error yields the absent optional, not a crash -- mirrors the
+    # transpiler's `serde_json::from_str(..).ok()`.
+    let bad = fromJson<JsonUntaggedEnumJVal>("{{ not json")
+    if let bad:
+        print "bad: unexpectedly parsed {bad}"
+    else:
+        print "bad: none"
+
+# ---- json_serde_shapes ----
+# Companion to tests/cases/json_untagged_enum.br: the *other* `@serde(...)`
+# shapes `fromJson<T>` has to agree on between `boring run` and
+# `boring build`, now that the interpreter really deserializes instead of
+# returning its input string unchanged (see that file's header and
+# docs/interpreter-untagged-enum-fromjson-mismatch.md).
+#
+# Covered here:
+#   * struct-level `@serde(rename_all = "camelCase")` -- serde's own
+#     RenameRule, re-implemented interpreter-side in src/interpreter/json.rs
+#     (the transpiler needs no equivalent: it emits the attribute verbatim and
+#     lets real serde do the conversion, so there was no helper to share).
+#   * a per-field `@serde(rename = "...")` overriding rename_all, for a JSON
+#     key that isn't a valid Boring identifier at all.
+#   * a nested struct field, and an `[T]` of structs.
+#   * serde's DEFAULT (externally-tagged) enum representation, which
+#     `@serde(rename_all = ...)` applies to the *variant* names: a field-less
+#     variant is the bare string `"unit_thing"`, a 1-field variant is
+#     `{"circle": payload}`, and an N-field variant is `{"rect": [a, b]}`.
+#
+# Struct values are printed field-by-field rather than as `{p}`: Boring's
+# `Display for <struct>` and Rust's derived `Debug` genuinely disagree on
+# braced-struct spelling, and unifying that is out of scope here (only enum
+# payloads route through Debug-style formatting, since only enums get an
+# auto-`Display` that delegates to `{:?}`).
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(rename_all = "camelCase")
+struct JsonSerdeShapesAddress:
+    string street_name
+    int house_number
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(rename_all = "camelCase")
+struct JsonSerdeShapesPerson:
+    string first_name
+    int age_years
+    @serde(rename = "home-address")
+    JsonSerdeShapesAddress home
+    [int] scores
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(rename_all = "snake_case")
+enum JsonSerdeShapesShape:
+    UnitThing()
+    Circle(float)
+    Rect(float, float)
+
+def run_json_serde_shapes():
+    let src = "{{\"firstName\": \"Ada\", \"ageYears\": 36, \"home-address\": {{\"streetName\": \"Elm\", \"houseNumber\": 7}}, \"scores\": [1, 2, 3]}}"
+    guard let p = fromJson<JsonSerdeShapesPerson>(src) else:
+        print "person FAILED"
+        return
+    print "{p.first_name} {p.age_years} {p.home.street_name}/{p.home.house_number} {p.scores}"
+
+    # A missing required key is a mismatch, not a partially-filled struct.
+    let missing = fromJson<JsonSerdeShapesPerson>("{{\"firstName\": \"Ada\"}}")
+    if let missing:
+        print "missing: unexpectedly parsed"
+    else:
+        print "missing: none"
+
+    for s in ["\"unit_thing\"", "{{\"circle\": 2.5}}", "{{\"rect\": [3, 4]}}", "\"nope\""]:
+        let sh = fromJson<JsonSerdeShapesShape>(s)
+        if let sh:
+            print "  {s} -> {sh}"
+        else:
+            print "  {s} -> none"
+
+def main() throws:
+    print "== json_serde_rename =="
+    run_json_serde_rename()
+    print "== json_untagged_enum =="
+    run_json_untagged_enum()
+    print "== json_serde_shapes =="
+    run_json_serde_shapes()

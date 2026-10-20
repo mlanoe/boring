@@ -1,0 +1,107 @@
+# ---- self_lent_reborrow ----
+# Passing `self` to a `mut` param inside a `&mut self` method must reborrow (`self`),
+# not emit `&mut self`; a pattern binding later lent as `mut` must be declared `mut`.
+struct SelfLentReborrowNode:
+    var int v = 0
+
+trait SelfLentReborrowBuilder:
+    req int build(mut SelfLentReborrowCore c)
+
+struct SelfLentReborrowFour as SelfLentReborrowBuilder:
+    req int build(mut SelfLentReborrowCore c): c.n + 4
+
+struct SelfLentReborrowCore:
+    var int n = 0
+    var SelfLentReborrowNode? root = nil
+    def int apply(int x):
+        n += x
+        n
+    def bump(mut SelfLentReborrowNode node):
+        node.v += 1
+    def start(SelfLentReborrowBuilder b):
+        _ = self.apply(b.build(self))
+    def touch():
+        if let current = root:
+            self.bump(current)
+            print current.v
+
+def run_self_lent_reborrow():
+    mut c = SelfLentReborrowCore(n = 0)
+    c.start(SelfLentReborrowFour())
+    print c.n
+    c.root = SelfLentReborrowNode()
+    c.touch()
+
+# ---- self_sibling_method_call ----
+# A struct method calling a sibling method through an explicit `self.` -- the form docs/book.md
+# ("Implicit `self`") requires. The bare form `one(n)` is a Boring diagnostic instead of
+# invalid Rust; see tests/cases/error_bare_sibling_method_call.br. A top-level function sharing
+# a sibling method's name still resolves bare, to the function.
+def int self_sibling_method_call_one(int n):
+    n * 100
+
+struct SelfSiblingMethodCallSrc:
+    var int pos = 0
+
+    def step(int n):
+        pos += n
+
+    def two(int n):
+        self.step(n)
+        self.step(n)
+
+    req int far(int n):
+        self_sibling_method_call_one(n)
+
+def run_self_sibling_method_call():
+    mut SelfSiblingMethodCallSrc s = SelfSiblingMethodCallSrc()
+    s.two(3)
+    print s.pos
+    print s.far(2)
+
+# ---- self_field_collection_return_by_value ----
+# Returning a bare implicit-self collection field by value from a `&self` method must
+# clone, not move out of `&self` (E0507).
+trait SelfFieldCollectionReturnByValueShape:
+    req int area()
+
+struct SelfFieldCollectionReturnByValueSq as SelfFieldCollectionReturnByValueShape:
+    int s
+    req int area(): s * s
+
+struct SelfFieldCollectionReturnByValueS:
+    [int] items
+    {string=int} d
+    {int} st
+    [string] names
+    [SelfFieldCollectionReturnByValueSq] sqs
+    [SelfFieldCollectionReturnByValueShape'shared] shapes
+    req [int] get(): items
+    req [int] get2():
+        return items
+    req {string=int} getd(): d
+    req {int} gets():
+        return st
+    req [string] getNames(): names
+    req [SelfFieldCollectionReturnByValueSq] getSqs(): sqs
+    req [SelfFieldCollectionReturnByValueShape'shared] getShapes():
+        return shapes
+
+def run_self_field_collection_return_by_value():
+    let x = SelfFieldCollectionReturnByValueS(items = [1, 2], d = {"a" = 1}, st = {2}, names = ["p", "q", "r"], sqs = [SelfFieldCollectionReturnByValueSq(3)], shapes = [SelfFieldCollectionReturnByValueSq(4), SelfFieldCollectionReturnByValueSq(5)])
+    print x.get().length
+    print x.get2().length
+    print x.getd().length
+    print x.gets().length
+    print x.getNames().length
+    print x.getSqs().length
+    print x.getShapes().length
+    print x.get().length
+
+def main() throws:
+    print "== self_lent_reborrow =="
+    run_self_lent_reborrow()
+    print "== self_sibling_method_call =="
+    run_self_sibling_method_call()
+    print "== self_field_collection_return_by_value =="
+    run_self_field_collection_return_by_value()

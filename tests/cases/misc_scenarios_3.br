@@ -1,0 +1,98 @@
+# ---- nested_dict_field_assign_in_place ----
+struct NestedDictFieldAssignInPlaceM:
+    var {string=int} slots = {=}
+    var int n = 0
+
+struct NestedDictFieldAssignInPlaceR:
+    var {int=mut NestedDictFieldAssignInPlaceM} nodes = {=}
+    var [NestedDictFieldAssignInPlaceM] list = []
+
+    def bool write(int id, string slot, int v):
+        nodes[id].slots[slot] = v
+        true
+    def bool write2(int id, string slot, int v):
+        list[id].slots[slot] = v
+        true
+
+def run_nested_dict_field_assign_in_place():
+    mut r = NestedDictFieldAssignInPlaceR()
+    r.nodes[1] = NestedDictFieldAssignInPlaceM()
+    r.list.push(NestedDictFieldAssignInPlaceM())
+    _ = r.write(1, "a", 5)
+    _ = r.write2(0, "b", 6)
+    print r.nodes[1].slots["a"]
+    print r.list[0].slots["b"]
+
+# ---- print_optional_value ----
+# `print` of an Option value (`try?` result, `T?` local, optional field, optional-returning call) shows
+# `nil` or the value, like the interpreter.
+struct PrintOptionalValueP:
+    int? x = nil
+    string? name = nil
+
+def int print_optional_value_f(int a) throws:
+    if a == 0:
+        throw "zero"
+    return a
+
+def int? print_optional_value_g(int a):
+    if a > 0:
+        return a
+    nil
+
+def run_print_optional_value():
+    let q = try? print_optional_value_f(0)
+    print q
+    let r = try? print_optional_value_f(5)
+    print r
+    let int? z = nil
+    print z
+    let int? w = 7
+    print w
+    let p = PrintOptionalValueP()
+    print p.x
+    print p.name
+    let p2 = PrintOptionalValueP(x = 3, name = "ann")
+    print p2.x
+    print p2.name
+    print print_optional_value_g(1)
+    print print_optional_value_g(0)
+
+# ---- req_method_mut_param_write ----
+# Regression test: a `req` method promises not to mutate `self`, not other objects -- writing
+# through a `mut` parameter's fields is legal (docs/book.md "`mut` vs `var` on a struct
+# parameter": a `mut` parameter's content may be mutated by the callee). `boring run` used to
+# reject `c.value += 1` with "cannot mutate non-transient field 'value' from a req method"
+# (the req gate applied to any object's field, not just `self`'s), while `boring build` +
+# `cargo run` accepted it and printed 1.
+
+struct ReqMethodMutParamWriteCounter:
+    var int value = 0
+
+struct ReqMethodMutParamWriteShape:
+    var int n = 0
+
+    req tap(mut ReqMethodMutParamWriteCounter c):
+        c.value += 1
+
+    req set(mut ReqMethodMutParamWriteCounter c, int v):
+        c.value = v
+
+def run_req_method_mut_param_write():
+    mut ReqMethodMutParamWriteCounter c = ReqMethodMutParamWriteCounter()
+    let s = ReqMethodMutParamWriteShape()
+    s.tap(c)
+    print c.value
+    s.tap(c)
+    s.set(c, 40)
+    s.tap(c)
+    s.tap(c)
+    print c.value
+
+def main() throws:
+    print "== nested_dict_field_assign_in_place =="
+    run_nested_dict_field_assign_in_place()
+    print "== print_optional_value =="
+    run_print_optional_value()
+    print "== req_method_mut_param_write =="
+    run_req_method_mut_param_write()

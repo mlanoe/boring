@@ -1,0 +1,66 @@
+# ---- set_param_methods ----
+# A set-typed (`{T}`) PARAMETER wasn't tracked as a set (only `let`/`var` locals were, via
+# `set_vars`), so `s.add(x)` was emitted as-is (E0599: no method `add` on `&mut HashSet<_>`)
+# and `s.remove(x)` as an array remove-at (E0308). Covers `mut` params (content mutation only, no rebind), a struct
+# method taking a set, and `set_vars` not leaking between functions: `seen` below is a set
+# in `main` but a plain array parameter in `head`.
+def set_param_methods_note(mut {int} s):
+    s.add(42)
+
+def set_param_methods_drop(mut {int} s):
+    s.remove(1)
+
+def int set_param_methods_head([int] seen):
+    seen[0]
+
+struct SetParamMethodsBag:
+    var int total = 0
+
+    def fill(mut {int} s):
+        s.add(7)
+        total += s.length
+
+def run_set_param_methods():
+    mut {int} seen = {1, 2}
+    set_param_methods_note(seen)
+    set_param_methods_drop(seen)
+    print seen.length
+    print seen.contains(42)
+    print seen.contains(1)
+    mut SetParamMethodsBag b = SetParamMethodsBag()
+    b.fill(seen)
+    print seen.length
+    print b.total
+    print set_param_methods_head([5, 6, 7])
+
+# ---- single_letter_struct_holds_dyn ----
+# A struct named with a single uppercase letter (`struct M`) parses its uses as
+# `Type::TypeParam`; the transpiler's dyn-holding analysis (derive Debug/Clone/
+# PartialEq decisions) must still treat it as the declared struct it names.
+
+trait SingleLetterStructHoldsDynNode:
+    req string label()
+
+struct SingleLetterStructHoldsDynLeaf as SingleLetterStructHoldsDynNode:
+    int v
+    req string label(): "leaf"
+
+struct SingleLetterStructHoldsDynM:
+    SingleLetterStructHoldsDynNode? v = nil
+    [SingleLetterStructHoldsDynM] kids = []
+
+struct SingleLetterStructHoldsDynRt:
+    var SingleLetterStructHoldsDynM? root = nil
+    var {int=SingleLetterStructHoldsDynM} nodes = {=}
+
+def run_single_letter_struct_holds_dyn():
+    var mut SingleLetterStructHoldsDynRt r = SingleLetterStructHoldsDynRt()
+    r.root = SingleLetterStructHoldsDynM()
+    print r.root != nil
+    print r.nodes.len()
+
+def main() throws:
+    print "== set_param_methods =="
+    run_set_param_methods()
+    print "== single_letter_struct_holds_dyn =="
+    run_single_letter_struct_holds_dyn()

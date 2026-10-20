@@ -1,0 +1,74 @@
+use boring.ui.*
+
+# ---- view_method_modifiers ----
+# Method-form view modifiers: `Text("x").padding(10.0)` is the ordered wrapper
+# `Padding(insets = 10.0, children = [Text("x")])`, and a chain wraps left to right.
+
+struct ViewMethodModifiersRuler:
+    def float padding(float amount):
+        amount * 2.0
+
+view ViewMethodModifiersCard:
+    string title
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Text(title).padding(4.0)
+            Text("b").frame(width = 20.0).padding(insets = 2.0).background("red")
+
+def run_view_method_modifiers():
+    let card = ViewMethodModifiersCard(title = "t")
+    let body = card.body()
+    let kids = body.viewChildren()
+    # Text(title).padding(4.0)  ->  Padding wrapping Text
+    print kids[0].viewKind()
+    print kids[0].viewProps()["insets"]
+    print kids[0].viewChildren()[0].viewKind()
+    # chain order: Text, then Frame, then Padding, then Background (outermost last)
+    var n = kids[1]
+    mut path = [n.viewKind()]
+    while n.viewChildren().length > 0:
+        n = n.viewChildren()[0]
+        path.push(n.viewKind())
+    print path.join(">")
+    # a same-named method on a non-view receiver is untouched
+    print ViewMethodModifiersRuler().padding(3.0)
+
+# ---- view_state_seed ----
+# Parent-supplied state seeds: `Counter(count = 10)` seeds that identity's `state` at mount; a
+# description without the argument keeps the declaration's default. (Laziness — the argument being
+# evaluated once per mount and never on a rebuild — is checked in `view_state_seed_values`.) A
+# string-literal seed is a closure returning a literal, which `boring build` must convert too.
+
+view ViewStateSeedCounter:
+    string title
+    state int count = 0
+    state string label = "none"
+
+    req int current():
+        count
+
+    req string tag():
+        label
+
+    body():
+        Text("{title}{count}")
+
+def int view_state_seed_seedValue(int base):
+    base * 2 + 1
+
+def run_view_state_seed():
+    let plain = ViewStateSeedCounter(title = "a")
+    let seeded = ViewStateSeedCounter(title = "b", count = view_state_seed_seedValue(5), label = "custom")
+    mut a = plain.seededState()
+    mut b = seeded.seededState()
+    print plain.current(a)
+    print seeded.current(b)
+    print plain.tag(a)
+    print seeded.tag(b)
+
+def main() throws:
+    print "== view_method_modifiers =="
+    run_view_method_modifiers()
+    print "== view_state_seed =="
+    run_view_state_seed()

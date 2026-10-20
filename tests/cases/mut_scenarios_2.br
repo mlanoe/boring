@@ -1,0 +1,87 @@
+# ---- mut_local_collection_alias ----
+# Regression test: a bare-`mut` local collection initialised from another variable is tracked
+# as a dict / array / set exactly like the `var` form. `mut {K=V} x = other` parses to
+# `Type::Mut(Dict(..))` (an owned permission marker with no Rust type of its own), which the
+# `emit_let` shape checks didn't look through -- so `x["k"] = v` was emitted as array indexing
+# (`x["k"] = v;`, invalid Rust) and `s.add(v)` was never rewritten to `insert`.
+
+def int mut_local_collection_alias_dict_mut({string=int} env):
+    mut {string=int} loop_env = env
+    loop_env["k"] = 1
+    loop_env.length
+
+def int mut_local_collection_alias_dict_var({string=int} env):
+    mut {string=int} loop_env = env
+    loop_env["k"] = 1
+    loop_env.length
+
+def int mut_local_collection_alias_array_mut([int] a):
+    mut [int] b = a
+    b[0] = 5
+    b[0] + b.length
+
+def int mut_local_collection_alias_set_mut({int} s):
+    mut {int} t = s
+    t.add(9)
+    t.length
+
+def int mut_local_collection_alias_set_var({int} s):
+    mut {int} t = s
+    t.add(9)
+    t.length
+
+def run_mut_local_collection_alias():
+    let env = {"a" = 0}
+    print mut_local_collection_alias_dict_mut(env)
+    print mut_local_collection_alias_dict_var(env)
+    print env.length
+    let a = [1, 2, 3]
+    print mut_local_collection_alias_array_mut(a)
+    print a[0]
+    let s = {1, 2}
+    print mut_local_collection_alias_set_mut(s)
+    print mut_local_collection_alias_set_var(s)
+    print s.length
+
+# ---- mut_local_float_array_elem_type ----
+# Regression test: a bare-`mut` local `[float]`/`[float32]` array keeps its element type for
+# later inference, exactly like the `var` form. `mut [float] e = ...` stores `Type::Mut(Array(..))`
+# in `var_types` (an owned permission marker with no Rust type of its own); `float_array_elem_ty`
+# (the `.sum::<T>()` turbofish pick), `infer_float_width_inner`'s array-index arm, the `let x = arr[i]`
+# element tracking and `emit_for`'s element-type detection all matched `Type::Array` directly -- so
+# `e |> sum()` was emitted `sum::<i64>()` against `f64` elements (E0277).
+
+def float mut_local_float_array_elem_type_total_mut([float] x):
+    mut [float] e = x |> map((v): v * 2.0)
+    let float s = e |> sum()
+    s
+
+def float mut_local_float_array_elem_type_total_var([float] x):
+    var [float] e = x |> map((v): v * 2.0)
+    let float s = e |> sum()
+    s
+
+def float32 mut_local_float_array_elem_type_total_mut32([float32] x):
+    mut [float32] e = x
+    e |> sum()
+
+def float mut_local_float_array_elem_type_total_loop([float] x):
+    mut [float] e = x |> map((v): v + 0.5)
+    var float acc = 0.0
+    for v in e:
+        acc = acc + v
+    acc + e[0]
+
+def run_mut_local_float_array_elem_type():
+    print mut_local_float_array_elem_type_total_mut([1.0, 2.0])
+    print mut_local_float_array_elem_type_total_var([1.0, 2.0])
+    let float32 a = 1.5
+    let float32 b = 2.5
+    print mut_local_float_array_elem_type_total_mut32([a, b])
+    print mut_local_float_array_elem_type_total_loop([1.0, 2.0])
+
+def main() throws:
+    print "== mut_local_collection_alias =="
+    run_mut_local_collection_alias()
+    print "== mut_local_float_array_elem_type =="
+    run_mut_local_float_array_elem_type()

@@ -1,0 +1,16 @@
+== actor_field_through ==
+z
+z
+z
+== actor_call_result_ctor_arg ==
+0
+4
+5
+8
+== actor_inferred_param_caller_reuse ==
+1
+== actor_field_method_via_call_local ==
+9
+== actor_collection_field_derive ==
+0
+0

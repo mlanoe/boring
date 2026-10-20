@@ -1,0 +1,183 @@
+# ---- trait_dynamic_dispatch ----
+# docs/book.md "Traits as types": a bare trait name in return/parameter/
+# local-variable type position means dynamic dispatch (`Box<dyn Trait>`).
+# Regression coverage for a transpiler bug where this was broken end-to-end
+# except for a method's own single-concrete-type return: array-literal
+# construction into a `[Trait]` slot never boxed its elements, iterating that
+# array used `.iter().cloned()` (Box<dyn Trait> isn't Clone), a bare
+# trait-typed function parameter transpiled to invalid/wrong-dispatch Rust,
+# and a trait-typed receiver's camelCase method calls got mangled to
+# snake_case. The tree-walk interpreter (`boring run`) already handled all of
+# this correctly; only `boring build`'s transpiler was affected.
+
+trait TraitDynamicDispatchDrawable:
+    req string getLabel()
+
+struct TraitDynamicDispatchCircle as TraitDynamicDispatchDrawable:
+    float r
+    req string getLabel(): "circle"
+
+struct TraitDynamicDispatchSquare as TraitDynamicDispatchDrawable:
+    float s
+    req string getLabel(): "square"
+
+def trait_dynamic_dispatch_describe(TraitDynamicDispatchDrawable item):
+    print item.getLabel()
+
+def run_trait_dynamic_dispatch():
+    let [TraitDynamicDispatchDrawable] shapes = [TraitDynamicDispatchCircle(r = 1.0), TraitDynamicDispatchSquare(s = 2.0)]
+    for s in shapes:
+        print s.getLabel()
+    trait_dynamic_dispatch_describe(TraitDynamicDispatchCircle(r = 3.0))
+    let c = TraitDynamicDispatchCircle(r = 9.0)
+    trait_dynamic_dispatch_describe(c)
+    print c.r
+
+# ---- trait_param_forwarding ----
+# A bare-trait parameter (dynamic dispatch, `Box<dyn Trait>`) forwarded to another
+# function/method must be handed over, not `.clone()`d (Box<dyn Trait> isn't Clone).
+trait TraitParamForwardingBuilder:
+    req int build(int x)
+
+struct TraitParamForwardingFour as TraitParamForwardingBuilder:
+    req int build(int x): x + 4
+
+int trait_param_forwarding_inner(TraitParamForwardingBuilder b, int n):
+    b.build(n)
+
+int trait_param_forwarding_outer(TraitParamForwardingBuilder b):
+    trait_param_forwarding_inner(b, 1)
+
+struct TraitParamForwardingRunner:
+    var int n = 0
+    def int flush(TraitParamForwardingBuilder b):
+        n += 1
+        b.build(n)
+    def int endEvent(TraitParamForwardingBuilder b):
+        self.flush(b)
+    def int viaFree(TraitParamForwardingBuilder b):
+        trait_param_forwarding_outer(b)
+
+def run_trait_param_forwarding():
+    mut r = TraitParamForwardingRunner()
+    print r.endEvent(TraitParamForwardingFour())
+    print r.viaFree(TraitParamForwardingFour())
+    print trait_param_forwarding_outer(TraitParamForwardingFour())
+
+# ---- trait_param_return ----
+# A function returning its own bare-trait parameter (`Box<dyn Trait>`) must move
+# the box (tail expression and explicit `return`), not `.clone()` it, and the
+# bare-trait return type is `Box<dyn Trait>` (docs/book.md "Traits as types").
+trait TraitParamReturnBuilder:
+    req int build(int x)
+
+struct TraitParamReturnFour as TraitParamReturnBuilder:
+    req int build(int x): x + 4
+
+struct TraitParamReturnTen as TraitParamReturnBuilder:
+    req int build(int x): x + 10
+
+TraitParamReturnBuilder trait_param_return_ident(TraitParamReturnBuilder b):
+    b
+
+TraitParamReturnBuilder trait_param_return_pick(TraitParamReturnBuilder b, bool early):
+    if early:
+        return b
+    TraitParamReturnTen()
+
+TraitParamReturnBuilder trait_param_return_make():
+    TraitParamReturnFour()
+
+def run_trait_param_return():
+    print trait_param_return_ident(TraitParamReturnFour()).build(2)
+    print trait_param_return_pick(TraitParamReturnFour(), true).build(1)
+    print trait_param_return_pick(TraitParamReturnFour(), false).build(1)
+    print trait_param_return_make().build(5)
+
+# ---- trait_method_return ----
+# Methods (struct `def` methods and a trait `req` method) returning a bare trait: `Box<dyn Trait>`,
+# agreeing between the trait declaration and the impl; a trait-typed param is moved, not cloned.
+trait TraitMethodReturnBuilder:
+    req int build(int x)
+
+struct TraitMethodReturnFour as TraitMethodReturnBuilder:
+    req int build(int x): x + 4
+
+struct TraitMethodReturnTen as TraitMethodReturnBuilder:
+    req int build(int x): x + 10
+
+trait TraitMethodReturnFactory:
+    req TraitMethodReturnBuilder make()
+
+struct TraitMethodReturnF as TraitMethodReturnFactory:
+    req TraitMethodReturnBuilder make(): TraitMethodReturnFour()
+
+struct TraitMethodReturnHolder:
+    var int n = 0
+    def TraitMethodReturnBuilder pass(TraitMethodReturnBuilder b):
+        b
+    def TraitMethodReturnBuilder pass2(TraitMethodReturnBuilder b):
+        n += 1
+        return b
+    def TraitMethodReturnBuilder fresh():
+        TraitMethodReturnTen()
+    def TraitMethodReturnBuilder viaParam(TraitMethodReturnBuilder b, bool e):
+        if e:
+            return b
+        TraitMethodReturnFour()
+
+def run_trait_method_return():
+    mut h = TraitMethodReturnHolder()
+    print h.pass(TraitMethodReturnFour()).build(1)
+    print h.pass2(TraitMethodReturnFour()).build(1)
+    print h.fresh().build(1)
+    print h.viaParam(TraitMethodReturnTen(), true).build(1)
+    print h.viaParam(TraitMethodReturnTen(), false).build(1)
+    print TraitMethodReturnF().make().build(1)
+
+# ---- trait_borrow_param ----
+# Explicit `Trait&` (bare trait, dynamic dispatch) is `&dyn Trait`: a fresh value, a local used
+# twice, a field, and a forwarded borrowed param all pass without a Box or a move.
+trait TraitBorrowParamBuilder:
+    req int build(int x)
+
+struct TraitBorrowParamFour as TraitBorrowParamBuilder:
+    req int build(int x): x + 4
+
+struct TraitBorrowParamTwo as TraitBorrowParamBuilder:
+    req int build(int x): x + 2
+
+int trait_borrow_param_inner(TraitBorrowParamBuilder& b, int n):
+    b.build(n)
+
+int trait_borrow_param_outer(TraitBorrowParamBuilder& b):
+    trait_borrow_param_inner(b, 1) + trait_borrow_param_inner(b, 2)
+
+struct TraitBorrowParamHolder:
+    TraitBorrowParamBuilder b
+
+    req int viaField():
+        trait_borrow_param_inner(b, 10)
+
+def run_trait_borrow_param():
+    let TraitBorrowParamBuilder local = TraitBorrowParamFour()
+    print trait_borrow_param_inner(local, 1)
+    print trait_borrow_param_inner(local, 2)
+    print trait_borrow_param_inner(TraitBorrowParamTwo(), 3)
+    print trait_borrow_param_outer(local)
+    print trait_borrow_param_outer(TraitBorrowParamFour())
+    let h = TraitBorrowParamHolder(TraitBorrowParamTwo())
+    print h.viaField()
+    print trait_borrow_param_inner(h.b, 20)
+
+def main() throws:
+    print "== trait_dynamic_dispatch =="
+    run_trait_dynamic_dispatch()
+    print "== trait_param_forwarding =="
+    run_trait_param_forwarding()
+    print "== trait_param_return =="
+    run_trait_param_return()
+    print "== trait_method_return =="
+    run_trait_method_return()
+    print "== trait_borrow_param =="
+    run_trait_borrow_param()

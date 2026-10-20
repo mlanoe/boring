@@ -1,0 +1,59 @@
+use Action as def void()
+use UIAction as def void()
+
+# ---- closure_owned_captures ----
+# A closure stored into a function-typed field owns every capture: an `'actor` handle, `self`
+# (cloned receiver), and a `for` loop variable that is still used after the closure is built.
+
+struct ClosureOwnedCapturesBtn:
+    string label
+    Action onTap
+
+struct ClosureOwnedCapturesSt:
+    var int n = 0
+
+struct ClosureOwnedCapturesCounter:
+    string title
+    req int step(int k):
+        k + 1
+    req int run([string] labels):
+        mut ClosureOwnedCapturesSt'actor st = ClosureOwnedCapturesSt()
+        mut [ClosureOwnedCapturesBtn] out = []
+        for item in labels:
+            let w = item.len() as int
+            out.push(ClosureOwnedCapturesBtn(label = item, onTap = ():
+                st.n += self.step(w)))
+            print item
+        for b in out:
+            b.onTap()
+        st.n
+
+def run_closure_owned_captures():
+    let c = ClosureOwnedCapturesCounter(title = "c")
+    print c.run(["a", "bb", "ccc"])
+
+# ---- closure_param_forward ----
+# A closure-typed parameter forwarded to another function moves, never `.clone()`s.
+
+struct ClosureParamForwardBuilder:
+    var int n = 0
+
+def closure_param_forward_inner(ClosureParamForwardBuilder host, UIAction body):
+    body()
+    body()
+
+def closure_param_forward_outer(ClosureParamForwardBuilder host, UIAction body):
+    closure_param_forward_inner(host, body)
+
+def closure_param_forward_sayHi():
+    print "hi"
+
+def run_closure_param_forward():
+    let b = ClosureParamForwardBuilder()
+    closure_param_forward_outer(b, closure_param_forward_sayHi)
+
+def main() throws:
+    print "== closure_owned_captures =="
+    run_closure_owned_captures()
+    print "== closure_param_forward =="
+    run_closure_param_forward()

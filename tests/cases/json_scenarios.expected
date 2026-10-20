@@ -1,0 +1,20 @@
+== json_serde_rename ==
+png true 7
+{"dataFormat":"png","isStage":true,"1":7}
+== json_untagged_enum ==
+parsed ok: JArr([JNum(1.0), JStr("two"), JBool(true), JNull, JArr([JNum(3.0), JNum(4.0)]), JObj({"a": JNum(5.0)})])
+  null -> JNull
+  false -> JBool(false)
+  7 -> JNum(7.0)
+  -2.5 -> JNum(-2.5)
+  "hi" -> JStr("hi")
+  [] -> JArr([])
+  {} -> JObj({})
+bad: none
+== json_serde_shapes ==
+Ada 36 Elm/7 [1, 2, 3]
+missing: none
+  "unit_thing" -> UnitThing
+  {"circle": 2.5} -> Circle(2.5)
+  {"rect": [3, 4]} -> Rect(3.0, 4.0)
+  "nope" -> none

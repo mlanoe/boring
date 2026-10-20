@@ -1,0 +1,50 @@
+use Look as req int(string)
+use Cmd as def int(string)
+use Calc as def int(int)
+use Greet as req string(string)
+use Hook as def void()
+
+# ---- fn_handle_inline_closure_ctor ----
+# Inline expression-bodied closures as labeled constructor args of function-typed fields
+# (`req` = Fn, `def` = FnMut).
+
+struct FnHandleInlineClosureCtorRow:
+    int id
+    Look onLook
+    Cmd onCommand
+
+def run_fn_handle_inline_closure_ctor():
+    let r = FnHandleInlineClosureCtorRow(id = 1, onLook = (s): s.len() as int, onCommand = (c): c.len() as int + 1)
+    let q = FnHandleInlineClosureCtorRow(id = 2, onLook = (s): 4, onCommand = (c): 5)
+    print r.onLook("abc")
+    print r.onCommand("abc")
+    print q.onLook("abc")
+    print q.onCommand("abc")
+
+# ---- fn_typed_local_alias ----
+# A local with a function type — a `use` alias (`Calc local = ...`) or inline — must not be emitted with an
+# `impl FnMut` type annotation (illegal in a `let`, E0562).
+
+def int fn_typed_local_alias_twice(Calc c, int x):
+    let a = c(x)
+    c(a)
+
+def run_fn_typed_local_alias():
+    let Calc local = (x): x + 1
+    print local(2)
+    var Calc counter = (x): x * 2
+    print counter(5)
+    print fn_typed_local_alias_twice(local, 10)
+    let Greet g = (n): "hi {n}"
+    print g("bob")
+    let (def int(int)) inline = (x): x - 1
+    print inline(9)
+    let Hook h = (): print("hook")
+    h()
+    h()
+
+def main() throws:
+    print "== fn_handle_inline_closure_ctor =="
+    run_fn_handle_inline_closure_ctor()
+    print "== fn_typed_local_alias =="
+    run_fn_typed_local_alias()

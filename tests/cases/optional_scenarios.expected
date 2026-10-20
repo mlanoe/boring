@@ -1,0 +1,30 @@
+== optional_field_is_nil ==
+nil
+notnil2
+nohook
+hook set
+set
+empty
+== optional_fn_param ==
+none
+has
+called
+none
+has
+field hook
+has
+field hook
+none
+forwarded nil
+none t
+none t
+-1
+5
+40
+-1
+== optional_let_return ==
+4
+empty
+9
+7
+2

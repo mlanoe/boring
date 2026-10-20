@@ -1,0 +1,18 @@
+== oversized_return_boxed_direct ==
+0
+34
+== oversized_return_boxed_via_let ==
+0
+34
+== oversized_return_small_stays_unboxed ==
+1
+2
+3
+4
+== oversized_struct_field_stays_inline ==
+0
+34
+== oversized_param_borrow_stays_unboxed ==
+1
+99
+30

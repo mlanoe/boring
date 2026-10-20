@@ -1,0 +1,235 @@
+# ---- string_temporary_method_chains ----
+def string string_temporary_method_chains_trimmed_replacement(string s):
+    return s.replace("x", " ").trim()
+
+def string string_temporary_method_chains_repeated_trim(string s):
+    s.trim().trim()
+
+def run_string_temporary_method_chains() throws:
+    let outside = " X outside X ".toLower().replace("x", "").trim()
+    print outside
+
+    for line in "a: b\r\nContent-Length: 42\r\n".split("\r\n"):
+        let low = line.toLower()
+        if low.startsWith("content-length:"):
+            let value = low.replace("content-length:", "").trim()
+            let n = (value as int) else 0
+            print n
+
+    let lines = [" X while X "]
+    var i = 0
+    while i < lines.length:
+        let upper = lines[i].toUpper()
+        let value = upper.replace("X", "").trimStart().trimEnd()
+        print value
+        i += 1
+
+    print string_temporary_method_chains_trimmed_replacement(" x direct x ")
+    print string_temporary_method_chains_repeated_trim("  twice  ")
+
+# ---- string_len_cast_parse_field ----
+# `(s.length as float)` must be a numeric `as f64` cast (not a string `.trim().parse()`), and
+# `parseFloat`/`parseInt` must work on any string expression — params, struct fields — plus
+# string literals against `Arc<str>` in `assert_eq` / `join`.
+struct StringLenCastParseFieldP:
+    var string txt = ""
+    var [string] names = []
+
+def float? string_len_cast_parse_field_conv(string s):
+    return s.parseFloat()
+
+def int? string_len_cast_parse_field_toint(string s):
+    return s.parseInt()
+
+def float string_len_cast_parse_field_lenf(string s):
+    return (s.length as float) * 2.0
+
+def string string_len_cast_parse_field_sep([string] parts, string d):
+    return parts.join(d)
+
+def run_string_len_cast_parse_field():
+    let s = "hello"
+    let w = (s.length as float) * 2.0
+    print w
+    let p = StringLenCastParseFieldP(txt = "2.5", names = ["7", "y"])
+    print (string_len_cast_parse_field_conv("1.5") else (0.0))
+    print (string_len_cast_parse_field_conv("zz") else (-1.0))
+    print (string_len_cast_parse_field_toint(p.names[0]) else (-1))
+    print (p.txt.parseFloat() else (0.0))
+    print (p.names[0].parseInt() else (0))
+    print string_len_cast_parse_field_lenf(p.txt)
+    print (p.txt.length as float)
+    let arr = ["a", "b"]
+    print arr.join("|")
+    print p.names.join(",")
+    print string_len_cast_parse_field_sep(arr, "-")
+    assert_eq(arr[0], "a")
+    assert_eq(p.names[1], "y")
+    assert_eq(arr.join("+"), "a+b")
+    assert_eq(p.txt, "2.5")
+    assert(arr[0] == "a", "eq")
+    assert(arr.join("|") == "a|b", "joined")
+
+# ---- string_methods_after_index ----
+# Regression: string builtins on an indexed string value must remain instance calls.
+# This covers a synthesized `[string]` from split as well as a declared array.
+def string string_methods_after_index_first_word(string text):
+    let parts = text.split("\n")[0].split(" ")
+    parts[0]
+
+def run_string_methods_after_index() throws:
+    let [string] values = [" Mixed Case "]
+    print string_methods_after_index_first_word("hello world\nsecond")
+    print "{values[0].trim()}"
+    print "{values[0].replace("Mixed", "Lower")}"
+    print "{values[0].startsWith(" Mixed")}"
+    print "{values[0].toLower()}"
+
+# ---- string_unicode_length ----
+def int string_unicode_length_width(string t):
+    t.length
+
+def run_string_unicode_length():
+    let s = "héllo…😀é"
+    print(s.length)
+    print("é".length)
+    print(string_unicode_length_width(s))
+    print(s.chars().length)
+    print(s.isEmpty())
+    let int? i1 = s.indexOf("…")
+    let int? i2 = s.indexOf("é")
+    let int? i3 = s.indexOf("😀")
+    print(i1)
+    print(i2)
+    print(i3)
+    print(s.slice(1, 3))
+    print(s[1..<3])
+    print(s[5])
+    print(s.startsWith("hé"))
+    print(s.split("l").length)
+    let n = s.length
+    print(s[0..<n])
+    # other receiver shapes: len(), struct field, call result, concatenation, trim chain
+    print(len(s))
+    let b = StringUnicodeLengthBox(label = s)
+    print(b.label.length)
+    print(b.size())
+    print(string_unicode_length_name().length)
+    let t = (s + "é").length
+    print(t)
+    print(s.trim().length)
+    print("日本語".length)
+    var total = 0
+    for i in 0..<s.length:
+        total += 1
+    print(total)
+
+struct StringUnicodeLengthBox:
+    string label
+    req int size():
+        label.length
+
+def string string_unicode_length_name():
+    "ñandú"
+
+# ---- string_graphemes ----
+# Grapheme clusters (UAX #29) and terminal display width; identical in `boring run`
+# and `boring build`.
+def run_string_graphemes():
+    let e = "é"          # e + combining acute: 1 cluster, 2 scalars, 1 cell
+    print(e.length)
+    print(e.graphemeCount)
+    print(e.displayWidth)
+    let s = "héllo 日本 😀 🇫🇷"
+    print(s.length)
+    print(s.graphemeCount)
+    print(s.displayWidth)
+    let gs = s.graphemes()
+    print(gs.length)
+    print(gs[1].length)
+    print(gs[1] == e)
+    print(gs.join("|"))
+    # cutting at grapheme boundaries never splits a cluster
+    print(s.graphemeSlice(1, 3))
+    print(s.graphemeSlice(0, 2).graphemeCount)
+    print(s.graphemeSlice(6, 9))
+    print(s.graphemeSlice(2, 99))
+    print(s.graphemeSlice(-3, 2))
+    print("[" + s.graphemeSlice(5, 3) + "]")
+    print("日本".displayWidth)
+    print("😀".displayWidth)
+    print("".displayWidth)
+    print("".graphemeCount)
+    print("abc".displayWidth)
+    print("a​b".displayWidth)
+    let fam = "👨‍👩‍👧"
+    print(fam.graphemeCount)
+    print(fam.displayWidth)
+    var w = 0
+    for g in s.graphemes():
+        w += g.displayWidth
+    print(w)
+
+# ---- string_grapheme_untyped ----
+# Regression fixture for two string-method transpilation defects (checked by tests/transpile.rs and run.rs):
+#   1. `c.text.graphemeSlice(i, i + 1)` on a struct-param string field (was E0716).
+#   2. `let g = s.graphemeSlice(..)` (no annotation) then `g.displayWidth` (was E0609).
+
+struct StringGraphemeUntypedLabel:
+    pub string text
+
+pub def int string_grapheme_untyped_total_width(StringGraphemeUntypedLabel c):
+    var total = 0
+    for i in 0..<c.text.graphemeCount:
+        let g = c.text.graphemeSlice(i, i + 1)
+        total = total + g.displayWidth
+    return total
+
+def run_string_grapheme_untyped():
+    let c = StringGraphemeUntypedLabel(text="héllo")
+    print "{string_grapheme_untyped_total_width(c)}"
+
+# ---- string_grapheme_cast_var ----
+# Casting a string property (int-valued) to float, and graphemeSlice on a `var` String
+# local; identical in `boring run` and `boring build`.
+def float string_grapheme_cast_var_widthOf(string s):
+    (s.displayWidth as float)
+
+def run_string_grapheme_cast_var():
+    let s = "héllo 日本 😀"
+    let a = (s.displayWidth as float)
+    let b = (s.graphemeCount as float) / 2.0
+    let c = (s.length as float)
+    print(a)
+    print(b)
+    print(c)
+    print(string_grapheme_cast_var_widthOf(s))
+    let gs = s.graphemes()
+    let g = gs[6]
+    print((g.displayWidth as float) + 0.5)
+    print((g.graphemeCount as int32))
+    mut [string] lines = []
+    lines.push(s)
+    var last = lines[0]
+    var n = last.graphemeCount
+    while n > 7:
+        n -= 1
+        last = last.graphemeSlice(0, n)
+    print(last)
+    print(last.graphemeCount)
+
+def main() throws:
+    print "== string_temporary_method_chains =="
+    run_string_temporary_method_chains()
+    print "== string_len_cast_parse_field =="
+    run_string_len_cast_parse_field()
+    print "== string_methods_after_index =="
+    run_string_methods_after_index()
+    print "== string_unicode_length =="
+    run_string_unicode_length()
+    print "== string_graphemes =="
+    run_string_graphemes()
+    print "== string_grapheme_untyped =="
+    run_string_grapheme_untyped()
+    print "== string_grapheme_cast_var =="
+    run_string_grapheme_cast_var()

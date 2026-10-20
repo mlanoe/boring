@@ -1,0 +1,141 @@
+use Hook as def void()
+use Calc as def int(int)
+use THook as def void() throws
+
+# ---- optional_field_is_nil ----
+# `x.field is nil` / `is not nil` on optional struct fields (scalar and function-typed) must test the
+# real Option, not be constant-folded.
+
+struct OptionalFieldIsNilS:
+    int? x = nil
+    Hook? maybe = nil
+
+    req string describe():
+        if x is nil:
+            return "empty"
+        "set"
+
+def run_optional_field_is_nil():
+    let s = OptionalFieldIsNilS()
+    if s.x is nil:
+        print "nil"
+    if s.x is not nil:
+        print "notnil"
+    let t = OptionalFieldIsNilS(x = 3)
+    if t.x is nil:
+        print "nil2"
+    if t.x is not nil:
+        print "notnil2"
+    if s.maybe is nil:
+        print "nohook"
+    let u = OptionalFieldIsNilS(maybe = (): print("hook"))
+    if u.maybe is not nil:
+        print "hook set"
+
+    let w = OptionalFieldIsNilS(x = 9)
+    print w.describe()
+    print s.describe()
+
+# ---- optional_fn_param ----
+# A function PARAMETER of optional function type (`Hook? h`, through a `use` alias): nil checks,
+# optional calls (`h?()`), `if let` unwrapping, forwarding, and passing an optional fn field —
+# for both throwing and non-throwing fn types.
+
+struct OptionalFnParamS:
+    Hook? maybe = nil
+    THook? tmaybe = nil
+    Calc? calc = nil
+
+def optional_fn_param_f(Hook? h):
+    if h != nil:
+        print "has"
+        h?()
+    else:
+        print "none"
+
+def optional_fn_param_g(THook? h):
+    if h != nil:
+        print "has t"
+        try? h()
+    else:
+        print "none t"
+
+def int optional_fn_param_apply(Calc? c, int x):
+    if let k = c:
+        return k(x)
+    -1
+
+def optional_fn_param_forward(Hook? h):
+    optional_fn_param_f(h)
+    if h is nil:
+        print "forwarded nil"
+
+def run_optional_fn_param():
+    optional_fn_param_f(nil)
+    optional_fn_param_f((): print("called"))
+    let s = OptionalFnParamS()
+    optional_fn_param_f(s.maybe)
+    let u = OptionalFnParamS(maybe = (): print("field hook"), calc = (n): n * 10)
+    optional_fn_param_f(u.maybe)
+    optional_fn_param_forward(u.maybe)
+    optional_fn_param_forward(nil)
+    optional_fn_param_g(nil)
+    optional_fn_param_g(s.tmaybe)
+    print optional_fn_param_apply(nil, 4)
+    print optional_fn_param_apply((n): n + 1, 4)
+    print optional_fn_param_apply(u.calc, 4)
+    print optional_fn_param_apply(s.calc, 4)
+
+# ---- optional_let_return ----
+# Returning a `let`-bound optional local returns it as is (no extra `Some`), and
+# assigning a plain value to an optional `var` wraps it in `Some`.
+struct OptionalLetReturnAnimation:
+    int id
+
+struct OptionalLetReturnSlot:
+    var OptionalLetReturnAnimation? last = nil
+    def void put(OptionalLetReturnAnimation a):
+        last = a
+    def OptionalLetReturnAnimation? take():
+        let a = last
+        last = nil
+        a
+
+struct OptionalLetReturnT:
+    OptionalLetReturnAnimation animation
+
+# `var here = inherited` (type inferred from an optional param) stays optional.
+def OptionalLetReturnAnimation? optional_let_return_pick([OptionalLetReturnT] ts, OptionalLetReturnAnimation? inherited):
+    var here = inherited
+    for t in ts:
+        here = t.animation
+    here
+
+def run_optional_let_return():
+    mut s = OptionalLetReturnSlot()
+    s.put(OptionalLetReturnAnimation(id = 4))
+    let t = s.take()
+    let u = s.take()
+    if let x = t:
+        print x.id
+    if u == nil:
+        print "empty"
+    let inherited = OptionalLetReturnAnimation(id = 1)
+    let tt = OptionalLetReturnT(animation = OptionalLetReturnAnimation(id = 9))
+    var OptionalLetReturnAnimation? here = inherited
+    here = tt.animation
+    if let h = here:
+        print h.id
+    let ts = [OptionalLetReturnT(animation = OptionalLetReturnAnimation(id = 7))]
+    if let p = optional_let_return_pick(ts, nil):
+        print p.id
+    if let p = optional_let_return_pick([], OptionalLetReturnAnimation(id = 2)):
+        print p.id
+
+def main() throws:
+    print "== optional_field_is_nil =="
+    run_optional_field_is_nil()
+    print "== optional_fn_param =="
+    run_optional_fn_param()
+    print "== optional_let_return =="
+    run_optional_let_return()

@@ -349,8 +349,6 @@ macro_rules! transpile_project_test {
 transpile_test!(basics);
 transpile_test!(global_assign_rhs_reads_global);
 transpile_test!(strings);
-transpile_test!(split_call_arg_then_split);
-transpile_test!(string_temporary_method_chains);
 transpile_test!(control_flow);
 transpile_test!(match_stmt);
 transpile_test!(functions);
@@ -372,7 +370,7 @@ transpile_test!(throws_untyped_enum_catch);
 transpile_test!(protocols);
 transpile_test!(optionals);
 transpile_test!(enums);
-transpile_test!(for_loop_enum_array_camel_case_method);
+transpile_test!(for_scenarios);
 transpile_test!(newtypes);
 transpile_test!(guard);
 transpile_test!(with_stmt);
@@ -404,19 +402,12 @@ transpile_test!(trait_type_level_methods);
 // registration of the same case is only the interpreter baseline it's pinned
 // against, which already worked). See tests/cases/trait_dynamic_dispatch.br's own
 // doc comment.
-transpile_test!(trait_dynamic_dispatch);
-transpile_test!(trait_param_forwarding);
-transpile_test!(self_lent_reborrow);
-transpile_test!(trait_param_return);
-transpile_test!(trait_method_return);
-transpile_test!(trait_borrow_param);
-transpile_test!(trait_borrow_infer);
-transpile_test!(trait_borrow_method_infer);
-transpile_test!(trait_borrow_contract);
+transpile_test!(trait_scenarios);
+transpile_test!(self_scenarios);
+transpile_test!(trait_scenarios_2);
+transpile_test!(trait_scenarios_3);
 transpile_test!(trait_borrow_contract_impls);
-transpile_test!(struct_borrow_method_param);
-transpile_test!(trait_borrow_mut);
-transpile_test!(trait_borrow_method_param);
+transpile_test!(struct_scenarios);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);
 transpile_test!(trait_downcast_shared_actor_state);
@@ -426,7 +417,7 @@ transpile_test!(trait_downcast_shared_actor_state);
 // — see tests/cases/do_expr_value_for_loop.br's own doc comment. Found and
 // fixed (`src/transpiler/emit_expr.rs`'s `ExprKind::Do` arm) while
 // implementing the trailing array-block sugar below, which relies on this.
-transpile_test!(do_expr_value_for_loop);
+transpile_test!(misc_scenarios_2);
 
 // Trailing array-block sugar (docs/book.md, "Trailing array-block sugar") —
 // real `rustc`-build guard for both the flat (plain array-literal) and
@@ -461,24 +452,19 @@ transpile_test!(modules);
 transpile_test!(boring_stdlib_collections);
 transpile_test!(boring_stdlib_identity);
 transpile_test!(boring_stdlib_ui);
-transpile_test!(struct_default_labeled);
 transpile_test!(view_state_lowering);
-transpile_test!(view_field_struct_no_partial_eq);
+transpile_test!(view_scenarios_2);
 transpile_test!(view_state_array_methods);
 transpile_test!(view_state_empty_set);
 transpile_test!(view_state_set_dict_mutation);
 transpile_test!(view_bind_env);
-transpile_test!(view_method_modifiers);
-transpile_test!(view_state_seed);
-transpile_test!(fn_field_optional_alias);
-transpile_test!(fn_field_collections);
-transpile_test!(fn_field_collection_writes);
-transpile_test!(closure_string_literal_result);
+transpile_test!(view_scenarios);
+transpile_test!(fn_scenarios_2);
+transpile_test!(misc_scenarios_6);
 transpile_test!(view_env_provide);
-transpile_test!(actor_field_through);
+transpile_test!(actor_scenarios);
 transpile_test!(actor_slot_double_read);
 transpile_test!(view_env_only);
-transpile_test!(view_act_str_args_trait_obj);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
 // tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its
@@ -518,6 +504,9 @@ transpile_test!(array_pop_remove);
 transpile_test!(optional_pop_tail_call);
 transpile_test!(transpiler_coerce);
 transpile_test!(string_len_chars);
+// Merged scenarios (one cargo build instead of seven) -- generated from the individual
+// string_*.br cases by tools/merge_cases.py; see that script's header.
+transpile_test!(string_scenarios);
 transpile_test!(mixed_modulo);
 transpile_test!(range_unary);
 transpile_test!(closure_colon);
@@ -543,10 +532,7 @@ transpile_test!(qualifiers_actor);
 // doc comment and try_emit_mutex_method/try_emit_rwlock_method's fix.
 transpile_test!(actor_guard_camel_case_method);
 transpile_test!(qualified_ctor_positional_args);
-transpile_test!(actor_call_result_ctor_arg);
 transpile_test!(assert_eq_call_field_length);
-transpile_test!(actor_inferred_param_caller_reuse);
-transpile_test!(actor_field_method_via_call_local);
 transpile_test!(qualified_struct_literal_positional_args);
 transpile_test!(pipe);
 transpile_test!(inline_match);
@@ -573,7 +559,7 @@ transpile_test!(system_time);
 // method's `string` parameter. Fixed in `compute_let_ty_and_value`
 // (src/transpiler/emit_let.rs) by promoting the local at declaration regardless of
 // mutability, matching what an explicit `string` annotation already produced.
-transpile_test!(untyped_string_lit_local_to_type_method);
+transpile_test!(misc_scenarios_5);
 // An enum's
 // `type_methods` were silently dropped from codegen entirely -- `enum Foo { A(isize) }`
 // with no `impl Foo { fn make() ... }` block, even though the call site (`Foo::make()`)
@@ -664,7 +650,7 @@ transpile_test!(const_promotion_known_fn);
 // case's real value is exactly that real `cargo run` compile, same rationale
 // as `top_level_const` above.
 transpile_test!(struct_count_field);
-transpile_test!(field_method_same_name);
+transpile_test!(field_scenarios);
 // String-interpolating a struct field whose type is an array (`[int]`,
 // `[string]`, and one level of field chaining) emitted a bare
 // `println!("{}", p.scores)` on a `Vec<isize>`/`Vec<Rc<str>>` field -- these
@@ -672,7 +658,6 @@ transpile_test!(field_method_same_name);
 // exact same array in a local variable was already wrapped in the
 // transpiler's `BoringFmt` shim. This case's real value is the `cargo run`
 // compile, same rationale as `struct_count_field` above.
-transpile_test!(struct_field_array_interp);
 // `.add()`/`.contains()`/`.remove()` on a `{T}` (Set) struct field: the
 // transpiler's set-method remapping (`add` -> `HashSet::insert`, etc.) only
 // recognized a bare local variable tracked in `set_vars`, never a struct
@@ -755,7 +740,6 @@ transpile_test!(dict_string_key_index);
 // `var_struct_type`. See tests/cases/dict_field_via_non_self_local.br's own
 // doc comment.
 transpile_test!(dict_field_via_non_self_local);
-transpile_test!(dict_field_param_var_key_else);
 
 // A top-level (main-body) call site passing a struct-typed local (a struct-
 // element array here) whose bare NAME collides with some other already-
@@ -784,7 +768,6 @@ transpile_test!(var_struct_param_mutation);
 // enum actually declared).
 transpile_test!(builtin_name_user_members);
 transpile_test!(implicit_self_length_nontail);
-transpile_test!(throws_method_name_collision);
 transpile_test!(narrowing_cast_if_let);
 // A `string`-typed STRUCT FIELD (not a bare local/parameter) cast to a fixed-width
 // integer inside `guard let`/`if let` used to be misclassified as a numeric narrowing
@@ -816,9 +799,8 @@ transpile_test!(cast_bare_field_index);
 // field/index/method-result type resolution, making numeric casts emit string
 // parsing (`f32.trim().parse()`). Covers immutable/mutable/rebindable borrows
 // and an explicitly borrowed local alias.
-transpile_test!(explicit_borrow_field_type_cast);
 // Regression: `ord(c) < 32` / `ord(c) << 1` — see tests/cases/cast_lhs_of_lt.br.
-transpile_test!(cast_lhs_of_lt);
+transpile_test!(cast_scenarios);
 // Regression: `(if cond: a else: b) as T`, where every branch is an ordinary
 // numeric expression — the if/else's own branches weren't recognized by any
 // of emit_expr_cast's numeric-source checks, so the cast fell through to the
@@ -828,7 +810,6 @@ transpile_test!(cast_lhs_of_lt);
 transpile_test!(if_else_cast_numeric);
 // `(s.length as float)` numeric cast, `parseFloat`/`parseInt` on field/param strings, string-literal
 // promotion in `assert_eq`/`join` — see tests/cases/string_len_cast_parse_field.br.
-transpile_test!(string_len_cast_parse_field);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 
@@ -933,7 +914,6 @@ transpile_test!(mem_borrow_builtins);
 // lent as `&mut` instead of moved, and a non-`Clone` std type (`TcpStream`) passed by value
 // to a Boring function is moved instead of auto-`.clone()`d. See tests/cases/
 // external_read_buffer.br's own doc comment. Loopback TCP only.
-transpile_test!(external_read_buffer);
 
 // A `var` (rebindable out-parameter) param on a Boring-declared struct *method* is lent as
 // `&mut <place>` at the call site (was a by-value `.clone()`: E0308 / lost mutation). See
@@ -952,8 +932,7 @@ transpile_test!(mut_collection_param);
 // a trait method's implementer) -- was a by-value clone, the callee's writes lost. See
 // tests/cases/mut_struct_param.br's own doc comment; the interpreter side is the same case in
 // tests/run.rs.
-transpile_test!(mut_struct_param);
-transpile_test!(req_method_mut_param_write);
+transpile_test!(mut_scenarios);
 
 // The same `mut` struct / `mut [T]` lending when the receiver's type is only reachable through
 // declarations: indexed `[T]`/`[mut T]`/`[Trait]`/dict elements, loop variables, call and method-call
@@ -977,34 +956,30 @@ transpile_test!(lend_disjoint_receiver_ok);
 // A bare-`mut` local collection initialised from another variable (`mut {K=V} x = env`) is
 // tracked as a dict/array/set like the `var` form -- `Type::Mut(..)` wrapper looked through in
 // `emit_let`'s metadata tracking (was `x["k"] = v` array-indexing / un-rewritten `.add`).
-transpile_test!(mut_local_collection_alias);
+transpile_test!(mut_scenarios_2);
 
 // A `mut`/`var mut` collection local passed by value (struct / enum-variant constructor field, by-value
 // call arg) is cloned like a `var`/`let` one, so it can be reused afterwards (was a move -> rustc E0382);
 // array/set locals of any spelling are cloned in a constructor field too. Lent `mut [T]` params and `var`
 // out-params keep `&mut`. `Type::Mut(..)` wrapper looked through in `emit_expr_owned`'s clone arm.
-transpile_test!(mut_collection_by_value_reuse);
 
 // Last-use analysis (`src/transpiler/last_use.rs`): a by-value read that is provably the variable's
 // last use is a Rust move, every other read (loop body, other branch, later closure/defer, same
 // statement as a borrow, ...) must still clone -- compile+run in all four configs.
 transpile_test!(last_use_move);
 transpile_test!(field_by_value_reuse);
-transpile_test!(by_value_arg_then_reuse);
+transpile_test!(misc_scenarios);
 transpile_test!(destructured_slice_by_value_reuse);
 transpile_test!(lend_and_read_same_local);
 transpile_test!(lend_and_read_same_local_lock_wrapper);
 
-transpile_test!(mut_local_float_array_elem_type);
 
 // `push` onto a `mut`/`var mut` local `[Trait]` array boxes the element like the `var` form --
 // `Type::Mut(..)` wrapper looked through in the push path's element-trait lookup (was E0308).
-transpile_test!(mut_local_trait_array_push);
 
 // An array literal bound to a `mut [mut Trait]` local (element-`mut` spelling,
 // `Type::Array(Type::Mut(Named))`) boxes each element, like the plain `[Trait]` form -- the
 // element's `Type::Mut` wrapper is looked through at every `[Trait]` match (was E0308).
-transpile_test!(mut_elem_trait_array_literal);
 transpile_test!(dyn_struct_fields_optional);
 transpile_test!(dyn_struct_transitive_iflet);
 transpile_test!(dyn_return_borrowed_field_req_trait);
@@ -1015,7 +990,7 @@ transpile_test!(shared_dyn_def_trait_stays_boxed);
 // A Boring-declared struct method named like a builtin Vec/iterator index method (`swap`,
 // `insert`, `drain`, ...) no longer gets its first argument cast `as usize`. See
 // tests/cases/method_name_collides_builtin.br's own doc comment.
-transpile_test!(method_name_collides_builtin);
+transpile_test!(misc_scenarios_7);
 
 // `@derive(Serialize, Deserialize)`/`fromJson<T>()`/`json()` -- see tests/cases/
 // json_serde_rename.br's own doc comment for the two real bugs this pins (a bare,
@@ -1024,7 +999,7 @@ transpile_test!(method_name_collides_builtin);
 // plus the field-level `@serde(rename = "...")` addition. Now registered in
 // tests/run.rs too -- both `fromJson` and `json(v)` are real on the interpreter side
 // (src/interpreter/json.rs), so this case's second line agrees between backends too.
-transpile_test!(json_serde_rename);
+transpile_test!(json_scenarios);
 
 // docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins
 // (`fromJson<T>(s)`, `fs.read`/`fs.readLines`/`fs.readBytes`) that already do their own
@@ -1051,9 +1026,6 @@ transpile_test!(try_wrap_double_handling);
 //                           `will_have_debug` gate: `@derive(Clone, Serialize,
 //                           Deserialize)` on an enum emitted `write!(f, "{:?}", self)`
 //                           for a non-`Debug` type and never compiled.
-transpile_test!(json_untagged_enum);
-transpile_test!(json_serde_shapes);
-transpile_test!(enum_derive_no_debug);
 
 // docs/self-field-loop-match-borrow-bug.md -- a `for`/`match` directly over a bare
 // struct field (implicit `self.field`) inside a `req`/`def` method generated Rust
@@ -1220,7 +1192,6 @@ transpile_test!(guard_let_else_panic_throws);
 // zero-prefills every field via `Default::default()` — a hard compile
 // failure for struct-typed fields, since Boring structs don't implement
 // `Default`. See `emit_init` in `src/transpiler/emit_struct.rs`.
-transpile_test!(init_bare_field_assign);
 // `init_bare_field_assign_qualified`: same bug as `init_bare_field_assign`,
 // for 'shared/'actor/'guard-qualified fields assigned via bare names.
 transpile_test!(init_bare_field_assign_qualified);
@@ -1232,11 +1203,10 @@ transpile_test!(init_bare_field_assign_qualified);
 // init() body never run), and also broken for out-of-declaration-order
 // labeled args. See `try_emit_labeled_init_call` in
 // `src/transpiler/emit_expr.rs`.
-transpile_test!(labeled_ctor_init_call);
+transpile_test!(labeled_scenarios);
 // `labeled_ctor_init_call_qualified`: same bug as `labeled_ctor_init_call`,
 // for a 'actor-qualified field constructed via a labeled arg whose init
 // param name differs from the field name.
-transpile_test!(labeled_ctor_init_call_qualified);
 // `owned_call_arg_no_double_box`: passing a `Counter'owned` (Box<Counter>)
 // variable to a plain function call re-wrapped it in a second
 // `Box::new(...)` — `bump(ac)` emitted `bump(Box::new(ac))`, a
@@ -1313,9 +1283,8 @@ transpile_test!(init_owned_trait_param);
 // since there's no `'owned` call-site wrapping involved.
 transpile_test!(init_bare_trait_param);
 // `var_param_bare_trait_assign`: assigning to a bare-trait `var` out-param boxes the value.
-transpile_test!(var_param_bare_trait_assign);
+transpile_test!(var_scenarios);
 // `var_rebind_alias_independent`: `var c2 = c1` then rebinding either is independent, for bare/'owned/'shared/'actor/'guard/trait-typed locals.
-transpile_test!(var_rebind_alias_independent);
 // Managed mode can't call a method on a `'owned` local at all today (separate gap), so strict-only.
 transpile_test!(var_rebind_owned, ignore_managed);
 
@@ -1332,7 +1301,7 @@ transpile_test!(var_rebind_owned, ignore_managed);
 // type itself to `Type::Qualified(_, OwnerQual::Owned)` up front so every
 // existing `'owned`-aware return/tail-expression/constructor code path already
 // used for an explicit `T'owned` annotation applies here too.
-transpile_test!(oversized_return_boxed_direct);
+transpile_test!(oversized_scenarios);
 // Companion case: the constructor is bound to a local first and returned via a
 // bare tail variable (`let b = Big(...); b`). This also depends on a second,
 // closely-related fix in `compute_let_ty_and_value` (src/transpiler/emit_let.rs):
@@ -1346,17 +1315,14 @@ transpile_test!(oversized_return_boxed_direct);
 // function's own unpromoted managed-mode return type — see the `.br` file's own doc
 // comment and docs/qualifiers.md's now-closed "Managed mode and a bare oversized local
 // variable" section for the previously-open gap this closes.
-transpile_test!(oversized_return_boxed_via_let);
 // Contrast case: a struct SMALLER than the threshold must never be size-boxed,
 // in either return shape — guards `promote_bare_return_ty`/the
 // `compute_let_ty_and_value` fix against firing unconditionally.
-transpile_test!(oversized_return_small_stays_unboxed);
 // Sibling case: a bare oversized struct used as a STRUCT FIELD must stay
 // completely unaffected (a separate, already-correct suppression mechanism,
 // `emit_field_type`) — pins that down against a future regression. Managed mode
 // variants now un-ignored — see the `.br` file's own doc comment for why the same
 // `resolve_fallback` mode-awareness fix above also closes this sibling gap.
-transpile_test!(oversized_struct_field_stays_inline);
 // Sibling case (previously out-of-scope bug, tracked separately — see
 // oversized_struct_field_stays_inline.br's header comment): a bare oversized
 // struct used as a free-function PARAMETER with no other usage signal must
@@ -1365,7 +1331,6 @@ transpile_test!(oversized_struct_field_stays_inline);
 // `OwnerQual::Borrow`/`OwnerQual::BorrowMut` branches now suppress Priority 6
 // on their `Named` inner the same way the `OwnerQual::Owned` branch already
 // did (src/transpiler/emit_top.rs).
-transpile_test!(oversized_param_borrow_stays_unboxed);
 
 // ── `'atomic` qualifier (see docs/qualifiers.md's `'atomic` section) ────────────────
 
@@ -1394,13 +1359,12 @@ transpile_test!(atomic_promotion_binding_permission_regression);
 // fields to route a mutation through, unlike a struct-typed binding) must go
 // through the lock — both outside and inside a `with` block. See the fixture's
 // own doc comment and `src/transpiler/mod.rs`'s `var_lock_scalar`.
-transpile_test!(actor_guard_scalar_mutation);
+transpile_test!(actor_scenarios_2);
 
 // Regression: `outer_var.field.method(args)` (a plain, non-`self` local variable)
 // through an `'actor`-qualified struct field must route through the lock/borrow
 // guard, same as the already-working `self.field.method()` case — see the fixture's
 // own doc comment and `try_emit_actor_field_method` (src/transpiler/emit_methods.rs).
-transpile_test!(actor_field_method_outer_var);
 
 // `'observed` composable ownership-qualifier suffix (docs/book.md's "'observed"
 // section): all four legal compositions, `.value` read-only never notifying,
@@ -1480,7 +1444,7 @@ transpile_test!(collection_named_methods);
 // `let`/`var` locals were), so `s.add(x)` was emitted as-is (E0599) and `s.remove(x)` as an
 // array remove-at (E0308); `set_vars` also leaked from one function into the next. See
 // `seed_param_locals` in `src/transpiler/emit_top.rs`.
-transpile_test!(set_param_methods);
+transpile_test!(misc_scenarios_4);
 
 // Regression test: a plain `[T]` parameter used only via `.length`/`.count` was promoted to a
 // GPU-resident `BoringKernelArg<T>` parameter by the exclusive-ctor-arg scan (the size query counted
@@ -1491,54 +1455,26 @@ transpile_test!(array_param_length_only);
 // A struct method calling a sibling through `self.` (the bare form is a diagnostic, covered by
 // `tests/bare_sibling_method_call_build_fails.rs`), and a same-named top-level function still
 // winning a bare call.
-transpile_test!(self_sibling_method_call);
 
 // `var mut`/`mut` collection locals and parameters (the permitted forms of content mutation once a
 // bare `var` collection is rebindable-only) still transpile to Rust that compiles and runs.
 transpile_test!(var_mut_collection_ok);
-transpile_test!(field_mut_content_mutation);
 // A `mut` struct param whose struct has a dynamic field (`mut [string] log`) is lent as `&mut` too
 // (it is outside universal borrow inference): was by value, the caller never saw `push`.
-transpile_test!(field_mut_param_content_mutation);
-transpile_test!(string_methods_after_index);
-transpile_test!(cast_float_lit_to_int);
-transpile_test!(zero_arg_ctor_defaults_with_optional);
-transpile_test!(unwrap_or_struct_local_by_value);
 
 // Same case through `boring build`: `Rt` holding `M?` (which holds a `Node?` trait object) must
 // not derive Debug/Clone/PartialEq (E0277/E0369 before `type_holds_dyn` saw through `TypeParam`).
-transpile_test!(single_letter_struct_holds_dyn);
 
-transpile_test!(parse_float_if_let_dict_index);
-transpile_test!(self_field_collection_return_by_value);
+transpile_test!(parse_scenarios);
 transpile_test!(trait_method_casing_unknown_receiver);
 transpile_test!(stored_closure_captures_self_and_loop_item);
 transpile_test!(view_callbacks_capture_state_handles);
-transpile_test!(view_let_bound_callbacks);
-transpile_test!(view_state_owner_report_build);
-transpile_test!(view_trailing_block_multiline_callback);
-transpile_test!(optional_dyn_field_struct_literal_clone);
 transpile_test!(trait_object_no_rebox);
 transpile_test!(trait_object_fallback_optional);
-transpile_test!(nested_dict_field_assign_in_place);
-transpile_test!(actor_collection_field_derive);
+transpile_test!(misc_scenarios_3);
 transpile_test!(fn_field_handle_call);
-transpile_test!(fn_field_optional_self_call);
 transpile_test!(fn_field_optional_call);
 transpile_test!(fn_handle_pass_and_str_arg);
-transpile_test!(fn_handle_inline_closure_ctor);
-transpile_test!(optional_field_is_nil);
-transpile_test!(optional_fn_param);
-transpile_test!(fn_typed_local_alias);
-transpile_test!(print_optional_value);
-transpile_test!(guard_string_trim_temporary);
-transpile_test!(struct_param_nested_loop_call);
-transpile_test!(for_mut_elem_iter_mut);
-transpile_test!(closure_owned_captures);
-transpile_test!(parse_on_expr_receiver);
-transpile_test!(closure_param_forward);
-transpile_test!(optional_let_return);
-transpile_test!(string_unicode_length);
-transpile_test!(string_graphemes);
-transpile_test!(string_grapheme_untyped);
-transpile_test!(string_grapheme_cast_var);
+transpile_test!(fn_scenarios);
+transpile_test!(optional_scenarios);
+transpile_test!(closure_scenarios);

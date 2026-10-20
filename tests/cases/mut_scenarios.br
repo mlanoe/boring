@@ -1,0 +1,315 @@
+# ---- mut_struct_param ----
+# Regression test: a `mut` (content-mutable, non-rebindable) user-struct parameter lends the
+# caller's value (docs/book.md "`mut` vs `var` on a struct parameter": `mut Point p` lets the
+# callee mutate p's content). Free function and struct method alike, in both backends:
+#   - the callee's signature is `&mut T`, whether the body writes a field (`p.x = 7`), compound-
+#     assigns it, or calls a `def` method on it,
+#   - the call site lends `&mut place` -- no `.clone()` (the callee's writes landed on the
+#     throwaway clone and were lost),
+#   - `boring run` agrees: the callee's changes are visible to the caller.
+# Also covers: a one-uppercase-letter struct name (`struct P` -- spelled as an implicit type
+# parameter by the parser), a lent param forwarded to another lent param (free fn -> free fn,
+# method -> method), a bare struct field as the argument of a call on a *different* field
+# (`b.bump(inner)` -> `self.b.bump(&mut self.inner)`; lending a field of `self` to a method of
+# `self` itself is rustc's own E0499, not something Boring can emit around), a struct and a
+# `mut [T]` lent side by side, and a trait method whose implementer takes a `mut` struct --
+# called on the concrete struct and through the trait type.
+
+struct MutStructParamCounter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+struct MutStructParamP:
+    var int x = 0
+
+def mut_struct_param_poke(mut MutStructParamP p):
+    p.x = 7
+
+def mut_struct_param_set_value(mut MutStructParamCounter c):
+    c.value = 5
+
+def mut_struct_param_add_value(mut MutStructParamCounter c):
+    c.value += 10
+
+def mut_struct_param_call_inc(mut MutStructParamCounter c):
+    c.inc()
+
+def mut_struct_param_relay(mut MutStructParamCounter c):
+    mut_struct_param_set_value(c)
+    mut_struct_param_add_value(c)
+
+def mut_struct_param_fill_free(mut [uint8] b):
+    b[0] = 5 as uint8
+
+trait MutStructParamPoker:
+    def poke_it(mut MutStructParamCounter c)
+    def stamp(mut [uint8] b)
+
+struct MutStructParamA as MutStructParamPoker:
+    def poke_it(mut MutStructParamCounter c):
+        c.value += 100
+
+    def stamp(mut [uint8] b):
+        b[1] = 8 as uint8
+
+# A call through the trait type (`Box<dyn Poker>`): no struct decl to read the lent flags
+# from, the trait's own declaration is used.
+def mut_struct_param_drive(mut MutStructParamPoker p, mut MutStructParamCounter c, mut [uint8] b):
+    p.poke_it(c)
+    p.stamp(b)
+
+struct MutStructParamBumper:
+    var int hits = 0
+
+    def bump(mut MutStructParamCounter c):
+        c.value += 1
+        hits += 1
+
+    def forward(mut MutStructParamCounter c):
+        self.bump(c)
+        self.bump(c)
+
+    def fill(mut MutStructParamCounter c, mut [uint8] b):
+        c.value = 9
+        b[0] = 6 as uint8
+        hits += 1
+
+struct MutStructParamHolder:
+    var mut MutStructParamCounter inner = MutStructParamCounter()
+    var mut MutStructParamBumper b = MutStructParamBumper()
+
+    def bump_inner():
+        b.bump(inner)
+
+def run_mut_struct_param():
+    var mut MutStructParamP p = MutStructParamP()
+    mut_struct_param_poke(p)
+    print p.x
+
+    mut MutStructParamCounter c = MutStructParamCounter()
+    mut_struct_param_set_value(c)
+    print c.value
+    mut_struct_param_add_value(c)
+    print c.value
+    mut_struct_param_call_inc(c)
+    print c.value
+
+    mut MutStructParamCounter r = MutStructParamCounter()
+    mut_struct_param_relay(r)
+    print r.value
+
+    var mut [uint8] buf = [0 as uint8 for i in 0..<4]
+    mut_struct_param_fill_free(buf)
+    print buf[0]
+
+    mut MutStructParamBumper h = MutStructParamBumper()
+    h.bump(c)
+    print c.value
+    h.forward(c)
+    print c.value
+    h.fill(c, buf)
+    print c.value
+    print buf[0]
+    print h.hits
+
+    mut MutStructParamHolder hold = MutStructParamHolder()
+    hold.bump_inner()
+    print hold.inner.value
+    print hold.b.hits
+
+    mut MutStructParamA a = MutStructParamA()
+    a.poke_it(c)
+    print c.value
+    mut_struct_param_drive(a, c, buf)
+    print c.value
+    print buf[1]
+
+# ---- mut_collection_by_value_reuse ----
+# Regression test: a `mut` / `var mut` collection local passed BY VALUE (struct / enum-variant
+# constructor field, or a by-value call argument) must be cloned, exactly like a `var`/`let`
+# one -- Boring's value semantics: passing by value never invalidates the caller's variable.
+#
+# The parser wraps a `mut`-bound declared type in `Type::Mut(..)` (an owned permission marker
+# with no Rust type of its own), so `var_types["b"]` was `Mut(Dict(..))` and the by-value
+# clone arm of `emit_expr_owned` (`Dict`/`Array`/`Set`/`Named`) missed it: `Holder(b)` was
+# emitted `Holder { fields: b }` (a move) while the same `var {K=V}` got `b.clone()`, so reusing
+# `b` failed rustc with E0382. Separately, array/set locals (any spelling) were never cloned in
+# a constructor field at all (`emit_let_value_fallback` only cloned structs/enums/borrowed
+# params).
+#
+# Also pins what must NOT change: a lent `mut [T]` parameter still receives `&mut`, a `var`
+# out-parameter still receives `&mut` and its rebind is still visible to the caller.
+
+enum MutCollectionByValueReuseWrapper:
+    Dict({string=int} fields)
+    List([int] items)
+    Bag({int} items)
+
+struct MutCollectionByValueReuseHolder:
+    pub var {string=int} fields
+    pub var [int] xs
+
+def int mut_collection_by_value_reuse_total({string=int} d):
+    d["a"] else 0
+
+def int mut_collection_by_value_reuse_sum_list([int] l):
+    var int s = 0
+    for x in l:
+        s += x
+    s
+
+def mut_collection_by_value_reuse_grow(mut [int] xs):
+    xs.push(100)
+
+def mut_collection_by_value_reuse_refill(var [int] out):
+    out = [7, 7]
+
+# A lent `mut [T]` param read by value: clones to an owned Vec, the lent content survives.
+def int mut_collection_by_value_reuse_lent_then_reuse(mut [int] xs):
+    let h = MutCollectionByValueReuseHolder({=}, xs)
+    let h2 = MutCollectionByValueReuseHolder({=}, xs)
+    xs.push(2)
+    h.xs.length + h2.xs.length + xs.length
+
+def int mut_collection_by_value_reuse_wrapper_len(MutCollectionByValueReuseWrapper w):
+    match w:
+        Dict(fields): fields.length
+        List(items): items.length
+        Bag(items): items.length
+
+def run_mut_collection_by_value_reuse() throws:
+    # dict: `mut` and `var mut`, constructor + enum variant + by-value call arg
+    mut {string=int} c = {=}
+    c["a"] = 1
+    let hc1 = MutCollectionByValueReuseHolder(c, [])
+    let hc2 = MutCollectionByValueReuseHolder(c, [])
+    var mut {string=int} b = {=}
+    b["a"] = 2
+    let hb1 = MutCollectionByValueReuseHolder(b, [])
+    let hb2 = MutCollectionByValueReuseHolder(b, [])
+    let wb1 = MutCollectionByValueReuseWrapper.Dict(b)
+    let wb2 = MutCollectionByValueReuseWrapper.Dict(b)
+    print "dict {hc1.fields["a"] else 0} {hc2.fields["a"] else 0} {hb1.fields["a"] else 0} {hb2.fields["a"] else 0} {mut_collection_by_value_reuse_wrapper_len(wb1)} {mut_collection_by_value_reuse_wrapper_len(wb2)} {mut_collection_by_value_reuse_total(b) + mut_collection_by_value_reuse_total(b)}"
+
+    # array: `var`, `mut`, `var mut` -- all the same
+    var [int] av = [1, 2]
+    mut [int] am = [1, 2, 3]
+    var mut [int] avm = [1, 2, 3, 4]
+    am.push(4)
+    avm.push(5)
+    let ha1 = MutCollectionByValueReuseHolder({=}, av)
+    let ha2 = MutCollectionByValueReuseHolder({=}, av)
+    let hm1 = MutCollectionByValueReuseHolder({=}, am)
+    let hm2 = MutCollectionByValueReuseHolder({=}, am)
+    let hv1 = MutCollectionByValueReuseHolder({=}, avm)
+    let hv2 = MutCollectionByValueReuseHolder({=}, avm)
+    let wm1 = MutCollectionByValueReuseWrapper.List(am)
+    let wm2 = MutCollectionByValueReuseWrapper.List(avm)
+    print "array {ha1.xs.length} {ha2.xs.length} {hm1.xs.length} {hm2.xs.length} {hv1.xs.length} {hv2.xs.length} {mut_collection_by_value_reuse_wrapper_len(wm1)} {mut_collection_by_value_reuse_wrapper_len(wm2)} {mut_collection_by_value_reuse_sum_list(am) + mut_collection_by_value_reuse_sum_list(am)}"
+
+    # set
+    mut {int} sm = {1, 2}
+    sm.add(3)
+    var mut {int} svm = {1}
+    svm.add(9)
+    let wsm1 = MutCollectionByValueReuseWrapper.Bag(sm)
+    let wsm2 = MutCollectionByValueReuseWrapper.Bag(sm)
+    let wsv1 = MutCollectionByValueReuseWrapper.Bag(svm)
+    let wsv2 = MutCollectionByValueReuseWrapper.Bag(svm)
+    print "set {mut_collection_by_value_reuse_wrapper_len(wsm1)} {mut_collection_by_value_reuse_wrapper_len(wsm2)} {mut_collection_by_value_reuse_wrapper_len(wsv1)} {mut_collection_by_value_reuse_wrapper_len(wsv2)} {sm.length} {svm.length}"
+
+    # lent `mut` param + `var` out-param must keep their by-reference behaviour
+    mut [int] lent = [1]
+    mut_collection_by_value_reuse_grow(lent)
+    mut_collection_by_value_reuse_grow(lent)
+    print "lent {lent.length} {mut_collection_by_value_reuse_lent_then_reuse(lent)} {lent.length}"
+    var mut [int] out = [1]
+    let before = MutCollectionByValueReuseHolder({=}, out)
+    mut_collection_by_value_reuse_refill(out)
+    let after = MutCollectionByValueReuseHolder({=}, out)
+    print "out {before.xs.length} {after.xs.length} {out[0]} {out.length}"
+
+# ---- mut_local_trait_array_push ----
+# Regression test: `push`/`append` onto a bare-`mut` / `var mut` local array of a trait type must
+# box the element (`Box<dyn Trait>`) exactly like a `var` (rebindable-only) local would. The parser wraps a `mut`-bound
+# declared type in `Type::Mut(..)` (an owned permission marker with no Rust type of its own), and
+# the push path's element-trait lookup matched `Type::Array` on `var_types[..]` directly -- so
+# `a.push(Text("x"))` was emitted un-boxed (rustc E0308: expected `Box<dyn Widget>`, found `Text`).
+
+trait MutLocalTraitArrayPushWidget:
+    req string render()
+
+struct MutLocalTraitArrayPushText as MutLocalTraitArrayPushWidget:
+    pub string text
+    req string render(): text
+
+struct MutLocalTraitArrayPushLabel as MutLocalTraitArrayPushWidget:
+    pub string name
+    req string render(): "<" + name + ">"
+
+def run_mut_local_trait_array_push():
+    var mut [MutLocalTraitArrayPushWidget] a = []
+    a.push(MutLocalTraitArrayPushText("x"))
+    a.push(MutLocalTraitArrayPushLabel("y"))
+    mut [MutLocalTraitArrayPushWidget] b = []
+    b.push(MutLocalTraitArrayPushText("v"))
+    b.push(MutLocalTraitArrayPushLabel("w"))
+    for w in a:
+        print w.render()
+    for w in b:
+        print w.render()
+
+# ---- mut_elem_trait_array_literal ----
+# Regression test: an array literal bound to a local declared with the element-`mut` spelling
+# `mut [mut Trait] x = [Impl(), Impl()]` must box each element (`Box<dyn Trait>`) exactly like
+# the plain `[Trait]` / `var mut [Trait]` forms do. The declared type is
+# `Type::Array(Type::Mut(Named))`; `emit_let_value` only stripped the *outer* `Type::Mut`, so
+# the `[Trait]` literal-boxing arm never matched the `Mut`-wrapped element and the literal was
+# emitted as `vec![Sq::new(), Sq::new()]` (rustc E0308: expected `Box<dyn Poker>`, found `Sq`).
+
+trait MutElemTraitArrayLiteralPoker:
+    req tap(int x)
+
+struct MutElemTraitArrayLiteralSq as MutElemTraitArrayLiteralPoker:
+    var int n = 0
+
+    req tap(int x):
+        print x
+
+struct MutElemTraitArrayLiteralTri as MutElemTraitArrayLiteralPoker:
+    var int n = 0
+
+    req tap(int x):
+        print x + 100
+
+def run_mut_elem_trait_array_literal():
+    mut [mut MutElemTraitArrayLiteralPoker] mps = [MutElemTraitArrayLiteralSq(), MutElemTraitArrayLiteralTri()]
+    mps[0].tap(1)
+    mps[1].tap(2)
+    mps.push(MutElemTraitArrayLiteralSq())
+    mps[2].tap(3)
+    for p in mps:
+        p.tap(7)
+    let MutElemTraitArrayLiteralBag bag = MutElemTraitArrayLiteralBag([MutElemTraitArrayLiteralSq(), MutElemTraitArrayLiteralTri()])
+    print mut_elem_trait_array_literal_total(bag.items)
+    mut [mut MutElemTraitArrayLiteralPoker] other = []
+    other.push(MutElemTraitArrayLiteralTri())
+    other[0].tap(9)
+
+struct MutElemTraitArrayLiteralBag:
+    pub var [mut MutElemTraitArrayLiteralPoker] items
+
+def int mut_elem_trait_array_literal_total([mut MutElemTraitArrayLiteralPoker] ps):
+    return ps.length
+
+def main() throws:
+    print "== mut_struct_param =="
+    run_mut_struct_param()
+    print "== mut_collection_by_value_reuse =="
+    run_mut_collection_by_value_reuse()
+    print "== mut_local_trait_array_push =="
+    run_mut_local_trait_array_push()
+    print "== mut_elem_trait_array_literal =="
+    run_mut_elem_trait_array_literal()

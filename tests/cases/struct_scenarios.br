@@ -1,0 +1,173 @@
+# ---- struct_borrow_method_param ----
+# Explicit `T&` / `mut T&` parameters of methods: the caller keeps ownership and passes a
+# reference, whatever the receiver (struct, enum, trait object, 'actor value) and whatever the
+# argument (local used twice, fresh value, field, forwarded borrowed parameter, implicit-self field).
+struct StructBorrowMethodParamPt:
+    var int x
+
+struct StructBorrowMethodParamBox2:
+    StructBorrowMethodParamPt p
+
+struct StructBorrowMethodParamR:
+    var int n = 0
+    StructBorrowMethodParamPt own
+    def int m(StructBorrowMethodParamPt& p):
+        n += 1
+        p.x
+    def int fwd(StructBorrowMethodParamPt& p):
+        self.m(p)
+    req int peek(StructBorrowMethodParamPt& p):
+        p.x
+    req int viaField():
+        self.peek(own)
+    def int bump(mut StructBorrowMethodParamPt& p):
+        p.x += 1
+        p.x
+    def int total([int]& xs):
+        var s = 0
+        for v in xs:
+            s += v
+        s
+
+enum StructBorrowMethodParamShape:
+    A
+    B
+    def int m(StructBorrowMethodParamPt& p):
+        p.x * 2
+
+trait StructBorrowMethodParamReader:
+    req int read(StructBorrowMethodParamPt& p)
+
+struct StructBorrowMethodParamDoubler as StructBorrowMethodParamReader:
+    req int read(StructBorrowMethodParamPt& p): p.x * 2
+
+def run_struct_borrow_method_param():
+    mut r = StructBorrowMethodParamR(own = StructBorrowMethodParamPt(9))
+    let p = StructBorrowMethodParamPt(3)
+    print r.m(p)
+    print r.m(p)
+    print r.m(StructBorrowMethodParamPt(4))
+    print r.fwd(p)
+    let b = StructBorrowMethodParamBox2(StructBorrowMethodParamPt(5))
+    print r.m(b.p)
+    print r.viaField()
+    var mut q = StructBorrowMethodParamPt(7)
+    print r.bump(q)
+    print q.x
+    let xs = [1, 2, 3]
+    print r.total(xs)
+    print r.total(xs)
+    let StructBorrowMethodParamShape e = StructBorrowMethodParamShape.A
+    print e.m(p)
+    print e.m(p)
+    let StructBorrowMethodParamReader rd = StructBorrowMethodParamDoubler()
+    print rd.read(p)
+    print rd.read(p)
+
+# ---- struct_default_labeled ----
+enum StructDefaultLabeledAl:
+    Leading
+    Center
+
+struct StructDefaultLabeledC:
+    [string] kids
+    int n = 3
+
+struct StructDefaultLabeledD:
+    int n = 3
+    float? f = nil
+    [string] kids
+
+struct StructDefaultLabeledE:
+    StructDefaultLabeledAl a = StructDefaultLabeledAl.Center
+    string s = "hi"
+    [int] xs = [1, 2]
+    int k
+
+struct StructDefaultLabeledS:
+    int v = 7
+
+def run_struct_default_labeled():
+    let c = StructDefaultLabeledC(kids = ["a"])
+    print c.n
+    let c2 = StructDefaultLabeledC(["b"])
+    print c2.n
+    let d = StructDefaultLabeledD(f = 1.0, kids = ["a"])
+    print d.n
+    let d2 = StructDefaultLabeledD(kids = ["z"])
+    print d2.n
+    let e = StructDefaultLabeledE(k = 5)
+    print e.s
+    print e.xs[1]
+    print e.k
+    let s = StructDefaultLabeledS()
+    print s.v
+
+# ---- struct_field_array_interp ----
+# Regression test: string-interpolating a struct *field* whose type is an
+# array didn't compile. The transpiler wraps a plain local array variable
+# (`let a = [1,2,3]` then `print "{a}"`) in its `BoringFmt` shim so it prints
+# unquoted (`[1, 2, 3]`) instead of relying on `Vec<T>`'s (nonexistent)
+# `Display` impl -- but that shim-wrapping decision was made purely from the
+# interpolated expression's own shape (`ExprKind::Var`/`ExprKind::Array`/a
+# function call with a known collection return type), and never considered a
+# struct *field* access (`ExprKind::Field`) resolving to an array type. So
+# `print "{p.scores}"` on a `Person` with `[int] scores` emitted a bare
+# `println!("{}", p.scores)`, and rustc rejected it (E0277: `Vec<isize>`
+# doesn't implement `Display`).
+#
+# Covers:
+#   * a direct `[int]` field, interpolated on its own (the original repro).
+#   * a `[string]` field, to confirm it goes through the same `BoringFmt`
+#     unquoted-Display path as a local `[string]` var, not a `{:?}` fallback
+#     that would print with debug quotes (`["a", "b"]` vs `[a, b]`).
+#   * a *chained* field access (`p.inner.scores`) one level deep.
+
+struct StructFieldArrayInterpInner:
+    [int] scores
+
+struct StructFieldArrayInterpPerson:
+    [int] scores
+    [string] tags
+    StructFieldArrayInterpInner inner
+
+def run_struct_field_array_interp():
+    let p = StructFieldArrayInterpPerson([1, 2, 3], ["red", "green"], StructFieldArrayInterpInner([9, 8, 7]))
+    print "{p.scores}"
+    print "{p.tags}"
+    print "{p.inner.scores}"
+
+# ---- struct_param_nested_loop_call ----
+# A struct-typed loop variable passed on to a function taking a struct param is lent by
+# reference (`&c`), including inside a nested `for` over that function's own result.
+struct StructParamNestedLoopCallPlaced:
+    int id
+    string kind
+    [StructParamNestedLoopCallPlaced] children
+
+def [StructParamNestedLoopCallPlaced] struct_param_nested_loop_call_findAll(StructParamNestedLoopCallPlaced p, string kind):
+    mut [StructParamNestedLoopCallPlaced] out = []
+    if p.kind == kind:
+        out.push(p)
+    for c in p.children:
+        for f in struct_param_nested_loop_call_findAll(c, kind):
+            out.push(f)
+    out
+
+def run_struct_param_nested_loop_call():
+    let a = StructParamNestedLoopCallPlaced(id = 3, kind = "b", children = [])
+    let b = StructParamNestedLoopCallPlaced(id = 2, kind = "a", children = [a])
+    let root = StructParamNestedLoopCallPlaced(id = 1, kind = "b", children = [b])
+    for p in struct_param_nested_loop_call_findAll(root, "b"):
+        print p.id
+    print struct_param_nested_loop_call_findAll(root, "a").length
+
+def main() throws:
+    print "== struct_borrow_method_param =="
+    run_struct_borrow_method_param()
+    print "== struct_default_labeled =="
+    run_struct_default_labeled()
+    print "== struct_field_array_interp =="
+    run_struct_field_array_interp()
+    print "== struct_param_nested_loop_call =="
+    run_struct_param_nested_loop_call()

@@ -1,7 +1,0 @@
-def main():
-    let n = 3.9 as int
-    let m = 2.5 as uint8
-    let k = -3.9 as int
-    print "{n}"
-    print "{m}"
-    print "{k}"

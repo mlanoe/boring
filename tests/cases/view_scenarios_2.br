@@ -1,0 +1,200 @@
+use boring.ui.*
+use Command as def void(string)
+
+# ---- view_field_struct_no_partial_eq ----
+# A struct (or lowered `view`) whose field is a USER struct that can't derive `PartialEq`
+# (it holds an `'actor` slot) must drop `PartialEq` too, transitively — `boring build` used to
+# emit `#[derive(.., PartialEq)]` and fail with E0369. An explicit `@derive(Clone)` on a `view`
+# carries over to the lowered struct instead of being ignored.
+
+pub struct ViewFieldStructNoPartialEqTodo:
+    pub int id
+    pub var mut Slot<string>'actor title
+
+pub struct ViewFieldStructNoPartialEqWrapper:
+    pub ViewFieldStructNoPartialEqTodo inner
+    pub int n
+
+pub struct ViewFieldStructNoPartialEqChain:
+    pub [ViewFieldStructNoPartialEqWrapper] items
+
+pub view ViewFieldStructNoPartialEqTodoRow:
+    ViewFieldStructNoPartialEqTodo item
+    body():
+        Text(item.title.value)
+
+@derive(Clone)
+pub view ViewFieldStructNoPartialEqPlain:
+    int n
+    ViewFieldStructNoPartialEqTodo item
+    body():
+        Text("{n}")
+
+@derive(Clone)
+pub view ViewFieldStructNoPartialEqSimple:
+    int n
+    body():
+        Text("{n}")
+
+def run_view_field_struct_no_partial_eq():
+    print "ok"
+
+# ---- view_act_str_args_trait_obj ----
+# String literals / `string` locals passed to a method on a trait-object value (`View`) held in an
+# optional field: the trait method takes owned shared strings, so the args must be converted.
+
+struct ViewActStrArgsTraitObjNode:
+    View? control
+    string kind = "x"
+
+def view_act_str_args_trait_obj_poke(ViewActStrArgsTraitObjNode node, int n):
+    if let control = node.control:
+        control.viewAct("mount", "")
+        let hookName = "tick"
+        let hookArg = "x{n}"
+        control.viewAct(hookName, hookArg)
+        for i in 0 ..< 2:
+            let nm = "loop"
+            control.viewAct(nm, "")
+            control.viewAct("again", hookArg)
+
+struct ViewActStrArgsTraitObjHost:
+    var [ViewActStrArgsTraitObjNode] nodes = []
+
+    def void run(int id):
+        if let node = self.find(id):
+            if node.kind == "x":
+                if let control = node.control:
+                    control.viewAct("mount", "")
+                    let hook = "unmount"
+                    for k in 0 ..< 2:
+                        let arg = "a{k}"
+                        control.viewAct(hook, arg)
+
+    req ViewActStrArgsTraitObjNode? find(int id):
+        nil
+
+view ViewActStrArgsTraitObjCounter:
+    state bool on = false
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Toggle(value = on, label = "on")
+
+def run_view_act_str_args_trait_obj():
+    let c = ViewActStrArgsTraitObjCounter()
+    let body = c.expand(c.newState())
+    let node = ViewActStrArgsTraitObjNode(control = body, kind = "x")
+    view_act_str_args_trait_obj_poke(node, 1)
+    print "done"
+
+# ---- view_let_bound_callbacks ----
+# A closure bound with `let` inside a view's `body` and later passed to a callback field
+# transpiles like the same closure written inline: it captures the state handles by clone
+# (`'static`), and an untyped parameter takes its type from the field it is stored in.
+# Only compiled here — a transpiled `body` is not runnable without the runtime.
+
+
+pub view ViewLetBoundCallbacksPanel:
+    state bool alive = true
+    state string last = ""
+    Command onCommand
+    body():
+        let gone = ():
+            alive = false
+        let record = (name):
+            last = name
+            onCommand(name)
+        Column(spacing = 4.0):
+            OnMount(onMount = gone):
+                Text("mounted")
+            ViewLetBoundCallbacksEntry(onCommand = record)
+
+pub view ViewLetBoundCallbacksEntry:
+    Command onCommand
+    body():
+        Button(label = "x", onActivate = ():
+            onCommand("x"))
+
+def run_view_let_bound_callbacks():
+    print "ok"
+
+# ---- view_state_owner_report_build ----
+# (Compile-only twin of view_state_owner_report.br: the transpiled output carries the owner link through
+# shared slot handles; the runtime-driven behaviour is covered by boring-ui's transpiled tests.)
+# A callback a view's body hands to a constructor reports to the owner of the state it closes over:
+# `touch` when it only reaches its own `state` (directly or through its own methods), `escalate` when
+# it reaches an input / bind / free function. The owner is the view whose body wrote the closure, even
+# when the button ends up under another composite (slot content).
+
+def view_state_owner_report_build_log(string s):
+    print "view_state_owner_report_build_log {s}"
+
+view ViewStateOwnerReportBuildPanel:
+    string title
+    state int taps = 0
+
+    def bump():
+        taps += 1
+
+    def noisy():
+        view_state_owner_report_build_log("noisy")
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Button(label = "inc", onActivate = ():
+                taps += 1)
+            Button(label = "method", onActivate = ():
+                self.bump())
+            Button(label = "title", onActivate = ():
+                print title)
+            Button(label = "free", onActivate = ():
+                view_state_owner_report_build_log("x"))
+            Button(label = "viamethod", onActivate = ():
+                self.noisy())
+            Button(label = "mapped", onActivate = ():
+                let xs = [1, 2].map((x): x + taps)
+                print xs.length)
+
+view ViewStateOwnerReportBuildShell:
+    View content
+    state int own = 0
+    body():
+        Column(alignment = .Center, spacing = nil):
+            content
+
+def run_view_state_owner_report_build():
+    print "ok"
+
+# ---- view_trailing_block_multiline_callback ----
+# A trailing array block (`for` inside) whose call carries a multi-line callback closure: the `do:` block's tail is
+# still recognised as an already-shared pointer (it used to be wrapped a second time: Arc<Arc<List>>).
+
+view ViewTrailingBlockMultilineCallbackPlain:
+    state string selection = ""
+    state [string] items = ["a"]
+
+    def dropAt(int i):
+        selection = "x"
+
+    body():
+        List(selection = selection, onDelete = (indices):
+            self.dropAt(1)
+            self.dropAt(2)):
+            for item in items with item:
+                Text(item)
+
+def run_view_trailing_block_multiline_callback():
+    print "ok"
+
+def main() throws:
+    print "== view_field_struct_no_partial_eq =="
+    run_view_field_struct_no_partial_eq()
+    print "== view_act_str_args_trait_obj =="
+    run_view_act_str_args_trait_obj()
+    print "== view_let_bound_callbacks =="
+    run_view_let_bound_callbacks()
+    print "== view_state_owner_report_build =="
+    run_view_state_owner_report_build()
+    print "== view_trailing_block_multiline_callback =="
+    run_view_trailing_block_multiline_callback()

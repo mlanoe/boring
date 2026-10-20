@@ -1,0 +1,29 @@
+== trait_borrow_contract ==
+5
+5
+3
+4
+10
+5
+5
+6
+6
+== trait_borrow_mut ==
+2
+4
+4
+12
+120
+2
+7
+110
+8
+9
+10
+10
+== trait_borrow_method_param ==
+5
+4
+5
+104
+8

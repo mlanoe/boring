@@ -1,0 +1,50 @@
+# ---- parse_float_if_let_dict_index ----
+# `if let s = dict[key]:` binds a string; `s.parseFloat()` must get string-method dispatch
+# (it emitted `s.parse_float()`, E0599 on Arc<str>), and returning it from a `float?`
+# function must not double-wrap in `Some(...)`.
+struct ParseFloatIfLetDictIndexN:
+    {string=string} props
+
+    req float? numProp(string key):
+        if let s = props[key]:
+            return s.parseFloat()
+        nil
+
+    req int? intProp(string key):
+        if let s = props[key]:
+            return s.parseInt()
+        nil
+
+def run_parse_float_if_let_dict_index():
+    let n = ParseFloatIfLetDictIndexN(props = {"a" = "1.5", "b" = "x", "c" = "7"})
+    print n.numProp("a")
+    print n.numProp("b")
+    print n.numProp("zzz")
+    print n.intProp("c")
+    print n.intProp("a")
+
+# ---- parse_on_expr_receiver ----
+# `.parseFloat()` / `.parseInt()` on a non-variable string expression (parenthesised
+# `else`, call result, index) must use the string-parse codegen, not an unknown method.
+struct ParseOnExprReceiverD:
+    var {string=string} props = {"x" = "2.5"}
+
+string parse_on_expr_receiver_valueOf(ParseOnExprReceiverD d, string k):
+    k
+
+def run_parse_on_expr_receiver():
+    let d = ParseOnExprReceiverD()
+    let a = (d.props["x"] else ("1")).parseFloat() else (1.0)
+    let b = parse_on_expr_receiver_valueOf(d, "2.5").parseFloat() else (0.0)
+    let c = parse_on_expr_receiver_valueOf(d, "oops").parseInt() else (7)
+    let e = (d.props["nope"] else ("3")).parseInt() else (0)
+    print a
+    print b
+    print c
+    print e
+
+def main() throws:
+    print "== parse_float_if_let_dict_index =="
+    run_parse_float_if_let_dict_index()
+    print "== parse_on_expr_receiver =="
+    run_parse_on_expr_receiver()

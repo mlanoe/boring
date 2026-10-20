@@ -1,0 +1,10 @@
+== view_field_struct_no_partial_eq ==
+ok
+== view_act_str_args_trait_obj ==
+done
+== view_let_bound_callbacks ==
+ok
+== view_state_owner_report_build ==
+ok
+== view_trailing_block_multiline_callback ==
+ok

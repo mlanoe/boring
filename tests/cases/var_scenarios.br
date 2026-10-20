@@ -1,0 +1,101 @@
+# ---- var_param_bare_trait_assign ----
+trait VarParamBareTraitAssignCounter:
+    req int peek()
+    def int bump()
+
+struct VarParamBareTraitAssignCell as VarParamBareTraitAssignCounter:
+    var int n = 0
+    req int peek(): n
+    def int bump():
+        n += 1
+        n
+
+struct VarParamBareTraitAssignStep as VarParamBareTraitAssignCounter:
+    var int n = 100
+    req int peek(): n
+    def int bump():
+        n += 10
+        n
+
+VarParamBareTraitAssignCounter var_param_bare_trait_assign_make():
+    VarParamBareTraitAssignStep()
+
+def var_param_bare_trait_assign_viaVar(var VarParamBareTraitAssignCounter c):
+    c = VarParamBareTraitAssignCell()
+
+def var_param_bare_trait_assign_viaOther(var VarParamBareTraitAssignCounter c, VarParamBareTraitAssignCounter other):
+    c = other
+
+def var_param_bare_trait_assign_viaCall(var VarParamBareTraitAssignCounter c):
+    c = var_param_bare_trait_assign_make()
+
+def run_var_param_bare_trait_assign():
+    var mut VarParamBareTraitAssignCounter first = VarParamBareTraitAssignCell()
+    var_param_bare_trait_assign_viaVar(first)
+    print first.peek()
+    var mut VarParamBareTraitAssignCounter second = VarParamBareTraitAssignStep()
+    var_param_bare_trait_assign_viaCall(first)
+    print first.peek()
+    var_param_bare_trait_assign_viaVar(first)
+    print first.bump()
+    var_param_bare_trait_assign_viaOther(second, first)
+    print second.peek()
+
+# ---- var_rebind_alias_independent ----
+trait VarRebindAliasIndependentTally:
+    req int peek()
+
+struct VarRebindAliasIndependentCell as VarRebindAliasIndependentTally:
+    var int n = 0
+    req int peek(): n
+
+struct VarRebindAliasIndependentCounter:
+    var int n = 0
+    req int peek(): n
+
+def run_var_rebind_alias_independent():
+    var c1 = VarRebindAliasIndependentCounter()
+    var c2 = c1
+    c1 = VarRebindAliasIndependentCounter(5)
+    c2 = VarRebindAliasIndependentCounter(7)
+    print c1.peek()
+    print c2.peek()
+
+    var VarRebindAliasIndependentCounter'shared s1 = VarRebindAliasIndependentCounter(1)
+    var VarRebindAliasIndependentCounter'shared s2 = s1
+    s1 = VarRebindAliasIndependentCounter(8)
+    print s1.peek()
+    print s2.peek()
+    s2 = s1
+    print s2.peek()
+
+    var mut VarRebindAliasIndependentCounter'actor a1 = VarRebindAliasIndependentCounter(1)
+    var mut VarRebindAliasIndependentCounter'actor a2 = a1
+    a1 = VarRebindAliasIndependentCounter(9)
+    print a1.peek()
+    print a2.peek()
+    a2 = a1
+    print a2.peek()
+
+    var mut VarRebindAliasIndependentCounter'guard g1 = VarRebindAliasIndependentCounter(1)
+    var mut VarRebindAliasIndependentCounter'guard g2 = g1
+    g1 = VarRebindAliasIndependentCounter(10)
+    print g1.peek()
+    print g2.peek()
+    g2 = g1
+    print g2.peek()
+
+    var VarRebindAliasIndependentTally t1 = VarRebindAliasIndependentCell(1)
+    var VarRebindAliasIndependentTally t2 = VarRebindAliasIndependentCell(2)
+    t1 = VarRebindAliasIndependentCell(3)
+    t2 = VarRebindAliasIndependentCell(4)
+    print t1.peek()
+    print t2.peek()
+    t1 = t2
+    print t1.peek()
+
+def main() throws:
+    print "== var_param_bare_trait_assign =="
+    run_var_param_bare_trait_assign()
+    print "== var_rebind_alias_independent =="
+    run_var_rebind_alias_independent()

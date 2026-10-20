@@ -1,0 +1,100 @@
+# ---- by_value_arg_then_reuse ----
+# A by-value argument whose later reuse needs the original intact:
+#  1) `if let d = opt:` where `opt` is the (inferred) `T?` result of a method call —
+#     `run_body(interp, d)` must clone `d` because `d.params` is read afterwards;
+#  2) a field of a struct local (`p = params[i]`, so only its declared element type is known)
+#     passed by value to a method of an `'actor` receiver, then read again.
+struct ByValueArgThenReuseParam:
+    string name
+    bool mutable
+
+struct ByValueArgThenReuseDecl:
+    [ByValueArgThenReuseParam] params
+    int n
+
+struct ByValueArgThenReuseInterp:
+    var int count = 0
+
+    req ByValueArgThenReuseDecl? find(int n):
+        if n > 0:
+            return ByValueArgThenReuseDecl([ByValueArgThenReuseParam("a", true), ByValueArgThenReuseParam("b", false)], n)
+        nil
+
+struct ByValueArgThenReuseEnv:
+    var {string=int} vars = {=}
+
+    req int? get(string name):
+        vars.get(name)
+
+def int by_value_arg_then_reuse_run_body(mut ByValueArgThenReuseInterp interp, ByValueArgThenReuseDecl d):
+    interp.count += d.n
+    interp.count
+
+def int by_value_arg_then_reuse_count_params([ByValueArgThenReuseParam] ps):
+    ps.length
+
+def int by_value_arg_then_reuse_capture([ByValueArgThenReuseParam] params, ByValueArgThenReuseEnv'actor env):
+    mut [(int, string, int)] outs = []
+    var i = 0
+    while i < params.length:
+        let p = params[i]
+        if p.mutable:
+            let cur = env.get(p.name)
+            if let v = cur:
+                outs.push((i, p.name, v))
+        i += 1
+    outs.length
+
+def run_by_value_arg_then_reuse():
+    mut interp = ByValueArgThenReuseInterp()
+    let opt = interp.find(3)
+    if let decl = opt:
+        let result = by_value_arg_then_reuse_run_body(interp, decl)
+        let k = by_value_arg_then_reuse_count_params(decl.params)
+        print "{result} {k}"
+    let env = ByValueArgThenReuseEnv({"a" = 7})
+    print by_value_arg_then_reuse_capture([ByValueArgThenReuseParam("a", true)], env)
+
+# ---- dict_field_param_var_key_else ----
+# Regression: `param.dict_field[key] else default` with a non-self struct param
+# transpiled to `.get((k) as usize)` (E0308/E0605): expr_is_dict's Field arm only
+# consulted var_struct_type(s), missing a param typed only via var_types.
+
+struct DictFieldParamVarKeyElseD:
+    var {string=string} props = {"x" = "2.5"}
+
+    req string get(string k):
+        props[k] else ("0")
+
+    req string get2(string k):
+        self.props[k] else ("0")
+
+string dict_field_param_var_key_else_valueOf(DictFieldParamVarKeyElseD d, string k):
+    d.props[k] else ("0")
+
+string dict_field_param_var_key_else_valueOf2(DictFieldParamVarKeyElseD d, string k):
+    d.props[k]
+
+string dict_field_param_var_key_else_valueOf3(DictFieldParamVarKeyElseD d, string k):
+    let s = d.props[k]
+    s
+
+string dict_field_param_var_key_else_local(string k):
+    let m = {"x" = "7"}
+    m[k] else ("0")
+
+def run_dict_field_param_var_key_else():
+    let d = DictFieldParamVarKeyElseD()
+    print dict_field_param_var_key_else_valueOf(d, "x")
+    print dict_field_param_var_key_else_valueOf(d, "y")
+    print dict_field_param_var_key_else_valueOf2(d, "x")
+    print dict_field_param_var_key_else_valueOf3(d, "x")
+    print dict_field_param_var_key_else_local("x")
+    print d.get("x")
+    print d.get2("x")
+
+def main() throws:
+    print "== by_value_arg_then_reuse =="
+    run_by_value_arg_then_reuse()
+    print "== dict_field_param_var_key_else =="
+    run_dict_field_param_var_key_else()

@@ -1,0 +1,160 @@
+# ---- trait_borrow_contract ----
+# Trait contract: a bare-trait parameter of a trait method is borrowed (`&dyn Trait`) unless the
+# trait opts into by-value with `Trait'owned`; implementers and every call (struct receiver,
+# trait object, default method) follow the contract.
+trait TraitBorrowContractBuilder:
+    req int build(int x)
+
+struct TraitBorrowContractFour as TraitBorrowContractBuilder:
+    req int build(int x): x + 4
+
+struct TraitBorrowContractTwo as TraitBorrowContractBuilder:
+    req int build(int x): x + 2
+
+struct TraitBorrowContractHolder:
+    TraitBorrowContractBuilder b
+
+trait TraitBorrowContractVisitor:
+    req int visit(TraitBorrowContractBuilder b)
+    req int take(TraitBorrowContractBuilder'owned b)
+    # default method: borrowed param, forwarded to the contract method
+    req int visitTwice(TraitBorrowContractBuilder b):
+        self.visit(b) + self.visit(b)
+
+struct TraitBorrowContractCounter as TraitBorrowContractVisitor:
+    req int visit(TraitBorrowContractBuilder b):
+        b.build(1)
+    req int take(TraitBorrowContractBuilder'owned b):
+        let h = TraitBorrowContractHolder(b)
+        h.b.build(2)
+
+def run_trait_borrow_contract():
+    let TraitBorrowContractBuilder first = TraitBorrowContractFour()
+    let TraitBorrowContractCounter c = TraitBorrowContractCounter()
+    print c.visit(first)
+    print c.visit(first)
+    print c.visit(TraitBorrowContractTwo())
+    print c.take(TraitBorrowContractTwo())
+    print c.visitTwice(first)
+    let TraitBorrowContractVisitor v = TraitBorrowContractCounter()
+    print v.visit(first)
+    print v.visit(first)
+    print v.take(TraitBorrowContractFour())
+    print v.visitTwice(TraitBorrowContractTwo())
+
+# ---- trait_borrow_mut ----
+# `mut` bare-trait parameters are lent (`&mut dyn Trait`), like `mut` struct parameters: the
+# callee's `def` calls are visible to the caller, and the argument stays usable afterwards.
+trait TraitBorrowMutCounter:
+    req int peek()
+    def int bump()
+
+struct TraitBorrowMutCell as TraitBorrowMutCounter:
+    var int n = 0
+    req int peek(): n
+    def int bump():
+        n += 1
+        n
+
+struct TraitBorrowMutStep as TraitBorrowMutCounter:
+    var int n = 100
+    req int peek(): n
+    def int bump():
+        n += 10
+        n
+
+# free function: `mut` -> lent
+int trait_borrow_mut_twice(mut TraitBorrowMutCounter c):
+    _ = c.bump()
+    c.bump()
+
+# forwarded to another `mut` param, and to a read-only borrowed one
+int trait_borrow_mut_viaTwice(mut TraitBorrowMutCounter c):
+    trait_borrow_mut_twice(c) + trait_borrow_mut_look(c)
+
+int trait_borrow_mut_look(TraitBorrowMutCounter c):
+    c.peek()
+
+TraitBorrowMutCounter trait_borrow_mut_make():
+    TraitBorrowMutCell()
+
+# trait contract: `mut` stays `mut` (a `def` call on the argument is allowed)
+trait TraitBorrowMutDriver:
+    req int drive(mut TraitBorrowMutCounter c)
+
+struct TraitBorrowMutRunner as TraitBorrowMutDriver:
+    var int calls = 0
+    req int drive(mut TraitBorrowMutCounter c):
+        c.bump()
+
+struct TraitBorrowMutHost:
+    var int n = 0
+    def int use(mut TraitBorrowMutCounter c):
+        n += 1
+        c.bump()
+
+def run_trait_borrow_mut():
+    var mut TraitBorrowMutCounter first = TraitBorrowMutCell()
+    print trait_borrow_mut_twice(first)
+    print trait_borrow_mut_twice(first)
+    print first.peek()
+    print trait_borrow_mut_viaTwice(first)
+    print trait_borrow_mut_twice(TraitBorrowMutStep())
+    print trait_borrow_mut_twice(trait_borrow_mut_make())
+    var mut TraitBorrowMutHost h = TraitBorrowMutHost()
+    print h.use(first)
+    print h.use(TraitBorrowMutStep())
+    let TraitBorrowMutRunner r = TraitBorrowMutRunner()
+    print r.drive(first)
+    let TraitBorrowMutDriver d = TraitBorrowMutRunner()
+    print d.drive(first)
+    var mut TraitBorrowMutHost'actor a = TraitBorrowMutHost()
+    print a.use(first)
+    print first.peek()
+
+# ---- trait_borrow_method_param ----
+# Explicit `Trait&` (`&dyn Trait`) on a *method* parameter: a fresh value, a local used twice,
+# a forwarded borrowed param, a field, and a free function reached from a method all pass
+# without a Box or a move.
+trait TraitBorrowMethodParamBuilder:
+    req int build(int x)
+
+struct TraitBorrowMethodParamFour as TraitBorrowMethodParamBuilder:
+    req int build(int x): x + 4
+
+struct TraitBorrowMethodParamTwo as TraitBorrowMethodParamBuilder:
+    req int build(int x): x + 2
+
+int trait_borrow_method_param_inner(TraitBorrowMethodParamBuilder& b, int n):
+    b.build(n)
+
+struct TraitBorrowMethodParamRunner:
+    var int n = 0
+    def int flush(TraitBorrowMethodParamBuilder& b):
+        n += 1
+        b.build(n)
+    def int endEvent(TraitBorrowMethodParamBuilder& b):
+        self.flush(b)
+    def int viaFree(TraitBorrowMethodParamBuilder& b):
+        trait_borrow_method_param_inner(b, 100)
+
+struct TraitBorrowMethodParamHolder:
+    TraitBorrowMethodParamBuilder b
+
+def run_trait_borrow_method_param():
+    mut r = TraitBorrowMethodParamRunner()
+    print r.endEvent(TraitBorrowMethodParamFour())
+    let TraitBorrowMethodParamBuilder local = TraitBorrowMethodParamTwo()
+    print r.endEvent(local)
+    print r.endEvent(local)
+    print r.viaFree(TraitBorrowMethodParamFour())
+    let h = TraitBorrowMethodParamHolder(TraitBorrowMethodParamFour())
+    print r.endEvent(h.b)
+
+def main() throws:
+    print "== trait_borrow_contract =="
+    run_trait_borrow_contract()
+    print "== trait_borrow_mut =="
+    run_trait_borrow_mut()
+    print "== trait_borrow_method_param =="
+    run_trait_borrow_method_param()

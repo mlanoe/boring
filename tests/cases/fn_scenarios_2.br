@@ -1,0 +1,132 @@
+use Seed as def int()
+use MakeInt as def int()
+
+# ---- fn_field_optional_alias ----
+# An optional function-typed struct field (`Seed? make = nil`), spelled through a `use` alias:
+# stored as `Option<handle>` (impl Trait is illegal in a field), constructed with nil or a
+# closure, unwrapped with `if let` / `guard let`, and called through the unwrapped handle.
+
+struct FnFieldOptionalAliasS:
+    int id
+    Seed? make = nil
+
+int fn_field_optional_alias_run(FnFieldOptionalAliasS s):
+    if let f = s.make:
+        return f()
+    -1
+
+int fn_field_optional_alias_viaGuard(FnFieldOptionalAliasS s):
+    guard let f = s.make else:
+        return 0
+    f() * 2
+
+def run_fn_field_optional_alias():
+    let a = FnFieldOptionalAliasS(id = 1)
+    let b = FnFieldOptionalAliasS(id = 2, make = nil)
+    let c = FnFieldOptionalAliasS(id = 3, make = (): 42)
+    print fn_field_optional_alias_run(a)
+    print fn_field_optional_alias_run(b)
+    print fn_field_optional_alias_run(c)
+    let d = c.clone()
+    print fn_field_optional_alias_run(d)
+    if let g = c.make:
+        print g() + 1
+    print fn_field_optional_alias_viaGuard(a)
+    print fn_field_optional_alias_viaGuard(c)
+
+# ---- fn_field_collections ----
+# Function-typed struct fields spelled as collections / inline-optional, through a `use` alias:
+# `[Seed]` -> Vec<handle>, `{string=Seed}` -> HashMap<K, handle>, `(def int())?` -> Option<handle>
+# (a parenthesized fn type is grouping, not a 1-tuple). Dict literals use `=`, never `:`.
+
+struct FnFieldCollectionsT:
+    mut [Seed] many
+    {string=Seed} named
+    (def int())? inl = nil
+
+def run_fn_field_collections():
+    mut t = FnFieldCollectionsT(many = [(): 1, (): 2], named = {"a" = (): 7})
+    t.many.push((): 3)
+    print t.many.len()
+    for f in t.many:
+        print f()
+    print t.many[0]()
+    print t.many[2]()
+    if let g = t.named["a"]:
+        print g()
+    if let h = t.inl:
+        print h()
+    else:
+        print "no inl"
+    let u = FnFieldCollectionsT(many = [], named = {=}, inl = (): 5)
+    if let h = u.inl:
+        print h()
+
+# ---- fn_field_collection_writes ----
+# Writes into function-typed collection fields after construction: index assignment and the
+# insert/set/put/append mutators wrap each closure in the field's handle.
+
+struct FnFieldCollectionWritesT:
+    mut {string=Seed} named
+    mut [Seed] many
+
+def run_fn_field_collection_writes():
+    mut t = FnFieldCollectionWritesT(named = {"a" = (): 7}, many = [(): 1, (): 2])
+    t.named["b"] = (): 1
+    t.named["a"] = (): 70
+    t.many[0] = (): 9
+    t.many.insert(1, (): 5)
+    t.many.append([(): 11])
+    t.named.set("d", (): 4)
+    t.named.put("e", (): 6)
+    for f in t.many:
+        print f()
+    for k in ["a", "b", "c", "d", "e"]:
+        if let g = t.named[k]:
+            print g()
+
+# ---- fn_field_optional_self_call ----
+# Calling an optional function-typed field's unwrapped handle INSIDE a struct method, where the
+# field is read as a bare implicit-self name (`if let f = make`) rather than `s.make`.
+
+struct FnFieldOptionalSelfCallS:
+    MakeInt? make = nil
+    req int viaIfLet():
+        if let f = make:
+            return f()
+        0
+    req int viaIfLetNoReturn():
+        if let f = make:
+            let r = f()
+            return r
+        0
+    req int viaGuard():
+        guard let f = make else:
+            return 0
+        f()
+    req int viaNilCheck():
+        if make != nil:
+            return make()
+        0
+
+def run_fn_field_optional_self_call():
+    let a = FnFieldOptionalSelfCallS(make = ():
+        7)
+    print a.viaIfLet()
+    print FnFieldOptionalSelfCallS().viaIfLet()
+    print a.viaIfLetNoReturn()
+    print FnFieldOptionalSelfCallS().viaIfLetNoReturn()
+    print a.viaGuard()
+    print FnFieldOptionalSelfCallS().viaGuard()
+    print a.viaNilCheck()
+    print FnFieldOptionalSelfCallS().viaNilCheck()
+
+def main() throws:
+    print "== fn_field_optional_alias =="
+    run_fn_field_optional_alias()
+    print "== fn_field_collections =="
+    run_fn_field_collections()
+    print "== fn_field_collection_writes =="
+    run_fn_field_collection_writes()
+    print "== fn_field_optional_self_call =="
+    run_fn_field_optional_self_call()

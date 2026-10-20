@@ -1,0 +1,19 @@
+== do_expr_value_for_loop ==
+12
+== enum_derive_no_debug ==
+int 42
+str x
+== explicit_borrow_field_type_cast ==
+1.5
+1.5
+1.5
+1.5
+1.5
+1.5
+2
+== guard_string_trim_temporary ==
+got [hi]
+empty
+== init_bare_field_assign ==
+1
+2

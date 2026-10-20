@@ -1,0 +1,178 @@
+# ---- do_expr_value_for_loop ----
+# Regression: `do: ...` used as a value (`let x = do: ...`) whose body
+# contains a "complex" statement (a `for` loop) must still evaluate to its
+# tail expression, not silently degrade to `()` — a transpiler-only bug (the
+# sub-emitter used for `ExprKind::Do` inherited the *enclosing* function's
+# own `fn_returns_void`/`suppress_ok_wrap`, so this broke specifically when
+# the enclosing function was itself void, e.g. `main()`). The interpreter
+# (`boring run`) already handled this correctly; only `boring build` was
+# affected. Found while implementing the trailing array-block sugar's
+# control-flow desugaring, which relies on exactly this `do:`-as-a-value
+# shape (see src/desugar_array_block.rs).
+
+def int do_expr_value_for_loop_sum_evens([int] xs):
+    let total = do:
+        var int acc = 0
+        for x in xs:
+            if x % 2 == 0:
+                acc = acc + x
+        acc
+    total
+
+def run_do_expr_value_for_loop():
+    print do_expr_value_for_loop_sum_evens([1, 2, 3, 4, 5, 6])
+
+# ---- enum_derive_no_debug ----
+# Regression test for the enum half of the auto-`Display`-assumes-`Debug` bug.
+#
+# The struct path in src/transpiler/emit_struct.rs already gated its
+# auto-generated `impl Display` (which delegates to `write!(f, "{:?}", self)`)
+# on the type actually ending up with a `Debug` impl -- see
+# tests/cases/json_serde_rename.br, bug 2. The *enum* path had no such gate:
+# it emitted that `impl Display` whenever the enum had no `@error(...)` variant,
+# no `as string:` conversion and no `@derive(Display)`, regardless of whether
+# `Debug` was in the final derive list.
+#
+# So an explicit `@derive(Clone, Serialize, Deserialize)` on an enum -- explicit,
+# so used verbatim, with no auto-injected `Debug` -- generated Rust that failed
+# to compile with "`Num` doesn't implement `Debug`", pointing straight at the
+# generated impl. Fixed by mirroring the struct path's `will_have_debug` check.
+#
+# Consequence of the fix, deliberately: such an enum now has NO `Display` at
+# all, exactly like the equivalent struct, so `print n` on it would be a
+# compile error. That is why this fixture pattern-matches instead of printing
+# the enum value directly.
+
+@derive(Clone, Serialize, Deserialize)
+@serde(untagged)
+enum EnumDeriveNoDebugNum:
+    NInt(int)
+    NStr(string)
+
+def run_enum_derive_no_debug():
+    guard let a = fromJson<EnumDeriveNoDebugNum>("42") else:
+        print "a FAILED"
+        return
+    match a:
+        NInt(i): print "int {i}"
+        NStr(s): print "str {s}"
+
+    guard let b = fromJson<EnumDeriveNoDebugNum>("\"x\"") else:
+        print "b FAILED"
+        return
+    match b:
+        NInt(i): print "int {i}"
+        NStr(s): print "str {s}"
+
+# ---- explicit_borrow_field_type_cast ----
+# Explicit `T&`/`mut T&`/`var T&` receivers must retain their pointee's
+# declared field types through nested fields, aliases, method results, and array
+# indexing. Otherwise numeric casts fall through to string parsing in Rust.
+struct ExplicitBorrowFieldTypeCastInner:
+    float32 t
+
+struct ExplicitBorrowFieldTypeCastOuter:
+    ExplicitBorrowFieldTypeCastInner d
+    [ExplicitBorrowFieldTypeCastInner] items
+
+    req ExplicitBorrowFieldTypeCastInner inner():
+        d
+
+def float explicit_borrow_field_type_cast_by_value(ExplicitBorrowFieldTypeCastOuter o):
+    o.d.t as float
+
+def float explicit_borrow_field_type_cast_by_borrow(ExplicitBorrowFieldTypeCastOuter& o):
+    o.d.t as float
+
+def float explicit_borrow_field_type_cast_by_mut_borrow(mut ExplicitBorrowFieldTypeCastOuter& o):
+    o.d.t as float
+
+def float explicit_borrow_field_type_cast_by_var_borrow(var ExplicitBorrowFieldTypeCastOuter& o):
+    o.d.t as float
+
+def float explicit_borrow_field_type_cast_by_alias(ExplicitBorrowFieldTypeCastOuter& o):
+    let ExplicitBorrowFieldTypeCastOuter& alias = o
+    alias.d.t as float
+
+def float explicit_borrow_field_type_cast_by_method(ExplicitBorrowFieldTypeCastOuter& o):
+    o.inner().t as float
+
+def int explicit_borrow_field_type_cast_by_index(ExplicitBorrowFieldTypeCastOuter& o, int i):
+    o.items[i].t as int
+
+def run_explicit_borrow_field_type_cast() throws:
+    var mut ExplicitBorrowFieldTypeCastOuter o = ExplicitBorrowFieldTypeCastOuter(ExplicitBorrowFieldTypeCastInner(1.5 as float32), [ExplicitBorrowFieldTypeCastInner(2.5 as float32)])
+    print explicit_borrow_field_type_cast_by_value(o)
+    print explicit_borrow_field_type_cast_by_borrow(o)
+    print explicit_borrow_field_type_cast_by_mut_borrow(o)
+    print explicit_borrow_field_type_cast_by_var_borrow(o)
+    print explicit_borrow_field_type_cast_by_alias(o)
+    print explicit_borrow_field_type_cast_by_method(o)
+    print explicit_borrow_field_type_cast_by_index(o, 0)
+
+# ---- guard_string_trim_temporary ----
+# `slot.value.trim()` on a locked `Slot<string>'actor` must own the trimmed text: borrowing it
+# straight from the lock-guard temporary dies at the end of the `let` statement (E0716).
+struct GuardStringTrimTemporarySlot<T>:
+    var T value
+
+struct GuardStringTrimTemporaryForm:
+    GuardStringTrimTemporarySlot<string>'actor title
+
+def guard_string_trim_temporary_submit(mut GuardStringTrimTemporaryForm f):
+    let clean = f.title.value.trim()
+    if clean.length == 0:
+        print "empty"
+        return
+    print "got [{clean}]"
+
+def run_guard_string_trim_temporary():
+    mut f = GuardStringTrimTemporaryForm(title = GuardStringTrimTemporarySlot(value = "  hi  "))
+    guard_string_trim_temporary_submit(f)
+    mut g = GuardStringTrimTemporaryForm(title = GuardStringTrimTemporarySlot(value = "   "))
+    guard_string_trim_temporary_submit(g)
+
+# ---- init_bare_field_assign ----
+# emit_init's "general case" branch (used whenever an init() body isn't 100%
+# `self.field = expr` assignments) used to zero-prefill every struct field with
+# `Default::default()` before running the body — a hard compile failure
+# (E0277) for any field whose type doesn't implement Rust's `Default`, which
+# most Boring-declared structs don't. Bare (non-`self.`-prefixed) field
+# assignment in an init() body — valid per book.md's implicit-self rule —
+# didn't count as a "self assign" for the fast-path struct-literal codegen,
+# so it always fell into that buggy general case. This covers the plain
+# (unqualified) struct-field case: `Holder`'s fields are themselves structs
+# with no `@derive(Default)` and no `Default` impl at all.
+
+struct InitBareFieldAssignCounter:
+    var int value = 0
+
+    req int get():
+        value
+
+struct InitBareFieldAssignHolder:
+    let InitBareFieldAssignCounter c1
+    let InitBareFieldAssignCounter c2
+
+    init(InitBareFieldAssignCounter a, InitBareFieldAssignCounter b):
+        c1 = a
+        c2 = b
+
+def run_init_bare_field_assign():
+    let c1 = InitBareFieldAssignCounter(1)
+    let c2 = InitBareFieldAssignCounter(2)
+    let h = InitBareFieldAssignHolder(c1, c2)
+    print h.c1.get()
+    print h.c2.get()
+
+def main() throws:
+    print "== do_expr_value_for_loop =="
+    run_do_expr_value_for_loop()
+    print "== enum_derive_no_debug =="
+    run_enum_derive_no_debug()
+    print "== explicit_borrow_field_type_cast =="
+    run_explicit_borrow_field_type_cast()
+    print "== guard_string_trim_temporary =="
+    run_guard_string_trim_temporary()
+    print "== init_bare_field_assign =="
+    run_init_bare_field_assign()

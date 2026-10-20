@@ -1,0 +1,44 @@
+# ---- for_loop_enum_array_camel_case_method ----
+enum ForLoopEnumArrayCamelCaseMethodShape:
+    Circle(float radius)
+    Point
+
+    req string describeMe():
+        "shape"
+
+def run_for_loop_enum_array_camel_case_method():
+    let c = ForLoopEnumArrayCamelCaseMethodShape.Circle(2.0)
+    print c.describeMe()
+
+    let shapes = [ForLoopEnumArrayCamelCaseMethodShape.Circle(2.0), ForLoopEnumArrayCamelCaseMethodShape.Point]
+    for s in shapes:
+        print s.describeMe()
+
+# ---- for_mut_elem_iter_mut ----
+# `for n in nodes` over a `mut [mut T]` parameter whose body writes through `n` borrows the
+# elements mutably, so the writes (and the recursive `mut` lend of `n.children`) land in the
+# caller's collection.
+struct ForMutElemIterMutSemNode:
+    var bool focused = false
+    var int id = 0
+    var int hits = 0
+    var mut [ForMutElemIterMutSemNode] children = []
+
+def for_mut_elem_iter_mut_markFocus(mut [mut ForMutElemIterMutSemNode] nodes, int id):
+    for n in nodes:
+        n.focused = n.id == id
+        n.hits += 1
+        for_mut_elem_iter_mut_markFocus(n.children, id)
+
+def run_for_mut_elem_iter_mut():
+    mut nodes = [ForMutElemIterMutSemNode(id = 1), ForMutElemIterMutSemNode(id = 2, children = [ForMutElemIterMutSemNode(id = 3)])]
+    for_mut_elem_iter_mut_markFocus(nodes, 3)
+    print nodes[0].focused
+    print nodes[1].children[0].focused
+    print nodes[1].hits
+
+def main() throws:
+    print "== for_loop_enum_array_camel_case_method =="
+    run_for_loop_enum_array_camel_case_method()
+    print "== for_mut_elem_iter_mut =="
+    run_for_mut_elem_iter_mut()

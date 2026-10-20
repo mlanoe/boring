@@ -1,0 +1,161 @@
+# ---- actor_field_through ----
+pub struct ActorFieldThroughSlot<T>:
+    pub var mut T value
+
+struct ActorFieldThroughProfile:
+    var string name = ""
+    def rename(string n):
+        name = n
+
+struct ActorFieldThroughParentState:
+    pub var mut ActorFieldThroughSlot<string>'actor name = ActorFieldThroughSlot(value = "a")
+    pub var mut ActorFieldThroughSlot<ActorFieldThroughProfile>'actor profile = ActorFieldThroughSlot(value = ActorFieldThroughProfile())
+
+struct ActorFieldThroughChild:
+    var mut ActorFieldThroughSlot<string>'actor __bind_name
+    var mut ActorFieldThroughSlot<ActorFieldThroughProfile>'actor __bind_profile
+    req string read():
+        __bind_name.value
+    req void write(string s):
+        __bind_name.value = s
+        __bind_profile.value.rename(s)
+
+def run_actor_field_through():
+    mut st = ActorFieldThroughParentState()
+    let c = ActorFieldThroughChild(__bind_name = st.name, __bind_profile = st.profile)
+    c.write("z")
+    print st.name.value
+    print c.read()
+    print st.profile.value.name
+
+# ---- actor_call_result_ctor_arg ----
+# A call whose declared return type is already `T'actor` / `T'guard`, passed directly as the
+# constructor argument for a field of that same qualified type, yields a ready-made handle:
+# the constructor must take it as-is, not wrap it in a second Arc<Mutex<..>> / Arc<RwLock<..>>
+# (rustc E0308). Binding it to a local first, then passing the local, already worked.
+
+struct ActorCallResultCtorArgEnv:
+    var int depth = 0
+
+    def bump():
+        depth += 1
+
+    req int get():
+        depth
+
+struct ActorCallResultCtorArgInterp:
+    var mut ActorCallResultCtorArgEnv'actor current_env
+    var ActorCallResultCtorArgEnv'guard audit_env
+    var mut ActorCallResultCtorArgEnv'actor bound_env
+    var int hits
+
+    def bump_envs():
+        current_env.bump()
+        bound_env.bump()
+
+    req int current_depth():
+        current_env.get()
+
+    req int audit_depth():
+        audit_env.get()
+
+    req int bound_depth():
+        bound_env.get()
+
+def ActorCallResultCtorArgEnv'actor actor_call_result_ctor_arg_new_env(int d):
+    let e'actor = ActorCallResultCtorArgEnv(depth = d)
+    e
+
+def ActorCallResultCtorArgEnv'guard actor_call_result_ctor_arg_new_audit(int d):
+    let e'guard = ActorCallResultCtorArgEnv(depth = d)
+    e
+
+def ActorCallResultCtorArgInterp'actor actor_call_result_ctor_arg_new_interp():
+    let bound = actor_call_result_ctor_arg_new_env(7)
+    let interp'actor = ActorCallResultCtorArgInterp(current_env = actor_call_result_ctor_arg_new_env(3), audit_env = actor_call_result_ctor_arg_new_audit(5), bound_env = bound, hits = 0)
+    interp
+
+def run_actor_call_result_ctor_arg():
+    mut interp = actor_call_result_ctor_arg_new_interp()
+    interp.bump_envs()
+    print interp.hits
+    print interp.current_depth()
+    print interp.audit_depth()
+    print interp.bound_depth()
+
+# ---- actor_inferred_param_caller_reuse ----
+# A parameter inferred `'actor` (captured by a closure that mutates it) used to leave the
+# caller's own local a plain `St`: the call site emitted `run(&Arc::new(Mutex::new(st)))`,
+# moving `st` (rustc E0382 on the later `st.n` read) and hiding the callee's mutation. The
+# caller's local is now promoted to `'actor` too, as if declared `mut St'actor st`.
+
+struct ActorInferredParamCallerReuseSt:
+    var int n = 0
+
+def actor_inferred_param_caller_reuse_run(mut ActorInferredParamCallerReuseSt st):
+    let f = ():
+        st.n += 1
+    f()
+
+def run_actor_inferred_param_caller_reuse():
+    mut st = ActorInferredParamCallerReuseSt()
+    actor_inferred_param_caller_reuse_run(st)
+    print st.n
+
+# ---- actor_field_method_via_call_local ----
+# A local bound (unannotated `mut`/`let`) to a free-function call returning `T'actor` is an
+# actor handle, and a method call on one of ITS `'actor` fields (`interp.bound_env.bump()`) must
+# take both locks: the outer local's, then the field's own. The local's type used to be recorded
+# only in the managed-mutex/refcell membership sets, not `var_types`, so the field-actor lookup
+# lost the struct name and emitted only the outer lock (rustc E0599: no method `bump` on
+# `Arc<Mutex<Env>>`). The same program with an explicit `mut interp'actor = ...` already worked.
+struct ActorFieldMethodViaCallLocalEnv:
+    var int depth = 0
+
+    def bump():
+        depth += 1
+
+    req int get():
+        depth
+
+struct ActorFieldMethodViaCallLocalInterp:
+    var mut ActorFieldMethodViaCallLocalEnv'actor bound_env
+
+def ActorFieldMethodViaCallLocalInterp'actor actor_field_method_via_call_local_make():
+    let bound'actor = ActorFieldMethodViaCallLocalEnv(depth = 7)
+    let i'actor = ActorFieldMethodViaCallLocalInterp(bound_env = bound)
+    i
+
+def run_actor_field_method_via_call_local():
+    mut interp = actor_field_method_via_call_local_make()
+    interp.bound_env.bump()
+    interp.bound_env.bump()
+    print interp.bound_env.get()
+
+# ---- actor_collection_field_derive ----
+struct ActorCollectionFieldDeriveN:
+    pub int id
+
+struct ActorCollectionFieldDeriveTree:
+    pub var mut [ActorCollectionFieldDeriveN'actor] kids = []
+    pub var mut {int=ActorCollectionFieldDeriveN'actor} byId = {=}
+    pub var mut ActorCollectionFieldDeriveN'actor? root = nil
+
+def run_actor_collection_field_derive():
+    mut t = ActorCollectionFieldDeriveTree()
+    let c = t.kids.length
+    print c
+    let d = t.byId.length
+    print d
+
+def main() throws:
+    print "== actor_field_through =="
+    run_actor_field_through()
+    print "== actor_call_result_ctor_arg =="
+    run_actor_call_result_ctor_arg()
+    print "== actor_inferred_param_caller_reuse =="
+    run_actor_inferred_param_caller_reuse()
+    print "== actor_field_method_via_call_local =="
+    run_actor_field_method_via_call_local()
+    print "== actor_collection_field_derive =="
+    run_actor_collection_field_derive()
