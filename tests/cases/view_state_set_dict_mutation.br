@@ -1,0 +1,36 @@
+# `state {string}` / `state {string=int}` fields mutated by the view's own methods: the field is
+# a `Slot`-wrapped HashSet/HashMap in `V__State`, so `add`/`remove`/index-assign must emit
+# set/dict operations through the slot's lock + `.value`.
+use boring.ui.*
+
+view P:
+    state {string} picked = {}
+    state {string=int} counts = {=}
+
+    def pick(string s):
+        picked.add(s)
+        counts[s] = picked.length
+
+    def drop(string s):
+        picked.remove(s)
+
+    req int size():
+        picked.length
+
+    req bool has(string s):
+        picked.contains(s)
+
+    req int count(string s):
+        counts[s]
+
+def main():
+    let p = P()
+    mut st = P__State()
+    p.pick("a", st)
+    p.pick("b", st)
+    p.pick("a", st)
+    p.drop("a", st)
+    print p.size(st)
+    print p.has("a", st)
+    print p.has("b", st)
+    print p.count("b", st)

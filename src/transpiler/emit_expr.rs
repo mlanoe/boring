@@ -1715,7 +1715,10 @@ impl Transpiler {
         // `.get_mut(k)` yields the real place instead; the leading `*` turns the
         // `&mut V` into an lvalue so both `(*d.get_mut(k)...).method()` and
         // `(*d.get_mut(k)...) += rhs` compile.
-        if matches!(&obj.kind, ExprKind::Var(_)) && self.expr_is_dict(obj) {
+        if (matches!(&obj.kind, ExprKind::Var(_))
+            || matches!(&obj.kind, ExprKind::Field(_, f) if f == "value"))
+            && self.expr_is_dict(obj)
+        {
             let obj_s = self.emit_expr(obj);
             let key_ref = self.emit_dict_key_borrow(idx);
             if self.in_lhs_assign.get() {
@@ -3436,6 +3439,17 @@ impl Transpiler {
                     self.in_lhs_assign.set(old);
                     return format!("{}.{}.insert({}, {})", obj_s, field_name, key_owned, val_s);
                 }
+            }
+            // `slot.value[key] = v` on a lowered view's `Slot<{K=V}>` state cell: `insert` through
+            // the cell's lock. Key and value are evaluated first, so a value that reads the same
+            // cell (`counts[k] = counts.length`) doesn't re-lock it while the write guard is held.
+            if matches!(&dict_obj.kind, ExprKind::Field(_, f) if f == "value") && self.expr_is_dict(dict_obj) {
+                let key_owned = self.emit_dict_key_owned(key);
+                let val_s = self.emit_expr_owned(value);
+                let old = self.in_lhs_assign.replace(true);
+                let place_s = self.emit_expr(dict_obj);
+                self.in_lhs_assign.set(old);
+                return format!("{{ let __k = {key_owned}; let __v = {val_s}; {place_s}.insert(__k, __v); }}");
             }
             // Implicit self: `table[key] = v` inside a struct method where `table` is
             // itself a dict-typed struct field (no explicit `self.` prefix) — same

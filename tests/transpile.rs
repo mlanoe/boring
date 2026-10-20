@@ -446,6 +446,7 @@ transpile_test!(view_state_lowering);
 transpile_test!(view_field_struct_no_partial_eq);
 transpile_test!(view_state_array_methods);
 transpile_test!(view_state_empty_set);
+transpile_test!(view_state_set_dict_mutation);
 transpile_test!(view_bind_env);
 transpile_test!(view_method_modifiers);
 transpile_test!(view_state_seed);
