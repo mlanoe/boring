@@ -17,6 +17,7 @@
 use crate::ast::*;
 
 mod emit_top;
+mod host_types;
 mod emit_struct;
 mod emit_stmt;
 mod emit_let;

@@ -212,8 +212,11 @@ the bind group when the length changed), SIMD `copy_<f>_to_device`, Metal a fres
 array's length, CUDA/ROCm a fresh device buffer (`Arc`-wrapped for a `let` field). Elements are converted to the
 field's width. `a.x = b.y` with a *kernel* on the right stays the zero-copy buffer handoff. `screen.frame` is
 readable in loop expressions on every target. Re-uploading a `'surface` field this way is not supported (the
-presenting bind group keeps the old buffer). Metal and its siblings still read `.count`/`.length` on a value as the
-array-length builtin: name a struct field `count` only if you read it through a typed path (wgpu does).
+presenting bind group keeps the old buffer). `.count`/`.length` on a value whose struct type declares a real field or method of that name (typed
+locals/params, `fn`/method return types, struct field chains, and `self`) reads that member on every backend
+(Metal/CUDA/ROCm/wgpu share a receiver-type resolver, `src/transpiler/host_types.rs`); only a receiver whose type is not
+resolvable as a user struct (or a real array) still gets the array-length builtin. Pinned by
+`tests/struct_count_field_receiver.rs`.
 
 ### On-demand redraw
 

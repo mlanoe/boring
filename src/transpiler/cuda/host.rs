@@ -106,6 +106,8 @@ struct HostEmitter {
     /// `self.count()` against a real declared member before falling back to
     /// the `.len() as isize` builtin.
     self_type: Option<String>,
+    /// Receiver-type resolution for the `.count`/`.length` guard (see `host_types`).
+    tenv: crate::transpiler::host_types::HostTypeEnv,
     /// The CURRENTLY-being-emitted function's own by-ref-typed parameter names
     /// (reset per `emit_fn` call). A bare read of one of these (`Stmt::For`'s
     /// iterable, `ExprKind::Index`, or forwarding it as an argument to something
@@ -216,6 +218,7 @@ impl HostEmitter {
             struct_field_names: std::collections::HashMap::new(),
             struct_method_names: std::collections::HashMap::new(),
             self_type: None,
+            tenv: Default::default(),
             ref_params: std::collections::HashSet::new(),
             in_resident_return: false,
             fn_returns_resident: std::collections::HashMap::new(),
@@ -324,6 +327,7 @@ impl HostEmitter {
         boring_main_throws: bool,
         top_level_kernel_touching: bool,
     ) {
+        self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
         // Pass 1: struct/enum names, needed below (before pass 2) to resolve
         // whether a `Type::Named(n)` function parameter is by-ref-worthy.
         for item in &program.items {
@@ -1841,6 +1845,7 @@ impl HostEmitter {
                 self.line(&format!("{};", s));
             }
             Stmt::Let(s) => {
+                self.tenv.track_local(&s.name, s.ty.as_ref(), s.value.as_ref(), self.self_type.as_deref());
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
@@ -2132,6 +2137,8 @@ impl HostEmitter {
         self.indent += 1;
         let outer_self_type = self.self_type.take();
         self.self_type = self_ty.map(|s| s.to_string());
+        let outer_tenv_locals = self.tenv.take_locals();
+        for p in &f.params { self.tenv.track_param(p); }
         let outer_in_throws = self.in_throws;
         self.in_throws = f.throws;
         let outer_in_resident_return = self.in_resident_return;
@@ -2185,6 +2192,7 @@ impl HostEmitter {
             }
         }
         self.self_type = outer_self_type;
+        self.tenv.restore_locals(outer_tenv_locals);
         self.in_throws = outer_in_throws;
         self.in_resident_return = outer_in_resident_return;
         self.ref_params = outer_ref_params;
@@ -2198,6 +2206,7 @@ impl HostEmitter {
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(s) => {
+                self.tenv.track_local(&s.name, s.ty.as_ref(), s.value.as_ref(), self.self_type.as_deref());
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
                 // A materializing call (RHS calls a `fn_returns_resident`
                 // function) whose OWN `let` is itself explicitly `'kernel'unified`
@@ -2635,6 +2644,7 @@ impl HostEmitter {
             struct_field_names: self.struct_field_names.clone(),
             struct_method_names: self.struct_method_names.clone(),
             self_type: self.self_type.clone(),
+            tenv: self.tenv.clone(),
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return,
             fn_returns_resident: self.fn_returns_resident.clone(),
@@ -2660,11 +2670,12 @@ impl HostEmitter {
     /// field or method of `self`'s own struct type — see `metal::host`'s
     /// identical function for the full rationale.
     fn is_real_self_member(&self, obj: &Expr, member: &str) -> bool {
-        matches!(&obj.kind, ExprKind::Var(v) if v == "self")
+        (matches!(&obj.kind, ExprKind::Var(v) if v == "self")
             && self.self_type.as_deref().is_some_and(|t| {
                 self.struct_field_names.get(t).is_some_and(|f| f.contains(member))
                     || self.struct_method_names.get(t).is_some_and(|m| m.contains(member))
-            })
+            }))
+            || self.tenv.is_real_member(obj, member, self.self_type.as_deref())
     }
 
     // ── Expressions ────────────────────────────────────────────────────────────

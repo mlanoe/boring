@@ -44,6 +44,8 @@ struct HostEmitter<'a> {
     /// correctly special-cased by that pass (see `transpiler::emit_kernel`) — this
     /// backend only needs to splice the result in and, if present, call `boring_main()`.
     general_code: &'a str,
+    /// Receiver-type resolution for `.count`/`.length` (see `host_types`).
+    tenv: crate::transpiler::host_types::HostTypeEnv,
     has_boring_main: bool,
     /// Whether the emitted `boring_main` actually returns a `Result` — an explicit
     /// user `def main():` only does when it declares `throws`; a synthesized one
@@ -88,7 +90,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), errors: Vec::new() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), errors: Vec::new() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -1658,6 +1660,7 @@ impl<'a> HostEmitter<'a> {
             }
             // A per-frame local (`let c = palette(screen.frame)`), visible to the rest of the frame body.
             Stmt::Let(ls) if ls.value.is_some() => {
+                self.tenv.track_local(&ls.name, ls.ty.as_ref(), ls.value.as_ref(), None);
                 let v = self.host_expr(ls.value.as_ref().unwrap());
                 let mutability = if ls.binding.is_mutable() { "mut " } else { "" };
                 self.line(&format!("{indent}let {mutability}{} = {v};", ls.name));
@@ -1953,6 +1956,37 @@ impl<'a> HostEmitter<'a> {
                     && matches!(field.as_str(), "x" | "y" | "left" | "right" | "middle") =>
             {
                 format!("{pfx}__mouse_{field}")
+            }
+            // `arr.count` / `arr.length` on a known array → length; a user struct's real
+            // field of that name (or any receiver not known to be an array) stays a field read.
+            ExprKind::Field(obj, field)
+                if (field == "count" || field == "length")
+                    && !self.tenv.is_real_member(obj, field, None)
+                    && self.tenv.expr_is_array(obj, None) =>
+            {
+                format!("({}.len() as isize)", self.host_expr(obj))
+            }
+            ExprKind::Field(obj, field) => {
+                format!("{}.{}", self.host_expr(obj), field)
+            }
+            ExprKind::Array(elems) => {
+                let es: Vec<_> = elems.iter().map(|x| self.host_expr(x)).collect();
+                format!("vec![{}]", es.join(", "))
+            }
+            // `x.count()` / `x.length()`: a real struct method wins; a known array gets the builtin.
+            ExprKind::MethodCall(obj, method, args)
+                if args.is_empty() && (method == "count" || method == "length")
+                    && !self.tenv.is_real_member(obj, method, None)
+                    && self.tenv.expr_is_array(obj, None) =>
+            {
+                format!("({}.len() as isize)", self.host_expr(obj))
+            }
+            // Any other method call on a host value: `recv.method(args)`.
+            ExprKind::MethodCall(obj, method, args)
+                if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
+            {
+                let args_s: Vec<_> = args.iter().map(|a| self.host_expr(&a.value)).collect();
+                format!("{}.{}({})", self.host_expr(obj), method, args_s.join(", "))
             }
             ExprKind::Field(obj, field) => {
                 format!("{}.{}", self.host_expr(obj), field)
