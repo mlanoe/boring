@@ -517,6 +517,7 @@ fn is_slot_of_set(t: &Type) -> bool {
     matches!(t, Type::Generic(g, args) if g == "Slot" && args.len() == 1 && matches!(strip_mut(&args[0]), Type::Set(_)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, owner_slot: bool, state_name: &str, seeds: &[(String, bool, Type)], env_fields: &[FieldDecl]) -> Vec<FnDecl> {
     let field_ty = |name: &str| s.fields.iter().find(|f| f.name == name).map(|f| strip_mut(&f.ty).clone());
     let mut src = format!("struct G:\n    req string viewKind(): \"{}\"\n", s.name);

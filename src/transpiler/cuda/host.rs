@@ -3089,7 +3089,7 @@ impl HostEmitter {
                     if let Some(ty) = str_ty {
                         if crate::transpiler::screen_input::is_host_str(&a.value, self.screen_var.as_deref(), &self.event_vars) {
                             let v = self.expr(&a.value);
-                            let v = if matches!(&a.value.kind, ExprKind::Str(_)) { v } else if matches!(&a.value.kind, ExprKind::Var(_)) { format!("{v}.as_str()") } else { format!("{v}.as_str()") };
+                            let v = if matches!(&a.value.kind, ExprKind::Str(_)) { v } else { format!("{v}.as_str()") };
                             return crate::transpiler::screen_input::to_string_type(ty, &v);
                         }
                     }

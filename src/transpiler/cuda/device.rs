@@ -353,8 +353,8 @@ impl DeviceEmitter {
                 self.line("__syncthreads();");
                 self.line("for (int bp_wmma_i = threadIdx.x; bp_wmma_i < 64 * 64; bp_wmma_i += 256) {");
                 self.indent += 1;
-                self.line(&format!("const int64_t bp_wmma_row = (int64_t)blockIdx.y * 64 + bp_wmma_i / 64;"));
-                self.line(&format!("const int64_t bp_wmma_col = (int64_t)blockIdx.x * 64 + bp_wmma_i % 64;"));
+                self.line("const int64_t bp_wmma_row = (int64_t)blockIdx.y * 64 + bp_wmma_i / 64;");
+                self.line("const int64_t bp_wmma_col = (int64_t)blockIdx.x * 64 + bp_wmma_i % 64;");
                 self.line(&format!("if (bp_wmma_row < {m} && bp_wmma_col < {n}) {{"));
                 self.indent += 1;
                 if has_bias {

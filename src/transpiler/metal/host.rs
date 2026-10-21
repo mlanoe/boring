@@ -2253,44 +2253,6 @@ impl HostEmitter {
         self.line("}");
     }
 
-    fn emit_struct(&mut self, s: &StructDecl) {
-        if s.is_native { return; }
-        let vis = if s.is_pub { "pub " } else { "" };
-        self.line(&format!("{}struct {} {{", vis, s.name));
-        self.indent += 1;
-        for f in &s.fields {
-            let fvis = if f.is_pub { "pub " } else { "" };
-            self.line(&format!("{}{}: {},", fvis, f.name, rust_type(&f.ty)));
-        }
-        self.indent -= 1;
-        self.line("}");
-        if !s.methods.is_empty() {
-            self.blank();
-            self.line(&format!("impl {} {{", s.name));
-            self.indent += 1;
-            for m in &s.methods { self.emit_fn(m, Some(&s.name)); self.blank(); }
-            self.indent -= 1;
-            self.line("}");
-        }
-    }
-
-    fn emit_enum(&mut self, e: &EnumDecl) {
-        if e.is_native { return; }
-        let vis = if e.is_pub { "pub " } else { "" };
-        self.line(&format!("{}enum {} {{", vis, e.name));
-        self.indent += 1;
-        for v in &e.variants {
-            if v.fields.is_empty() {
-                self.line(&format!("{},", v.name));
-            } else {
-                let fs: Vec<String> = v.fields.iter().map(|f| rust_type(&f.ty)).collect();
-                self.line(&format!("{}({}),", v.name, fs.join(", ")));
-            }
-        }
-        self.indent -= 1;
-        self.line("}");
-    }
-
     // ── Statements ─────────────────────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
@@ -3074,7 +3036,7 @@ impl HostEmitter {
                     if let Some(ty) = str_ty {
                         if crate::transpiler::screen_input::is_host_str(&a.value, self.screen_var.as_deref(), &self.event_vars) {
                             let v = self.expr(&a.value);
-                            let v = if matches!(&a.value.kind, ExprKind::Str(_)) { v } else if matches!(&a.value.kind, ExprKind::Var(_)) { format!("{v}.as_str()") } else { format!("{v}.as_str()") };
+                            let v = if matches!(&a.value.kind, ExprKind::Str(_)) { v } else { format!("{v}.as_str()") };
                             return crate::transpiler::screen_input::to_string_type(ty, &v);
                         }
                     }

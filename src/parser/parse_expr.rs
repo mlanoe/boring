@@ -841,7 +841,7 @@ impl Parser {
                     }
                 }
                 TokenKind::Question
-                    if self.tokens.get(self.pos + 1).map_or(false, |t| {
+                    if self.tokens.get(self.pos + 1).is_some_and(|t| {
                         matches!(t.kind, TokenKind::LParen)
                             && t.line == self.tokens[self.pos].line
                             && t.col == self.tokens[self.pos].col + 1

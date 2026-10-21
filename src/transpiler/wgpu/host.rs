@@ -12,6 +12,7 @@ use crate::transpiler::TranspileError;
 /// report/exit instead of writing out `host_rs` when non-empty -- exactly
 /// like the general pass's own `TranspileConfig`-produced errors already are
 /// (see `main.rs`'s `report_transpile_errors`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_host_rs(
     program: &Program,
     kernel_names: &[String],

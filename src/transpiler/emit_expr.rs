@@ -2814,13 +2814,12 @@ impl Transpiler {
                     // `k.n = enc.n`: an `int`/`uint` host value (`isize`/`usize`) narrows to the
                     // kernel field's 32-bit mirror, as `k.t = float(..)` already does for floats.
                     if let Some(f) = field_decl {
-                        if matches!(&f.ty, Type::Int | Type::Uint)
-                            || matches!(&f.ty, Type::Named(n) if n == "int" || n == "uint")
+                        if (matches!(&f.ty, Type::Int | Type::Uint)
+                            || matches!(&f.ty, Type::Named(n) if n == "int" || n == "uint"))
+                            && !matches!(&value.kind, ExprKind::Int(_))
                         {
-                            if !matches!(&value.kind, ExprKind::Int(_)) {
-                                let t = super::emit_kernel::kernel_host_scalar_type(&f.ty);
-                                return format!("{kvar}.{field} = (({}) as {t})", self.emit_expr(value));
-                            }
+                            let t = super::emit_kernel::kernel_host_scalar_type(&f.ty);
+                            return format!("{kvar}.{field} = (({}) as {t})", self.emit_expr(value));
                         }
                     }
                     let field_ty = field_decl
