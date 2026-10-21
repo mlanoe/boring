@@ -68,13 +68,14 @@ def main() throws:
 
     # Quantized prefill (m > 1): default is the exact fp32 tiled kernel; with
     # `[tensor.linear.prefill] precision = "half"` it is the half WMMA kernel
-    # (error ~1e-2 relative to magnitudes ~50 is expected).
+    # (an error well above the fp32 run's ~1e-6, around 1e-2, proves the half kernel ran).
     let qm = 70
     let qn = 96
     let qk = 64
     let blocks = qn * qk / 32
     let [uint8]'kernel'global qw = [if i % 34 == 0: 0 as uint8 elif i % 34 == 1: 0x38 as uint8 else: (qvalue((i / 34) * 32 + (i % 34) - 2) & 0xFF) as uint8 for i in 0..<blocks * 34]
-    let [float32]'kernel'global qx = [((i % 17) as float32) / 8.0 - 1.0 for i in 0..<qm * qk]
+    # /7.0 is not exactly representable in half, so the half WMMA path shows a visible rounding error.
+    let [float32]'kernel'global qx = [((i % 17) as float32) / 7.0 - 1.0 for i in 0..<qm * qk]
     let [float32]'kernel'global qb = [(i as float32) * 0.02 for i in 0..<qn]
     let qy = qlinear(qx, qw, qb, qm, qn, qk)
     var float32 qworst = 0.0
