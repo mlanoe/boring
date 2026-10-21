@@ -1944,7 +1944,7 @@ fn quantized_prefill_stays_scalar_tiled_without_half_opt_in() {
     let (cu, host, build, _) = run_cuda_with_config("quant_default", QUANT_LINEAR, None);
     assert!(!cu.contains("nvcuda::wmma"), "{cu}");
     assert!(!cu.contains("cuda_fp16"), "{cu}");
-    assert!(!build.contains("sm_70"), "{build}");
+    assert!(!build.contains("-arch="), "{build}");
     assert!(host.contains("(((n + 15) / 16"), "{host}");
 }
 
@@ -1959,7 +1959,7 @@ fn half_prefill_opt_in_uses_wmma_64x64_tiles_with_generic_dequant() {
     // The weight tile still comes from the shared Q8_0 dequantizer.
     assert!(cu.contains("bTile[bc + bk * 64] = "), "{cu}");
     assert!(cu.contains("+ bias[bp_wmma_col]"), "{cu}");
-    assert!(build.contains("-arch=sm_70"), "{build}");
+    assert!(build.contains("\"-arch=sm_70\", \"-arch=sm_75\""), "{build}");
     assert!(host.contains("(((n + 63) / 64"), "{host}");
     // Decode (m == 1) keeps the exact fp32 warp kernel.
     assert!(cu.contains("__shfl_xor_sync"), "{cu}");

@@ -252,27 +252,42 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let ptx_path = PathBuf::from(&out_dir).join("main.ptx");
 
-    let status = Command::new("nvcc")
-        .args([
-            "--ptx",
-            "-O2",
-            // BORING_NVCC_ARCH_ARGS
+    // Architectures to try in order; "" means nvcc's default. Newer toolkits
+    // drop old targets (CUDA 13 rejects sm_70), so a later candidate is a fallback.
+    let candidates: &[&str] = &[BORING_NVCC_ARCH_CANDIDATES];
+    let mut compiled = false;
+    for arch in candidates {
+        let mut command = Command::new("nvcc");
+        command.args(["--ptx", "-O2"]);
+        if !arch.is_empty() {
+            command.arg(arch);
+        }
+        let status = command
+            .args(["--output-file", ptx_path.to_str().unwrap(), "kernels/main.cu"])
+            .status()
+            .expect("nvcc not found — install the CUDA toolkit (https://developer.nvidia.com/cuda-downloads)");
+        if status.success() {
+            compiled = true;
+            break;
+        }
+    }
 
-            "--output-file", ptx_path.to_str().unwrap(),
-            "kernels/main.cu",
-        ])
-        .status()
-        .expect("nvcc not found — install the CUDA toolkit (https://developer.nvidia.com/cuda-downloads)");
-
-    if !status.success() {
+    if !compiled {
         panic!("nvcc failed to compile kernels/main.cu");
     }
 
     println!("cargo:rustc-env=BORING_PTX_PATH={}", ptx_path.display());
 }
 "#;
-    let arch = if tf32 { "\"-arch=sm_80\"," } else if half_wmma { "\"-arch=sm_70\"," } else { "" };
-    template.replace("// BORING_NVCC_ARCH_ARGS", arch)
+    // TF32 needs sm_80; half WMMA needs sm_70 (sm_75 when the toolkit dropped Volta).
+    let arch = if tf32 {
+        "\"-arch=sm_80\""
+    } else if half_wmma {
+        "\"-arch=sm_70\", \"-arch=sm_75\""
+    } else {
+        "\"\""
+    };
+    template.replace("BORING_NVCC_ARCH_CANDIDATES", arch)
 }
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────

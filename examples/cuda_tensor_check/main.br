@@ -43,7 +43,7 @@ def main() throws:
                 var float32 expected = bias[c]
                 for i in 0..<k:
                     expected += x[r * k + i] * w[c * k + i]
-                let err = abs(y[r * n + c] - expected)
+                let err = (y[r * n + c] - expected).abs()
                 if err > worst:
                     worst = err
     print "linear max abs error: {worst}"
@@ -61,7 +61,7 @@ def main() throws:
                 var float32 expected = 0.0
                 for i in 0..<32:
                     expected += ta[r * 32 + i] * tb[i * 32 + c]
-                let err = abs(tc[r * 32 + c] - expected)
+                let err = (tc[r * 32 + c] - expected).abs()
                 if err > tile_worst:
                     tile_worst = err
     print "tile max abs error: {tile_worst}"
@@ -84,7 +84,7 @@ def main() throws:
                 var float32 expected = qb[c]
                 for i in 0..<qk:
                     expected += qx[r * qk + i] * (qvalue(c * qk + i) as float32) * 0.5
-                let err = abs(qy[r * qn + c] - expected)
+                let err = (qy[r * qn + c] - expected).abs()
                 if err > qworst:
                     qworst = err
     print "quantized prefill max abs error: {qworst}"
