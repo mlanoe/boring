@@ -1,0 +1,90 @@
+# CUDA tensor numerical check: dynamic linear (+bias) and a device matmulTile,
+# each compared against a CPU reference. Run it with the default fp32 config
+# (tolerance 1e-3) and with `[tensor.matmul] algorithm = "tf32"` (see
+# tools/colab-cuda-tensor-test.ipynb); TF32 rounds inputs to 10 mantissa bits.
+
+kernel Tile:
+    let [float32, k = 32, m = 32]'global a
+    let [float32, n = 32, k = 32]'global b
+    mut [float32, n = 32, m = 32]'unified c
+    init([float32]'global ai, [float32]'global bi):
+        a = ai
+        b = bi
+        c = [0.0 as float32 for ..<1024]
+    def ():
+        .tensors.matmulTile(a, b, c, row = .block.y * 16, col = .block.x * 16, rows = 16, cols = 16)
+
+req [float32]'kernel'unified linear([float32]'kernel'global x, [float32]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k)
+    y
+
+# Q8_0 weights: 34-byte blocks of one fp16 scale (0.5 = 0x3800) + 32 int8 values.
+req [float32]'kernel'unified qlinear([float32]'kernel'global x, [uint8]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k, format = "q8_0")
+    y
+
+int qvalue(int flat):
+    ((flat * 7) % 23) - 11
+
+def main() throws:
+    let m = 37
+    let n = 53
+    let k = 40
+    let [float32]'kernel'global x = [((i % 13) as float32) / 7.0 - 0.8 for i in 0..<m * k]
+    let [float32]'kernel'global w = [((i % 11) as float32) / 5.0 - 1.0 for i in 0..<n * k]
+    let [float32]'kernel'global bias = [(i as float32) * 0.01 for i in 0..<n]
+    let y = linear(x, w, bias, m, n, k)
+    var float32 worst = 0.0
+    with y:
+        for r in 0..<m:
+            for c in 0..<n:
+                var float32 expected = bias[c]
+                for i in 0..<k:
+                    expected += x[r * k + i] * w[c * k + i]
+                let err = abs(y[r * n + c] - expected)
+                if err > worst:
+                    worst = err
+    print "linear max abs error: {worst}"
+
+    let [float32]'global ta = [((i % 9) as float32) / 4.0 - 1.0 for i in 0..<1024]
+    let [float32]'global tb = [((i % 7) as float32) / 3.0 - 1.0 for i in 0..<1024]
+    mut t = Tile(ta, tb)
+    kernel:
+        t(block = 128, grid = (2, 2))
+    var float32 tile_worst = 0.0
+    let tc = t.c
+    with tc:
+        for r in 0..<32:
+            for c in 0..<32:
+                var float32 expected = 0.0
+                for i in 0..<32:
+                    expected += ta[r * 32 + i] * tb[i * 32 + c]
+                let err = abs(tc[r * 32 + c] - expected)
+                if err > tile_worst:
+                    tile_worst = err
+    print "tile max abs error: {tile_worst}"
+
+    # Quantized prefill (m > 1): default is the exact fp32 tiled kernel; with
+    # `[tensor.linear.prefill] precision = "half"` it is the half WMMA kernel
+    # (error ~1e-2 relative to magnitudes ~50 is expected).
+    let qm = 70
+    let qn = 96
+    let qk = 64
+    let blocks = qn * qk / 32
+    let [uint8]'kernel'global qw = [if i % 34 == 0: 0 as uint8 elif i % 34 == 1: 0x38 as uint8 else: (qvalue((i / 34) * 32 + (i % 34) - 2) & 0xFF) as uint8 for i in 0..<blocks * 34]
+    let [float32]'kernel'global qx = [((i % 17) as float32) / 8.0 - 1.0 for i in 0..<qm * qk]
+    let [float32]'kernel'global qb = [(i as float32) * 0.02 for i in 0..<qn]
+    let qy = qlinear(qx, qw, qb, qm, qn, qk)
+    var float32 qworst = 0.0
+    with qy:
+        for r in 0..<qm:
+            for c in 0..<qn:
+                var float32 expected = qb[c]
+                for i in 0..<qk:
+                    expected += qx[r * qk + i] * (qvalue(c * qk + i) as float32) * 0.5
+                let err = abs(qy[r * qn + c] - expected)
+                if err > qworst:
+                    qworst = err
+    print "quantized prefill max abs error: {qworst}"

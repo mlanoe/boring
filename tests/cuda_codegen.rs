@@ -87,6 +87,10 @@ fn build_rs_and_toml(test_name: &str, src: &str) -> (String, String) {
 }
 
 fn run_cuda(test_name: &str, src: &str) -> (String, String, String, String) {
+    run_cuda_with_config(test_name, src, None)
+}
+
+fn run_cuda_with_config(test_name: &str, src: &str, config: Option<&str>) -> (String, String, String, String) {
     let bin = env!("CARGO_BIN_EXE_boring");
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("cuda_codegen").join(test_name);
@@ -97,6 +101,7 @@ fn run_cuda(test_name: &str, src: &str) -> (String, String, String, String) {
     let br_file  = tmp.join("test.br");
     let cuda_dir = tmp.join("test_cuda");
     fs::write(&br_file, src).unwrap();
+    if let Some(config) = config { fs::write(tmp.join("boring.toml"), config).unwrap(); }
 
     let result = Command::new(bin)
         .args(["build", "--target", "cuda"])
@@ -182,6 +187,22 @@ kernel.tensors.mma(a, b, c)
 "#);
     assert!(mma.contains("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N"), "{mma}");
     assert!(mma.contains("beta: 1.0f32"), "{mma}");
+}
+
+#[test]
+fn dynamic_float_linear_uses_cublas_for_any_shape_with_fused_bias() {
+    let (cu, host) = cuda_codegen("dynamic_native_tensor_linear", r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [float32]'kernel'global weights, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k)
+    y
+"#);
+    assert!(cu.contains("BoringTensorDynamicFloatNative0_kernel"), "{cu}");
+    assert!(cu.contains("c[bp_cell] += bias[bp_cell % n]"), "{cu}");
+    assert!(host.contains("CUBLAS_PEDANTIC_MATH"), "{host}");
+    assert!(host.contains("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T"), "{host}");
+    assert!(host.contains("m: self.n as i32, n: self.m as i32, k: self.k as i32"), "{host}");
+    assert!(host.contains("blas.gemm(config, &*self.b, &*self.a, &mut self.c)"), "{host}");
 }
 
 #[test]
@@ -1860,4 +1881,93 @@ kernel:
     assert!(rs.contains("boring_mouse_x as f32"), "{rs}");
     assert!(rs.contains("boring_mouse_left") && rs.contains("boring_mouse_right"), "{rs}");
     assert!(rs.contains("boring_mouse_y > 3"), "{rs}");
+}
+
+const TILE_KERNEL: &str = r#"
+kernel Tile:
+    let [float32, k = 32, m = 32]'global a
+    let [float32, n = 32, k = 32]'global b
+    mut [float32, n = 32, m = 32]'unified c
+    init([float32]'global ai, [float32]'global bi):
+        a = ai
+        b = bi
+        c = [0.0 as float32 for ..<1024]
+    def ():
+        .tensors.matmulTile(a, b, c, row = .block.y * 16, col = .block.x * 16, rows = 16, cols = 16)
+"#;
+
+#[test]
+fn device_tensor_tiles_stay_exact_fp32_without_tf32_opt_in() {
+    let (cu, _, build, _) = run_cuda_with_config("tile_default", TILE_KERNEL, None);
+    assert!(!cu.contains("nvcuda::wmma"), "{cu}");
+    assert!(!cu.contains("mma.h"), "{cu}");
+    assert!(!build.contains("sm_80"), "{build}");
+}
+
+#[test]
+fn tf32_opt_in_emits_wmma_tiles_with_exact_scalar_fallback() {
+    let config = "[tensor.matmul]\nalgorithm = \"tf32\"\n";
+    let (cu, host, build, _) = run_cuda_with_config("tile_tf32", TILE_KERNEL, Some(config));
+    assert!(cu.contains("#include <mma.h>"), "{cu}");
+    assert!(cu.contains("precision::tf32"), "{cu}");
+    assert!(cu.contains("nvcuda::wmma::mma_sync"), "{cu}");
+    assert!(cu.contains("__float_to_tf32"), "{cu}");
+    assert!(cu.contains("} else {"), "runtime fallback to the fp32 scalar tile expected:\n{cu}");
+    assert!(cu.contains("bp_tensor_sum"), "{cu}");
+    assert!(build.contains("-arch=sm_80"), "{build}");
+    let _ = host;
+}
+
+#[test]
+fn tf32_opt_in_switches_cublas_to_tf32_math_and_scalar_keeps_fp32() {
+    let src = r#"
+let [float32, k = 64, m = 64]'kernel'global a = [1.0 as float32 for ..<4096]
+let [float32, n = 64, k = 64]'kernel'global b = [1.0 as float32 for ..<4096]
+mut [float32, n = 64, m = 64]'kernel'unified c = [0.0 as float32 for ..<4096]
+kernel.tensors.matmul(a, b, c)
+"#;
+    let (_, tf32, _, _) = run_cuda_with_config("cublas_tf32", src, Some("[tensor.matmul]\nalgorithm = \"tf32\"\n"));
+    assert!(tf32.contains("CUBLAS_TF32_TENSOR_OP_MATH"), "{tf32}");
+    let (_, exact, _, _) = run_cuda_with_config("cublas_exact", src, None);
+    assert!(exact.contains("CUBLAS_PEDANTIC_MATH"), "{exact}");
+}
+
+const QUANT_LINEAR: &str = r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k, format = "q8_0")
+    y
+"#;
+
+#[test]
+fn quantized_prefill_stays_scalar_tiled_without_half_opt_in() {
+    let (cu, host, build, _) = run_cuda_with_config("quant_default", QUANT_LINEAR, None);
+    assert!(!cu.contains("nvcuda::wmma"), "{cu}");
+    assert!(!cu.contains("cuda_fp16"), "{cu}");
+    assert!(!build.contains("sm_70"), "{build}");
+    assert!(host.contains("(((n + 15) / 16"), "{host}");
+}
+
+#[test]
+fn half_prefill_opt_in_uses_wmma_64x64_tiles_with_generic_dequant() {
+    let config = "[tensor.linear.prefill]\nprecision = \"half\"\n";
+    let (cu, host, build, _) = run_cuda_with_config("quant_half", QUANT_LINEAR, Some(config));
+    assert!(cu.contains("#include <cuda_fp16.h>") && cu.contains("#include <mma.h>"), "{cu}");
+    assert!(cu.contains("wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __half"), "{cu}");
+    assert!(cu.contains("nvcuda::wmma::mma_sync(bp_wmma_acc[bp_wmma_j]"), "{cu}");
+    assert!(cu.contains("__align__(32) __half bp_wmma_ha"), "{cu}");
+    // The weight tile still comes from the shared Q8_0 dequantizer.
+    assert!(cu.contains("bTile[bc + bk * 64] = "), "{cu}");
+    assert!(cu.contains("+ bias[bp_wmma_col]"), "{cu}");
+    assert!(build.contains("-arch=sm_70"), "{build}");
+    assert!(host.contains("(((n + 63) / 64"), "{host}");
+    // Decode (m == 1) keeps the exact fp32 warp kernel.
+    assert!(cu.contains("__shfl_xor_sync"), "{cu}");
+}
+
+#[test]
+fn half_prefill_respects_scalar_prefill_override() {
+    let config = "[tensor.linear.prefill]\nprecision = \"half\"\nalgorithm = \"scalar\"\n";
+    let (cu, _, _, _) = run_cuda_with_config("quant_half_scalar", QUANT_LINEAR, Some(config));
+    assert!(!cu.contains("nvcuda::wmma"), "{cu}");
 }

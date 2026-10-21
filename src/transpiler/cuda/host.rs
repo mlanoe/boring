@@ -1980,6 +1980,48 @@ impl HostEmitter {
             return;
         }
 
+        if name.starts_with("BoringTensorDynamicFloatNative") {
+            // Runtime-shape float32 linear: C[m,n] = A[m,k] * W[n,k]^T through cuBLAS
+            // (pedantic math keeps true fp32, never TF32), then a fused bias broadcast.
+            self.line("let stream = boring_new_stream_with_priority(&self.__ctx, priority)?;");
+            self.line("for dep in after { stream.join(dep)?; }");
+            self.line("let blas = CudaBlas::new(stream.clone())?;");
+            self.line("unsafe { cudarc::cublas::sys::cublasSetMathMode(*blas.handle(), cudarc::cublas::sys::cublasMath_t::CUBLAS_PEDANTIC_MATH).result()?; }");
+            self.line("let config = GemmConfig {");
+            self.indent += 1;
+            self.line("transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,");
+            self.line("transb: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,");
+            self.line("m: self.n as i32, n: self.m as i32, k: self.k as i32,");
+            self.line("alpha: 1.0f32, lda: self.k as i32, ldb: self.k as i32, beta: 0.0f32, ldc: self.n as i32,");
+            self.indent -= 1;
+            self.line("};");
+            self.line("unsafe { blas.gemm(config, &*self.b, &*self.a, &mut self.c) }?;");
+            if fields.iter().any(|field| field.name == "bias") {
+                self.line(&format!("let func = BORING_MODULE.get().unwrap().load_function(\"{name}_kernel\")?;"));
+                self.line("let total = (self.m as i64) * (self.n as i64);");
+                self.line("let cfg = LaunchConfig { block_dim: (256, 1, 1), grid_dim: (((total + 255) / 256) as u32, 1, 1), shared_mem_bytes: 0 };");
+                self.line("let mut launcher = stream.launch_builder(&func);");
+                for f in fields {
+                    match f.qual {
+                        GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
+                            if f.binding == FieldBinding::Let {
+                                self.line(&format!("launcher.arg(&*self.{});", f.name));
+                            } else {
+                                self.line(&format!("launcher.arg(&mut self.{});", f.name));
+                            }
+                        }
+                        GpuQual::Local | GpuQual::Const => self.line(&format!("launcher.arg(&self.{});", f.name)),
+                        GpuQual::Actor => {}
+                    }
+                }
+                self.line("unsafe { launcher.launch(cfg) }.map_err(__boring_cuda_classify_error)?;");
+            }
+            self.line("Ok(KernelHandle { inner: self, stream })");
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+
         // Compute smem_bytes from dynamic 'shared fields (extern __shared__ T arr[]).
         // Statically-sized 'shared ArrayN fields embed their size in the kernel declaration
         // and do not contribute to smem_bytes.

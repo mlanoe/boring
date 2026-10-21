@@ -12,13 +12,36 @@ use crate::transpiler::helpers::{
 
 #[cfg(test)]
 pub(super) fn emit_device_cu(program: &Program) -> String {
-    emit_device_cu_with_errors(program).0
+    emit_device_cu_with_errors(program, false, false).0
 }
 
-pub(super) fn emit_device_cu_with_errors(program: &Program) -> (String, Vec<crate::transpiler::TranspileError>) {
+pub(super) fn emit_device_cu_with_errors(program: &Program, tf32: bool, half_wmma: bool) -> (String, Vec<crate::transpiler::TranspileError>) {
     let mut e = DeviceEmitter::new();
+    e.tf32 = tf32;
+    e.half_wmma = half_wmma;
     e.emit_program(program);
     (e.out, e.errors)
+}
+
+enum WmmaMarker {
+    Init,
+    Step(String, String),
+    Store(String, String, String),
+}
+
+fn wmma_marker(expr: &Expr) -> Option<WmmaMarker> {
+    let ExprKind::Call(callee, args) = &expr.kind else { return None };
+    let ExprKind::Var(name) = &callee.kind else { return None };
+    let var = |index: usize| match args.get(index).map(|arg| &arg.value.kind) {
+        Some(ExprKind::Var(name)) => Some(name.clone()),
+        _ => None,
+    };
+    match name.as_str() {
+        "__boring_wmma_init" => Some(WmmaMarker::Init),
+        "__boring_wmma_step" => Some(WmmaMarker::Step(var(0)?, var(1)?)),
+        "__boring_wmma_store" => Some(WmmaMarker::Store(var(0)?, var(1)?, var(2)?)),
+        _ => None,
+    }
 }
 
 struct DeviceEmitter {
@@ -35,6 +58,10 @@ struct DeviceEmitter {
     /// see `metal::device`'s identical field.
     current_fn_is_void: bool,
     errors: Vec<crate::transpiler::TranspileError>,
+    /// Opt-in `matrix.algorithm = "tf32"`: eligible tensor tiles use WMMA TF32.
+    tf32: bool,
+    /// Opt-in half WMMA quantized prefill (`prefill.precision = "half"`).
+    half_wmma: bool,
 }
 
 impl DeviceEmitter {
@@ -44,6 +71,8 @@ impl DeviceEmitter {
             auto_sync: false, top_level_scalars: std::collections::HashMap::new(),
             current_fn_is_void: true,
             errors: Vec::new(),
+            tf32: false,
+            half_wmma: false,
         }
     }
 
@@ -78,6 +107,12 @@ impl DeviceEmitter {
         self.blank();
         self.line("#include <cuda_runtime.h>");
         self.line("#include <stdint.h>");
+        if self.tf32 || self.half_wmma {
+            self.line("#include <mma.h>");
+        }
+        if self.half_wmma {
+            self.line("#include <cuda_fp16.h>");
+        }
         self.blank();
         // Boring built-in Dimension type (mirrors host-side struct, see
         // helpers::DIMENSION_STRUCT_RUST — width/height are `u32`, so this must
@@ -241,6 +276,18 @@ impl DeviceEmitter {
                 }
             }
         }
+        if decl.name.starts_with("BoringTensorDynamicFloatNative") {
+            // The GEMM itself runs through cuBLAS on the host (true fp32, see
+            // `emit_boring_launch`); this kernel only fuses the row-broadcast bias.
+            if decl.fields.iter().any(|field| field.name == "bias") {
+                self.line("const int64_t bp_block = (int64_t)blockIdx.x + (int64_t)blockIdx.y * (int64_t)gridDim.x;");
+                self.line("const int64_t bp_cell = (int64_t)threadIdx.x + bp_block * (int64_t)blockDim.x;");
+                self.line("if (bp_cell < m * n) { c[bp_cell] += bias[bp_cell % n]; }");
+            }
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
         let has_sync_fields = self.current_fields.iter().any(|f| matches!(f.qual, GpuQual::Actor));
         self.auto_sync = has_sync_fields && !body_has_explicit_sync(&entry.body);
         if self.auto_sync {
@@ -255,6 +302,72 @@ impl DeviceEmitter {
         }
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// Expands the internal `__boring_wmma_*` intrinsics of the opt-in half-precision
+    /// quantized prefill (`tensor_host`'s 64x64 tile kernel) into WMMA m16n16k16.
+    /// Eight warps own a 4x4 grid of 16x16 fragments: warp `w` holds fragment row
+    /// `w / 2` and fragment columns `2 * (w % 2)` and `+ 1` in registers across K.
+    /// Activations and dequantized weights are staged as float tiles and rounded to
+    /// half here, so the only precision loss is the documented half rounding.
+    fn emit_wmma_marker(&mut self, marker: WmmaMarker) {
+        let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
+        match marker {
+            WmmaMarker::Init => {
+                self.line("__shared__ __align__(32) __half bp_wmma_ha[64 * 16];");
+                self.line("__shared__ __align__(32) __half bp_wmma_hb[16 * 64];");
+                self.line("__shared__ __align__(32) float bp_wmma_out[64 * 64];");
+                self.line("const int bp_wmma_warp = threadIdx.x / 32;");
+                self.line("const int bp_wmma_fr = bp_wmma_warp / 2;");
+                self.line("const int bp_wmma_fc = (bp_wmma_warp % 2) * 2;");
+                self.line("nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> bp_wmma_acc[2];");
+                self.line("nvcuda::wmma::fill_fragment(bp_wmma_acc[0], 0.0f);");
+                self.line("nvcuda::wmma::fill_fragment(bp_wmma_acc[1], 0.0f);");
+            }
+            WmmaMarker::Step(a, b) => {
+                let (a, b) = (c_gpu_safe_ident(&a), c_gpu_safe_ident(&b));
+                self.line("for (int bp_wmma_i = threadIdx.x; bp_wmma_i < 1024; bp_wmma_i += 256) {");
+                self.indent += 1;
+                self.line(&format!("bp_wmma_ha[bp_wmma_i] = __float2half({a}[bp_wmma_i]);"));
+                self.line(&format!("bp_wmma_hb[bp_wmma_i] = __float2half({b}[bp_wmma_i]);"));
+                self.indent -= 1;
+                self.line("}");
+                self.line("__syncthreads();");
+                self.line("nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __half, nvcuda::wmma::row_major> bp_wmma_a;");
+                self.line("nvcuda::wmma::load_matrix_sync(bp_wmma_a, bp_wmma_ha + bp_wmma_fr * 16 * 16, 16);");
+                self.line("for (int bp_wmma_j = 0; bp_wmma_j < 2; ++bp_wmma_j) {");
+                self.indent += 1;
+                self.line("nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16, __half, nvcuda::wmma::row_major> bp_wmma_b;");
+                self.line("nvcuda::wmma::load_matrix_sync(bp_wmma_b, bp_wmma_hb + (bp_wmma_fc + bp_wmma_j) * 16, 64);");
+                self.line("nvcuda::wmma::mma_sync(bp_wmma_acc[bp_wmma_j], bp_wmma_a, bp_wmma_b, bp_wmma_acc[bp_wmma_j]);");
+                self.indent -= 1;
+                self.line("}");
+            }
+            WmmaMarker::Store(c, m, n) => {
+                let c = c_gpu_safe_ident(&c);
+                self.line("for (int bp_wmma_j = 0; bp_wmma_j < 2; ++bp_wmma_j) {");
+                self.indent += 1;
+                self.line("nvcuda::wmma::store_matrix_sync(bp_wmma_out + bp_wmma_fr * 16 * 64 + (bp_wmma_fc + bp_wmma_j) * 16, bp_wmma_acc[bp_wmma_j], 64, nvcuda::wmma::mem_row_major);");
+                self.indent -= 1;
+                self.line("}");
+                self.line("__syncthreads();");
+                self.line("for (int bp_wmma_i = threadIdx.x; bp_wmma_i < 64 * 64; bp_wmma_i += 256) {");
+                self.indent += 1;
+                self.line(&format!("const int64_t bp_wmma_row = (int64_t)blockIdx.y * 64 + bp_wmma_i / 64;"));
+                self.line(&format!("const int64_t bp_wmma_col = (int64_t)blockIdx.x * 64 + bp_wmma_i % 64;"));
+                self.line(&format!("if (bp_wmma_row < {m} && bp_wmma_col < {n}) {{"));
+                self.indent += 1;
+                if has_bias {
+                    self.line(&format!("{c}[bp_wmma_row * {n} + bp_wmma_col] = bp_wmma_out[bp_wmma_i] + bias[bp_wmma_col];"));
+                } else {
+                    self.line(&format!("{c}[bp_wmma_row * {n} + bp_wmma_col] = bp_wmma_out[bp_wmma_i];"));
+                }
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
     }
 
     // ── Statements ────────────────────────────────────────────────────────────
@@ -279,10 +392,15 @@ impl DeviceEmitter {
                 }
             }
             Stmt::Expr(e) => {
+                if let Some(marker) = wmma_marker(e) {
+                    self.emit_wmma_marker(marker);
+                    return;
+                }
                 if crate::checker::tensor::is_tensor_call(e) {
                     let fields = self.current_fields.clone();
                     let source = crate::transpiler::tensor::emit(
-                        e, &fields, crate::transpiler::tensor::Dialect::Cuda,
+                        e, &fields,
+                        if self.tf32 { crate::transpiler::tensor::Dialect::CudaTf32 } else { crate::transpiler::tensor::Dialect::Cuda },
                         |expr| self.expr(expr),
                     );
                     for line in source.lines() { self.line(line); }

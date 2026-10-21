@@ -528,4 +528,4 @@ The following features are not yet implemented:
 
 - `'actor'shared` — parse error; only `'actor'global`/`'actor'unified` (or bare `'actor` for block-shared memory) are accepted
 - Omitting `grid` when no 1D array field, `Image`, or `Volume` field is present silently defaults to `(1, 1, 1)` — see the grid-inference rules above for what fields DO get 2D/3D inference
-- **No tensor-core (`wmma`) support** — no fragment types, no `mma.sync` lowering, nothing. See [tensor-core primitives](tensor-core-primitives.html) for a proposed `kernel.tensors.*` design (not implemented).
+- **Tensor cores are opt-in and partial** — `[tensor.matmul] algorithm = "tf32"` enables WMMA TF32 for eligible device tensor tiles and TF32 cuBLAS math; there are still no public fragment types, no `mma.sync` lowering, and half-precision quantized prefill on tensor cores is opt-in only via `[tensor.linear.prefill] precision = "half"` (WMMA f16, sm_70+). See [tensor-core primitives](tensor-core-primitives.html) for a proposed `kernel.tensors.*` design (not implemented).

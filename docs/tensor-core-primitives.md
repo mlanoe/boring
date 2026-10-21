@@ -209,7 +209,38 @@ conversion. Unaligned shapes retain the portable generated CUDA kernel. ROCm
 and WGPU currently treat this fixed-matrix setting as the portable schedule. The same
 selection happens at run time for dynamically shaped, non-quantized
 `kernel.tensors.linear`: compatible calls launch the 32-thread native kernel and
-other shapes launch the 256-thread scalar kernel.
+other shapes launch the 256-thread scalar kernel. On CUDA the same dynamic
+`linear` (any shape, optional bias) runs through cuBLAS SGEMM in pedantic math
+mode, followed by a fused row-broadcast bias kernel; there is no alignment
+split and no implicit TF32 conversion. This path is covered by codegen tests
+only; numerical validation on NVIDIA hardware is still open.
+
+**Opt-in TF32 on CUDA.** NVIDIA tensor cores have no fp32 mode, only TF32
+(sm_80+) and half, both of which round inputs. They are therefore never
+selected implicitly. Setting `[tensor.matmul] algorithm = "tf32"` in
+`boring.toml` (a) emits WMMA `m16n16k8` TF32 code for device
+`matmulTile`/`mmaTile`/`linearTile` calls whose tile is a multiple of 16x16 and
+whose K and N are multiples of 8, with a uniform runtime guard (tile fully
+inside the matrix, column origin a multiple of 8, block size a multiple of 32)
+that falls back to the exact fp32 scalar tile otherwise; (b) switches the cuBLAS
+host paths to `CUBLAS_TF32_TENSOR_OP_MATH`; and (c) builds PTX with
+`-arch=sm_80`. Without the option the generated code is unchanged. Validate with
+`tools/colab-cuda-tensor-test.ipynb` (`examples/cuda_tensor_check/`); this path
+is covered by codegen tests only until that notebook has been run on an
+A100/L4.
+
+**Opt-in half prefill on CUDA.** `[tensor.linear.prefill] precision = "half"`
+switches quantized `kernel.tensors.linear` prefill (`m > 1`, any packed format
+that has a portable dequantizer) from the exact fp32 16x16 tiled kernel to a
+64x64-output-tile kernel on WMMA `m16n16k16` with half inputs and fp32
+accumulation (sm_70+, PTX built with `-arch=sm_70`). The weight tile is still
+produced by the same generic dequantizer as the portable kernel, so every
+supported format is covered; only the staged activations and dequantized
+weights are rounded to half. Eight warps hold a 4x4 grid of fragments, two per
+warp across K. Decode (`m == 1`) keeps the exact fp32 warp kernel, and
+`prefill.algorithm = "scalar"` still forces the exact reference. Covered by
+codegen tests and `examples/cuda_tensor_check/`; numerical validation on
+NVIDIA hardware is pending.
 
 Every packed dynamic linear format has a tiled prefill schedule on WGPU, CUDA,
 and ROCm. Single-row decode keeps its warp reduction. For `m > 1`, these

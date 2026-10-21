@@ -26,6 +26,12 @@ pub(crate) struct TensorLinearConfig {
     pub target_warp_width: usize,
     pub native_fixed_matrices: bool,
     pub native_dynamic_float_linear: bool,
+    /// The native float kernel handles every shape in one launch (cuBLAS),
+    /// so the dispatch needs no aligned-vs-scalar geometry split.
+    pub single_launch_float_linear: bool,
+    /// Opt-in (`prefill.precision = "half"` on CUDA): the tiled quantized prefill
+    /// multiplies 64x64 output tiles with half-precision WMMA instead of scalar FMAs.
+    pub cuda_half_wmma_prefill: bool,
     pub native_dynamic_q8_linear: bool,
     pub portable_tiled_dynamic_quantized_linear: bool,
 }
@@ -42,6 +48,8 @@ impl Default for TensorLinearConfig {
             target_warp_width: 32,
             native_fixed_matrices: false,
             native_dynamic_float_linear: false,
+            single_launch_float_linear: false,
+            cuda_half_wmma_prefill: false,
             native_dynamic_q8_linear: false,
             portable_tiled_dynamic_quantized_linear: false,
         }
@@ -807,9 +815,34 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
             "        else:\n            let tx = .thread.x % 16\n            let ty = .thread.x / 16\n            let row = .block.y * 16 + ty\n            let col = .block.x * 16 + tx\n            var float32 sum = 0.0\n            let tileCount = (k + 15) / 16\n            for tile in 0..<tileCount:\n                let aCol = tile * 16 + tx\n                let bRow = tile * 16 + ty\n                if row < m and aCol < k:\n                    aTile[width = tx, height = ty] = a[row * k + aCol]\n                else:\n                    aTile[width = tx, height = ty] = 0.0\n                if col < n and bRow < k:\n                    let inner = bRow\n{tiled_dequant}                else:\n                    bTile[width = tx, height = ty] = 0.0\n                sync\n                for inner in 0..<16:\n                    sum += aTile[width = inner, height = ty] * bTile[width = tx, height = inner]\n                sync\n            if row < m and col < n:\n                c[row * n + col] = sum + {bias}\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
         );
-        body = body.replacen(&scalar_prefill, &tiled_prefill, 1);
+        let wmma_prefill = if tensor_config.cuda_half_wmma_prefill {
+            // Same generic dequantizer as the portable tile, retargeted at 64x64 output
+            // tiles: each thread stages four activations and four dequantized weights per
+            // 16-deep K stage; the multiply itself is the `__boring_wmma_*` intrinsics,
+            // expanded to half WMMA by the CUDA device emitter.
+            let dequant = {
+                // Preserve relative indentation of the decoder (it is nested Python-style).
+                let base = product.lines().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start_matches(' ').len()).min().unwrap_or(0);
+                product.lines().map(|line| {
+                    let extra = line.len() - line.trim_start_matches(' ').len() - base;
+                    format!("{}{}\n", " ".repeat(24 + extra), line.trim_start_matches(' '))
+                }).collect::<String>()
+            }.replace(
+                "sum += a[row * k + inner] * ",
+                "bTile[width = bc, height = bk] = ",
+            ).replace(
+                "bTile[width = tx, height = ty] = ",
+                "bTile[width = bc, height = bk] = ",
+            );
+            Some(format!(
+                "        else:\n            __boring_wmma_init()\n            let tileCount = (k + 15) / 16\n            for tile in 0..<tileCount:\n                for part in 0..<4:\n                    let aIndex = .thread.x + part * 256\n                    let ar = aIndex / 16\n                    let ak = aIndex % 16\n                    let aRow = .block.y * 64 + ar\n                    let aCol = tile * 16 + ak\n                    if aRow < m and aCol < k:\n                        aTile[width = ak, height = ar] = a[aRow * k + aCol]\n                    else:\n                        aTile[width = ak, height = ar] = 0.0\n                    let bIndex = .thread.x + part * 256\n                    let bk = bIndex / 64\n                    let bc = bIndex % 64\n                    let col = .block.x * 64 + bc\n                    let inner = tile * 16 + bk\n                    if col < n and inner < k:\n{dequant}                    else:\n                        bTile[width = bc, height = bk] = 0.0\n                sync\n                __boring_wmma_step(aTile, bTile)\n                sync\n            __boring_wmma_store(c, m, n)\n"
+            ))
+        } else { None };
+        body = body.replacen(&scalar_prefill, wmma_prefill.as_deref().unwrap_or(&tiled_prefill), 1);
     }
-    let tile_fields = if portable_tiled_quantized {
+    let tile_fields = if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
+        "    mut [float32, width = 16, height = 64]'actor aTile\n    mut [float32, width = 64, height = 16]'actor bTile\n"
+    } else if portable_tiled_quantized {
         "    mut [float32, width = 16, height = 16]'actor aTile\n    mut [float32, width = 16, height = 16]'actor bTile\n"
     } else { "" };
     let source = format!(
@@ -900,7 +933,9 @@ fn parse_dynamic_replacement_stmts(
         && call.format.is_some()
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
-    let launch = if native_float {
+    let launch = if native_float && tensor_config.single_launch_float_linear {
+        format!("    kernel:\n        {instance}(block = 256, grid = {grid})\n")
+    } else if native_float {
         format!("    if {m} % 8 == 0 and {n} % 8 == 0 and {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = ({n} / 8, {m} / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
     } else if native_scalar_decode {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 255) / 256)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
@@ -916,6 +951,8 @@ fn parse_dynamic_replacement_stmts(
         } else {
             format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
         }
+    } else if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else if portable_tiled_quantized {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 15) / 16))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else {
