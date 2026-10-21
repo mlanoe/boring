@@ -44,7 +44,7 @@ Rationale, in short:
 
 - **Step 0 done**: `boring-ui/render/src/raster.br` (+ `raster_font.br`) draws `FillRect`, `StrokeRect`, `DrawShadow`,
   `DrawText` (5x7 fixture font), `PushClip`/`PopClip`, `PushOpacity`/`PopOpacity`. `DrawImage` and `MarkedText` are
-  not drawn yet. The colour pipeline is still sRGB-encoded source-over; only `blend` changes when it is decided.
+  not drawn yet. The colour pipeline is linear-light (decided and implemented 2026-10-21).
 - **Step 1 done**: `raster_gpu.br` is the one-thread-per-pixel kernel; `encode` bakes clips, expands text to glyph
   commands and bounds opacity nesting to 4. It matches the CPU reference within one LSB on the test corpus under
   `boring run`, `--target simd` and `--target wgpu` (Metal). Not yet measured: speed.
@@ -85,6 +85,8 @@ Two representations are needed, because `Command` carries strings (`kind`, `text
 2. **Resolved commands** — a flat encoding built by one CPU pass: `kind` as an integer opcode, color as a
    premultiplied `uint`, geometry as `float`s, text as glyph-run offsets into an atlas. Stored as parallel
    arrays (struct-of-arrays) so kernels read plain numeric buffers.
+
+**Decided (2026-10-21):** color pipeline — blend in linear light as this draft says, decode/encode per operation on 8-bit sRGB-encoded storage (premultiplied linear, re-encoded); implemented in the CPU reference and both kernels. The original open question follows.
 
 **Open decision (must be settled before step 1):** color pipeline. The main draft specifies premultiplied
 colors in a *linear* working space; `Screen` presents BGRA8. The sRGB conversion belongs in one place — the

@@ -460,6 +460,14 @@ pub view AnimationScope:
     [View] children
     body(): native
 
+# MatchedGeometry: shared-element animation. Under an animated transaction, a `MatchedGeometry(id = x)` that appears while
+# another with the same `id` disappears (a different mounted identity) presents from the old one's frame to its own — the
+# old one's removal ghost is suppressed, since its frame carried over. The same wrapper kept in place is an ordinary move.
+pub view MatchedGeometry:
+    string id
+    [View] children
+    body(): native
+
 pub view Transition:
     TransitionKind insertion = .Fade
     TransitionKind removal = .Fade
