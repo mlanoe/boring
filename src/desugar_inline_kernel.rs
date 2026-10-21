@@ -7,6 +7,9 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 
 pub fn desugar_inline_kernels(program: Program) -> Program {
+    // Every entry point (run/check/build and the interpreter) calls this first, so the
+    // `kernel.tensors.*` operand-residency inference rides along here.
+    let program = crate::desugar_tensor_quals::infer_tensor_operand_quals(program);
     let mut generated = Vec::new();
     let mut items = Vec::with_capacity(program.items.len());
     let mut serial = 0usize;

@@ -1345,6 +1345,17 @@ impl OwnerQual {
     /// guarantees indirection (never `'inline`) before per-usage inference has
     /// resolved it to one concrete member. Replaces the old `Owned | New` match arms
     /// from when `'new` had its own dedicated enum variant instead of being a `Union`.
+    /// The two host-context GPU residencies a bare `'kernel` stands for — "GPU-resident,
+    /// placement inferred" (`desugar_tensor_quals` resolves it to one of them before the
+    /// checker, interpreter or transpiler ever see it). Also the acceptance contract of a
+    /// `'kernel` parameter: either residency.
+    pub const KERNEL_MEMBERS: [OwnerQual; 2] = [OwnerQual::GpuGlobal, OwnerQual::GpuUnified];
+
+    /// True for the bare `'kernel` marker, `Union([GpuGlobal, GpuUnified])`.
+    pub fn is_kernel_marker(&self) -> bool {
+        matches!(self, OwnerQual::Union(members) if members.as_slice() == Self::KERNEL_MEMBERS)
+    }
+
     pub fn is_owned_or_new(&self) -> bool {
         match self {
             OwnerQual::Owned => true,

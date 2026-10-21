@@ -191,6 +191,88 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 | `'kernel'unified` | unified host + device DRAM |
 | `'kernel'global` | device-only DRAM |
 
+**Inferred for `kernel.tensors.*` operands.** A labeled-array binding or parameter with no
+qualifier that is connected to a host `kernel.tensors.matmul/mma/linear` operand gets its
+residency inferred, so `let [float32, k = 64, m = 64] a = ...` needs no `'kernel'global`. It follows
+the same model as the ownership qualifiers (`'shared`/`'actor`/...): each array starts with the
+candidates `{'kernel'global, 'kernel'unified}`, constraints narrow them, groups share their fate,
+and a default resolves what is left.
+
+| Step | Rule |
+|---|---|
+| Groups | `let y = x`, and passing `x` to a free function of the same file (`f(x)`), put the two bindings in one group, in both directions; a parameter has one qualifier, so every caller of it agrees |
+| Constraints | an explicit `'kernel'global`/`'kernel'unified` on a callee parameter that receives the array, or on the return type of a function returning it, demands that qualifier (`'unified` wins if a group is demanded both ways) |
+| Default | a group holding a `mut` binding or parameter → `'kernel'unified`; otherwise → `'kernel'global` |
+
+The default is a *policy*, not a correctness rule: host code can read either qualifier directly and
+`with` works for both, they only differ in cost. A read-only input needs no host view, so it stays
+device-only; a `mut` array is written, and usually read back, by the host. Spell the qualifier out
+to take control; an explicit qualifier is never touched.
+
+A `mut` binding in such a group that is never written (not a tensor destination, no assignment,
+not passed on, not returned) gets a warning: it only pushes its group to `'kernel'unified`.
+
+Candidates are labeled arrays (`[float32, k = 64, m = 64]`) and plain dynamic arrays (`[float32]`,
+the operands of `kernel.tensors.linear(x, w, y, m = ..., n = ..., k = ...)`).
+
+Followed: bindings in nested blocks (`if`, loops, `match`...), at the top level or in a function,
+and labeled arguments (`mm(z = c, x = a, y = b)` binds by name, not position).
+
+Not followed: methods, closures, calls with a computed argument, a name declared twice in one
+scope (also across sibling blocks — `'kernel` on such a name is an error), and a top-level binding
+used inside a function body.
+
+**Bare `'kernel`: GPU, placement left to the inference.** On an array-typed `let`, parameter or
+return type of a free function, `'kernel` (with no `'global`/`'unified` after it) says "this lives
+on the GPU" and lets the rules above pick the placement:
+
+```
+req [float32, n = 8, m = 8]'kernel product([float32, k = 8, m = 8]'kernel a, [float32, n = 8, k = 8]'kernel b) throws:
+    mut [float32, n = 8, m = 8]'kernel c = [0.0 as float32 for ..<64]
+    kernel.tensors.matmul(a, b, c)
+    c
+```
+
+Unlike an unqualified array, a `'kernel` one takes part in the inference even with no
+`kernel.tensors.*` call in sight, which is how a function that only forwards its arrays declares
+them GPU-side. A `'kernel` return type joins the group of what the function returns (here `c`,
+a `mut` array, so the return is `'kernel'unified`). The result is resolved before the checker, so
+everything downstream sees `'kernel'global` or `'kernel'unified`; `'kernel` is also what a
+parameter accepts, either residency. Where it cannot be resolved — a struct field, a method, a
+non-array type — it is an error that tells you to spell the qualifier out.
+
+**Automatic resident returns.** A resident value is opaque outside `with`, so making a function
+return one could break callers. The compiler only does it when it is sure: a free, non-`pub`
+function returning one of its own plain-array variables (the tail or every `return`), where that
+array is connected to a `kernel.tensors.*` call — and **every** mention of the function in the
+program is a call that stays correct with a resident result:
+
+- the result is discarded (`product(a, b)`),
+- bound to an explicitly typed binding (`let [float32, ...] r = product(a, b)` — a plain
+  annotation materializes a host copy once, as before),
+- or bound to an untyped `let`/`mut` whose every use keeps it on the GPU: a `kernel.tensors.*`
+  operand, an argument to a function taking a GPU array, or a `with r:` block.
+
+Anything else — reading `r[0]` outside `with`, `product(a, b)[0]`, passing `product` as a value,
+a call from a method, a `pub` function, no call at all — leaves the return a plain host array.
+The analysis covers the program the compiler sees: the whole project for `boring build`, the entry
+file for `boring run`. Its placement follows the returned array's group (a `mut` destination
+gives `'kernel'unified`). Write the return type yourself (`'kernel`, `'kernel'global`,
+`'kernel'unified`) to take control, or to get residency where this analysis stays out.
+
+**See what was inferred.** `boring run --show-qualifiers file.br` (also accepted by `boring build`)
+lists every qualifier the compiler chose, where, and why:
+
+```
+inferred GPU qualifiers (mm.br):
+  mm.br:1:1  <top level>::a  'kernel'global   - default: no explicit demand and no `mut` in its group
+  mm.br:7:1  <top level>::c  'kernel'unified  - default: `<top level>::c` in its group is `mut`
+```
+
+A group spanning several functions says so (`shares its qualifier with mm::x`), and a qualifier
+that comes from an explicit annotation names it (`demanded by parameter 1 of `mm` is explicitly
+'kernel'unified`).
+
 `'const` (like bare `'actor` and `'local`) has no host-context form — it has no host access at
 all (see the table above), so a host-side binding could never be read from or written to.
 It's only meaningful as a field qualifier inside a `kernel` struct.

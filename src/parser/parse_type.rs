@@ -505,12 +505,9 @@ impl Parser {
                         }
                     }
                 } else {
-                    return Err(ParseError::Generic {
-                        msg: "'kernel must be followed by 'unified or 'global".into(),
-                        line: self.line(),
-                        col: self.col(),
-                        len: self.tok_len(),
-                    });
+                    // Bare `'kernel`: GPU-resident, `'global` or `'unified` left to the
+                    // residency inference (`desugar_tensor_quals`).
+                    OwnerQual::Union(OwnerQual::KERNEL_MEMBERS.to_vec())
                 }
             }
             TokenKind::Ident(ref s) => match s.as_str() {

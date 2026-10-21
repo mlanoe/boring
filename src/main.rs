@@ -18,6 +18,7 @@ pub mod ast;
 pub mod parser;
 pub mod desugar_labeled_array;
 pub mod desugar_inline_kernel;
+pub mod desugar_tensor_quals;
 pub mod desugar_array_block;
 pub mod desugar_inject;
 pub mod desugar_view_modifiers;
@@ -186,7 +187,24 @@ fn report_transpile_warnings(path: &Path, source: &str, warnings: &[transpiler::
     }
 }
 
+/// `--show-qualifiers`: lists every `'kernel'global`/`'kernel'unified` the compiler inferred
+/// for a `kernel.tensors.*` operand, with the reason (`desugar_tensor_quals`). Always drains
+/// the pass's decisions so they never pile up when the flag is off.
+fn report_inferred_qualifiers(path: &Path) {
+    let decisions = desugar_tensor_quals::take_decisions();
+    if std::env::var_os("BORING_SHOW_QUALIFIERS").is_none() { return; }
+    if decisions.is_empty() {
+        eprintln!("inferred GPU qualifiers: none ({})", path.display());
+        return;
+    }
+    eprintln!("inferred GPU qualifiers ({}):", path.display());
+    for d in &decisions {
+        eprintln!("  {}:{}:{}  {}::{}  {}  - {}", path.display(), d.line, d.col, d.scope, d.name, d.qual, d.why);
+    }
+}
+
 fn report_check_result(path: &Path, source: &str, result: checker::CheckResult) -> bool {
+    report_inferred_qualifiers(path);
     for w in &result.warnings {
         report_warning(path, source, w.line, w.col, w.len, &w.message);
     }
@@ -1572,6 +1590,9 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
             // parameter through every intermediate function between here and there.
             "--locked" => { std::env::set_var("BORING_LOCKED", "1"); }
             "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
+            // Read back by `report_inferred_qualifiers` — same "well-known name, not a
+            // threaded parameter" shape as `--locked`/`--offline`.
+            "--show-qualifiers" => { std::env::set_var("BORING_SHOW_QUALIFIERS", "1"); }
             // `@provide(env = "...")` (docs/book.md §33) — just
             // recognized here so it isn't rejected as an unknown flag; the actual value is
             // read back independently by `current_env_flag()` (`main.rs`), the same
@@ -1748,6 +1769,7 @@ fn print_help() {
     eprintln!("                               Built-in profiles: default, v100, a100, rtx3090, rtx4090, h100");
     eprintln!("                               Custom profile:    --gpu path/to/profile.toml");
     eprintln!("    boring run --locked        Fail instead of creating/updating a boring.lock entry");
+    eprintln!("    boring run --show-qualifiers  List the 'kernel'global/'kernel'unified qualifiers inferred for kernel.tensors operands (also on build)");
     eprintln!("    boring run --offline       Never touch the network for a git [deps] dependency");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
@@ -1954,6 +1976,7 @@ fn parse_build_command(build_args: &[String]) {
             // parameter — read back via DepPolicy::from_env() (src/git_deps.rs).
             "--locked"  => { std::env::set_var("BORING_LOCKED", "1"); }
             "--offline" => { std::env::set_var("BORING_OFFLINE", "1"); }
+            "--show-qualifiers" => { std::env::set_var("BORING_SHOW_QUALIFIERS", "1"); }
             // `@provide(env = "...")` (docs/book.md §33) — see
             // `parse_run_flags`'s matching arm for why this is just recognized (not stored)
             // here; the value is read back independently by `current_env_flag()`.

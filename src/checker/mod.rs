@@ -54,6 +54,9 @@ pub fn check(program: &Program) -> CheckResult {
     // single-pass walk above. See `Checker::scan_fn_gpu_arg_params`.
     checker.collect_gpu_arg_params(program);
     checker.check_program(program);
+    // Warnings raised by the residency-inference pass that ran just before the checker.
+    checker.warnings.extend(crate::desugar_tensor_quals::take_warnings());
+    checker.errors.extend(crate::desugar_tensor_quals::take_errors());
     CheckResult { errors: checker.errors, warnings: checker.warnings }
 }
 
