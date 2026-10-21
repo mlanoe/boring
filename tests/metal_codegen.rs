@@ -3769,3 +3769,50 @@ kernel:
     assert!(rs.contains("boring_mouse_left") && rs.contains("boring_mouse_right"), "{rs}");
     assert!(rs.contains("boring_mouse_y > 3"), "{rs}");
 }
+
+fn tensor_matmul_through_function_src(qual: &str) -> String {
+    format!(r#"
+def mm([float32, k = 64, m = 64]'kernel'{qual} a, [float32, n = 64, k = 64]'kernel'{qual} b, mut [float32, n = 64, m = 64]'kernel'{qual} c) throws:
+    kernel.tensors.matmul(a, b, c)
+
+def run_it() throws:
+    let [float32, k = 64, m = 64]'kernel'{qual} a = [1.0 as float32 for ..<4096]
+    let [float32, n = 64, k = 64]'kernel'{qual} b = [1.0 as float32 for ..<4096]
+    mut [float32, n = 64, m = 64]'kernel'{qual} c = [0.0 as float32 for ..<4096]
+    mm(a, b, c)
+    with c:
+        print "{{c[0]}} {{c[4095]}}"
+
+run_it()
+"#)
+}
+
+#[test]
+fn host_arrays_passed_to_kernel_qualified_params_are_wrapped_and_mut_written_back() {
+    for qual in ["global", "unified"] {
+        let (_, rs) = metal_codegen(&format!("tensor_fn_boundary_codegen_{qual}"), &tensor_matmul_through_function_src(qual));
+        assert!(rs.contains("fn mm(a: BoringKernelArg<f32>, b: BoringKernelArg<f32>, c: &mut BoringKernelArg<f32>)"), "{qual}:\n{rs}");
+        assert!(!rs.contains("mm(a.clone()"), "{qual}: caller must not pass a plain Vec:\n{rs}");
+        assert!(rs.contains("let mut __boring_marg_c = BoringKernelArg::Host("), "{qual}: mut arg needs a write-back:\n{rs}");
+    }
+}
+
+#[test]
+fn tensor_matmul_through_function_runs_on_metal() {
+    for qual in ["global", "unified"] {
+        let test_name = format!("tensor_fn_boundary_run_{qual}");
+        let (_msl, _rs, _toml) = run_metal(&test_name, &tensor_matmul_through_function_src(qual));
+        let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("metal_codegen").join(&test_name).join("test_metal").join("Cargo.toml");
+        let run = Command::new("cargo")
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(&manifest)
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{qual}: generated Metal program failed:\n{stdout}\n{stderr}");
+        assert_eq!(stdout.trim_end(), "64 64", "{qual}");
+    }
+}

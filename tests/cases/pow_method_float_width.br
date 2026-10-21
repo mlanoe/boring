@@ -36,3 +36,6 @@ def main() throws:
 
     let v = Velocity(3.0, 4.0)
     print "{v.x.pow(2.0) + v.y.pow(2.0)}"
+
+    # An explicitly cast receiver must retain the cast's width too.
+    print "{(2.0 as float32).pow(4.0 as float32)}"

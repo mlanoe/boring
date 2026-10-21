@@ -133,6 +133,14 @@ struct HostEmitter {
     /// host value wrapped at a call site converts to exactly that width
     /// (`f32` for `[float32]`, `f64` for `[float]`) instead of a fixed `f64`.
     fn_gpu_array_params: std::collections::HashMap<String, Vec<Option<String>>>,
+    /// Free function name -> per-parameter "is a `mut` `'kernel'global`/`'kernel'unified`
+    /// array parameter" flags. Such a parameter is declared `&mut BoringKernelArg<T>`
+    /// so the callee's writes (`c = k.c`) reach the caller; the call site passes
+    /// `&mut` (writing a host-array argument back after the call).
+    fn_gpu_array_mut_params: std::collections::HashMap<String, Vec<Option<String>>>,
+    /// `mut` GPU array parameters of the function being emitted (assignment targets
+    /// need a `*` deref).
+    mut_gpu_params: std::collections::HashSet<String>,
     /// Local variable names (current function only, reset per `emit_fn` call,
     /// mirrors `ref_params`' scoping) bound directly to a materializing call
     /// (`let k_t = transpose_gpu(...)`) -- these are `Vec<f64>` (the general
@@ -246,6 +254,8 @@ impl HostEmitter {
             in_resident_tuple_return: None,
             fn_float_array_params: std::collections::HashMap::new(),
             fn_gpu_array_params: std::collections::HashMap::new(),
+            fn_gpu_array_mut_params: std::collections::HashMap::new(),
+            mut_gpu_params: std::collections::HashSet::new(),
             f64_array_locals: std::collections::HashSet::new(),
             resident_locals: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
@@ -386,6 +396,12 @@ impl HostEmitter {
                     .map(|p| p.ty.as_ref().is_some_and(is_float_array_param))
                     .collect();
                 self.fn_float_array_params.insert(f.name.clone(), float_array_flags);
+                self.fn_gpu_array_mut_params.insert(
+                    f.name.clone(),
+                    f.params.iter()
+                        .map(|p| p.ty.as_ref().filter(|t| p.mutable && is_gpu_array_param(t)).map(elem_rust_type))
+                        .collect(),
+                );
                 self.fn_gpu_array_params.insert(
                     f.name.clone(),
                     f.params.iter()
@@ -1424,8 +1440,33 @@ impl HostEmitter {
     /// destructuring-assignment support (`(a, b) = (b, a);`, stable since
     /// 1.59) handles the tuple case natively — no manual temporary-swap
     /// codegen needed.
+    /// Wraps a call that passes host-array locals as `mut` `'kernel'global`/`'kernel'unified`
+    /// arguments (`&mut __boring_marg_<name>`): uploads each into a temporary
+    /// `BoringKernelArg::Host` before the call and copies the callee's result back
+    /// into the local afterwards, so the write is visible to the caller.
+    fn wrap_mut_write_backs(&self, write_backs: &[(String, String, String)], gpu_flags: Option<&[Option<String>]>, args: &[Arg], call: String) -> String {
+        if write_backs.is_empty() { return call; }
+        let mut out = String::from("{ ");
+        for (tmp, name, _) in write_backs {
+            let pos = args.iter().position(|a| matches!(&a.value.kind, ExprKind::Var(n) if n == name)).unwrap_or(0);
+            let elem = gpu_flags.and_then(|f| f.get(pos)).and_then(|e| e.clone()).unwrap_or_else(|| "f64".into());
+            out.push_str(&format!(
+                "let mut {tmp} = BoringKernelArg::Host(({name}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()); "
+            ));
+        }
+        out.push_str(&format!("let __boring_call_result = {call}; "));
+        for (tmp, name, dev) in write_backs {
+            out.push_str(&format!(
+                "{name} = match {tmp} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{dev}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as _).collect(), BoringKernelArg::Host(v) => v.iter().map(|&x| x as _).collect() }}; "
+            ));
+        }
+        out.push_str("__boring_call_result }");
+        out
+    }
+
     fn emit_assign_target(&mut self, target: &Expr) -> String {
         match &target.kind {
+            ExprKind::Var(name) if self.mut_gpu_params.contains(name.as_str()) => format!("*{}", name),
             ExprKind::Var(name) => name.clone(),
             ExprKind::Field(obj, field) => format!("{}.{}", self.emit_assign_target(obj), field),
             ExprKind::Tuple(elems) => {
@@ -2080,8 +2121,10 @@ impl HostEmitter {
         if f.is_native { return; }
         let vis = if f.is_pub { "pub " } else { "" };
         let params: Vec<String> = f.params.iter().map(|p| {
-            let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
+            let mut_gpu = p.mutable && p.ty.as_ref().is_some_and(is_gpu_array_param) && self_ty.is_none();
+            let name = if p.mutable && !mut_gpu { format!("mut {}", p.name) } else { p.name.clone() };
             match &p.ty {
+                Some(ty) if mut_gpu => format!("{}: &mut BoringKernelArg<{}>", name, general_host_elem_type(ty)),
                 Some(ty) => {
                     // boring's by-ref contract for array/dict/set/struct/enum
                     // params -- see `cuda::host`'s identical fix for the full
@@ -2138,11 +2181,13 @@ impl HostEmitter {
         // `cuda::host`'s identical change for the full rationale — previously
         // ignored entirely, leaving `throw`/`guard ... else throw` with nothing
         // but the plain (non-Result) return type to `return Err(...)` into.
+        let plain_ret_is_unit = plain_ret == "()";
         let ret = if f.throws {
             format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", plain_ret)
         } else {
             plain_ret
         };
+        let ret_is_unit = plain_ret_is_unit;
         let sig = format!("{}fn {}({}) -> {}", vis, f.name, all_params, ret);
         if f.body.is_empty() {
             self.line(&format!("{} {{}}", sig));
@@ -2167,10 +2212,12 @@ impl HostEmitter {
             &mut self.last_use_sites,
             crate::transpiler::last_use::last_use_sites(&f.params, &f.body),
         );
+        let outer_mut_gpu_params = std::mem::take(&mut self.mut_gpu_params);
         for p in &f.params {
             if let Some(ty) = &p.ty {
                 if is_gpu_array_param(ty) {
                     self.resident_locals.insert(p.name.clone());
+                    if p.mutable && self_ty.is_none() { self.mut_gpu_params.insert(p.name.clone()); }
                     continue;
                 }
                 // A `[float]` param is declared `&Vec<f64>` (see the param-
@@ -2196,8 +2243,9 @@ impl HostEmitter {
                 }
             }
         }
-        let len = f.body.len();
-        for (i, stmt) in f.body.iter().enumerate() {
+        // Trailing comments emit nothing; the last real statement is the tail.
+        let len = f.body.iter().rposition(|s| !matches!(s, Stmt::Comment(_))).map_or(0, |i| i + 1);
+        for (i, stmt) in f.body.iter().enumerate().take(len) {
             if i + 1 == len {
                 if f.throws {
                     if let Stmt::Expr(e) = stmt {
@@ -2236,6 +2284,14 @@ impl HostEmitter {
                     }
                 }
                 self.emit_stmt_last(stmt);
+                // A `throws` function with no return value whose last statement is
+                // not itself an expression (a trailing `with`/`for`/`let`/...) still
+                // has to end in `Ok(())`.
+                if f.throws && ret_is_unit
+                    && !matches!(stmt, Stmt::Expr(_) | Stmt::Return(_) | Stmt::Throw(_) | Stmt::Match(_))
+                {
+                    self.line("Ok(())");
+                }
             } else {
                 self.emit_stmt(stmt);
             }
@@ -2248,6 +2304,7 @@ impl HostEmitter {
         self.ref_params = outer_ref_params;
         self.f64_array_locals = outer_f64_array_locals;
         self.resident_locals = outer_resident_locals;
+        self.mut_gpu_params = outer_mut_gpu_params;
         self.last_use_sites = outer_last_use_sites;
         self.indent -= 1;
         self.line("}");
@@ -2679,6 +2736,8 @@ impl HostEmitter {
             in_resident_tuple_return: self.in_resident_tuple_return.clone(),
             fn_float_array_params: self.fn_float_array_params.clone(),
             fn_gpu_array_params: self.fn_gpu_array_params.clone(),
+            fn_gpu_array_mut_params: self.fn_gpu_array_mut_params.clone(),
+            mut_gpu_params: self.mut_gpu_params.clone(),
             f64_array_locals: self.f64_array_locals.clone(),
             resident_locals: self.resident_locals.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
@@ -3003,12 +3062,29 @@ impl HostEmitter {
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
                 let float_flags = callee_name.and_then(|n| self.fn_float_array_params.get(n)).cloned();
                 let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
+                let mut_gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_mut_params.get(n)).cloned();
+                // `mut` GPU array arguments passed by `&mut`, with the callee's write
+                // back into a host-array local copied back after the call:
+                // (temp name, local name, device buffer element type).
+                let mut write_backs: Vec<(String, String, String)> = Vec::new();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
                     if let Some(elem) = gpu_flags.as_ref().and_then(|f| f.get(i)).and_then(|e| e.as_deref()) {
+                        let mut_dev_elem = mut_gpu_flags.as_ref().and_then(|f| f.get(i)).and_then(|e| e.clone());
+                        let is_mut_pos = mut_dev_elem.is_some();
                         if let ExprKind::Var(name) = &a.value.kind {
                             if self.resident_locals.contains(name.as_str()) {
+                                if is_mut_pos { return if self.mut_gpu_params.contains(name.as_str()) { name.clone() } else { format!("&mut {}", name) }; }
                                 return format!("{}.clone()", name);
                             }
+                            if is_mut_pos {
+                                let tmp = format!("__boring_marg_{}", name);
+                                write_backs.push((tmp.clone(), name.clone(), mut_dev_elem.clone().unwrap_or_default()));
+                                return format!("&mut {}", tmp);
+                            }
+                        }
+                        if is_mut_pos {
+                            let value = self.expr(&a.value);
+                            return format!("&mut BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", value);
                         }
                         // Convert to the callee's own `BoringKernelArg<elem>` width
                         // (not a fixed `f64`): a `[float32]` param is
@@ -3061,6 +3137,7 @@ impl HostEmitter {
                 // (already typed `BoringKernelArg<T>` by `emit_fn`) is returned
                 // as-is. See `cuda::host`'s identical case for the unconditional
                 // (non-suppressible) version of this same rule.
+                let call = self.wrap_mut_write_backs(&write_backs, gpu_flags.as_deref(), args, call);
                 if __suppress_materialize {
                     return call;
                 }

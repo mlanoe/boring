@@ -2209,6 +2209,11 @@ impl<'a> HostEmitter<'a> {
             {
                 crate::transpiler::screen_input::method(method, &self.host_expr(&args[0].value), &format!("{pfx}__input")).unwrap()
             }
+            // `screen.mouse.scroll_x as float`: the member's own host type, converted.
+            ExprKind::Cast(inner, ty) => match host_cast_type(ty) {
+                Some(t) => format!("({} as {t})", self.host_expr(inner)),
+                None => self.host_expr(inner),
+            },
             ExprKind::Str(v) => crate::transpiler::screen_input::str_to_string(&format!("{v:?}")),
             ExprKind::Bool(b) => format!("{b}"),
             ExprKind::UnaryOp(op, inner) => {
@@ -2276,6 +2281,9 @@ impl<'a> HostEmitter<'a> {
                                 match *mode {
                                     "&mut" => format!("&mut {v}"),
                                     "&" => format!("&{v}"),
+                                    // a bare trait parameter the body consumes (`Box<dyn Trait>`)
+                                    "box" if is_field => format!("Box::new({v}.clone())"),
+                                    "box" => format!("Box::new({v})"),
                                     _ if is_field => format!("{v}.clone()"),
                                     _ => v,
                                 }
@@ -2314,8 +2322,10 @@ impl<'a> HostEmitter<'a> {
     fn general_fn_param_modes(&self, name: &str) -> Option<Vec<&'static str>> {
         let needle = format!("fn {name}(");
         let at = self.general_code.lines().find_map(|l| {
-            let t = l.trim_start();
-            let t = t.strip_prefix("pub ").unwrap_or(t);
+            // Column 0 only: an indented `fn name(` is a method of some impl (`fn release(&mut self, ..)`)
+            // that merely shares the name, not the free function.
+            if l.starts_with(char::is_whitespace) { return None; }
+            let t = l.strip_prefix("pub ").unwrap_or(l);
             if t.starts_with(&needle) { Some(t.to_string()) } else { None }
         })?;
         let rest = &at[needle.len()..];
@@ -2338,7 +2348,8 @@ impl<'a> HostEmitter<'a> {
             let t = cur.trim();
             if !t.is_empty() {
                 let ty = t.split_once(':').map(|(_, ty)| ty.trim()).unwrap_or("");
-                out.push(if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" } else { "" });
+                out.push(if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" }
+                    else if ty.starts_with("Box<dyn ") { "box" } else { "" });
             }
             cur.clear();
         };
@@ -2510,6 +2521,21 @@ fn is_packed_byte_field(inner_ty: &Type) -> bool {
 /// wouldn't hold a whole number of the `array<u32>` words the device side indexes by.
 fn round_up_to_word_bytes(byte_len_expr: &str) -> String {
     format!("(((({}) + 3) / 4) * 4) as u64", byte_len_expr)
+}
+
+/// The Rust numeric type a host-side `expr as <ty>` converts to (`float` is `f64`, as in the general pass).
+fn host_cast_type(ty: &Type) -> Option<&'static str> {
+    Some(match ty {
+        Type::Int => "isize", Type::Uint => "usize",
+        Type::Float32 => "f32", Type::Float64 => "f64",
+        Type::Int8 => "i8", Type::Int16 => "i16", Type::Int32 => "i32", Type::Int64 => "i64",
+        Type::Uint8 => "u8", Type::Uint16 => "u16", Type::Uint32 => "u32", Type::Uint64 => "u64",
+        Type::Named(n) => match n.as_str() {
+            "float" | "float64" => "f64", "float32" => "f32", "int" => "isize", "uint" => "usize",
+            _ => return None,
+        },
+        _ => return None,
+    })
 }
 
 fn host_scalar_type(ty: &Type) -> &'static str {

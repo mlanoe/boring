@@ -5259,6 +5259,7 @@ impl Transpiler {
             }
         };
         match &e.kind {
+            ExprKind::Cast(_, ty) => width_of(ty),
             ExprKind::Var(v) => {
                 if let Some(w) = self.var_types.get(v.as_str()).and_then(width_of) {
                     return Some(w);

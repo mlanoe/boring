@@ -2930,6 +2930,22 @@ impl Transpiler {
         self.indent += 1;
         let was_throws = self.in_throws;
         self.in_throws = true;
+        // The setup code is its own scope: reset `inferred_qualifiers` (otherwise it still holds the
+        // LAST function's parameters -- a `mut rt = Runtime()` here would pick up `rt`'s auto-ref
+        // `Borrow` and lower to `let mut rt: &Runtime = &Runtime { .. }`), exactly like `main`'s
+        // top-level code does (see `main_infer_stmts` below).
+        let setup_stmts: Vec<Stmt> = setup_items.iter().filter_map(|i| match i {
+            Item::Let(s) => Some(Stmt::Let(s.clone())),
+            Item::Stmt(s) => Some(s.clone()),
+            _ => None,
+        }).collect();
+        let saved_params = std::mem::take(&mut self.fn_current_params);
+        let saved_params_mut = std::mem::take(&mut self.fn_current_params_mut);
+        let saved_params_lent = std::mem::take(&mut self.fn_current_params_lent);
+        self.infer_qualifiers(&setup_stmts);
+        self.fn_current_params = saved_params;
+        self.fn_current_params_mut = saved_params_mut;
+        self.fn_current_params_lent = saved_params_lent;
         let mut fields: Vec<(String, String)> = Vec::new();
         for item in setup_items {
             match item {
@@ -5920,6 +5936,51 @@ pub(crate) fn kernel_touching_fn_names(program: &Program, kernel_names: &std::co
                 out.insert(f.name.clone());
             }
         }
+    }
+    // A kernel-touching function (that doesn't return a resident value) with a
+    // `'kernel'global`/`'kernel'unified` array parameter is emitted by the backend's own host emitter with a
+    // `BoringKernelArg<T>` parameter (dual host/resident). A caller emitted by the
+    // *general* pipeline has no idea about that signature and passes a plain
+    // `Vec<T>` (rustc E0308), so every free function that calls such a function
+    // is kernel-touching too (transitively), keeping the whole call chain on the
+    // host emitter, which wraps/forwards the argument correctly.
+    let is_gpu_array_param = |p: &Param| p.ty.as_ref().is_some_and(|ty| {
+        matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+            if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+    });
+    // (A callee that returns a resident value is already handled by the general
+    // pipeline: `compute_gpu_arg_params` flags its qualified parameters, so its
+    // callers wrap/forward the argument themselves.)
+    let returns_resident = |g: &FnDecl| g.return_ty.as_ref().is_some_and(|ty| match ty {
+        Type::Tuple(elems) => elems.iter().any(|t| t.gpu_resident_qual().is_some()),
+        other => other.gpu_resident_qual().is_some(),
+    });
+    loop {
+        let mut changed = false;
+        for item in &program.items {
+            let Item::Fn(f) = item else { continue };
+            if out.contains(&f.name) { continue; }
+            let calls_resident_taking_fn = {
+                let mut found = false;
+                crate::ast::walk_stmts(&f.body, &mut |node| {
+                    if let crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Call(callee, _), .. }) = node {
+                        if let ExprKind::Var(name) = &callee.kind {
+                            if out.contains(name) && program.items.iter().any(|it| matches!(it,
+                                Item::Fn(g) if g.name == *name && g.params.iter().any(is_gpu_array_param) && !returns_resident(g)))
+                            {
+                                found = true;
+                            }
+                        }
+                    }
+                });
+                found
+            };
+            if calls_resident_taking_fn {
+                out.insert(f.name.clone());
+                changed = true;
+            }
+        }
+        if !changed { break; }
     }
     out
 }
