@@ -2929,6 +2929,15 @@ impl HostEmitter {
                         return "println!()".into();
                     }
                 }
+                // `abs(x)`/`sqrt(x)`/… → `(x).abs()`/`(x).sqrt()`/…
+                if let ExprKind::Var(name) = &callee.kind {
+                    if let Some(arg) = args.first() {
+                        let inner = self.expr(&arg.value);
+                        if let Some(call) = crate::transpiler::host_types::gpu_host_math_builtin(name, &arg.value, &inner) {
+                            return call;
+                        }
+                    }
+                }
                 // `float(expr)`/`float64(expr)` → `expr as f64`; `float32(expr)` → `expr as f32`
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "float" || name == "float64" {

@@ -1971,3 +1971,34 @@ fn half_prefill_respects_scalar_prefill_override() {
     let (cu, _, _, _) = run_cuda_with_config("quant_half_scalar", QUANT_LINEAR, Some(config));
     assert!(!cu.contains("nvcuda::wmma"), "{cu}");
 }
+
+#[test]
+fn math_builtin_in_gpu_host_fn_emits_method_call() {
+    let (_, rs) = cuda_codegen("host_math_builtin", r#"
+kernel Dbl:
+    let [float32]'global a
+    mut [float32]'unified out
+    init([float32]'global ai, int n):
+        a = ai
+        out = [0.0 for ..<n]
+    def ():
+        out[.thread.x] = a[.thread.x] * 2.0
+
+def main() throws:
+    let [float32]'global x = [1.0, -2.0, 3.0]
+    mut t = Dbl(x, 3)
+    kernel:
+        t(block = 3, grid = 1)
+    let y = t.out
+    with y:
+        for r in 0..<3:
+            let err = abs(y[r] - x[r])
+            print "{err} {sqrt(err)} {floor(2.5)}"
+"#);
+    assert!(rs.contains(".abs()"), "{rs}");
+    assert!(rs.contains(".sqrt()"), "{rs}");
+    assert!(rs.contains("(2.5 as f64).floor()"), "{rs}");
+    for bare in ["abs(", "sqrt(", "floor("] {
+        assert!(!rs.contains(&format!(" {bare}")) && !rs.contains(&format!("({bare}")), "bare {bare} call in:\n{rs}");
+    }
+}

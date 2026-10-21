@@ -2953,6 +2953,15 @@ impl HostEmitter {
                         return format!("boring_metal_device_n({} as usize)?", idx);
                     }
                 }
+                // `abs(x)`/`sqrt(x)`/… → `(x).abs()`/`(x).sqrt()`/…
+                if let ExprKind::Var(name) = &callee.kind {
+                    if let Some(arg) = args.first() {
+                        let inner = self.expr(&arg.value);
+                        if let Some(call) = crate::transpiler::host_types::gpu_host_math_builtin(name, &arg.value, &inner) {
+                            return call;
+                        }
+                    }
+                }
                 // `float(expr)`/`float64(expr)` → `expr as f32` (Metal is f32-only —
                 // see `msl_unsupported_f64` in device.rs for the device-side rejection
                 // of a real `float64` field; this host-side helper narrows the same

@@ -143,3 +143,19 @@ impl HostTypeEnv {
         self.locals = l;
     }
 }
+
+/// Free-function math builtins (`abs(x)`, `sqrt(x)`, …) as a Rust method call on the already
+/// emitted argument. The GPU host emitters are separate codegen paths from the general
+/// `emit_builtin_call` and don't delegate to it, so without this a call fell through to a bare
+/// `abs(...)` (rustc E0425). `float_literal` arguments get an `f64` cast: an unsuffixed literal
+/// receiver is ambiguous (E0689). Returns `None` for any other callee.
+pub(crate) fn gpu_host_math_builtin(name: &str, arg: &Expr, inner: &str) -> Option<String> {
+    let method = match name {
+        "sqrt" | "abs" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan"
+        | "asin" | "acos" | "atan" | "exp" | "tanh" | "log2" | "log10" => name,
+        "log" => "ln",
+        _ => return None,
+    };
+    let recv = if matches!(arg.kind, ExprKind::Float(_)) { format!("({inner} as f64)") } else { format!("({inner})") };
+    Some(format!("{recv}.{method}()"))
+}
