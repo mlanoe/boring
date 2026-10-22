@@ -560,6 +560,7 @@ interp_test!(qualifier_group_param);
 interp_test!(cast_bare_field_index);
 interp_test!(cast_scenarios);
 interp_test!(if_else_cast_numeric);
+interp_test!(unresolved_field_cast_numeric);
 
 // Regression: `boring run` (the interpreter) had the analogous bug to the
 // transpiler's `in_instance_setter` recursion guard (see

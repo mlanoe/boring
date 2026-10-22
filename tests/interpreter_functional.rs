@@ -451,6 +451,7 @@ itest!(float32_struct_method_math);
 itest!(float32_math_builtins);
 itest!(float32_local_var_math);
 itest!(if_else_cast_numeric);
+itest!(unresolved_field_cast_numeric);
 
 itest!(narrowing_cast_if_let);
 itest!(guard_let_cast_struct_field);

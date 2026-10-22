@@ -1,0 +1,14 @@
+# Regression test: `x.field as <numeric>` where the type of `x` is unknown to the
+# checker (for-var over an opaque value, e.g. an external crate
+# struct like swash `Glyph { id: u16 }`) used to emit `.trim().parse::<T>().ok()`
+# (E0599: no method `trim` on u16). An unresolved field is unknown, not string,
+# so a numeric target now gets a plain `as` cast.
+
+struct Glyph:
+    uint16 id
+
+let gs = [Glyph(7), Glyph(9)]
+var mut [uint] ids = []
+for g in gs.map((x): x):
+    ids.push(g.id as uint)
+print ids

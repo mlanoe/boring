@@ -1376,7 +1376,15 @@ impl Transpiler {
         // Skipped when a declared struct field of that name resolves to a string.
         let src_is_builtin_len_field = matches!(&e.kind, ExprKind::Field(_, f) if matches!(f.as_str(), "length" | "count" | "graphemeCount" | "displayWidth"))
             && !matches!(self.resolve_field_or_index_type(e).as_ref().map(Type::without_mut), Some(Type::Str));
-        let src_is_known_numeric_access = src_is_known_numeric_access || src_is_builtin_len_field;
+        // A field whose type can't be resolved at all (e.g. `g.id` where `g` iterates
+        // an external crate's struct, like swash's `Glyph { id: u16 }`) is unknown, not
+        // string: a numeric target gets a plain `as` cast, never `.trim().parse()`
+        // (which fails with "no method named `trim` found for type `u16`").
+        let src_is_unresolved_field = matches!(&e.kind, ExprKind::Field(_, _))
+            && self.resolve_field_or_index_type(e).is_none();
+        let src_is_known_numeric_access = src_is_known_numeric_access
+            || src_is_builtin_len_field
+            || src_is_unresolved_field;
         if src_is_known_numeric_access && is_float_ty {
             return format!("({} as {})", src, dst);
         }
