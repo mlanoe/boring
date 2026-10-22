@@ -33,6 +33,19 @@ Rationale, in short:
 - It is the most demanding real test the kernels will have had outside LLM inference (atomics, workgroup
   memory, barriers, packed bytes).
 
+## Status: text, step 3 started (2026-10-22)
+
+- **Text engine** (`boring-ui/text/`, host-side only): `swash` (shaping + glyph rasterization) is called directly from Boring
+  source via `boring.toml` `[dependencies]` + `[external_fns]`; chosen over `cosmic-text` because it was already in the
+  cargo cache (parley is there if layout/fallback is needed). `engine.br`: `shape` (glyph ids, proportional advances),
+  `rasterize` (8-bit mask + placement); `glyph_run.br`: `GlyphCache` turns a string into `DrawGlyph` commands over a shared atlas.
+  Tests run through `text/tests/run_tests.sh` (`boring build`; `boring run` cannot call a crate).
+- **Renderers**: `DrawGlyph` (`Command.glyph` = index into a `GlyphAtlas`, a pool of contiguous 8-bit masks in
+  `display_list.br`, passed beside the list like `Bitmap`s) in the CPU reference (`rasterizeWith`), the per-pixel kernel
+  (op 7, masks in `Encoded.pool`) and the tiled kernel. The pen snaps to whole pixels for now (no subpixel positioning).
+- **Not done**: layout still measures text with the fixture font (the engine's advances must feed layout through a
+  measurer trait), `scene.br` still emits `DrawText`, subpixel positioning, font fallback, line breaking via the engine.
+
 ## Status (2026-10-20)
 
 - **Step 2 done (without atomics)**: `raster_tile.br` bins inside the dispatch: a workgroup per 16 x 16 tile compacts the
