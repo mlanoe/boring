@@ -67,6 +67,8 @@ struct HostEmitter<'a> {
     has_emulated_shader: bool,
     /// `(name, type)` of the values `__boring_screen_setup` returns (`__App` fields).
     setup_fields: Vec<(String, String)>,
+    /// Names of the `let`s of the render loop body seen so far (assignable when `var`).
+    frame_locals: std::cell::RefCell<Vec<String>>,
     /// Errors found while checking a `Screen` program's shape (see
     /// `check_screen_program_shape`/`emit_render_stmt`'s error fallbacks).
     /// Non-empty means `out` is incomplete/wrong and must not be written out
@@ -95,7 +97,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), frame_locals: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -1213,7 +1215,7 @@ impl<'a> HostEmitter<'a> {
                     let needed = loop_vars.contains(&s.name)
                         || w_expr.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == s.name)
                         || h_expr.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == s.name);
-                    if needed && !is_screen && !is_kernel && matches!(val.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) {
+                    if needed && !is_screen && !is_kernel && !s.binding.is_mutable() && matches!(val.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) {
                         return Some((s.name.clone(), host_expr(val)));
                     }
                 }
@@ -1731,13 +1733,26 @@ impl<'a> HostEmitter<'a> {
                 } else if let Some(s) = self.try_emit_kernel_realloc(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if matches!(&e.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(f)
-                    if self.general_fn_param_modes(f).is_some())) {
-                    // an ordinary Boring function called for its effect
+                    if self.general_fn_param_modes(f).is_some()))
+                    || matches!(&e.kind, ExprKind::MethodCall(o, m, a)
+                        if self.setup_method_modes(o, m).is_some_and(|modes| modes.len() == a.len()))
+                    || matches!(&e.kind, ExprKind::Call(c, a) if matches!(&c.kind, ExprKind::Field(o, m)
+                        if self.setup_method_modes(o, m).is_some_and(|modes| modes.len() == a.len()))) {
+                    // an ordinary Boring function (or a method of a setup value) called for its effect
                     let call = self.host_expr(e);
                     self.line(&format!("{indent}{call};"));
+                } else if let Some(s) = self.try_emit_setup_assign(e) {
+                    self.line(&format!("{indent}{s}"));
                 } else {
+                    let hint = match &e.kind {
+                        ExprKind::Assign(l, _) if matches!(&l.kind, ExprKind::Var(_)) =>
+                            "; the assigned variable must be a top-level `var` of the program's setup code (or a `var` declared in the loop body)",
+                        ExprKind::MethodCall(..) =>
+                            "; a method can be called on a top-level struct value (declared with `let`/`mut` at the top level) whose type is declared in this program",
+                        _ => "; only calls of Boring functions, `screen.*` queries, kernel field updates and assignments to top-level variables are supported there",
+                    };
                     self.push_error(e.line, e.col,
-                        "wgpu target: expression not supported inside a Screen render loop");
+                        format!("wgpu target: expression not supported inside a Screen render loop{hint}"));
                 }
             }
             // A per-frame local (`let c = palette(screen.frame)`), visible to the rest of the frame body.
@@ -1745,6 +1760,7 @@ impl<'a> HostEmitter<'a> {
                 self.tenv.track_local(&ls.name, ls.ty.as_ref(), ls.value.as_ref(), None);
                 let v = self.host_expr(ls.value.as_ref().unwrap());
                 let mutability = if ls.binding.is_mutable() { "mut " } else { "" };
+                self.frame_locals.borrow_mut().push(ls.name.clone());
                 self.line(&format!("{indent}let {mutability}{} = {v};", ls.name));
             }
             // `for k in screen.key_events:` / `key_up_events`: the frame's key events in order.
@@ -1890,6 +1906,18 @@ impl<'a> HostEmitter<'a> {
         };
         if !self.in_method { return None; }
         Some(format!("{pfx}{name} = {new_value}; {pfx}__reblit();"))
+    }
+
+    /// `dirty = true` / `n += 1` in the render loop where the target is a top-level `var` of the
+    /// program's setup code (an `__App` field) or a per-frame local: a plain assignment.
+    fn try_emit_setup_assign(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Assign(lhs, rhs) = &e.kind else { return None };
+        let ExprKind::Var(name) = &lhs.kind else { return None };
+        if self.event_vars.borrow().contains(name) { return None; }
+        let is_field = self.setup_fields.iter().any(|(f, _)| f == name);
+        if !is_field && !self.frame_locals.borrow().contains(name) { return None; }
+        let pfx = if self.in_method && is_field { "self." } else { "" };
+        Some(format!("{pfx}{name} = {};", self.host_expr(rhs)))
     }
 
     /// `screen.setImeArea(x, y, w, h)` -- where the input method may put its candidate window,
@@ -2165,6 +2193,24 @@ impl<'a> HostEmitter<'a> {
             {
                 format!("{pfx}__mouse_{field}")
             }
+            // `screen.key_events.length` / `.count`
+            ExprKind::Field(obj, field)
+                if (field == "length" || field == "count")
+                    && matches!(&obj.kind, ExprKind::Field(sv, m) if matches!(&sv.kind, ExprKind::Var(n) if n == "screen")
+                        && crate::transpiler::screen_input::event_list_field(m).is_some()) =>
+            {
+                let ExprKind::Field(_, m) = &obj.kind else { unreachable!() };
+                let list = crate::transpiler::screen_input::event_list_field(m).unwrap();
+                format!("({pfx}__input.{list}.len() as isize)")
+            }
+            // `screen.key_events` / `screen.key_up_events` as a value: this frame's key names, in order.
+            ExprKind::Field(obj, field)
+                if matches!(&obj.kind, ExprKind::Var(n) if n == "screen")
+                    && crate::transpiler::screen_input::event_list_field(field).is_some() =>
+            {
+                let list = crate::transpiler::screen_input::event_list_field(field).unwrap();
+                format!("{pfx}__input.{list}.iter().map(|__k| std::sync::Arc::<str>::from(__k.as_str())).collect::<Vec<std::sync::Arc<str>>>()")
+            }
             // `arr.count` / `arr.length` on a known array → length; a user struct's real
             // field of that name (or any receiver not known to be an array) stays a field read.
             ExprKind::Field(obj, field)
@@ -2188,6 +2234,14 @@ impl<'a> HostEmitter<'a> {
                     && self.tenv.expr_is_array(obj, None) =>
             {
                 format!("({}.len() as isize)", self.host_expr(obj))
+            }
+            // A method of a struct value the setup code built (`pace.frame(rt, host, ..)`): each argument
+            // is passed the way the method's generated signature takes it.
+            ExprKind::MethodCall(obj, method, args)
+                if self.setup_method_modes(obj, method).is_some_and(|m| m.len() == args.len()) =>
+            {
+                let modes = self.setup_method_modes(obj, method).unwrap();
+                format!("{}.{method}({})", self.host_expr(obj), self.call_args(args, &modes).join(", "))
             }
             // Any other method call on a host value: `recv.method(args)`.
             ExprKind::MethodCall(obj, method, args)
@@ -2254,6 +2308,9 @@ impl<'a> HostEmitter<'a> {
             // actually compiles, so it didn't catch this on its own).
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Field(obj, method) = &callee.kind {
+                    if let Some(modes) = self.setup_method_modes(obj, method).filter(|m| m.len() == args.len()) {
+                        return format!("{}.{method}({})", self.host_expr(obj), self.call_args(args, &modes).join(", "));
+                    }
                     if (method == "key" || method == "key_pressed")
                         && matches!(&obj.kind, ExprKind::Var(n) if n == "screen")
                     {
@@ -2275,20 +2332,7 @@ impl<'a> HostEmitter<'a> {
                 if let ExprKind::Var(fname) = &callee.kind {
                     if let Some(modes) = self.general_fn_param_modes(fname) {
                         if modes.len() == args.len() {
-                            let args_s: Vec<_> = args.iter().zip(&modes).map(|(a, mode)| {
-                                let v = self.host_expr(&a.value);
-                                let is_field = matches!(&a.value.kind, ExprKind::Var(n)
-                                    if self.setup_fields.iter().any(|(f, _)| f == n) || self.event_vars.borrow().contains(n));
-                                match *mode {
-                                    "&mut" => format!("&mut {v}"),
-                                    "&" => format!("&{v}"),
-                                    // a bare trait parameter the body consumes (`Box<dyn Trait>`)
-                                    "box" if is_field => format!("Box::new({v}.clone())"),
-                                    "box" => format!("Box::new({v})"),
-                                    _ if is_field => format!("{v}.clone()"),
-                                    _ => v,
-                                }
-                            }).collect();
+                            let args_s = self.call_args(args, &modes);
                             return format!("{fname}({})", args_s.join(", "));
                         }
                     }
@@ -2301,7 +2345,11 @@ impl<'a> HostEmitter<'a> {
             ExprKind::Var(n) if self.setup_fields.iter().any(|(f, _)| f == n) => format!("{pfx}{n}"),
             ExprKind::Var(n) => n.clone(),
             ExprKind::Int(v)   => format!("{v}"),
-            ExprKind::Float(v) => format!("{v}f32"),
+            // Untyped: takes the type of whatever it meets (`(x as f64) * 1000.0`, `k.t = 0.5` on an f32 field).
+            ExprKind::Float(v) => {
+                let t = format!("{v}");
+                if t.contains(['.', 'e', 'E', 'N', 'i']) { t } else { format!("{t}.0") }
+            }
             ExprKind::BinOp(op, l, r) => {
                 let op_s = match op {
                     BinOp::Add => "+", BinOp::Sub => "-",
@@ -2318,6 +2366,56 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
+    /// The arguments of a call to a generated function/method, each passed the way its signature takes it.
+    fn call_args(&self, args: &[Arg], modes: &[&'static str]) -> Vec<String> {
+        args.iter().zip(modes).map(|(a, mode)| {
+            let v = self.host_expr(&a.value);
+            let is_field = matches!(&a.value.kind, ExprKind::Var(n)
+                if self.setup_fields.iter().any(|(f, _)| f == n) || self.event_vars.borrow().contains(n));
+            match *mode {
+                "&mut" => format!("&mut {v}"),
+                "&" => format!("&{v}"),
+                // a bare trait parameter the body consumes (`Box<dyn Trait>`)
+                "box" if is_field => format!("Box::new({v}.clone())"),
+                "box" => format!("Box::new({v})"),
+                // host floats are f32 (`screen.time`) or f64 (`as float`): follow the parameter
+                "f64" => format!("(({v}) as f64)"),
+                "f32" => format!("(({v}) as f32)"),
+                _ if is_field => format!("{v}.clone()"),
+                _ => v,
+            }
+        }).collect()
+    }
+
+    /// The parameter modes of method `method` of the struct value `recv` (a setup value of a
+    /// struct type), read back from the generated `impl`; `None` when it is not such a call.
+    fn setup_method_modes(&self, recv: &Expr, method: &str) -> Option<Vec<&'static str>> {
+        let ExprKind::Var(n) = &recv.kind else { return None };
+        let (_, ty) = self.setup_fields.iter().find(|(f, _)| f == n)?;
+        let ty = ty.trim_start_matches('&');
+        let mut in_impl = false;
+        for l in self.general_code.lines() {
+            if l.trim().is_empty() { continue; }
+            if !l.starts_with(char::is_whitespace) {
+                let t = l.trim_end();
+                in_impl = t.starts_with("impl ") && t.trim_end_matches(" {").split_whitespace().last() == Some(ty)
+                    || t.starts_with(&format!("impl<")) && t.trim_end_matches(" {").ends_with(&format!(" {ty}"));
+                continue;
+            }
+            if !in_impl { continue; }
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let needle = format!("fn {method}(");
+            if let Some(rest) = t.strip_prefix(&needle) {
+                let mut modes = Self::param_modes(rest)?;
+                if modes.is_empty() { return None; }
+                modes.remove(0); // `self`
+                return Some(modes);
+            }
+        }
+        None
+    }
+
     /// How the general pass's `fn name(...)` takes each parameter: `"&mut"`, `"&"` or `""` (by
     /// value), read back from the generated signature. `None` when `name` isn't one of its functions.
     fn general_fn_param_modes(&self, name: &str) -> Option<Vec<&'static str>> {
@@ -2329,7 +2427,11 @@ impl<'a> HostEmitter<'a> {
             let t = l.strip_prefix("pub ").unwrap_or(l);
             if t.starts_with(&needle) { Some(t.to_string()) } else { None }
         })?;
-        let rest = &at[needle.len()..];
+        Self::param_modes(&at[needle.len()..])
+    }
+
+    /// `rest` is a signature after `fn name(`: its parameters' modes.
+    fn param_modes(rest: &str) -> Option<Vec<&'static str>> {
         let mut depth = 0i32;
         let mut end = None;
         for (i, c) in rest.char_indices() {
@@ -2350,7 +2452,7 @@ impl<'a> HostEmitter<'a> {
             if !t.is_empty() {
                 let ty = t.split_once(':').map(|(_, ty)| ty.trim()).unwrap_or("");
                 out.push(if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" }
-                    else if ty.starts_with("Box<dyn ") { "box" } else { "" });
+                    else if ty.starts_with("Box<dyn ") { "box" } else if ty == "f64" { "f64" } else if ty == "f32" { "f32" } else { "" });
             }
             cur.clear();
         };

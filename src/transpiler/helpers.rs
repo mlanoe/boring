@@ -2990,6 +2990,9 @@ pub(crate) fn classify_screen_let(s: &LetStmt, kernel_names: &std::collections::
             ExprKind::Var(n) if kernel_names.contains(n) && is_dimension_only_ctor_args(args) => ScreenLet::HostKernel,
             _ => ScreenLet::Setup,
         },
+        // A `var` scalar is state the render loop may assign (`dirty = true`): a setup value (an
+        // `__App` field), not a constant.
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) if s.binding.is_mutable() => ScreenLet::Setup,
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => ScreenLet::Scalar,
         _ => ScreenLet::Setup,
     }

@@ -2974,6 +2974,10 @@ impl HostEmitter {
                         if let Some((e, _)) = crate::transpiler::screen_input::property(field, "boring_input") {
                             return e;
                         }
+                        // `screen.key_events` as a value (`.length`, ...): this frame's key names.
+                        if let Some(list) = crate::transpiler::screen_input::event_list_field(field) {
+                            return format!("boring_input.{list}.clone()");
+                        }
                     }
                 }
                 // `screen.mouse.x` / `.y` / `.left` / `.right` / `.middle` (Screen program only).

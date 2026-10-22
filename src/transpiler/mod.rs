@@ -2971,6 +2971,10 @@ impl Transpiler {
                             (None, Some(ExprKind::Call(c, _))) if matches!(&c.kind, ExprKind::Var(n) if kernel_names.contains(n)) => {
                                 if let ExprKind::Var(n) = &c.kind { Some(n.clone()) } else { None }
                             }
+                            // an unannotated scalar literal (`var dirty = false`): its default type
+                            (None, Some(ExprKind::Bool(_))) => Some("bool".to_string()),
+                            (None, Some(ExprKind::Int(_))) => Some("isize".to_string()),
+                            (None, Some(ExprKind::Float(_))) => Some("f64".to_string()),
                             (None, Some(_)) => s.value.as_ref()
                                 .and_then(|v| self.resolve_expr_type(v))
                                 .map(|t| self.emit_type(&t)),
