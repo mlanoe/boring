@@ -419,6 +419,10 @@ transpile_test!(trait_scenarios_4);
 // implementing the trailing array-block sugar below, which relies on this.
 transpile_test!(misc_scenarios_2);
 
+// Multi-statement closure body containing a `for` loop used to emit `/* complex stmt */`
+// (loop silently dropped) — see tests/cases/closure_block_for_loop.br.
+transpile_test!(closure_block_for_loop);
+
 // Trailing array-block sugar (docs/book.md, "Trailing array-block sugar") —
 // real `rustc`-build guard for both the flat (plain array-literal) and
 // control-flow (imperative `Vec` builder + `.push()` boxing) desugarings.
@@ -1006,11 +1010,11 @@ transpile_test!(json_scenarios);
 // real interpreter-side `fromJson` makes both backends agree byte-for-byte).
 transpile_test!(try_wrap_double_handling);
 transpile_test!(throws_call_else_default);
+transpile_test!(throws_optional_return);
 
 // docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and `boring build`
 // printed completely different things for `fromJson<T>` on a `@serde(untagged)` enum,
 // because the interpreter's `fromJson` was a no-op stub returning its input string and
-transpile_test!(throws_optional_return);
 // its enum `Display` formatted payloads with Display where the compiled program uses
 // derived `Debug`. Unlike json_serde_rename/try_wrap_double_handling above, these three
 // ARE registered in tests/run.rs too, against these same .expected files -- pinning the

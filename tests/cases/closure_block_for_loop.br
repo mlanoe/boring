@@ -1,0 +1,16 @@
+# A multi-statement closure whose body contains a `for` loop must keep the loop
+# (previously emitted as `|x| { /* complex stmt */ }`, silently dropping it).
+use Visit as def void(int)
+
+def each2(Visit f):
+    f(0)
+    f(1)
+
+def main():
+    var total = 0
+    let groups = [[1, 2, 3], [4, 5]]
+    each2((i):
+        for g in groups[i]:
+            total += g
+    )
+    print total

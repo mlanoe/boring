@@ -6845,7 +6845,15 @@ impl Transpiler {
                 sub.emit_if(s, false);
                 sub.out.trim_end().to_string()
             }
-            _ => "/* complex stmt */".into(),
+            // Every other statement kind (`for`, `while`, `loop`, `LetDestructure`, ...)
+            // goes through the regular statement emitter on a sub-transpiler — a
+            // placeholder comment here silently dropped the whole statement (e.g. a
+            // multi-statement closure whose body is a `for` loop became `|x| { }`).
+            _ => {
+                let mut sub = self.make_sub();
+                sub.emit_stmt(stmt, false);
+                sub.out.trim_end().to_string()
+            }
         }
     }
 
