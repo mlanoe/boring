@@ -43,8 +43,7 @@ Rationale, in short:
   would not. `simd` emulates workgroups on CPU threads and stays far slower than the CPU reference.
 
 - **Step 0 done**: `boring-ui/render/src/raster.br` (+ `raster_font.br`) draws `FillRect`, `StrokeRect`, `DrawShadow`,
-  `DrawText` (5x7 fixture font), `PushClip`/`PopClip`, `PushOpacity`/`PopOpacity`. `DrawImage` and `MarkedText` are
-  not drawn yet. The colour pipeline is linear-light (decided and implemented 2026-10-21).
+  `DrawText` (5x7 fixture font), `PushClip`/`PopClip`, `PushOpacity`/`PopOpacity`. `DrawImage` (2026-10-22: bilinear, linear light, images passed beside the list, all three renderers) is drawn; `MarkedText` too. The colour pipeline is linear-light (decided and implemented 2026-10-21).
 - **Step 1 done**: `raster_gpu.br` is the one-thread-per-pixel kernel; `encode` bakes clips, expands text to glyph
   commands and bounds opacity nesting to 4. It matches the CPU reference within one LSB on the test corpus under
   `boring run`, `--target simd` and `--target wgpu` (Metal). Not yet measured: speed.
