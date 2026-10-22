@@ -3068,6 +3068,9 @@ impl Transpiler {
         for item in stmts {
             match item {
                 Item::Let(s) => {
+        // The last emitted method's lent params (`mut Rt rt`) are still in `inferred_qualifiers`;
+        // a top-level value of the same name is a plain local here, not a `&mut` (`&mut *rt`, E0614).
+        self.inferred_qualifiers.clear();
                     if s.binding.is_mutable() && self.global_vars_used_in_fns.contains(&s.name) {
                         // Already emitted as LazyLock<Mutex<T>> static — skip.
                     } else {
