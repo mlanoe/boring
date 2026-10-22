@@ -31,6 +31,8 @@ impl Transpiler {
         self.inferred_qualifiers.clear();
         self.observed_locals.clear();
         self.task_method_call_vars.clear();
+        self.unresolved_call_args.clear();
+        self.cpu_decision_notes.clear();
 
         // Re-seed `'observed`-qualified parameters right after the clear above (not in
         // `seed_param_locals`, which runs *before* this function's first call for the
@@ -429,7 +431,31 @@ impl Transpiler {
             // If both a plain qualifier and its 'task variant survived elimination, pick
             // one based on whether a task-declared method was called on this variable.
             let mut remaining: Vec<OwnerQual> = remaining.clone();
-            disambiguate_task_variant(&mut remaining, self.task_method_call_vars.contains(var_name.as_str()));
+            let has_task_signal = self.task_method_call_vars.contains(var_name.as_str());
+            let plain_chosen_by_default = !has_task_signal && [
+                (OwnerQual::Actor, OwnerQual::ActorTask),
+                (OwnerQual::Guard, OwnerQual::GuardTask),
+            ].iter().any(|(plain, task)| {
+                remaining.iter().any(|q| quals_equal(q, plain)) && remaining.iter().any(|q| quals_equal(q, task))
+            });
+            if plain_chosen_by_default {
+                // Undecidable, not proven: say so when the value left for a function the pass
+                // could not look into (the cheaper variant stays the default, see docs/qualifiers.md).
+                let root = alias_of.get(var_name.as_str()).map(|s| s.as_str()).unwrap_or(var_name.as_str());
+                let callee = self.unresolved_call_args.get(var_name.as_str())
+                    .or_else(|| self.unresolved_call_args.get(root))
+                    .or_else(|| alias_of.iter()
+                        .filter(|(_, target)| target.as_str() == root)
+                        .find_map(|(alias, _)| self.unresolved_call_args.get(alias.as_str())));
+                if let Some(callee) = callee {
+                    self.cpu_decision_notes.insert(var_name.clone(), format!(
+                        "plain variant picked by default: passed to `{callee}`, whose signature is not visible \
+                         here (declared later, in another file, or external); if it awaits while holding the \
+                         value, annotate the `'task` variant explicitly"
+                    ));
+                }
+            }
+            disambiguate_task_variant(&mut remaining, has_task_signal);
             match remaining.len() {
                 0 if !is_alias => {
                     let line = self.fn_current_param_lines.get(var_name.as_str()).copied().unwrap_or(0);
@@ -663,6 +689,15 @@ impl Transpiler {
                 // because a plain T or Box<T> can be wrapped at the call site.
                 if let ExprKind::Var(fn_name) = &callee.kind {
                     let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
+                    if param_types.is_none() && !is_struct_ctor {
+                        for arg in args {
+                            if let ExprKind::Var(v) = &arg.value.kind {
+                                if anonymous_vars.contains(v.as_str()) {
+                                    self.unresolved_call_args.entry(v.clone()).or_insert_with(|| fn_name.clone());
+                                }
+                            }
+                        }
+                    }
                     if let Some(param_types) = param_types {
                         for (i, arg) in args.iter().enumerate() {
                             let Some(param_ty) = param_types.get(i) else { continue };
@@ -2519,6 +2554,8 @@ pub struct CpuDecision {
     pub col: usize,
     pub qual: String,
     pub kind: &'static str,
+    /// Why this choice is a guess rather than a proof, when it is one.
+    pub note: Option<String>,
 }
 
 thread_local! {
@@ -2570,7 +2607,7 @@ impl Transpiler {
             } else {
                 continue;
             };
-            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), kind });
+            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), kind, note: self.cpu_decision_notes.get(name).cloned() });
         }
         out.sort_by_key(|d| (d.line, d.col));
         CPU_DECISIONS.with(|d| d.borrow_mut().extend(out));

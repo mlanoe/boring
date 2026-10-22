@@ -1302,6 +1302,13 @@ struct Transpiler {
     /// `'task` variant of 'actor/'guard remain candidates, presence in this set picks the
     /// `'task` variant. Cleared each call to `infer_qualifiers`.
     pub(crate) task_method_call_vars: std::collections::HashSet<String>,
+    /// Local variables passed as an argument to a free function whose signature the inference
+    /// could not see (declared later, in another file, or external): variable → callee name.
+    /// Only used to explain, in `--show-qualifiers`, a plain `'actor`/`'guard` picked by default
+    /// where the `'task` variant was also possible. Cleared each call to `infer_qualifiers`.
+    pub(crate) unresolved_call_args: std::collections::HashMap<String, String>,
+    /// Variable → note for `--show-qualifiers`, filled by the last `infer_qualifiers` pass.
+    pub(crate) cpu_decision_notes: std::collections::HashMap<String, String>,
     /// Struct field names (bare, unqualified within `infer_struct_field_qualifiers`'s scope)
     /// on which a `task`-declared method was called during struct field qualifier inference.
     /// Same purpose as `task_method_call_vars` but for `self.field` captures. Cleared per struct.
@@ -1739,6 +1746,8 @@ impl Transpiler {
             infer_local_actor_vars: std::collections::HashSet::new(),
             infer_local_shared_vars: std::collections::HashSet::new(),
             task_method_call_vars: std::collections::HashSet::new(),
+            unresolved_call_args: std::collections::HashMap::new(),
+            cpu_decision_notes: std::collections::HashMap::new(),
             task_method_call_fields: std::collections::HashSet::new(),
             lazy_vars: std::collections::HashSet::new(),
             lazy_var_types: std::collections::HashMap::new(),
