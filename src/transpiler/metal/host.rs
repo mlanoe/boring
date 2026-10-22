@@ -34,6 +34,12 @@ struct HostEmitter {
     // Top-level scalar lets (name → Rust expression), used to inline scalars
     // that are in scope in main() but not in kernel new() functions.
     top_level_scalars: std::collections::HashMap<String, String>,
+    // Top-level non-scalar bindings hoisted to module-scope statics by the general pass
+    // (name -> true when a `mut` global behind a `Mutex`, false for an immutable
+    // `LazyLock<Vec<T>>`). Reads/writes inside a function body must go through the
+    // uppercased static unless a parameter/local of the same name shadows it.
+    global_statics: std::collections::HashMap<String, bool>,
+    fn_locals: std::collections::HashSet<String>,
     // Screen / display support
     screen_var: Option<String>,
     screen_width_expr: String,
@@ -226,6 +232,8 @@ impl HostEmitter {
             var_kernel_type: std::collections::HashMap::new(),
             gpu_vars: std::collections::HashSet::new(),
             top_level_scalars: std::collections::HashMap::new(),
+            global_statics: std::collections::HashMap::new(),
+            fn_locals: std::collections::HashSet::new(),
             screen_var: None,
             screen_width_expr: String::new(),
             screen_height_expr: String::new(),
@@ -353,6 +361,27 @@ impl HostEmitter {
         top_level_kernel_touching: bool,
     ) {
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
+        {
+            let mut fn_used: Vec<String> = Vec::new();
+            for item in &program.items {
+                if let Item::Fn(f) = item {
+                    for stmt in &f.body { crate::transpiler::helpers::collect_vars_in_stmt(stmt, &mut fn_used); }
+                }
+            }
+            // When the host emitter owns the top level, the general pass emits no module
+            // statics (top-level lets stay `main` locals), so nothing is rewritten.
+            for item in program.items.iter().filter(|_| !top_level_kernel_touching) {
+                if let Item::Let(l) = item {
+                    if crate::transpiler::helpers::top_level_typed_array_let(l) {
+                        self.global_statics.insert(l.name.clone(), false);
+                    } else if l.binding.is_mutable() && fn_used.contains(&l.name)
+                        && matches!(l.ty.as_ref().map(|t| t.without_mut()), Some(Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) | Type::Qualified(_, _)))
+                    {
+                        self.global_statics.insert(l.name.clone(), true);
+                    }
+                }
+            }
+        }
         // Pass 1: struct/enum names, needed below to resolve whether a
         // `Type::Named(n)` function parameter is by-ref-worthy.
         for item in &program.items {
@@ -1467,6 +1496,8 @@ impl HostEmitter {
     fn emit_assign_target(&mut self, target: &Expr) -> String {
         match &target.kind {
             ExprKind::Var(name) if self.mut_gpu_params.contains(name.as_str()) => format!("*{}", name),
+            ExprKind::Var(name) if self.global_statics.get(name) == Some(&true) && !self.fn_locals.contains(name) =>
+                format!("*{}.lock().unwrap_or_else(|e| e.into_inner())", name.to_uppercase()),
             ExprKind::Var(name) => name.clone(),
             ExprKind::Field(obj, field) => format!("{}.{}", self.emit_assign_target(obj), field),
             ExprKind::Tuple(elems) => {
@@ -2119,6 +2150,8 @@ impl HostEmitter {
 
     fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
         if f.is_native { return; }
+        self.fn_locals = f.params.iter().map(|p| p.name.clone()).collect();
+        crate::transpiler::helpers::collect_local_decl_names(&f.body, &mut self.fn_locals);
         let vis = if f.is_pub { "pub " } else { "" };
         let params: Vec<String> = f.params.iter().map(|p| {
             let mut_gpu = p.mutable && p.ty.as_ref().is_some_and(is_gpu_array_param) && self_ty.is_none();
@@ -2708,6 +2741,8 @@ impl HostEmitter {
             var_kernel_type: self.var_kernel_type.clone(),
             gpu_vars: self.gpu_vars.clone(),
             top_level_scalars: self.top_level_scalars.clone(),
+            global_statics: self.global_statics.clone(),
+            fn_locals: self.fn_locals.clone(),
             screen_var: self.screen_var.clone(),
             screen_width_expr: self.screen_width_expr.clone(),
             screen_height_expr: self.screen_height_expr.clone(),
@@ -2783,6 +2818,14 @@ impl HostEmitter {
             ExprKind::Var(name) => {
                 // Inline top-level scalars when referenced inside kernel new()
                 // where they are not in scope as Rust local variables.
+                if let (Some(is_mut), false) = (self.global_statics.get(name), self.fn_locals.contains(name)) {
+                    let st = name.to_uppercase();
+                    return if *is_mut {
+                        format!("{{ let __a = {st}.lock().unwrap_or_else(|e| e.into_inner()).clone(); __a }}")
+                    } else {
+                        st
+                    };
+                }
                 self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
             }
 

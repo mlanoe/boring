@@ -1032,13 +1032,18 @@ synthesized WGSL, which also executes through WGPU on real adapters. These runs
 cover automatically dispatched matmul and linear kernels, including packed
 quantized formats.
 
-## Known limit: top-level operands inside functions (2026-10-22)
+## Top-level operands inside functions (2026-10-22)
 
-`kernel.tensors.*` called inside a function body must use operands that are
-parameters or locals of that function. A top-level array binding (`let [..]'kernel'global a`)
-used directly in a function is not supported: in generated Rust a top-level non-scalar
-`let` stays a local of the synthesized `main` and is invisible to other functions
-(this is not tensor-specific -- a plain top-level `let [int] z` read from a `def`
-fails the same way on the std target; only mutable `var`/`mut` globals and scalar
-constants are hoisted to statics). The error now says so; pass the arrays as
-parameters (see `host_arrays_passed_to_kernel_qualified_params_are_wrapped_and_mut_written_back`).
+`kernel.tensors.*` inside a function body may use a typed top-level array as an
+operand. An immutable `let [T, ...]'kernel'global a = [...]` is promoted to a
+module-scope `static A: LazyLock<Vec<T>>` (any immutable top-level `let` with a
+declared array type and an array literal/fill/comprehension initializer is, for
+every target), and a `mut` top-level array read or written from a function is the
+existing `Mutex` static. The Metal, CUDA and ROCm host emitters resolve both (uppercased static -- dereferenced
+as `(*A)` on CUDA/ROCm so `clone_htod(&A)` sees a `Vec` -- or lock + clone / lock +
+assign) unless a parameter or local shadows the name; WGPU goes through the general
+emitter, which already does. An untyped top-level array literal of all-int / all-float /
+all-bool elements is promoted too (`Vec<isize>` / `Vec<f64>` / `Vec<bool>`); any other
+untyped initializer still needs a declared type. Verified by running on Metal and WGPU
+(8); CUDA and ROCm are covered by codegen assertions only (no toolchain on the
+development machine).

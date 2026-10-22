@@ -3085,3 +3085,40 @@ pub(crate) fn screen_setup_returns(program: &Program, kernel_names: &std::collec
     }
     out
 }
+
+/// An immutable top-level `let` with a declared array type initialized by an array
+/// literal/fill/comprehension -- promoted to a module-scope `static NAME: LazyLock<Vec<T>>`
+/// (uppercased) so functions can read it. See `Transpiler::top_level_let_is_typed_array`.
+pub(crate) fn top_level_typed_array_let(s: &LetStmt) -> bool {
+    if !matches!(s.binding, crate::ast::BindingKind::Let) {
+        return false;
+    }
+    let Some(ty) = &s.ty else { return untyped_array_literal_elem(s).is_some() };
+    let mut inner = ty.without_mut();
+    if let Type::Qualified(i, OwnerQual::GpuGlobal | OwnerQual::GpuUnified) = inner {
+        inner = i.without_mut();
+    }
+    matches!(inner, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _))
+        && matches!(s.value.as_ref().map(|v| &v.kind),
+            Some(ExprKind::Array(_) | ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. }
+                | ExprKind::ArrayComp { .. } | ExprKind::ArrayCompIter { .. } | ExprKind::LabeledArrayComp { .. }))
+}
+
+/// Rust element type of an untyped top-level `let x = [lit, ...]` whose elements are all
+/// int, all float, or all bool literals (`isize` / `f64` / `bool`, matching an ordinary
+/// untyped local's inference). Anything else needs a declared type to be promoted.
+pub(crate) fn untyped_array_literal_elem(s: &LetStmt) -> Option<&'static str> {
+    if s.ty.is_some() || !matches!(s.binding, crate::ast::BindingKind::Let) { return None; }
+    let Some(ExprKind::Array(elems)) = s.value.as_ref().map(|v| &v.kind) else { return None };
+    fn lit(e: &Expr) -> Option<&'static str> {
+        match &e.kind {
+            ExprKind::Int(_) => Some("isize"),
+            ExprKind::Float(_) => Some("f64"),
+            ExprKind::Bool(_) => Some("bool"),
+            ExprKind::UnaryOp(_, inner) => lit(inner),
+            _ => None,
+        }
+    }
+    let first = lit(elems.first()?)?;
+    elems.iter().all(|e| lit(e) == Some(first)).then_some(first)
+}

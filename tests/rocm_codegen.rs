@@ -1782,3 +1782,22 @@ fn rocblas_opt_in_dynamic_linear_fuses_bias_with_companion_kernel() {
     // Scalar kernel (with its own bias add) remains the fallback.
     assert!(host.contains("load_function(\"BoringTensorDynamicFloatNative0_kernel\")"), "{host}");
 }
+
+#[test]
+fn top_level_tensor_arrays_resolve_as_statics_inside_function() {
+    let (_dev, host) = rocm_codegen("toplevel_tensor_in_fn", r#"
+let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
+let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]
+mut [float32, n = 8, m = 8]'kernel'unified c = [0.0 as float32 for ..<64]
+
+def run() throws:
+    kernel.tensors.matmul(a, b, c)
+
+run()
+with c:
+    print "{c[0]}"
+"#);
+    assert!(host.contains("static A: std::sync::LazyLock<Vec<f32>>"), "{host}");
+    assert!(host.contains("clone_htod::<f32>(&(*A))"), "{host}");
+    assert!(host.contains("C.lock()"), "{host}");
+}

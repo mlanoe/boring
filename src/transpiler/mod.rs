@@ -3188,6 +3188,17 @@ impl Transpiler {
         self.top_level_let_is_const_safe(s)
             || self.top_level_let_external_call(s).is_some()
             || self.top_level_let_is_string_literal(s)
+            || self.top_level_let_is_typed_array(s)
+    }
+
+    /// An immutable top-level `let` with a declared array type (plain `[T]`, sized, or a
+    /// labeled/kernel-qualified tensor array) initialized by an array literal or
+    /// comprehension. Promoted to a lazily-initialized `static NAME: LazyLock<Vec<T>>`
+    /// (verbatim name, like the string-literal case) so functions can read it; reads
+    /// auto-deref through `LazyLock`. A declared type is required: a `static` needs an
+    /// explicit Rust type and this transpiler does not infer one here.
+    pub(crate) fn top_level_let_is_typed_array(&self, s: &LetStmt) -> bool {
+        helpers::top_level_typed_array_let(s)
     }
 
     /// Whether a top-level (or `main`-scope) `let`'s declared type is explicitly
@@ -4467,7 +4478,7 @@ impl Transpiler {
                 // plain CPU program with `let n = 255` at the top and an unrelated local
                 // `n` anywhere else (e.g. `fn countdown(n: isize)`) hit the exact same
                 // Rust restriction — confirmed via examples/hello.br.
-                if self.top_level_let_is_const_safe(s) {
+                if self.top_level_let_is_const_safe(s) || self.top_level_let_is_typed_array(s) {
                     self.gpu_top_level_const_names.insert(s.name.clone());
                 }
                 if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_promotable(s) {

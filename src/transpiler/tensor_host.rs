@@ -141,9 +141,20 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
                 items.push(Item::Fn(function));
                 continue;
             }
-            let mut function_types: HashMap<String, Type> = function.params.iter()
-                .filter_map(|param| param.ty.as_ref().map(|ty| (param.name.clone(), ty.clone())))
+            // Top-level typed bindings are visible inside the function (the transpiler
+            // hoists them to module-scope statics); parameters shadow them.
+            let mut function_types: HashMap<String, Type> = program.items.iter()
+                .filter_map(|it| match it {
+                    Item::Let(b) => b.ty.as_ref().map(|ty| (b.name.clone(), ty.clone())),
+                    _ => None,
+                })
                 .collect();
+            for param in &function.params {
+                match &param.ty {
+                    Some(ty) => { function_types.insert(param.name.clone(), ty.clone()); }
+                    None => { function_types.remove(&param.name); }
+                }
+            }
             for stmt in &function.body {
                 if let Stmt::Let(binding) = stmt {
                     used_binding_names.insert(binding.name.clone());
@@ -391,9 +402,8 @@ fn lower_function_body(
         let Some(spec) = resolve_spec(method, names, types) else {
             errors.push(super::TranspileError::at_line(
                 "unable to synthesize kernel.tensors host dispatch from the declared operand types \
-                 (inside a function, operands must be parameters or locals declared in that function: \
-                 top-level array bindings are not visible inside generated function bodies -- \
-                 pass them as parameters)",
+                 (inside a function, operands must be parameters, locals, or top-level typed array \
+                 bindings declared with an explicit type)",
                 call.line,
             ));
             out.push(stmt.clone());
@@ -1093,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_operand_inside_function_names_the_cause() {
+    fn top_level_typed_operands_resolve_inside_function() {
         let program = parse(r#"
 let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
 let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]
@@ -1105,8 +1115,7 @@ def run() throws:
 run()
 "#);
         let lowered = lower(&program);
-        assert!(lowered.errors.iter().any(|e| e.to_string().contains("top-level array bindings are not visible")),
-            "{:?}", lowered.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+        assert!(lowered.errors.is_empty(), "{:?}", lowered.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>());
     }
 
     #[test]

@@ -145,11 +145,14 @@ impl Transpiler {
                             vis, s.name, rust_ty, val_str
                         ));
                     } else if self.top_level_let_is_typed_array(s) {
-                        let rust_ty = self.emit_type(s.ty.as_ref().expect("typed-array let has a declared type"));
+                        let rust_ty = match &s.ty {
+                            Some(ty) => self.emit_type(ty),
+                            None => format!("Vec<{}>", crate::transpiler::helpers::untyped_array_literal_elem(s).expect("untyped promoted array has a literal element type")),
+                        };
                         let val_str = s.value.as_ref().map(|v| self.emit_expr_owned(v)).unwrap_or_else(|| "Vec::new()".to_string());
                         self.line(&format!(
                             "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
-                            vis, s.name, rust_ty, val_str
+                            vis, s.name.to_uppercase(), rust_ty, val_str
                         ));
                     } else if self.let_type_is_static(s) {
                         self.emit_static_qualified_let_item(s, vis);

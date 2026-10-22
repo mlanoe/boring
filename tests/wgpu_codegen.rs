@@ -4534,3 +4534,22 @@ kernel:
     // The existing `if screen.key(..): break` form still exits.
     assert!(rs.contains("event_loop.exit()"), "{rs}");
 }
+
+#[test]
+fn top_level_tensor_arrays_resolve_as_statics_inside_function() {
+    let (_dev, host) = wgpu_codegen("toplevel_tensor_in_fn", r#"
+let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
+let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]
+mut [float32, n = 8, m = 8]'kernel'unified c = [0.0 as float32 for ..<64]
+
+def run() throws:
+    kernel.tensors.matmul(a, b, c)
+
+run()
+with c:
+    print "{c[0]}"
+"#);
+    assert!(host.contains("static A: std::sync::LazyLock<Vec<f32>>"), "{host}");
+    assert!(host.contains("copy_a_to_device(&A.iter()"), "{host}");
+    assert!(host.contains("C.lock()"), "{host}");
+}

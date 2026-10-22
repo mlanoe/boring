@@ -306,6 +306,37 @@ fn host_array_passed_to_float32_gpu_param_runs_on_metal() {
     assert_eq!(stdout.trim_end(), "4");
 }
 
+const TOP_LEVEL_TENSOR_ARRAYS_IN_FN: &str = r#"
+let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
+let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]
+mut [float32, n = 8, m = 8]'kernel'unified c = [0.0 as float32 for ..<64]
+
+def run() throws:
+    kernel.tensors.matmul(a, b, c)
+
+run()
+with c:
+    print "{c[0]}"
+"#;
+
+#[test]
+fn top_level_tensor_arrays_used_as_operands_inside_function_run_on_metal() {
+    let test_name = "toplevel_tensor_in_fn_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, TOP_LEVEL_TENSOR_ARRAYS_IN_FN);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "program failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "8");
+}
+
 const FIXED_ARRAY_LOCAL_KERNEL: &str = r#"
 kernel LocalArr:
     mut [float32]'unified out
