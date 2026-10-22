@@ -2018,6 +2018,27 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
 }
 
 #[test]
+fn default_tiled_prefill_covers_k_quant_formats() {
+    for format in ["q4_k", "q6_k"] {
+        let src = format!(r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "{format}")
+    y
+"#);
+        let (cu, host, _, _) = run_cuda_with_config(&format!("quant_tiled_{format}"), &src, None);
+        assert!(!cu.contains("nvcuda::wmma"), "{format}: {cu}");
+        // Both shared tiles are written and read in the prefill branch.
+        assert!(cu.contains("aTile[tx + ty * 16] = "), "{format}: {cu}");
+        assert!(cu.contains("bTile[tx + ty * 16] = "), "{format}: {cu}");
+        assert!(cu.contains("aTile[inner + ty * 16]") && cu.contains("bTile[tx + inner * 16]"), "{format}: {cu}");
+        assert!(host.contains("(((n + 15) / 16"), "{format}: {host}");
+        // Decode (m == 1) keeps the fp32 warp kernel.
+        assert!(cu.contains("__shfl_xor_sync"), "{format}: {cu}");
+    }
+}
+
+#[test]
 fn generated_host_silences_lints_that_are_noise_for_machine_written_code() {
     let (_, host) = cuda_codegen("lint_allow", TILE_KERNEL);
     let allow = host.lines().find(|line| line.starts_with("#![allow(")).expect("crate-level allow");

@@ -838,18 +838,11 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
                 "        else:\n            __boring_wmma_init()\n            let tileCount = (k + 15) / 16\n            for tile in 0..<tileCount:\n                for part in 0..<4:\n                    let aIndex = .thread.x + part * 256\n                    let ar = aIndex / 16\n                    let ak = aIndex % 16\n                    let aRow = .block.y * 64 + ar\n                    let aCol = tile * 16 + ak\n                    if aRow < m and aCol < k:\n                        aTile[width = ak, height = ar] = a[aRow * k + aCol]\n                    else:\n                        aTile[width = ak, height = ar] = 0.0\n                    let bIndex = .thread.x + part * 256\n                    let bk = bIndex / 64\n                    let bc = bIndex % 64\n                    let col = .block.x * 64 + bc\n                    let inner = tile * 16 + bk\n                    if col < n and inner < k:\n{dequant}                    else:\n                        bTile[width = bc, height = bk] = 0.0\n                sync\n                __boring_wmma_step(aTile, bTile)\n                sync\n            __boring_wmma_store(c, m, n)\n"
             ))
         } else { None };
-        if let Some(wmma) = wmma_prefill.as_deref() {
-            // K-quant (warp-decode) bodies reuse `warp_product` in their prefill loop, so
-            // the nested-product spelling above does not match them; try that one too.
-            let warp_scalar_prefill = scalar_prefill.replace(&nested_scalar_product, &warp_product);
-            if body.contains(&scalar_prefill) {
-                body = body.replacen(&scalar_prefill, wmma, 1);
-            } else {
-                body = body.replacen(&warp_scalar_prefill, wmma, 1);
-            }
-        } else {
-            body = body.replacen(&scalar_prefill, &tiled_prefill, 1);
-        }
+        // K-quant (warp-decode) bodies reuse `warp_product` in their prefill loop, so the
+        // nested-product spelling above does not match them; try that one too.
+        let warp_scalar_prefill = scalar_prefill.replace(&nested_scalar_product, &warp_product);
+        let matched_prefill = if body.contains(&scalar_prefill) { &scalar_prefill } else { &warp_scalar_prefill };
+        body = body.replacen(matched_prefill, wmma_prefill.as_deref().unwrap_or(&tiled_prefill), 1);
     }
     let tile_fields = if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
         "    mut [float32, width = 16, height = 64]'actor aTile\n    mut [float32, width = 64, height = 16]'actor bTile\n"
@@ -1175,6 +1168,10 @@ mod tests {
             ).unwrap();
             assert!(tiled.fields.iter().any(|field| field.name == "aTile"), "{format}");
             assert!(tiled.fields.iter().any(|field| field.name == "bTile"), "{format}");
+            // The prefill branch must actually use the tiles (K-quant bodies spell their
+            // scalar prefill with a different indentation and used to be left untouched).
+            let body = format!("{:?}", tiled.methods);
+            assert!(body.contains("aTile") && body.contains("bTile"), "{format}: tiles declared but unused");
         }
 
         let mut scalar_config = tiled_config;
