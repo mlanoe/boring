@@ -179,6 +179,21 @@ impl DeviceEmitter {
             self.emit_entry_point(decl, entry);
             self.blank();
         }
+
+        // rocBLAS path (opt-in): the GEMM runs on the host side and this companion kernel
+        // only broadcasts the bias over the rows, with the same parameters as the main
+        // kernel so the host can reuse its argument list.
+        if decl.name.starts_with("BoringTensorDynamicFloatNative") && decl.fields.iter().any(|f| f.name == "bias") {
+            let params = field_params(&decl.fields);
+            self.line(&format!("__global__ void {}_bias_kernel({}) {{", decl.name, params.join(", ")));
+            self.indent += 1;
+            self.line("const int64_t bp_block = (int64_t)blockIdx.x + (int64_t)blockIdx.y * (int64_t)gridDim.x;");
+            self.line("const int64_t bp_cell = (int64_t)threadIdx.x + bp_block * (int64_t)blockDim.x;");
+            self.line("if (bp_cell < m * n) { c[bp_cell] += bias[bp_cell % n]; }");
+            self.indent -= 1;
+            self.line("}");
+            self.blank();
+        }
     }
 
     fn emit_device_fn(&mut self, kernel: &str, method: &FnDecl, fields: &[KernelFieldDecl]) {

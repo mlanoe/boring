@@ -34,14 +34,68 @@ pub(super) fn emit_host_rs(
     has_boring_main: bool,
     boring_main_throws: bool,
     top_level_kernel_touching: bool,
+    rocblas: bool,
 ) -> String {
     let mut e = HostEmitter::new(kernel_names);
+    e.rocblas = rocblas;
     e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching);
     e.out
 }
 
 // ─── Hand-rolled HIP FFI + safe wrapper, emitted verbatim into every generated
 // ─── project (see this module's doc comment).
+
+/// rocBLAS SGEMM bindings (opt-in). rocBLAS is a plain C library, so the same hand-rolled
+/// FFI approach as the HIP runtime applies. A single handle is created lazily and
+/// guarded by a mutex because rocBLAS handles are not safe for concurrent use.
+const ROCBLAS_PRELUDE: &str = r#"
+#[allow(non_camel_case_types)]
+mod __boring_rocblas_ffi {
+    use std::os::raw::{c_int, c_void};
+    pub type rocblas_handle = *mut c_void;
+    pub type rocblas_status = c_int;
+    pub const ROCBLAS_OP_NONE: c_int = 111;
+    pub const ROCBLAS_OP_TRANSPOSE: c_int = 112;
+    extern "C" {
+        pub fn rocblas_create_handle(handle: *mut rocblas_handle) -> rocblas_status;
+        pub fn rocblas_set_stream(handle: rocblas_handle, stream: *mut c_void) -> rocblas_status;
+        pub fn rocblas_sgemm(
+            handle: rocblas_handle, trans_a: c_int, trans_b: c_int, m: c_int, n: c_int, k: c_int,
+            alpha: *const f32, a: *const f32, lda: c_int, b: *const f32, ldb: c_int,
+            beta: *const f32, c: *mut f32, ldc: c_int,
+        ) -> rocblas_status;
+    }
+}
+
+static BORING_ROCBLAS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+/// Row-major `C[rows, cols] = A * B` expressed as the column-major `C^T = B^T * A^T`
+/// (the same operand swap as the CUDA path). Returns `false` when rocBLAS reports a
+/// failure, so the caller can fall back to the portable kernel.
+fn boring_rocblas_sgemm(
+    stream: &HipStream, transpose_weight: bool, m: i32, n: i32, k: i32,
+    a: *const c_void, b: *const c_void, c: *mut c_void, accumulate: bool,
+) -> bool {
+    use __boring_rocblas_ffi::*;
+    let mut guard = match BORING_ROCBLAS.lock() { Ok(guard) => guard, Err(_) => return false };
+    unsafe {
+        if *guard == 0 {
+            let mut handle: rocblas_handle = std::ptr::null_mut();
+            if rocblas_create_handle(&mut handle) != 0 { return false; }
+            *guard = handle as usize;
+        }
+        let handle = *guard as rocblas_handle;
+        if rocblas_set_stream(handle, stream.raw as *mut c_void) != 0 { return false; }
+        let alpha = 1.0f32;
+        let beta = if accumulate { 1.0f32 } else { 0.0f32 };
+        let (op, lda) = if transpose_weight { (ROCBLAS_OP_TRANSPOSE, k) } else { (ROCBLAS_OP_NONE, n) };
+        rocblas_sgemm(
+            handle, op, ROCBLAS_OP_NONE, n, m, k,
+            &alpha, b as *const f32, lda, a as *const f32, k, &beta, c as *mut f32, n,
+        ) == 0
+    }
+}
+"#;
 
 const ROCM_HOST_PRELUDE: &str = r#"
 use std::sync::{Arc, OnceLock};
@@ -508,6 +562,10 @@ impl HostEmitter {
     fn emit_prelude(&mut self, kernel_names: &[String]) {
         self.line(ROCM_HOST_PRELUDE);
         self.blank();
+        if self.rocblas {
+            self.line(ROCBLAS_PRELUDE);
+            self.blank();
+        }
         self.line(crate::transpiler::helpers::DIMENSION_STRUCT_RUST);
         self.blank();
 
@@ -628,6 +686,8 @@ impl HostEmitter {
 struct HostEmitter {
     out: String,
     indent: usize,
+    /// Opt-in `[tensor.matmul] algorithm = "rocblas"`: native tensor kernels try rocBLAS SGEMM first.
+    rocblas: bool,
     /// Names of all `kernel` structs — used to translate `Scale(args)` → `Scale::new(...)`.
     kernel_names: std::collections::HashSet<String>,
     /// Kernel struct declarations indexed by name — for field type lookup at readback sites.
@@ -802,6 +862,7 @@ impl HostEmitter {
         Self {
             out: String::new(),
             indent: 0,
+            rocblas: false,
             kernel_names: kernel_names.iter().cloned().collect(),
             kernel_decls: std::collections::HashMap::new(),
             var_kernel_type: std::collections::HashMap::new(),
@@ -2044,6 +2105,60 @@ impl HostEmitter {
         }
     }
 
+    /// Opt-in rocBLAS path for the native tensor kernels (`algorithm = "rocblas"`). The
+    /// scalar kernel the dispatch would launch anyway stays as the fallback when rocBLAS
+    /// reports an error; it is emitted right after this block by `emit_boring_launch`.
+    fn emit_rocblas_attempt(&mut self, name: &str, fields: &[KernelFieldDecl]) {
+        let ptr = |field: &str| format!("self.{field}.ptr");
+        if name.starts_with("BoringTensorHostNative") {
+            let Some(decl) = self.kernel_decls.get(name).cloned() else { return };
+            let Some(entry) = decl.methods.iter().find(|method| method.name.is_empty()) else { return };
+            let Some(call) = entry.body.iter().find_map(|stmt| match stmt {
+                Stmt::Expr(expr) if crate::checker::tensor::is_tensor_call(expr) => Some(expr),
+                _ => None,
+            }) else { return };
+            let Ok(op) = crate::checker::tensor::resolve(call, &decl) else { return };
+            self.line(&format!(
+                "if boring_rocblas_sgemm(&stream, {}, {}i32, {}i32, {}i32, {}, {}, {}, {}) {{",
+                op.transpose_b, op.m, op.n, op.k, ptr("a"), ptr("b"), ptr("c"), op.accumulate,
+            ));
+            self.indent += 1;
+            self.line("return Ok(KernelHandle { inner: self, stream });");
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        // Dynamic float linear: C[m,n] = A[m,k] * W[n,k]^T, then the row-broadcast bias.
+        self.line(&format!(
+            "if boring_rocblas_sgemm(&stream, true, self.m as i32, self.n as i32, self.k as i32, {}, {}, {}, false) {{",
+            ptr("a"), ptr("b"), ptr("c"),
+        ));
+        self.indent += 1;
+        if fields.iter().any(|field| field.name == "bias") {
+            self.line(&format!("let func = BORING_MODULE.get().unwrap().load_function(\"{name}_bias_kernel\")?;"));
+            self.line("let total = (self.m as i64) * (self.n as i64);");
+            self.line("let cfg = LaunchConfig { block_dim: (256, 1, 1), grid_dim: (((total + 255) / 256) as u32, 1, 1), shared_mem_bytes: 0 };");
+            self.line("let mut launcher = stream.launch_builder(&func);");
+            for f in fields {
+                match f.qual {
+                    GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
+                        if f.binding == FieldBinding::Let {
+                            self.line(&format!("launcher.arg(&*self.{});", f.name));
+                        } else {
+                            self.line(&format!("launcher.arg(&mut self.{});", f.name));
+                        }
+                    }
+                    GpuQual::Local | GpuQual::Const => self.line(&format!("launcher.arg(&self.{});", f.name)),
+                    GpuQual::Actor => {}
+                }
+            }
+            self.line("unsafe { launcher.launch(cfg) }?;");
+        }
+        self.line("return Ok(KernelHandle { inner: self, stream });");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_boring_launch(&mut self, name: &str, fields: &[KernelFieldDecl]) {
         // Auto grid sizing: when the first field is a device array ('unified/'global/
         // 'actor'global), `grid_dim` becomes optional and is derived from its length
@@ -2131,6 +2246,10 @@ impl HostEmitter {
         // GPU-side stream ordering (`hipStreamWaitEvent`, non-blocking on the
         // CPU) instead of a CPU-blocking `dep.synchronize()?`.
         self.line("for dep in after { stream.join(dep)?; }");
+
+        if self.rocblas && (name.starts_with("BoringTensorHostNative") || name.starts_with("BoringTensorDynamicFloatNative")) {
+            self.emit_rocblas_attempt(name, fields);
+        }
 
         // Upload 'const fixed-size arrays (and fixed-shape Image/Volume) to
         // __constant__ memory before launch.
@@ -2644,6 +2763,7 @@ impl HostEmitter {
 
     fn emit_sub_block(&mut self, stmts: &[Stmt]) -> String {
         let mut sub = HostEmitter {
+            rocblas: self.rocblas,
             out: String::new(),
             indent: 0,
             kernel_names: self.kernel_names.clone(),

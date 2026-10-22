@@ -121,6 +121,10 @@ fn build_rs_and_toml(test_name: &str, src: &str) -> (String, String) {
 }
 
 fn run_rocm(test_name: &str, src: &str) -> (String, String, String, String) {
+    run_rocm_with_config(test_name, src, None)
+}
+
+fn run_rocm_with_config(test_name: &str, src: &str, config: Option<&str>) -> (String, String, String, String) {
     let bin = env!("CARGO_BIN_EXE_boring");
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("rocm_codegen").join(test_name);
@@ -131,6 +135,7 @@ fn run_rocm(test_name: &str, src: &str) -> (String, String, String, String) {
     let br_file  = tmp.join("test.br");
     let rocm_dir = tmp.join("test_rocm");
     fs::write(&br_file, src).unwrap();
+    if let Some(config) = config { fs::write(tmp.join("boring.toml"), config).unwrap(); }
 
     let result = Command::new(bin)
         .args(["build", "--target", "rocm"])
@@ -1728,4 +1733,52 @@ kernel:
     assert!(rs.contains("boring_mouse_x as f32"), "{rs}");
     assert!(rs.contains("boring_mouse_left") && rs.contains("boring_mouse_right"), "{rs}");
     assert!(rs.contains("boring_mouse_y > 3"), "{rs}");
+}
+
+const ROCBLAS_CONFIG: &str = "[tensor.matmul]\nalgorithm = \"rocblas\"\n";
+
+const FIXED_MATMUL: &str = r#"
+let [float32, k = 64, m = 64]'kernel'global a = [1.0 as float32 for ..<4096]
+let [float32, n = 64, k = 64]'kernel'global b = [1.0 as float32 for ..<4096]
+mut [float32, n = 64, m = 64]'kernel'unified c = [0.0 as float32 for ..<4096]
+kernel.tensors.matmul(a, b, c)
+"#;
+
+const DYNAMIC_LINEAR: &str = r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [float32]'kernel'global weights, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k)
+    y
+"#;
+
+#[test]
+fn rocblas_is_never_linked_or_called_by_default() {
+    for (name, src) in [("rocblas_default_fixed", FIXED_MATMUL), ("rocblas_default_dynamic", DYNAMIC_LINEAR)] {
+        let (hip, host, build, _) = run_rocm_with_config(name, src, None);
+        assert!(!host.contains("rocblas"), "{host}");
+        assert!(!build.contains("rocblas"), "{build}");
+        assert!(!hip.contains("_bias_kernel"), "{hip}");
+    }
+}
+
+#[test]
+fn rocblas_opt_in_tries_sgemm_for_fixed_matmul_and_keeps_scalar_fallback() {
+    let (hip, host, build, _) = run_rocm_with_config("rocblas_fixed", FIXED_MATMUL, Some(ROCBLAS_CONFIG));
+    assert!(build.contains("cargo:rustc-link-lib=dylib=rocblas"), "{build}");
+    assert!(host.contains("fn boring_rocblas_sgemm"), "{host}");
+    assert!(host.contains("if boring_rocblas_sgemm(&stream, false, 64i32, 64i32, 64i32, self.a.ptr, self.b.ptr, self.c.ptr, false)"), "{host}");
+    // The fallback kernel is still emitted and launched when rocBLAS reports an error.
+    assert!(hip.contains("BoringTensorHostNative0_kernel"), "{hip}");
+    assert!(host.contains("load_function(\"BoringTensorHostNative0_kernel\")"), "{host}");
+}
+
+#[test]
+fn rocblas_opt_in_dynamic_linear_fuses_bias_with_companion_kernel() {
+    let (hip, host, _, _) = run_rocm_with_config("rocblas_dynamic", DYNAMIC_LINEAR, Some(ROCBLAS_CONFIG));
+    assert!(hip.contains("BoringTensorDynamicFloatNative0_bias_kernel"), "{hip}");
+    assert!(hip.contains("c[bp_cell] += bias[bp_cell % n]"), "{hip}");
+    assert!(host.contains("boring_rocblas_sgemm(&stream, true, self.m as i32, self.n as i32, self.k as i32"), "{host}");
+    assert!(host.contains("load_function(\"BoringTensorDynamicFloatNative0_bias_kernel\")"), "{host}");
+    // Scalar kernel (with its own bias add) remains the fallback.
+    assert!(host.contains("load_function(\"BoringTensorDynamicFloatNative0_kernel\")"), "{host}");
 }

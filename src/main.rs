@@ -2959,8 +2959,8 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
     let Some(root) = find_project_root(path) else { return Default::default() };
     let Ok(source) = std::fs::read_to_string(root.join("boring.toml")) else { return Default::default() };
     let config = BoringToml::parse(&source).tensor_linear;
-    if config.matrix_algorithm.as_deref().is_some_and(|value| !matches!(value, "auto" | "native" | "scalar" | "tf32")) {
-        eprintln!("error: unsupported tensor matrix algorithm '{}' (expected auto, native, scalar, or tf32)", config.matrix_algorithm.as_deref().unwrap());
+    if config.matrix_algorithm.as_deref().is_some_and(|value| !matches!(value, "auto" | "native" | "scalar" | "tf32" | "rocblas")) {
+        eprintln!("error: unsupported tensor matrix algorithm '{}' (expected auto, native, scalar, tf32, or rocblas)", config.matrix_algorithm.as_deref().unwrap());
         process::exit(1);
     }
     let valid = |value: &str| matches!(value, "auto" | "native" | "scalar" | "warp" | "warp-broadcast" | "rows" | "split-k");
