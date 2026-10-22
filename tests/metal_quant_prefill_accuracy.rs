@@ -179,7 +179,9 @@ mod macos {
         assert_ne!(fs::canonicalize(&scalar_exe).unwrap(), fs::canonicalize(&tiled_exe).unwrap());
         for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k"] {
             let k_quant = format.ends_with("_k");
-            let shapes = [(37, 77, 512), (8, 33, 256), (130, 129, 256), (300, 200, if k_quant { 1024 } else { 800 })];
+            // m == 1 exercises the decode (matrix-vector) kernels; n = 1000 is not a multiple of the
+            // 32 output rows a decode threadgroup covers.
+            let shapes = [(1, 77, 512), (1, 33, 256), (1, 1000, 1024), (37, 77, 512), (8, 33, 256), (130, 129, 256), (300, 200, if k_quant { 1024 } else { 800 })];
             for (m, n, k) in shapes {
                 for with_bias in [false, true] {
                     let scalar = run(&scalar_exe, format, m, n, k, with_bias);

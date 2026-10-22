@@ -66,6 +66,12 @@ fn metal_blocked_format(config: &TensorLinearConfig, format: Option<&str>) -> bo
     config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
 }
 
+/// Subset of the blocked formats whose decode (`m == 1`) also has a Metal SIMD-group kernel:
+/// four output rows per SIMD group, vector loads, four lanes per 32-element block.
+fn metal_rows_decode_format(config: &TensorLinearConfig, format: Option<&str>) -> bool {
+    config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl"))
+}
+
 fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, usize) {
     if config.native_fixed_matrices
         && spec.m.is_multiple_of(8)
@@ -876,6 +882,10 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
             Some(format!("        else:\n            __boring_metal_blocked_prefill_{}()\n", quantized_format.unwrap()))
         } else { None };
         body = body.replacen(matched_prefill, wmma_prefill.as_deref().or(blocked_prefill.as_deref()).unwrap_or(&tiled_prefill), 1);
+        if metal_rows_decode_format(tensor_config, quantized_format) {
+            let format = quantized_format.unwrap();
+            body = format!("        if m == 1:\n            __boring_metal_rows_decode_{format}()\n        else:\n            __boring_metal_blocked_prefill_{format}()\n");
+        }
     }
     let tile_fields = if portable_tiled_quantized && metal_blocked_format(tensor_config, quantized_format) {
         "" // the blocked kernel declares its own threadgroup scratch
@@ -992,7 +1002,12 @@ fn parse_dynamic_replacement_stmts(
             format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
         }
     } else if portable_tiled_quantized && metal_blocked_format(tensor_config, call.format) {
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
+        let decode_grid = if metal_rows_decode_format(tensor_config, call.format) {
+            format!("({} + 31) / 32", call.n)
+        } else {
+            format!("({} + {}) / {warps_per_block}", call.n, warps_per_block - 1)
+        };
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = {decode_grid})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n)
     } else if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else if portable_tiled_quantized {

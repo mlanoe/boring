@@ -54,3 +54,15 @@ fn scalar_prefill_override_disables_the_simdgroup_kernel() {
     let (msl, _) = metal_codegen("q4_scalar", "q4_0", Some("[tensor.linear.prefill]\nalgorithm = \"scalar\"\n"));
     assert!(!msl.contains("simdgroup_multiply_accumulate"), "{msl}");
 }
+
+#[test]
+fn small_block_formats_decode_with_four_rows_per_simd_group() {
+    for format in ["q4_0", "q5_0", "iq4_nl"] {
+        let (msl, host) = metal_codegen(&format!("{format}_decode"), format, None);
+        assert!(msl.contains("constexpr uint bp_rows = 4;"), "{format}: {msl}");
+        assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{format}");
+        assert!(!msl.contains("__boring_metal_rows_decode"), "{format}: marker must be expanded");
+        // 8 SIMD groups x 4 rows = 32 output rows per decode threadgroup.
+        assert!(host.contains("+ 31) / 32"), "{format}: {host}");
+    }
+}

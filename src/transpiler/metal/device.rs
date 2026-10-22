@@ -1447,6 +1447,83 @@ impl DeviceEmitter {
         self.line("}");
     }
 
+    /// Matrix-vector schedule for Q4_0 / Q5_0 / IQ4_NL (32-element blocks): four output rows per
+    /// SIMD group (one activation load feeds all four), eight blocks in flight per iteration
+    /// (`slot` = lane / 4), four lanes per block. A lane owns elements `it*4..it*4+3` and
+    /// `16+it*4..` (the low and high nibbles of the same four `qs` bytes), loads them with one
+    /// byte-aligned `packed_uchar4`, and the block's scale is read by lane 0 of the slot and
+    /// shuffled to its siblings. Matches the Boring reference dequantizer element for element.
+    fn emit_small_block_rows_decode(&mut self, has_bias: bool, format: &str) {
+        let (block_bytes, qs_offset) = match format { "q5_0" => (22, 6), _ => (18, 2) };
+        self.line("constexpr uint bp_rows = 4;");
+        self.line("const uint bp_lane = __simd_lane_id;");
+        self.line("const uint bp_warp = __thread_pos.x / 32;");
+        self.line("const ulong bp_row0 = ((ulong)__block_pos.x * 8 + bp_warp) * bp_rows;");
+        self.line("const uint bp_slot = bp_lane / 4, bp_it = bp_lane % 4;");
+        self.line("const ulong bp_nb = (ulong)k / 32;");
+        if format == "iq4_nl" {
+            self.line("const char bp_iq4[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};");
+        }
+        self.line("float bp_sumf[bp_rows];");
+        self.line("device const uchar* bp_rowp[bp_rows];");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("bp_sumf[bp_r] = 0.0f;");
+        self.line(&format!("bp_rowp[bp_r] = b + min(bp_row0 + bp_r, (ulong)n - 1) * bp_nb * {block_bytes} + bp_slot * {block_bytes};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line("device const float* bp_y = a + bp_slot * 32 + bp_it * 4;");
+        self.line("for (ulong bp_ib = bp_slot; bp_ib < bp_nb; bp_ib += 8) {");
+        self.indent += 1;
+        self.line("const float4 bp_ylo = *(device const float4*)bp_y;");
+        self.line("const float4 bp_yhi = *(device const float4*)(bp_y + 16);");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("device const uchar* bp_blk = bp_rowp[bp_r];");
+        self.line("float bp_scale = bp_it == 0 ? float(as_type<half>(*(device const ushort*)bp_blk)) : 0.0f;");
+        self.line("bp_scale = simd_shuffle(bp_scale, bp_slot * 4);");
+        self.line(&format!("const packed_uchar4 bp_q = *(device const packed_uchar4*)(bp_blk + {qs_offset} + bp_it * 4);"));
+        match format {
+            "q4_0" => {
+                self.line("const float4 bp_lo = float4(uchar4(bp_q) & 15) - 8.0f;");
+                self.line("const float4 bp_hi = float4(uchar4(bp_q) >> 4) - 8.0f;");
+            }
+            "iq4_nl" => {
+                self.line("float4 bp_lo, bp_hi;");
+                self.line("for (uint bp_i = 0; bp_i < 4; ++bp_i) { bp_lo[bp_i] = float(bp_iq4[bp_q[bp_i] & 15]); bp_hi[bp_i] = float(bp_iq4[bp_q[bp_i] >> 4]); }");
+            }
+            _ => {
+                self.line("const uint bp_qh = uint(bp_blk[2]) | (uint(bp_blk[3]) << 8) | (uint(bp_blk[4]) << 16) | (uint(bp_blk[5]) << 24);");
+                self.line("float4 bp_lo, bp_hi;");
+                self.line("for (uint bp_i = 0; bp_i < 4; ++bp_i) { bp_lo[bp_i] = float(int((bp_q[bp_i] & 15) | (((bp_qh >> (bp_it * 4 + bp_i)) & 1) << 4)) - 16); bp_hi[bp_i] = float(int((bp_q[bp_i] >> 4) | (((bp_qh >> (16 + bp_it * 4 + bp_i)) & 1) << 4)) - 16); }");
+            }
+        }
+        self.line("bp_sumf[bp_r] += bp_scale * (dot(bp_lo, bp_ylo) + dot(bp_hi, bp_yhi));");
+        self.line(&format!("bp_rowp[bp_r] += 8 * {block_bytes};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line("bp_y += 8 * 32;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("const float bp_total = simd_sum(bp_sumf[bp_r]);");
+        self.line("if (bp_lane == 0 && bp_row0 + bp_r < (ulong)n) {");
+        self.indent += 1;
+        if has_bias {
+            self.line("c[bp_row0 + bp_r] = bp_total + bias[bp_row0 + bp_r];");
+        } else {
+            self.line("c[bp_row0 + bp_r] = bp_total;");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_blocked_q4_scale(&mut self, s: &str, scale: &str, min: &str) {
         self.line(&format!("const int {scale} = {s} < 4 ? int(b[bp_block + 4 + {s}]) & 63 : (int(b[bp_block + 8 + {s}]) & 15) | ((int(b[bp_block + {s}]) >> 6) << 4);"));
         self.line(&format!("const int {min} = {s} < 4 ? int(b[bp_block + 8 + {s}]) & 63 : (int(b[bp_block + 8 + {s}]) >> 4) | ((int(b[bp_block + 4 + {s}]) >> 6) << 4);"));
@@ -1521,6 +1598,11 @@ impl DeviceEmitter {
                 }
             }
             Stmt::Expr(e) => {
+                if let Some(format) = rows_decode_marker(e) {
+                    let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
+                    self.emit_small_block_rows_decode(has_bias, format);
+                    return;
+                }
                 if let Some(format) = blocked_prefill_marker(e) {
                     // Float SIMD-group prefill for a 32-element-block format without a native kernel.
                     let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
@@ -2426,6 +2508,18 @@ fn blocked_prefill_marker(expr: &Expr) -> Option<&'static str> {
         "__boring_metal_blocked_prefill_iq4_nl" => Some("iq4_nl"),
         "__boring_metal_blocked_prefill_q3_k" => Some("q3_k"),
         "__boring_metal_blocked_prefill_q2_k" => Some("q2_k"),
+        _ => None,
+    }
+}
+
+/// `__boring_metal_rows_decode_<format>()`: the `m == 1` branch of a 32-element-block format.
+fn rows_decode_marker(expr: &Expr) -> Option<&'static str> {
+    let ExprKind::Call(callee, _) = &expr.kind else { return None };
+    let ExprKind::Var(name) = &callee.kind else { return None };
+    match name.as_str() {
+        "__boring_metal_rows_decode_q4_0" => Some("q4_0"),
+        "__boring_metal_rows_decode_q5_0" => Some("q5_0"),
+        "__boring_metal_rows_decode_iq4_nl" => Some("iq4_nl"),
         _ => None,
     }
 }
