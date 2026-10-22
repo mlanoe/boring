@@ -177,14 +177,38 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     // backend's own existing driver too.
     let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
 
+    // A `Screen` program's struct values / `var` scalars the render loop reads (`let Root host =
+    // Root(5)`, `mut Pace pace = Pace()`, `var dirty = false`) are built by the general pass in
+    // `__boring_screen_setup` (like wgpu); the host binds them as locals before the window opens.
+    // Everything else at the top level (kernels, arrays, statements) stays with the host driver,
+    // so the general pass only sees the lets it must build.
+    let setup_names: Vec<String> = if has_screen {
+        crate::transpiler::helpers::screen_setup_returns(program, &kernel_names_set).into_iter().filter(|n| {
+            program.items.iter().any(|i| matches!(i, Item::Let(s) if &s.name == n && match s.value.as_ref().map(|v| &v.kind) {
+                Some(ExprKind::Call(c, _)) => matches!(&c.kind, ExprKind::Var(f) if f != "Screen" && !kernel_names_set.contains(f)
+                    && program.items.iter().any(|i| matches!(i, Item::Struct(st) if &st.name == f))),
+                Some(ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) => s.binding.is_mutable(),
+                _ => false,
+            }))
+        }).collect()
+    } else { Vec::new() };
     let renamed_program = crate::transpiler::rename_top_level_main(program, "boring_main");
+    let mut general_program = renamed_program.clone();
+    if !setup_names.is_empty() {
+        general_program.items.retain(|i| match i {
+            Item::Let(s) => setup_names.contains(&s.name) || crate::transpiler::helpers::classify_screen_let(s, &kernel_names_set) == crate::transpiler::helpers::ScreenLet::Scalar,
+            Item::Stmt(_) => false,
+            _ => true,
+        });
+    }
     let general_config = crate::transpiler::TranspileConfig {
         gpu_kernels: Vec::new(),
         is_gpu_target: true,
         gpu_top_level_handled_by_host: top_level_kernel_touching,
+        screen_setup: if setup_names.is_empty() { None } else { Some(setup_names.clone()) },
         ..crate::transpiler::TranspileConfig::default()
     };
-    let general_out = crate::transpiler::transpile_with_config(&renamed_program, general_config);
+    let general_out = crate::transpiler::transpile_with_config(&general_program, general_config);
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
     let strip_names: std::collections::HashSet<String> = kernel_touching.iter().map(|n| {
@@ -199,7 +223,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
 
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
-        has_boring_main, boring_main_throws, top_level_kernel_touching, rocblas,
+        has_boring_main, boring_main_throws, top_level_kernel_touching, rocblas, &general_out.screen_setup_fields,
     );
     let build_rs  = emit_build_rs(rocblas);
     let cargo_toml = emit_cargo_toml(stem, version, has_screen);

@@ -193,13 +193,10 @@ fn simd_render_loop_assigns_top_level_vars() {
 
 /// Metal: the top-level struct values and `var`s the loop reads are built before the window opens
 /// (by the general pass's `__boring_screen_setup`), and a method call on one passes each argument
-/// the way its signature takes it. (Float mixing and `key_up_events` as an argument: wgpu only.)
+/// the way its signature takes it. (`key_up_events` as an argument and `screen.time` mixed with `as float` included.)
 #[test]
 fn metal_render_loop_state_values_and_methods() {
-    let src = PROGRAM
-        .replace("        ticks += keyCount(screen.key_up_events)\n", "        ticks += 1\n")
-        .replace("        let t = (screen.time as float) * 1000.0\n", "")
-        .replace(" + (ms(screen.time) + t) as int", "");
+    let src = PROGRAM;
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state").join("metal_state");
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
@@ -210,7 +207,7 @@ fn metal_render_loop_state_values_and_methods() {
     let project = tmp.join("test_metal");
     let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
     assert!(rs.contains("let (mut dirty, mut ticks, host, mut rt, mut pace) = __boring_screen_setup()?;"), "{rs}");
-    assert!(rs.contains("ticks = (ticks + 1);"), "{rs}");
+    assert!(rs.contains("ticks = (ticks + keyCount(&(boring_input.key_released.iter().map("), "{rs}");
     assert!(rs.contains("pace.frame(&mut rt, &host, 2)"), "{rs}");
     if cfg!(target_os = "macos") {
         let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_metal_target");
@@ -224,4 +221,22 @@ fn metal_render_loop_state_values_and_methods() {
             .unwrap();
         assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
     }
+}
+
+/// ROCm: same as Metal -- the top-level struct values and `var`s are built by `__boring_screen_setup`
+/// and bound before the window opens. No HIP toolchain here, so only the generated text is asserted.
+#[test]
+fn rocm_render_loop_state_values_and_methods() {
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state").join("rocm_state");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br = tmp.join("test.br");
+    fs::write(&br, PROGRAM).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--target", "rocm"]).arg(&br).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let rs = fs::read_to_string(tmp.join("test_rocm/src/main.rs")).unwrap();
+    assert!(rs.contains("let (mut dirty, mut ticks, host, mut rt, mut pace) = __boring_screen_setup()?;"), "{rs}");
+    assert!(rs.contains("dirty = true;"), "{rs}");
+    assert!(rs.contains("ticks = (ticks + keyCount(&(boring_input.key_released.iter().map("), "{rs}");
+    assert!(rs.contains("pace.frame(&mut rt, &host, 2)"), "{rs}");
 }

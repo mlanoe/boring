@@ -2748,6 +2748,29 @@ impl HostEmitter {
         }
     }
 
+    /// The declared Rust parameter types of the general pass's `fn name(...)`; empty when unknown.
+    fn general_fn_param_types(&self, name: &str) -> Vec<String> {
+        let needle = format!("fn {name}(");
+        let Some(sig) = self.general_code_text.lines().find_map(|l| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            t.starts_with(&needle).then(|| t.to_string())
+        }) else { return Vec::new() };
+        let rest = &sig[needle.len()..];
+        let (mut depth, mut cur, mut out) = (0i32, String::new(), Vec::new());
+        for c in rest.chars() {
+            match c {
+                '(' | '<' | '[' => { depth += 1; cur.push(c) }
+                ')' if depth == 0 => break,
+                ')' | '>' | ']' => { depth -= 1; cur.push(c) }
+                ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        if !cur.trim().is_empty() { out.push(cur); }
+        out.iter().map(|p| p.split_once(':').map(|(_, t)| t.trim().to_string()).unwrap_or_default()).collect()
+    }
+
     /// The parameter modes of method `method` of the struct value `recv` (a setup value of a
     /// struct type), read back from the generated `impl`; `None` when it is not such a call.
     fn setup_method_modes(&self, recv: &Expr, method: &str) -> Option<Vec<&'static str>> {
@@ -3229,6 +3252,23 @@ impl HostEmitter {
                         return format!("&(({}).iter().map(|&x| x as f64).collect::<Vec<f64>>())", s);
                     }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                    // `screen.key_events` / `key_up_events` (`Vec<String>` here) to a `[string]` parameter,
+                    // and a float host value (`screen.time`, an `f64`) to a `float32` one.
+                    if let Some(n) = callee_name {
+                        let pty = self.general_fn_param_types(n).get(i).cloned().unwrap_or_default();
+                        if let ExprKind::Field(o, m) = &a.value.kind {
+                            if matches!(&o.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref()) {
+                                if let Some(list) = crate::transpiler::screen_input::event_list_field(m) {
+                                    let st = if pty.contains("Rc<str>") { "std::rc::Rc" } else { "std::sync::Arc" };
+                                    let v = format!("boring_input.{list}.iter().map(|__k| {st}::<str>::from(__k.as_str())).collect::<Vec<_>>()");
+                                    return if expects_ref { format!("&({v})") } else { v };
+                                }
+                                if m == "time" && pty.trim_start_matches('&') == "f32" {
+                                    return format!("(({}) as f32)", self.expr(&a.value));
+                                }
+                            }
+                        }
+                    }
                     // A `string` parameter takes the generated crate's own string type; this host's
                     // literals and `screen.text` are `&str`/`String`.
                     let str_ty = callee_name
@@ -3513,6 +3553,10 @@ impl HostEmitter {
                 if *inclusive { format!("({}..={})", lo, hi) } else { format!("({}..{})", lo, hi) }
             }
             ExprKind::Cast(inner, ty) => {
+                // Host floats in the render loop are `f64` (`screen.time`); `float` means `f64` there.
+                if self.in_render_loop && matches!(ty, Type::Named(n) if n == "float" || n == "float64") {
+                    return format!("({} as f64)", self.expr(inner));
+                }
                 format!("({} as {})", self.expr(inner), rust_type(ty))
             }
             ExprKind::Else(val, default) => {

@@ -35,8 +35,10 @@ pub(super) fn emit_host_rs(
     boring_main_throws: bool,
     top_level_kernel_touching: bool,
     rocblas: bool,
+    setup_fields: &[(String, String)],
 ) -> String {
     let mut e = HostEmitter::new(kernel_names);
+    e.setup_fields = setup_fields.to_vec();
     e.rocblas = rocblas;
     e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching);
     e.out
@@ -836,6 +838,8 @@ struct HostEmitter {
     /// Window title from `Screen(.., title = "...")`, defaults to `"Boring"`.
     screen_title: String,
     screen_on_demand: bool,
+    /// `(name, type)` of the values `__boring_screen_setup` returns (locals of `main`).
+    setup_fields: Vec<(String, String)>,
     /// True while emitting statements inside a `kernel: loop:` body that is
     /// ALSO a `Screen` render loop (see `emit_render_loop`). The winit
     /// `run_return` closure driving that loop returns `()`, not
@@ -901,6 +905,7 @@ impl HostEmitter {
             screen_height_expr: "600".into(),
             screen_title: "Boring".into(),
             screen_on_demand: false,
+            setup_fields: Vec::new(),
             in_render_loop: false,
         }
     }
@@ -1607,7 +1612,7 @@ impl HostEmitter {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
                     let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
-                    if is_scalar {
+                    if is_scalar && !self.setup_fields.iter().any(|(n, _)| n == &s.name) {
                         let rhs = self.expr(val);
                         self.top_level_scalars.insert(s.name.clone(), rhs);
                     }
@@ -1668,6 +1673,7 @@ impl HostEmitter {
             // doc comment and `top_level_touches_kernel`'s doc for why this
             // can't go through the general-pipeline splice.
             let mut screen_setup_emitted = false;
+            let mut setup_bound = false;
             for item in &program.items {
                 match item {
                     Item::Let(s) => {
@@ -1678,6 +1684,19 @@ impl HostEmitter {
                             if !screen_setup_emitted {
                                 self.emit_screen_setup();
                                 screen_setup_emitted = true;
+                            }
+                            continue;
+                        }
+                        // Built by the general pass's `__boring_screen_setup`, bound once, in order.
+                        if self.setup_fields.iter().any(|(n, _)| n == &s.name) {
+                            if !setup_bound {
+                                setup_bound = true;
+                                let pats: Vec<String> = self.setup_fields.iter().map(|(n, _)| {
+                                    let m = program.items.iter().any(|i| matches!(i, Item::Let(l) if &l.name == n && l.binding.is_mutable()));
+                                    format!("{}{n}", if m { "mut " } else { "" })
+                                }).collect();
+                                let comma = if pats.len() == 1 { "," } else { "" };
+                                self.line(&format!("let ({}{comma}) = __boring_screen_setup()?;", pats.join(", ")));
                             }
                             continue;
                         }
@@ -2793,6 +2812,77 @@ impl HostEmitter {
         }
     }
 
+    /// The declared Rust parameter types of the general pass's `fn name(...)`; empty when unknown.
+    fn general_fn_param_types(&self, name: &str) -> Vec<String> {
+        let needle = format!("fn {name}(");
+        let Some(sig) = self.general_code_text.lines().find_map(|l| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            t.starts_with(&needle).then(|| t.to_string())
+        }) else { return Vec::new() };
+        let rest = &sig[needle.len()..];
+        let (mut depth, mut cur, mut out) = (0i32, String::new(), Vec::new());
+        for c in rest.chars() {
+            match c {
+                '(' | '<' | '[' => { depth += 1; cur.push(c) }
+                ')' if depth == 0 => break,
+                ')' | '>' | ']' => { depth -= 1; cur.push(c) }
+                ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        if !cur.trim().is_empty() { out.push(cur); }
+        out.iter().map(|p| p.split_once(':').map(|(_, t)| t.trim().to_string()).unwrap_or_default()).collect()
+    }
+
+    /// The parameter modes of method `method` of the struct value `recv` (a setup value of a
+    /// struct type), read back from the generated `impl`; `None` when it is not such a call.
+    fn setup_method_modes(&self, recv: &Expr, method: &str) -> Option<Vec<&'static str>> {
+        let ExprKind::Var(n) = &recv.kind else { return None };
+        let (_, ty) = self.setup_fields.iter().find(|(f, _)| f == n)?;
+        let ty = ty.trim_start_matches('&');
+        let mut in_impl = false;
+        for l in self.general_code_text.lines() {
+            if l.trim().is_empty() { continue; }
+            if !l.starts_with(char::is_whitespace) {
+                let t = l.trim_end();
+                in_impl = t.starts_with("impl ") && t.trim_end_matches(" {").split_whitespace().last() == Some(ty)
+                    || t.starts_with("impl<") && t.trim_end_matches(" {").ends_with(&format!(" {ty}"));
+                continue;
+            }
+            if !in_impl { continue; }
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            if let Some(rest) = t.strip_prefix(&format!("fn {method}(")) {
+                let mut depth = 0i32;
+                let mut end = None;
+                for (i, c) in rest.char_indices() {
+                    match c { '(' | '<' | '[' => depth += 1, ')' | '>' | ']' if depth > 0 => depth -= 1, ')' => { end = Some(i); break; } _ => {} }
+                }
+                let params = &rest[..end?];
+                let (mut parts, mut cur, mut d) = (Vec::new(), String::new(), 0i32);
+                for c in params.chars() {
+                    match c {
+                        '(' | '<' | '[' => { d += 1; cur.push(c) }
+                        ')' | '>' | ']' => { d -= 1; cur.push(c) }
+                        ',' if d == 0 => parts.push(std::mem::take(&mut cur)),
+                        _ => cur.push(c),
+                    }
+                }
+                if !cur.trim().is_empty() { parts.push(cur); }
+                let mut modes: Vec<&'static str> = parts.iter().map(|p| {
+                    let ty = p.split_once(':').map(|(_, ty)| ty.trim()).unwrap_or("");
+                    if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" }
+                    else if ty.starts_with("Box<dyn ") { "box" } else if ty == "f64" { "f64" } else if ty == "f32" { "f32" } else { "" }
+                }).collect();
+                if modes.is_empty() { return None; }
+                modes.remove(0); // `self`
+                return Some(modes);
+            }
+        }
+        None
+    }
+
     fn emit_sub_block(&mut self, stmts: &[Stmt]) -> String {
         let mut sub = HostEmitter {
             rocblas: self.rocblas,
@@ -2831,6 +2921,7 @@ impl HostEmitter {
             screen_height_expr: self.screen_height_expr.clone(),
             screen_title: self.screen_title.clone(),
             screen_on_demand: self.screen_on_demand,
+            setup_fields: self.setup_fields.clone(),
             in_render_loop: self.in_render_loop,
         };
         let last = stmts.len().saturating_sub(1);
@@ -3156,6 +3247,23 @@ impl HostEmitter {
                         return format!("BoringKernelArg::Host(({}).clone())", self.expr(&a.value));
                     }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                    // `screen.key_events` / `key_up_events` (`Vec<String>` here) to a `[string]` parameter,
+                    // and a float host value (`screen.time`, an `f64`) to a `float32` one.
+                    if let Some(n) = callee_name {
+                        let pty = self.general_fn_param_types(n).get(i).cloned().unwrap_or_default();
+                        if let ExprKind::Field(o, m) = &a.value.kind {
+                            if matches!(&o.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref()) {
+                                if let Some(list) = crate::transpiler::screen_input::event_list_field(m) {
+                                    let st = if pty.contains("Rc<str>") { "std::rc::Rc" } else { "std::sync::Arc" };
+                                    let v = format!("boring_input.{list}.iter().map(|__k| {st}::<str>::from(__k.as_str())).collect::<Vec<_>>()");
+                                    return if expects_ref { format!("&({v})") } else { v };
+                                }
+                                if m == "time" && pty.trim_start_matches('&') == "f32" {
+                                    return format!("(({}) as f32)", self.expr(&a.value));
+                                }
+                            }
+                        }
+                    }
                     // A `string` parameter takes the generated crate's own string type; this host's
                     // literals and `screen.text` are `&str`/`String`.
                     let str_ty = callee_name
@@ -3206,6 +3314,23 @@ impl HostEmitter {
                 })
             }
             ExprKind::MethodCall(obj, method, args) => {
+                // A method of a struct value the setup code built (`pace.frame(rt, host, ..)`): each
+                // argument is passed the way the method's generated signature takes it.
+                if let Some(modes) = self.setup_method_modes(obj, method).filter(|m| m.len() == args.len()) {
+                    let args_s: Vec<String> = args.iter().zip(&modes).map(|(a, mode)| {
+                        let v = self.expr(&a.value);
+                        match *mode {
+                            "&mut" => format!("&mut {v}"),
+                            "&" => format!("&{v}"),
+                            "box" => format!("Box::new({v})"),
+                            "f64" => format!("(({v}) as f64)"),
+                            "f32" => format!("(({v}) as f32)"),
+                            _ if matches!(&a.value.kind, ExprKind::Var(n) if self.setup_fields.iter().any(|(f, _)| f == n)) => format!("{v}.clone()"),
+                            _ => v,
+                        }
+                    }).collect();
+                    return format!("{}.{method}({})", self.expr(obj), args_s.join(", "));
+                }
                 if let ExprKind::Var(name) = &obj.kind {
                     if self.screen_var.as_deref() == Some(name.as_str()) && args.len() == 1 {
                         if let Some(q) = crate::transpiler::screen_input::method(method, &self.expr(&args[0].value), "boring_input") { return q; }

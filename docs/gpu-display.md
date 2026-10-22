@@ -445,7 +445,7 @@ On wgpu the loop body can use the program's top-level setup values directly (tes
   default type (`bool`, `int`, `float`); a `var` declared inside the loop body is a per-frame local. Assigning a
   name that is neither is rejected with an error that says so.
 - **`screen.key_events` / `screen.key_up_events` are values**, not only `for` sources: `screen.key_events.length > 0`,
-  `anyKeys(screen.key_events)` (a `[string]` parameter). Metal, CUDA and ROCm accept the `.length` form too (a
+  `anyKeys(screen.key_events)` (a `[string]` parameter). Metal and ROCm accept both forms; CUDA accepts the `.length` form too (a
   `Vec<String>` there, not usable as a function argument); simd still only supports the `for` form.
 - **Floats follow their context.** Float literals in loop expressions are untyped, so `(screen.time as float) * 1000.0`
   is a plain `f64`. `screen.time` itself is an `f32`; passed to a function's `float` parameter it is converted, so
@@ -462,12 +462,13 @@ Methods of top-level struct values also work on simd (`pace.frame(rt, host, 2)` 
 Metal builds the top-level struct values and `var` scalars the loop reads (`let Root host = Root(5)`,
 `mut Pace pace = Pace()`, `var dirty = false`) in the general pass's `__boring_screen_setup`, bound as locals of
 `main` before the window opens, like wgpu; `dirty = true` / `n += 1` assign them and `pace.frame(rt, host, 2)` is
-emitted as `pace.frame(&mut rt, &host, 2)` (covered by `metal_render_loop_state_values_and_methods`). On Metal
-`screen.key_up_events` still cannot be passed to a function and `screen.time` is not converted to a `float`
-parameter.
+emitted as `pace.frame(&mut rt, &host, 2)` (covered by `metal_render_loop_state_values_and_methods`).
+`screen.key_events` / `key_up_events` can be passed to a `[string]` parameter, `screen.time` (an `f64`) to a
+`float` or `float32` one, and `as float` in the loop is an `f64`.
 
-Not yet on ROCm: assigning a top-level `var` in the loop and method calls on a top-level struct value.
-Use free functions and per-frame locals there.
+ROCm does the same as Metal (same `__boring_screen_setup` binding, assignable `var`s, method calls, `[string]`
+arguments); covered by `rocm_render_loop_state_values_and_methods`, which asserts the generated text only (no HIP
+toolchain to `cargo check` it).
 
 ---
 
