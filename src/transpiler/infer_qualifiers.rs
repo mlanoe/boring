@@ -2509,3 +2509,70 @@ mod tests {
         assert_eq!(result, Some(OwnerQual::Owned), "expected 'owned to still win the whole chain");
     }
 }
+
+
+/// One ownership qualifier the CPU inference chose, as reported by `--show-qualifiers`.
+pub struct CpuDecision {
+    pub scope: String,
+    pub name: String,
+    pub line: usize,
+    pub col: usize,
+    pub qual: String,
+    pub kind: &'static str,
+}
+
+thread_local! {
+    static CPU_DECISIONS: std::cell::RefCell<Vec<CpuDecision>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drains the CPU qualifiers inferred by earlier transpiles on this thread.
+pub fn take_cpu_decisions() -> Vec<CpuDecision> {
+    CPU_DECISIONS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
+fn cpu_qual_text(q: &OwnerQual) -> String {
+    match q {
+        OwnerQual::Owned => "'owned".into(),
+        OwnerQual::Actor => "'actor".into(),
+        OwnerQual::ActorTask => "'actor'task".into(),
+        OwnerQual::Guard => "'guard".into(),
+        OwnerQual::GuardTask => "'guard'task".into(),
+        OwnerQual::Atomic => "'atomic".into(),
+        OwnerQual::Shared => "'shared".into(),
+        OwnerQual::Inline => "'inline".into(),
+        OwnerQual::Borrow => "& (borrow)".into(),
+        OwnerQual::BorrowMut => "mut & (mutable borrow)".into(),
+        other => format!("{other:?}"),
+    }
+}
+
+impl Transpiler {
+    /// Records, for `--show-qualifiers`, every qualifier `infer_qualifiers` just resolved for
+    /// a parameter or `let` of `f`. Called once per function (the pre-inference pass in
+    /// `emit_fn`), after `self.inferred_qualifiers` is populated.
+    pub(crate) fn record_cpu_decisions(&self, f: &crate::ast::FnDecl) {
+        let mut stmts = f.body.clone();
+        let mut lets: Vec<(String, usize, usize)> = Vec::new();
+        {
+            let mut on_expr = |_: &mut Expr| {};
+            let mut on_stmt = |s: &mut Stmt| {
+                if let Stmt::Let(l) = s { lets.push((l.name.clone(), l.line, l.col)); }
+            };
+            let mut walker = crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+            walker.stmts(&mut stmts);
+        }
+        let mut out: Vec<CpuDecision> = Vec::new();
+        for (name, q) in &self.inferred_qualifiers {
+            let (line, col, kind) = if let Some(p) = f.params.iter().find(|p| &p.name == name) {
+                (p.line, p.col, "param")
+            } else if let Some((_, l, c)) = lets.iter().find(|(n, _, _)| n == name) {
+                (*l, *c, "let")
+            } else {
+                continue;
+            };
+            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), kind });
+        }
+        out.sort_by_key(|d| (d.line, d.col));
+        CPU_DECISIONS.with(|d| d.borrow_mut().extend(out));
+    }
+}

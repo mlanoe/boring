@@ -203,6 +203,23 @@ fn report_inferred_qualifiers(path: &Path) {
     }
 }
 
+/// `--show-qualifiers`, CPU half: the ownership qualifiers (`'owned`, `'actor`, borrows...)
+/// the transpiler inferred for unannotated parameters and `let`s. Call after a transpile;
+/// always drains so decisions never pile up when the flag is off.
+fn report_inferred_cpu_qualifiers(path: &Path) {
+    let mut decisions = transpiler::take_cpu_decisions();
+    if std::env::var_os("BORING_SHOW_QUALIFIERS").is_none() { return; }
+    decisions.dedup_by(|a, b| a.scope == b.scope && a.name == b.name && a.line == b.line);
+    if decisions.is_empty() {
+        eprintln!("inferred CPU qualifiers: none ({})", path.display());
+        return;
+    }
+    eprintln!("inferred CPU qualifiers ({}):", path.display());
+    for d in &decisions {
+        eprintln!("  {}:{}:{}  {}::{}  {}  - {}", path.display(), d.line, d.col, d.scope, d.name, d.qual, d.kind);
+    }
+}
+
 fn report_check_result(path: &Path, source: &str, result: checker::CheckResult) -> bool {
     report_inferred_qualifiers(path);
     for w in &result.warnings {
@@ -1769,7 +1786,7 @@ fn print_help() {
     eprintln!("                               Built-in profiles: default, v100, a100, rtx3090, rtx4090, h100");
     eprintln!("                               Custom profile:    --gpu path/to/profile.toml");
     eprintln!("    boring run --locked        Fail instead of creating/updating a boring.lock entry");
-    eprintln!("    boring run --show-qualifiers  List the 'kernel'global/'kernel'unified qualifiers inferred for kernel.tensors operands (also on build)");
+    eprintln!("    boring run --show-qualifiers  List the inferred qualifiers: 'kernel'global/'kernel'unified for kernel.tensors operands, plus CPU ownership ('owned/'actor/borrow...) of unannotated params and lets (also on build)");
     eprintln!("    boring run --offline       Never touch the network for a git [deps] dependency");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
@@ -2329,6 +2346,14 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
 
     // If this file belongs to a project (an ancestor directory has a
     // `boring.toml`), also search that project's `src/` directory — so a
+    // The interpreter never transpiles, so the CPU ownership inference only runs here, for the report.
+    if std::env::var_os("BORING_SHOW_QUALIFIERS").is_some() {
+        let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let cfg = transpiler::TranspileConfig { source_dir, deps: deps.clone(), ..Default::default() };
+        let _ = transpiler::transpile_with_config(&program, cfg);
+        report_inferred_cpu_qualifiers(&path);
+    }
+
     // script under `test/` or `examples/` can `use` a module that lives in
     // `src/` without needing `BORING_PATH` set. See `find_project_root`.
     if let Some(root) = find_project_root(&path) {
@@ -2473,6 +2498,7 @@ fn rust_dir_name_full(stem: &str, threading: &transpiler::ThreadingMode, mode: &
 fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpiler::TranspileConfig, extra_deps: &[String]) {
     let path = PathBuf::from(path);
 
+    report_inferred_cpu_qualifiers(&path);
     // Determine output project directory next to the source file
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -2571,6 +2597,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     for (mod_name, mod_code) in &extra_modules {
         let mod_path = src_dir.join(format!("{}.rs", mod_name));
         if let Err(e) = std::fs::write(&mod_path, mod_code) {
+    report_inferred_cpu_qualifiers(&path);
             eprintln!("error: cannot write '{}': {}", mod_path.display(), e);
             process::exit(1);
         }

@@ -1691,6 +1691,7 @@ impl Transpiler {
             let prev_in_struct_method = self.in_struct_method;
             self.in_struct_method = self_ty.is_some();
             self.infer_qualifiers(&f.body);
+            self.record_cpu_decisions(f);
             self.scan_atomic_promotions(&f.body);
             self.in_struct_method = prev_in_struct_method;
             // Snapshot only the qualifiers for THIS function's params.
