@@ -445,15 +445,18 @@ On wgpu the loop body can use the program's top-level setup values directly (tes
   default type (`bool`, `int`, `float`); a `var` declared inside the loop body is a per-frame local. Assigning a
   name that is neither is rejected with an error that says so.
 - **`screen.key_events` / `screen.key_up_events` are values**, not only `for` sources: `screen.key_events.length > 0`,
-  `anyKeys(screen.key_events)` (a `[string]` parameter). Metal and CUDA accept the `.length` form too (a
-  `Vec<String>` there, not usable as a function argument); ROCm and simd still only support the `for` form.
+  `anyKeys(screen.key_events)` (a `[string]` parameter). Metal, CUDA and ROCm accept the `.length` form too (a
+  `Vec<String>` there, not usable as a function argument); simd still only supports the `for` form.
 - **Floats follow their context.** Float literals in loop expressions are untyped, so `(screen.time as float) * 1000.0`
   is a plain `f64`. `screen.time` itself is an `f32`; passed to a function's `float` parameter it is converted, so
   a `float` (or `float32`) parameter works without a `float32` workaround.
 - **Methods of top-level struct values can be called**: `pace.frame(rt, host, ...)` passes each argument the way the
   method's signature takes it (`&mut rt`, `&host` for a trait object), exactly as for a free function.
 
-Not yet outside wgpu: assigning a top-level `var` in the loop (simd emits `DIRTY = true` on a constant), and method
+Top-level `var`s are also assignable on simd (a local of the generated `boring_main`, not a `const`; covered by
+`simd_render_loop_assigns_top_level_vars`).
+
+Not yet outside wgpu: assigning a top-level `var` in the loop on Metal/ROCm, and method
 calls on a top-level struct value (Metal does not build the top-level value at all, simd emits `&mut *rt` on a
 value). Use free functions and per-frame locals there.
 

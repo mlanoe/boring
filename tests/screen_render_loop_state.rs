@@ -127,7 +127,7 @@ fn wgpu_assigning_an_unknown_variable_in_the_loop_names_the_fix() {
 
 /// `screen.key_events.length` in an expression on the other native-window hosts.
 #[test]
-fn metal_and_cuda_key_events_in_an_expression() {
+fn metal_cuda_and_rocm_key_events_in_an_expression() {
     let src = r#"
 let screen = Screen(Dimension(8, 8), title = "test")
 kernel Fill:
@@ -152,7 +152,7 @@ kernel:
         if screen.key("\x1B"):
             break
 "#;
-    for target in ["metal", "cuda"] {
+    for target in ["metal", "cuda", "rocm"] {
         let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state").join(format!("keys_{target}"));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
@@ -163,4 +163,30 @@ kernel:
         let rs = fs::read_to_string(tmp.join(format!("test_{target}/src/main.rs"))).unwrap();
         assert!(rs.contains("boring_input.key_repeat.clone().len() as isize"), "[{target}] {rs}");
     }
+}
+
+/// simd: a top-level `var` the loop assigns is a local of the generated `boring_main`, not a `const`.
+#[test]
+fn simd_render_loop_assigns_top_level_vars() {
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state").join("simd_state");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br = tmp.join("test.br");
+    fs::write(&br, PROGRAM).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--target", "simd"]).arg(&br).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let project = tmp.join("test_simd");
+    let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert!(rs.contains("let mut dirty = false;") && rs.contains("dirty = true;"), "{rs}");
+    assert!(!rs.contains("const DIRTY") && !rs.contains("const TICKS"), "{rs}");
+    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_simd_target");
+    let out = common::SharedCargo::new("screen_render_loop_state")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(shared)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
 }
