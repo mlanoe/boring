@@ -1,0 +1,8 @@
+# AMD Radeon RX 6600 (RDNA2, gfx1032)
+name = "AMD Radeon RX 6600"
+vendor = "amd"
+totalMem = 8589934592       # 8 GB GDDR6
+warpSize = 32               # RDNA wave32
+maxThreads = 1024
+maxSharedMem = 65536        # 64 KB LDS per workgroup
+computeCapability = [10, 3] # gfx1032

@@ -874,16 +874,34 @@ These profiles simulate the reported properties of named GPU models. No real GPU
 | `rtx3090` | RTX 3090 | 24 GB | 8.6 |
 | `rtx4090` | RTX 4090 | 24 GB | 8.9 |
 | `h100` | H100 SXM5 | 80 GB | 9.0 |
+| `m1` / `m2` / `m3` | Apple M1 / M2 / M3 (Metal) | 16 GB unified | family 7 / 8 / 9 |
+| `rx6600` | AMD Radeon RX 6600 (RDNA2, ROCm) | 8 GB | gfx 10.3 |
+| `rx7900xtx` | AMD Radeon RX 7900 XTX (RDNA3, ROCm) | 24 GB | gfx 11.0 |
+
+### Profile / target consistency
+
+`--gpu` only affects `boring run` (simulation). Add `--target cuda|rocm|metal|wgpu|simd` to have the
+profile checked against the backend you plan to build for; an inconsistent pair is an error:
+
+```sh
+boring run --gpu rx6600 --target rocm main.br   # ok
+boring run --gpu a100   --target metal main.br  # error: not consistent with --target metal
+```
+
+Each profile has a `vendor` (`nvidia`, `amd`, `apple`, `generic`) that fixes its compatible targets:
+nvidia → `cuda`, `wgpu`; amd → `rocm`, `wgpu`; apple → `metal`, `wgpu`; generic → any. `simd` is CPU-only,
+so only `generic` profiles accept it.
 
 ### Custom TOML profile
 
 ```toml
 name = "My GPU"
+vendor = "nvidia"          # optional: generic (default) | nvidia | amd | apple
 totalMem = 8589934592
 warpSize = 32
 maxThreads = 1024
 maxSharedMem = 49152
-computeCapability = [8, 6]
+computeCapability = [8, 6]   # optional, [0, 0] when absent
 ```
 
 > Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if barriers are missing. In auto mode the transpiler inserts them; in manual mode (`sync` present in the `def`) the developer is responsible.

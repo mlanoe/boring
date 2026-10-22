@@ -1586,9 +1586,10 @@ fn main() {
 }
 
 /// Parse `boring run [--gpu <profile>] [file.br]` flags.
-/// Returns (gpu_profile_name, file_path).
-fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
+/// Returns (gpu_profile_name, target, file_path).
+fn parse_run_flags(args: &[String]) -> (Option<String>, Option<String>, Option<&str>) {
     let mut gpu: Option<String> = None;
+    let mut target: Option<String> = None;
     let mut file: Option<&str>  = None;
     let mut i = 0;
     while i < args.len() {
@@ -1600,6 +1601,21 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
                 } else {
                     eprintln!("error: --gpu requires a profile name");
                     process::exit(1);
+                }
+            }
+            "--target" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) if interpreter::gpu_profile::TARGETS.contains(&t.as_str()) => target = Some(t.clone()),
+                    Some(t) => {
+                        eprintln!("error: unknown target '{t}'");
+                        eprintln!("hint:  supported targets: {}", interpreter::gpu_profile::TARGETS.join(", "));
+                        process::exit(1);
+                    }
+                    None => {
+                        eprintln!("error: --target requires a value");
+                        process::exit(1);
+                    }
                 }
             }
             // Set once, immediately — read back via DepPolicy::from_env() (src/git_deps.rs)
@@ -1640,7 +1656,7 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
         }
         i += 1;
     }
-    (gpu, file)
+    (gpu, target, file)
 }
 
 /// `boring update [<name>]` — forces a fresh resolution of one (or, with no `name`, every) git
@@ -1743,7 +1759,17 @@ fn run() {
         Some("run") => {
             // Parse optional: --gpu <profile>  before the file path.
             let run_args = &args[2..];
-            let (gpu_profile_name, file_arg) = parse_run_flags(run_args);
+            let (gpu_profile_name, run_target, file_arg) = parse_run_flags(run_args);
+            // `--gpu P --target T`: refuse a profile that cannot belong to backend T
+            // (e.g. an NVIDIA profile with `--target metal`). `--target` alone has nothing to check.
+            if let (Some(name), Some(target)) = (&gpu_profile_name, &run_target) {
+                let checked = interpreter::gpu_profile::GpuProfile::load(name)
+                    .and_then(|p| p.check_target(target));
+                if let Err(e) = checked {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
             // Everything after a `--` separator is the script's own argv, passed
             // through untouched (see args()'s doc comment in interpreter/mod.rs).
             // `parse_run_flags` already rejects any bare positional beyond the file,
@@ -1783,7 +1809,10 @@ fn print_help() {
     eprintln!("    boring run                 Run the project in the current directory");
     eprintln!("    boring run <file.br>       Run a single file");
     eprintln!("    boring run --gpu <profile> <file.br>  Run with a GPU simulation profile");
-    eprintln!("                               Built-in profiles: default, v100, a100, rtx3090, rtx4090, h100");
+    eprintln!("                               Built-in profiles: default, v100, a100, rtx3090, rtx4090, h100,");
+    eprintln!("                                                  m1, m2, m3 (Apple), rx6600, rx7900xtx (AMD)");
+    eprintln!("    boring run --gpu <profile> --target <t> <file.br>  Same, erroring if the profile's vendor can't use target t");
+    eprintln!("                               (nvidia: cuda|wgpu, amd: rocm|wgpu, apple: metal|wgpu, generic: any)");
     eprintln!("                               Custom profile:    --gpu path/to/profile.toml");
     eprintln!("    boring run --locked        Fail instead of creating/updating a boring.lock entry");
     eprintln!("    boring run --show-qualifiers  List the inferred qualifiers: 'kernel'global/'kernel'unified for kernel.tensors operands, plus CPU ownership ('owned/'actor/borrow...) of unannotated params and lets (also on build)");
@@ -2317,6 +2346,14 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
         process::exit(1);
     }
 
+    // The interpreter never transpiles, so the CPU ownership inference only runs here, for the report.
+    if std::env::var_os("BORING_SHOW_QUALIFIERS").is_some() {
+        let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let cfg = transpiler::TranspileConfig { source_dir, deps: deps.clone(), ..Default::default() };
+        let _ = transpiler::transpile_with_config(&program, cfg);
+        report_inferred_cpu_qualifiers(&path);
+    }
+
     let mut interp = interpreter::Interpreter::new();
 
     // Forwarded to the `args()`/`raw_args()` builtins — see `user_args`'s doc
@@ -2333,7 +2370,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
             Ok(profile) => interp.gpu_profile = profile,
             Err(e) => {
                 eprintln!("error: {e}");
-                eprintln!("available profiles: default, v100, a100, rtx3090, rtx4090, h100");
+                eprintln!("available profiles: {}", interpreter::gpu_profile::BUILTIN_PROFILES);
                 process::exit(1);
             }
         }
@@ -2346,14 +2383,6 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
 
     // If this file belongs to a project (an ancestor directory has a
     // `boring.toml`), also search that project's `src/` directory — so a
-    // The interpreter never transpiles, so the CPU ownership inference only runs here, for the report.
-    if std::env::var_os("BORING_SHOW_QUALIFIERS").is_some() {
-        let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
-        let cfg = transpiler::TranspileConfig { source_dir, deps: deps.clone(), ..Default::default() };
-        let _ = transpiler::transpile_with_config(&program, cfg);
-        report_inferred_cpu_qualifiers(&path);
-    }
-
     // script under `test/` or `examples/` can `use` a module that lives in
     // `src/` without needing `BORING_PATH` set. See `find_project_root`.
     if let Some(root) = find_project_root(&path) {
@@ -2469,6 +2498,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
     let config = transpiler::TranspileConfig { source_dir, deps, ..config };
     let out = transpiler::transpile_with_config(&program, config);
     report_transpile_warnings(&path, &source, &out.warnings);
+    report_inferred_cpu_qualifiers(&path);
     if !out.errors.is_empty() { report_transpile_errors(&path, &source, &out.errors); process::exit(1); }
     print!("{}", out.code);
     // `--emit-rust` prints a single Rust stream on stdout, so cross-file/cross-project
@@ -2498,7 +2528,6 @@ fn rust_dir_name_full(stem: &str, threading: &transpiler::ThreadingMode, mode: &
 fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpiler::TranspileConfig, extra_deps: &[String]) {
     let path = PathBuf::from(path);
 
-    report_inferred_cpu_qualifiers(&path);
     // Determine output project directory next to the source file
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -2568,6 +2597,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     let config_with_dir = transpiler::TranspileConfig { source_dir, deps, ..config.clone() };
     let transpile_out = transpiler::transpile_with_config(&program, config_with_dir);
     report_transpile_warnings(&path, &source, &transpile_out.warnings);
+    report_inferred_cpu_qualifiers(&path);
     if !transpile_out.errors.is_empty() { report_transpile_errors(&path, &source, &transpile_out.errors); process::exit(1); }
     let rust_code = transpile_out.code;
     let has_streams = transpile_out.has_streams;
@@ -2597,7 +2627,6 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     for (mod_name, mod_code) in &extra_modules {
         let mod_path = src_dir.join(format!("{}.rs", mod_name));
         if let Err(e) = std::fs::write(&mod_path, mod_code) {
-    report_inferred_cpu_qualifiers(&path);
             eprintln!("error: cannot write '{}': {}", mod_path.display(), e);
             process::exit(1);
         }

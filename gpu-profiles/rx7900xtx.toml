@@ -1,0 +1,8 @@
+# AMD Radeon RX 7900 XTX (RDNA3, gfx1100)
+name = "AMD Radeon RX 7900 XTX"
+vendor = "amd"
+totalMem = 25769803776      # 24 GB GDDR6
+warpSize = 32               # RDNA wave32
+maxThreads = 1024
+maxSharedMem = 65536        # 64 KB LDS per workgroup
+computeCapability = [11, 0] # gfx1100

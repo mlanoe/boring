@@ -1,5 +1,6 @@
 # Generic simulated GPU — used when no --gpu profile is specified.
 name = "Simulated GPU"
+vendor = "generic"          # compatible with every --target
 totalMem = 8589934592       # 8 GB
 warpSize = 32
 maxThreads = 1024

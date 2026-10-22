@@ -1,0 +1,8 @@
+# Apple M2 (10-core GPU, unified memory; 16 GB configuration)
+name = "Apple M2"
+vendor = "apple"
+totalMem = 17179869184      # 16 GB unified
+warpSize = 32               # SIMD-group width
+maxThreads = 1024
+maxSharedMem = 32768        # 32 KB threadgroup memory
+computeCapability = [8, 0]  # MTLGPUFamily.Apple8
