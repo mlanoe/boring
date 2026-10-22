@@ -422,6 +422,8 @@ transpile_test!(misc_scenarios_2);
 // Multi-statement closure body containing a `for` loop used to emit `/* complex stmt */`
 // (loop silently dropped) — see tests/cases/closure_block_for_loop.br.
 transpile_test!(closure_block_for_loop);
+// Bare `Fn(args)` param must emit a unit return (was `-> Fn`, E0782) — tests/cases/fn_param_bare_type.br.
+transpile_test!(fn_param_bare_type);
 
 // Trailing array-block sugar (docs/book.md, "Trailing array-block sugar") —
 // real `rustc`-build guard for both the flat (plain array-literal) and

@@ -90,7 +90,9 @@ impl Parser {
             }
             self.expect(&TokenKind::RParen)?;
             let fn_throws = self.eat(&TokenKind::Throws);
-            return Ok(Type::Fn(Some(Box::new(ret_ty)), params, fn_throws, prefix_task, prefix_req));
+            // `req Fn(args)` — bare `Fn` is the closure spelling with a unit return.
+            let ret = if matches!(&ret_ty, Type::Named(n) if n == "Fn") { None } else { Some(Box::new(ret_ty)) };
+            return Ok(Type::Fn(ret, params, fn_throws, prefix_task, prefix_req));
         }
 
         let base_ty = self.parse_type_base(line)?;
@@ -113,8 +115,12 @@ impl Parser {
                 self.expect(&TokenKind::RParen)?;
                 let fn_task   = self.eat(&TokenKind::Task);
                 let fn_throws = self.eat(&TokenKind::Throws);
+                // A bare `Fn(args)` is the closure-parameter spelling with a unit
+                // return, not a function returning a type named `Fn`.
+                let bare_fn = matches!(&base_ty, Type::Named(n) if n == "Fn");
+                let ret = if bare_fn { None } else { Some(Box::new(base_ty)) };
                 // No prefix → def (default, not pure)
-                Type::Fn(Some(Box::new(base_ty)), params, fn_throws, fn_task, false)
+                Type::Fn(ret, params, fn_throws, fn_task, false)
             } else {
                 base_ty
             }

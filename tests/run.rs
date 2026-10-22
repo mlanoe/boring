@@ -720,6 +720,7 @@ interp_test!(new_owned_no_double_or_missing_box);
 // src/desugar_array_block.rs for the implementation.
 interp_test!(misc_scenarios_2);
 interp_test!(closure_block_for_loop);
+interp_test!(fn_param_bare_type);
 interp_test!(array_block_flat);
 interp_test!(array_block_nested);
 interp_test!(array_block_if);

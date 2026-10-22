@@ -1,0 +1,37 @@
+# A bare `Fn(args)` / `Fn()` parameter type (no return type) used to emit
+# `impl FnMut(isize) -> Fn`, rejected by rustc (E0782).
+struct Runner:
+    req each(Fn(int) f):
+        f(1)
+        f(2)
+
+    req run(Fn() f):
+        f()
+
+def each2(Fn(int) f):
+    f(0)
+    f(1)
+
+def pure_each(req Fn(int) f):
+    f(5)
+
+int apply_ret(int f(int)):
+    f(1)
+
+def main():
+    print apply_ret((i): i + 41)
+    var total = 0
+    each2((i):
+        total += i + 10
+    )
+    print total
+    pure_each((i):
+        print i
+    )
+    let r = Runner()
+    r.each((n):
+        print n
+    )
+    r.run(():
+        print "ran"
+    )
