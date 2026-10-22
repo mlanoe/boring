@@ -239,8 +239,11 @@ supported format is covered; only the staged activations and dequantized
 weights are rounded to half. Eight warps hold a 4x4 grid of fragments, two per
 warp across K. Decode (`m == 1`) keeps the exact fp32 warp kernel, and
 `prefill.algorithm = "scalar"` still forces the exact reference. Covered by
-codegen tests and `examples/cuda_tensor_check/`; numerical validation on
-NVIDIA hardware is pending.
+codegen tests and `examples/cuda_tensor_check/`. Validated on a T4 (sm_75):
+the quantized prefill error rises from about 6e-6 (fp32) to 5e-3 (half) on a
+70x96x64 Q8_0 check, confirming the WMMA kernel runs and is accurate.
+`examples/cuda_prefill_bench/` and `tools/colab-cuda-prefill-bench.ipynb` time
+the fp32 and half prefill kernels (q8_0, q4_k, q6_k) for a first speed comparison.
 
 Every packed dynamic linear format has a tiled prefill schedule on WGPU, CUDA,
 and ROCm. Single-row decode keeps its warp reduction. For `m > 1`, these

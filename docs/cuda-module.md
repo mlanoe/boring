@@ -529,3 +529,8 @@ The following features are not yet implemented:
 - `'actor'shared` — parse error; only `'actor'global`/`'actor'unified` (or bare `'actor` for block-shared memory) are accepted
 - Omitting `grid` when no 1D array field, `Image`, or `Volume` field is present silently defaults to `(1, 1, 1)` — see the grid-inference rules above for what fields DO get 2D/3D inference
 - **Tensor cores are opt-in and partial** — `[tensor.matmul] algorithm = "tf32"` enables WMMA TF32 for eligible device tensor tiles and TF32 cuBLAS math; there are still no public fragment types, no `mma.sync` lowering, and half-precision quantized prefill on tensor cores is opt-in only via `[tensor.linear.prefill] precision = "half"` (WMMA f16, sm_70+). See [tensor-core primitives](tensor-core-primitives.html) for a proposed `kernel.tensors.*` design (not implemented).
+
+
+## Lints in generated host code
+
+The generated `src/main.rs` (CUDA, ROCm, Metal and wgpu hosts) starts with a crate-level `#![allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_imports, unused_parens, non_snake_case, non_camel_case_types, non_upper_case_globals, unexpected_cfgs)]` (`GENERATED_HOST_LINT_ALLOW` in `src/transpiler/helpers.rs`). The code is machine-written, so these lints (unused kernel-field locals, camelCase Boring names, helpers emitted whether or not they are called) are only noise in `cargo build`; rustc errors are unaffected.

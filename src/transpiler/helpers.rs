@@ -174,6 +174,12 @@ pub(crate) fn is_scalar_let_value(val: &Expr, ty: Option<&Type>) -> bool {
 
 /// Rust source for boring's built-in `Dimension` type, used by 2-D kernels.
 /// Emitted verbatim by both the cuda and metal host backends.
+/// Crate-level lint allowances for generated GPU host code (`main.rs`). The output is
+/// machine-written: kernel fields become unused locals, camelCase Boring names stay
+/// camelCase, and helpers are emitted whether or not a program calls them, so these
+/// lints only add noise to every `cargo build`.
+pub(crate) const GENERATED_HOST_LINT_ALLOW: &str = "#![allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_imports, unused_parens, non_snake_case, non_camel_case_types, non_upper_case_globals, unexpected_cfgs)]";
+
 pub(crate) const DIMENSION_STRUCT_RUST: &str =
     "#[repr(C)]\n\
      #[derive(Copy, Clone, Debug)]\n\

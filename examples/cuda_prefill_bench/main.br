@@ -1,0 +1,74 @@
+# CUDA quantized prefill benchmark: exact fp32 tiled kernel vs the opt-in half WMMA kernel.
+# The program is identical for both; only boring.toml changes:
+#
+#   [tensor.linear.prefill]
+#   precision = "half"      # omit for the exact fp32 baseline
+#
+# It warms the kernel once, times 20 back-to-back calls with a single synchronization
+# (reading the result), and prints ms/call and TFLOP/s plus two output samples so the
+# two runs can be compared (expect a relative difference around 1e-3 with half).
+#
+#   boring build --target cuda examples/cuda_prefill_bench/main.br
+#   cd examples/cuda_prefill_bench/main_cuda && cargo run --release -- 512x896x4864 q8_0
+#
+# Shapes (m x k x n): 512x896x4864, 512x4864x896, 512x2048x11008, partial. Formats: q8_0, q4_k, q6_k.
+
+use std.time.Instant
+
+req [float32]'kernel'unified q8([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q8_0")
+    y
+
+req [float32]'kernel'unified q4k([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q4_k")
+    y
+
+req [float32]'kernel'unified q6k([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q6_k")
+    y
+
+req [float32]'kernel'unified run(string format, [float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    if format == "q8_0":
+        q8(x, w, m, n, k)
+    elif format == "q4_k":
+        q4k(x, w, m, n, k)
+    else:
+        q6k(x, w, m, n, k)
+
+def main() throws:
+    let [string] argv = args()
+    let shape = if argv.length > 1: argv[1] else: "512x896x4864"
+    let format = if argv.length > 2: argv[2] else: "q8_0"
+    guard shape == "512x896x4864" or shape == "512x4864x896" or shape == "512x2048x11008" or shape == "partial" else throw "unknown shape"
+    guard format == "q8_0" or format == "q4_k" or format == "q6_k" else throw "expected q8_0, q4_k or q6_k"
+    let m = if shape == "partial": 35 else: 512
+    let k = if shape == "512x4864x896": 4864 elif shape == "512x2048x11008": 2048 elif shape == "partial": 256 else: 896
+    let n = if shape == "512x896x4864": 4864 elif shape == "512x2048x11008": 11008 elif shape == "partial": 19 else: 896
+    let blockElements = if format == "q8_0": 32 else: 256
+    let blockBytes = if format == "q8_0": 34 elif format == "q4_k": 144 else: 210
+    let weightBytes = (n * k / blockElements) * blockBytes
+    # Valid fp16 scale (0.5 = 0x3800) at the start of every Q8_0 block; K-quant bytes are pseudo-random.
+    let [float32]'kernel'global x = [((i % 17) as float32 - 8.0 as float32) / 7.0 as float32 for i in 0..<m * k]
+    let [uint8]'kernel'global w = [(if format == "q8_0" and i % 34 == 0: 0 elif format == "q8_0" and i % 34 == 1: 0x38 else: (i * 17 + 29) % 256) as uint8 for i in 0..<weightBytes]
+
+    let warmup = run(format, x, w, m, n, k)
+    with warmup:
+        let warmupSink = warmup[0]
+
+    let calls = 20
+    let started = Instant.now()
+    var iteration = 1
+    var result = run(format, x, w, m, n, k)
+    while iteration < calls:
+        result = run(format, x, w, m, n, k)
+        iteration += 1
+    with result:
+        let first = result[0]
+        let last = result[m * n - 1]
+        let elapsedUs = started.elapsed().asMicros()
+        let perCallMs = (elapsedUs as float64) / (calls as float64) / 1000.0
+        let tflops = 2.0 * (m as float64) * (n as float64) * (k as float64) / (perCallMs / 1000.0) / 1.0e12
+        print "{format} {m}x{k}x{n}: {perCallMs:.3f} ms/call, {tflops:.2f} TFLOP/s, y[0]={first}, y[last]={last}"

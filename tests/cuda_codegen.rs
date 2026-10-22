@@ -2002,3 +2002,27 @@ def main() throws:
         assert!(!rs.contains(&format!(" {bare}")) && !rs.contains(&format!("({bare}")), "bare {bare} call in:\n{rs}");
     }
 }
+
+#[test]
+fn half_prefill_covers_k_quant_formats_too() {
+    let src = r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "q4_k")
+    y
+"#;
+    let config = "[tensor.linear.prefill]\nprecision = \"half\"\n";
+    let (cu, _, _, _) = run_cuda_with_config("quant_half_q4k", src, Some(config));
+    assert!(cu.contains("nvcuda::wmma::mma_sync"), "{cu}");
+    assert!(cu.contains("bTile[bc + bk * 64] = "), "{cu}");
+}
+
+#[test]
+fn generated_host_silences_lints_that_are_noise_for_machine_written_code() {
+    let (_, host) = cuda_codegen("lint_allow", TILE_KERNEL);
+    let allow = host.lines().find(|line| line.starts_with("#![allow(")).expect("crate-level allow");
+    for lint in ["dead_code", "unused_variables", "unused_mut", "non_snake_case"] {
+        assert!(allow.contains(lint), "{allow}");
+    }
+    assert!(host.lines().take(3).any(|line| line.starts_with("#![allow(")), "inner attribute must precede all items:\n{}", &host[..200.min(host.len())]);
+}
