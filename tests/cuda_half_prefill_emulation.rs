@@ -93,12 +93,12 @@ void mma_sync(C& d, const A& a, const B& b, const C& c) {
 } }
 "#;
 
-fn generate(tmp: &PathBuf, with_bias: bool) -> String {
+fn generate(tmp: &PathBuf, format: &str, half: bool, with_bias: bool) -> String {
     let bin = env!("CARGO_BIN_EXE_boring");
     let call = if with_bias {
-        "kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k, format = \"q8_0\")"
+        format!("kernel.tensors.linear(a, weights, bias, y, m = m, n = n, k = k, format = \"{format}\")")
     } else {
-        "kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = \"q8_0\")"
+        format!("kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = \"{format}\")")
     };
     let bias_param = if with_bias { "[float32]'kernel'global bias, " } else { "" };
     let src = format!(
@@ -107,16 +107,88 @@ fn generate(tmp: &PathBuf, with_bias: bool) -> String {
     let _ = fs::remove_dir_all(tmp);
     fs::create_dir_all(tmp).unwrap();
     fs::write(tmp.join("test.br"), src).unwrap();
-    fs::write(tmp.join("boring.toml"), "[tensor.linear.prefill]\nprecision = \"half\"\n").unwrap();
+    if half {
+        fs::write(tmp.join("boring.toml"), "[tensor.linear.prefill]\nprecision = \"half\"\n").unwrap();
+    }
     let result = Command::new(bin).args(["build", "--target", "cuda"]).arg(tmp.join("test.br")).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     fs::read_to_string(tmp.join("test_cuda/kernels/main.cu")).unwrap()
 }
 
-fn run_case(name: &str, with_bias: bool, m: usize, n: usize, k: usize) {
+
+/// Packed weights for `format`, written so every scale is a small finite fp16.
+fn weights_source(format: &str) -> &'static str {
+    match format {
+        "q8_0" => r#"std::vector<uint8_t> w((N * K / 32) * 34);
+    for (size_t i = 0; i < w.size(); ++i) {
+        long block = i / 34, pos = i % 34;
+        w[i] = pos == 0 ? 0x00 : pos == 1 ? 0x38 : uint8_t(int8_t(int(((block * 32 + (pos - 2)) * 7) % 23) - 11));
+    }"#,
+        "q4_k" => r#"std::vector<uint8_t> w((N * K / 256) * 144);
+    for (size_t i = 0; i < w.size(); ++i) {
+        long pos = i % 144;
+        w[i] = pos == 0 ? 0x00 : pos == 1 ? 0x2C /* d = 0.0625 */ : pos == 2 ? 0x00 : pos == 3 ? 0x28 /* dmin = 0.03125 */
+             : uint8_t((i * 2654435761u) >> 13);
+    }"#,
+        "q6_k" => r#"std::vector<uint8_t> w((N * K / 256) * 210);
+    for (size_t i = 0; i < w.size(); ++i) {
+        long pos = i % 210;
+        w[i] = pos == 208 ? 0x00 : pos == 209 ? 0x2C /* d = 0.0625 */ : uint8_t((i * 2654435761u) >> 13);
+    }"#,
+        other => panic!("no reference for {other}"),
+    }
+}
+
+/// Independent C++ dequantizer (llama.cpp block layouts) returning the weight at a flat index.
+fn weight_fn_source(format: &str) -> &'static str {
+    match format {
+        "q8_0" => r#"auto weight = [&](long flat) { return float(int((flat * 7) % 23) - 11) * 0.5f; };"#,
+        "q4_k" => r#"auto half_bits = [](float f) { return f; };  (void)half_bits;
+    auto weight = [&](long flat) {
+        const uint8_t* b = &w[(flat / 256) * 144];
+        long pos = flat % 256, chunk = pos / 64, within = pos % 64, hi = within / 32, lane = within % 32;
+        const float d = 0.0625f, dmin = 0.03125f;
+        int sub = int(chunk * 2 + hi);
+        const uint8_t* s = b + 4;
+        int sc, mn;
+        if (sub < 4) { sc = s[sub] & 63; mn = s[sub + 4] & 63; }
+        else { sc = (s[sub + 4] & 15) | ((s[sub - 4] >> 6) << 4); mn = (s[sub + 4] >> 4) | ((s[sub] >> 6) << 4); }
+        int q = b[16 + chunk * 32 + lane];
+        q = hi == 0 ? (q & 15) : (q >> 4);
+        return d * sc * q - dmin * mn;
+    };"#,
+        "q6_k" => r#"auto weight = [&](long flat) {
+        const uint8_t* b = &w[(flat / 256) * 210];
+        const uint8_t* ql = b; const uint8_t* qh = b + 128; const int8_t* sc = (const int8_t*)(b + 192);
+        const float d = 0.0625f;
+        long pos = flat % 256, half = pos / 128, within = pos % 128, quarter = within / 32, l = within % 32;
+        const uint8_t* qlh = ql + half * 64; const uint8_t* qhh = qh + half * 32; const int8_t* sch = sc + half * 8;
+        int is = int(l / 16), q;
+        switch (quarter) {
+            case 0: q = ((qlh[l] & 15) | (((qhh[l] >> 0) & 3) << 4)) - 32; return d * sch[is + 0] * q;
+            case 1: q = ((qlh[l + 32] & 15) | (((qhh[l] >> 2) & 3) << 4)) - 32; return d * sch[is + 2] * q;
+            case 2: q = ((qlh[l] >> 4) | (((qhh[l] >> 4) & 3) << 4)) - 32; return d * sch[is + 4] * q;
+            default: q = ((qlh[l + 32] >> 4) | (((qhh[l] >> 6) & 3) << 4)) - 32; return d * sch[is + 6] * q;
+        }
+    };"#,
+        other => panic!("no reference for {other}"),
+    }
+}
+
+fn run_case(name: &str, format: &str, with_bias: bool, m: usize, n: usize, k: usize) {
+    run_case_with(name, format, true, with_bias, m, n, k);
+}
+
+/// `half = false` exercises the default exact-fp32 shared-memory tiled prefill instead.
+fn run_case_with(name: &str, format: &str, half: bool, with_bias: bool, m: usize, n: usize, k: usize) {
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cuda_half_prefill_emulation").join(name);
-    let cu = generate(&tmp, with_bias);
-    assert!(cu.contains("nvcuda::wmma::mma_sync"), "half WMMA kernel expected:\n{cu}");
+    let cu = generate(&tmp, format, half, with_bias);
+    if half {
+        assert!(cu.contains("nvcuda::wmma::mma_sync"), "half WMMA kernel expected:\n{cu}");
+    } else {
+        assert!(!cu.contains("nvcuda::wmma"), "exact fp32 kernel expected:\n{cu}");
+        assert!(cu.contains("aTile[") && cu.contains("bTile["), "tiled prefill expected:\n{cu}");
+    }
     let kernel = cu
         .lines()
         .find_map(|line| line.strip_prefix("__global__ void ").and_then(|rest| rest.split('(').next()))
@@ -136,6 +208,7 @@ fn run_case(name: &str, with_bias: bool, m: usize, n: usize, k: usize) {
     let harness = format!(
         r##"
 #include "{cu_path}"
+#define ROUND(v) {round}
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -144,15 +217,10 @@ int main() {{
     std::vector<float> x(M * K), bias(N), y(M * N, -999.0f);
     for (int i = 0; i < M * K; ++i) x[i] = float(i % 17) / 7.0f - 1.0f;
     for (int i = 0; i < N; ++i) bias[i] = float(i) * 0.02f;
-    std::vector<uint8_t> w((N * K / 32) * 34);
-    auto q = [](long flat) {{ return int((flat * 7) % 23) - 11; }};
-    for (size_t i = 0; i < w.size(); ++i) {{
-        long block = i / 34, pos = i % 34;
-        w[i] = pos == 0 ? 0x00 : pos == 1 ? 0x38 : uint8_t(int8_t(q(block * 32 + (pos - 2))));
-    }}
+    {weights}
     {bias_decl}
     blockDim = {{256, 1, 1}};
-    gridDim = {{unsigned((N + 63) / 64), unsigned((M + 63) / 64), 1}};
+    gridDim = {{unsigned((N + {tile} - 1) / {tile}), unsigned((M + {tile} - 1) / {tile}), 1}};
     boring_barrier.count = 256;
     for (unsigned by = 0; by < gridDim.y; ++by) for (unsigned bx = 0; bx < gridDim.x; ++bx) {{
         blockIdx = {{bx, by, 0}};
@@ -163,19 +231,25 @@ int main() {{
         }});
         for (auto& th : threads) th.join();
     }}
+    {weight_fn}
     double worst = 0, scale = 0;
     for (int r = 0; r < M; ++r) for (int c = 0; c < N; ++c) {{
         float expected = {bias_ref};
-        for (int i = 0; i < K; ++i) expected += __float2half(x[r * K + i]) * __float2half(float(q(long(c) * K + i)) * 0.5f);
+        for (int i = 0; i < K; ++i) expected += ROUND(x[r * K + i]) * ROUND(weight(long(c) * K + i));
         worst = std::fmax(worst, std::fabs(y[r * N + c] - expected));
         scale = std::fmax(scale, std::fabs(expected));
     }}
     std::printf("max abs error %g (max |y| %g)\n", worst, scale);
     // The reference applies the same half rounding, so only fp32 summation order may differ.
-    return worst <= 2e-4 ? 0 : 1;
+    // Half rounding effects are ~1e-3 relative, three orders above this bound.
+    return worst <= 2e-4 + 2e-6 * scale ? 0 : 1;
 }}
 "##,
         cu_path = tmp.join("test_cuda/kernels/main.cu").display(),
+        tile = if half { 64 } else { 16 },
+        round = if half { "__float2half(v)" } else { "(v)" },
+        weights = weights_source(format),
+        weight_fn = weight_fn_source(format),
     );
     fs::write(tmp.join("harness.cpp"), harness).unwrap();
     let binary = tmp.join("harness");
@@ -196,11 +270,32 @@ int main() {{
 #[cfg(unix)]
 fn half_wmma_prefill_matches_half_rounded_reference_with_bias_and_edge_tiles() {
     // m and n are not multiples of 64 (edge tiles); k spans several 16-deep stages.
-    run_case("bias_edges", true, 70, 96, 96);
+    run_case("bias_edges", "q8_0", true, 70, 96, 96);
 }
 
 #[test]
 #[cfg(unix)]
 fn half_wmma_prefill_matches_reference_without_bias_on_a_single_partial_tile() {
-    run_case("no_bias_small", false, 5, 19, 64);
+    run_case("no_bias_small", "q8_0", false, 5, 19, 64);
+}
+
+#[test]
+#[cfg(unix)]
+fn half_wmma_prefill_matches_independent_q4_k_dequantizer() {
+    run_case("q4k_bias_edges", "q4_k", true, 70, 96, 512);
+}
+
+#[test]
+#[cfg(unix)]
+fn half_wmma_prefill_matches_independent_q6_k_dequantizer() {
+    run_case("q6k_no_bias", "q6_k", false, 37, 70, 256);
+}
+
+#[test]
+#[cfg(unix)]
+fn exact_fp32_tiled_prefill_matches_reference_for_q8_0_and_k_quants() {
+    // The default (non-WMMA) prefill; Q4_K/Q6_K only reach it since the K-quant tiling fix.
+    run_case_with("fp32_q8", "q8_0", false, true, 37, 70, 96);
+    run_case_with("fp32_q4k", "q4_k", false, true, 37, 70, 512);
+    run_case_with("fp32_q6k", "q6_k", false, false, 21, 35, 256);
 }
