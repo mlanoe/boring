@@ -4314,6 +4314,12 @@ impl Transpiler {
         } else if receiver_is_dict_var && (method == "set" || method == "put") {
             // dict.set(key, val) / dict.put(key, val) → dict.insert(key, val)
             ("insert".to_string(), None)
+        } else if matches!(method, "map" | "filter") && args.len() == 1
+            && matches!(&args[0].value.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Cast(..) | ExprKind::BinOp(..))
+        {
+            // `x.map(65 as uint32)` — an argument that cannot be a callable means this is not
+            // an iterator `map`/`filter` (e.g. `swash::Charmap::map(codepoint)`): plain method call.
+            (method.to_string(), None)
         } else {
             let (m, w) = map_method(method, args.len(), self.want_raw_option_pop.get());
             // A receiver whose type could not be resolved (`let node = found else (...)`, a

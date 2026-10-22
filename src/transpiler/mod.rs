@@ -17,6 +17,7 @@
 use crate::ast::*;
 
 mod emit_top;
+mod external_closure_borrow;
 mod host_types;
 mod emit_struct;
 mod emit_stmt;
@@ -280,6 +281,8 @@ pub fn transpile_full(program: &Program) -> TranspileOutput {
 }
 
 pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
+    let rewritten = external_closure_borrow::infer(program);
+    let program = rewritten.as_ref().unwrap_or(program);
     let mut t = Transpiler::new(config);
     t.source_dir = t.config.source_dir.clone();
     t.deps = t.config.deps.clone();
