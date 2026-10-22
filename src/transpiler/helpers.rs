@@ -495,7 +495,14 @@ pub(crate) fn collect_lifetimes(ty: &Type, out: &mut Vec<String>) {
 /// call site `&mut buf` — never cloned or moved. Free functions and struct methods alike.
 pub(crate) fn is_lent_collection_param(p: &Param) -> bool {
     p.mutable && !p.rebindable && !p.variadic
-        && matches!(p.ty.as_ref().map(|t| t.without_mut()), Some(Type::Array(_) | Type::Dict(_, _) | Type::Set(_)))
+        && match p.ty.as_ref().map(|t| t.without_mut()) {
+            Some(Type::Array(_) | Type::Dict(_, _) | Type::Set(_)) => true,
+            // A `'kernel'global`/`'kernel'unified` host array is the same plain `Vec<T>`
+            // in a method signature (`emit_type`), so it is lent the same way.
+            Some(Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)) =>
+                matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)),
+            _ => false,
+        }
 }
 
 /// A `mut` (non-`var`, non-variadic) parameter whose declared type is a bare user type name —
@@ -513,9 +520,18 @@ pub(crate) fn is_mut_user_type_param_shape(p: &Param) -> Option<&str> {
 
 /// The parameter's type as registered in `fn_sigs`: a lent `mut [T]` is `&mut [T]`
 /// (`BorrowMut`), so the existing `Borrow`/`BorrowMut` call-site machinery lends the argument.
+/// A plain (non-`mut`, non-`var`) `'kernel'global`/`'kernel'unified` array parameter: borrowed
+/// (`&Vec<T>`) so the caller keeps its array, like a free function's `BoringKernelArg` argument.
+pub(crate) fn is_shared_gpu_array_param(p: &Param) -> bool {
+    !p.mutable && !p.rebindable && !p.variadic
+        && matches!(p.ty.as_ref().map(|t| t.without_mut()), Some(Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified))
+            if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+}
+
 pub(crate) fn sig_param_type(p: &Param) -> Option<Type> {
-    if is_lent_collection_param(p) {
-        p.ty.as_ref().map(|t| crate::transpiler::infer_qualifiers::apply_inferred_qual(t, OwnerQual::BorrowMut))
+    if is_lent_collection_param(p) || is_shared_gpu_array_param(p) {
+        let q = if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
+        p.ty.as_ref().map(|t| crate::transpiler::infer_qualifiers::apply_inferred_qual(t, q))
     } else {
         p.ty.clone()
     }

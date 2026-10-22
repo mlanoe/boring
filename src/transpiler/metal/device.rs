@@ -1304,6 +1304,71 @@ impl DeviceEmitter {
                 if pass > 0 { self.line(&format!("threadgroup {weight}* {dst} = bp_b_tile + ((bp_ni / 8) * {kf} + 4 + bp_lane8) * 64 + (bp_ni % 8) * 8;")); }
                 self.emit_blocked_q6_vector(weight, &dst, suffix);
             }
+        } else if matches!(format, "q3_k" | "q2_k") {
+            // 256-element superblocks, one 32-wide K step at a time: `outer` (128-wide half) and
+            // `group` (32-wide quarter) are constant within a step, and each thread's 8 values
+            // share one 16-wide `sub` block. Mirrors the Boring reference dequantizer exactly.
+            let block_bytes = if format == "q3_k" { 110 } else { 84 };
+            self.line("const ulong bp_flat0 = (ulong)bp_output_col * (ulong)k + bp_base;");
+            self.line(&format!("const ulong bp_block = (bp_flat0 / 256) * {block_bytes};"));
+            self.line("const uint bp_position = uint(bp_flat0 % 256);");
+            self.line("const uint bp_outer = bp_position / 128, bp_group = (bp_position % 128) / 32;");
+            self.line("const uint bp_sub = bp_lane8 / 2, bp_lane0 = (bp_lane8 % 2) * 8;");
+            if format == "q3_k" {
+                self.line("const uint bp_scale_index = bp_outer * 8 + bp_group * 2 + bp_sub;");
+                self.line("const uint bp_scale_word = bp_scale_index / 4, bp_scale_lane = bp_scale_index % 4;");
+                self.line("const int bp_scale_byte = int(b[bp_block + 96 + (bp_scale_word % 2) * 4 + bp_scale_lane]);");
+                self.line("const int bp_scale_low = bp_scale_word < 2 ? (bp_scale_byte & 15) : ((bp_scale_byte >> 4) & 15);");
+                self.line("const int bp_scale_high = (int(b[bp_block + 104 + bp_scale_lane]) >> (bp_scale_word * 2)) & 3;");
+                self.line("const int bp_subscale = (bp_scale_low | (bp_scale_high << 4)) - 32;");
+                self.line("const float bp_d = float(as_type<half>(ushort(ushort(b[bp_block + 108]) | (ushort(b[bp_block + 109]) << 8))));");
+                self.line("const ulong bp_qs = bp_block + 32 + bp_outer * 32 + bp_sub * 16 + bp_lane0;");
+                self.line("const ulong bp_hs = bp_block + bp_sub * 16 + bp_lane0;");
+                self.line("const uint bp_high_bit = bp_outer * 4 + bp_group;");
+                for half_index in 0..2 {
+                    let off = half_index * 4;
+                    self.line(&format!("{{ {weight}4 bp_v; const packed_uchar4 bp_p = *(device const packed_uchar4*)(b + bp_qs + {off}); const packed_uchar4 bp_h = *(device const packed_uchar4*)(b + bp_hs + {off}); for (uint bp_i = 0; bp_i < 4; ++bp_i) {{ const int bp_q = (int(bp_p[bp_i]) >> (bp_group * 2)) & 3; const int bp_offset = (int(bp_h[bp_i]) & (1 << bp_high_bit)) == 0 ? 4 : 0; bp_v[bp_i] = {weight}(float(bp_subscale * (bp_q - bp_offset)) * bp_d); }} *(threadgroup {weight}4*)(bp_dst_b0 + {off}) = bp_v; }}"));
+                }
+            } else {
+                self.line("const int bp_scale_byte = int(b[bp_block + bp_outer * 8 + bp_group * 2 + bp_sub]);");
+                self.line("const float bp_d = float(as_type<half>(ushort(ushort(b[bp_block + 80]) | (ushort(b[bp_block + 81]) << 8))));");
+                self.line("const float bp_dmin = float(as_type<half>(ushort(ushort(b[bp_block + 82]) | (ushort(b[bp_block + 83]) << 8))));");
+                self.line("const float bp_minimum = bp_dmin * float(bp_scale_byte >> 4);");
+                self.line("const ulong bp_qs = bp_block + 16 + bp_outer * 32 + bp_sub * 16 + bp_lane0;");
+                for half_index in 0..2 {
+                    let off = half_index * 4;
+                    self.line(&format!("{{ {weight}4 bp_v; const packed_uchar4 bp_p = *(device const packed_uchar4*)(b + bp_qs + {off}); for (uint bp_i = 0; bp_i < 4; ++bp_i) {{ const int bp_q = (int(bp_p[bp_i]) >> (bp_group * 2)) & 3; bp_v[bp_i] = {weight}(float((bp_scale_byte & 15) * bp_q) * bp_d - bp_minimum); }} *(threadgroup {weight}4*)(bp_dst_b0 + {off}) = bp_v; }}"));
+                }
+            }
+        } else if matches!(format, "q4_0" | "iq4_nl" | "q5_0") {
+            // 32-element blocks: one block per K step, each thread fills 8 consecutive k values
+            // (`bp_lane8 * 8 ..`) of one output column. Elements 0..15 are the low nibbles of
+            // qs[0..15], elements 16..31 the high nibbles; loads are byte-aligned (`packed_*`)
+            // because 18/22-byte blocks put qs at a 2-mod-4 address.
+            let block_bytes = if format == "q5_0" { 22 } else { 18 };
+            let qs_offset = if format == "q5_0" { 6 } else { 2 };
+            self.line(&format!("const ulong bp_block = ((ulong)bp_output_col * (ulong)k + bp_base) / 32 * {block_bytes};"));
+            self.line("const float bp_scale = float(as_type<half>(*(device const ushort*)(b + bp_block)));");
+            self.line("const uint bp_shift = bp_lane8 >= 2 ? 4 : 0;");
+            self.line(&format!("const ulong bp_qs = bp_block + {qs_offset} + (bp_lane8 & 1) * 8;"));
+            self.line("const packed_uchar4 bp_q0 = *(device const packed_uchar4*)(b + bp_qs);");
+            self.line("const packed_uchar4 bp_q1 = *(device const packed_uchar4*)(b + bp_qs + 4);");
+            let value = match format {
+                "q4_0" => "(float((bp_q[bp_i] >> bp_shift) & 15) - 8.0f) * bp_scale".to_string(),
+                "iq4_nl" => "float(bp_iq4[(bp_q[bp_i] >> bp_shift) & 15]) * bp_scale".to_string(),
+                _ => "(float(((bp_q[bp_i] >> bp_shift) & 15) | (((bp_qh >> (bp_lane8 * 8 + bp_i)) & 1) << 4)) - 16.0f) * bp_scale".to_string(),
+            };
+            if format == "iq4_nl" {
+                self.line("const char bp_iq4[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};");
+            }
+            if format == "q5_0" {
+                self.line("const uint bp_qh = uint(b[bp_block + 2]) | (uint(b[bp_block + 3]) << 8) | (uint(b[bp_block + 4]) << 16) | (uint(b[bp_block + 5]) << 24);");
+            }
+            for half_index in 0..2 {
+                self.line(&format!("{{ {weight}4 bp_v; const packed_uchar4 bp_q = bp_q{half_index}; for (uint bp_i = 0; bp_i < 4; ++bp_i) bp_v[bp_i] = {weight}({}); *(threadgroup {weight}4*)(bp_dst_b0 + {}) = bp_v; }}",
+                    value.replace("bp_lane8 * 8 + bp_i", &format!("bp_lane8 * 8 + {} + bp_i", half_index * 4)),
+                    half_index * 4));
+            }
         } else {
             self.line("const ulong bp_block = ((ulong)bp_output_col * (ulong)k + bp_base) / 32 * 34;");
             self.line("const float bp_scale = float(as_type<half>(*(device const ushort*)(b + bp_block)));");
@@ -1456,6 +1521,12 @@ impl DeviceEmitter {
                 }
             }
             Stmt::Expr(e) => {
+                if let Some(format) = blocked_prefill_marker(e) {
+                    // Float SIMD-group prefill for a 32-element-block format without a native kernel.
+                    let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
+                    self.emit_blocked_quant_prefill(has_bias, format, "float", "float");
+                    return;
+                }
                 if crate::checker::tensor::is_tensor_call(e) {
                     let fields = self.current_fields.clone();
                     let dialect = if self.current_kernel.starts_with("BoringTensorHost") {
@@ -2341,5 +2412,20 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
         ExprKind::Assign(l, r)     => expr_references_any(l, names) || expr_references_any(r, names),
         ExprKind::Call(f, args)    => expr_references_any(f, names) || args.iter().any(|a| expr_references_any(&a.value, names)),
         _ => false,
+    }
+}
+
+/// `__boring_metal_blocked_prefill_<format>()` statement synthesized by `tensor_host` for the
+/// formats the blocked SIMD-group prefill supports; returns the format name.
+fn blocked_prefill_marker(expr: &Expr) -> Option<&'static str> {
+    let ExprKind::Call(callee, _) = &expr.kind else { return None };
+    let ExprKind::Var(name) = &callee.kind else { return None };
+    match name.as_str() {
+        "__boring_metal_blocked_prefill_q4_0" => Some("q4_0"),
+        "__boring_metal_blocked_prefill_q5_0" => Some("q5_0"),
+        "__boring_metal_blocked_prefill_iq4_nl" => Some("iq4_nl"),
+        "__boring_metal_blocked_prefill_q3_k" => Some("q3_k"),
+        "__boring_metal_blocked_prefill_q2_k" => Some("q2_k"),
+        _ => None,
     }
 }

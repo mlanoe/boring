@@ -32,6 +32,9 @@ pub(crate) struct TensorLinearConfig {
     /// Opt-in (`prefill.precision = "half"` on CUDA): the tiled quantized prefill
     /// multiplies 64x64 output tiles with half-precision WMMA instead of scalar FMAs.
     pub cuda_half_wmma_prefill: bool,
+    /// Metal: Q4_0/Q5_0/IQ4_NL prefill uses the backend's SIMD-group blocked kernel (a
+    /// `__boring_metal_blocked_prefill_<format>()` marker the Metal device emitter expands).
+    pub metal_blocked_prefill: bool,
     pub native_dynamic_q8_linear: bool,
     pub portable_tiled_dynamic_quantized_linear: bool,
 }
@@ -50,10 +53,17 @@ impl Default for TensorLinearConfig {
             native_dynamic_float_linear: false,
             single_launch_float_linear: false,
             cuda_half_wmma_prefill: false,
+            metal_blocked_prefill: false,
             native_dynamic_q8_linear: false,
             portable_tiled_dynamic_quantized_linear: false,
         }
     }
+}
+
+/// Formats the Metal blocked SIMD-group prefill supports (32-element blocks, or 256-element
+/// K-quant superblocks walked one 32-wide K step at a time).
+fn metal_blocked_format(config: &TensorLinearConfig, format: Option<&str>) -> bool {
+    config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
 }
 
 fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, usize) {
@@ -380,7 +390,10 @@ fn lower_function_body(
         };
         let Some(spec) = resolve_spec(method, names, types) else {
             errors.push(super::TranspileError::at_line(
-                "unable to synthesize kernel.tensors host dispatch from the declared operand types",
+                "unable to synthesize kernel.tensors host dispatch from the declared operand types \
+                 (inside a function, operands must be parameters or locals declared in that function: \
+                 top-level array bindings are not visible inside generated function bodies -- \
+                 pass them as parameters)",
                 call.line,
             ));
             out.push(stmt.clone());
@@ -710,8 +723,15 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     let q4_decode_algorithm = tensor_config.algorithm(Some("q4_0"), true);
     let iq4_decode_algorithm = tensor_config.algorithm(Some("iq4_nl"), true);
     let decode_algorithm = tensor_config.algorithm(quantized_format, true);
+    // A native packed kernel (Metal Q8_0/Q4_K/Q6_K) gets its body from the backend, so it
+    // must not also declare the portable shared tiles.
+    let native_packed_kernel = tensor_config.native_dynamic_q8_linear
+        && matches!(quantized_format, Some("q8_0" | "q4_k" | "q6_k"))
+        && matches!(tensor_config.algorithm(quantized_format, false), "auto" | "native")
+        && !(quantized_format == Some("q8_0") && decode_algorithm == "scalar");
     let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
         && quantized_format.is_some()
+        && !native_packed_kernel
         && matches!(tensor_config.algorithm(quantized_format, false), "auto" | "native")
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
     let warp_decode = matches!(quantized_format, Some("q8_0" | "q6_k" | "q4_k" | "q3_k" | "q2_k"))
@@ -842,9 +862,14 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
         // nested-product spelling above does not match them; try that one too.
         let warp_scalar_prefill = scalar_prefill.replace(&nested_scalar_product, &warp_product);
         let matched_prefill = if body.contains(&scalar_prefill) { &scalar_prefill } else { &warp_scalar_prefill };
-        body = body.replacen(matched_prefill, wmma_prefill.as_deref().unwrap_or(&tiled_prefill), 1);
+        let blocked_prefill = if metal_blocked_format(tensor_config, quantized_format) {
+            Some(format!("        else:\n            __boring_metal_blocked_prefill_{}()\n", quantized_format.unwrap()))
+        } else { None };
+        body = body.replacen(matched_prefill, wmma_prefill.as_deref().or(blocked_prefill.as_deref()).unwrap_or(&tiled_prefill), 1);
     }
-    let tile_fields = if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
+    let tile_fields = if portable_tiled_quantized && metal_blocked_format(tensor_config, quantized_format) {
+        "" // the blocked kernel declares its own threadgroup scratch
+    } else if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
         "    mut [float32, width = 16, height = 64]'actor aTile\n    mut [float32, width = 64, height = 16]'actor bTile\n"
     } else if portable_tiled_quantized {
         "    mut [float32, width = 16, height = 16]'actor aTile\n    mut [float32, width = 16, height = 16]'actor bTile\n"
@@ -935,6 +960,7 @@ fn parse_dynamic_replacement_stmts(
     let native_prefill_columns = 64;
     let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
         && call.format.is_some()
+        && !native_packed
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
     let launch = if native_float && tensor_config.single_launch_float_linear {
@@ -955,6 +981,8 @@ fn parse_dynamic_replacement_stmts(
         } else {
             format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
         }
+    } else if portable_tiled_quantized && metal_blocked_format(tensor_config, call.format) {
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else if portable_tiled_quantized {
@@ -1062,6 +1090,23 @@ mod tests {
 
     fn parse(source: &str) -> Program {
         crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn top_level_operand_inside_function_names_the_cause() {
+        let program = parse(r#"
+let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
+let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]
+mut [float32, n = 8, m = 8]'kernel'unified c = [0.0 as float32 for ..<64]
+
+def run() throws:
+    kernel.tensors.matmul(a, b, c)
+
+run()
+"#);
+        let lowered = lower(&program);
+        assert!(lowered.errors.iter().any(|e| e.to_string().contains("top-level array bindings are not visible")),
+            "{:?}", lowered.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>());
     }
 
     #[test]

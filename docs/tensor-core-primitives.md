@@ -1031,3 +1031,14 @@ Toolchain 27A266a and execute on real Metal hardware. Naga 30.0.1 validates the
 synthesized WGSL, which also executes through WGPU on real adapters. These runs
 cover automatically dispatched matmul and linear kernels, including packed
 quantized formats.
+
+## Known limit: top-level operands inside functions (2026-10-22)
+
+`kernel.tensors.*` called inside a function body must use operands that are
+parameters or locals of that function. A top-level array binding (`let [..]'kernel'global a`)
+used directly in a function is not supported: in generated Rust a top-level non-scalar
+`let` stays a local of the synthesized `main` and is invisible to other functions
+(this is not tensor-specific -- a plain top-level `let [int] z` read from a `def`
+fails the same way on the std target; only mutable `var`/`mut` globals and scalar
+constants are hoisted to statics). The error now says so; pass the arrays as
+parameters (see `host_arrays_passed_to_kernel_qualified_params_are_wrapped_and_mut_written_back`).

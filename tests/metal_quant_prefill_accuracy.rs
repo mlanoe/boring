@@ -159,4 +159,50 @@ mod macos {
             }
         }
     }
+
+    /// Formats without a native Metal kernel (Q4_0, Q5_0, IQ4_NL, Q3_K, Q2_K) use the shared-memory
+    /// tiled prefill by default; `algorithm = "scalar"` keeps the per-element reference. Both run
+    /// on the real GPU and must agree (same inner-K accumulation order).
+    #[test]
+    fn tiled_prefill_of_non_native_formats_matches_scalar_on_real_metal() {
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_tiled_quant_prefill");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let build_fixture = |name: &str, config: &str| {
+            let root = base.join(name);
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("prefill.br"), include_str!("fixtures/metal_tiled_quant_prefill.br")).unwrap();
+            build(&root, config)
+        };
+        let scalar_exe = build_fixture("scalar", "[tensor.linear.prefill]\nalgorithm = \"scalar\"\n");
+        let tiled_exe = build_fixture("tiled", "[tensor.linear.prefill]\nalgorithm = \"auto\"\n");
+        assert_ne!(fs::canonicalize(&scalar_exe).unwrap(), fs::canonicalize(&tiled_exe).unwrap());
+        for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k"] {
+            let k_quant = format.ends_with("_k");
+            let shapes = [(37, 77, 512), (8, 33, 256), (130, 129, 256), (300, 200, if k_quant { 1024 } else { 800 })];
+            for (m, n, k) in shapes {
+                for with_bias in [false, true] {
+                    let scalar = run(&scalar_exe, format, m, n, k, with_bias);
+                    let tiled = run(&tiled_exe, format, m, n, k, with_bias);
+                    assert_eq!(scalar.len(), m * n);
+                    assert_eq!(tiled.len(), scalar.len());
+                    let scale = scalar.iter().copied().map(f32::abs).fold(0.0, f32::max);
+                    assert!(scale.is_finite() && scale > 0.0, "{format} {m}x{n}x{k}: degenerate reference (scale {scale})");
+                    let mut worst = 0.0f32;
+                    for (index, (&a, &r)) in tiled.iter().zip(scalar.iter()).enumerate() {
+                        let error = (a - r).abs();
+                        worst = worst.max(error);
+                        // The scalar kernel seeds its accumulator with the bias, the tiled one
+                        // adds it last, shifting rounding by an ulp of the partial sum. A wrong
+                        // element is off by ~1x the scale, orders of magnitude above this bound.
+                        let bound = if with_bias { 1.0e-5 * scale } else { 1.0e-5 * (r.abs() + 1.0) };
+                        assert!(error <= bound,
+                            "{format} {m}x{n}x{k} bias={with_bias} output {index} (row {}, col {}): tiled={a}, scalar={r}, error={error}",
+                            index / n, index % n);
+                    }
+                    eprintln!("{format} {m}x{n}x{k} bias={with_bias}: worst absolute error {worst} (scale {scale})");
+                }
+            }
+        }
+    }
 }

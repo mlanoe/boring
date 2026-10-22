@@ -144,6 +144,13 @@ impl Transpiler {
                             "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
                             vis, s.name, rust_ty, val_str
                         ));
+                    } else if self.top_level_let_is_typed_array(s) {
+                        let rust_ty = self.emit_type(s.ty.as_ref().expect("typed-array let has a declared type"));
+                        let val_str = s.value.as_ref().map(|v| self.emit_expr_owned(v)).unwrap_or_else(|| "Vec::new()".to_string());
+                        self.line(&format!(
+                            "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
+                            vis, s.name, rust_ty, val_str
+                        ));
                     } else if self.let_type_is_static(s) {
                         self.emit_static_qualified_let_item(s, vis);
                     } else {
@@ -2341,7 +2348,11 @@ impl Transpiler {
                             | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned)
                             | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_))));
                 let lent_ty;
-                let effective_ty = if lent {
+                let borrowed_gpu_ty;
+                let effective_ty = if crate::transpiler::helpers::is_shared_gpu_array_param(p) {
+                    borrowed_gpu_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, OwnerQual::Borrow);
+                    &borrowed_gpu_ty
+                } else if lent {
                     // Set directly rather than read from `inferred_qualifiers`: a header-only
                     // trait method has no body to infer from, yet its signature must match
                     // the implementing methods' exactly.

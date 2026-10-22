@@ -215,3 +215,9 @@ transpiler to handle.
 - **Buffer index ordering**: unified/global/actor arrays → const fields → local scalars → dynamic shared (`threadgroup`). Device and host use the same fixed order.
 - **Dispatch**: deferred — launches are batched into shared command buffers and waited on at the next host read (see Error handling). `after =` is accepted syntactically but has no effect.
 - **Atomics**: `atomicSub` has no MSL equivalent — emitted as `atomic_fetch_add_explicit` with a negated value, `memory_order_relaxed`.
+
+## Quantized prefill for formats without a native kernel
+
+`kernel.tensors.linear` has native Metal kernels for Q8_0, Q4_K and Q6_K. The other packed formats (Q4_0, Q5_0, IQ4_NL, Q3_K, Q2_K) use the portable path: `m == 1` decodes with a SIMD-group reduction, and prefill (`m > 1`) stages 16x16 activation and dequantized-weight tiles in threadgroup memory (the same generic dequantizer as CUDA/ROCm, exact fp32). Before this path was enabled for Metal they ran a per-element scalar loop. On an Apple GPU, 20 calls of a 128x2048x11008 prefill took 55-82 s that way and 4.2-5.0 s tiled (the native Q8_0/Q4_K kernels take about 0.4 s). `[tensor.linear.prefill] algorithm = "scalar"` still selects the per-element reference.
+
+Every packed format without a native kernel (Q4_0, Q5_0, IQ4_NL, Q3_K, Q2_K) goes one step further: its prefill reuses the native Q8_0 SIMD-group schedule (64x64 output tiles, `simdgroup_multiply_accumulate`) with a format-specific weight-tile fill (nibble split, Q5_0 high bits, the IQ4_NL lookup table, and for the 256-element Q3_K/Q2_K superblocks one 32-wide K step at a time, mirroring the portable reference dequantizer; loads are byte-aligned `packed_uchar4` since odd-sized blocks place `qs` at unaligned addresses). The same 128x2048x11008 benchmark takes 0.3-1 s for all five (Q8_0 native: about 0.3-0.5 s), bit-identical to the scalar reference without bias on the real-GPU test.

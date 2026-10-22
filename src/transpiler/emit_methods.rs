@@ -4234,6 +4234,8 @@ impl Transpiler {
         // Per-param lent `mut [T]`/`mut {K=V}`/`mut {T}` flags (`is_lent_collection_param`) of
         // that same decl — lent as `&mut <place>`, never cloned/moved.
         let mut struct_method_param_lent: Vec<bool> = Vec::new();
+        // Per-param plain `'kernel'global`/`'kernel'unified` array flags (`&Vec<T>` parameters).
+        let mut struct_method_param_shared_gpu: Vec<bool> = Vec::new();
         let (rust_method, extra_wrap) = if is_user_struct_receiver {
             // Check for overloaded struct methods — pick the best-matching overload.
             let struct_type_opt = self.resolve_expr_struct_type(obj);
@@ -4295,6 +4297,9 @@ impl Transpiler {
                 .unwrap_or_default();
             struct_method_param_lent = chosen_decl
                 .map(|decl| decl.params.iter().map(|p| self.is_lent_param(p, true)).collect())
+                .unwrap_or_default();
+            struct_method_param_shared_gpu = chosen_decl
+                .map(|decl| decl.params.iter().map(super::helpers::is_shared_gpu_array_param).collect())
                 .unwrap_or_default();
             let overloaded_name = chosen_decl.filter(|_| {
                 struct_type_opt.as_ref()
@@ -4400,6 +4405,9 @@ impl Transpiler {
                 }
                 if struct_method_param_lent.get(i).copied().unwrap_or(false) {
                     return self.emit_lent_arg(&a.value);
+                }
+                if struct_method_param_shared_gpu.get(i).copied().unwrap_or(false) {
+                    if let Some(s) = self.emit_plain_borrow_arg(false, &a.value) { return s; }
                 }
                 // An `'actor`/`'guard` handle param (`mut Counter'actor c` too) is declared
                 // `&Arc<Mutex<T>>`: lend the handle by reference, never move or clone it.
@@ -5756,6 +5764,15 @@ impl Transpiler {
     /// smart pointer, an `'actor`/`'guard` argument that needs its lock held) — the caller
     /// then keeps its by-value emission.
     fn emit_borrow_arg_any(&self, inner: &Type, mutable: bool, arg: &Expr) -> Option<String> {
+        // A `'kernel'global`/`'kernel'unified` array is a plain host `Vec<T>` here: borrow it as one.
+        let mut inner = inner;
+        loop {
+            match inner {
+                Type::Mut(t) => inner = t,
+                Type::Qualified(t, OwnerQual::GpuGlobal | OwnerQual::GpuUnified) => inner = t,
+                _ => break,
+            }
+        }
         match inner {
             Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => {
                 if mutable {
@@ -5770,7 +5787,7 @@ impl Transpiler {
             }
             Type::Named(n) if n == "str" || n == "String"
                 || self.non_fn_type_aliases.contains_key(n.as_str()) => None,
-            Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) =>
+            Type::Named(_) | Type::Array(_) | Type::ArrayN(..) | Type::ArrayNExpr(..) | Type::LabeledArray(..) | Type::Dict(..) | Type::Set(_) =>
                 self.emit_plain_borrow_arg(mutable, arg),
             _ => None,
         }

@@ -1,0 +1,135 @@
+# Real-Metal fixture for the tiled prefill of formats without a native Metal kernel.
+# Prints every output so the Rust harness can compare complete matrices.
+kernel CopyBytesKernel:
+    let [uint8]'global src
+    mut [uint8]'unified out
+    let int n
+    init([uint8]'global s, int nn):
+        src = s
+        n = nn
+        out = [0 as uint8 for ..<nn]
+    def ():
+        let block_idx = .block.x + .block.y * .grid_dim.x
+        let base = (.thread.x + block_idx * .block_dim.x) * 16
+        for j in 0..<16:
+            if base + j < n:
+                out[base + j] = src[base + j]
+
+kernel CopyFloatsKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+    def ():
+        let block_idx = .block.x + .block.y * .grid_dim.x
+        let base = (.thread.x + block_idx * .block_dim.x) * 4
+        for j in 0..<4:
+            if base + j < n:
+                out[base + j] = src[base + j]
+
+req [uint8]'kernel'unified upload_bytes([uint8]'global src) throws:
+    let n = src.length
+    let blocks = (n + 4095) / 4096
+    let gx = if blocks > 65535: 65535 else: blocks
+    mut copy = CopyBytesKernel(src, n)
+    kernel:
+        copy(block = 256, grid = (gx, (blocks + gx - 1) / gx))
+    copy.out
+
+req [float32]'kernel'unified upload_floats([float32]'global src) throws:
+    let n = src.length
+    let blocks = (n + 1023) / 1024
+    let gx = if blocks > 65535: 65535 else: blocks
+    mut copy = CopyFloatsKernel(src, n)
+    kernel:
+        copy(block = 256, grid = (gx, (blocks + gx - 1) / gx))
+    copy.out
+
+req [float32]'kernel'unified q4_0_b([float32]'kernel'global x, [uint8]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k, format = "q4_0")
+    y
+
+req [float32]'kernel'unified q4_0_nb([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q4_0")
+    y
+
+req [float32]'kernel'unified q5_0_b([float32]'kernel'global x, [uint8]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k, format = "q5_0")
+    y
+
+req [float32]'kernel'unified q5_0_nb([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q5_0")
+    y
+
+req [float32]'kernel'unified iq4_nl_b([float32]'kernel'global x, [uint8]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k, format = "iq4_nl")
+    y
+
+req [float32]'kernel'unified iq4_nl_nb([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "iq4_nl")
+    y
+
+req [float32]'kernel'unified q3_k_b([float32]'kernel'global x, [uint8]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k, format = "q3_k")
+    y
+
+req [float32]'kernel'unified q3_k_nb([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q3_k")
+    y
+
+req [float32]'kernel'unified q2_k_b([float32]'kernel'global x, [uint8]'kernel'global w, [float32]'kernel'global bias, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, bias, y, m = m, n = n, k = k, format = "q2_k")
+    y
+
+req [float32]'kernel'unified q2_k_nb([float32]'kernel'global x, [uint8]'kernel'global w, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q2_k")
+    y
+
+def main() throws:
+    let [string] argv = args()
+    let format = argv[1]
+    guard let m = (argv[2] as int) else throw "m"
+    guard let n = (argv[3] as int) else throw "n"
+    guard let k = (argv[4] as int) else throw "k"
+    let with_bias = argv.length < 6 or argv[5] == "bias"
+    let block_elements = if format == "q4_0": 32 elif format == "q5_0": 32 elif format == "iq4_nl": 32 elif format == "q3_k": 256 else: 256
+    let block_bytes = if format == "q4_0": 18 elif format == "q5_0": 22 elif format == "iq4_nl": 18 elif format == "q3_k": 110 else: 84
+    let scale_at = if format == "q4_0": 0 elif format == "q5_0": 0 elif format == "iq4_nl": 0 elif format == "q3_k": 108 else: 80
+    let [float32] host_x = [(((i * 7919) % 10007) as float32) / 10007.0 as float32 * 2.0 as float32 - 1.0 as float32 for i in 0..<m * k]
+    let total_bytes = n * k / block_elements * block_bytes
+    let [uint8] host_weights = [fill_byte(i, block_bytes, scale_at, format) as uint8 for i in 0..<total_bytes]
+    let [float32] host_bias = [(((i * 131) % 97) as float32) / 97.0 as float32 + 1.0 as float32 for i in 0..<n]
+    let x = upload_floats(host_x)
+    let w = upload_bytes(host_weights)
+    let bias = upload_floats(host_bias)
+    let result = if with_bias:
+        if format == "q4_0": q4_0_b(x, w, bias, m, n, k) elif format == "q5_0": q5_0_b(x, w, bias, m, n, k) elif format == "iq4_nl": iq4_nl_b(x, w, bias, m, n, k) elif format == "q3_k": q3_k_b(x, w, bias, m, n, k) else: q2_k_b(x, w, bias, m, n, k)
+    else:
+        if format == "q4_0": q4_0_nb(x, w, m, n, k) elif format == "q5_0": q5_0_nb(x, w, m, n, k) elif format == "iq4_nl": iq4_nl_nb(x, w, m, n, k) elif format == "q3_k": q3_k_nb(x, w, m, n, k) else: q2_k_nb(x, w, m, n, k)
+    with result:
+        for i in 0..<m * n:
+            print "value={result[i]}"
+
+# Finite fp16 scales (0x2E66 ~ 0.1) at the format's scale slots; pseudo-random everywhere else.
+int fill_byte(int i, int block_bytes, int scale_at, string format):
+    let at = i % block_bytes
+    let rel = at - scale_at
+    let scale_len = if format == "q2_k": 4 else: 2
+    if rel >= 0 and rel < scale_len:
+        if rel % 2 == 0:
+            return 102
+        return 46
+    return (i * 17 + 29) % 256

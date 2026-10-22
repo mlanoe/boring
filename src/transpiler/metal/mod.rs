@@ -66,6 +66,10 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
     tensor_config.native_fixed_matrices = !matches!(tensor_config.matrix_algorithm.as_deref(), Some("scalar"));
     tensor_config.native_dynamic_float_linear = !matches!(tensor_config.matrix_algorithm.as_deref(), Some("scalar"));
     tensor_config.native_dynamic_q8_linear = true;
+    // Formats without a native Metal kernel (Q5_0, Q4_0, IQ4_NL, Q3_K, Q2_K) get the shared-memory
+    // tiled prefill instead of the per-element scalar loop (60-90x slower on an M-series GPU).
+    tensor_config.portable_tiled_dynamic_quantized_linear = true;
+    tensor_config.metal_blocked_prefill = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
     let program = &optional_lowered;

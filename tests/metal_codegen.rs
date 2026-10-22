@@ -3798,6 +3798,49 @@ fn host_arrays_passed_to_kernel_qualified_params_are_wrapped_and_mut_written_bac
     }
 }
 
+fn tensor_matmul_through_method_src() -> &'static str {
+    r#"
+struct Op:
+    def go(mut [float32, n = 8, m = 8]'kernel'unified c, [float32, k = 8, m = 8]'kernel'global a, [float32, n = 8, k = 8]'kernel'global b) throws:
+        kernel.tensors.matmul(a, b, c)
+
+def run_it() throws:
+    let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
+    let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]
+    mut [float32, n = 8, m = 8]'kernel'unified c = [0.0 as float32 for ..<64]
+    mut o = Op()
+    o.go(c, a, b)
+    o.go(c, a, b)
+    with c:
+        print "{c[0]}"
+
+run_it()
+"#
+}
+
+#[test]
+fn host_arrays_passed_to_kernel_qualified_method_params_are_borrowed() {
+    let (_, rs) = metal_codegen("tensor_method_boundary_codegen", tensor_matmul_through_method_src());
+    assert!(rs.contains("o.go(&mut c, &a, &b)"), "method call must borrow its array args:\n{rs}");
+}
+
+#[test]
+fn tensor_matmul_through_method_runs_on_metal() {
+    let (_msl, _rs, _toml) = run_metal("tensor_method_boundary_run", tensor_matmul_through_method_src());
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join("tensor_method_boundary_run").join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generated Metal program failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "8");
+}
+
 #[test]
 fn tensor_matmul_through_function_runs_on_metal() {
     for qual in ["global", "unified"] {
