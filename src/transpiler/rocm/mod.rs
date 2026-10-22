@@ -206,7 +206,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
         is_gpu_target: true,
         gpu_top_level_handled_by_host: top_level_kernel_touching,
         screen_setup: if setup_names.is_empty() { None } else { Some(setup_names.clone()) },
-        ..crate::transpiler::TranspileConfig::default()
+        ..crate::transpiler::kernel_target_base_config()
     };
     let general_out = crate::transpiler::transpile_with_config(&general_program, general_config);
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);

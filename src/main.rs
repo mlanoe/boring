@@ -3054,6 +3054,7 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
 }
 
 fn emit_cuda(path: &str, version: &str) {
+    install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
 
@@ -3129,6 +3130,7 @@ fn emit_cuda(path: &str, version: &str) {
 }
 
 fn emit_rocm(path: &str, version: &str) {
+    install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
 
@@ -3199,6 +3201,7 @@ fn emit_rocm(path: &str, version: &str) {
 }
 
 fn emit_metal(path: &str, version: &str) {
+    install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
 
@@ -3262,6 +3265,7 @@ fn emit_metal(path: &str, version: &str) {
 }
 
 fn emit_wgpu(path: &str, version: &str) {
+    install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
 
@@ -3343,6 +3347,30 @@ fn emit_wgpu(path: &str, version: &str) {
 /// target adds around it — the unicode crates the grapheme / display-width methods lower to, and
 /// `boring.toml`'s `[dependencies]` (of the project owning `source`). A crate the manifest
 /// already names is not added twice; the project's own declarations win over the inferred ones.
+/// Loads `[external_types]`/`[derives]`/`[external_fns]` (with their `include`s) from the
+/// source's `boring.toml` and installs them as the kernel-target backends' base config —
+/// the same tables project-mode threads explicitly via `build_project_with_config`.
+fn install_kernel_target_project_config(source: &Path) {
+    let Some(root) = find_project_root(source) else { return };
+    let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) else { return };
+    let mut toml = BoringToml::parse(&toml_src);
+    for r in [
+        toml.resolve_external_types_includes(&root),
+        toml.resolve_derive_includes(&root),
+        toml.resolve_external_fns_includes(&root),
+    ] {
+        if let Err(e) = r { eprintln!("error: {}", e); process::exit(1); }
+    }
+    transpiler::set_kernel_target_project_config(transpiler::TranspileConfig {
+        external_tuple_structs: toml.external_tuple_structs.clone(),
+        external_const_fns: toml.external_const_fns.clone(),
+        external_optional_fields: toml.external_optional_fields.clone(),
+        known_derives: toml.derive_traits.clone(),
+        external_fns: toml.external_fns.clone(),
+        ..Default::default()
+    });
+}
+
 fn kernel_target_cargo_toml(base: &str, uses_unicode: bool, source: &Path) -> String {
     let crate_name = |line: &str| line.split('=').next().unwrap_or("").trim().to_string();
     let mut project_deps: Vec<String> = Vec::new();
@@ -3379,6 +3407,7 @@ fn kernel_target_cargo_toml(base: &str, uses_unicode: bool, source: &Path) -> St
 }
 
 fn emit_simd(path: &str, version: &str) {
+    install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
     let source = std::fs::read_to_string(&path).unwrap_or_default();

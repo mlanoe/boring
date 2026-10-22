@@ -73,7 +73,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         gpu_kernels: kernels.clone(),
         is_gpu_target: true,
         is_simd_target: true,
-        ..Default::default()
+        ..crate::transpiler::kernel_target_base_config()
     };
     SIMD_HOST_TYPES.with(|flag| flag.set(true));
     let general = crate::transpiler::transpile_with_config(&renamed, config);

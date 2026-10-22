@@ -272,6 +272,25 @@ fn contains_bare_box_dyn(code: &str) -> bool {
     })
 }
 
+thread_local! {
+    static KERNEL_TARGET_PROJECT_CONFIG: std::cell::RefCell<TranspileConfig> =
+        std::cell::RefCell::new(TranspileConfig::default());
+}
+
+/// Installs the `boring.toml`-derived tables (`[external_types]`, `[derives]`,
+/// `[external_fns]`) that kernel-target host transpilation (cuda/rocm/metal/wgpu/simd) layers
+/// under its own config — those backends build their `TranspileConfig` internally, so
+/// project-mode's explicit threading of these tables doesn't reach them.
+pub fn set_kernel_target_project_config(base: TranspileConfig) {
+    KERNEL_TARGET_PROJECT_CONFIG.with(|c| *c.borrow_mut() = base);
+}
+
+/// Base config for a kernel-target backend's general (host) pass: defaults plus whatever
+/// `set_kernel_target_project_config` installed.
+pub fn kernel_target_base_config() -> TranspileConfig {
+    KERNEL_TARGET_PROJECT_CONFIG.with(|c| c.borrow().clone())
+}
+
 pub fn transpile(program: &Program) -> String {
     transpile_full(program).code
 }

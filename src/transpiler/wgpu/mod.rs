@@ -117,7 +117,7 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
                 .chain(gpu_kernel_generic_names.keys().cloned()).collect();
             Some(crate::transpiler::helpers::screen_setup_returns(program, &names))
         } else { None },
-        ..crate::transpiler::TranspileConfig::default()
+        ..crate::transpiler::kernel_target_base_config()
     };
     let general_out = crate::transpiler::transpile_with_config(&renamed_program, general_config);
     // `boring_main` exists either because the user's own `def main():` was renamed to it

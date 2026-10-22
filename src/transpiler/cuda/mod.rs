@@ -205,7 +205,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
         gpu_kernels: Vec::new(),
         is_gpu_target: true,
         gpu_top_level_handled_by_host: top_level_kernel_touching,
-        ..crate::transpiler::TranspileConfig::default()
+        ..crate::transpiler::kernel_target_base_config()
     };
     let general_out = crate::transpiler::transpile_with_config(&renamed_program, general_config);
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
