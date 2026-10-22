@@ -456,9 +456,18 @@ On wgpu the loop body can use the program's top-level setup values directly (tes
 Top-level `var`s are also assignable on simd (a local of the generated `boring_main`, not a `const`; covered by
 `simd_render_loop_assigns_top_level_vars`).
 
-Not yet outside wgpu: assigning a top-level `var` in the loop on Metal/ROCm, and method
-calls on a top-level struct value (Metal does not build the top-level value at all, simd emits `&mut *rt` on a
-value). Use free functions and per-frame locals there.
+Methods of top-level struct values also work on simd (`pace.frame(rt, host, 2)` is emitted as
+`pace.frame(&mut rt, &host, 2)` on the locals of `boring_main`; covered by `simd_render_loop_state_method_call`).
+
+Metal builds the top-level struct values and `var` scalars the loop reads (`let Root host = Root(5)`,
+`mut Pace pace = Pace()`, `var dirty = false`) in the general pass's `__boring_screen_setup`, bound as locals of
+`main` before the window opens, like wgpu; `dirty = true` / `n += 1` assign them and `pace.frame(rt, host, 2)` is
+emitted as `pace.frame(&mut rt, &host, 2)` (covered by `metal_render_loop_state_values_and_methods`). On Metal
+`screen.key_up_events` still cannot be passed to a function and `screen.time` is not converted to a `float`
+parameter.
+
+Not yet on ROCm: assigning a top-level `var` in the loop and method calls on a top-level struct value.
+Use free functions and per-frame locals there.
 
 ---
 
