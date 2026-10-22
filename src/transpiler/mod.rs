@@ -2723,7 +2723,8 @@ impl Transpiler {
                 // so it runs as an ordinary statement inside the synthesized/renamed
                 // `boring_main` (see the `is_gpu_target` branch further down), the same
                 // way it would for a non-GPU target's auto-generated `fn main()`.
-                Item::Let(s) if self.is_gpu_target && self.top_level_let_is_const_safe(s) => {
+                // A `var` scalar stays a local of `boring_main`: a Screen render loop (simd) assigns it.
+                Item::Let(s) if self.is_gpu_target && !s.binding.is_mutable() && self.top_level_let_is_const_safe(s) => {
                     self.emit_item(item);
                     self.blank();
                 }

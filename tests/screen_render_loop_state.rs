@@ -190,3 +190,38 @@ fn simd_render_loop_assigns_top_level_vars() {
         .unwrap();
     assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// Metal: the top-level struct values and `var`s the loop reads are built before the window opens
+/// (by the general pass's `__boring_screen_setup`), and a method call on one passes each argument
+/// the way its signature takes it. (Float mixing and `key_up_events` as an argument: wgpu only.)
+#[test]
+fn metal_render_loop_state_values_and_methods() {
+    let src = PROGRAM
+        .replace("        ticks += keyCount(screen.key_up_events)\n", "        ticks += 1\n")
+        .replace("        let t = (screen.time as float) * 1000.0\n", "")
+        .replace(" + (ms(screen.time) + t) as int", "");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state").join("metal_state");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br = tmp.join("test.br");
+    fs::write(&br, &src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--target", "metal"]).arg(&br).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let project = tmp.join("test_metal");
+    let rs = fs::read_to_string(project.join("src/main.rs")).unwrap();
+    assert!(rs.contains("let (mut dirty, mut ticks, host, mut rt, mut pace) = __boring_screen_setup()?;"), "{rs}");
+    assert!(rs.contains("ticks = (ticks + 1);"), "{rs}");
+    assert!(rs.contains("pace.frame(&mut rt, &host, 2)"), "{rs}");
+    if cfg!(target_os = "macos") {
+        let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_metal_target");
+        let out = common::SharedCargo::new("screen_render_loop_state_metal")
+            .args(["check", "--quiet", "--manifest-path"])
+            .arg(project.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(shared)
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+}
