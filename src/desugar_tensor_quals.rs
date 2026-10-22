@@ -37,9 +37,19 @@
 //!   (not a tensor destination, no assignment, not passed on, not returned) gets a warning:
 //!   it only pushes its group to `'kernel'unified`.
 //!
+//! * **Methods.** `o.m(x)` links `x` to the parameter of struct method `m`, and `self.m(x)`
+//!   inside a method does too. Methods are resolved by name: only a name declared exactly once
+//!   among struct methods, extensions and trait defaults is followed, and a receiver evidently
+//!   of another type (an annotated or constructed local) is ruled out.
+//! * **Top-level bindings in functions.** A top-level array used inside a free function body
+//!   is read like a use at the top level (tensor operand, `f(x)`, `let y = x`), unless the
+//!   function declares the same name. Methods may mean a field of that name, so a top-level
+//!   mention there stays out of sight.
+//!
 //! Explicit qualifiers are never touched. Scope: `let`/`mut`/`var` declared directly in a
-//! function body (or at the top level / in a `mod`), parameters of free functions. A name
-//! declared twice in one scope is left alone, as are calls through methods or closures.
+//! function or method body (or at the top level / in a `mod`), parameters of free functions
+//! and struct methods. A name declared twice in one scope is left alone, as are calls through
+//! closures, type methods and computed arguments.
 
 use crate::ast::*;
 use crate::ast_walk::Walker;
@@ -180,6 +190,12 @@ impl Sig {
     }
 }
 
+/// A struct method as a caller sees it.
+struct MethodSig {
+    owner: String,
+    sig: Sig,
+}
+
 /// Every `let` of `stmts`, nested blocks (`if`, loops, `match`, closures...) included.
 fn all_lets(stmts: &[Stmt]) -> Vec<LetStmt> {
     let mut stmts = stmts.to_vec();
@@ -206,9 +222,18 @@ struct Facts {
     maybe_written: bool,
 }
 
+#[derive(Clone)]
 struct Scope {
     /// Enclosing function ("<top level>" for the file's own statements).
     fn_name: String,
+    /// The struct a method belongs to; `None` for a free function and the top level.
+    owner: Option<String>,
+    /// Every parameter and `let` name the body declares, candidate or not: a top-level
+    /// binding with the same name is shadowed there.
+    declared: HashSet<String>,
+    /// Struct type of the locals whose type is evident from an annotation or a constructor
+    /// call (`None`: declared twice with different types), to resolve method calls.
+    var_types: HashMap<String, Option<String>>,
     stmts: Vec<Stmt>,
     /// Qualifier demanded by the enclosing function's return type, if it is resident.
     ret_force: Option<OwnerQual>,
@@ -251,7 +276,10 @@ fn infer_unit(items: &mut Vec<Item>) {
     for name in &ambiguous { fn_index.remove(name); }
 
     let mut scopes: Vec<Scope> = Vec::new();
-    let mut top = Scope { fn_name: "<top level>".to_string(), stmts: Vec::new(), ret_force: None, ret_node: None, names: Vec::new() };
+    let mut top = Scope {
+        fn_name: "<top level>".to_string(), owner: None, declared: HashSet::new(),
+        var_types: HashMap::new(), stmts: Vec::new(), ret_force: None, ret_node: None, names: Vec::new(),
+    };
     let mut top_seen: HashMap<String, usize> = HashMap::new();
     for item in items.iter() {
         match item {
@@ -291,20 +319,47 @@ fn infer_unit(items: &mut Vec<Item>) {
         }
     }
     top.names.retain(|(n, _)| top_seen.get(n) == Some(&1));
+    top.var_types = collect_var_types(&[], &top.stmts);
     scopes.push(top);
 
+    // Free functions are keyed by their item index; methods get ids after the items, so one
+    // key space covers both. `(id, item index, method index)`.
+    let mut fn_like: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    let mut method_fid: HashMap<(usize, usize), usize> = HashMap::new();
     for (i, item) in items.iter().enumerate() {
-        let Item::Fn(f) = item else { continue };
+        match item {
+            Item::Fn(_) => fn_like.push((i, i, None)),
+            Item::Struct(st) => {
+                for mi in 0..st.methods.len() {
+                    let fid = items.len() + method_fid.len();
+                    method_fid.insert((i, mi), fid);
+                    fn_like.push((fid, i, Some(mi)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for &(i, item_idx, method_idx) in &fn_like {
+        let (f, owner) = match (&items[item_idx], method_idx) {
+            (Item::Fn(f), None) => (f, None),
+            (Item::Struct(st), Some(mi)) => (&st.methods[mi], Some(st.name.clone())),
+            _ => continue,
+        };
+        let label = match &owner { Some(o) => format!("{o}.{}", f.name), None => f.name.clone() };
         let ret_node = if has_marker(f.return_ty.as_ref()) {
             let id = infos.len();
-            infos.push(NodeInfo { marker: true, scope: f.name.clone(), name: "<return>".to_string(), line: f.line, col: f.col, mutable: false });
+            infos.push(NodeInfo { marker: true, scope: label.clone(), name: "<return>".to_string(), line: f.line, col: f.col, mutable: false });
             ret_nodes.insert(i, id);
             Some(id)
         } else {
             None
         };
         let mut scope = Scope {
-            fn_name: f.name.clone(),
+            fn_name: label.clone(),
+            owner: owner.clone(),
+            declared: HashSet::new(),
+            var_types: collect_var_types(&f.params, &f.body),
             ret_node,
             stmts: f.body.clone(),
             ret_force: f.return_ty.as_ref().and_then(|t| t.without_mut().gpu_resident_qual().cloned()),
@@ -314,12 +369,13 @@ fn infer_unit(items: &mut Vec<Item>) {
         for p in &f.params { *seen.entry(p.name.clone()).or_default() += 1; }
         let lets = all_lets(&f.body);
         for l in &lets { *seen.entry(l.name.clone()).or_default() += 1; }
+        scope.declared = seen.keys().cloned().collect();
         for (pi, p) in f.params.iter().enumerate() {
             if !p.variadic && p.default.is_none() && is_node_type(p.ty.as_ref())
                 && seen.get(&p.name) == Some(&1)
             {
                 let id = infos.len();
-                infos.push(NodeInfo { marker: has_marker(p.ty.as_ref()), scope: f.name.clone(), name: p.name.clone(), line: p.line, col: p.col, mutable: param_is_mutable(p) });
+                infos.push(NodeInfo { marker: has_marker(p.ty.as_ref()), scope: label.clone(), name: p.name.clone(), line: p.line, col: p.col, mutable: param_is_mutable(p) });
                 param_nodes.insert((i, pi), id);
                 scope.names.push((p.name.clone(), id));
             }
@@ -328,7 +384,7 @@ fn infer_unit(items: &mut Vec<Item>) {
             if !is_candidate(l) { continue; }
             if seen.get(&l.name) == Some(&1) {
                 let id = infos.len();
-                infos.push(NodeInfo { marker: has_marker(l.ty.as_ref()), scope: f.name.clone(), name: l.name.clone(), line: l.line, col: l.col, mutable: let_is_mutable(l) });
+                infos.push(NodeInfo { marker: has_marker(l.ty.as_ref()), scope: label.clone(), name: l.name.clone(), line: l.line, col: l.col, mutable: let_is_mutable(l) });
                 let_nodes.insert((i, l.name.clone()), id);
                 scope.names.push((l.name.clone(), id));
             } else if has_marker(l.ty.as_ref()) {
@@ -340,15 +396,14 @@ fn infer_unit(items: &mut Vec<Item>) {
                 marker_error("a name declared twice in its scope", p.line, p.col);
             }
         }
-        scope_of_fn.insert(i, scopes.len());
+        if method_idx.is_none() { scope_of_fn.insert(i, scopes.len()); }
         scopes.push(scope);
     }
     if infos.is_empty() { return; }
 
-    let sigs: HashMap<String, Sig> = fn_index.iter().map(|(name, &i)| {
-        let Item::Fn(f) = &items[i] else { unreachable!() };
+    let sig_of = |fid: usize, f: &FnDecl| -> Sig {
         let kinds = f.params.iter().enumerate().map(|(pi, p)| {
-            if let Some(&id) = param_nodes.get(&(i, pi)) {
+            if let Some(&id) = param_nodes.get(&(fid, pi)) {
                 ParamKind::Node(id, param_is_mutable(p))
             } else if let Some(q) = p.ty.as_ref().and_then(|t| t.without_mut().gpu_resident_qual().cloned()) {
                 ParamKind::Force(q, param_is_mutable(p))
@@ -356,8 +411,34 @@ fn infer_unit(items: &mut Vec<Item>) {
                 ParamKind::Other
             }
         }).collect();
-        (name.clone(), Sig { names: f.params.iter().map(|p| p.name.clone()).collect(), kinds })
+        Sig { names: f.params.iter().map(|p| p.name.clone()).collect(), kinds }
+    };
+    let sigs: HashMap<String, Sig> = fn_index.iter().map(|(name, &i)| {
+        let Item::Fn(f) = &items[i] else { unreachable!() };
+        (name.clone(), sig_of(i, f))
     }).collect();
+    // Methods are resolved by name: only a name no other method, extension or trait default
+    // declares is followed, and `receiver_ok` rules out a receiver evidently of another type.
+    let msigs: HashMap<String, MethodSig> = {
+        let mut declared: HashMap<String, usize> = HashMap::new();
+        for item in items.iter() {
+            match item {
+                Item::Struct(st) => for m in &st.methods { *declared.entry(m.name.clone()).or_default() += 1; },
+                Item::Ext(e) => for m in &e.methods { *declared.entry(m.name.clone()).or_default() += 1; },
+                Item::Trait(t) => for m in &t.defaults { *declared.entry(m.name.clone()).or_default() += 1; },
+                _ => {}
+            }
+        }
+        let mut out = HashMap::new();
+        for (&(item_idx, mi), &fid) in &method_fid {
+            let Item::Struct(st) = &items[item_idx] else { continue };
+            let m = &st.methods[mi];
+            if declared.get(&m.name) == Some(&1) {
+                out.insert(m.name.clone(), MethodSig { owner: st.name.clone(), sig: sig_of(fid, m) });
+            }
+        }
+        out
+    };
 
     // --- returns --------------------------------------------------------------------------
     // A function whose returned array lives on the GPU can return it resident (no copy back
@@ -387,7 +468,7 @@ fn infer_unit(items: &mut Vec<Item>) {
     for (id, info) in infos.iter().enumerate() { facts[id].operand = info.marker; }
     for scope in &scopes {
         for (name, id) in &scope.names {
-            let f = usage_of(scope, name, *id, &sigs);
+            let f = usage_of(scope, name, *id, &sigs, &msigs);
             let slot = &mut facts[*id];
             slot.operand |= f.operand;
             slot.maybe_written |= f.maybe_written;
@@ -395,11 +476,26 @@ fn infer_unit(items: &mut Vec<Item>) {
             slot.unions.extend(f.unions);
         }
     }
-    // A top-level binding mentioned inside a function body is used out of sight.
-    for (name, id) in &scopes[0].names {
-        if items.iter().any(|item| matches!(item, Item::Fn(f) if mentions(&f.body, name))) {
-            facts[*id].maybe_written = true;
+    // A top-level binding is visible from every free-function body: read its uses there like
+    // those of the top level itself. A function that declares the same name shadows it (the
+    // mention is not this binding), and a method may mean a field of that name: both stay
+    // out of sight, so the binding counts as possibly written.
+    let top_names = scopes[0].names.clone();
+    for (name, id) in &top_names {
+        let mut out_of_sight = items.iter().any(|item| other_item_mentions(item, name));
+        for scope in scopes.iter().skip(1) {
+            if scope.owner.is_some() || !mentions(&scope.stmts, name) { continue; }
+            if scope.declared.contains(name) { out_of_sight = true; continue; }
+            let mut seen_from = scope.clone();
+            seen_from.names.extend(top_names.iter().filter(|(n, _)| !scope.declared.contains(n)).cloned());
+            let f = usage_of(&seen_from, name, *id, &sigs, &msigs);
+            let slot = &mut facts[*id];
+            slot.operand |= f.operand;
+            slot.maybe_written |= f.maybe_written;
+            slot.forced.extend(f.forced);
+            slot.unions.extend(f.unions);
         }
+        if out_of_sight { facts[*id].maybe_written = true; }
     }
 
     // --- groups, resolution ------------------------------------------------------------
@@ -504,6 +600,20 @@ fn infer_unit(items: &mut Vec<Item>) {
                 }
                 requalify_lets(&mut f.body, i, &let_nodes, &decided);
             }
+            Item::Struct(st) => {
+                for (mi, m) in st.methods.iter_mut().enumerate() {
+                    let fid = method_fid[&(i, mi)];
+                    if let Some(q) = ret_nodes.get(&fid).and_then(|id| decided.get(id)) {
+                        requalify(&mut m.return_ty, q.clone());
+                    }
+                    for (pi, p) in m.params.iter_mut().enumerate() {
+                        if let Some(q) = param_nodes.get(&(fid, pi)).and_then(|id| decided.get(id)) {
+                            requalify(&mut p.ty, q.clone());
+                        }
+                    }
+                    requalify_lets(&mut m.body, fid, &let_nodes, &decided);
+                }
+            }
             _ => {}
         }
     }
@@ -607,7 +717,7 @@ fn tensor_call(e: &Expr) -> Option<&[Arg]> {
     Some(args)
 }
 
-fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>) -> Facts {
+fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>, msigs: &HashMap<String, MethodSig>) -> Facts {
     // Both walker callbacks update the same counters.
     let facts = RefCell::new(Facts::default());
     let total = RefCell::new(0usize);
@@ -649,31 +759,41 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>)
                     }
                 }
             }
-            if let ExprKind::Call(callee, args) = &e.kind {
-                let ExprKind::Var(fname) = &callee.kind else { return };
-                let Some(sig) = sigs.get(fname) else { return };
-                for (i, arg) in args.iter().enumerate() {
-                    if arg.spread || arg.default_rest { continue; }
-                    if !matches!(&arg.value.kind, ExprKind::Var(n) if n == name) { continue; }
-                    let Some((pi, kind)) = sig.param_for(i, arg.label.as_deref()) else { continue };
-                    match Some(kind) {
-                        Some(ParamKind::Node(other, mutable)) => {
-                            *accounted.borrow_mut() += 1;
-                            let mut f = facts.borrow_mut();
-                            f.maybe_written |= *mutable;
-                            f.unions.push(*other);
-                        }
-                        Some(ParamKind::Force(q, mutable)) => {
-                            // Handing the array to a function that wants it resident is
-                            // enough to make it participate, tensor operand or not.
-                            *accounted.borrow_mut() += 1;
-                            let mut f = facts.borrow_mut();
-                            f.operand = true;
-                            f.maybe_written |= *mutable;
-                            f.forced.push((q.clone(), format!("parameter {} of `{}` is explicitly {}", pi + 1, fname, qual_text(q))));
-                        }
-                        _ => {}
+            // A free function (`f(x)`) or a method (`o.m(x)`) the pass has a signature for.
+            let target: Option<(&Sig, String, &[Arg])> = match &e.kind {
+                ExprKind::Call(callee, args) => match &callee.kind {
+                    ExprKind::Var(fname) => sigs.get(fname).map(|sig| (sig, fname.clone(), args.as_slice())),
+                    _ => None,
+                },
+                ExprKind::MethodCall(recv, mname, args) if tensor_call(e).is_none() => {
+                    msigs.get(mname)
+                        .filter(|m| receiver_ok(recv, &m.owner, scope))
+                        .map(|m| (&m.sig, format!("{}.{mname}", m.owner), args.as_slice()))
+                }
+                _ => None,
+            };
+            let Some((sig, fname, args)) = target else { return };
+            for (i, arg) in args.iter().enumerate() {
+                if arg.spread || arg.default_rest { continue; }
+                if !matches!(&arg.value.kind, ExprKind::Var(n) if n == name) { continue; }
+                let Some((pi, kind)) = sig.param_for(i, arg.label.as_deref()) else { continue };
+                match kind {
+                    ParamKind::Node(other, mutable) => {
+                        *accounted.borrow_mut() += 1;
+                        let mut f = facts.borrow_mut();
+                        f.maybe_written |= *mutable;
+                        f.unions.push(*other);
                     }
+                    ParamKind::Force(q, mutable) => {
+                        // Handing the array to a function that wants it resident is
+                        // enough to make it participate, tensor operand or not.
+                        *accounted.borrow_mut() += 1;
+                        let mut f = facts.borrow_mut();
+                        f.operand = true;
+                        f.maybe_written |= *mutable;
+                        f.forced.push((q.clone(), format!("parameter {} of `{}` is explicitly {}", pi + 1, fname, qual_text(q))));
+                    }
+                    ParamKind::Other => {}
                 }
             }
         };
@@ -720,6 +840,58 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>)
     // may be a write: only a fully understood array is reported as never written.
     if total.into_inner() > accounted.into_inner() { facts.maybe_written = true; }
     facts
+}
+
+/// Could `recv` be an instance of struct `owner`? Only a receiver evidently of another type
+/// (an annotated or constructed local, a `self` of another struct) is ruled out.
+fn receiver_ok(recv: &Expr, owner: &str, scope: &Scope) -> bool {
+    match &recv.kind {
+        ExprKind::Var(v) if v == "self" => scope.owner.as_deref() == Some(owner),
+        ExprKind::Var(v) => !matches!(scope.var_types.get(v), Some(Some(t)) if t != owner),
+        ExprKind::Call(callee, _) => match &callee.kind {
+            ExprKind::Var(n) if n.chars().next().is_some_and(char::is_uppercase) => n == owner,
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+/// The struct name a type annotation names; the empty string for a type no struct method can
+/// be called on (arrays, strings, numbers...); `None` when unknown.
+fn type_owner(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Mut(inner) | Type::Optional(inner) | Type::Qualified(inner, _) => type_owner(inner),
+        Type::Named(n) => Some(n.clone()),
+        Type::Array(_) | Type::ArrayN(..) | Type::LabeledArray(..) | Type::Dict(..) | Type::Set(_)
+        | Type::Tuple(_) | Type::Str | Type::Int | Type::Uint | Type::Float32 | Type::Float64
+        | Type::Bool => Some(String::new()),
+        _ => None,
+    }
+}
+
+/// The type of each local whose struct is evident: from its annotation, else from a
+/// constructor-call initializer (`Op()`). A name declared with two different types maps to `None`.
+fn collect_var_types(params: &[Param], stmts: &[Stmt]) -> HashMap<String, Option<String>> {
+    let mut out: HashMap<String, Option<String>> = HashMap::new();
+    let mut note = |name: &str, ty: Option<String>| {
+        match out.get(name) {
+            Some(prev) if *prev != ty => { out.insert(name.to_string(), None); }
+            Some(_) => {}
+            None => { out.insert(name.to_string(), ty); }
+        }
+    };
+    for p in params { note(&p.name, p.ty.as_ref().and_then(type_owner)); }
+    for l in all_lets(stmts) {
+        let ty = l.ty.as_ref().and_then(type_owner).or_else(|| match l.value.as_ref().map(|v| &v.kind) {
+            Some(ExprKind::Call(callee, _)) => match &callee.kind {
+                ExprKind::Var(n) if n.chars().next().is_some_and(char::is_uppercase) => Some(n.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        note(&l.name, ty);
+    }
+    out
 }
 
 /// Free function whose single, plain-array return is a variable of its own: the shape a
@@ -1379,5 +1551,88 @@ mod tests {
             result.warnings.iter().any(|w| w.message.contains("never written")),
             "{:?}", result.warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
+    }
+    // --- methods and top-level bindings used inside functions ----------------------------
+
+    /// Qualifiers of `Struct.method`'s parameters and body `let`s.
+    fn method_quals(program: &Program, sname: &str, mname: &str) -> (Vec<Option<OwnerQual>>, Vec<Option<OwnerQual>>) {
+        let m = program.items.iter().find_map(|i| match i {
+            Item::Struct(st) if st.name == sname => st.methods.iter().find(|m| m.name == mname),
+            _ => None,
+        }).unwrap();
+        let params = m.params.iter().map(|p| p.ty.as_ref().and_then(|t| t.without_mut().gpu_resident_qual().cloned())).collect();
+        let lets = m.body.iter().filter_map(|s| match s {
+            Stmt::Let(l) => Some(l.ty.as_ref().and_then(|t| t.without_mut().gpu_resident_qual().cloned())),
+            _ => None,
+        }).collect();
+        (params, lets)
+    }
+
+    const METHOD: &str = "struct Op:\n    def go([float32, k = 2, m = 2] x, [float32, n = 2, k = 2] y, mut [float32, n = 2, m = 2] z) throws:\n        kernel.tensors.matmul(x, y, z)\n";
+
+    #[test]
+    fn a_method_body_tensor_call_is_inferred() {
+        let program = run(METHOD);
+        assert_eq!(method_quals(&program, "Op", "go").0, vec![G, G, U]);
+    }
+
+    #[test]
+    fn qualifiers_propagate_through_a_method_call() {
+        let src = format!("{METHOD}def work() throws:\n    mut o = Op()\n{BODY_METHOD}    with c:\n        print \"{{c[0]}}\"\n");
+        let program = run(&src);
+        assert_eq!(method_quals(&program, "Op", "go").0, vec![G, G, U]);
+        assert_eq!(fn_quals(&program, "work").1[1..], [G, G, U]);
+    }
+
+    const BODY_METHOD: &str = "    let [float32, k = 2, m = 2] a = [0.0 for ..<4]\n    let [float32, n = 2, k = 2] b = [0.0 for ..<4]\n    mut [float32, n = 2, m = 2] c = [0.0 for ..<4]\n    o.go(a, b, c)\n";
+
+    #[test]
+    fn a_method_is_followed_through_self() {
+        let src = "struct Op:\n    def inner([float32, k = 2, m = 2] x, [float32, n = 2, k = 2] y, mut [float32, n = 2, m = 2] z) throws:\n        kernel.tensors.matmul(x, y, z)\n    def outer([float32, k = 2, m = 2] p, [float32, n = 2, k = 2] q, mut [float32, n = 2, m = 2] r) throws:\n        self.inner(p, q, r)\n";
+        let program = run(src);
+        assert_eq!(method_quals(&program, "Op", "outer").0, vec![G, G, U]);
+    }
+
+    #[test]
+    fn an_ambiguous_method_name_is_not_followed() {
+        let src = format!("{METHOD}struct Other:\n    def go(int x):\n        print \"{{x}}\"\ndef work() throws:\n    mut o = Op()\n{BODY_METHOD}");
+        let got = fn_quals(&run(&src), "work").1;
+        assert_eq!(got[1..], [G, G, U].map(|_| None::<OwnerQual>));
+    }
+
+    #[test]
+    fn a_receiver_of_another_struct_is_not_followed() {
+        let src = format!("{METHOD}def work() throws:\n    let int o = 1\n{BODY_METHOD}");
+        let got = fn_quals(&run(&src), "work").1;
+        assert!(got[1..].iter().all(Option::is_none), "{got:?}");
+    }
+
+    const TOP: &str = "let [float32, k = 2, m = 2] a = [0.0 for ..<4]\nlet [float32, n = 2, k = 2] b = [0.0 for ..<4]\nmut [float32, n = 2, m = 2] c = [0.0 for ..<4]\n";
+
+    #[test]
+    fn a_top_level_binding_used_in_a_function_tensor_call_is_inferred() {
+        let src = format!("{TOP}def run() throws:\n    kernel.tensors.matmul(a, b, c)\nrun()\n");
+        let got = types(&src);
+        assert_eq!((qual_of(&got, "a"), qual_of(&got, "b"), qual_of(&got, "c")), (G, G, U));
+    }
+
+    #[test]
+    fn a_top_level_binding_passed_on_from_a_function_joins_the_callee_group() {
+        let src = format!("{CALLEE}{TOP}def run() throws:\n    mm(a, b, c)\nrun()\n");
+        let got = types(&src);
+        assert_eq!((qual_of(&got, "a"), qual_of(&got, "b"), qual_of(&got, "c")), (G, G, U));
+    }
+
+    #[test]
+    fn a_function_declaring_the_same_name_shadows_the_top_level_binding() {
+        let src = format!("{TOP}def run() throws:\n    let [float32, k = 2, m = 2] a = [1.0 for ..<4]\n    kernel.tensors.matmul(a, b, c)\nrun()\n");
+        let got = types(&src);
+        assert_eq!(qual_of(&got, "a"), None);
+    }
+
+    #[test]
+    fn a_top_level_use_in_a_method_still_counts_as_a_possible_write() {
+        let src = format!("{TOP}struct S:\n    def go() throws:\n        print \"{{c[0]}}\"\nkernel.tensors.matmul(a, b, c)\n");
+        assert!(warnings_of(&src).is_empty());
     }
 }

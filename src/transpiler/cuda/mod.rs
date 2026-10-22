@@ -143,6 +143,14 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
     // Opt-in only: TF32 tensor cores round fp32 inputs, so they never apply by default.
     let tf32 = tensor_config.matrix_algorithm.as_deref() == Some("tf32");
     let half_wmma = tensor_config.cuda_half_wmma_prefill;
+    // The strictest opt-in in use decides the minimum architecture checked at start-up.
+    let min_arch = if tf32 {
+        Some((80, "[tensor.matmul] algorithm = \"tf32\""))
+    } else if half_wmma {
+        Some((70, "[tensor.linear.prefill] precision = \"half\""))
+    } else {
+        None
+    };
     let (device_cu, device_errors) = device::emit_device_cu_with_errors(program, tf32, half_wmma);
 
     // See this module's doc comment for the full splice architecture.
@@ -221,7 +229,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
 
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
-        has_boring_main, boring_main_throws, top_level_kernel_touching,
+        has_boring_main, boring_main_throws, top_level_kernel_touching, min_arch,
     );
     let host_rs = if tf32 {
         host_rs.replace("CUBLAS_PEDANTIC_MATH", "CUBLAS_TF32_TENSOR_OP_MATH")

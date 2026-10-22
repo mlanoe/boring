@@ -218,9 +218,16 @@ the operands of `kernel.tensors.linear(x, w, y, m = ..., n = ..., k = ...)`).
 Followed: bindings in nested blocks (`if`, loops, `match`...), at the top level or in a function,
 and labeled arguments (`mm(z = c, x = a, y = b)` binds by name, not position).
 
-Not followed: methods, closures, calls with a computed argument, a name declared twice in one
-scope (also across sibling blocks — `'kernel` on such a name is an error), and a top-level binding
-used inside a function body.
+Also followed: struct methods (`o.go(a, b, c)`, or `self.go(...)` inside a method; their parameters
+and body `let`s are inferred like a free function's), and a top-level binding used inside a free
+function body (a tensor operand, `f(x)`, `let y = x`). Methods are resolved by name — only a name
+declared once among struct methods, `ext` methods and trait defaults is followed — and a receiver
+evidently of another type (an annotated or constructor-initialized local) is skipped. A function
+that declares the same name shadows the top-level binding; a method mentioning it may mean a field,
+so that use is not followed. A bare `'kernel` is still not accepted on a method.
+
+Not followed: closures, type methods, calls with a computed argument, and a name declared twice in
+one scope (also across sibling blocks — `'kernel` on such a name is an error).
 
 **Bare `'kernel`: GPU, placement left to the inference.** On an array-typed `let`, parameter or
 return type of a free function, `'kernel` (with no `'global`/`'unified` after it) says "this lives

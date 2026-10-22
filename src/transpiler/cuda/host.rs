@@ -18,8 +18,10 @@ pub(super) fn emit_host_rs(
     has_boring_main: bool,
     boring_main_throws: bool,
     top_level_kernel_touching: bool,
+    min_arch: Option<(u32, &'static str)>,
 ) -> String {
     let mut e = HostEmitter::new(kernel_names);
+    e.min_arch = min_arch;
     e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching);
     e.out
 }
@@ -27,6 +29,10 @@ pub(super) fn emit_host_rs(
 struct HostEmitter {
     out: String,
     indent: usize,
+    /// Opt-in tensor-core features need a minimum compute capability (`sm_XX`) and name the
+    /// `boring.toml` option behind it, so a too-old GPU fails at start-up with a clear message
+    /// instead of an opaque `CUDA_ERROR_INVALID_PTX` at the first launch.
+    min_arch: Option<(u32, &'static str)>,
     /// Names of all `kernel` structs — used to translate `Scale(args)` → `Scale::new(...)`.
     kernel_names: std::collections::HashSet<String>,
     /// Kernel struct declarations indexed by name — for field type lookup at readback sites.
@@ -206,6 +212,7 @@ impl HostEmitter {
         Self {
             out: String::new(),
             indent: 0,
+            min_arch: None,
             kernel_names: kernel_names.iter().cloned().collect(),
             kernel_decls: std::collections::HashMap::new(),
             var_kernel_type: std::collections::HashMap::new(),
@@ -548,12 +555,31 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
+        if let Some((min_sm, option)) = self.min_arch {
+            self.line("fn __boring_check_arch(ctx: &Arc<CudaContext>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+            self.indent += 1;
+            self.line("let (major, minor) = ctx.compute_capability()?;");
+            self.line("let sm = (major * 10 + minor) as u32;");
+            self.line(&format!("if sm < {min_sm} {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "return Err(format!(\"this program was built with {}, which needs a GPU of compute capability sm_{min_sm} or newer, but device {{}} is sm_{{}}; remove that option from boring.toml to use the portable exact-fp32 kernels\", ctx.name()?, sm).into());",
+                option.replace('"', "\\\""),
+            ));
+            self.indent -= 1;
+            self.line("}");
+            self.line("Ok(())");
+            self.indent -= 1;
+            self.line("}");
+            self.blank();
+        }
         self.line("fn boring_gpu_init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         // `CudaContext::new`/`CudaContext::load_module` already return
         // `Arc<Self>` in real cudarc 0.19.8 -- wrapping again in `Arc::new(...)`
         // produced `Arc<Arc<_>>`, a real E0308 confirmed via `cargo check`.
         self.line("let ctx = CudaContext::new(0)?;");
+        if self.min_arch.is_some() { self.line("__boring_check_arch(&ctx)?;"); }
         self.line("__boring_gpu_enable_peer_access(&ctx)?;");
         self.line("let ptx = Ptx::from_src(BORING_PTX);");
         self.line("let module = ctx.load_module(ptx)?;");
@@ -569,6 +595,7 @@ impl HostEmitter {
         // `CudaContext::new` already returns `Arc<Self>` -- see `boring_gpu_init`'s
         // identical fix.
         self.line("let ctx = CudaContext::new(idx)?;");
+        if self.min_arch.is_some() { self.line("__boring_check_arch(&ctx)?;"); }
         self.line("__boring_gpu_enable_peer_access(&ctx)?;");
         self.line("Ok(ctx)");
         self.indent -= 1;
@@ -2703,6 +2730,7 @@ impl HostEmitter {
     /// `emit_match_expr`'s `MatchBody::Block` case.
     fn emit_sub_block(&mut self, stmts: &[Stmt]) -> String {
         let mut sub = HostEmitter {
+            min_arch: self.min_arch,
             out: String::new(),
             indent: 0,
             kernel_names: self.kernel_names.clone(),

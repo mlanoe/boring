@@ -224,7 +224,11 @@ whose K and N are multiples of 8, with a uniform runtime guard (tile fully
 inside the matrix, column origin a multiple of 8, block size a multiple of 32)
 that falls back to the exact fp32 scalar tile otherwise; (b) switches the cuBLAS
 host paths to `CUBLAS_TF32_TENSOR_OP_MATH`; and (c) builds PTX with
-`-arch=sm_80`. Without the option the generated code is unchanged. Validate with
+`-arch=sm_80`. Without the option the generated code is unchanged. A program
+built with either opt-in (`tf32`: sm_80+, half prefill: sm_70+) checks the GPU's
+compute capability at start-up and fails with a message naming the option to
+remove, instead of the opaque `CUDA_ERROR_INVALID_PTX` the first launch would
+report on an older GPU (seen on a T4 with `tf32`). Validate with
 `tools/colab-cuda-tensor-test.ipynb` (`examples/cuda_tensor_check/`); this path
 is covered by codegen tests only until that notebook has been run on an
 A100/L4.

@@ -2047,3 +2047,22 @@ fn generated_host_silences_lints_that_are_noise_for_machine_written_code() {
     }
     assert!(host.lines().take(3).any(|line| line.starts_with("#![allow(")), "inner attribute must precede all items:\n{}", &host[..200.min(host.len())]);
 }
+
+#[test]
+fn opt_in_tensor_cores_check_the_gpu_architecture_at_startup() {
+    let (_, tf32_host, _, _) = run_cuda_with_config("arch_check_tf32", TILE_KERNEL, Some("[tensor.matmul]\nalgorithm = \"tf32\"\n"));
+    assert!(tf32_host.contains("fn __boring_check_arch"), "{tf32_host}");
+    assert!(tf32_host.contains("if sm < 80 {"), "{tf32_host}");
+    assert!(tf32_host.contains("algorithm = \\\"tf32\\\""), "{tf32_host}");
+    // Both the default context and `Device(index = n)` contexts are checked.
+    assert_eq!(tf32_host.matches("__boring_check_arch(&ctx)?;").count(), 2, "{tf32_host}");
+
+    let config = "[tensor.linear.prefill]\nprecision = \"half\"\n";
+    let (_, half_host, _, _) = run_cuda_with_config("arch_check_half", QUANT_LINEAR, Some(config));
+    assert!(half_host.contains("if sm < 70 {"), "{half_host}");
+    assert!(half_host.contains("precision = \\\"half\\\""), "{half_host}");
+
+    // Nothing is added to default builds.
+    let (_, default_host, _, _) = run_cuda_with_config("arch_check_default", QUANT_LINEAR, None);
+    assert!(!default_host.contains("__boring_check_arch"), "{default_host}");
+}
