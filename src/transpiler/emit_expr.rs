@@ -359,6 +359,28 @@ impl Transpiler {
                         _ => format!("{}.unwrap_or({})", self.emit_expr(e), dv),
                     };
                 }
+                // `throws_call() else default` — the call yields a `Result`, so the default
+                // applies on `Err` (same codegen as `try throws_call() else default`): the
+                // closure takes the error, and builtins (`fs.readBytes`) are emitted bare
+                // (no plain-context `.unwrap()`).
+                let is_fs_fallible = matches!(&e.kind, ExprKind::MethodCall(obj, m, _)
+                    if matches!(&obj.kind, ExprKind::Var(v) if v == "fs")
+                        && !matches!(m.as_str(), "exists" | "isDir" | "isFile"));
+                if self.spawned_expr_throws(e) || is_fs_fallible {
+                    let inner = if let (true, ExprKind::MethodCall(_, m, args)) = (is_fs_fallible, &e.kind) {
+                        self.emit_fs_call_bare(m, args)
+                    } else {
+                        let mut sub = self.make_sub();
+                        sub.in_throws = false;
+                        sub.in_try_body = false;
+                        let inner = sub.emit_expr(e);
+                        self.errors.borrow_mut().extend(sub.errors.take());
+                        self.warnings.borrow_mut().extend(sub.warnings.take());
+                        inner
+                    };
+                    let default_s = self.emit_expr_owned(default);
+                    return format!("{}.unwrap_or_else(|_| {})", inner, default_s);
+                }
                 // `dict[key] else default` — rebuild .get() directly to avoid double-unwrap
                 // (ExprKind::Index for dict vars emits .unwrap() for bare access).
                 // Uses expr_is_dict (not a plain-Var-only check) so `self.field[key] else d`

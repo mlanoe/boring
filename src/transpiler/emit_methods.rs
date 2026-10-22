@@ -6927,7 +6927,7 @@ impl Transpiler {
     /// Builds one `fs.<method>(...)` call as a bare `Result<T, io::Error>`-typed Rust
     /// expression — no `?`, `.unwrap()`, or `.ok()` suffix. See the module doc comment
     /// on `emit_fs_call` above for why every method is built this way now.
-    fn emit_fs_call_bare(&self, method: &str, args: &[Arg]) -> String {
+    pub(crate) fn emit_fs_call_bare(&self, method: &str, args: &[Arg]) -> String {
         // Await suffix only — error propagation is left to the caller (see above).
         // We always emit tokio::fs in Boring — all programs run under tokio.
         let aw = if self.in_async { ".await" } else { "" };

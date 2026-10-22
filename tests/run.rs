@@ -345,6 +345,7 @@ interp_test!(for_destructure);
 interp_test!(numeric_separators);
 interp_test!(task_timeout);
 interp_test!(try_else_block);
+interp_test!(throws_call_else_default);
 interp_test!(error_match);
 interp_test!(fn_shorthand);
 interp_test!(camel_to_snake);

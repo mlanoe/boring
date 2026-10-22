@@ -1758,7 +1758,12 @@ impl Interpreter {
             ExprKind::TryElseBlock(try_stmts, else_stmts) => self.eval_expr_try_else_block(try_stmts, else_stmts, env),
 
             ExprKind::Else(expr, default) => {
-                let val = self.eval_expr(expr, Rc::clone(&env))?;
+                // `throws_call() else d`: an exception from the call also selects the default
+                // (matches the transpiler's `.unwrap_or_else(|_| d)` on the call's `Result`).
+                let val = match self.eval_expr(expr, Rc::clone(&env)) {
+                    Err(Signal::Exception(_)) => return self.eval_expr(default, env),
+                    other => other?,
+                };
                 match val {
                     Value::Nil => self.eval_expr(default, env),
                     other => Ok(other),

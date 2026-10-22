@@ -1,0 +1,22 @@
+# `throws_call() else (default)`: the default applies when the call throws.
+use fs
+
+def [int] ok_list() throws:
+    [1, 2]
+
+def [int] bad_list() throws:
+    throw "boom"
+
+def string? maybe_name(bool fail) throws:
+    if fail:
+        throw "nope"
+    nil
+
+def main():
+    let a = ok_list() else ([])
+    let b = bad_list() else ([])
+    let c = maybe_name(false) else (nil)
+    let d = maybe_name(true) else (nil)
+    let bytes = fs.readBytes("/nonexistent/boring_zzz") else ([])
+    print "{a.count} {b.count} {bytes.count}"
+    print "{c else ("none")} {d else ("none")}"
