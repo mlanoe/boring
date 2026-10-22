@@ -379,6 +379,14 @@ impl Transpiler {
                         inner
                     };
                     let default_s = self.emit_expr_owned(default);
+                    // `throws` fn returning `T?`: the default covers both the error and a
+                    // nil result (as in the interpreter), so the value is a plain `T`.
+                    if !is_fs_fallible
+                        && !matches!(default.kind, ExprKind::Nil)
+                        && matches!(self.resolve_expr_type(e), Some(Type::Optional(_)))
+                    {
+                        return format!("{}.ok().flatten().unwrap_or_else(|| {})", inner, default_s);
+                    }
                     return format!("{}.unwrap_or_else(|_| {})", inner, default_s);
                 }
                 // `dict[key] else default` — rebuild .get() directly to avoid double-unwrap

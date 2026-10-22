@@ -1,0 +1,23 @@
+# `f() else (d)` on a `throws` fn returning `T?`: the default covers the error and nil.
+def string? some_name() throws:
+    "ada"
+
+def string? nil_name() throws:
+    nil
+
+def string? err_name() throws:
+    throw "boom"
+
+def int? some_int(int a) throws:
+    a + 1
+
+def int? err_int() throws:
+    throw "boom"
+
+def main():
+    print "{some_name() else ("x")} {nil_name() else ("x")} {err_name() else ("x")}"
+    print "{some_int(4) else (-1)} {err_int() else (-1)}"
+    let a = some_name() else ("y")
+    let b = nil_name() else ("y")
+    let c = err_name() else ("y")
+    print "{a} {b} {c}"
