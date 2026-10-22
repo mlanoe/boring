@@ -2352,7 +2352,7 @@ impl Transpiler {
                             | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_))));
                 let lent_ty;
                 let borrowed_gpu_ty;
-                let effective_ty = if crate::transpiler::helpers::is_shared_gpu_array_param(p) {
+                let effective_ty = if in_method && crate::transpiler::helpers::is_shared_gpu_array_param(p) {
                     borrowed_gpu_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, OwnerQual::Borrow);
                     &borrowed_gpu_ty
                 } else if lent {

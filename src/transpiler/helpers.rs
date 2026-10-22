@@ -529,9 +529,10 @@ pub(crate) fn is_shared_gpu_array_param(p: &Param) -> bool {
 }
 
 pub(crate) fn sig_param_type(p: &Param) -> Option<Type> {
-    if is_lent_collection_param(p) || is_shared_gpu_array_param(p) {
-        let q = if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
-        p.ty.as_ref().map(|t| crate::transpiler::infer_qualifiers::apply_inferred_qual(t, q))
+    // Only struct methods borrow a plain `'kernel` array (`is_shared_gpu_array_param`); a free
+    // function's signature (all `fn_sigs` hold) keeps its declared type.
+    if is_lent_collection_param(p) {
+        p.ty.as_ref().map(|t| crate::transpiler::infer_qualifiers::apply_inferred_qual(t, OwnerQual::BorrowMut))
     } else {
         p.ty.clone()
     }
