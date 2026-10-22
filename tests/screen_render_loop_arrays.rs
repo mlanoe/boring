@@ -9,6 +9,7 @@
 // wgpu / metal / simd generated crates are `cargo check`ed (no window is opened);
 // cuda / rocm have no toolchain here, so only their generated host text is asserted.
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -84,7 +85,7 @@ fn build(target: &str, name: &str, src: &str) -> (PathBuf, String) {
 /// dependencies are compiled once.
 fn cargo_check(project: &PathBuf, target: &str) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("screen_render_loop_arrays_{target}_target"));
-    let out = Command::new("cargo")
+    let out = common::SharedCargo::new("screen_render_loop_arrays")
         .args(["check", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")

@@ -13,6 +13,7 @@
 // Run with:
 //   cargo test --test wgpu_codegen
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -504,7 +505,7 @@ print "pow = {k.out[4]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("float_builtin_methods_real_shader");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -913,7 +914,7 @@ print "r8 = {k.out[8]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("shift_variable_amount_real_shader");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -2485,7 +2486,7 @@ kernel:
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("screen_surface_field_no_explicit_present");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let build = Command::new("cargo")
+    let build = common::SharedCargo::new("wgpu_codegen")
         .args(["build", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -2746,7 +2747,7 @@ kernel:
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("const_generic_kernel_turbofish");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let build = Command::new("cargo")
+    let build = common::SharedCargo::new("wgpu_codegen")
         .args(["build", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3020,7 +3021,7 @@ print "done"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("const_generic_kernel_fixed_array_params_validation");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3111,7 +3112,7 @@ print "y[7] = {k.y[7]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("len_comparison_against_i32_index");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3246,7 +3247,7 @@ print "data[2] = {k.data[2]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("kernel_helper_real_shader_value");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3367,7 +3368,7 @@ print "out[3] = {k.out[3]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("free_fn_gpu_array_param_real_dispatch");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3548,7 +3549,7 @@ for i in 0..<2:
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join(test_name);
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3646,7 +3647,7 @@ print "len = {k.out.len()}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join(test_name);
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -4018,7 +4019,7 @@ print "dst[5] = {k.dst[5]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("reshape_axis_fields_two_fields_share_params");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -4116,7 +4117,7 @@ print "{a.out[0]} {b.out[0]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("two_kernels_sharing_actor_field_name");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -4204,7 +4205,7 @@ print "{k.out[0]}"
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("literal_float_div_by_zero_nan_inf");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -4293,7 +4294,7 @@ for i, v in k.out:
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join("init_derived_scalar_field");
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -4460,7 +4461,7 @@ def main() throws:
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join(test_name);
     let manifest = tmp.join("test_wgpu").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("wgpu_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")

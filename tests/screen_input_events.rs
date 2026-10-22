@@ -10,6 +10,7 @@
 // macOS; ROCm too, with its `build.rs` (hipcc + device probe) replaced by a stub.
 // No window is opened.
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -110,7 +111,7 @@ fn cargo_check(project: &PathBuf, target: &str) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("screen_input_events_{target}_target"));
     let fake_nvcc = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/fake-nvcc");
     let path = format!("{}:{}", fake_nvcc.display(), std::env::var("PATH").unwrap_or_default());
-    let out = Command::new("cargo")
+    let out = common::SharedCargo::new("screen_input_events")
         .args(["check", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")

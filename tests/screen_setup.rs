@@ -9,6 +9,7 @@
 // wgpu generated crates are `cargo check`ed (no window is opened); cuda / rocm have no toolchain
 // here, so only their generated host text is asserted.
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -123,7 +124,7 @@ fn wgpu_screen_program_runs_kernel_init_and_top_level_code() {
 
 fn cargo_check(project: &PathBuf) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_setup_wgpu_target");
-    let out = Command::new("cargo")
+    let out = common::SharedCargo::new("screen_setup")
         .args(["check", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")
@@ -168,7 +169,7 @@ fn metal_screen_program_keeps_module_level_constants() {
     screen_setup_text_checks("metal", &rs);
     if cfg!(target_os = "macos") {
         let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_setup_metal_target");
-        let out = Command::new("cargo")
+        let out = common::SharedCargo::new("screen_setup")
             .args(["check", "--quiet", "--manifest-path"])
             .arg(project.join("Cargo.toml"))
             .arg("--target-dir")

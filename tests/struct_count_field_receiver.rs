@@ -5,6 +5,7 @@
 // (not only `self`), must win over the array-length builtin (`.len() as isize`) on every
 // GPU/host backend. `.count`/`.length` on real arrays keeps the builtin.
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -85,7 +86,7 @@ fn build(target: &str) -> (PathBuf, String) {
 
 fn cargo_check(project: &PathBuf, target: &str) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("struct_count_field_receiver_{target}_target"));
-    let out = Command::new("cargo")
+    let out = common::SharedCargo::new("struct_count_field_receiver")
         .args(["check", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")

@@ -9,6 +9,7 @@
 //  - `screen.mouse.scroll_x as float` converts the member (here `f32`) to the parameter type.
 // The generated crate is `cargo check`ed (no window is opened).
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -118,7 +119,7 @@ fn screen_loop_calls_follow_the_free_function_signature() {
     assert!(rs.contains("self.__input.scroll_x as f64"), "{rs}");
 
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_setup_wgpu_target");
-    let check = Command::new("cargo")
+    let check = common::SharedCargo::new("screen_host_call_lowering")
         .args(["check", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")

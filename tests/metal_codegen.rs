@@ -13,6 +13,7 @@
 // Run with:
 //   cargo test --test metal_codegen
 
+mod common;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -237,7 +238,7 @@ fn resident_tuple_chain_runs_on_metal() {
     let (_msl, _rs, _toml) = run_metal(test_name, RESIDENT_TUPLE_CHAIN);
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -293,7 +294,7 @@ fn host_array_passed_to_float32_gpu_param_runs_on_metal() {
     let (_msl, _rs, _toml) = run_metal(test_name, FLOAT32_HOST_ARG_TO_GPU_REQ);
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -782,7 +783,7 @@ with result:
         let (_msl, _rs) = metal_codegen(&test_name, &source);
         let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("metal_codegen").join(&test_name).join("test_metal").join("Cargo.toml");
-        let run = Command::new("cargo")
+        let run = common::SharedCargo::new("metal_codegen")
             .args(["run", "--quiet", "--manifest-path"])
             .arg(&manifest)
             .env("CARGO_TERM_COLOR", "never")
@@ -1635,7 +1636,7 @@ def main() throws:
 
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -2856,7 +2857,7 @@ print "out[3] = {k.out[3]}"
 
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -2930,7 +2931,7 @@ print "{v}"
 
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -2997,7 +2998,7 @@ def main() throws:
 
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3061,7 +3062,7 @@ def main() throws:
 
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3177,7 +3178,7 @@ def main() throws:
 
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3485,7 +3486,7 @@ def main() throws:
 "#);
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
-    let run = Command::new("cargo")
+    let run = common::SharedCargo::new("metal_codegen")
         .args(["run", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TERM_COLOR", "never")
@@ -3804,7 +3805,7 @@ fn tensor_matmul_through_function_runs_on_metal() {
         let (_msl, _rs, _toml) = run_metal(&test_name, &tensor_matmul_through_function_src(qual));
         let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("metal_codegen").join(&test_name).join("test_metal").join("Cargo.toml");
-        let run = Command::new("cargo")
+        let run = common::SharedCargo::new("metal_codegen")
             .args(["run", "--quiet", "--release", "--manifest-path"])
             .arg(&manifest)
             .env("CARGO_TERM_COLOR", "never")
