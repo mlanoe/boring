@@ -1,0 +1,15 @@
+# Regression fixture: indexing (read and write) by a function-call result.
+
+def int find([int] xs, int v):
+    var int r = -1
+    for i in 0..<3:
+        if xs[i] == v:
+            r = i
+    r
+
+def main():
+    mut [int] xs = [10, 20, 30]
+    mut [int] ys = [0, 0, 0]
+    ys[find(xs, 20)] = 5
+    ys[find(xs, 30)] += 2
+    print "{xs[find(xs, 30)]} {ys}"

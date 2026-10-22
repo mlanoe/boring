@@ -1604,7 +1604,8 @@ impl Transpiler {
             // Cast an index expression to `usize` where needed.
             let cast_idx = |raw: String, e: &crate::ast::Expr| -> String {
                 match &e.kind {
-                    ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                    ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) =>
                         format!("({}) as usize", raw),
                     _ => raw,
                 }
@@ -1663,7 +1664,8 @@ impl Transpiler {
         if is_str {
             let raw = self.emit_expr(idx);
             let idx_s = match &idx.kind {
-                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) =>
                     format!("({}) as usize", raw),
                 _ => raw,
             };
@@ -1783,7 +1785,8 @@ impl Transpiler {
             // Rust requires usize for slice indexing; cast integer expressions.
             let raw = self.emit_expr(idx);
             match &idx.kind {
-                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) => format!("({}) as usize", raw),
+                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) => format!("({}) as usize", raw),
                 _ => raw,
             }
         };
@@ -3406,7 +3409,8 @@ impl Transpiler {
             if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
                 let cast_idx = |raw: String, e: &Expr| -> String {
                     match &e.kind {
-                        ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                        ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) =>
                             format!("({}) as usize", raw),
                         _ => raw,
                     }
@@ -3558,6 +3562,7 @@ impl Transpiler {
             let raw_idx = self.emit_expr(idx_expr);
             let idx_s = match &idx_expr.kind {
                 ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
                 // Nested index read (`list[cursor[c]] = v`): the element is an `int` (`isize`).
                 | ExprKind::Index(..) => format!("({}) as usize", raw_idx),
                 _ => raw_idx,
