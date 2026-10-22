@@ -66,10 +66,11 @@ fn metal_blocked_format(config: &TensorLinearConfig, format: Option<&str>) -> bo
     config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
 }
 
-/// Subset of the blocked formats whose decode (`m == 1`) also has a Metal SIMD-group kernel:
-/// four output rows per SIMD group, vector loads, four lanes per 32-element block.
+/// Blocked formats whose decode (`m == 1`) also has a Metal SIMD-group kernel: four output rows
+/// per SIMD group with vector loads (32-element blocks: four lanes per block; Q3_K/Q2_K: eight
+/// lanes per 256-element superblock).
 fn metal_rows_decode_format(config: &TensorLinearConfig, format: Option<&str>) -> bool {
-    config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl"))
+    config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
 }
 
 fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, usize) {

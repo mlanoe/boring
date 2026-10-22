@@ -56,8 +56,8 @@ fn scalar_prefill_override_disables_the_simdgroup_kernel() {
 }
 
 #[test]
-fn small_block_formats_decode_with_four_rows_per_simd_group() {
-    for format in ["q4_0", "q5_0", "iq4_nl"] {
+fn non_native_formats_decode_with_four_rows_per_simd_group() {
+    for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k"] {
         let (msl, host) = metal_codegen(&format!("{format}_decode"), format, None);
         assert!(msl.contains("constexpr uint bp_rows = 4;"), "{format}: {msl}");
         assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{format}");

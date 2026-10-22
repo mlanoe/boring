@@ -1524,6 +1524,105 @@ impl DeviceEmitter {
         self.line("}");
     }
 
+    /// Matrix-vector schedule for Q3_K / Q2_K: four output rows per SIMD group, four 256-element
+    /// superblocks in flight (`slot` = lane / 8), eight lanes per superblock. Lane `it` owns the
+    /// 32 elements `it*32 .. it*32+31` (half `outer = it / 4`, quarter `g = it % 4`), which are
+    /// two 16-wide sub blocks whose 2-bit quants sit in one shift (`2 * g`) of 32 contiguous
+    /// `qs` bytes, so the 32 activations are loaded once as eight `float4` and reused for all
+    /// four rows. The dot product is taken in the quantized domain and the per-sub-block scale
+    /// (and, for Q2_K, minimum) is applied once per sub block. Mirrors the Boring reference
+    /// dequantizer; loads are byte-aligned `packed_uchar4` (110-byte Q3_K blocks are not
+    /// 4-byte aligned).
+    fn emit_q3_q2_k_rows_decode(&mut self, has_bias: bool, format: &str) {
+        let block_bytes = if format == "q3_k" { 110 } else { 84 };
+        self.line("constexpr uint bp_rows = 4;");
+        self.line("const uint bp_lane = __simd_lane_id;");
+        self.line("const uint bp_warp = __thread_pos.x / 32;");
+        self.line("const ulong bp_row0 = ((ulong)__block_pos.x * 8 + bp_warp) * bp_rows;");
+        self.line("const uint bp_slot = bp_lane / 8, bp_it = bp_lane % 8, bp_outer = bp_it / 4, bp_g = bp_it % 4;");
+        self.line("const uint bp_shift = bp_g * 2;");
+        self.line("const ulong bp_nb = (ulong)k / 256;");
+        self.line("float bp_sumf[bp_rows];");
+        self.line("device const uchar* bp_rowp[bp_rows];");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("bp_sumf[bp_r] = 0.0f;");
+        self.line(&format!("bp_rowp[bp_r] = b + min(bp_row0 + bp_r, (ulong)n - 1) * bp_nb * {block_bytes} + bp_slot * {block_bytes};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line("device const float* bp_y = a + bp_slot * 256 + bp_it * 32;");
+        self.line("for (ulong bp_ib = bp_slot; bp_ib < bp_nb; bp_ib += 4) {");
+        self.indent += 1;
+        for i in 0..8 {
+            self.line(&format!("const float4 bp_y{i} = *(device const float4*)(bp_y + {});", i * 4));
+        }
+        if format == "q2_k" {
+            self.line("const float4 bp_s0v = bp_y0 + bp_y1 + bp_y2 + bp_y3, bp_s1v = bp_y4 + bp_y5 + bp_y6 + bp_y7;");
+            self.line("const float bp_sumy0 = bp_s0v.x + bp_s0v.y + bp_s0v.z + bp_s0v.w, bp_sumy1 = bp_s1v.x + bp_s1v.y + bp_s1v.z + bp_s1v.w;");
+        }
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("device const uchar* bp_blk = bp_rowp[bp_r];");
+        if format == "q2_k" {
+            self.line("const uint bp_sb0 = uint(bp_blk[bp_outer * 8 + bp_g * 2]), bp_sb1 = uint(bp_blk[bp_outer * 8 + bp_g * 2 + 1]);");
+            self.line("const float bp_d = float(as_type<half>(*(device const ushort*)(bp_blk + 80)));");
+            self.line("const float bp_dmin = float(as_type<half>(*(device const ushort*)(bp_blk + 82)));");
+            self.line("device const uchar* bp_qs = bp_blk + 16 + bp_outer * 32;");
+            self.line("float bp_acc0 = 0.0f, bp_acc1 = 0.0f;");
+            for i in 0..4 {
+                self.line(&format!("bp_acc0 += dot(float4((uchar4(*(device const packed_uchar4*)(bp_qs + {})) >> bp_shift) & 3), bp_y{i});", i * 4));
+                self.line(&format!("bp_acc1 += dot(float4((uchar4(*(device const packed_uchar4*)(bp_qs + {})) >> bp_shift) & 3), bp_y{});", 16 + i * 4, 4 + i));
+            }
+            self.line("bp_sumf[bp_r] += bp_d * (float(bp_sb0 & 15) * bp_acc0 + float(bp_sb1 & 15) * bp_acc1) - bp_dmin * (float(bp_sb0 >> 4) * bp_sumy0 + float(bp_sb1 >> 4) * bp_sumy1);");
+        } else {
+            self.line("int bp_subscale[2];");
+            self.line("for (uint bp_sub = 0; bp_sub < 2; ++bp_sub) {");
+            self.indent += 1;
+            self.line("const uint bp_index = bp_outer * 8 + bp_g * 2 + bp_sub, bp_word = bp_index / 4, bp_sl = bp_index % 4;");
+            self.line("const int bp_byte = int(bp_blk[96 + (bp_word % 2) * 4 + bp_sl]);");
+            self.line("const int bp_low = bp_word < 2 ? (bp_byte & 15) : ((bp_byte >> 4) & 15);");
+            self.line("const int bp_high = (int(bp_blk[104 + bp_sl]) >> (bp_word * 2)) & 3;");
+            self.line("bp_subscale[bp_sub] = (bp_low | (bp_high << 4)) - 32;");
+            self.indent -= 1;
+            self.line("}");
+            self.line("const float bp_d = float(as_type<half>(*(device const ushort*)(bp_blk + 108)));");
+            self.line("device const uchar* bp_qs = bp_blk + 32 + bp_outer * 32;");
+            self.line("const uint bp_hbit = bp_outer * 4 + bp_g;");
+            self.line("float bp_acc0 = 0.0f, bp_acc1 = 0.0f;");
+            for i in 0..4 {
+                for sub in 0..2 {
+                    let off = sub * 16 + i * 4;
+                    let y = sub * 4 + i;
+                    self.line(&format!("bp_acc{sub} += dot(float4((uchar4(*(device const packed_uchar4*)(bp_qs + {off})) >> bp_shift) & 3) + 4.0f * float4((uchar4(*(device const packed_uchar4*)(bp_blk + {off})) >> bp_hbit) & 1) - 4.0f, bp_y{y});"));
+                }
+            }
+            self.line("bp_sumf[bp_r] += bp_d * (float(bp_subscale[0]) * bp_acc0 + float(bp_subscale[1]) * bp_acc1);");
+        }
+        self.line(&format!("bp_rowp[bp_r] += 4 * {block_bytes};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line("bp_y += 4 * 256;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        self.line("const float bp_total = simd_sum(bp_sumf[bp_r]);");
+        self.line("if (bp_lane == 0 && bp_row0 + bp_r < (ulong)n) {");
+        self.indent += 1;
+        if has_bias {
+            self.line("c[bp_row0 + bp_r] = bp_total + bias[bp_row0 + bp_r];");
+        } else {
+            self.line("c[bp_row0 + bp_r] = bp_total;");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_blocked_q4_scale(&mut self, s: &str, scale: &str, min: &str) {
         self.line(&format!("const int {scale} = {s} < 4 ? int(b[bp_block + 4 + {s}]) & 63 : (int(b[bp_block + 8 + {s}]) & 15) | ((int(b[bp_block + {s}]) >> 6) << 4);"));
         self.line(&format!("const int {min} = {s} < 4 ? int(b[bp_block + 8 + {s}]) & 63 : (int(b[bp_block + 8 + {s}]) >> 4) | ((int(b[bp_block + 4 + {s}]) >> 6) << 4);"));
@@ -1600,7 +1699,11 @@ impl DeviceEmitter {
             Stmt::Expr(e) => {
                 if let Some(format) = rows_decode_marker(e) {
                     let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
-                    self.emit_small_block_rows_decode(has_bias, format);
+                    if matches!(format, "q3_k" | "q2_k") {
+                        self.emit_q3_q2_k_rows_decode(has_bias, format);
+                    } else {
+                        self.emit_small_block_rows_decode(has_bias, format);
+                    }
                     return;
                 }
                 if let Some(format) = blocked_prefill_marker(e) {
@@ -2520,6 +2623,8 @@ fn rows_decode_marker(expr: &Expr) -> Option<&'static str> {
         "__boring_metal_rows_decode_q4_0" => Some("q4_0"),
         "__boring_metal_rows_decode_q5_0" => Some("q5_0"),
         "__boring_metal_rows_decode_iq4_nl" => Some("iq4_nl"),
+        "__boring_metal_rows_decode_q3_k" => Some("q3_k"),
+        "__boring_metal_rows_decode_q2_k" => Some("q2_k"),
         _ => None,
     }
 }
