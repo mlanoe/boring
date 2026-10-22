@@ -1010,6 +1010,7 @@ transpile_test!(throws_call_else_default);
 // docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and `boring build`
 // printed completely different things for `fromJson<T>` on a `@serde(untagged)` enum,
 // because the interpreter's `fromJson` was a no-op stub returning its input string and
+transpile_test!(throws_optional_return);
 // its enum `Display` formatted payloads with Display where the compiled program uses
 // derived `Debug`. Unlike json_serde_rename/try_wrap_double_handling above, these three
 // ARE registered in tests/run.rs too, against these same .expected files -- pinning the

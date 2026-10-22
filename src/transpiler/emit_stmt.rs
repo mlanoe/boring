@@ -3,6 +3,51 @@ use super::Transpiler;
 use super::helpers::*;
 
 impl Transpiler {
+    /// Tail expression of a `T?`-returning function: wrap a plain value in `Some(...)`
+    /// unless it is already Option-shaped. Shared by the plain and `throws` tail paths.
+    fn wrap_optional_tail(&self, e: &Expr) -> String {
+        let raw = self.emit_expr_owned(e);
+        let already_opt = raw == "None" || raw.starts_with("Some(")
+            || is_try_optional(e)
+            || matches!(&e.kind, ExprKind::Var(v)
+                if self.optional_vars.contains(v.as_str())
+                || self.var_types.get(v.as_str())
+                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
+            || matches!(&e.kind, ExprKind::Call(callee, _)
+                if matches!(&callee.kind, ExprKind::Var(fn_name)
+                    if self.fn_return_types.get(fn_name.as_str())
+                        .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
+            || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
+                if matches!(&recv.kind, ExprKind::Var(v)
+                    if self.var_struct_types.get(v.as_str()).map(|sty| {
+                        self.struct_method_return_types
+                            .get(&format!("{}::{}", sty, method))
+                            .map(|t| matches!(t, Type::Optional(_)))
+                            .unwrap_or(false)
+                    }).unwrap_or(false)))
+            // Field read of a `T?`-declared field, or a call/method-call whose
+            // own declared return type is `T?` (any receiver shape, not just a
+            // bare var — see `expr_is_declared_optional`'s doc for why the
+            // MethodCall check above alone isn't enough, e.g. `items[0].as_str()`).
+            // See docs/option-return-double-some-wrap-bug.md.
+            || self.expr_is_declared_optional(e)
+            // If-expression whose branches already produce Option (nil/some/method)
+            || matches!(&e.kind, ExprKind::If(if_stmt) if {
+                fn branch_ends_optional(body: &[Stmt]) -> bool {
+                    match body.last() {
+                        Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
+                            || matches!(&e.kind, ExprKind::Call(callee, _)
+                                if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
+                            || matches!(&e.kind, ExprKind::MethodCall(_, _, _)),
+                        _ => false,
+                    }
+                }
+                if_stmt.branches.iter().any(|(_, b)| branch_ends_optional(b))
+                    || if_stmt.else_body.as_ref().map(|b| branch_ends_optional(b)).unwrap_or(false)
+            });
+        if already_opt { raw } else { format!("Some({})", raw) }
+    }
+
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
             // A `T'static` local inside `main` was already hoisted to a module-level
@@ -213,7 +258,11 @@ impl Transpiler {
                             return;
                         }
                     }
-                    let s = format!("Ok({})", self.emit_expr_owned(e));
+                    let s = if matches!(&self.fn_return_ty, Some(Type::Optional(_))) && !self.is_option_expr(e) {
+                        format!("Ok({})", self.wrap_optional_tail(e))
+                    } else {
+                        format!("Ok({})", self.emit_expr_owned(e))
+                    };
                     self.line(&s);
                 } else if is_last && !self.fn_returns_void {
                     // Interprocedural GPU residency (docs/scoped-access-blocks.md): this
@@ -287,50 +336,7 @@ impl Transpiler {
                         // Wrap scalar/integer/variable values in Some() so Rust is happy.
                         // Use emit_expr_owned so string literals become Arc::<str>::from("...")
                         // rather than &str, which would mismatch Option<Arc<str>>.
-                        let raw = self.emit_expr_owned(e);
-                        let already_opt = raw == "None" || raw.starts_with("Some(")
-                            || is_try_optional(e)
-                            || matches!(&e.kind, ExprKind::Var(v)
-                                if self.optional_vars.contains(v.as_str())
-                                || self.var_types.get(v.as_str())
-                                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
-                            || matches!(&e.kind, ExprKind::Call(callee, _)
-                                if matches!(&callee.kind, ExprKind::Var(fn_name)
-                                    if self.fn_return_types.get(fn_name.as_str())
-                                        .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
-                            || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
-                                if matches!(&recv.kind, ExprKind::Var(v)
-                                    if self.var_struct_types.get(v.as_str()).map(|sty| {
-                                        self.struct_method_return_types
-                                            .get(&format!("{}::{}", sty, method))
-                                            .map(|t| matches!(t, Type::Optional(_)))
-                                            .unwrap_or(false)
-                                    }).unwrap_or(false)))
-                            // Field read of a `T?`-declared field, or a call/method-call whose
-                            // own declared return type is `T?` (any receiver shape, not just a
-                            // bare var — see `expr_is_declared_optional`'s doc for why the
-                            // MethodCall check above alone isn't enough, e.g. `items[0].as_str()`).
-                            // See docs/option-return-double-some-wrap-bug.md.
-                            || self.expr_is_declared_optional(e)
-                            // If-expression whose branches already produce Option (nil/some/method)
-                            || matches!(&e.kind, ExprKind::If(if_stmt) if {
-                                fn branch_ends_optional(body: &[Stmt]) -> bool {
-                                    match body.last() {
-                                        Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
-                                            || matches!(&e.kind, ExprKind::Call(callee, _)
-                                                if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
-                                            || matches!(&e.kind, ExprKind::MethodCall(_, _, _)),
-                                        _ => false,
-                                    }
-                                }
-                                if_stmt.branches.iter().any(|(_, b)| branch_ends_optional(b))
-                                    || if_stmt.else_body.as_ref().map(|b| branch_ends_optional(b)).unwrap_or(false)
-                            });
-                        if already_opt {
-                            raw
-                        } else {
-                            format!("Some({})", raw)
-                        }
+                        self.wrap_optional_tail(e)
                     } else if let Some(tn) = match &self.fn_return_ty {
                     Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str()) => Some(n.clone()),
                     _ => None,

@@ -1,0 +1,39 @@
+# `throws` fn returning `T?`: implicit and explicit return wrap non-nil values in `some`.
+def string? implicit_name() throws:
+    "ada"
+
+def string? implicit_nil() throws:
+    nil
+
+def int? implicit_int(int a) throws:
+    a + 1
+
+def string? explicit_name() throws:
+    return "bob"
+
+def int? explicit_int(int a) throws:
+    return a * 2
+
+def int? explicit_nil() throws:
+    return nil
+
+def int? branchy(int a) throws:
+    if a > 0:
+        return a
+    if a < -5:
+        throw "too small"
+    nil
+
+def main():
+    let a = implicit_name() else (nil)
+    let b = implicit_nil() else (nil)
+    let c = implicit_int(4) else (nil)
+    let d = explicit_name() else (nil)
+    let e = explicit_int(4) else (nil)
+    let f = explicit_nil() else (nil)
+    print "{a else ("none")} {b else ("none")} {c else (-1)}"
+    print "{d else ("none")} {e else (-1)} {f else (-1)}"
+    let g = branchy(3) else (nil)
+    let h = branchy(0) else (nil)
+    let i = branchy(-7) else (nil)
+    print "{g else (-9)} {h else (-9)} {i else (-9)}"
