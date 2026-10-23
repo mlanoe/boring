@@ -57,3 +57,18 @@ fn no_note_without_a_task_capture() {
     let report = show_qualifiers(&src, "nocapture");
     assert!(!report.contains("note:"), "{report}");
 }
+
+#[test]
+fn a_chain_declared_in_reverse_order_propagates_the_task_lock_to_its_head() {
+    // `a` calls `b` calls `c`; only `c` awaits while holding its parameter. All three
+    // parameters must agree on the tokio lock, whatever the declaration order.
+    let src = format!(
+        "{COUNTER}task def void a(mut Counter x):\n    b(x)\n\n\
+         task def void b(mut Counter y):\n    c(y)\n\n\
+         task def void c(mut Counter z):\n    with z:\n        z.inc()\n        wait(Duration.fromMillis(10))\n"
+    );
+    let report = show_qualifiers(&src, "chain");
+    for name in ["a::x", "b::y", "c::z"] {
+        assert!(report.contains(&format!("{name}  'actor'task")), "{name}: {report}");
+    }
+}

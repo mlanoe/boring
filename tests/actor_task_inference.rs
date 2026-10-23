@@ -234,19 +234,14 @@ def main():
 //
 // `caller` calls `mid`, which calls `deep` (the function that actually awaits while
 // holding its parameter via a `with` block). All three are declared in this file order.
-// `fn_sigs` propagation is itself file-ordered (see docs/qualifiers.md): by the time
-// `caller`'s own body is really emitted, `mid`'s signature has not yet been updated with
-// the fact that `deep` — declared after `mid` — requires the async lock (that update only
-// lands when `mid` is REALLY emitted, which is after `caller`). This is the documented,
-// accepted residual gap, not a bug: `caller` must stay on the plain sync variant rather
-// than erroring out or guessing async — the fix, when a developer actually hits this, is
-// to annotate the parameter explicitly, not for the compiler to guess in the safe-but-
-// expensive direction on its own. (`mid` itself, one hop closer to `deep`, does happen to
-// pick the requirement up here — the speculative `pre_infer_fn_qualifiers` pass gives it
-// one full pass of head start over `caller` — but that is an implementation detail of
-// *how far* the propagation reaches today, not something this test depends on.)
+// `pre_infer_fn_qualifiers` iterates to a fixed point, so a requirement reaches back through
+// any number of forward references inside one file: `deep` (declared last) needs the async
+// lock, so `mid` (which passes its value to `deep`) and `caller` (which passes it to `mid`) must
+// take the very same lock type — the two lock types are different concrete Rust types, a caller
+// cannot decline. (This used to stop one hop short: `caller` stayed a plain borrow while `mid`
+// already took the async lock.)
 #[test]
-fn forward_reference_two_hops_away_stays_conservative() {
+fn forward_reference_two_hops_away_propagates_to_the_head_of_the_chain() {
     let src = "\
 struct Counter:
     var int value = 0
@@ -270,19 +265,11 @@ def main():
     let out = emit_rust(src);
     assert!(
         out.status.success(),
-        "expected this program to transpile without error (the residual gap must never \
-         surface as a compile error) — stderr:\n{}",
+        "expected this program to transpile without error — stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let generated = String::from_utf8_lossy(&out.stdout);
-    // `caller` never becomes an actor-source-typed value here (nothing forces `Counter`
-    // into that role the way `multi_function_always_sync_value_is_never_promoted_to_task`
-    // does), so it may resolve to a plain `&mut Counter` auto-ref borrow rather than an
-    // explicit `'actor` — either is fine; what must never happen is the async lock.
-    let caller_line = signature_line(&generated, "caller");
-    assert!(
-        !caller_line.contains("tokio::sync::Mutex"),
-        "expected `caller` to stay conservative (no async lock), got:\n{}", caller_line
-    );
+    assert_actor_task(&generated, "caller");
+    assert_actor_task(&generated, "mid");
     assert_actor_task(&generated, "deep");
 }

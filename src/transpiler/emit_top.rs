@@ -609,6 +609,26 @@ impl Transpiler {
     /// bit both bare-struct params (rare in practice) and bare array/dict/set params (the
     /// common case in a call-heavy file like a hand-written recursive-descent parser).
     pub(crate) fn pre_infer_fn_qualifiers(&mut self, program: &crate::ast::Program) {
+        // A caller declared before its callee only learns the callee's qualifier from the next
+        // round, and a chain of N functions in reverse order needs N rounds: iterate to a fixed
+        // point (bounded by the function count). `applied` remembers what this pass wrote into
+        // each signature slot, so a later round may refine it but never overrides a qualifier
+        // the user wrote.
+        let fn_count = program.items.iter().filter(|i| matches!(i, crate::ast::Item::Fn(_))).count();
+        let mut applied: std::collections::HashMap<(String, usize), crate::ast::OwnerQual> =
+            std::collections::HashMap::new();
+        for _round in 0..=fn_count {
+            if !self.pre_infer_fn_qualifiers_round(program, &mut applied) { break; }
+        }
+    }
+
+    /// One pass of `pre_infer_fn_qualifiers`; `true` when it changed any signature.
+    fn pre_infer_fn_qualifiers_round(
+        &mut self,
+        program: &crate::ast::Program,
+        applied: &mut std::collections::HashMap<(String, usize), crate::ast::OwnerQual>,
+    ) -> bool {
+        let mut changed = false;
         for item in &program.items {
             let crate::ast::Item::Fn(f) = item else { continue };
             if f.qualifier.is_some() || f.is_native { continue; }
@@ -662,12 +682,23 @@ impl Transpiler {
                     let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
                         && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
                         && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_)));
-                    if !already_qualified {
-                        *param_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(param_ty, inferred_qual);
+                    // Written by an earlier round of this pass (not by the user): may be refined.
+                    let ours = match (applied.get(&(key.clone(), i)), &*param_ty) {
+                        (Some(prev), crate::ast::Type::Qualified(_, q)) => q == prev,
+                        (Some(prev), crate::ast::Type::Optional(inner)) =>
+                            matches!(inner.as_ref(), crate::ast::Type::Qualified(_, q) if q == prev),
+                        _ => false,
+                    };
+                    if !already_qualified || ours {
+                        let new_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(param_ty, inferred_qual.clone());
+                        if new_ty != *param_ty { changed = true; }
+                        *param_ty = new_ty;
+                        applied.insert((key.clone(), i), inferred_qual);
                     }
                 }
             }
         }
+        changed
     }
 
     fn inline_boring_use(&mut self, path: &std::path::Path, use_line: usize, use_col: usize) {
