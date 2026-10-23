@@ -18,6 +18,7 @@ pub mod ast;
 pub mod parser;
 pub mod desugar_labeled_array;
 pub mod desugar_inline_kernel;
+pub mod desugar_tensor_fields;
 pub mod desugar_tensor_quals;
 pub mod desugar_array_block;
 pub mod desugar_inject;

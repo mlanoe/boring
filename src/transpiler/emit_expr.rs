@@ -2821,6 +2821,13 @@ impl Transpiler {
             self.want_raw_option_pop.set(false);
             return format!("let _ = {raw}");
         }
+        // Write-back of a host tensor destination field (`desugar_tensor_fields`): the alias is a
+        // plain host vector, the resident field stores it back as its `Host` variant.
+        if let (ExprKind::Field(..), ExprKind::Var(alias)) = (&target.kind, &value.kind) {
+            if alias.starts_with(crate::desugar_tensor_fields::ALIAS_PREFIX) && self.expr_is_gpu_resident_field(target) {
+                return format!("{} = BoringKernelArg::Host({alias})", self.emit_expr(target));
+            }
+        }
         // `x = v` for a name that was never declared: a bare assignment only reassigns
         // (`let`/`var`/`mut` introduce bindings). Without this, rustc fails with E0425.
         if let ExprKind::Var(n) = &target.kind {

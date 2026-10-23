@@ -227,14 +227,45 @@ name. When the receiver's type is not evident, the call is followed only if the 
 a single struct method and by no `ext` method or trait default; a receiver evidently of another type
 is skipped. A function
 that declares the same name shadows the top-level binding; a method mentioning it may mean a field,
-so that use is not followed. A bare `'kernel` is accepted on the array-typed parameters, return type and `let`s of a struct method, resolved like a free function's; it is still rejected on an `ext` method, a struct field and a non-array type.
+so that use is not followed. A bare `'kernel` is accepted on the array-typed parameters, return type and `let`s of a struct method, resolved like a free function's; it is still rejected on an `ext` method and a non-array type. On a struct field it is accepted when a method of its struct passes the field to a host tensor call (see below).
 
 Not followed: closures, type methods, calls with a computed argument, and a name declared twice in
 one scope (also across sibling blocks — `'kernel` on such a name is an error).
 
-Struct fields are not an inference gap: a host `kernel.tensors.*` operand must be a local or a
-parameter, so a field (`self.w`, or a bare `w` inside a method) is rejected whatever its qualifier —
-pass the array to the method as a parameter instead. The error says so.
+**Struct fields as operands.** Inside a method of its struct, a field is a host operand like any
+other array: `kernel.tensors.matmul(x, self.w, self.out)`, or a bare `w` that no parameter or
+`let` of the method shadows. An early pass (`src/desugar_tensor_fields.rs`) rewrites each such call
+into the local form every consumer already handles — a `__tf_<field>_<n>` alias typed exactly like
+the field, the call on the aliases, and, for the destination, a write-back
+(`self.out = __tf_out_1`). The interpreter, the checker and all backends therefore agree by
+construction. Design decisions:
+
+- **Mutation.** A destination field *is* visible to the caller afterwards: the call replaces the
+  array and the result is stored back into the field (a later method, or the caller reading it
+  through a parameter, sees it). The field must be declared `mut` (content-mutable; the write-back
+  is the call mutating the field's content, so it is allowed on a `mut` field that a plain
+  `self.out = ..` could not reassign), and the method must be `def`: `req` is an error, as is a
+  non-`mut` destination field.
+- **Several methods and calls.** Each call gets its own alias; the field stays the single source of
+  truth. The aliases of one field are tied together by the inference, so one field has one
+  residency across all the methods that use it (`--show-qualifiers` lists them as
+  `Struct.field (struct field)`), and the result is written back onto the field declaration.
+  The same field as input and destination of one call is the usual "destination must not alias an
+  input" error.
+- **`'unified` vs `'global`.** An explicit qualifier on the field is kept and is what the alias
+  carries. When it is omitted, or a bare `'kernel` (now accepted on a field that some method of its
+  struct passes to a host tensor call; still an error on a field nothing uses), the same default as
+  for locals applies to the field's group: `'kernel'unified` if the field is `mut` (it is written,
+  and usually read back), else `'kernel'global`; a demand from a callee parameter or return type
+  that receives the alias wins as usual. Constructor arguments (`Layer(w_arr, out_arr)`) are not
+  followed.
+- **Cost and limits.** Inside a method, host tensor calls run the portable host loops on plain
+  vectors, so a resident (`BoringKernelArg`) field is downloaded into the alias and the destination
+  is stored back as host data; the alias is a copy, not a view. Outside the struct (`l.w` in
+  `main`) a field is still not an operand; fields of nested structs (`self.a.w`) neither. Reading
+  a resident field directly from host code (`l.out[0]`) does not transpile on the GPU targets
+  (existing limit, independent of this feature: read it through a method that passes it on, e.g.
+  as an operand of another host call); the plain `std` target has no resident field type at all.
 
 **Bare `'kernel`: GPU, placement left to the inference.** On an array-typed `let`, parameter or
 return type of a free function, `'kernel` (with no `'global`/`'unified` after it) says "this lives
@@ -252,7 +283,7 @@ Unlike an unqualified array, a `'kernel` one takes part in the inference even wi
 them GPU-side. A `'kernel` return type joins the group of what the function returns (here `c`,
 a `mut` array, so the return is `'kernel'unified`). The result is resolved before the checker, so
 everything downstream sees `'kernel'global` or `'kernel'unified`; `'kernel` is also what a
-parameter accepts, either residency. Where it cannot be resolved — a struct field, an `ext` method, a
+parameter accepts, either residency. Where it cannot be resolved — a struct field no method passes to a host tensor call, an `ext` method, a
 non-array type — it is an error that tells you to spell the qualifier out.
 
 **Automatic resident returns.** A resident value is opaque outside `with`, so making a function

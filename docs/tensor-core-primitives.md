@@ -1052,3 +1052,30 @@ all-bool elements is promoted too (`Vec<isize>` / `Vec<f64>` / `Vec<bool>`); any
 untyped initializer still needs a declared type. Verified by running on Metal and WGPU
 (8); CUDA and ROCm are covered by codegen assertions only (no toolchain on the
 development machine).
+
+## Struct fields as host operands (2026-10-23)
+
+Inside a method of its struct, a field (`self.w`, or a bare `w` the method does not shadow) is
+accepted as a host `kernel.tensors.matmul/mma/linear` operand, on the interpreter and on the
+Metal, CUDA, ROCm, wgpu and SIMD builds (Metal and SIMD run; the others are transpiled). It is lowered by
+`src/desugar_tensor_fields.rs`, an AST pass run first by `infer_tensor_operand_quals`: the call is
+rewritten to use `__tf_`-prefixed local aliases typed like the fields, plus a write-back for the
+destination, so the checker, the interpreter and the host synthesizers keep seeing only plain
+variables (the interpreter exempts that write-back from the "immutable field" rule through the
+prefix). Semantics:
+
+- a destination field must be `mut`, the method `def`; the result is stored back into the field and
+  is visible to the caller afterwards;
+- each call has its own alias, the aliases of one field share one inferred residency (written back
+  onto the field declaration when it was omitted or a bare `'kernel`), so the same field passed to
+  several methods stays consistent; the same field as input and destination is the existing alias
+  error;
+- an explicit `'global`/`'unified` on the field is kept; otherwise `mut` fields default to
+  `'unified` and read-only ones to `'global`, as for locals;
+- the alias is a copy (a resident field is downloaded by reference first, the destination is stored
+  back as host data): a per-call cost proportional to the field size, not a view. Constructor
+  arguments are not followed, nested fields (`self.a.w`) and fields outside the struct's methods are
+  still not operands.
+
+Tests: `tests/tensor_struct_fields.rs` (interpreter output, five-target builds, diagnostics) and
+the `desugar_tensor_quals` unit tests on field inference.

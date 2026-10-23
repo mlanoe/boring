@@ -188,6 +188,23 @@ impl Transpiler {
     /// by reference, mirroring `try_emit_gpu_resident_call_let`'s opt-out path.
     /// Returns `true` when handled.
     pub(crate) fn try_emit_gpu_resident_alias_let(&mut self, s: &LetStmt) -> bool {
+        // A resident struct field read into a `__tf_` alias (`desugar_tensor_fields`): the host
+        // tensor call in a method works on plain host vectors, so the alias downloads the field
+        // by reference (a `Host` field is just cloned); the write-back re-wraps it as `Host`.
+        if let Some(val) = &s.value {
+            if s.name.starts_with(crate::desugar_tensor_fields::ALIAS_PREFIX) && self.expr_is_gpu_resident_field(val) {
+                if let Some(ty) = &s.ty {
+                    let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+                    let name = escape_rust_keyword(&s.name);
+                    let src = self.emit_expr(val);
+                    let materialized = self.materialize_resident_var(&src, ty.without_mut());
+                    self.line(&format!("{kw} {name} = {materialized};"));
+                    self.var_types.insert(s.name.clone(), ty.clone());
+                    self.known_local_vars.insert(s.name.clone());
+                    return true;
+                }
+            }
+        }
         if self.resident_call_vars.is_empty() {
             return false;
         }

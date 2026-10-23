@@ -60,8 +60,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 pub fn infer_tensor_operand_quals(mut program: Program) -> Program {
-    reject_unsupported_markers(&program.items);
-    infer_unit(&mut program.items);
+    // Struct-field operands become local aliases first (`desugar_tensor_fields`), so the
+    // inference below sees ordinary bindings; the aliases of one field share a qualifier.
+    let aliases = crate::desugar_tensor_fields::lower_field_operands(&mut program.items);
+    ERRORS.with(|e| e.borrow_mut().extend(aliases.errors.iter().cloned()));
+    reject_unsupported_markers(&program.items, &aliases.used);
+    infer_unit(&mut program.items, &aliases);
     program
 }
 
@@ -87,7 +91,7 @@ fn marker_error(what: &str, line: usize, col: usize) {
 }
 
 /// A written `'kernel` the pass will not resolve (so it must not reach the later stages).
-fn reject_unsupported_markers(items: &[Item]) {
+fn reject_unsupported_markers(items: &[Item], used_fields: &HashSet<(String, String)>) {
     fn fn_decl(f: &FnDecl, what: &str) {
         for p in &f.params {
             if has_marker(p.ty.as_ref()) { marker_error(what, p.line, p.col); }
@@ -111,10 +115,14 @@ fn reject_unsupported_markers(items: &[Item]) {
                 marker_error("a non-array binding", l.line, l.col);
             }
             Item::Fn(f) => free_fn(f),
-            Item::Mod(m) => reject_unsupported_markers(&m.items),
+            Item::Mod(m) => reject_unsupported_markers(&m.items, used_fields),
             Item::Struct(st) => {
                 for f in &st.fields {
-                    if has_marker(Some(&f.ty)) { marker_error("a struct field", f.line, f.col); }
+                    // A field resolves through the aliases a host tensor call in one of the
+                    // struct's methods gave it; a never-used one has nothing to resolve from.
+                    if has_marker(Some(&f.ty)) && !used_fields.contains(&(st.name.clone(), f.name.clone())) {
+                        marker_error("a struct field that no method of its struct passes to a host tensor call", f.line, f.col);
+                    }
                 }
                 // Struct methods take part in the inference like free functions.
                 for m in &st.methods { free_fn(m); }
@@ -304,10 +312,10 @@ struct NodeInfo {
     mutable: bool,
 }
 
-fn infer_unit(items: &mut [Item]) {
+fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldAliases) {
     // Nested modules are independent units: they resolve calls against their own functions.
     for item in items.iter_mut() {
-        if let Item::Mod(m) = item { infer_unit(&mut m.items); }
+        if let Item::Mod(m) = item { infer_unit(&mut m.items, aliases); }
     }
 
     // --- nodes -------------------------------------------------------------------------
@@ -540,6 +548,17 @@ fn infer_unit(items: &mut [Item]) {
             slot.unions.extend(f.unions);
         }
     }
+    // The aliases of one struct field stand for the same array: one group, one qualifier.
+    {
+        let mut by_field: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for ((_, name), &id) in &let_nodes {
+            if let Some(key) = aliases.by_alias.get(name) { by_field.entry(key.clone()).or_default().push(id); }
+        }
+        for ids in by_field.values_mut() {
+            ids.sort_unstable();
+            for pair in ids.windows(2) { facts[pair[0]].unions.push(pair[1]); }
+        }
+    }
     // A top-level binding is visible from every free-function body: read its uses there like
     // those of the top level itself. A function that declares the same name shadows it (the
     // mention is not this binding), and a method may mean a field of that name: both stay
@@ -587,7 +606,10 @@ fn infer_unit(items: &mut [Item]) {
         g.members.push(id);
         g.forced.extend(fact.forced.iter().cloned());
     }
-    let label = |id: usize| format!("{}::{}", infos[id].scope, infos[id].name);
+    let label = |id: usize| match aliases.by_alias.get(&infos[id].name) {
+        Some((owner, field)) => format!("{}::{owner}.{field}", infos[id].scope),
+        None => format!("{}::{}", infos[id].scope, infos[id].name),
+    };
     // The decision and the sentence that explains it (for `--show-qualifiers`).
     let resolve = |g: &Group| -> Option<(OwnerQual, String)> {
         if !g.operand { return None; }
@@ -616,7 +638,10 @@ fn infer_unit(items: &mut [Item]) {
         let shared: Vec<String> = g.members.iter().copied().filter(|&m| m != id).map(label).collect();
         DECISIONS.with(|d| d.borrow_mut().push(Decision {
             scope: info.scope.clone(),
-            name: info.name.clone(),
+            name: match aliases.by_alias.get(&info.name) {
+                Some((owner, field)) => format!("{owner}.{field} (struct field)"),
+                None => info.name.clone(),
+            },
             line: info.line,
             col: info.col,
             qual: qual_text(&q),
@@ -631,7 +656,9 @@ fn infer_unit(items: &mut [Item]) {
     // A `mut` that changes nothing but the default: it is in a participating group, and
     // every use of the array is one the pass fully understands as read-only.
     for (id, info) in infos.iter().enumerate().take(node_count) {
-        if decided.contains_key(&id) && info.mutable && !facts[id].maybe_written {
+        if decided.contains_key(&id) && info.mutable && !facts[id].maybe_written
+            && !info.name.starts_with(crate::desugar_tensor_fields::ALIAS_PREFIX)
+        {
             WARNINGS.with(|w| w.borrow_mut().push(crate::errors::SourceError::at(
                 format!(
                     "`{}` is declared `mut` but is never written: use `let` (a `mut` array is inferred \
@@ -644,6 +671,7 @@ fn infer_unit(items: &mut [Item]) {
     }
 
     // --- apply -------------------------------------------------------------------------
+    let mut field_quals: HashMap<(String, String), OwnerQual> = HashMap::new();
     for (i, item) in items.iter_mut().enumerate() {
         match item {
             Item::Let(l) => {
@@ -675,6 +703,21 @@ fn infer_unit(items: &mut [Item]) {
                         }
                     }
                     requalify_lets(&mut m.body, fid, &let_nodes, &decided);
+                    for l in all_lets(&m.body) {
+                        let Some((owner, field)) = aliases.by_alias.get(&l.name) else { continue };
+                        if let Some(q) = let_nodes.get(&(fid, l.name.clone())).and_then(|id| decided.get(id)) {
+                            field_quals.insert((owner.clone(), field.clone()), q.clone());
+                        }
+                    }
+                }
+                // The field declaration takes what its aliases resolved to.
+                for f in st.fields.iter_mut() {
+                    if !is_node_type(Some(&f.ty)) { continue; }
+                    if let Some(q) = field_quals.get(&(st.name.clone(), f.name.clone())) {
+                        let mut ty = Some(f.ty.clone());
+                        requalify(&mut ty, q.clone());
+                        if let Some(ty) = ty { f.ty = ty; }
+                    }
                 }
             }
             _ => {}
@@ -1747,5 +1790,77 @@ mod tests {
     fn bare_kernel_on_an_extension_method_is_still_an_error() {
         let got = errors_of("ext Vec:\n    def go([float32, k = 2, m = 2]'kernel x):\n        print \"{x}\"\n");
         assert!(got.iter().any(|e| e.contains("a method")), "{got:?}");
+    }
+    // --- struct fields as host operands (desugar_tensor_fields) -----------------------------
+
+    fn field_qual(program: &Program, sname: &str, field: &str) -> Option<OwnerQual> {
+        program.items.iter().find_map(|i| match i {
+            Item::Struct(st) if st.name == sname => st.fields.iter().find(|f| f.name == field),
+            _ => None,
+        }).and_then(|f| f.ty.without_mut().gpu_resident_qual().cloned())
+    }
+
+    fn layer(w: &str, out: &str, extra: &str) -> String {
+        format!("struct Layer:\n    let [float32, k = 2, m = 2]{w} w\n    mut [float32, n = 2, m = 2]{out} out\n\n    def forward([float32, n = 2, k = 2]'kernel'global x) throws:\n        kernel.tensors.matmul(x, w, out)\n{extra}")
+    }
+
+    #[test]
+    fn field_operands_become_aliases_with_a_write_back() {
+        let program = run(&layer("'kernel'global", "'kernel'unified", ""));
+        let Item::Struct(st) = &program.items[0] else { panic!() };
+        let body = &st.methods[0].body;
+        assert!(matches!(&body[0], Stmt::Let(l) if l.name.starts_with("__tf_w_")));
+        assert!(matches!(&body[1], Stmt::Let(l) if l.name.starts_with("__tf_out_") && l.ty.as_ref().unwrap().is_mut()));
+        assert!(matches!(&body[3], Stmt::Expr(e) if matches!(&e.kind, ExprKind::Assign(..))));
+        assert_eq!(body.len(), 4);
+    }
+
+    #[test]
+    fn unqualified_field_gets_its_residency_inferred() {
+        let program = run(&layer("", "", ""));
+        assert_eq!(field_qual(&program, "Layer", "w"), G);
+        assert_eq!(field_qual(&program, "Layer", "out"), U);
+    }
+
+    #[test]
+    fn bare_kernel_field_is_resolved_when_a_method_uses_it() {
+        let program = run(&layer("'kernel", "'kernel", ""));
+        assert_eq!(field_qual(&program, "Layer", "w"), G);
+        assert_eq!(field_qual(&program, "Layer", "out"), U);
+        assert!(errors_of(&layer("'kernel", "'kernel", "")).is_empty());
+    }
+
+    #[test]
+    fn a_field_shares_one_residency_across_methods() {
+        // `out` is only read by `peek` but written by `forward`: one qualifier, 'unified.
+        let extra = "\n    def peek([float32, n = 2, k = 2]'kernel'global eye, mut [float32, n = 2, m = 2]'kernel'global res) throws:\n        kernel.tensors.matmul(out, eye, res)\n";
+        let program = run(&layer("", "", extra));
+        assert_eq!(field_qual(&program, "Layer", "out"), U);
+        // an explicit demand from another method's parameter reaches the field too
+        let extra = "\n    def peek([float32, n = 2, k = 2]'kernel'global eye, mut [float32, n = 2, m = 2]'kernel'global res) throws:\n        kernel.tensors.matmul(out, eye, res)\n";
+        let src = layer("", "", extra).replace("mut [float32, n = 2, m = 2] out", "[float32, n = 2, m = 2] out");
+        let program = run(&src);
+        assert_eq!(field_qual(&program, "Layer", "out"), G);
+    }
+
+    #[test]
+    fn a_bare_kernel_field_nothing_uses_is_still_an_error() {
+        let got = errors_of("struct S:\n    let [float32, k = 2, m = 2]'kernel a\n    def go() throws:\n        print \"x\"\n");
+        assert!(got.iter().any(|e| e.contains("a struct field")), "{got:?}");
+    }
+
+    #[test]
+    fn a_shadowing_parameter_is_not_the_field() {
+        let src = "struct Layer:\n    let [float32, k = 2, m = 2] w\n    def forward([float32, n = 2, k = 2] x, [float32, k = 2, m = 2] w, mut [float32, n = 2, m = 2] out) throws:\n        kernel.tensors.matmul(x, w, out)\n";
+        let program = run(src);
+        assert_eq!(field_qual(&program, "Layer", "w"), None);
+    }
+
+    #[test]
+    fn a_destination_field_needs_mut_and_a_def_method() {
+        let src = layer("'kernel'global", "'kernel'unified", "").replace("mut [float32, n = 2, m = 2]'kernel'unified out", "[float32, n = 2, m = 2]'kernel'unified out");
+        assert!(errors_of(&src).iter().any(|e| e.contains("must be declared `mut`")), "{:?}", errors_of(&src));
+        let src = layer("'kernel'global", "'kernel'unified", "").replace("def forward", "req forward");
+        assert!(errors_of(&src).iter().any(|e| e.contains("must be `def`")), "{:?}", errors_of(&src));
     }
 }

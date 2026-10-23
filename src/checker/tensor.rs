@@ -12,13 +12,15 @@ pub(crate) fn is_tensor_call(call: &Expr) -> bool {
 }
 
 impl super::Checker {
-    /// A host tensor operand that is not a plain name. A struct field (`self.w`) gets the cause
-    /// spelled out: only locals and parameters carry the declared residency the call is built from.
+    /// A host tensor operand that is not a plain name. A struct field reaching here (not
+    /// `self.<field>` in a method of its struct, which `desugar_tensor_fields` already lowered)
+    /// gets the cause spelled out.
     fn not_a_direct_operand(&mut self, operand: &Expr, line: usize, col: usize) {
         let msg = match &operand.kind {
             ExprKind::Field(base, field) if matches!(&base.kind, ExprKind::Var(_)) => format!(
-                "host tensor operands must be direct variables: `{field}` is a struct field, which \
-                 cannot be a host tensor operand — pass the array to the function or method as a parameter"
+                "host tensor operands must be direct variables: `{field}` is a struct field, which is an \
+                 operand only as `self.{field}` (or a bare `{field}`) inside a method of its own struct — \
+                 elsewhere, pass the array to the function or method as a parameter"
             ),
             _ => "host tensor operands must be direct variables".to_string(),
         };
@@ -30,8 +32,9 @@ impl super::Checker {
     fn undefined_operand(&mut self, name: &str, line: usize, col: usize) {
         let msg = if self.current_struct_fields.contains(name) {
             format!(
-                "undefined tensor operand '{name}': it is a field of `{}`, and a struct field cannot be a \
-                 host tensor operand — pass the array to the method as a parameter",
+                "undefined tensor operand '{name}': it is a field of `{}` that is not an array type the host \
+                 tensor call can use — declare it as a labeled array with `'kernel'global`/`'kernel'unified`, \
+                 or pass the array to the method as a parameter",
                 self.current_struct.as_deref().unwrap_or("this struct")
             )
         } else {

@@ -1651,6 +1651,13 @@ impl Interpreter {
                 if matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
                     val = self.stored_copy(value, val, &env);
                 }
+                // The write-back of a host tensor destination field (`desugar_tensor_fields`)
+                // stores the call's result into the field's content, so a `mut` field accepts it.
+                if matches!(target.kind, ExprKind::Field(..))
+                    && matches!(&value.kind, ExprKind::Var(n) if n.starts_with(crate::desugar_tensor_fields::ALIAS_PREFIX))
+                {
+                    self.in_content_writeback = true;
+                }
                 self.assign(target, val.clone(), Rc::clone(&env), line)?;
                 Ok(val)
             }
