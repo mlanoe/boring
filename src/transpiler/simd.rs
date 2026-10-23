@@ -397,6 +397,20 @@ fn __boring_gemm(a: &[f32], lda: usize, row0: usize, rows: usize, b: &[f32], ldb
     { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_dot_fma(a, b, init) }; } }
     __boring_dot_with(a, b, init, __boring_fma)
 }
+/// Same arithmetic as `__boring_dot_with` but the sixteen partial sums live in the caller, so a
+/// quantized column can add block after block and reduce horizontally once at the end.
+#[allow(dead_code)] #[inline(always)] fn __boring_dot_lanes_with(a: &[f32], b: &[f32], acc: &mut [f32; 16], fma: impl Fn(f32, f32, f32) -> f32) {
+    let n = a.len().min(b.len());
+    for (x, y) in a[..n].chunks_exact(16).zip(b[..n].chunks_exact(16)) { for l in 0..16 { acc[l] = fma(x[l], y[l], acc[l]); } }
+}
+#[cfg(target_arch = "x86_64")] #[allow(dead_code)] #[target_feature(enable = "avx2,fma")] unsafe fn __boring_dot_lanes_fma(a: &[f32], b: &[f32], acc: &mut [f32; 16]) {
+    __boring_dot_lanes_with(a, b, acc, |x, y, z| x.mul_add(y, z))
+}
+#[allow(dead_code)] #[inline(always)] fn __boring_dot_lanes(a: &[f32], b: &[f32], acc: &mut [f32; 16]) {
+    #[cfg(target_arch = "x86_64")]
+    { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_dot_lanes_fma(a, b, acc) }; } }
+    __boring_dot_lanes_with(a, b, acc, __boring_fma)
+}
 #[inline(always)] fn __boring_axpy(out: &mut [f32], scale: f32, row: &[f32]) {
     #[cfg(target_arch = "x86_64")]
     { if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") { return unsafe { __boring_axpy_fma(out, scale, row) }; } }
@@ -590,6 +604,261 @@ fn __boring_simd_parallel_threshold() -> usize {
             }
         }
     }
+}
+// ---- Opt-in int8 decode (`BORING_SIMD_QUANT_INT8=1`, single-row `linear` only) -----------------
+// The activation row is rounded to int8 per 32-element block (scale = max|x| / 127) and each weight
+// block is expressed as small integers times a float scale per sub block (plus a float minimum for
+// Q4_K/Q2_K), so a sub block's contribution is `scale * act_scale * sum(q * qa) - min * act_scale *
+// sum(qa)` with the two sums in integer arithmetic (NEON `vmull_s8` + `vpadalq_s16`; on x86 SSSE3
+// `maddubs`, which every AVX2 CPU has). The result differs from the float schedule by the activation rounding, never by the
+// weights; it is an explicit precision/speed trade and is never the default.
+/// 0 = off (default), 1 = int8 kernels, 2 = `activations`: round the activations to int8 exactly as
+/// mode 1 does but compute in float, the reference that isolates the integer kernels' correctness.
+#[allow(dead_code)] fn __boring_simd_quant_int8() -> u8 {
+    static INT8: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *INT8.get_or_init(|| match std::env::var("BORING_SIMD_QUANT_INT8").as_deref() { Ok("1") => 1, Ok("activations") => 2, _ => 0 })
+}
+/// The activations as mode 1 sees them: rounded to int8 per 32-block, back to float.
+#[allow(dead_code)] fn __boring_round_activations(x: &[f32]) -> Vec<f32> {
+    let (qa, scales, _) = __boring_quantize_activations(x);
+    qa.iter().enumerate().map(|(i, &v)| v as f32 * scales[i / 32]).collect()
+}
+/// Per 32-block int8 activations, their block scales, and the int sums of every 16 activations.
+#[allow(dead_code)] fn __boring_quantize_activations(x: &[f32]) -> (Vec<i8>, Vec<f32>, Vec<i32>) {
+    let mut qa = vec![0i8; x.len()];
+    let mut scales = vec![0f32; x.len() / 32];
+    for (block, chunk) in x.chunks_exact(32).enumerate() {
+        let amax = chunk.iter().fold(0f32, |m, v| m.max(v.abs()));
+        if amax == 0.0 { continue; }
+        scales[block] = amax / 127.0;
+        let inverse = 127.0 / amax;
+        for (i, v) in chunk.iter().enumerate() { qa[block * 32 + i] = (v * inverse).round() as i8; }
+    }
+    let sums = qa.chunks_exact(16).map(|c| c.iter().map(|&v| v as i32).sum::<i32>()).collect();
+    (qa, scales, sums)
+}
+/// `sum(q[i] * qa[i])` for 16 or 32 values, in integer arithmetic. |q| <= 128 and |qa| <= 127.
+#[allow(dead_code)] #[inline(always)] fn __boring_idot(q: &[i8], qa: &[i8]) -> i32 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut acc = vdupq_n_s32(0);
+        for off in (0..q.len()).step_by(16) {
+            let (x, y) = (vld1q_s8(q.as_ptr().add(off)), vld1q_s8(qa.as_ptr().add(off)));
+            acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(x), vget_low_s8(y)));
+            acc = vpadalq_s16(acc, vmull_high_s8(x, y));
+        }
+        return vaddvq_s32(acc);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if __boring_avx2_int8_ok() { return unsafe { __boring_idot_avx2(q, qa) }; }
+        if std::is_x86_feature_detected!("ssse3") { return unsafe { __boring_idot_ssse3(q, qa) }; }
+    }
+    #[allow(unreachable_code)]
+    { q.iter().zip(qa).map(|(&a, &b)| a as i32 * b as i32).sum() }
+}
+#[cfg(target_arch = "x86_64")] #[allow(dead_code)] #[target_feature(enable = "ssse3")] unsafe fn __boring_idot_ssse3(q: &[i8], qa: &[i8]) -> i32 {
+    use std::arch::x86_64::*;
+    // maddubs wants (unsigned, signed): use |q| and qa with q's sign (|q| <= 128 fits u8, and a
+    // pair sum is at most 2 * 128 * 127 < 32767, so the i16 accumulate never saturates).
+    let ones = _mm_set1_epi16(1);
+    let mut acc = _mm_setzero_si128();
+    for off in (0..q.len()).step_by(16) {
+        let x = _mm_loadu_si128(q.as_ptr().add(off) as *const __m128i);
+        let y = _mm_loadu_si128(qa.as_ptr().add(off) as *const __m128i);
+        let pairs = _mm_maddubs_epi16(_mm_abs_epi8(x), _mm_sign_epi8(y, x));
+        acc = _mm_add_epi32(acc, _mm_madd_epi16(pairs, ones));
+    }
+    let hi = _mm_unpackhi_epi64(acc, acc);
+    let acc = _mm_add_epi32(acc, hi);
+    let acc = _mm_add_epi32(acc, _mm_shuffle_epi32(acc, 0b01));
+    _mm_cvtsi128_si32(acc)
+}
+/// 256-bit AVX2 form of `__boring_idot_ssse3`: 32 weights per instruction group, with a 128-bit tail for
+/// a 16-wide sub block. NOTE: written without access to AVX2 hardware (the development machine's
+/// Rosetta lacks it), so `__boring_avx2_int8_ok` verifies it against scalar arithmetic before first use.
+#[cfg(target_arch = "x86_64")] #[allow(dead_code)] #[target_feature(enable = "avx2")] unsafe fn __boring_idot_avx2(q: &[i8], qa: &[i8]) -> i32 {
+    use std::arch::x86_64::*;
+    let ones = _mm256_set1_epi16(1);
+    let mut acc = _mm256_setzero_si256();
+    let mut off = 0;
+    while off + 32 <= q.len() {
+        let x = _mm256_loadu_si256(q.as_ptr().add(off) as *const __m256i);
+        let y = _mm256_loadu_si256(qa.as_ptr().add(off) as *const __m256i);
+        let pairs = _mm256_maddubs_epi16(_mm256_abs_epi8(x), _mm256_sign_epi8(y, x));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(pairs, ones));
+        off += 32;
+    }
+    let mut sum = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+    if off < q.len() {
+        let x = _mm_loadu_si128(q.as_ptr().add(off) as *const __m128i);
+        let y = _mm_loadu_si128(qa.as_ptr().add(off) as *const __m128i);
+        let pairs = _mm_maddubs_epi16(_mm_abs_epi8(x), _mm_sign_epi8(y, x));
+        sum = _mm_add_epi32(sum, _mm_madd_epi16(pairs, _mm_set1_epi16(1)));
+    }
+    let sum = _mm_add_epi32(sum, _mm_unpackhi_epi64(sum, sum));
+    let sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, 0b01));
+    _mm_cvtsi128_si32(sum)
+}
+/// Whether the AVX2 integer dot may be used: the CPU has AVX2, `BORING_SIMD_QUANT_NO_AVX2` is not `1`
+/// (forces the SSSE3 path, for comparison), and a one-time self-test agrees with scalar arithmetic on
+/// random and extreme vectors. A disagreement disables the AVX2 path for the process and says so once.
+#[cfg(target_arch = "x86_64")] #[allow(dead_code)] fn __boring_avx2_int8_ok() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        if !std::is_x86_feature_detected!("avx2") || std::env::var("BORING_SIMD_QUANT_NO_AVX2").map(|v| v == "1").unwrap_or(false) { return false; }
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+        let mut cases: Vec<(Vec<i8>, Vec<i8>)> = Vec::new();
+        for len in [16usize, 32] {
+            for (qv, av) in [(-128i8, 127i8), (-128, -127), (127, 127), (127, -127), (0, 127), (-1, -1)] {
+                cases.push((vec![qv; len], vec![av; len]));
+            }
+            for _ in 0..64 {
+                cases.push(((0..len).map(|_| next() as i8).collect(), (0..len).map(|_| (next() % 255) as i8).map(|v| if v == -128 { -127 } else { v }).collect()));
+            }
+        }
+        let agrees = cases.iter().all(|(q, qa)| {
+            let scalar: i32 = q.iter().zip(qa).map(|(&a, &b)| a as i32 * b as i32).sum();
+            unsafe { __boring_idot_avx2(q, qa) == scalar }
+        });
+        if !agrees { eprintln!("boring: the AVX2 int8 kernel failed its self-test; using the SSSE3 kernel instead"); }
+        agrees
+    })
+}
+// Integer block forms: `q` = small signed integers, `ws`/`wm` = per-sub-block float scale / minimum
+// (weight = ws * q - wm). They mirror the float block dequantizers above.
+#[allow(dead_code)] #[inline] fn __boring_intq_q8_0(blk: &[u8], scale: f32, q: &mut [i8; 32], ws: &mut [f32; 1], _wm: &mut [f32; 1]) {
+    let blk: &[u8; 34] = blk.try_into().unwrap();
+    for i in 0..32 { q[i] = blk[2 + i] as i8; }
+    ws[0] = scale;
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_q4_0(blk: &[u8], scale: f32, q: &mut [i8; 32], ws: &mut [f32; 1], _wm: &mut [f32; 1]) {
+    let blk: &[u8; 18] = blk.try_into().unwrap();
+    for i in 0..16 { q[i] = (blk[2 + i] & 0x0f) as i8 - 8; q[16 + i] = (blk[2 + i] >> 4) as i8 - 8; }
+    ws[0] = scale;
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_q5_0(blk: &[u8], scale: f32, q: &mut [i8; 32], ws: &mut [f32; 1], _wm: &mut [f32; 1]) {
+    let blk: &[u8; 22] = blk.try_into().unwrap();
+    let high_bits = u32::from_le_bytes([blk[2], blk[3], blk[4], blk[5]]);
+    for i in 0..16 {
+        q[i] = ((blk[6 + i] & 0x0f) | ((((high_bits >> i) & 1) as u8) << 4)) as i8 - 16;
+        q[16 + i] = ((blk[6 + i] >> 4) | ((((high_bits >> (i + 16)) & 1) as u8) << 4)) as i8 - 16;
+    }
+    ws[0] = scale;
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_iq4_nl(blk: &[u8], scale: f32, q: &mut [i8; 32], ws: &mut [f32; 1], _wm: &mut [f32; 1]) {
+    const TABLE: [i8; 16] = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
+    let blk: &[u8; 18] = blk.try_into().unwrap();
+    for i in 0..16 { q[i] = TABLE[(blk[2 + i] & 0x0f) as usize]; q[16 + i] = TABLE[(blk[2 + i] >> 4) as usize]; }
+    ws[0] = scale;
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_q4_k(blk: &[u8], scale: f32, q: &mut [i8; 256], ws: &mut [f32; 8], wm: &mut [f32; 8]) {
+    let blk: &[u8; 144] = blk.try_into().unwrap();
+    let dmin = __boring_f16_to_f32(u16::from(blk[2]) | (u16::from(blk[3]) << 8));
+    for chunk in 0..4 {
+        for half in 0..2 {
+            let sub = chunk * 2 + half;
+            let (subscale, submin) = if sub < 4 {
+                (blk[4 + sub] & 63, blk[4 + sub + 4] & 63)
+            } else {
+                ((blk[4 + sub + 4] & 15) | ((blk[4 + sub - 4] >> 6) << 4), (blk[4 + sub + 4] >> 4) | ((blk[4 + sub] >> 6) << 4))
+            };
+            ws[sub] = scale * (subscale as f32);
+            wm[sub] = dmin * (submin as f32);
+            let packed = &blk[16 + chunk * 32..16 + chunk * 32 + 32];
+            let dst = &mut q[chunk * 64 + half * 32..chunk * 64 + half * 32 + 32];
+            if half == 0 { for lane in 0..32 { dst[lane] = (packed[lane] & 0x0f) as i8; } }
+            else { for lane in 0..32 { dst[lane] = (packed[lane] >> 4) as i8; } }
+        }
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_q6_k(blk: &[u8], scale: f32, q: &mut [i8; 256], ws: &mut [f32; 16], _wm: &mut [f32; 16]) {
+    let blk: &[u8; 210] = blk.try_into().unwrap();
+    for iteration in 0..2 {
+        let (ql, qh, scales) = (iteration * 64, 128 + iteration * 32, 192 + iteration * 8);
+        for group in 0..4 {
+            for half in 0..2 {
+                ws[(iteration * 4 + group) * 2 + half] = scale * (blk[scales + half + group * 2] as i8 as f32);
+                for l in 0..16 {
+                    let lane = half * 16 + l;
+                    let low = if group & 1 == 0 { blk[ql + lane] } else { blk[ql + lane + 32] };
+                    let nibble = if group < 2 { low & 0x0f } else { low >> 4 };
+                    let high = (blk[qh + lane] >> (group * 2)) & 3;
+                    q[iteration * 128 + group * 32 + lane] = (nibble | (high << 4)) as i8 - 32;
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_q3_k(blk: &[u8], scale: f32, q: &mut [i8; 256], ws: &mut [f32; 16], _wm: &mut [f32; 16]) {
+    let blk: &[u8; 110] = blk.try_into().unwrap();
+    for outer in 0..2 {
+        for group in 0..4 {
+            for sub in 0..2 {
+                let scale_index = outer * 8 + group * 2 + sub;
+                let (scale_word, scale_lane) = (scale_index / 4, scale_index % 4);
+                let scale_byte = blk[96 + (scale_word % 2) * 4 + scale_lane];
+                let scale_low = if scale_word < 2 { scale_byte & 15 } else { scale_byte >> 4 };
+                let scale_high = (blk[104 + scale_lane] >> (scale_word * 2)) & 3;
+                ws[scale_index] = scale * (((scale_low | (scale_high << 4)) as i32 - 32) as f32);
+                let shift = group * 2;
+                let mask = 1u8 << (outer * 4 + group);
+                let packed = &blk[32 + outer * 32 + sub * 16..32 + outer * 32 + sub * 16 + 16];
+                let high = &blk[sub * 16..sub * 16 + 16];
+                let dst = &mut q[outer * 128 + group * 32 + sub * 16..outer * 128 + group * 32 + sub * 16 + 16];
+                for lane in 0..16 {
+                    let offset = if high[lane] & mask == 0 { 4 } else { 0 };
+                    dst[lane] = ((packed[lane] >> shift) & 3) as i8 - offset;
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_intq_q2_k(blk: &[u8], scale: f32, q: &mut [i8; 256], ws: &mut [f32; 16], wm: &mut [f32; 16]) {
+    let blk: &[u8; 84] = blk.try_into().unwrap();
+    let dmin = __boring_f16_to_f32(u16::from(blk[82]) | (u16::from(blk[83]) << 8));
+    for outer in 0..2 {
+        for group in 0..4 {
+            for sub in 0..2 {
+                let scale_index = outer * 8 + group * 2 + sub;
+                let scale_byte = blk[scale_index];
+                ws[scale_index] = scale * ((scale_byte & 15) as f32);
+                wm[scale_index] = dmin * ((scale_byte >> 4) as f32);
+                let shift = group * 2;
+                let packed = &blk[16 + outer * 32 + sub * 16..16 + outer * 32 + sub * 16 + 16];
+                let dst = &mut q[outer * 128 + group * 32 + sub * 16..outer * 128 + group * 32 + sub * 16 + 16];
+                for lane in 0..16 { dst[lane] = ((packed[lane] >> shift) & 3) as i8; }
+            }
+        }
+    }
+}
+/// One output column of the int8 schedule: `NSUB` sub blocks of `BE / NSUB` weights per block.
+#[allow(dead_code)] fn __boring_int8_column<const BE: usize, const NSUB: usize, const MIN: bool>(
+    b: &[u8], col: usize, blocks: usize, block_bytes: usize, scale_offset: usize,
+    intq: fn(&[u8], f32, &mut [i8; BE], &mut [f32; NSUB], &mut [f32; NSUB]),
+    qa: &[i8], act_scales: &[f32], act_sums: &[i32],
+) -> f32 {
+    let sub = BE / NSUB;
+    let mut total = 0f32;
+    for blk in 0..blocks {
+        let offset = (col * blocks + blk) * block_bytes;
+        let scale = __boring_f16_to_f32(u16::from(b[offset + scale_offset]) | (u16::from(b[offset + scale_offset + 1]) << 8));
+        let mut q = [0i8; BE]; let mut ws = [0f32; NSUB]; let mut wm = [0f32; NSUB];
+        intq(&b[offset..offset + block_bytes], scale, &mut q, &mut ws, &mut wm);
+        let base = blk * BE;
+        for s in 0..NSUB {
+            let at = base + s * sub;
+            let act = act_scales[at / 32];
+            total += ws[s] * act * (__boring_idot(&q[s * sub..(s + 1) * sub], &qa[at..at + sub]) as f32);
+            if MIN {
+                let sum: i32 = act_sums[at / 16..(at + sub) / 16].iter().sum();
+                total -= wm[s] * act * (sum as f32);
+            }
+        }
+    }
+    total
 }
 #[allow(dead_code)] #[inline(always)] fn __boring_f16_to_f32(bits: u16) -> f32 {
     static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();

@@ -112,26 +112,69 @@ heterogeneous performance/efficiency cores busy. On an Apple M3 the one-row deco
 2048x11008 Q8_0 weight went from 13.5 ms to 4.2 ms per call and Q4_0 from 20.4 ms to 5.7 ms. Every cell is
 computed in the same order whatever the worker count, so results are bit-identical to
 `BORING_SIMD_THREADS=1` (checked by `tests/simd_quant_linear.rs`).
-The per-block dequantization of the quantized `linear` uses flat-loop block dequantizers
-(`__boring_dequant_<format>`) that the compiler vectorizes (NEON, SSE, AVX2). They compute the
-same f32 weights as the original per-element decoder, operation for operation, so results are
-bit-identical (checked by `tests/simd_quant_linear.rs` for all eight formats, single worker and
-forced-parallel). On a loaded Apple M3 the one-row decode of a 2048x11008 weight ran 1.3x (Q8_0),
-1.9x (Q4_0), 2.4x (Q5_0), 4x (IQ4_NL), 7x (Q4_K), 5x (Q6_K), 5x (Q3_K) and 7x (Q2_K) faster than
-the original decoder on one worker, and 1.3x to 4x faster on eight; the machine load varied during
-those runs, so only the ratios within each pair are meaningful. `BORING_SIMD_QUANT_REFERENCE=1`
-selects the original per-element decoder, kept for comparison and regression checks.
-Further microkernels were evaluated with `tools/simd_quant_microbench.rs` (Q8_0, one core, Apple M3,
-loaded machine, stable ordering over repeated runs). The shipped schedule reduces its sixteen
-accumulators horizontally after every 32-weight block, which costs as much as the dequantization.
-Keeping the sixteen float lanes across blocks and reducing once per column ran about 2.2-2.5x faster
-than the original order at ~1.5e-6 relative difference (sums reassociated, still deterministic and
-worker-count independent, like the float `linear`). An int8-activation NEON kernel (activations
-rounded to int8 per 32-block, `vmull_s8` + `vpadalq_s16`) ran about 5-7x faster still but differs from
-the float reference by ~2e-2 relative on the benchmark's random weights, so it could only be an
-explicit opt-in precision mode; the sdot instruction (`vdotq_s32`) is unstable in Rust, and AVX2 would
-use `_mm256_maddubs_epi16`. Neither is implemented. Backend-specific BLAS integration also remains
-future work.
+### Quantized `linear` schedules
+
+Three schedules exist for the quantized `linear` (Q8_0, Q4_0, Q5_0, IQ4_NL, Q4_K, Q6_K, Q3_K, Q2_K);
+the default is the middle one and the others are selected with environment variables.
+
+| Schedule | Selected by | Numerics |
+|---|---|---|
+| reference | `BORING_SIMD_QUANT_REFERENCE=1` | original per-element decoder, horizontal sum after every block |
+| float (default) | nothing | flat-loop block dequantizers (`__boring_dequant_<format>`) and sixteen float lanes kept across blocks, one horizontal sum per column |
+| int8 | `BORING_SIMD_QUANT_INT8=1` | single-row decode only: activations rounded to int8 |
+
+**Float (default).** The block dequantizers produce exactly the weights of the reference decoder
+(same operations in the same order) as vectorizable loops, and keeping the sixteen partial sums
+across blocks removes the sixteen dependent additions the reference pays per block. Sums are
+reassociated, so results differ from the reference by about 1e-6 of the output scale (declared and
+tested bound: 1e-5), exactly like the float `linear`; they never depend on the number of workers.
+
+**Int8 (opt-in, `m == 1` only).** The activation row is rounded to int8 per 32-element block
+(`scale = max|x| / 127`), every weight block is expressed as small integers times a float scale per
+sub block (plus a float minimum for Q4_K and Q2_K), and each sub block is one integer dot product,
+`vmull_s8` + `vpadalq_s16` on AArch64, and `maddubs` on x86-64: a 256-bit AVX2 form
+(`__boring_idot_avx2`) when the CPU has AVX2 and the 128-bit SSSE3 form otherwise (`vdotq_s32` is
+still unstable in Rust), with a scalar fallback. The weights are exact; the
+only error is the activation rounding. **Declared tolerance: 6e-2 of the largest output magnitude**
+(observed up to 4.9e-2 for Q4_K, where the minimum term amplifies the rounding, typically 2e-3 to
+1e-2), checked in `tests/simd_quant_linear.rs`. A separate diagnostic value,
+`BORING_SIMD_QUANT_INT8=activations`, rounds the activations the same way but computes in float:
+the integer kernels must match it within 2e-5, which isolates their correctness from the rounding
+(measured about 2e-7 on AArch64 and, through Rosetta with the real SSSE3 code, on x86-64). Any
+`m > 1` call keeps the float schedule untouched.
+
+**AVX2 caveat.** The 256-bit AVX2 kernel was written on a machine whose Rosetta has no AVX2, so it has
+been type-checked for `x86_64` (the generated crate builds) but never executed. Two safeguards follow
+from that. Before its first use it verifies itself against scalar arithmetic on 140 random and extreme
+vectors (including -128 x -127), and on any disagreement it disables itself for the process, prints
+`the AVX2 int8 kernel failed its self-test; using the SSSE3 kernel instead` once, and the SSSE3 kernel
+(which was executed, through Rosetta) takes over. `BORING_SIMD_QUANT_NO_AVX2=1` forces the SSSE3 kernel.
+On an AVX2 machine `cargo test --test simd_quant_linear` also runs
+`avx2_int8_kernel_is_bit_identical_to_the_ssse3_kernel_when_available`, and every test in that file
+fails if the self-test message appears. The self-test vectors themselves were run through the SSSE3
+kernel under Rosetta with no mismatch, so a failure on real hardware would mean a real AVX2 bug, not a
+bad vector.
+
+**Measured** on an Apple M3, one-row decode of a 2048x11008 weight, best of three runs per mode
+while another process kept the machine at a load average of 10-20 (use the ratios; `ms/call`):
+
+| Format | threads | reference | float | int8 | float vs ref | int8 vs float |
+|---|---|---|---|---|---|---|
+| Q8_0 | 1 / 8 | 29.9 / 12.1 | 17.2 / 4.7 | 2.9 / 2.2 | 1.7x / 2.6x | 5.9x / 2.1x |
+| Q4_0 | 1 / 8 | 51.6 / 11.2 | 12.9 / 4.1 | 6.5 / 1.5 | 4.0x / 2.8x | 2.0x / 2.7x |
+| Q5_0 | 1 / 8 | 47.8 / 19.4 | 8.8 / 6.1 | 10.5 / 4.3 | 5.5x / 3.2x | **0.8x** / 1.4x |
+| IQ4_NL | 1 / 8 | 72.7 / 22.5 | 8.8 / 3.5 | 7.0 / 2.9 | 8.3x / 6.5x | 1.2x / 1.2x |
+| Q4_K | 1 / 8 | 62.5 / 18.6 | 7.3 / 3.2 | 2.9 / 1.6 | 8.6x / 5.9x | 2.5x / 2.0x |
+| Q6_K | 1 / 8 | 47.3 / 15.5 | 9.5 / 3.9 | 5.8 / 2.6 | 5.0x / 4.0x | 1.6x / 1.5x |
+| Q3_K | 1 / 8 | 55.6 / 17.1 | 9.6 / 3.5 | 3.6 / 1.6 | 5.8x / 4.8x | 2.7x / 2.2x |
+| Q2_K | 1 / 8 | 52.6 / 16.8 | 7.0 / 2.5 | 3.4 / 1.6 | 7.5x / 6.8x | 2.1x / 1.5x |
+
+The int8 gain is smaller than a bare integer dot product would give (about 6x in
+`tools/simd_quant_microbench.rs`) because every block still pays its weight-extraction step, and Q5_0
+single-worker is slower in int8 because rebuilding its fifth bits costs more than the integer dot
+saves, so int8 is worth enabling per workload, not blindly.
+
+Backend-specific BLAS integration also remains future work.
 
 Very large operations use the host's available parallelism. Set
 `BORING_SIMD_THREADS=N` to cap them to `N` workers; `BORING_SIMD_THREADS=1`
