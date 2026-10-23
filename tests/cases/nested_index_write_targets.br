@@ -1,0 +1,31 @@
+# Regression: a nested index (an index read from another array) used as the
+# outer index of an assignment OR compound-assignment target:
+# `count[lengths[start + i]] += 1`, `lengths[order[i]] = v`,
+# `a[b[c[i]]] += 1`, `self.a[b[i]] = v`.
+
+struct Table:
+    var mut [int] slots = [0, 0, 0, 0]
+    var mut [int] map = [3, 2, 1, 0]
+
+    def put(int i, int v):
+        slots[map[i]] = v
+        slots[map[i]] += 10
+
+def main():
+    mut [int] lengths = [1, 2, 1, 0]
+    mut [int] count = [0, 0, 0, 0]
+    mut [int] order = [3, 2, 1, 0]
+    mut [int] offs = [0, 1, 2, 3]
+    mut [int] symbol = [0, 0, 0, 0]
+    let start = 1
+    for i in 0..<2:
+        count[lengths[start + i]] += 1
+        lengths[order[i]] = i
+        symbol[offs[i + 1]] = i
+    mut [int] deep = [0, 0, 0, 0]
+    deep[order[offs[1]]] += 5
+    deep[order[offs[order[3]]]] = 7
+    mut t = Table()
+    t.put(0, 4)
+    let [int] slots = t.slots
+    print "{count} {lengths} {symbol} {deep} {slots}"

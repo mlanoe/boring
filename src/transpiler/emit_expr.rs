@@ -1824,7 +1824,9 @@ impl Transpiler {
             let raw = self.emit_expr(idx);
             match &idx.kind {
                 ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
-                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) => format!("({}) as usize", raw),
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                // Nested index read (`a[b[i]]`), also as the target of `a[b[i]] += v`.
+                | ExprKind::Index(..) => format!("({}) as usize", raw),
                 _ => raw,
             }
         };
