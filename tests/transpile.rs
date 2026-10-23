@@ -1483,3 +1483,7 @@ transpile_test!(fn_handle_pass_and_str_arg);
 transpile_test!(fn_scenarios);
 transpile_test!(optional_scenarios);
 transpile_test!(closure_scenarios);
+
+// `[self.field] as [[uint8]]` clones the byte-array field (was E0507), and a method's array param
+// used in several calls compiles. See the fixture's header.
+transpile_test!(bytes_array_field_and_param_reuse);

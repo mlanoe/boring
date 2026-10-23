@@ -1,0 +1,41 @@
+# Regression fixture for two byte-array ownership miscompiles:
+#
+#   1. `[self.font] as [[uint8]]` in a struct method moved `self.font` out of
+#      `&self` (E0507) instead of cloning it like other field reads.
+#   2. A method taking a `[uint8] font` param and using it in two calls was
+#      emitted with `font: Vec<u8>` by value, so the second use failed E0382.
+#      Arrays are passed by reference automatically; the param must borrow.
+
+struct Face:
+    pub let [uint8] font
+
+    req int stacked():
+        var mut all = [self.font] as [[uint8]]
+        all.push([9 as uint8])
+        return all.len() as int
+
+    req int size([uint8] data):
+        return data.len() as int
+
+    req int twice([uint8] data):
+        let a = self.size(data)
+        let b = self.size(data)
+        return a + b
+
+    req int viaFree([uint8] data, int n):
+        var acc = 0
+        for i in 0..<n:
+            acc = acc + total(data) + self.size(data)
+        return acc
+
+def int total([uint8] data):
+    return data.len() as int + data.len() as int
+
+def main():
+    let f = Face(font=[1 as uint8, 2 as uint8, 3 as uint8])
+    let bytes = [4 as uint8, 5 as uint8]
+    print "{f.stacked()}"
+    print "{f.twice(bytes)}"
+    print "{f.twice(bytes)}"
+    print "{total(bytes)}"
+    print "{f.viaFree(bytes, 2)}"

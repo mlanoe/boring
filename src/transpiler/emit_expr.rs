@@ -466,7 +466,12 @@ impl Transpiler {
                 // so the vec is typed Vec<Rc<str>> consistently.
                 let has_str_lit = elems.iter().any(|e| matches!(&e.kind, ExprKind::Str(_) | ExprKind::StringInterp(_)));
                 let es: Vec<String> = elems.iter().map(|e| {
-                    if has_str_lit { self.emit_expr_owned(e) } else { self.emit_expr(e) }
+                    // A field read (`[self.font]`) is by value: moving a non-Copy field (an
+                    // array, dict, struct...) out of `&self` is E0507, so it takes the same
+                    // clone `emit_expr_owned` gives every other by-value field read.
+                    let owned_field = matches!(&e.kind, ExprKind::Field(..))
+                        && !matches!(self.resolve_expr_type(e), Some(t) if param_ty_is_copy_scalar(&t));
+                    if has_str_lit || owned_field { self.emit_expr_owned(e) } else { self.emit_expr(e) }
                 }).collect();
                 format!("vec![{}]", es.join(", "))
             }
@@ -5846,4 +5851,12 @@ impl Transpiler {
         format!("{}!(\"{}\", {})", macro_name, placeholders, args_s.join(", "))
     }
 
+}
+
+/// A primitive scalar: copied, never moved, so a by-value read of it needs no `.clone()`.
+fn param_ty_is_copy_scalar(t: &Type) -> bool {
+    matches!(t,
+        Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+            | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+            | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
 }
