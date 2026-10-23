@@ -175,8 +175,11 @@ mod macos {
             build(&root, config)
         };
         let scalar_exe = build_fixture("scalar", "[tensor.linear.prefill]\nalgorithm = \"scalar\"\n");
-        let tiled_exe = build_fixture("tiled", "[tensor.linear.prefill]\nalgorithm = \"auto\"\n");
-        assert_ne!(fs::canonicalize(&scalar_exe).unwrap(), fs::canonicalize(&tiled_exe).unwrap());
+        let simd_exe = build_fixture("tiled", "[tensor.linear.prefill]\nalgorithm = \"auto\"\n");
+        // The generic Boring-synthesized kernels stay selectable and must keep working.
+        let portable_exe = build_fixture("portable", "[tensor.linear]\nalgorithm = \"portable\"\n");
+        assert_ne!(fs::canonicalize(&scalar_exe).unwrap(), fs::canonicalize(&simd_exe).unwrap());
+        assert_ne!(fs::canonicalize(&simd_exe).unwrap(), fs::canonicalize(&portable_exe).unwrap());
         for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k"] {
             let k_quant = format.ends_with("_k");
             // m == 1 exercises the decode (matrix-vector) kernels; n = 1000 is not a multiple of the
@@ -185,24 +188,26 @@ mod macos {
             for (m, n, k) in shapes {
                 for with_bias in [false, true] {
                     let scalar = run(&scalar_exe, format, m, n, k, with_bias);
-                    let tiled = run(&tiled_exe, format, m, n, k, with_bias);
                     assert_eq!(scalar.len(), m * n);
-                    assert_eq!(tiled.len(), scalar.len());
                     let scale = scalar.iter().copied().map(f32::abs).fold(0.0, f32::max);
                     assert!(scale.is_finite() && scale > 0.0, "{format} {m}x{n}x{k}: degenerate reference (scale {scale})");
-                    let mut worst = 0.0f32;
-                    for (index, (&a, &r)) in tiled.iter().zip(scalar.iter()).enumerate() {
-                        let error = (a - r).abs();
-                        worst = worst.max(error);
-                        // The scalar kernel seeds its accumulator with the bias, the tiled one
-                        // adds it last, shifting rounding by an ulp of the partial sum. A wrong
-                        // element is off by ~1x the scale, orders of magnitude above this bound.
-                        let bound = if with_bias { 1.0e-5 * scale } else { 1.0e-5 * (r.abs() + 1.0) };
-                        assert!(error <= bound,
-                            "{format} {m}x{n}x{k} bias={with_bias} output {index} (row {}, col {}): tiled={a}, scalar={r}, error={error}",
-                            index / n, index % n);
+                    for (variant, exe) in [("simd", &simd_exe), ("portable", &portable_exe)] {
+                        let actual = run(exe, format, m, n, k, with_bias);
+                        assert_eq!(actual.len(), scalar.len());
+                        let mut worst = 0.0f32;
+                        for (index, (&a, &r)) in actual.iter().zip(scalar.iter()).enumerate() {
+                            let error = (a - r).abs();
+                            worst = worst.max(error);
+                            // The scalar kernel seeds its accumulator with the bias, the others
+                            // add it last, shifting rounding by an ulp of the partial sum. A wrong
+                            // element is off by ~1x the scale, orders of magnitude above this bound.
+                            let bound = if with_bias { 1.0e-5 * scale } else { 1.0e-5 * (r.abs() + 1.0) };
+                            assert!(error <= bound,
+                                "{variant} {format} {m}x{n}x{k} bias={with_bias} output {index} (row {}, col {}): got={a}, scalar={r}, error={error}",
+                                index / n, index % n);
+                        }
+                        eprintln!("{variant} {format} {m}x{n}x{k} bias={with_bias}: worst absolute error {worst} (scale {scale})");
                     }
-                    eprintln!("{format} {m}x{n}x{k} bias={with_bias}: worst absolute error {worst} (scale {scale})");
                 }
             }
         }

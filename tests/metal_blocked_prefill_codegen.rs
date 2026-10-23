@@ -66,3 +66,24 @@ fn non_native_formats_decode_with_four_rows_per_simd_group() {
         assert!(host.contains("+ 31) / 32"), "{format}: {host}");
     }
 }
+
+#[test]
+fn portable_algorithm_keeps_the_generic_kernels_selectable() {
+    // `algorithm = "portable"` is the escape hatch back to the Boring-synthesized shared-memory
+    // tiled prefill and warp decode, kept for comparison and regression checks.
+    for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k"] {
+        let (msl, host) = metal_codegen(
+            &format!("{format}_portable"), format, Some("[tensor.linear]\nalgorithm = \"portable\"\n"));
+        assert!(msl.contains("aTile"), "{format}: portable tiled prefill expected");
+        assert!(!msl.contains("simdgroup_multiply_accumulate"), "{format}: no SIMD-group matrices expected");
+        assert!(!msl.contains("constexpr uint bp_rows = 4;"), "{format}: generic warp decode expected");
+        assert!(host.contains("+ 15) / 16"), "{format}: 16x16 tile grid expected: {host}");
+    }
+}
+
+#[test]
+fn portable_in_one_direction_disables_the_simd_group_kernels_for_both() {
+    let (msl, _) = metal_codegen("q4_decode_portable", "q4_0", Some("[tensor.linear.decode]\nalgorithm = \"portable\"\n"));
+    assert!(!msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    assert!(msl.contains("aTile"), "{msl}");
+}

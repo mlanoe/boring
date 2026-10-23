@@ -3020,11 +3020,11 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
         eprintln!("error: unsupported tensor matrix algorithm '{}' (expected auto, native, scalar, tf32, or rocblas)", config.matrix_algorithm.as_deref().unwrap());
         process::exit(1);
     }
-    let valid = |value: &str| matches!(value, "auto" | "native" | "scalar" | "warp" | "warp-broadcast" | "rows" | "split-k");
+    let valid = |value: &str| matches!(value, "auto" | "native" | "scalar" | "portable" | "warp" | "warp-broadcast" | "rows" | "split-k");
     for value in config.decode_algorithm.iter().chain(config.prefill_algorithm.iter())
         .chain(config.decode_formats.values()).chain(config.prefill_formats.values()) {
         if !valid(value) {
-            eprintln!("error: unsupported tensor linear algorithm '{}' (expected auto, native, scalar, warp, warp-broadcast, rows, or split-k)", value);
+            eprintln!("error: unsupported tensor linear algorithm '{}' (expected auto, native, scalar, portable, warp, warp-broadcast, rows, or split-k)", value);
             process::exit(1);
         }
     }

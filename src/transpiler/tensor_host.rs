@@ -63,14 +63,15 @@ impl Default for TensorLinearConfig {
 /// Formats the Metal blocked SIMD-group prefill supports (32-element blocks, or 256-element
 /// K-quant superblocks walked one 32-wide K step at a time).
 fn metal_blocked_format(config: &TensorLinearConfig, format: Option<&str>) -> bool {
-    config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
+    config.metal_blocked_prefill && !config.wants_portable(format)
+        && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
 }
 
 /// Blocked formats whose decode (`m == 1`) also has a Metal SIMD-group kernel: four output rows
 /// per SIMD group with vector loads (32-element blocks: four lanes per block; Q3_K/Q2_K: eight
 /// lanes per 256-element superblock).
 fn metal_rows_decode_format(config: &TensorLinearConfig, format: Option<&str>) -> bool {
-    config.metal_blocked_prefill && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
+    metal_blocked_format(config, format)
 }
 
 fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, usize) {
@@ -98,10 +99,26 @@ fn fixed_kernel_prefix(spec: &Spec, config: &TensorLinearConfig) -> &'static str
 }
 
 impl TensorLinearConfig {
-    fn algorithm(&self, format: Option<&str>, decode: bool) -> &str {
+    fn raw_algorithm(&self, format: Option<&str>, decode: bool) -> &str {
         let formats = if decode { &self.decode_formats } else { &self.prefill_formats };
         let fallback = if decode { &self.decode_algorithm } else { &self.prefill_algorithm };
         format.and_then(|name| formats.get(name)).or(fallback.as_ref()).map_or("auto", String::as_str)
+    }
+
+    /// `portable` only steers backend-specific kernels (see `wants_portable`); every generic
+    /// schedule choice treats it as `auto`.
+    fn algorithm(&self, format: Option<&str>, decode: bool) -> &str {
+        match self.raw_algorithm(format, decode) {
+            "portable" => "auto",
+            other => other,
+        }
+    }
+
+    /// `algorithm = "portable"` (either direction) keeps the generic Boring-synthesized kernels
+    /// (shared-memory tiled prefill, warp decode) instead of a backend's hand-written SIMD-group
+    /// kernels, so the older schedules stay selectable for comparison and regression checks.
+    fn wants_portable(&self, format: Option<&str>) -> bool {
+        self.raw_algorithm(format, false) == "portable" || self.raw_algorithm(format, true) == "portable"
     }
 }
 

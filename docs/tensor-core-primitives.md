@@ -316,6 +316,11 @@ checks a 35x896x19 result against a scalar CPU oracle.
 prefill schedule (and native Metal Q4_K/Q6_K schedules) or the portable tiled
 packed-weight schedule on WGPU, CUDA, and ROCm.
 `scalar` explicitly retains the one-thread-per-output-cell reference schedule.
+`portable` (accepted in `[tensor.linear]` or either direction's section, and per format) keeps the generic
+Boring-synthesized kernels, the shared-memory tiled prefill and the warp decode, for the Metal formats that
+otherwise get hand-written SIMD-group kernels (Q4_0, Q5_0, IQ4_NL, Q3_K, Q2_K): the older schedules stay
+selectable for comparison and regression checks, and a real-GPU test keeps them matching the scalar reference.
+On other backends and for the native Q8_0/Q4_K/Q6_K Metal kernels it behaves like `auto`.
 Native Metal Q8_0, Q4_K, and Q6_K prefill stages float32 activations and
 dequantized weights by default and uses float32 simdgroup matrix operands and
 accumulators. This avoids the roughly `5e-4` per-matmul relative error observed
