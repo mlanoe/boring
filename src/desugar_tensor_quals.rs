@@ -40,7 +40,9 @@
 //! * **Methods.** `o.m(x)` links `x` to the parameter of struct method `m`, and `self.m(x)`
 //!   inside a method does too. Methods are resolved by name: only a name declared exactly once
 //!   among struct methods, extensions and trait defaults is followed, and a receiver evidently
-//!   of another type (an annotated or constructed local) is ruled out.
+//!   of another type (an annotated or constructed local) is ruled out. A written bare `'kernel`
+//!   is accepted on a struct method's array parameters, return type and `let`s (not on `ext`
+//!   methods or struct fields).
 //! * **Top-level bindings in functions.** A top-level array used inside a free function body
 //!   is read like a use at the top level (tensor operand, `f(x)`, `let y = x`), unless the
 //!   function declares the same name. Methods may mean a field of that name, so a top-level
@@ -113,7 +115,8 @@ fn reject_unsupported_markers(items: &[Item]) {
                 for f in &st.fields {
                     if has_marker(Some(&f.ty)) { marker_error("a struct field", f.line, f.col); }
                 }
-                for m in &st.methods { fn_decl(m, "a method"); }
+                // Struct methods take part in the inference like free functions.
+                for m in &st.methods { free_fn(m); }
             }
             Item::Ext(e) => {
                 for m in &e.methods { fn_decl(m, "a method"); }
@@ -1634,5 +1637,35 @@ mod tests {
     fn a_top_level_use_in_a_method_still_counts_as_a_possible_write() {
         let src = format!("{TOP}struct S:\n    def go() throws:\n        print \"{{c[0]}}\"\nkernel.tensors.matmul(a, b, c)\n");
         assert!(warnings_of(&src).is_empty());
+    }
+    #[test]
+    fn bare_kernel_on_a_method_resolves_like_on_a_free_function() {
+        let src = "struct Op:\n    def go([float32, k = 2, m = 2]'kernel x, [float32, n = 2, k = 2]'kernel y, mut [float32, n = 2, m = 2]'kernel z) throws:\n        kernel.tensors.matmul(x, y, z)\n";
+        assert!(errors_of(src).is_empty());
+        assert_eq!(method_quals(&run(src), "Op", "go").0, vec![G, G, U]);
+    }
+
+    #[test]
+    fn bare_kernel_on_a_method_return_follows_what_is_returned() {
+        let src = "struct Op:\n    def [float32, n = 2, m = 2]'kernel go([float32, k = 2, m = 2]'kernel x, [float32, n = 2, k = 2]'kernel y) throws:\n        mut [float32, n = 2, m = 2] z = [0.0 as float32 for ..<4]\n        kernel.tensors.matmul(x, y, z)\n        z\n";
+        assert!(errors_of(src).is_empty());
+        let program = run(src);
+        let m = program.items.iter().find_map(|i| match i {
+            Item::Struct(st) => st.methods.first(),
+            _ => None,
+        }).unwrap();
+        assert_eq!(m.return_ty.as_ref().and_then(|t| t.without_mut().gpu_resident_qual().cloned()), U);
+    }
+
+    #[test]
+    fn bare_kernel_on_a_non_array_method_parameter_is_an_error() {
+        let got = errors_of("struct Op:\n    def go(float'kernel x):\n        print \"{x}\"\n");
+        assert!(got.iter().any(|e| e.contains("a non-array parameter")), "{got:?}");
+    }
+
+    #[test]
+    fn bare_kernel_on_an_extension_method_is_still_an_error() {
+        let got = errors_of("ext Vec:\n    def go([float32, k = 2, m = 2]'kernel x):\n        print \"{x}\"\n");
+        assert!(got.iter().any(|e| e.contains("a method")), "{got:?}");
     }
 }

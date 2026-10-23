@@ -224,7 +224,7 @@ function body (a tensor operand, `f(x)`, `let y = x`). Methods are resolved by n
 declared once among struct methods, `ext` methods and trait defaults is followed — and a receiver
 evidently of another type (an annotated or constructor-initialized local) is skipped. A function
 that declares the same name shadows the top-level binding; a method mentioning it may mean a field,
-so that use is not followed. A bare `'kernel` is still not accepted on a method.
+so that use is not followed. A bare `'kernel` is accepted on the array-typed parameters, return type and `let`s of a struct method, resolved like a free function's; it is still rejected on an `ext` method, a struct field and a non-array type.
 
 Not followed: closures, type methods, calls with a computed argument, and a name declared twice in
 one scope (also across sibling blocks — `'kernel` on such a name is an error).
@@ -245,7 +245,7 @@ Unlike an unqualified array, a `'kernel` one takes part in the inference even wi
 them GPU-side. A `'kernel` return type joins the group of what the function returns (here `c`,
 a `mut` array, so the return is `'kernel'unified`). The result is resolved before the checker, so
 everything downstream sees `'kernel'global` or `'kernel'unified`; `'kernel` is also what a
-parameter accepts, either residency. Where it cannot be resolved — a struct field, a method, a
+parameter accepts, either residency. Where it cannot be resolved — a struct field, an `ext` method, a
 non-array type — it is an error that tells you to spell the qualifier out.
 
 **Automatic resident returns.** A resident value is opaque outside `with`, so making a function
