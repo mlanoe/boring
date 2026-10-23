@@ -2249,6 +2249,7 @@ impl Transpiler {
             if let Some(struct_name) = self.resolve_struct_name(base) {
                 if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
                     if let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == field) {
+                        let fty = fty.without_mut();
                         return matches!(fty, Type::Array(_))
                             || matches!(fty, Type::Named(n) if n == "Vec");
                     }

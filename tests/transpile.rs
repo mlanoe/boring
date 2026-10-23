@@ -546,6 +546,7 @@ transpile_test!(int_literal_overflow_cast);
 transpile_test!(array_index_as_cast);
 transpile_test!(index_by_call);
 transpile_test!(nested_index_write_targets);
+transpile_test!(print_mut_array_field);
 transpile_test!(builtin_error_enum);
 transpile_test!(typed_catch_match_error);
 // A type-level method's (`type def`/`type req`/`type set`) `throws` was previously

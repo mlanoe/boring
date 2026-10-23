@@ -1,0 +1,14 @@
+# Regression: printing/interpolating an array field declared `var mut [T]`
+# (`Type::Mut(Array)`), directly or via an unannotated `let` — both used to emit
+# a bare `println!("{}", v)` with no `BoringFmt`, which doesn't compile.
+
+struct Table:
+    var mut [int] slots = [1, 2]
+    mut [string] names = ["a", "b"]
+
+def main():
+    mut t = Table()
+    print "{t.slots}"
+    print t.names
+    let q = t.slots
+    print "{q}"

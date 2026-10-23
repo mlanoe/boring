@@ -632,7 +632,9 @@ impl Transpiler {
         // `x["k"] = v` / `x.add(v)` as array-style code. `var` has no wrapper, hence the divergence.
         let decl_ty: Option<&Type> = s.ty.as_ref().map(Type::without_mut);
         // Track variables that hold collections (for {:?} formatting later)
-        if looks_like_collection(val) || is_collection_type(decl_ty) {
+        // `let q = obj.items` — an unannotated local initialised from an array-typed struct field.
+        let from_array_field = s.ty.is_none() && self.expr_field_is_array(&s_value);
+        if looks_like_collection(val) || is_collection_type(decl_ty) || from_array_field {
             self.collection_vars.insert(s.name.clone());
         }
         // Track variables that unambiguously hold a Vec<T> (not HashMap/HashSet, not scalars from reduce).
@@ -640,6 +642,7 @@ impl Transpiler {
         // contain intermediate .collect::<Vec<_>>() but terminate as a scalar.
         if (expr_ends_as_vec(val) && !looks_like_map_or_set(val))
             || matches!(decl_ty, Some(Type::Array(_)))
+            || from_array_field
         {
             self.vec_vars.insert(s.name.clone());
         }

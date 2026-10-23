@@ -539,7 +539,7 @@ pub(crate) fn sig_param_type(p: &Param) -> Option<Type> {
 }
 
 pub(crate) fn is_collection_type(ty: Option<&Type>) -> bool {
-    match ty {
+    match ty.map(|t| t.without_mut()) {
         Some(Type::Array(_)) | Some(Type::Dict(_, _)) | Some(Type::Set(_)) => true,
         Some(Type::Named(n)) => matches!(n.as_str(), "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"),
         Some(Type::Generic(n, _)) => matches!(n.as_str(), "Vec" | "HashMap" | "HashSet"),
