@@ -1533,6 +1533,22 @@ impl Transpiler {
                 }
             }
         }
+        // `let m = a.b.measurer` where the field is a `'shared` trait object: record the local's
+        // type so a later `f(m)` to a `Trait&` parameter reborrows through the `Arc` (`&*m`)
+        // instead of unsizing the `Arc` itself. (The one-level `v.field` case is handled above.)
+        if let ExprKind::Field(obj_expr, field_name) = &s_value.kind {
+            if !matches!(obj_expr.kind, ExprKind::Var(_)) && !self.var_types.contains_key(s.name.as_str()) {
+                let field_ty = self.resolve_expr_struct_type(obj_expr)
+                    .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(f, _)| f == field_name))
+                    .map(|(_, t)| t.clone());
+                if let Some(ty @ Type::Qualified(_, OwnerQual::Shared)) = field_ty {
+                    if matches!(&ty, Type::Qualified(i, _) if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))) {
+                        self.var_types.insert(s.name.clone(), ty);
+                    }
+                }
+            }
+        }
         // `looks_like_collection(val)` is intentionally a generated-Rust heuristic, but a
         // scalar-returning call can contain a collection expression in one of its arguments:
         //

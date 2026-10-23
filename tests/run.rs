@@ -593,6 +593,7 @@ interp_test!(dyn_struct_fields_optional);
 interp_test!(dyn_struct_transitive_iflet);
 interp_test!(dyn_return_borrowed_field_req_trait);
 interp_test!(dyn_return_borrowed_field_shared);
+interp_test!(shared_dyn_local_call);
 interp_test!(shared_dyn_tree_copy);
 interp_test!(shared_dyn_def_trait_stays_boxed);
 

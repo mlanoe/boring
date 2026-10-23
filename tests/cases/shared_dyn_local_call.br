@@ -1,0 +1,20 @@
+trait TextMeasurer:
+    req float width(string s, float size)
+struct FixtureMeasurer as TextMeasurer:
+    req float width(string s, float size): (s.length as float) * size
+struct Theme:
+    pub TextMeasurer'shared measurer = FixtureMeasurer()
+struct Node:
+    Theme theme = Theme()
+    string value = "hello"
+def float textWidthAt(TextMeasurer m, string s, float cell): m.width(s, cell * 2.0)
+def float viaLocal(Node n):
+    let m = n.theme.measurer
+    textWidthAt(m, n.value, 1.5)
+def float viaMethod(Node n, int lo):
+    let m = n.theme.measurer
+    m.width(n.value.graphemeSlice(0, lo), 2.0)
+def main():
+    let n = Node()
+    print viaLocal(n)
+    print viaMethod(n, 3)
