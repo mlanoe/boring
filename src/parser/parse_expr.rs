@@ -147,8 +147,14 @@ impl Parser {
             TokenKind::CaretEq     => Some(BinOp::BitXor),
             _ => None,
         };
+        let shift = if op.is_none() { self.peek_shift_assign() } else { None };
+        let (op, ntok) = match (op, shift) {
+            (Some(o), _) => (Some(o), 1),
+            (None, Some((o, n))) => (Some(o), n),
+            _ => (None, 0),
+        };
         if let Some(op) = op {
-            self.advance();
+            for _ in 0..ntok { self.advance(); }
             let rhs = self.parse_or()?;
             let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line, col, len: self.span_len(line, col)};
             return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line, col, len: self.span_len(line, col)}));
@@ -483,9 +489,9 @@ impl Parser {
                 TokenKind::LtEq   => BinOp::LtEq,
                 TokenKind::GtEq   => BinOp::GtEq,
                 // `<` is comparison only when NOT followed by another `<` (which would be shift)
-                TokenKind::Lt if !self.check2(&TokenKind::Lt) => BinOp::Lt,
+                TokenKind::Lt if !self.check2(&TokenKind::Lt) && self.peek_shift_assign().is_none() => BinOp::Lt,
                 // `>` is comparison only when NOT followed by another `>` (which would be shift)
-                TokenKind::Gt if !self.check2(&TokenKind::Gt) => BinOp::Gt,
+                TokenKind::Gt if !self.check2(&TokenKind::Gt) && self.peek_shift_assign().is_none() => BinOp::Gt,
                 _ => break,
             };
             let line = self.line();
@@ -531,6 +537,20 @@ impl Parser {
             lhs = Expr { kind: ExprKind::BinOp(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)), line, col, len: self.span_len(line, col)};
         }
         Ok(lhs)
+    }
+
+    /// `<<=` / `>>=` lex as `Lt LtEq` / `Gt GtEq` (shifts are two adjacent
+    /// tokens, see `parse_shift`). Returns the shift op and the number of
+    /// tokens to consume when the next two tokens are adjacent and form one.
+    pub(crate) fn peek_shift_assign(&self) -> Option<(BinOp, usize)> {
+        let a = self.tokens.get(self.pos)?;
+        let b = self.tokens.get(self.pos + 1)?;
+        if a.line != b.line || b.col != a.col + 1 { return None; }
+        match (&a.kind, &b.kind) {
+            (TokenKind::Lt, TokenKind::LtEq) => Some((BinOp::Shl, 2)),
+            (TokenKind::Gt, TokenKind::GtEq) => Some((BinOp::Shr, 2)),
+            _ => None,
+        }
     }
 
     pub(crate) fn parse_shift(&mut self) -> Result<Expr, ParseError> {
@@ -1882,8 +1902,8 @@ impl Parser {
                         TokenKind::BangEq => Some(BinOp::NotEq),
                         TokenKind::LtEq   => Some(BinOp::LtEq),
                         TokenKind::GtEq   => Some(BinOp::GtEq),
-                        TokenKind::Lt if !self.check2(&TokenKind::Lt) => Some(BinOp::Lt),
-                        TokenKind::Gt if !self.check2(&TokenKind::Gt) => Some(BinOp::Gt),
+                        TokenKind::Lt if !self.check2(&TokenKind::Lt) && self.peek_shift_assign().is_none() => Some(BinOp::Lt),
+                        TokenKind::Gt if !self.check2(&TokenKind::Gt) && self.peek_shift_assign().is_none() => Some(BinOp::Gt),
                         TokenKind::Plus    => Some(BinOp::Add),
                         TokenKind::Minus   => Some(BinOp::Sub),
                         TokenKind::Star    => Some(BinOp::Mul),

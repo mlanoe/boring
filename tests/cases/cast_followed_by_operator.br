@@ -1,4 +1,4 @@
-# `as <scalar>` followed by `<`, `<<`, `<=`, `>`, `>>`: the operator is not a generic-args opener.
+# `as <scalar>` followed by `<`, `<<`, `<=`, `>`, `>>`, `<<=`, `>>=`: the operator is not a generic-args opener.
 let r = 3
 let g = 5
 let b = 7
@@ -10,4 +10,8 @@ print g as int > r as int
 print a as uint >> 8
 var s = 1
 s = s as uint << 3
+print s
+s <<= 2
+print s
+s >>= 1
 print s

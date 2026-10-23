@@ -1224,6 +1224,7 @@ type_list       ::= type ("," type)*
 #   x -= n    →  x = x - n
 #   x *= n    →  x = x * n
 #   x /= n    →  x = x / n
+#   x <<= n   →  x = x << n   (also `>>=`; lexed as two adjacent tokens, like `<<`/`>>`)
 # The transpiler re-folds them back to `+=`, `-=`, `*=`, `/=` in Rust output
 # (except for string concatenation, which uses `Arc::new(…)` instead).
 

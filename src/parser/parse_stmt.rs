@@ -327,8 +327,14 @@ impl Parser {
                     TokenKind::CaretEq     => Some(BinOp::BitXor),
                     _ => None,
                 };
+                let shift = if compound_op.is_none() { self.peek_shift_assign() } else { None };
+                let (compound_op, ntok) = match (compound_op, shift) {
+                    (Some(o), _) => (Some(o), 1),
+                    (None, Some((o, n))) => (Some(o), n),
+                    _ => (None, 0),
+                };
                 if let Some(op) = compound_op {
-                    self.advance();
+                    for _ in 0..ntok { self.advance(); }
                     let rhs = self.parse_else_expr()?;
                     let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line, col, len: self.tok_len()};
                     self.expect_newline_soft();
