@@ -59,7 +59,7 @@ kernel Render:
         let row = .block.y * .block_dim.y + .thread.y
         if col < dim.width and row < dim.height:
             let alive = cells[row * dim.width + col]
-            # BGRA: alive = bright green 0xFF00FF00, dead = near-black 0xFF111111
+            # 0xAARRGGBB: alive = bright green 0xFF00FF00, dead = near-black 0xFF111111
             pixels[row * dim.width + col] = if alive == 1: 0xFF00FF00 else 0xFF111111
 
 var step   = Step(Dimension(width, height))

@@ -180,3 +180,13 @@ fn metal_screen_program_keeps_module_level_constants() {
         assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
     }
 }
+
+#[test]
+fn wgpu_blit_shader_unpacks_0xaarrggbb() {
+    let (_project, rs) = build("wgpu");
+    // docs/gpu-display.md: pixels are `(a << 24) | (r << 16) | (g << 8) | b`
+    assert!(rs.contains("let r = f32((raw >> 16u) & 0xFFu) / 255.0;"), "{rs}");
+    assert!(rs.contains("let g = f32((raw >>  8u) & 0xFFu) / 255.0;"), "{rs}");
+    assert!(rs.contains("let b = f32((raw >>  0u) & 0xFFu) / 255.0;"), "{rs}");
+    assert!(rs.contains("let a = f32((raw >> 24u) & 0xFFu) / 255.0;"), "{rs}");
+}

@@ -1373,10 +1373,12 @@ impl<'a> HostEmitter<'a> {
         self.line("    let x = u32(in.pos.x); let y = u32(in.pos.y);");
         self.line("    let i = y * blit_dim.width + x;");
         self.line("    if i >= blit_dim.width * blit_dim.height { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }");
+        // Pixels are packed 0xAARRGGBB (docs/gpu-display.md); the fragment output is logical RGBA,
+        // the BGRA8Unorm surface does the byte swizzle itself.
         self.line("    let raw = blit_pixels[i];");
-        self.line("    let r = f32((raw >>  0u) & 0xFFu) / 255.0;");
+        self.line("    let r = f32((raw >> 16u) & 0xFFu) / 255.0;");
         self.line("    let g = f32((raw >>  8u) & 0xFFu) / 255.0;");
-        self.line("    let b = f32((raw >> 16u) & 0xFFu) / 255.0;");
+        self.line("    let b = f32((raw >>  0u) & 0xFFu) / 255.0;");
         self.line("    let a = f32((raw >> 24u) & 0xFFu) / 255.0;");
         self.line("    return vec4<f32>(r, g, b, a); }");
         self.line("            \"#)),");
