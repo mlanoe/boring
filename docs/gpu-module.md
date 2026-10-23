@@ -220,9 +220,12 @@ and labeled arguments (`mm(z = c, x = a, y = b)` binds by name, not position).
 
 Also followed: struct methods (`o.go(a, b, c)`, or `self.go(...)` inside a method; their parameters
 and body `let`s are inferred like a free function's), and a top-level binding used inside a free
-function body (a tensor operand, `f(x)`, `let y = x`). Methods are resolved by name — only a name
-declared once among struct methods, `ext` methods and trait defaults is followed — and a receiver
-evidently of another type (an annotated or constructor-initialized local) is skipped. A function
+function body (a tensor operand, `f(x)`, `let y = x`). A method call is resolved through the receiver's struct when it is evident — `self`, a local
+annotated with a struct or initialized by a constructor or by a free function with a declared
+return type, or a field of such a value (`self.op.go(..)`) — so two structs may share a method
+name. When the receiver's type is not evident, the call is followed only if the name is declared by
+a single struct method and by no `ext` method or trait default; a receiver evidently of another type
+is skipped. A function
 that declares the same name shadows the top-level binding; a method mentioning it may mean a field,
 so that use is not followed. A bare `'kernel` is accepted on the array-typed parameters, return type and `let`s of a struct method, resolved like a free function's; it is still rejected on an `ext` method, a struct field and a non-array type.
 

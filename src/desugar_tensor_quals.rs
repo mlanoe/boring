@@ -38,9 +38,10 @@
 //!   it only pushes its group to `'kernel'unified`.
 //!
 //! * **Methods.** `o.m(x)` links `x` to the parameter of struct method `m`, and `self.m(x)`
-//!   inside a method does too. Methods are resolved by name: only a name declared exactly once
-//!   among struct methods, extensions and trait defaults is followed, and a receiver evidently
-//!   of another type (an annotated or constructed local) is ruled out. A written bare `'kernel`
+//!   inside a method does too. The receiver's struct is taken from what is evident (`self`, an
+//!   annotated or constructed local, a free function's declared return type, a field of such a
+//!   value), which lets two structs share a method name; with no evident type, a name is followed
+//!   only if one struct method declares it and no extension or trait default does. A written bare `'kernel`
 //!   is accepted on a struct method's array parameters, return type and `let`s (not on `ext`
 //!   methods or struct fields).
 //! * **Top-level bindings in functions.** A top-level array used inside a free function body
@@ -199,6 +200,52 @@ struct MethodSig {
     sig: Sig,
 }
 
+/// Everything needed to resolve `recv.m(x)` to a struct method.
+#[derive(Default)]
+struct MethodIndex {
+    /// Struct methods by name: one entry per struct declaring that name.
+    by_name: HashMap<String, Vec<MethodSig>>,
+    /// Names an `ext` or a trait default also declares: with no known receiver type, such a
+    /// name is not followed (the call may be on a different type altogether).
+    foreign: HashSet<String>,
+    /// `(struct, field)` -> the struct (or `""`, no struct) the field's declared type names.
+    field_types: HashMap<(String, String), String>,
+    /// Free function -> the struct (or `""`) its declared return type names.
+    fn_returns: HashMap<String, String>,
+}
+
+impl MethodIndex {
+    /// The struct method a call `recv.mname(..)` resolves to, if it can be told.
+    fn resolve(&self, recv: &Expr, mname: &str, scope: &Scope) -> Option<&MethodSig> {
+        let cands = self.by_name.get(mname)?;
+        match self.receiver_type(recv, scope) {
+            // The receiver's struct is known: the method of that struct, if it has one (`""`
+            // is a type no struct method can be called on, so it matches nothing).
+            Some(t) => cands.iter().find(|m| m.owner == t),
+            // Unknown: only an unambiguous name is followed.
+            None => (cands.len() == 1 && !self.foreign.contains(mname)).then(|| &cands[0]),
+        }
+    }
+
+    /// The struct a receiver expression evidently is (`""`: evidently none); `None` if unknown.
+    fn receiver_type(&self, recv: &Expr, scope: &Scope) -> Option<String> {
+        match &recv.kind {
+            ExprKind::Var(v) if v == "self" => Some(scope.owner.clone().unwrap_or_default()),
+            ExprKind::Var(v) => scope.var_types.get(v).cloned().flatten(),
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(n) if n.chars().next().is_some_and(char::is_uppercase) => Some(n.clone()),
+                ExprKind::Var(n) => self.fn_returns.get(n).cloned(),
+                _ => None,
+            },
+            ExprKind::Field(base, field) => {
+                let owner = self.receiver_type(base, scope).filter(|t| !t.is_empty())?;
+                self.field_types.get(&(owner, field.clone())).cloned()
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Every `let` of `stmts`, nested blocks (`if`, loops, `match`, closures...) included.
 fn all_lets(stmts: &[Stmt]) -> Vec<LetStmt> {
     let mut stmts = stmts.to_vec();
@@ -322,7 +369,25 @@ fn infer_unit(items: &mut [Item]) {
         }
     }
     top.names.retain(|(n, _)| top_seen.get(n) == Some(&1));
-    top.var_types = collect_var_types(&[], &top.stmts);
+    let mut method_index = MethodIndex::default();
+    for item in items.iter() {
+        match item {
+            Item::Fn(f) => {
+                if let Some(t) = f.return_ty.as_ref().and_then(type_owner) {
+                    method_index.fn_returns.insert(f.name.clone(), t);
+                }
+            }
+            Item::Struct(st) => {
+                for fld in &st.fields {
+                    if let Some(t) = type_owner(&fld.ty) {
+                        method_index.field_types.insert((st.name.clone(), fld.name.clone()), t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    top.var_types = collect_var_types(&[], &top.stmts, &method_index.fn_returns);
     scopes.push(top);
 
     // Free functions are keyed by their item index; methods get ids after the items, so one
@@ -362,7 +427,7 @@ fn infer_unit(items: &mut [Item]) {
             fn_name: label.clone(),
             owner: owner.clone(),
             declared: HashSet::new(),
-            var_types: collect_var_types(&f.params, &f.body),
+            var_types: collect_var_types(&f.params, &f.body, &method_index.fn_returns),
             ret_node,
             stmts: f.body.clone(),
             ret_force: f.return_ty.as_ref().and_then(|t| t.without_mut().gpu_resident_qual().cloned()),
@@ -420,28 +485,24 @@ fn infer_unit(items: &mut [Item]) {
         let Item::Fn(f) = &items[i] else { unreachable!() };
         (name.clone(), sig_of(i, f))
     }).collect();
-    // Methods are resolved by name: only a name no other method, extension or trait default
-    // declares is followed, and `receiver_ok` rules out a receiver evidently of another type.
-    let msigs: HashMap<String, MethodSig> = {
-        let mut declared: HashMap<String, usize> = HashMap::new();
-        for item in items.iter() {
-            match item {
-                Item::Struct(st) => for m in &st.methods { *declared.entry(m.name.clone()).or_default() += 1; },
-                Item::Ext(e) => for m in &e.methods { *declared.entry(m.name.clone()).or_default() += 1; },
-                Item::Trait(t) => for m in &t.defaults { *declared.entry(m.name.clone()).or_default() += 1; },
-                _ => {}
-            }
+    // Methods are resolved through the receiver's type when it is evident (`MethodIndex::resolve`),
+    // by name alone only when the name is unambiguous.
+    for item in items.iter() {
+        match item {
+            Item::Ext(e) => for m in &e.methods { method_index.foreign.insert(m.name.clone()); },
+            Item::Trait(t) => for m in &t.defaults { method_index.foreign.insert(m.name.clone()); },
+            _ => {}
         }
-        let mut out = HashMap::new();
-        for (&(item_idx, mi), &fid) in &method_fid {
-            let Item::Struct(st) = &items[item_idx] else { continue };
-            let m = &st.methods[mi];
-            if declared.get(&m.name) == Some(&1) {
-                out.insert(m.name.clone(), MethodSig { owner: st.name.clone(), sig: sig_of(fid, m) });
-            }
-        }
-        out
-    };
+    }
+    let mut method_ids: Vec<(&(usize, usize), &usize)> = method_fid.iter().collect();
+    method_ids.sort();
+    for (&(item_idx, mi), &fid) in method_ids {
+        let Item::Struct(st) = &items[item_idx] else { continue };
+        let m = &st.methods[mi];
+        method_index.by_name.entry(m.name.clone()).or_default()
+            .push(MethodSig { owner: st.name.clone(), sig: sig_of(fid, m) });
+    }
+    let msigs = method_index;
 
     // --- returns --------------------------------------------------------------------------
     // A function whose returned array lives on the GPU can return it resident (no copy back
@@ -719,7 +780,7 @@ fn tensor_call(e: &Expr) -> Option<&[Arg]> {
     Some(args)
 }
 
-fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>, msigs: &HashMap<String, MethodSig>) -> Facts {
+fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>, msigs: &MethodIndex) -> Facts {
     // Both walker callbacks update the same counters.
     let facts = RefCell::new(Facts::default());
     let total = RefCell::new(0usize);
@@ -768,8 +829,7 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
                     _ => None,
                 },
                 ExprKind::MethodCall(recv, mname, args) if tensor_call(e).is_none() => {
-                    msigs.get(mname)
-                        .filter(|m| receiver_ok(recv, &m.owner, scope))
+                    msigs.resolve(recv, mname, scope)
                         .map(|m| (&m.sig, format!("{}.{mname}", m.owner), args.as_slice()))
                 }
                 _ => None,
@@ -844,20 +904,6 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
     facts
 }
 
-/// Could `recv` be an instance of struct `owner`? Only a receiver evidently of another type
-/// (an annotated or constructed local, a `self` of another struct) is ruled out.
-fn receiver_ok(recv: &Expr, owner: &str, scope: &Scope) -> bool {
-    match &recv.kind {
-        ExprKind::Var(v) if v == "self" => scope.owner.as_deref() == Some(owner),
-        ExprKind::Var(v) => !matches!(scope.var_types.get(v), Some(Some(t)) if t != owner),
-        ExprKind::Call(callee, _) => match &callee.kind {
-            ExprKind::Var(n) if n.chars().next().is_some_and(char::is_uppercase) => n == owner,
-            _ => true,
-        },
-        _ => true,
-    }
-}
-
 /// The struct name a type annotation names; the empty string for a type no struct method can
 /// be called on (arrays, strings, numbers...); `None` when unknown.
 fn type_owner(ty: &Type) -> Option<String> {
@@ -872,8 +918,8 @@ fn type_owner(ty: &Type) -> Option<String> {
 }
 
 /// The type of each local whose struct is evident: from its annotation, else from a
-/// constructor-call initializer (`Op()`). A name declared with two different types maps to `None`.
-fn collect_var_types(params: &[Param], stmts: &[Stmt]) -> HashMap<String, Option<String>> {
+/// constructor-call initializer (`Op()`) or a call to a free function with a declared return type. A name declared with two different types maps to `None`.
+fn collect_var_types(params: &[Param], stmts: &[Stmt], fn_returns: &HashMap<String, String>) -> HashMap<String, Option<String>> {
     let mut out: HashMap<String, Option<String>> = HashMap::new();
     let mut note = |name: &str, ty: Option<String>| {
         match out.get(name) {
@@ -887,6 +933,8 @@ fn collect_var_types(params: &[Param], stmts: &[Stmt]) -> HashMap<String, Option
         let ty = l.ty.as_ref().and_then(type_owner).or_else(|| match l.value.as_ref().map(|v| &v.kind) {
             Some(ExprKind::Call(callee, _)) => match &callee.kind {
                 ExprKind::Var(n) if n.chars().next().is_some_and(char::is_uppercase) => Some(n.clone()),
+                // `let o = make()`: the declared return type of a free function.
+                ExprKind::Var(n) => fn_returns.get(n).cloned(),
                 _ => None,
             },
             _ => None,
@@ -1594,11 +1642,45 @@ mod tests {
         assert_eq!(method_quals(&program, "Op", "outer").0, vec![G, G, U]);
     }
 
+    const OTHER: &str = "struct Other:\n    def go(int x):\n        print \"{x}\"\n";
+
     #[test]
-    fn an_ambiguous_method_name_is_not_followed() {
-        let src = format!("{METHOD}struct Other:\n    def go(int x):\n        print \"{{x}}\"\ndef work() throws:\n    mut o = Op()\n{BODY_METHOD}");
+    fn a_shared_method_name_is_resolved_through_the_receiver_type() {
+        // Two structs declare `go`: the typed receiver picks `Op`'s, not `Other`'s.
+        let src = format!("{METHOD}{OTHER}def work() throws:\n    mut o = Op()\n{BODY_METHOD}");
         let got = fn_quals(&run(&src), "work").1;
-        assert_eq!(got[1..], [G, G, U].map(|_| None::<OwnerQual>));
+        assert_eq!(got[1..], [G, G, U]);
+    }
+
+    #[test]
+    fn a_shared_method_name_with_an_unknown_receiver_is_not_followed() {
+        // `make_unknown()` has no declared return type: the receiver's struct is not evident.
+        let src = format!("{METHOD}{OTHER}def make_unknown():\n    Op()\ndef work() throws:\n    mut o = make_unknown()\n{BODY_METHOD}");
+        let got = fn_quals(&run(&src), "work").1;
+        assert!(got[1..].iter().all(Option::is_none), "{got:?}");
+    }
+
+    #[test]
+    fn a_receiver_typed_by_a_function_return_is_resolved() {
+        let src = format!("{METHOD}{OTHER}Op make():\n    Op()\ndef work() throws:\n    mut o = make()\n{BODY_METHOD}");
+        let got = fn_quals(&run(&src), "work").1;
+        assert_eq!(got[1..], [G, G, U]);
+    }
+
+    #[test]
+    fn a_receiver_typed_by_a_field_is_resolved() {
+        let src = format!(
+            "{METHOD}{OTHER}struct Holder:\n    mut Op op\n    def run() throws:\n        let [float32, k = 2, m = 2] a = [0.0 for ..<4]\n        let [float32, n = 2, k = 2] b = [0.0 for ..<4]\n        mut [float32, n = 2, m = 2] c = [0.0 for ..<4]\n        self.op.go(a, b, c)\n"
+        );
+        let program = run(&src);
+        assert_eq!(method_quals(&program, "Holder", "run").1, vec![G, G, U]);
+    }
+
+    #[test]
+    fn a_name_also_declared_by_an_extension_is_not_followed_without_a_typed_receiver() {
+        let src = format!("{METHOD}ext Vec:\n    def go(int x):\n        print \"{{x}}\"\ndef make_unknown():\n    Op()\ndef work() throws:\n    mut o = make_unknown()\n{BODY_METHOD}");
+        let got = fn_quals(&run(&src), "work").1;
+        assert!(got[1..].iter().all(Option::is_none), "{got:?}");
     }
 
     #[test]
