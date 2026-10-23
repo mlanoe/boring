@@ -12,6 +12,34 @@ pub(crate) fn is_tensor_call(call: &Expr) -> bool {
 }
 
 impl super::Checker {
+    /// A host tensor operand that is not a plain name. A struct field (`self.w`) gets the cause
+    /// spelled out: only locals and parameters carry the declared residency the call is built from.
+    fn not_a_direct_operand(&mut self, operand: &Expr, line: usize, col: usize) {
+        let msg = match &operand.kind {
+            ExprKind::Field(base, field) if matches!(&base.kind, ExprKind::Var(_)) => format!(
+                "host tensor operands must be direct variables: `{field}` is a struct field, which \
+                 cannot be a host tensor operand — pass the array to the function or method as a parameter"
+            ),
+            _ => "host tensor operands must be direct variables".to_string(),
+        };
+        self.error(msg, line, col);
+    }
+
+    /// A host tensor operand that names nothing in scope; when it is a field of the enclosing
+    /// struct (a bare `w` inside a method), say so instead of "undefined".
+    fn undefined_operand(&mut self, name: &str, line: usize, col: usize) {
+        let msg = if self.current_struct_fields.contains(name) {
+            format!(
+                "undefined tensor operand '{name}': it is a field of `{}`, and a struct field cannot be a \
+                 host tensor operand — pass the array to the method as a parameter",
+                self.current_struct.as_deref().unwrap_or("this struct")
+            )
+        } else {
+            format!("undefined tensor operand '{name}'")
+        };
+        self.error(msg, line, col);
+    }
+
     pub(super) fn check_direct_tensor_calls(&mut self, kernel: &KernelDecl) {
         self.errors.extend(validate_kernel(kernel));
     }
@@ -79,11 +107,11 @@ impl super::Checker {
             };
             for (index, arg) in args[..operand_count].iter().enumerate() {
                 let ExprKind::Var(name) = &arg.value.kind else {
-                    self.error("host tensor operands must be direct variables", call.line, call.col);
+                    self.not_a_direct_operand(&arg.value, call.line, call.col);
                     return;
                 };
                 let Some(binding) = self.lookup(name) else {
-                    self.error(format!("undefined tensor operand '{name}'"), call.line, call.col);
+                    self.undefined_operand(name, call.line, call.col);
                     return;
                 };
                 let Some(ty) = binding.ty.as_ref() else {
@@ -142,11 +170,11 @@ impl super::Checker {
         let mut operands = Vec::with_capacity(3);
         for arg in args {
             let ExprKind::Var(name) = &arg.value.kind else {
-                self.error("host tensor operands must be direct variables", call.line, call.col);
+                self.not_a_direct_operand(&arg.value, call.line, call.col);
                 return;
             };
             let Some(binding) = self.lookup(name) else {
-                self.error(format!("undefined tensor operand '{name}'"), call.line, call.col);
+                self.undefined_operand(name, call.line, call.col);
                 return;
             };
             let Some(ty) = binding.ty.clone() else {

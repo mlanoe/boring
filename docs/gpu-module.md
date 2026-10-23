@@ -229,6 +229,10 @@ so that use is not followed. A bare `'kernel` is accepted on the array-typed par
 Not followed: closures, type methods, calls with a computed argument, and a name declared twice in
 one scope (also across sibling blocks — `'kernel` on such a name is an error).
 
+Struct fields are not an inference gap: a host `kernel.tensors.*` operand must be a local or a
+parameter, so a field (`self.w`, or a bare `w` inside a method) is rejected whatever its qualifier —
+pass the array to the method as a parameter instead. The error says so.
+
 **Bare `'kernel`: GPU, placement left to the inference.** On an array-typed `let`, parameter or
 return type of a free function, `'kernel` (with no `'global`/`'unified` after it) says "this lives
 on the GPU" and lets the rules above pick the placement:

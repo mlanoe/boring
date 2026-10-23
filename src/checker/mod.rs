@@ -2888,6 +2888,27 @@ mod tuple_mut_tests {
     }
 
     #[test]
+    fn a_struct_field_tensor_operand_is_explained() {
+        let src = "struct Layer:\n    let [float32, k = 2, m = 2]'kernel'global w\n    mut [float32, n = 2, m = 2]'kernel'unified out\n    def go([float32, n = 2, k = 2]'kernel'global x) throws:\n        kernel.tensors.matmul(x, self.w, self.out)\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("`w` is a struct field") && e.contains("as a parameter")), "{errs:?}");
+    }
+
+    #[test]
+    fn a_bare_struct_field_tensor_operand_is_explained() {
+        let src = "struct Layer:\n    let [float32, k = 2, m = 2]'kernel'global w\n    mut [float32, n = 2, m = 2]'kernel'unified out\n    def go([float32, n = 2, k = 2]'kernel'global x) throws:\n        kernel.tensors.matmul(x, w, out)\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("it is a field of `Layer`")), "{errs:?}");
+    }
+
+    #[test]
+    fn an_undefined_tensor_operand_keeps_the_plain_message() {
+        let src = "def go() throws:\n    kernel.tensors.matmul(a, b, c)\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e == "undefined tensor operand 'a'"), "{errs:?}");
+    }
+
+    #[test]
     fn mut_on_typed_tuple_variable_is_rejected() {
         let src = "def main():\n    mut (int, int) t = (1, 2)\n    print t.0\n";
         let errs = errors_for(src);
