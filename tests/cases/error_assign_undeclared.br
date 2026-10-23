@@ -1,0 +1,4 @@
+# `x = v` with no prior declaration is an error in both `boring run` and `boring build`.
+def main():
+    start = 1
+    print "{start}"

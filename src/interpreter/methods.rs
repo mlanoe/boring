@@ -2504,8 +2504,9 @@ impl Interpreter {
                             let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
                             return self.assign(&field_expr, val, Rc::clone(&env), line);
                         }
-                        // Genuinely new local — define as mutable (bare assignment acts as declaration)
-                        env.borrow_mut().define_mut(name, val);
+                        // Not a declaration: `let`/`var`/`mut` introduce bindings, a bare `x = v`
+                        // only reassigns (`boring build` rejects it too).
+                        return Err(err(format!("cannot assign to undeclared variable '{}'; fix: declare it with `var {} = ...`", name, name), line));
                     }
                     Err(()) => return Err(err(format!("cannot assign to immutable variable '{}'", name), line)),
                 }

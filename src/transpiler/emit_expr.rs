@@ -2816,6 +2816,22 @@ impl Transpiler {
             self.want_raw_option_pop.set(false);
             return format!("let _ = {raw}");
         }
+        // `x = v` for a name that was never declared: a bare assignment only reassigns
+        // (`let`/`var`/`mut` introduce bindings). Without this, rustc fails with E0425.
+        if let ExprKind::Var(n) = &target.kind {
+            let is_implicit_self_field = self.self_type.as_deref()
+                .and_then(|t| self.struct_fields.get(t))
+                .is_some_and(|fields| fields.iter().any(|(fname, _)| fname == n));
+            if n != "_" && n != "self"
+                && !self.known_local_vars.contains(n.as_str())
+                && !self.fn_current_params.contains_key(n.as_str())
+                && !self.user_top_level_names.contains(n.as_str())
+                && !is_implicit_self_field
+            {
+                self.push_error(target.line, target.col, format!(
+                    "cannot assign to undeclared variable `{}`; fix: declare it with `var {} = ...`", n, n));
+            }
+        }
         // CPU/SIMD: `k = K(Dimension(w, h))` reallocates a Dimension-sized kernel (a render loop
         // does it when the window was resized), constructed exactly like the top-level `let`.
         if self.config.is_simd_target {
