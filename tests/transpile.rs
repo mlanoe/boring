@@ -494,6 +494,7 @@ transpile_test!(tasks);
 transpile_test!(channels);
 transpile_test!(streams);
 transpile_test!(let_pattern);
+transpile_test!(environment_builtin);
 transpile_test!(result_compat);
 transpile_test!(multi_catch);
 transpile_test!(implicit_self);

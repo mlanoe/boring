@@ -1,0 +1,5 @@
+let missing = environment("BORING_TEST_ENVIRONMENT_BUILTIN_EXPECTED_TO_BE_UNSET") else "fallback"
+print missing
+
+let path = environment("PATH") else ""
+print path.length > 0

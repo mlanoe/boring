@@ -575,10 +575,12 @@ impl Transpiler {
         // type, so a value read out of it never gets `.clone()`-inserted on 2+ reuse
         // (`E0382 use of moved value` at `cargo build`, invisible from the Boring
         // source itself).
-        let is_readline_call = s.ty.is_none()
+        let is_optional_string_builtin = s.ty.is_none()
             && matches!(&s_value.kind, ExprKind::Call(callee, args)
-                if args.is_empty() && matches!(&callee.kind, ExprKind::Var(n) if n == "readLine"));
-        if is_readline_call {
+                if matches!(&callee.kind, ExprKind::Var(n)
+                    if (n == "readLine" && args.is_empty())
+                        || (n == "environment" && args.len() == 1)));
+        if is_optional_string_builtin {
             self.var_types.insert(s.name.clone(), Type::Optional(Box::new(Type::Named("string".to_string()))));
             self.optional_vars.insert(s.name.clone());
         }

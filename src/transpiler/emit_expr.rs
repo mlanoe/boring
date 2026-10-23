@@ -5682,6 +5682,12 @@ impl Transpiler {
             "raw_args" => {
                 format!("std::env::args().map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
             }
+            // environment(name) -> string? — absence and non-Unicode values are
+            // ordinary None values, so callers can use `else` without an unwrap.
+            "environment" => {
+                let name = self.emit_expr(&args[0].value);
+                format!("std::env::var(&*({})).ok().map({}::<str>::from)", name, self.str_ptr())
+            }
             "ord" => {
                 let s = self.emit_expr(&args[0].value);
                 // Parenthesised: a bare `X as isize` followed by `<` / `<<` parses as generic args.

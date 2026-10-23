@@ -2174,6 +2174,24 @@ fn register_result_and_args_builtins(e: &mut Env) {
         },
     });
 
+    // environment(name) — reads one Unicode process-environment variable.
+    // Missing and non-Unicode values are represented as nil, matching the
+    // builtin's `string?` surface type and `std::env::var(name).ok()` in
+    // transpiled programs.
+    e.define("environment", Value::NativeFn {
+        name: "environment".into(),
+        func: |args, line| {
+            if args.len() != 1 {
+                return Err(err("environment() takes exactly 1 argument", line));
+            }
+            let name = match &args[0] {
+                Value::Str(name) => name,
+                _ => return Err(err("environment: expected a string argument", line)),
+            };
+            Ok(std::env::var(name.as_str()).ok().map(Value::Str).unwrap_or(Value::Nil))
+        },
+    });
+
     // ord(c) — Unicode codepoint of the first character of a string
     e.define("ord", Value::NativeFn {
         name: "ord".into(),

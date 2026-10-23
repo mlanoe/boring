@@ -323,6 +323,7 @@ fn use_transitive_then_direct_const() {
 
 interp_test!(ownership);
 interp_test!(let_pattern);
+interp_test!(environment_builtin);
 interp_test!(result_compat);
 interp_test!(multi_catch);
 interp_test!(implicit_self);

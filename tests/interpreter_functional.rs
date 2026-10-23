@@ -202,6 +202,7 @@ itest!(boring_stdlib_collections);
 itest!(boring_stdlib_identity);
 itest!(ownership);
 itest!(let_pattern);
+itest!(environment_builtin);
 itest!(result_compat);
 itest!(multi_catch);
 itest!(implicit_self);
