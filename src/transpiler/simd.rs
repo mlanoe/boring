@@ -471,6 +471,126 @@ fn __boring_simd_parallel_threshold() -> usize {
             .unwrap_or(1_048_576)
     })
 }
+/// Runtime switch back to the original per-element dequantization of the quantized `linear`
+/// (`BORING_SIMD_QUANT_REFERENCE=1`), kept for comparison and regression checks.
+#[allow(dead_code)] fn __boring_simd_quant_reference() -> bool {
+    static REFERENCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REFERENCE.get_or_init(|| std::env::var("BORING_SIMD_QUANT_REFERENCE").map(|value| value == "1").unwrap_or(false))
+}
+// Block dequantizers for the quantized `linear`. Each one produces exactly the f32 weights the
+// per-element reference computes (same operations in the same order, so results are bit-identical)
+// but as flat loops over the block's bytes, which the compiler vectorizes (NEON / SSE / AVX2).
+#[allow(dead_code)] #[inline] fn __boring_dequant_q8_0(blk: &[u8], scale: f32, out: &mut [f32; 32]) {
+    let blk: &[u8; 34] = blk.try_into().unwrap();
+    for i in 0..32 { out[i] = scale * (blk[2 + i] as i8 as f32); }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_q4_0(blk: &[u8], scale: f32, out: &mut [f32; 32]) {
+    let blk: &[u8; 18] = blk.try_into().unwrap();
+    for i in 0..16 {
+        out[i] = scale * (((blk[2 + i] & 0x0f) as i32 - 8) as f32);
+        out[16 + i] = scale * (((blk[2 + i] >> 4) as i32 - 8) as f32);
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_q5_0(blk: &[u8], scale: f32, out: &mut [f32; 32]) {
+    let blk: &[u8; 22] = blk.try_into().unwrap();
+    let high_bits = u32::from_le_bytes([blk[2], blk[3], blk[4], blk[5]]);
+    for i in 0..16 {
+        let low = (blk[6 + i] & 0x0f) as u32 | (((high_bits >> i) & 1) << 4);
+        let high = (blk[6 + i] >> 4) as u32 | (((high_bits >> (i + 16)) & 1) << 4);
+        out[i] = scale * ((low as i32 - 16) as f32);
+        out[16 + i] = scale * ((high as i32 - 16) as f32);
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_iq4_nl(blk: &[u8], scale: f32, out: &mut [f32; 32]) {
+    const TABLE: [i32; 16] = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
+    let blk: &[u8; 18] = blk.try_into().unwrap();
+    for i in 0..16 {
+        out[i] = scale * (TABLE[(blk[2 + i] & 0x0f) as usize] as f32);
+        out[16 + i] = scale * (TABLE[(blk[2 + i] >> 4) as usize] as f32);
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_q4_k(blk: &[u8], scale: f32, out: &mut [f32; 256]) {
+    let blk: &[u8; 144] = blk.try_into().unwrap();
+    let dmin = __boring_f16_to_f32(u16::from(blk[2]) | (u16::from(blk[3]) << 8));
+    for chunk in 0..4 {
+        for half in 0..2 {
+            let sub = chunk * 2 + half;
+            let (subscale, submin) = if sub < 4 {
+                (blk[4 + sub] & 63, blk[4 + sub + 4] & 63)
+            } else {
+                ((blk[4 + sub + 4] & 15) | ((blk[4 + sub - 4] >> 6) << 4), (blk[4 + sub + 4] >> 4) | ((blk[4 + sub] >> 6) << 4))
+            };
+            let (sc, mn) = (scale * (subscale as f32), dmin * (submin as f32));
+            let packed = &blk[16 + chunk * 32..16 + chunk * 32 + 32];
+            let dst = &mut out[chunk * 64 + half * 32..chunk * 64 + half * 32 + 32];
+            if half == 0 {
+                for lane in 0..32 { dst[lane] = sc * ((packed[lane] & 0x0f) as f32) - mn; }
+            } else {
+                for lane in 0..32 { dst[lane] = sc * ((packed[lane] >> 4) as f32) - mn; }
+            }
+        }
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_q6_k(blk: &[u8], scale: f32, out: &mut [f32; 256]) {
+    let blk: &[u8; 210] = blk.try_into().unwrap();
+    for iteration in 0..2 {
+        let (ql, qh, scales) = (iteration * 64, 128 + iteration * 32, 192 + iteration * 8);
+        for group in 0..4 {
+            for half in 0..2 {
+                let subscale = blk[scales + half + group * 2] as i8 as f32;
+                for l in 0..16 {
+                    let lane = half * 16 + l;
+                    let low = if group & 1 == 0 { blk[ql + lane] } else { blk[ql + lane + 32] };
+                    let nibble = if group < 2 { low & 0x0f } else { low >> 4 };
+                    let high = (blk[qh + lane] >> (group * 2)) & 3;
+                    let quantized = ((nibble | (high << 4)) as i32 - 32) as f32;
+                    out[iteration * 128 + group * 32 + lane] = scale * subscale * quantized;
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_q3_k(blk: &[u8], scale: f32, out: &mut [f32; 256]) {
+    let blk: &[u8; 110] = blk.try_into().unwrap();
+    for outer in 0..2 {
+        for group in 0..4 {
+            for sub in 0..2 {
+                let scale_index = outer * 8 + group * 2 + sub;
+                let (scale_word, scale_lane) = (scale_index / 4, scale_index % 4);
+                let scale_byte = blk[96 + (scale_word % 2) * 4 + scale_lane];
+                let scale_low = if scale_word < 2 { scale_byte & 15 } else { scale_byte >> 4 };
+                let scale_high = (blk[104 + scale_lane] >> (scale_word * 2)) & 3;
+                let subscale = (scale_low | (scale_high << 4)) as i32 - 32;
+                let shift = group * 2;
+                let mask = 1u8 << (outer * 4 + group);
+                let packed = &blk[32 + outer * 32 + sub * 16..32 + outer * 32 + sub * 16 + 16];
+                let high = &blk[sub * 16..sub * 16 + 16];
+                let dst = &mut out[outer * 128 + group * 32 + sub * 16..outer * 128 + group * 32 + sub * 16 + 16];
+                for lane in 0..16 {
+                    let offset = if high[lane] & mask == 0 { 4 } else { 0 };
+                    let quantized = ((packed[lane] >> shift) & 3) as i32 - offset;
+                    dst[lane] = scale * (subscale * quantized) as f32;
+                }
+            }
+        }
+    }
+}
+#[allow(dead_code)] #[inline] fn __boring_dequant_q2_k(blk: &[u8], scale: f32, out: &mut [f32; 256]) {
+    let blk: &[u8; 84] = blk.try_into().unwrap();
+    let dmin = __boring_f16_to_f32(u16::from(blk[82]) | (u16::from(blk[83]) << 8));
+    for outer in 0..2 {
+        for group in 0..4 {
+            for sub in 0..2 {
+                let scale_byte = blk[outer * 8 + group * 2 + sub];
+                let (sc, mn) = (scale * ((scale_byte & 15) as f32), dmin * ((scale_byte >> 4) as f32));
+                let shift = group * 2;
+                let packed = &blk[16 + outer * 32 + sub * 16..16 + outer * 32 + sub * 16 + 16];
+                let dst = &mut out[outer * 128 + group * 32 + sub * 16..outer * 128 + group * 32 + sub * 16 + 16];
+                for lane in 0..16 { dst[lane] = sc * (((packed[lane] >> shift) & 3) as f32) - mn; }
+            }
+        }
+    }
+}
 #[allow(dead_code)] #[inline(always)] fn __boring_f16_to_f32(bits: u16) -> f32 {
     static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| (0..=u16::MAX).map(__boring_f16_to_f32_slow).collect())[bits as usize]

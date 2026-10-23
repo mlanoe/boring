@@ -112,8 +112,26 @@ heterogeneous performance/efficiency cores busy. On an Apple M3 the one-row deco
 2048x11008 Q8_0 weight went from 13.5 ms to 4.2 ms per call and Q4_0 from 20.4 ms to 5.7 ms. Every cell is
 computed in the same order whatever the worker count, so results are bit-identical to
 `BORING_SIMD_THREADS=1` (checked by `tests/simd_quant_linear.rs`).
-Backend-specific BLAS integration and quantized SIMD microkernels remain future
-work.
+The per-block dequantization of the quantized `linear` uses flat-loop block dequantizers
+(`__boring_dequant_<format>`) that the compiler vectorizes (NEON, SSE, AVX2). They compute the
+same f32 weights as the original per-element decoder, operation for operation, so results are
+bit-identical (checked by `tests/simd_quant_linear.rs` for all eight formats, single worker and
+forced-parallel). On a loaded Apple M3 the one-row decode of a 2048x11008 weight ran 1.3x (Q8_0),
+1.9x (Q4_0), 2.4x (Q5_0), 4x (IQ4_NL), 7x (Q4_K), 5x (Q6_K), 5x (Q3_K) and 7x (Q2_K) faster than
+the original decoder on one worker, and 1.3x to 4x faster on eight; the machine load varied during
+those runs, so only the ratios within each pair are meaningful. `BORING_SIMD_QUANT_REFERENCE=1`
+selects the original per-element decoder, kept for comparison and regression checks.
+Further microkernels were evaluated with `tools/simd_quant_microbench.rs` (Q8_0, one core, Apple M3,
+loaded machine, stable ordering over repeated runs). The shipped schedule reduces its sixteen
+accumulators horizontally after every 32-weight block, which costs as much as the dequantization.
+Keeping the sixteen float lanes across blocks and reducing once per column ran about 2.2-2.5x faster
+than the original order at ~1.5e-6 relative difference (sums reassociated, still deterministic and
+worker-count independent, like the float `linear`). An int8-activation NEON kernel (activations
+rounded to int8 per 32-block, `vmull_s8` + `vpadalq_s16`) ran about 5-7x faster still but differs from
+the float reference by ~2e-2 relative on the benchmark's random weights, so it could only be an
+explicit opt-in precision mode; the sdot instruction (`vdotq_s32`) is unstable in Rust, and AVX2 would
+use `_mm256_maddubs_epi16`. Neither is implemented. Backend-specific BLAS integration also remains
+future work.
 
 Very large operations use the host's available parallelism. Set
 `BORING_SIMD_THREADS=N` to cap them to `N` workers; `BORING_SIMD_THREADS=1`
