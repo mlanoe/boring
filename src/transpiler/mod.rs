@@ -3087,12 +3087,12 @@ impl Transpiler {
         self.line(&format!("fn boring_main() -> {} {{", main_ret));
         self.indent += 1;
         self.in_throws = true;
-        for item in stmts {
-            match item {
-                Item::Let(s) => {
         // The last emitted method's lent params (`mut Rt rt`) are still in `inferred_qualifiers`;
         // a top-level value of the same name is a plain local here, not a `&mut` (`&mut *rt`, E0614).
         self.inferred_qualifiers.clear();
+        for item in stmts {
+            match item {
+                Item::Let(s) => {
                     if s.binding.is_mutable() && self.global_vars_used_in_fns.contains(&s.name) {
                         // Already emitted as LazyLock<Mutex<T>> static — skip.
                     } else {

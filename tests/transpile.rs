@@ -812,9 +812,9 @@ transpile_test!(cast_followed_by_operator);
 // named 'trim' found for type 'isize'` and friends. See
 // tests/cases/if_else_cast_numeric.br's own doc comment for the full repro.
 transpile_test!(if_else_cast_numeric);
+transpile_test!(unresolved_field_cast_numeric);
 // `(s.length as float)` numeric cast, `parseFloat`/`parseInt` on field/param strings, string-literal
 // promotion in `assert_eq`/`join` — see tests/cases/string_len_cast_parse_field.br.
-transpile_test!(unresolved_field_cast_numeric);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 
