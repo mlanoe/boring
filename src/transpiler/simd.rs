@@ -459,6 +459,18 @@ fn __boring_simd_parallel_threshold() -> usize {
             .unwrap_or(268_435_456)
     })
 }
+/// Quantized `linear` pays a dequantization per weight, so its parallel threshold (in
+/// multiply-accumulates) is far below the float one: one 22M-MAC decode already takes
+/// milliseconds on one core while spawning workers costs tens of microseconds.
+/// `BORING_SIMD_QUANT_THRESHOLD` overrides it; `BORING_SIMD_THREADS=1` forces one worker.
+#[allow(dead_code)] fn __boring_simd_quant_threshold() -> usize {
+    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("BORING_SIMD_QUANT_THRESHOLD").ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1_048_576)
+    })
+}
 #[allow(dead_code)] #[inline(always)] fn __boring_f16_to_f32(bits: u16) -> f32 {
     static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| (0..=u16::MAX).map(__boring_f16_to_f32_slow).collect())[bits as usize]

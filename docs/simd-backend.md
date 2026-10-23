@@ -104,6 +104,14 @@ instruction). When there are fewer rows than workers (down to the one-row decode
 across workers instead. Very large operations split output
 rows into disjoint mutable chunks across the available CPU cores; smaller ones
 run inline to avoid thread-spawn and cache-contention overhead.
+Quantized `linear` (Q4_0/Q5_0/Q8_0/IQ4_NL and the K-quants) pays a dequantization per weight, so it
+switches to several workers at a much lower threshold than the float operations (1M
+multiply-accumulates instead of 268M; `BORING_SIMD_QUANT_THRESHOLD` overrides it). It splits the
+output into many more tasks than workers and the workers pull them from a shared queue, which keeps
+heterogeneous performance/efficiency cores busy. On an Apple M3 the one-row decode of a
+2048x11008 Q8_0 weight went from 13.5 ms to 4.2 ms per call and Q4_0 from 20.4 ms to 5.7 ms. Every cell is
+computed in the same order whatever the worker count, so results are bit-identical to
+`BORING_SIMD_THREADS=1` (checked by `tests/simd_quant_linear.rs`).
 Backend-specific BLAS integration and quantized SIMD microkernels remain future
 work.
 
