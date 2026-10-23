@@ -2399,7 +2399,7 @@ impl<'a> HostEmitter<'a> {
             if !l.starts_with(char::is_whitespace) {
                 let t = l.trim_end();
                 in_impl = t.starts_with("impl ") && t.trim_end_matches(" {").split_whitespace().last() == Some(ty)
-                    || t.starts_with(&format!("impl<")) && t.trim_end_matches(" {").ends_with(&format!(" {ty}"));
+                    || t.starts_with("impl<") && t.trim_end_matches(" {").ends_with(&format!(" {ty}"));
                 continue;
             }
             if !in_impl { continue; }

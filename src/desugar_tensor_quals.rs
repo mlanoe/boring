@@ -106,8 +106,8 @@ fn reject_unsupported_markers(items: &[Item]) {
     }
     for item in items {
         match item {
-            Item::Let(l) => {
-                if has_marker(l.ty.as_ref()) && !is_node_type(l.ty.as_ref()) { marker_error("a non-array binding", l.line, l.col); }
+            Item::Let(l) if has_marker(l.ty.as_ref()) && !is_node_type(l.ty.as_ref()) => {
+                marker_error("a non-array binding", l.line, l.col);
             }
             Item::Fn(f) => free_fn(f),
             Item::Mod(m) => reject_unsupported_markers(&m.items),
@@ -257,7 +257,7 @@ struct NodeInfo {
     mutable: bool,
 }
 
-fn infer_unit(items: &mut Vec<Item>) {
+fn infer_unit(items: &mut [Item]) {
     // Nested modules are independent units: they resolve calls against their own functions.
     for item in items.iter_mut() {
         if let Item::Mod(m) = item { infer_unit(&mut m.items); }
@@ -510,8 +510,8 @@ fn infer_unit(items: &mut Vec<Item>) {
         while parent[cur] != root { let next = parent[cur]; parent[cur] = root; cur = next; }
         root
     }
-    for id in 0..node_count {
-        for &other in &facts[id].unions {
+    for (id, fact) in facts.iter().enumerate().take(node_count) {
+        for &other in &fact.unions {
             let (a, b) = (find(&mut parent, id), find(&mut parent, other));
             if a != b { parent[a] = b; }
         }
@@ -519,12 +519,12 @@ fn infer_unit(items: &mut Vec<Item>) {
     #[derive(Default)]
     struct Group { operand: bool, members: Vec<usize>, forced: Vec<(OwnerQual, String)> }
     let mut groups: HashMap<usize, Group> = HashMap::new();
-    for id in 0..node_count {
+    for (id, fact) in facts.iter().enumerate().take(node_count) {
         let root = find(&mut parent, id);
         let g = groups.entry(root).or_default();
-        g.operand |= facts[id].operand;
+        g.operand |= fact.operand;
         g.members.push(id);
-        g.forced.extend(facts[id].forced.iter().cloned());
+        g.forced.extend(fact.forced.iter().cloned());
     }
     let label = |id: usize| format!("{}::{}", infos[id].scope, infos[id].name);
     // The decision and the sentence that explains it (for `--show-qualifiers`).
@@ -547,17 +547,17 @@ fn infer_unit(items: &mut Vec<Item>) {
     };
 
     let mut decided: HashMap<usize, OwnerQual> = HashMap::new();
-    for id in 0..node_count {
+    for (id, info) in infos.iter().enumerate().take(node_count) {
         let root = find(&mut parent, id);
         let Some(g) = groups.get(&root) else { continue };
         let Some((q, why)) = resolve(g) else { continue };
         decided.insert(id, q.clone());
         let shared: Vec<String> = g.members.iter().copied().filter(|&m| m != id).map(label).collect();
         DECISIONS.with(|d| d.borrow_mut().push(Decision {
-            scope: infos[id].scope.clone(),
-            name: infos[id].name.clone(),
-            line: infos[id].line,
-            col: infos[id].col,
+            scope: info.scope.clone(),
+            name: info.name.clone(),
+            line: info.line,
+            col: info.col,
             qual: qual_text(&q),
             why: {
                 let why = match ret_notes.get(&id) { Some(note) => format!("{note}; {why}"), None => why };
@@ -569,9 +569,8 @@ fn infer_unit(items: &mut Vec<Item>) {
     // --- warnings ----------------------------------------------------------------------
     // A `mut` that changes nothing but the default: it is in a participating group, and
     // every use of the array is one the pass fully understands as read-only.
-    for id in 0..node_count {
-        if decided.contains_key(&id) && infos[id].mutable && !facts[id].maybe_written {
-            let info = &infos[id];
+    for (id, info) in infos.iter().enumerate().take(node_count) {
+        if decided.contains_key(&id) && info.mutable && !facts[id].maybe_written {
             WARNINGS.with(|w| w.borrow_mut().push(crate::errors::SourceError::at(
                 format!(
                     "`{}` is declared `mut` but is never written: use `let` (a `mut` array is inferred \
@@ -996,14 +995,13 @@ fn auto_return_calls(
         for stmt in &scope.stmts {
             match stmt {
                 Stmt::Expr(e) if is_call_to(e, fname) => safe_calls += 1,
-                Stmt::Let(l) if l.value.as_ref().is_some_and(|v| is_call_to(v, fname)) => {
-                    if l.ty.is_some() {
-                        safe_calls += 1;
-                    } else if matches!(l.binding, BindingKind::Let | BindingKind::Mut)
-                        && result_uses_safe(scope, si == 0, &l.name, items, sigs)
-                    {
-                        safe_calls += 1;
-                    }
+                Stmt::Let(l)
+                    if l.value.as_ref().is_some_and(|v| is_call_to(v, fname))
+                        && (l.ty.is_some()
+                            || (matches!(l.binding, BindingKind::Let | BindingKind::Mut)
+                                && result_uses_safe(scope, si == 0, &l.name, items, sigs))) =>
+                {
+                    safe_calls += 1;
                 }
                 _ => {}
             }
@@ -1488,7 +1486,7 @@ mod tests {
         let block = |c: &str| format!("    if go:\n        let [float32, k = 2, m = 2] a = [0.0 for ..<4]\n        let [float32, n = 2, k = 2] b = [0.0 for ..<4]\n        mut [float32, n = 2, m = 2] {c} = [0.0 for ..<4]\n        kernel.tensors.matmul(a, b, {c})\n");
         let src = format!("def work(bool go) throws:\n{}{}", block("c"), block("d"));
         let got = nested_quals(&run(&src), "work");
-        assert!(got.iter().all(|(n, q)| *q == None || n == "c" || n == "d"), "{got:?}");
+        assert!(got.iter().all(|(n, q)| q.is_none() || n == "c" || n == "d"), "{got:?}");
         assert!(got.iter().filter(|(n, _)| n == "a" || n == "b").all(|(_, q)| q.is_none()), "{got:?}");
     }
 

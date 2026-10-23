@@ -10,6 +10,7 @@ use crate::transpiler::helpers::{
     labeled_array_grid_dim_expr, desugared_labeled_array_shadow_fields,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_host_rs(
     program: &Program,
     kernel_names: &[String],

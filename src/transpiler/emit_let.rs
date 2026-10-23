@@ -633,7 +633,7 @@ impl Transpiler {
         let decl_ty: Option<&Type> = s.ty.as_ref().map(Type::without_mut);
         // Track variables that hold collections (for {:?} formatting later)
         // `let q = obj.items` — an unannotated local initialised from an array-typed struct field.
-        let from_array_field = s.ty.is_none() && self.expr_field_is_array(&s_value);
+        let from_array_field = s.ty.is_none() && self.expr_field_is_array(s_value);
         if looks_like_collection(val) || is_collection_type(decl_ty) || from_array_field {
             self.collection_vars.insert(s.name.clone());
         }
@@ -1676,6 +1676,19 @@ impl Transpiler {
         // the old struct type and incorrectly suppress `.await.unwrap()` on `.value`.
         self.var_struct_types.remove(&s.name);
         self.var_struct_type.remove(&s.name);
+        // A new binding shadows any same-named one from a sibling branch/scope. The string/Arc
+        // sets are flat per-fn, name-keyed, so without this reset a string `let g` in one
+        // `if` branch makes a later int `let g` in the `elif` look like an `Arc<str>`
+        // (`Arc::clone(&g)` passed where `isize` is expected). Every string/Arc-shaped
+        // initializer re-inserts the name afterwards. Skipped for `let g = g`, whose
+        // initializer still needs the outer binding's classification.
+        if !matches!(s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Var(v)) if v == &s.name) {
+            self.string_vars.remove(&s.name);
+            self.string_arc_vars.remove(&s.name);
+            self.arc_vars.remove(&s.name);
+            self.rc_vars.remove(&s.name);
+            self.var_types.remove(&s.name);
+        }
         // `let v` / `var v` — deferred initialisation: emit `let v;` and let Rust
         // enforce definite assignment via its own control-flow analysis.
         if s.value.is_none() {

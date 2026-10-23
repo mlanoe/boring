@@ -1,0 +1,24 @@
+# Two sibling branches of one function declare a local with the same name but different
+# types. Each branch scope must resolve its own binding: the `string g` of the first
+# branch must not leak into the int `g` of the second (previously emitted
+# `take_int(Arc::clone(&g))` -> E0308: expected `isize`, found `Arc<_>`).
+def take_str(string s):
+    print "str {s}"
+
+def take_int(int n):
+    print "int {n}"
+
+def f(int k):
+    if k == 0:
+        let string g = "a"
+        take_str(g)
+    elif k == 1:
+        let g = 5
+        take_int(g)
+    else:
+        let g = 2.5
+        print "float {g}"
+
+f(0)
+f(1)
+f(2)

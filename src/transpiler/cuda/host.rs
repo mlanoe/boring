@@ -10,6 +10,7 @@ use crate::transpiler::helpers::{
     labeled_array_total_size_expr,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_host_rs(
     program: &Program,
     kernel_names: &[String],

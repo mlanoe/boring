@@ -201,7 +201,7 @@ fn metal_render_loop_state_values_and_methods() {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
     let br = tmp.join("test.br");
-    fs::write(&br, &src).unwrap();
+    fs::write(&br, src).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--target", "metal"]).arg(&br).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let project = tmp.join("test_metal");

@@ -498,6 +498,7 @@ transpile_test!(result_compat);
 transpile_test!(multi_catch);
 transpile_test!(implicit_self);
 transpile_test!(shadowing);
+transpile_test!(sibling_branch_local_type);
 transpile_test!(for_destructure);
 transpile_test!(for_string_membership_early_exit);
 transpile_test!(struct_spread);

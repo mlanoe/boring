@@ -94,7 +94,7 @@ fn emit(br: &PathBuf, target: &str) {
     assert!(out.status.success(), "[{target}] build failed:\n{}", String::from_utf8_lossy(&out.stderr));
 }
 
-fn read(br: &PathBuf, rel: &str) -> String {
+fn read(br: &std::path::Path, rel: &str) -> String {
     fs::read_to_string(br.parent().unwrap().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 

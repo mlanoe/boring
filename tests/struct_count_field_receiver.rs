@@ -84,7 +84,7 @@ fn build(target: &str) -> (PathBuf, String) {
     (project, rs)
 }
 
-fn cargo_check(project: &PathBuf, target: &str) {
+fn cargo_check(project: &std::path::Path, target: &str) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("struct_count_field_receiver_{target}_target"));
     let out = common::SharedCargo::new("struct_count_field_receiver")
         .args(["check", "--quiet", "--manifest-path"])

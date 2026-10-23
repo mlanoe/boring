@@ -83,7 +83,7 @@ fn build(target: &str, name: &str, src: &str) -> (PathBuf, String) {
 
 /// `cargo check` the generated crate; one shared target dir per backend so the heavy
 /// dependencies are compiled once.
-fn cargo_check(project: &PathBuf, target: &str) {
+fn cargo_check(project: &std::path::Path, target: &str) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("screen_render_loop_arrays_{target}_target"));
     let out = common::SharedCargo::new("screen_render_loop_arrays")
         .args(["check", "--quiet", "--manifest-path"])

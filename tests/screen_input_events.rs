@@ -96,7 +96,7 @@ fn build(target: &str, name: &str, src: &str) -> (PathBuf, String) {
     (project, rs)
 }
 
-fn cargo_check(project: &PathBuf, target: &str) {
+fn cargo_check(project: &std::path::Path, target: &str) {
     if target == "rocm" {
         // The generated build script compiles the kernel with hipcc and probes the device;
         // neither is needed to type-check the host code.

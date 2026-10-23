@@ -328,6 +328,7 @@ interp_test!(multi_catch);
 interp_test!(implicit_self);
 interp_test!(nil_assign);
 interp_test!(shadowing);
+interp_test!(sibling_branch_local_type);
 interp_test!(struct_spread);
 interp_test!(default_rest);
 interp_test!(tuple_string);

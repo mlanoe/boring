@@ -122,7 +122,7 @@ fn wgpu_screen_program_runs_kernel_init_and_top_level_code() {
     cargo_check(&project);
 }
 
-fn cargo_check(project: &PathBuf) {
+fn cargo_check(project: &std::path::Path) {
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_setup_wgpu_target");
     let out = common::SharedCargo::new("screen_setup")
         .args(["check", "--quiet", "--manifest-path"])
