@@ -408,6 +408,8 @@ let bigger = count + 1     # fine — `1` is the flexible `int` literal kind
 
 Casting to a narrower type checks the range and produces `nil` (or errors, depending on context) if the value doesn't fit — same as the existing `uint8` behavior (`300 as uint8` is out of range).
 
+Scalar types (`int`, `uint`, `float`, `uint8`, …) take no generic arguments, so a `<` right after `as <scalar>` is always an operator: `255 as uint << 24` is a shift and `a as int < b` a comparison. Only non-scalar type names (`Foo<T>`) open a generic argument list there.
+
 > `kernel` struct fields (GPU targets) have their own, narrower per-backend width support than the host-side types above — see [chapter 32, GPU Computing](#32-gpu-computing).
 
 ### Fixed-width floats

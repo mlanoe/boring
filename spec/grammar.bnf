@@ -774,6 +774,7 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                                                                              #   labeled, order free at the use site (names disambiguate)
                   | "[" slice_range "]"                                     # slice: a[M..<N], a[..<N], a[M..], a[..]
                   | "as" type                                                # cast
+                                                                         # (scalar types take no `<...>` args: `x as uint << 3` is a shift)
                   | "as" "[" IDENT "=" IDENT ("," IDENT "=" IDENT)* ","? "]" # relabel cast (array-multidim-types.md):
                                                                              #   img as [line = width, column = height] —
                                                                              #   (target_label = source_label) pairs, must be a

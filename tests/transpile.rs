@@ -802,6 +802,7 @@ transpile_test!(cast_bare_field_index);
 // and an explicitly borrowed local alias.
 // Regression: `ord(c) < 32` / `ord(c) << 1` — see tests/cases/cast_lhs_of_lt.br.
 transpile_test!(cast_scenarios);
+transpile_test!(cast_followed_by_operator);
 // Regression: `(if cond: a else: b) as T`, where every branch is an ordinary
 // numeric expression — the if/else's own branches weren't recognized by any
 // of emit_expr_cast's numeric-source checks, so the cast fell through to the

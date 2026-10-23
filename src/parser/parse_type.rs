@@ -289,7 +289,13 @@ impl Parser {
                 // Generic type args: Foo<T, U> — supports the same extended syntax as
                 // struct/fn type-param declarations: lifetime args `&a` and optional
                 // `T as Trait` bounds (bounds are silently ignored at use sites).
-                let built = if self.eat(&TokenKind::Lt) {
+                // Scalar types take no generic args, so a following `<` is an operator
+                // (`x as uint << 24`, `x as int < y`), not an argument list.
+                let takes_generics = !matches!(s.as_str(),
+                    "int" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uint128"
+                    | "int8" | "int16" | "int32" | "int64" | "int128"
+                    | "float" | "float32" | "float64" | "bool" | "string" | "str");
+                let built = if takes_generics && self.eat(&TokenKind::Lt) {
                     let mut args = Vec::new();
                     args.push(self.parse_generic_type_arg()?);
                     while self.eat(&TokenKind::Comma) {

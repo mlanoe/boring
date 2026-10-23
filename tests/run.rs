@@ -560,6 +560,7 @@ interp_test!(self_field_loop_match_borrow);
 interp_test!(qualifier_group_param);
 interp_test!(cast_bare_field_index);
 interp_test!(cast_scenarios);
+interp_test!(cast_followed_by_operator);
 interp_test!(if_else_cast_numeric);
 interp_test!(unresolved_field_cast_numeric);
 
