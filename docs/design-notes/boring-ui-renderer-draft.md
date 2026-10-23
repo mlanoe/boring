@@ -42,15 +42,15 @@ Rationale, in short:
   Tests run through `text/tests/run_tests.sh` (`boring build`; `boring run` cannot call a crate).
 - **Renderers**: `DrawGlyph` (`Command.glyph` = index into a `GlyphAtlas`, a pool of contiguous 8-bit masks in
   `display_list.br`, passed beside the list like `Bitmap`s) in the CPU reference (`rasterizeWith`), the per-pixel kernel
-  (op 7, masks in `Encoded.pool`) and the tiled kernel. The pen snaps to whole pixels for now (no subpixel positioning).
+  (op 7, masks in `Encoded.pool`) and the tiled kernel. The command's pen is a whole pixel; the quarter-pixel position is baked into the mask (`rasterizeAt`, cache key includes the bin).
 - **Layout and window** (2026-10-22): `EngineMeasurer` implements the theme's `TextMeasurer` (layout, caret and click-to-caret
   use the real advances), `glyphify` turns every `DrawText` into glyphs, and `todo_window` runs on both (Arial).
 - **Font fallback** (2026-10-23): `shapeRuns` sends each grapheme to the first font of a list that covers all its characters
   (`covers`, via the charmap), shapes consecutive graphemes of one font together and lays the runs out in sequence
   (`PlacedGlyph.font`); `GlyphCache(fallbacks = ...)` and `EngineMeasurer(fallbacks = ...)` use it, and `todo_window`
   falls back to Hiragino Sans GB for CJK (an IME composing Chinese or Japanese now draws real glyphs, not boxes).
-- **Not done**: `scene.br` still emits `DrawText` (the window converts it after the fact: `glyphify`), subpixel positioning
-  (the pen snaps to whole pixels), bold/italic weights, per-call shaping with no cache in the measurer, line breaking via
+- **TextField** (2026-10-23): its text is clipped to the field and scrolls horizontally to keep the caret in view (`fieldScroll`).
+- **Not done**: `scene.br` still emits `DrawText` (the window converts it after the fact: `glyphify`), bold/italic weights, per-call shaping with no cache in the measurer, line breaking via
   the engine, bidi, colour emoji, and a bundled font (paths are macOS system fonts).
 
 ## Status (2026-10-20)
