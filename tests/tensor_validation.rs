@@ -339,13 +339,19 @@ fn project_tensor_config_auto_selects_iq4_warp_broadcast_decode() {
         .args(["build", "--target", "metal"]).arg(&path).output().unwrap();
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
     let shader = fs::read_to_string(root.join("main_metal/kernels/main.metal")).unwrap();
-    assert!(shader.contains("simd_shuffle(scale"), "auto must select IQ4_NL warp-broadcast because it substantially outperforms the scalar tensor schedule");
+    // `auto` picks the SIMD-group rows decode (four rows per SIMD group), which replaced the generic
+    // warp-broadcast schedule as the default; that schedule stays available by name (next test).
+    assert!(shader.contains("constexpr uint bp_rows = 4;") && shader.contains("bp_iq4["), "auto must select the IQ4_NL SIMD-group decode, not the scalar tensor schedule");
+    assert!(!shader.contains("nibble == 14"), "auto must not fall back to the generic codebook schedule");
 }
 
 #[test]
 fn dynamic_tensor_linear_decodes_q4_0_weights_on_all_gpu_targets() {
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_q4_0");
     fs::create_dir_all(&root).unwrap();
+    // These assertions describe the generic Boring-synthesized warp schedule, which Metal only
+    // uses on request now that Q4_0/Q5_0/IQ4_NL have SIMD-group kernels by default.
+    fs::write(root.join("boring.toml"), "[tensor.linear]\nalgorithm = \"portable\"\n").unwrap();
     let path = root.join("tensor_dynamic_q4_0.br");
     fs::write(&path, "req [float32]'kernel'unified compute([float32]'kernel'global x, [uint8]'kernel'global weight, [float32]'kernel'global bias) throws:\n    mut [float32]'kernel'unified y = [0.0 as float32]\n    kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = \"q4_0\")\n    y\n\nlet [float32]'kernel'global x = [1.0 as float32 for ..<32]\nmut [uint8]'kernel'global weight = [uint8(153) for ..<18]\nweight[0] = uint8(0)\nweight[1] = uint8(60)\nlet [float32]'kernel'global bias = [2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print result[0]\n").unwrap();
 
@@ -373,6 +379,9 @@ fn dynamic_tensor_linear_decodes_q4_0_weights_on_all_gpu_targets() {
 fn dynamic_tensor_linear_decodes_q5_0_weights_on_all_gpu_targets() {
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_q5_0");
     fs::create_dir_all(&root).unwrap();
+    // These assertions describe the generic Boring-synthesized warp schedule, which Metal only
+    // uses on request now that Q4_0/Q5_0/IQ4_NL have SIMD-group kernels by default.
+    fs::write(root.join("boring.toml"), "[tensor.linear]\nalgorithm = \"portable\"\n").unwrap();
     let path = root.join("tensor_dynamic_q5_0.br");
     fs::write(&path, "req [float32]'kernel'unified compute([float32]'kernel'global x, [uint8]'kernel'global weight, [float32]'kernel'global bias) throws:\n    mut [float32]'kernel'unified y = [0.0 as float32]\n    kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = \"q5_0\")\n    y\n\nlet [float32]'kernel'global x = [1.0 as float32 for ..<32]\nmut [uint8]'kernel'global weight = [uint8(17) for ..<22]\nweight[0] = uint8(0)\nweight[1] = uint8(60)\nweight[2] = uint8(255)\nweight[3] = uint8(255)\nweight[4] = uint8(255)\nweight[5] = uint8(255)\nlet [float32]'kernel'global bias = [2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print result[0]\n").unwrap();
 
@@ -1107,6 +1116,9 @@ fn dynamic_tensor_linear_reports_specific_runtime_shape_errors() {
 fn dynamic_tensor_linear_decodes_iq4_nl_weights_on_all_gpu_targets() {
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tensor_dynamic_iq4_nl");
     fs::create_dir_all(&root).unwrap();
+    // These assertions describe the generic Boring-synthesized warp schedule, which Metal only
+    // uses on request now that Q4_0/Q5_0/IQ4_NL have SIMD-group kernels by default.
+    fs::write(root.join("boring.toml"), "[tensor.linear]\nalgorithm = \"portable\"\n").unwrap();
     fs::write(root.join("boring.toml"), "[project]\nname = \"tensor-iq4-warp\"\n\n[tensor.linear.decode]\niq4_nl = \"warp-broadcast\"\n").unwrap();
     let path = root.join("tensor_dynamic_iq4_nl.br");
     fs::write(&path, "req [float32]'kernel'unified compute([float32]'kernel'global x, [uint8]'kernel'global weight, [float32]'kernel'global bias) throws:\n    mut [float32]'kernel'unified y = [0.0 as float32]\n    kernel.tensors.linear(x, weight, bias, y, m = 1, n = 1, k = 32, format = \"iq4_nl\")\n    y\n\nlet [float32]'kernel'global x = [1.0 as float32 for ..<32]\nmut [uint8]'kernel'global weight = [uint8(136) for ..<18]\nweight[0] = uint8(0)\nweight[1] = uint8(60)\nlet [float32]'kernel'global bias = [2.0 as float32]\nlet result = compute(x, weight, bias)\nwith result:\n    print result[0]\n").unwrap();

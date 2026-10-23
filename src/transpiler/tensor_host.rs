@@ -114,11 +114,13 @@ impl TensorLinearConfig {
         }
     }
 
-    /// `algorithm = "portable"` (either direction) keeps the generic Boring-synthesized kernels
+    /// `algorithm = "portable"` (either direction), or an explicit `warp`/`warp-broadcast` decode, keeps the generic Boring-synthesized kernels
     /// (shared-memory tiled prefill, warp decode) instead of a backend's hand-written SIMD-group
     /// kernels, so the older schedules stay selectable for comparison and regression checks.
     fn wants_portable(&self, format: Option<&str>) -> bool {
-        self.raw_algorithm(format, false) == "portable" || self.raw_algorithm(format, true) == "portable"
+        // An explicit `warp` / `warp-broadcast` decode asks for that generic schedule by name.
+        self.raw_algorithm(format, false) == "portable"
+            || matches!(self.raw_algorithm(format, true), "portable" | "warp" | "warp-broadcast")
     }
 }
 
