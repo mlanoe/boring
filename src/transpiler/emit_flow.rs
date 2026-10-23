@@ -130,7 +130,7 @@ impl Transpiler {
                         // fn) — see `wrap_return_for_qualifier`'s doc.
                         wrapped
                     } else {
-                        self.emit_expr_owned(e)
+                        self.emit_int_return_expr(e)
                     }
                 } else {
                     self.emit_expr_owned(e)

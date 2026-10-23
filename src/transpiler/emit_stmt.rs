@@ -1,8 +1,22 @@
 use super::*;
 use super::Transpiler;
 use super::helpers::*;
-
 impl Transpiler {
+    /// Return/tail value for a function declared `int` (isize): a `.len()` (or a `+`/`-`/`*`
+    /// combination of only `.len()` calls) is `usize` in Rust, so retarget its casts to `isize`.
+    pub(crate) fn emit_int_return_expr(&self, e: &Expr) -> String {
+        fn len_only(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::MethodCall(_, m, a) => m == "len" && a.is_empty(),
+                ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul, l, r) => len_only(l) && len_only(r),
+                _ => false,
+            }
+        }
+        let s = self.emit_expr_owned(e);
+        let int_ret = matches!(&self.fn_return_ty, Some(Type::Named(n)) if n == "int");
+        if int_ret && len_only(e) { s.replace(" as usize", " as isize") } else { s }
+    }
+
     /// Tail expression of a `T?`-returning function: wrap a plain value in `Some(...)`
     /// unless it is already Option-shaped. Shared by the plain and `throws` tail paths.
     fn wrap_optional_tail(&self, e: &Expr) -> String {
@@ -359,7 +373,7 @@ impl Transpiler {
                         // twin for the no-explicit-`return` tail-expression shape.
                         wrapped
                     } else {
-                        self.emit_expr_owned(e)
+                        self.emit_int_return_expr(e)
                     };
                     self.line(&s);
                 } else {

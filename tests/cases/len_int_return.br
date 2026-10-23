@@ -1,0 +1,22 @@
+# `.len()` flowing into an `int` return (explicit return, alone or summed) must be isize.
+
+def int one([uint8] data):
+    return data.len()
+
+def int two([uint8] data):
+    return data.len() + data.len()
+
+def int nested():
+    var mut all = [[1 as uint8], [2 as uint8, 3 as uint8]]
+    all.push([4 as uint8])
+    return all.len()
+
+def int str_len(string s):
+    return s.len()
+
+def main():
+    let b = [1 as uint8, 2 as uint8, 3 as uint8]
+    print "{one(b)}"
+    print "{two(b)}"
+    print "{nested()}"
+    print "{str_len("abcd")}"

@@ -870,3 +870,4 @@ interp_test!(fn_scenarios);
 interp_test!(optional_scenarios);
 interp_test!(closure_scenarios);
 interp_test!(bytes_array_field_and_param_reuse);
+interp_test!(len_int_return);
