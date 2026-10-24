@@ -836,6 +836,8 @@ interp_test!(kernel_float32_array_index_literal_assign);
 // block-permit comment in `run_kernel_parallel` (src/interpreter/eval_gpu.rs) and the
 // `value_stays_small` unit test.
 interp_test!(kernel_sim_many_threads_big_field);
+interp_test!(kernel_aux_method_return_type_first);
+interp_test!(kernel_aux_method_fast_path);
 
 // Ordinary (non-kernel) struct construction/field-assignment never coerced
 // field values to their declared field type under `boring run` — see each

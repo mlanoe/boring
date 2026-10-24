@@ -1,0 +1,16 @@
+# Regression: same as kernel_aux_method_return_type_first, fast path (no actor/sync).
+kernel K:
+    mut [uint]'unified out
+    init():
+        out = [0 as uint for ..<4]
+    uint mix(uint a, uint b):
+        a * 3 + b
+    def ():
+        let gid = .thread.x
+        out[gid] = mix(gid, 1)
+
+def main() throws:
+    mut k = K()
+    kernel:
+        k(block = (4), grid = (1))
+    print "{k.out[0]} {k.out[1]} {k.out[3]}"

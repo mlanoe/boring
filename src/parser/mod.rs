@@ -1409,6 +1409,11 @@ impl Parser {
                 TokenKind::Mut => {
                     fields.push(self.parse_kernel_field()?);
                 }
+                // Return-type-first method (`uint mix(uint a, uint b):`), same shorthand as
+                // top-level fns. Silently `break`ing here used to end the kernel body early.
+                _ if self.is_fn_decl_shorthand() => {
+                    methods.push(self.parse_fn_decl(false, true)?);
+                }
                 _ => break,
             }
         }
