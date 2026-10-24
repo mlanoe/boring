@@ -409,8 +409,10 @@ pub(super) fn is_host_str(e: &crate::ast::Expr, screen_var: Option<&str>, event_
     match &e.kind {
         ExprKind::Str(_) => true,
         ExprKind::Var(v) => event_vars.iter().any(|e| e == v),
-        ExprKind::Field(obj, f) => matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == screen_var)
-            && matches!(f.as_str(), "text" | "marked" | "last_key" | "clipboard"),
+        ExprKind::Field(obj, f) => {
+            matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == screen_var)
+                && matches!(f.as_str(), "text" | "marked" | "last_key" | "clipboard")
+        }
         _ => false,
     }
 }

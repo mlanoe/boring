@@ -3700,7 +3700,9 @@ impl Transpiler {
             obj
         };
         // `screen.setClipboard(s)` (simd): borrow `s` (a literal, `string` or `screen.text`) rather than move it.
-        if self.config.is_simd_target && method == "setClipboard" && args.len() == 1
+        if self.config.is_simd_target
+            && method == "setClipboard"
+            && args.len() == 1
             && matches!(&obj.kind, ExprKind::Var(v) if v == "screen")
         {
             return format!("screen.set_clipboard(&*({}))", self.emit_expr(&args[0].value));
@@ -4367,6 +4369,16 @@ impl Transpiler {
             // `x.map(65 as uint32)` — an argument that cannot be a callable means this is not
             // an iterator `map`/`filter` (e.g. `swash::Charmap::map(codepoint)`): plain method call.
             (method.to_string(), None)
+        } else if matches!(method, "map" | "filter") && args.len() == 1
+            && !matches!(&args[0].value.kind, ExprKind::Closure(..))
+            && self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
+                // A typed external value (`let Charmap charmap = ...`) given a plain variable:
+                // not an iterator adaptor. Collection/iterator/Option-like names stay `map`.
+                !["Iter", "Option", "Result", "Range", "Map", "Vec", "Set", "Stream", "Chars", "Bytes"]
+                    .iter().any(|k| n.contains(k))
+            })
+        {
+            (method.to_string(), None)
         } else {
             let (m, w) = map_method(method, args.len(), self.want_raw_option_pop.get());
             // A receiver whose type could not be resolved (`let node = found else (...)`, a
@@ -4374,6 +4386,14 @@ impl Transpiler {
             // the generic camel→snake fallback would call a method that doesn't exist.
             if w.is_none() && m == camel_to_snake(method) && m != method
                 && self.trait_method_names.values().any(|ms| ms.contains(method))
+                && !self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
+                    // A receiver typed as an external (non-user) type is a Rust-side call even when
+                    // a user trait happens to declare the same Boring method name.
+                    !self.struct_fields.contains_key(&n) && !self.all_enum_types.contains(&n)
+                        && !self.trait_method_names.contains_key(&n)
+                        && !self.struct_method_overload_decls.keys().any(|k| k.starts_with(&format!("{}::", n)))
+                        && n.chars().next().is_some_and(|c| c.is_uppercase())
+                })
             {
                 (method.to_string(), None)
             } else {
@@ -4397,16 +4417,6 @@ impl Transpiler {
                 .or_else(|| self.resolve_expr_external_type_name(obj))
                 .and_then(|qualifier| self.external_fn_arg_borrows(&qualifier, &rust_method))
         };
-        } else if matches!(method, "map" | "filter") && args.len() == 1
-            && !matches!(&args[0].value.kind, ExprKind::Closure(..))
-            && self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
-                // A typed external value (`let Charmap charmap = ...`) given a plain variable:
-                // not an iterator adaptor. Collection/iterator/Option-like names stay `map`.
-                !["Iter", "Option", "Result", "Range", "Map", "Vec", "Set", "Stream", "Chars", "Bytes"]
-                    .iter().any(|k| n.contains(k))
-            })
-        {
-            (method.to_string(), None)
         // HashSet::contains needs a plain reference; HashMap::contains_key needs &String.
         let args_s: Vec<String> = if let Some(borrows) = &external_arg_borrows {
             let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
@@ -4414,14 +4424,6 @@ impl Transpiler {
         } else if !is_user_struct_receiver && self.is_external_mut_buffer_call(&rust_method, args) {
             // `std::io::Read`-style buffer fill (`sock.read(buf)`): see
             // `EXTERNAL_MUT_BUFFER_METHODS`.
-                && !self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
-                    // A receiver typed as an external (non-user) type is a Rust-side call even when
-                    // a user trait happens to declare the same Boring method name.
-                    !self.struct_fields.contains_key(&n) && !self.all_enum_types.contains(&n)
-                        && !self.trait_method_names.contains_key(&n)
-                        && !self.struct_method_overload_decls.keys().any(|k| k.starts_with(&format!("{}::", n)))
-                        && n.chars().next().is_some_and(|c| c.is_uppercase())
-                })
             args.iter().map(|a| self.emit_external_mut_buffer_arg(&rust_method, &a.value)).collect()
         } else if rust_method == "contains_key" && receiver_is_dict_var {
             // Use emit_dict_key_borrow so the key is &str (Arc<str> via Deref).
@@ -6456,18 +6458,6 @@ impl Transpiler {
         self.state_slot_value_expr(inner, field)
     }
 
-    /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.
-    /// Declared type of `field` on the struct behind the `'actor` local/param `var`.
-    pub(crate) fn var_mutex_field_type(&self, var: &str, field: &str) -> Option<Type> {
-        let tname = self.var_types.get(var).and_then(|t| {
-            let mut cur = t.without_mut();
-            while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
-            if let Type::Named(n) = cur { Some(n.clone()) } else { None }
-        }).or_else(|| self.var_struct_types.get(var).cloned())?;
-        self.struct_fields.get(tname.as_str())?.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone())
-    }
-
-    /// `{ let __a = <read>; __a }` for a guard-taking read of a Copy / string value (cloned), so the
     /// `obj` resolves to a struct field declared `'actor`/`'guard` whose payload is a plain
     /// built-in collection (`let {string=float}'actor memo`): the lock handle plus the
     /// collection type. Indexing, `.length`, `.contains(..)` and index assignment on such a field
@@ -6485,6 +6475,18 @@ impl Transpiler {
         }
     }
 
+    /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.
+    /// Declared type of `field` on the struct behind the `'actor` local/param `var`.
+    pub(crate) fn var_mutex_field_type(&self, var: &str, field: &str) -> Option<Type> {
+        let tname = self.var_types.get(var).and_then(|t| {
+            let mut cur = t.without_mut();
+            while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+            if let Type::Named(n) = cur { Some(n.clone()) } else { None }
+        }).or_else(|| self.var_struct_types.get(var).cloned())?;
+        self.struct_fields.get(tname.as_str())?.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone())
+    }
+
+    /// `{ let __a = <read>; __a }` for a guard-taking read of a Copy / string value (cloned), so the
     /// guard is a temporary of the inner `let` only. `None` for any other (maybe non-`Clone`) type.
     pub(crate) fn scoped_guard_read(read: &str, ty: &Type) -> Option<String> {
         let t = ty.without_mut();
@@ -6767,9 +6769,9 @@ impl Transpiler {
             inside_trait_impl: self.inside_trait_impl,
             match_subject_enum: self.match_subject_enum.clone(),
             var_types: self.var_types.clone(),
+            var_scalar_types: self.var_scalar_types.clone(),
             var_init_exprs: self.var_init_exprs.clone(),
             var_std_types: self.var_std_types.clone(),
-            var_scalar_types: self.var_scalar_types.clone(),
             string_vars: self.string_vars.clone(),
             str_index_cache_vars: self.str_index_cache_vars.clone(),
             struct_operator_methods: self.struct_operator_methods.clone(),

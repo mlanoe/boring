@@ -3727,12 +3727,25 @@ impl Interpreter {
                         for v in arr.iter() {
                             match v {
                                 Value::Uint8(n) => out.push(*n),
-                                other => return Err(err(format!("fs.writeBytes: expected [uint8] elements, found {}", other.type_name()), line)),
+                                other => {
+                                    return Err(err(
+                                        format!(
+                                            "fs.writeBytes: expected [uint8] elements, found {}",
+                                            other.type_name()
+                                        ),
+                                        line,
+                                    ))
+                                }
                             }
                         }
                         out
                     }
-                    _ => return Err(err("fs.writeBytes: expected [uint8] as second argument", line)),
+                    _ => {
+                        return Err(err(
+                            "fs.writeBytes: expected [uint8] as second argument",
+                            line,
+                        ))
+                    }
                 };
                 match std::fs::write(&path, &bytes) {
                     Ok(())  => Ok(Value::Void),

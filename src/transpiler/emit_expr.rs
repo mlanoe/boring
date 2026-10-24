@@ -2346,14 +2346,14 @@ impl Transpiler {
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
         // `screen.clipboard` (simd): read lazily through `Screen::clipboard()`, not a per-frame field.
-        if self.config.is_simd_target && field == "clipboard" && matches!(&obj.kind, ExprKind::Var(v) if v == "screen") {
+        if self.config.is_simd_target
+            && field == "clipboard"
+            && matches!(&obj.kind, ExprKind::Var(v) if v == "screen")
+        {
             return "screen.clipboard()".to_string();
         }
         if let Some(code) = self.try_emit_string_prop(obj, field) {
             return code;
-        }
-        if let Some(value_access) = self.state_slot_value_expr(obj, field) {
-            return self.emit_expr(&value_access);
         }
         // `field.length` on a collection behind an `'actor` field, and the whole-field read itself.
         if !self.in_lhs_assign.get() {
@@ -2366,6 +2366,9 @@ impl Transpiler {
             if let Some((r, _)) = self.actor_collection_field(&whole) {
                 return format!("{}.clone()", self.lock_field_read(&r));
             }
+        }
+        if let Some(value_access) = self.state_slot_value_expr(obj, field) {
+            return self.emit_expr(&value_access);
         }
         // `st.cell.member` (`st.log.length`): resolve `member` against the cell's content.
         // `st.cell.value` is the explicit spelling of the `Slot`'s own field: leave it.
@@ -3588,9 +3591,6 @@ impl Transpiler {
                 }
             }
         }
-        // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
-        if let ExprKind::Index(dict_obj, key) = &target.kind {
-            if let ExprKind::Var(dict_name) = &dict_obj.kind {
         // `field[k] = v` / `field[i] = v` on a collection behind an `'actor` field: key and
         // value are evaluated before the write guard is taken (they may read the same field).
         if let ExprKind::Index(coll_obj, key) = &target.kind {
@@ -3608,6 +3608,9 @@ impl Transpiler {
                 }
             }
         }
+        // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
+        if let ExprKind::Index(dict_obj, key) = &target.kind {
+            if let ExprKind::Var(dict_name) = &dict_obj.kind {
                 if self.dict_vars.contains(dict_name.as_str()) {
                     let key_owned = self.emit_dict_key_owned(key);
                     let val_s = self.emit_expr_owned(value);
@@ -4081,13 +4084,13 @@ impl Transpiler {
                                         &self.fn_return_types,
                                         &self.struct_fields,
                                     );
-                                    // A loop variable / call result the quick inference can't type: the
-                                    // declared-type walk (or the struct a local is known to hold) can.
-                                    let inferred = inferred
                                     let inferred = inferred.or_else(|| match &arg.value.kind {
                                         ExprKind::Var(v) => self.var_scalar_types.get(v.as_str()).cloned(),
                                         _ => None,
                                     });
+                                    // A loop variable / call result the quick inference can't type: the
+                                    // declared-type walk (or the struct a local is known to hold) can.
+                                    let inferred = inferred
                                         .or_else(|| self.resolve_expr_type(&arg.value))
                                         .or_else(|| match &arg.value.kind {
                                             ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
@@ -5080,12 +5083,12 @@ impl Transpiler {
             for key in &self.struct_mutex_fields.clone() {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
+                        let raw = missing_lock_init(key, Self::mutex_inner);
                         let init = match self.config.threading {
                             crate::transpiler::ThreadingMode::Multi => self.emit_actor_new(&raw),
                             crate::transpiler::ThreadingMode::Single => format!("Rc::new(RefCell::new({}))", raw),
                         };
                         fields.push(format!("{}: {}", field_name, init));
-                        let raw = missing_lock_init(key, Self::mutex_inner);
                     }
                 }
             }

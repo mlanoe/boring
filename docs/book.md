@@ -8593,8 +8593,6 @@ Same rule as every other hand-verified whitelist in this doc: only add an entry 
 include = ["../shared/external_fns.toml"]   # path relative to this boring.toml
 ```
 
-### Advanced — External calls that fill a byte buffer (`read`, `read_exact`, ...)
-
 ### Advanced — `[external_fields]`: types of fields of external types
 
 The transpiler has no declaration for an external (Rust-side) type's fields, so in `para.level.isRtl()` the receiver `para.level` has an unknown type. When a user `trait` also declares `isRtl`, that method name is then kept verbatim instead of being converted to `is_rtl`. Declare the field's type in `boring.toml`:
@@ -8605,6 +8603,8 @@ The transpiler has no declaration for an external (Rust-side) type's fields, so 
 ```
 
 `para.level` now resolves to `Level` (an external type), so the call becomes `para.level.is_rtl()`. A plain `let Level lvl = para.level` has the same effect without any table. No `include` support.
+
+### Advanced — External calls that fill a byte buffer (`read`, `read_exact`, ...)
 
 Passing a **mutable array** to a `std::io::Read`-family method just works — the transpiler lends it out as a mutable borrow instead of moving it:
 

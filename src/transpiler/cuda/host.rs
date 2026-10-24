@@ -1256,14 +1256,16 @@ impl HostEmitter {
                         self.line(&format!("boring_window.set_ime_position(winit::dpi::PhysicalPosition::new(({x}) as f64 * (__boring_ws.width.max(1) as f64) / boring_buf_w, ({y}) as f64 * (__boring_ws.height.max(1) as f64) / boring_buf_h));"));
                         return;
                     }
-                    if method == "setClipboard" && margs.len() == 1
+                    if method == "setClipboard"
+                        && margs.len() == 1
                         && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
                     {
                         let s = self.expr(&margs[0].value);
                         self.line(&crate::transpiler::screen_input::set_clipboard_stmt(&s));
                         return;
                     }
-                    if method == "requestRedraw" && margs.is_empty()
+                    if method == "requestRedraw"
+                        && margs.is_empty()
                         && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
                     {
                         self.line("boring_dirty = true;");
