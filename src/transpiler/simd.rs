@@ -180,6 +180,11 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         });
     }
     e.raw(&general.code);
+    let uses_clipboard = uses_screen && (general.code.contains("screen.clipboard()") || general.code.contains(".set_clipboard("));
+    if uses_clipboard {
+        e.raw(super::screen_input::CLIPBOARD_RUNTIME);
+        e.raw(super::screen_input::SIMD_CLIPBOARD_SCREEN);
+    }
     if has_main {
         let call = if main_throws {
             "if let Err(e) = boring_main() { eprintln!(\"error: {}\", e); std::process::exit(1); }"
@@ -194,7 +199,8 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
     } else {
         e.raw("\nfn main() {}\n");
     }
-    let display_deps = if uses_screen { "[dependencies]\nwinit = \"0.28\"\nsoftbuffer = \"0.3\"\n" } else { "" };
+    let clipboard_dep = if uses_clipboard { super::screen_input::CLIPBOARD_DEP } else { "" };
+    let display_deps = if uses_screen { format!("[dependencies]\nwinit = \"0.28\"\nsoftbuffer = \"0.3\"\n{clipboard_dep}") } else { String::new() };
     let cargo_toml = format!("[package]\nname = \"{}-simd\"\nversion = \"{}\"\nedition = \"2021\"\n\n[profile.release]\nopt-level = 3\nlto = \"thin\"\ncodegen-units = 1\n\n{display_deps}", stem.replace('_', "-"), version);
     SimdOutput {
         host_rs: e.out,

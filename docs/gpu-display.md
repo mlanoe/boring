@@ -365,8 +365,8 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
 | `screen.last_key` | `string` | canonical name of the last key that went down or repeated this frame, `""` if none |
 | `for k in screen.key_events:` / `screen.key_up_events` | statement | every key-down (**including auto-repeats**) / key-up event of the frame as a canonical name, **in arrival order and with duplicates** — the event queue; nothing is lost when a frame is slow. `k` is a `string`; `break` inside is not supported |
 | `screen.setImeArea(x, y, w, h)` | statement | tell the input method where the text caret is (buffer coordinates, scaled like the mouse) so its candidate window opens next to it. winit 0.30 (wgpu) passes the rectangle; the winit 0.28 hosts pass the point just below it |
-| `screen.clipboard` | `string` | the system clipboard's text, `""` when it is empty, not text or unavailable. **wgpu only.** Read lazily: the clipboard is queried only when this expression is evaluated, not every frame |
-| `screen.setClipboard(s)` | statement | replace the system clipboard's text with `s`. **wgpu only.** Failures are ignored |
+| `screen.clipboard` | `string` | the system clipboard's text, `""` when it is empty, not text or unavailable. Read lazily: the clipboard is queried only when this expression is evaluated, not every frame |
+| `screen.setClipboard(s)` | statement | replace the system clipboard's text with `s` (a literal or a `string`). Failures are ignored |
 | `screen.mouse.x`, `.y` | `int` | cursor position in **pixel-buffer** coordinates (window pixels are rescaled to the buffer, so HiDPI and resized windows work; the last position is kept when the cursor leaves the window) |
 | `screen.mouse.left`, `.right`, `.middle` | `bool` | button held |
 | `screen.mouse_pressed(b)`, `screen.mouse_released(b)` | `bool` | button `"left"`/`"right"`/`"middle"` went down / up this frame (a click shorter than a frame is both) |
@@ -388,11 +388,15 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
   passed to an ordinary Boring function taking a `string` on every target (on Metal/CUDA/ROCm, whose own string
   literals are `&str`, they and string literals are converted to the function's `string` type at the call; in a
   comparison they are plain `String`s: `screen.text == "x"`).
-- **Clipboard.** `screen.clipboard` / `screen.setClipboard(s)` are implemented on **wgpu only** (simd, Metal, CUDA and ROCm
-  reject nothing but do not lower them yet). The generated `Cargo.toml` gets `arboard = "3"` only when a program uses
-  them. The handle is opened on first use and kept for the process (X11/Wayland lose owned content when it is dropped);
-  any error reads as `""` / ignores the write, so a headless or clipboard-less session never crashes the window. Text
-  only (no images/files). Use `screen.meta`/`screen.ctrl` with `key_events` to bind Cmd/Ctrl+C/X/V yourself.
+- **Clipboard.** `screen.clipboard` / `screen.setClipboard(s)` work on every target (simd, wgpu, Metal, CUDA, ROCm)
+  through the `arboard` crate. The generated `Cargo.toml` gets `arboard = "3"` only when a program uses them. The
+  handle is opened on first use and kept for the process (X11/Wayland lose owned content when it is dropped); any
+  error reads as `""` / ignores the write, so a headless or clipboard-less session never crashes the window. Text
+  only (no images/files). Per backend: on wgpu, `screen.clipboard` is an `Arc<str>` value; on simd it is read
+  through `Screen::clipboard()` (also an `Arc<str>`); on Metal/CUDA/ROCm it is a plain `String`, converted to the
+  `string` type when passed to a Boring function (like `screen.text`). `setClipboard`'s argument may be a literal,
+  a `string` or `screen.text` everywhere. Use
+  `screen.meta`/`screen.ctrl` with `key_events` to bind Cmd/Ctrl+C/X/V yourself.
 - Only the field forms of `screen.mouse` are supported (not a bare `screen.mouse` value on the GPU hosts).
 - State is consistent within one loop iteration on every host.
 - Caveat: kernel `int` fields are `i32` on simd/wgpu (the host narrows what you assign) but `isize` on Metal.

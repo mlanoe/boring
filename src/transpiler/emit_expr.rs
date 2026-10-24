@@ -2303,6 +2303,10 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        // `screen.clipboard` (simd): read lazily through `Screen::clipboard()`, not a per-frame field.
+        if self.config.is_simd_target && field == "clipboard" && matches!(&obj.kind, ExprKind::Var(v) if v == "screen") {
+            return "screen.clipboard()".to_string();
+        }
         if let Some(code) = self.try_emit_string_prop(obj, field) {
             return code;
         }

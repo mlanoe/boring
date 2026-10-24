@@ -2485,6 +2485,10 @@ impl Transpiler {
             }
             // self.field in owned context → .clone() so Arc<T> fields don't move out of &self
             ExprKind::Field(obj, field) => {
+                // `screen.clipboard` (simd): lazy `Screen::clipboard()` call, not a field.
+                if self.config.is_simd_target && field == "clipboard" && matches!(&obj.kind, ExprKind::Var(v) if v == "screen") {
+                    return "screen.clipboard()".to_string();
+                }
                 if let Some(code) = self.try_emit_string_prop(obj, field) {
                     return code;
                 }

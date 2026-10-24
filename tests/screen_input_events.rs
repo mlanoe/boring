@@ -519,3 +519,110 @@ fn key_name_normalizer_accepts_every_spelling() {
     let run = Command::new(&exe).output().unwrap();
     assert!(run.status.success(), "{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
 }
+
+// ── clipboard on the other hosts ─────────────────────────────────────────────────────────────
+
+fn assert_clipboard_host(target: &str, project: &std::path::Path, rs: &str, set: &str) {
+    assert!(rs.contains(set), "[{target}] {rs}");
+    assert!(
+        rs.contains("fn __boring_clipboard_get() -> String"),
+        "[{target}] {rs}"
+    );
+    assert!(rs.contains("__boring_clipboard_get()"), "[{target}] {rs}");
+    let cargo = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("arboard = \"3\""), "[{target}] {cargo}");
+}
+
+fn assert_no_clipboard(target: &str, project: &std::path::Path, rs: &str) {
+    assert!(!rs.contains("arboard"), "[{target}] {rs}");
+    assert!(!fs::read_to_string(project.join("Cargo.toml"))
+        .unwrap()
+        .contains("arboard"));
+}
+
+#[test]
+fn metal_clipboard_read_write_and_dependency() {
+    let (project, rs) = build("metal", "clipboard", &events(CLIPBOARD_LOOP));
+    assert_clipboard_host(
+        "metal",
+        &project,
+        &rs,
+        "__boring_clipboard_set(&*(\"copied\"));",
+    );
+    if cfg!(target_os = "macos") {
+        cargo_check(&project, "metal");
+    }
+    let (project, rs) = build("metal", "noclip", &events(TEXT_LOOP));
+    assert_no_clipboard("metal", &project, &rs);
+}
+
+#[test]
+fn cuda_clipboard_read_write_and_dependency() {
+    let (project, rs) = build("cuda", "clipboard", &events(CLIPBOARD_LOOP));
+    assert_clipboard_host(
+        "cuda",
+        &project,
+        &rs,
+        "__boring_clipboard_set(&*(\"copied\"));",
+    );
+    cargo_check(&project, "cuda");
+    let (project, rs) = build("cuda", "noclip", &events(TEXT_LOOP));
+    assert_no_clipboard("cuda", &project, &rs);
+}
+
+#[test]
+fn rocm_clipboard_read_write_and_dependency() {
+    let (project, rs) = build("rocm", "clipboard", &events(CLIPBOARD_LOOP));
+    assert_clipboard_host(
+        "rocm",
+        &project,
+        &rs,
+        "__boring_clipboard_set(&*(\"copied\"));",
+    );
+    cargo_check(&project, "rocm");
+    let (project, rs) = build("rocm", "noclip", &events(TEXT_LOOP));
+    assert_no_clipboard("rocm", &project, &rs);
+}
+
+#[test]
+fn simd_clipboard_read_write_and_dependency() {
+    let (project, rs) = build("simd", "clipboard", &events(CLIPBOARD_LOOP));
+    assert!(rs.contains("screen.clipboard()"), "{rs}");
+    assert!(rs.contains("screen.set_clipboard(&*("), "{rs}");
+    assert!(rs.contains("fn __boring_clipboard_get() -> String"), "{rs}");
+    assert!(fs::read_to_string(project.join("Cargo.toml"))
+        .unwrap()
+        .contains("arboard = \"3\""));
+    cargo_check(&project, "simd");
+    let (project, rs) = build("simd", "noclip", &events(TEXT_LOOP));
+    assert!(!rs.contains("arboard"), "{rs}");
+    assert!(!fs::read_to_string(project.join("Cargo.toml"))
+        .unwrap()
+        .contains("arboard"));
+}
+
+/// `screen.clipboard` into a `string` function parameter, and a `string` value into `setClipboard`.
+const CLIPBOARD_STRINGS_LOOP: &str = r#"
+int shout(string s):
+    s.length
+
+kernel:
+    loop:
+        if screen.key_pressed("v"):
+            k.mode = shout(screen.clipboard)
+        screen.setClipboard(screen.text)
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+
+#[test]
+fn clipboard_string_conversions_on_other_hosts() {
+    for target in ["simd", "metal", "cuda", "rocm"] {
+        let (project, _rs) = build(target, "clipstr", &events(CLIPBOARD_STRINGS_LOOP));
+        if target != "metal" || cfg!(target_os = "macos") {
+            cargo_check(&project, target);
+        }
+    }
+}

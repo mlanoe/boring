@@ -226,7 +226,9 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
         has_boring_main, boring_main_throws, top_level_kernel_touching, rocblas, &general_out.screen_setup_fields,
     );
     let build_rs  = emit_build_rs(rocblas);
-    let cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut host_rs = host_rs;
+    crate::transpiler::screen_input::add_clipboard(&mut host_rs, &mut cargo_toml);
 
     let mut errors = general_out.errors;
     errors.extend(device_errors);

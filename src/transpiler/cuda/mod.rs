@@ -235,7 +235,9 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
         host_rs.replace("CUBLAS_PEDANTIC_MATH", "CUBLAS_TF32_TENSOR_OP_MATH")
     } else { host_rs };
     let build_rs  = emit_build_rs(tf32, half_wmma);
-    let cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut host_rs = host_rs;
+    crate::transpiler::screen_input::add_clipboard(&mut host_rs, &mut cargo_toml);
 
     let mut errors = general_out.errors;
     errors.extend(device_errors);

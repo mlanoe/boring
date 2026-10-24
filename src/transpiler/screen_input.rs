@@ -222,6 +222,8 @@ pub(super) fn property(name: &str, inp: &str) -> Option<(String, InKind)> {
         "focused" => (format!("{inp}.focused"), Bool),
         "focus_gained" => (format!("{inp}.focus_gained"), Bool),
         "focus_lost" => (format!("{inp}.focus_lost"), Bool),
+        // Read lazily: only when the expression is evaluated (see `CLIPBOARD_RUNTIME`).
+        "clipboard" => ("__boring_clipboard_get()".to_string(), Str),
         _ => return None,
     })
 }
@@ -346,7 +348,7 @@ pub(super) fn is_host_str(e: &crate::ast::Expr, screen_var: Option<&str>, event_
         ExprKind::Str(_) => true,
         ExprKind::Var(v) => event_vars.iter().any(|e| e == v),
         ExprKind::Field(obj, f) => matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == screen_var)
-            && matches!(f.as_str(), "text" | "marked" | "last_key"),
+            && matches!(f.as_str(), "text" | "marked" | "last_key" | "clipboard"),
         _ => false,
     }
 }
@@ -396,3 +398,33 @@ pub(super) fn uses_clipboard(code: &str) -> bool {
     (code.contains("__boring_clipboard_get()") || code.contains("__boring_clipboard_set(&"))
         && !code.contains("fn __boring_clipboard_get()")
 }
+
+/// Cargo dependency line added to a generated crate that uses the clipboard.
+pub(super) const CLIPBOARD_DEP: &str = "arboard = \"3\"\n";
+
+/// `screen.setClipboard(s)` for a winit 0.28 host (`s` already lowered: a `&str` literal, `String`, `Arc<str>`).
+pub(super) fn set_clipboard_stmt(arg: &str) -> String {
+    format!("__boring_clipboard_set(&*({arg}));")
+}
+
+/// Appends the clipboard runtime and the `arboard` dependency to a generated host/`Cargo.toml` when
+/// the host code uses the clipboard. Returns whether it did.
+pub(super) fn add_clipboard(host_rs: &mut String, cargo_toml: &mut String) -> bool {
+    if !uses_clipboard(host_rs) {
+        return false;
+    }
+    host_rs.push_str(CLIPBOARD_RUNTIME);
+    cargo_toml.push_str(CLIPBOARD_DEP);
+    true
+}
+
+/// simd host: `screen.clipboard` / `screen.setClipboard(s)` as methods of the generated `Screen`
+/// (pasted with `CLIPBOARD_RUNTIME` only when the program uses them; the general pass lowers them to
+/// `screen.clipboard()` / `screen.set_clipboard(..)`).
+pub(super) const SIMD_CLIPBOARD_SCREEN: &str = r##"
+#[allow(dead_code)]
+impl Screen {
+    fn clipboard(&self) -> std::sync::Arc<str> { __boring_clipboard_get().into() }
+    fn set_clipboard(&self, s: &str) { __boring_clipboard_set(s); }
+}
+"##;

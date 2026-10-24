@@ -3662,6 +3662,12 @@ impl Transpiler {
         } else {
             obj
         };
+        // `screen.setClipboard(s)` (simd): borrow `s` (a literal, `string` or `screen.text`) rather than move it.
+        if self.config.is_simd_target && method == "setClipboard" && args.len() == 1
+            && matches!(&obj.kind, ExprKind::Var(v) if v == "screen")
+        {
+            return format!("screen.set_clipboard(&*({}))", self.emit_expr(&args[0].value));
+        }
         let slot_value_receiver;
         let obj = if let Some(v) = self.state_slot_receiver_value(obj) {
             slot_value_receiver = v;
