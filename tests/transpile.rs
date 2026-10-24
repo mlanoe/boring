@@ -1142,6 +1142,10 @@ transpile_test!(monomorphize_mut_arg);
 // `Wrapper_string` clone lands in `monomorphize_cross_file_lib.br`'s own module
 // (the declaring file) rather than duplicated into every caller.
 transpile_test!(monomorphize_cross_file_main);
+// A specialized free function declared in an imported file must have its mangled
+// signature registered before the caller is emitted, including shared (`[T]&`)
+// and mutable (`mut [T]`) argument borrows.
+transpile_test!(monomorphize_cross_file_borrow_main);
 // `monomorphize_method`: a generic METHOD call via explicit turbofish
 // (`obj.method<T>(...)`) on a NON-generic struct -- the method itself
 // introduces its own type param, separate from anything the struct declares

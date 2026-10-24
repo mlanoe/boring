@@ -440,6 +440,68 @@ def main() throws:
     }
 }
 
+#[test]
+fn imported_kernel_touching_fn_borrows_imported_function_arguments() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen")
+        .join("imported_function_borrows");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("storage.br"),
+        r#"
+use std.fs.File
+
+def mutate(mut [uint8] bytes):
+    bytes[0] = 7
+
+def inspect(File& file, [uint8]& bytes):
+    let n = bytes.length
+
+kernel Touch:
+    mut [float32]'unified out
+    init():
+        out = [0.0 as float32 for ..<1]
+    def ():
+        out[.thread.x] = 1.0
+
+pub def save(string path) throws:
+    let created = try? File.create(path)
+    guard let created else throw "create failed"
+    mut file = created
+    mut [uint8] bytes = [0]
+    mutate(bytes)
+    inspect(file, bytes)
+    mut touch = Touch()
+    kernel:
+        touch(block = 1)
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("test.br"),
+        r#"
+use storage.*
+
+def main() throws:
+    save("/tmp/boring-imported-function-borrows")
+"#,
+    )
+    .unwrap();
+
+    let result = Command::new(bin)
+        .args(["build", "--target", "metal"])
+        .arg(root.join("test.br"))
+        .output()
+        .expect("failed to invoke boring");
+    assert!(result.status.success(), "build failed:\n{}", String::from_utf8_lossy(&result.stderr));
+
+    let rs = fs::read_to_string(root.join("test_metal/src/main.rs")).unwrap();
+    assert!(rs.contains("mutate(&mut (bytes))"), "mutable imported parameter was not borrowed:\n{rs}");
+    assert!(rs.contains("inspect(&(file), &(bytes))"), "shared imported parameters were not borrowed:\n{rs}");
+}
+
 /// Invoke `boring build --target metal <file>` and return the generated
 /// (kernels/main.metal, src/main.rs) text pair.
 ///

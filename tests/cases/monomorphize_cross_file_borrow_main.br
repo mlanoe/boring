@@ -1,0 +1,8 @@
+# A specialized call into an imported generic function must retain the concrete
+# declaration's shared and mutable parameter borrowing after its name is mangled.
+use monomorphize_cross_file_borrow_lib
+
+let source = [4, 7]
+mut [int] destination = [0]
+copy_first<int>(source, destination)
+print destination[0]

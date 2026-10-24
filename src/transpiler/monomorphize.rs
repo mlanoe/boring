@@ -469,6 +469,27 @@ pub(crate) fn substitute_fn_decl(decl: &FnDecl, subst: &HashMap<String, Type>, n
     out
 }
 
+/// Builds the concrete free-function declarations represented by the global
+/// instantiation map.  Callers that emit a file containing only a cross-file call
+/// need these declarations' signatures registered before the declaring file is
+/// emitted; otherwise the rewritten, mangled call name is absent from `fn_sigs`
+/// and argument borrowing/coercion is skipped.
+pub(crate) fn specialized_free_fn_decls(
+    instantiations: &InstantiationMap,
+    generic_fns: &HashMap<String, FnDecl>,
+) -> Vec<FnDecl> {
+    let mut out = Vec::new();
+    for (name, insts) in instantiations {
+        let Some(decl) = generic_fns.get(name) else { continue };
+        for inst in insts {
+            if inst.is_struct { continue; }
+            let subst = build_type_subst(&decl.type_params, &inst.type_args);
+            out.push(substitute_fn_decl(decl, &subst, &inst.mangled));
+        }
+    }
+    out
+}
+
 // ─── Mangled naming ─────────────────────────────────────────────────────────────
 
 /// Returns a Rust-identifier-safe name fragment for `ty`, or `None` when `ty` isn't

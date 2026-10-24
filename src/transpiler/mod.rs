@@ -2193,6 +2193,17 @@ impl Transpiler {
                 &self.global_generic_structs,
                 &self.global_generic_fns,
             );
+            // `rewrite_call_sites` turns a cross-file `f<T>(...)` into a call to the
+            // specialized name before the file declaring `f` is emitted. Register
+            // every such concrete signature globally now, so the ordinary call
+            // coercion path still sees borrowed and mutable parameters.
+            let specialized_fns = monomorphize::specialized_free_fn_decls(
+                &self.global_instantiations,
+                &self.global_generic_fns,
+            );
+            for f in &specialized_fns {
+                self.pre_register_fn(f);
+            }
             self.global_method_instantiations = monomorphize::build_method_instantiation_map(
                 &self.pending_method_call_candidates,
                 &self.global_generic_methods,

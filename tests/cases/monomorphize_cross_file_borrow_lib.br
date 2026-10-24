@@ -1,0 +1,3 @@
+# The caller lives in another file and is emitted before this declaration.
+pub def copy_first<T>([T]& source, mut [T] destination):
+    destination[0] = source[0]

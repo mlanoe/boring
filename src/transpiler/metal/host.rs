@@ -197,6 +197,7 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
     match ty {
         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) => true,
         Type::Named(n) => struct_names.contains(n),
+        Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
         _ => false,
     }
 }
@@ -384,6 +385,12 @@ impl HostEmitter {
         } else {
             "std::sync::Arc<str>".into()
         };
+        // Kernel-touching functions are emitted before `general_code` is spliced
+        // into the output below, but calls in those functions may target ordinary
+        // functions declared in an imported file. Make their generated signatures
+        // available to `general_fn_param_types` before emitting the custom bodies,
+        // so `&T` and `&mut T` arguments keep their borrow convention.
+        self.general_code_text = general_code.to_string();
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
         {
             let mut fn_used: Vec<String> = Vec::new();
@@ -539,7 +546,6 @@ impl HostEmitter {
         // top level stays with this driver, see `metal::mod`), so a per-frame host helper
         // called from the render loop gets the same codegen as in any other program.
         self.blank();
-        self.general_code_text = general_code.to_string();
         self.out.push_str(general_code);
         self.blank();
 
@@ -3291,7 +3297,14 @@ impl HostEmitter {
                 // Ordinary function call -- coerce each argument to match the
                 // callee's own by-ref/owned parameter convention. See
                 // `cuda::host`'s identical case for the full rationale.
-                let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
+                // A wildcard-imported free function can retain its source module
+                // as a `Field` here even though `self.expr(callee)` emits the
+                // flattened function name. Its final field is still the signature
+                // key used by the general pass.
+                let callee_name = match &callee.kind {
+                    ExprKind::Var(name) | ExprKind::Field(_, name) => Some(name.as_str()),
+                    _ => None,
+                };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
                 let general_param_types = callee_name
                     .map(|n| self.general_fn_param_types(n))
