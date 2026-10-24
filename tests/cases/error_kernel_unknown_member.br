@@ -1,0 +1,8 @@
+kernel K:
+    mut [uint]'unified out
+    foo bar baz
+    def ():
+        out[0] = 1
+
+def main():
+    print "x"

@@ -87,7 +87,10 @@ fn run_error_case_exact(name: &str) {
 
     let path_str = br_file.to_string_lossy();
     let raw = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
-    let actual = raw.replace(path_str.as_ref(), "<file>").trim_end().to_string();
+    let actual = raw
+        .replace(path_str.as_ref(), "<file>")
+        .trim_end()
+        .to_string();
 
     let expected = std::fs::read_to_string(&error_file)
         .unwrap_or_else(|_| panic!("missing error file: {}", error_file.display()))
@@ -96,12 +99,9 @@ fn run_error_case_exact(name: &str) {
         .to_string();
 
     assert_eq!(
-        actual,
-        expected,
+        actual, expected,
         "test '{}': diagnostic mismatch\n--- expected ---\n{}\n--- actual ---\n{}",
-        name,
-        expected,
-        actual
+        name, expected, actual
     );
 }
 
@@ -684,6 +684,7 @@ interp_test!(negative_count_no_oom);
 // RuntimeError, not overflow usize or attempt an unbounded allocation
 // (finding #3).
 error_test!(error_kernel_thread_cap);
+error_test!(error_kernel_unknown_member);
 error_test!(error_array_fill_alloc_cap);
 error_test!(error_array_alloc_cap);
 error_test!(error_array_comp_cap);
