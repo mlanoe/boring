@@ -33,3 +33,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
 
+
+# Smaller target/debug (the dominant disk cost): keep line tables for backtraces, drop full DWARF.
+[profile.dev]
+debug = "line-tables-only"
