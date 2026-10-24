@@ -590,6 +590,9 @@ def void register_stdlib(mut Interpreter interp):
     let args_fn = Value.NativeFn("args", Value.Nil)
     env_define(env, "args", args_fn, false)
 
+    let environment_fn = Value.NativeFn("environment", Value.Nil)
+    env_define(env, "environment", environment_fn, false)
+
     let input_fn = Value.NativeFn("input", Value.Nil)
     env_define(env, "input", input_fn, false)
 

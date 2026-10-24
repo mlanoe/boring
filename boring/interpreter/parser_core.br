@@ -2912,6 +2912,18 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         for a in interp.cli_args:
             out.push(Value.Str(a))
         return Value.Array(out)
+    if name == "environment":
+        # One Unicode process-environment variable; a missing (or non-Unicode) one is nil,
+        # like the `string?` the builtin has under the Rust interpreter and `std::env::var(..).ok()`.
+        if args.length != 1:
+            throw "environment() takes exactly 1 argument"
+        match args[0] else Value.Nil:
+            Value.Str(s):
+                let found = environment(s)
+                if found == nil:
+                    return Value.Nil
+                return Value.Str(found else "")
+            _: throw "environment: expected a string argument"
     if name == "error":
         let v = args[0] else Value.Nil
         throw val_to_string(v)
