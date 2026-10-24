@@ -1828,7 +1828,22 @@ impl Transpiler {
                     let key = self.self_type.as_deref()
                         .map(|t| format!("{}::{}", t, mutex_field));
                     if let Some(k) = key {
-                        if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
+                        // A read-only builtin method on a plain collection behind the field
+                        // (`memo.contains(k)`) goes through the generic collection dispatch on a
+                        // locked read of the field, which knows the element/key types.
+                        if method == "contains" && args.len() == 1 {
+                            if let Some((r, coll_ty)) = self.actor_collection_field(obj) {
+                                let key_ref = match coll_ty {
+                                    Type::Array(_) => format!("&{}", self.emit_expr(&args[0].value)),
+                                    _ => self.emit_dict_key_borrow(&args[0].value),
+                                };
+                                let op = if matches!(coll_ty, Type::Dict(..)) { "contains_key" } else { "contains" };
+                                return Some(format!("{{ let __k = {}; let __r = {}.{}(__k); __r }}", key_ref, self.lock_field_read(&r), op));
+                            }
+                        }
+                        let read_only_coll_call = self.actor_collection_field(obj).is_some()
+                            && !MUTATING_COLLECTION_METHODS.contains(&method);
+                        if !read_only_coll_call && (self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k)) {
                             self.check_field_def_call_mut_gate(obj, mutex_field, method);
                             // Preserve the real method name for a known user struct/enum
                             // field, same as the local-var case above and
@@ -1998,7 +2013,10 @@ impl Transpiler {
                     // `cargo build`).
                     let is_actor_field = matches!(field_ty.as_ref().map(|t| t.without_mut()),
                         Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)));
-                    if is_actor_field {
+                    let read_only_coll_call = is_actor_field
+                        && self.actor_collection_field(obj).is_some()
+                        && !MUTATING_COLLECTION_METHODS.contains(&method);
+                    if is_actor_field && !read_only_coll_call {
                         // Preserve the real method name for a known user struct/enum
                         // field — see the matching comment/fix in `try_emit_mutex_method`.
                         let field_struct_name = field_ty.as_ref().and_then(qualified_named_type_name);
@@ -6440,6 +6458,23 @@ impl Transpiler {
     }
 
     /// `{ let __a = <read>; __a }` for a guard-taking read of a Copy / string value (cloned), so the
+    /// `obj` resolves to a struct field declared `'actor`/`'guard` whose payload is a plain
+    /// built-in collection (`let {string=float}'actor memo`): the lock handle plus the
+    /// collection type. Indexing, `.length`, `.contains(..)` and index assignment on such a field
+    /// must take the lock first — the Rust field is an `Arc<Mutex<HashMap<..>>>`, not the map.
+    pub(crate) fn actor_collection_field(&self, obj: &Expr) -> Option<(LockFieldRef, Type)> {
+        let r = self.resolve_lock_field_ref(obj)?;
+        let mut cur = r.field_ty.without_mut();
+        let mut qualified = false;
+        while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); qualified = true; }
+        if qualified && matches!(cur, Type::Array(_) | Type::Dict(..) | Type::Set(_)) {
+            let coll = cur.clone();
+            Some((r, coll))
+        } else {
+            None
+        }
+    }
+
     /// guard is a temporary of the inner `let` only. `None` for any other (maybe non-`Clone`) type.
     pub(crate) fn scoped_guard_read(read: &str, ty: &Type) -> Option<String> {
         let t = ty.without_mut();

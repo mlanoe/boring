@@ -7601,6 +7601,8 @@ struct Color as Debug, Clone, PartialEq:
 
 This only works for a whitelist of zero-dependency std derive macros (`Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `Default`, plus anything your project adds via `boring.toml`'s `[derives]`) and has one caveat around the auto-default every struct/enum with no explicit `@derive` already gets — see [Advanced — derive-trait whitelist](#advanced--derive-trait-whitelist-as-trait-routed-into-derive) for the full rules before converting an existing `@derive(...)` to this form.
 
+**An explicit `@derive(...)` is the exact derive list — it replaces the automatic `Debug`/`Clone`/`PartialEq`, it does not add to them.** `@derive(Default)` alone leaves the struct without `Debug` or `Clone` (rustc: "doesn't implement `Debug`" as soon as it is printed or sits in a `Debug`/`Clone` struct), so write `@derive(Debug, Clone, Default)`; a struct that needs only the automatic set plus `Default` can instead be built with `WidthMemo()` and no `@derive`, since a field's declared `= expr` initializer (including a struct-valued one on an `'actor` field) is always used rather than `Default::default()`.
+
 The no-parentheses form applies to all `@` attributes, including `@error` on enum variants:
 
 ```boring

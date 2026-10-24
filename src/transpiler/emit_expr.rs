@@ -93,6 +93,12 @@ impl Transpiler {
                                 // mut/var-mut collection field and wrongly `.clone()` it here.
                                 let is_collection = matches!(fty.without_mut(), Type::Dict(..) | Type::Array(_) | Type::Set(_));
                                 let needs_clone = !is_primitive && !is_collection && !self.in_lhs_assign.get();
+                                // A collection behind an `'actor` field: read it through the lock.
+                                if !self.in_lhs_assign.get() {
+                                    if let Some((r, _)) = self.actor_collection_field(expr) {
+                                        return format!("{}.clone()", self.lock_field_read(&r));
+                                    }
+                                }
                                 return if needs_clone {
                                     format!("{}.{}.clone()", self_ref, field_s)
                                 } else {
@@ -393,6 +399,24 @@ impl Transpiler {
                 // (ExprKind::Index for dict vars emits .unwrap() for bare access).
                 // Uses expr_is_dict (not a plain-Var-only check) so `self.field[key] else d`
                 // is recognized too, not just a bare dict variable.
+                if let ExprKind::Index(coll_obj, key) = &e.kind {
+                    if !matches!(key.kind, ExprKind::SliceRange { .. }) {
+                        if let Some((r, coll_ty)) = self.actor_collection_field(coll_obj) {
+                            // Behind an `'actor` field: key/default are evaluated around the guard.
+                            let is_dict = matches!(coll_ty, Type::Dict(..));
+                            let flat = if matches!(self.resolve_expr_type(e), Some(Type::Optional(_))) { ".flatten()" } else { "" };
+                            let dv = self.emit_else_default(e, default);
+                            let guard = self.lock_field_read(&r);
+                            return if is_dict {
+                                let key_ref = self.emit_dict_key_borrow(key);
+                                format!("{{ let __k = {}; let __r = {{ let __g = {}; __g.get(__k).cloned() }}; __r{}.unwrap_or_else(|| {}) }}", key_ref, guard, flat, dv)
+                            } else {
+                                let idx_s = self.emit_expr(key);
+                                format!("{{ let __i = ({}) as usize; let __r = {{ let __g = {}; __g.get(__i).cloned() }}; __r{}.unwrap_or_else(|| {}) }}", idx_s, guard, flat, dv)
+                            };
+                        }
+                    }
+                }
                 if let ExprKind::Index(dict_obj, key) = &e.kind {
                     if self.expr_is_dict(dict_obj) {
                         let dict_s = self.emit_expr(dict_obj);
@@ -1691,6 +1715,24 @@ impl Transpiler {
             };
             return format!("{}[{}].to_vec()", obj_s, range_s);
         }
+        // `field[k]` / `field[i]` on a collection behind an `'actor` field: index through the lock
+        // (a place — `d[k].method()` / `d[k] += v` — is handled by the assignment/place paths).
+        if !self.in_lhs_assign.get() {
+            if let Some((r, coll_ty)) = self.actor_collection_field(obj) {
+                let guard = self.lock_field_read(&r);
+                if matches!(coll_ty, Type::Dict(..)) {
+                    let key_ref = self.emit_dict_key_borrow(idx);
+                    let tail = if self.want_raw_dict_get.get() {
+                        "__g.get(__k).cloned()".to_string()
+                    } else {
+                        "__g.get(__k).cloned().expect(\"dict key not found\")".to_string()
+                    };
+                    return format!("{{ let __k = {}; let __g = {}; {} }}", key_ref, guard, tail);
+                }
+                let idx_s = self.emit_expr(idx);
+                return format!("{{ let __i = ({}) as usize; let __g = {}; __g[__i].clone() }}", idx_s, guard);
+            }
+        }
         // Single-index string access: s[i] → the i-th character, as a one-char
         // string (boring has no separate `char` type -- comparisons like
         // `s[i] == "x"` and `s[i] != Q` expect a string back). Rust can't index
@@ -2312,6 +2354,18 @@ impl Transpiler {
         }
         if let Some(value_access) = self.state_slot_value_expr(obj, field) {
             return self.emit_expr(&value_access);
+        }
+        // `field.length` on a collection behind an `'actor` field, and the whole-field read itself.
+        if !self.in_lhs_assign.get() {
+            if matches!(field.as_str(), "length" | "count") {
+                if let Some((r, _)) = self.actor_collection_field(obj) {
+                    return format!("({}.len() as isize)", self.lock_field_read(&r));
+                }
+            }
+            let whole = Expr { kind: ExprKind::Field(Box::new(obj.clone()), field.clone()), ..obj.clone() };
+            if let Some((r, _)) = self.actor_collection_field(&whole) {
+                return format!("{}.clone()", self.lock_field_read(&r));
+            }
         }
         // `st.cell.member` (`st.log.length`): resolve `member` against the cell's content.
         // `st.cell.value` is the explicit spelling of the `Slot`'s own field: leave it.
@@ -3537,6 +3591,23 @@ impl Transpiler {
         // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
         if let ExprKind::Index(dict_obj, key) = &target.kind {
             if let ExprKind::Var(dict_name) = &dict_obj.kind {
+        // `field[k] = v` / `field[i] = v` on a collection behind an `'actor` field: key and
+        // value are evaluated before the write guard is taken (they may read the same field).
+        if let ExprKind::Index(coll_obj, key) = &target.kind {
+            if !matches!(key.kind, ExprKind::SliceRange { .. }) {
+                if let Some((r, coll_ty)) = self.actor_collection_field(coll_obj) {
+                    let val_s = self.emit_expr_owned(value);
+                    let guard = self.lock_field_write(&r);
+                    return if matches!(coll_ty, Type::Dict(..)) {
+                        let key_owned = self.emit_dict_key_owned(key);
+                        format!("{{ let __k = {}; let __v = {}; {}.insert(__k, __v); }}", key_owned, val_s, guard)
+                    } else {
+                        let idx_s = self.emit_expr(key);
+                        format!("{{ let __i = ({}) as usize; let __v = {}; {}[__i] = __v; }}", idx_s, val_s, guard)
+                    };
+                }
+            }
+        }
                 if self.dict_vars.contains(dict_name.as_str()) {
                     let key_owned = self.emit_dict_key_owned(key);
                     let val_s = self.emit_expr_owned(value);
@@ -4989,17 +5060,28 @@ impl Transpiler {
                     }
                 }
             }
-            // Append var T'task fields missing from the call with a Mutex-wrapped default.
+            // Append lock-qualified fields missing from the call: the field's own declared
+            // `= expr` initializer when it has one, `Default::default()` only otherwise.
+            let missing_lock_init = |key: &str, inner: fn(&Type) -> Option<&Type>| -> String {
+                match self.struct_field_defaults.get(key) {
+                    Some(def) => {
+                        let fty = self.struct_fields.get(name)
+                            .and_then(|fs| fs.iter().find(|(n, _)| key.ends_with(&format!("::{}", n))).map(|(_, t)| t.clone()));
+                        let inner_ty = fty.as_ref().and_then(|t| inner(t));
+                        self.emit_let_value(inner_ty, def)
+                    }
+                    None => "Default::default()".to_string(),
+                }
+            };
             for key in &self.struct_mutex_fields.clone() {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
                         let init = match self.config.threading {
-                            crate::transpiler::ThreadingMode::Multi =>
-                                self.emit_actor_new("Default::default()"),
-                            crate::transpiler::ThreadingMode::Single =>
-                                "Rc::new(RefCell::new(Default::default()))".to_string(),
+                            crate::transpiler::ThreadingMode::Multi => self.emit_actor_new(&raw),
+                            crate::transpiler::ThreadingMode::Single => format!("Rc::new(RefCell::new({}))", raw),
                         };
                         fields.push(format!("{}: {}", field_name, init));
+                        let raw = missing_lock_init(key, Self::mutex_inner);
                     }
                 }
             }
@@ -5007,21 +5089,24 @@ impl Transpiler {
             for key in &self.struct_mutex_task_fields.clone() {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
-                        fields.push(format!("{}: {}", field_name, self.emit_actor_task_new("Default::default()")));
+                        let raw = missing_lock_init(key, Self::mutex_inner);
+                        fields.push(format!("{}: {}", field_name, self.emit_actor_task_new(&raw)));
                     }
                 }
             }
             for key in &self.struct_rwlock_fields.clone() {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
-                        fields.push(format!("{}: {}", field_name, self.emit_guard_new("Default::default()")));
+                        let raw = missing_lock_init(key, Self::rwlock_inner);
+                        fields.push(format!("{}: {}", field_name, self.emit_guard_new(&raw)));
                     }
                 }
             }
             for key in &self.struct_rwlock_task_fields.clone() {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
-                        fields.push(format!("{}: {}", field_name, self.emit_guard_task_new("Default::default()")));
+                        let raw = missing_lock_init(key, Self::rwlock_inner);
+                        fields.push(format!("{}: {}", field_name, self.emit_guard_task_new(&raw)));
                     }
                 }
             }

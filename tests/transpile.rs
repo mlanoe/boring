@@ -1422,6 +1422,7 @@ transpile_test!(static_di);
 // uses exactly this bare-constructor-return shape for every `@provide` worked example.
 // See `src/transpiler/emit_stmt.rs`'s `wrap_return_for_qualifier` doc for the fix.
 transpile_test!(actor_guard_shared_return_qualifier);
+transpile_test!(actor_collection_field_ops);
 
 // Regression test: a bare (unannotated) local assigned from a call to a
 // `'shared`-returning function got the wrong inferred qualifier (`Inline` instead of

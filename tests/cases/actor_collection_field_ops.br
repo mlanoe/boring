@@ -1,0 +1,50 @@
+# An `'actor` field holding a plain collection: indexing, `.length`, `.contains`, `.clear()` and
+# index assignment from a `req` method must lock the field first.
+struct Memo:
+    var mut {string=float} items = {=}
+
+    req float recall(string key):
+        items[key] else (0.0 - 1.0)
+
+struct Cache:
+    let {string=float}'actor memo = {=}
+    # a declared struct initializer, not `Default::default()` (Memo does not derive Default)
+    mut Memo'actor inner = Memo()
+
+    req float lookup(string key):
+        memo[key] else (0.0 - 1.0)
+
+    req int size():
+        memo.length
+
+    req bool has(string key):
+        memo.contains(key)
+
+    req float remember(string key, float w):
+        if memo.length >= 2:
+            memo.clear()
+        memo[key] = w
+        w
+
+    req float viaInner(string key):
+        inner.recall(key)
+
+# an explicit @derive is the exact derive list (see docs/book.md): Debug/Clone are named here
+@derive(Debug, Clone, Default)
+struct Plain:
+    var int n = 0
+
+def main():
+    let c = Cache()
+    let d = Cache(memo = {"z" = 9.0})
+    print "{d.lookup("z")} {d.viaInner("q")}"
+    print "{c.lookup("a")}"
+    c.remember("a", 1.5)
+    c.remember("b", 2.5)
+    print "{c.lookup("a")} {c.size()} {c.has("b")}"
+    c.remember("c", 3.5)
+    print "{c.size()} {c.has("a")}"
+    print "{c.viaInner("a")}"
+    let p = Plain()
+    let q = p.clone()
+    print "{q.n}"
