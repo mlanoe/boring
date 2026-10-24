@@ -113,7 +113,7 @@ fn wgpu_screen_program_runs_kernel_init_and_top_level_code() {
     assert!(rs.contains("pub const SCALE: f64 = 2.0;"), "{rs}");
     assert!(rs.contains("pub const LIMIT: isize = 3;"), "{rs}");
     assert!(!rs.contains("let LIMIT"), "{rs}");
-    assert!(!rs.contains("scale: "), "unused imported constants must not become __App fields:\n{rs}");
+    assert!(!rs.contains("\n    scale: ") && !rs.contains(" scale: f64"), "unused imported constants must not become __App fields:\n{rs}");
     // the render loop binds locals and calls ordinary functions
     assert!(rs.contains("let n = limit();"), "{rs}");
     assert!(rs.contains("let fr = makeFrame(n);"), "{rs}");

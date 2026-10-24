@@ -441,9 +441,9 @@ kernel:
             break
 "#;
     let (project, rs) = build("wgpu", "rebuild", src);
-    assert!(rs.contains("struct __ScreenSize { width: isize, height: isize }"), "{rs}");
+    assert!(rs.contains("struct __ScreenSize { width: isize, height: isize, scale: f32 }"), "{rs}");
     assert!(rs.contains("fn __boring_screen_rebuild_k(screen: &__ScreenSize, pal: &Vec<usize>) -> Result<Tiles,"), "{rs}");
-    assert!(rs.contains("self.k = __boring_screen_rebuild_k(&__ScreenSize { width: self.__win_w, height: self.__win_h }, &self.pal).expect(\"kernel rebuild failed\"); self.__reblit();"), "{rs}");
+    assert!(rs.contains("self.k = __boring_screen_rebuild_k(&__ScreenSize { width: self.__win_w, height: self.__win_h, scale: self.__scale }, &self.pal).expect(\"kernel rebuild failed\"); self.__reblit();"), "{rs}");
     cargo_check(&project, "wgpu");
 }
 
