@@ -1074,8 +1074,22 @@ prefix). Semantics:
   `'unified` and read-only ones to `'global`, as for locals;
 - the alias is a copy (a resident field is downloaded by reference first, the destination is stored
   back as host data): a per-call cost proportional to the field size, not a view. Constructor
-  arguments are not followed, nested fields (`self.a.w`) and fields outside the struct's methods are
-  still not operands.
+  arguments are not followed, and nested fields (`self.a.w`) are still not operands.
 
-Tests: `tests/tensor_struct_fields.rs` (interpreter output, five-target builds, diagnostics) and
-the `desugar_tensor_quals` unit tests on field inference.
+**Outside the struct's methods** (`layer.w` in a free function or at the top level, `layer` being a
+local or a parameter whose struct is evident: annotated, built by a constructor, or returned by a
+function with a declared type), the same pass moves the call into a method it generates on the
+struct (`__tf_call_N`), whose operands are `self.w`, and replaces the call by
+`layer.__tf_call_N(..)`: the working in-method form, so every target agrees by construction. The
+other operands (plain variables, which need an explicit array type) and any non-literal labeled
+argument (`m = rows`) become parameters of the generated method. A destination field makes it `def`
+and needs `layer` to be `mut`/`var mut`; a call that only reads fields leaves `layer` immutable
+(`req`). A call cannot mix fields of `self` with fields of another object, nor take fields of two
+different objects: pass them as parameters.
+
+A separate, unrelated limit: with a host tensor call in a *free function*, Metal and CUDA emit a
+struct with resident fields that is built in `main` as a function call (`rustc` E0423). The
+generated method avoids it, since the tensor call then lives in a method.
+
+Tests: `tests/tensor_struct_fields.rs` (interpreter output, five-target builds, a compile-and-run
+on the SIMD target, diagnostics) and the `desugar_tensor_quals` unit tests on field inference.

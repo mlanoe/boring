@@ -13,14 +13,15 @@ pub(crate) fn is_tensor_call(call: &Expr) -> bool {
 
 impl super::Checker {
     /// A host tensor operand that is not a plain name. A struct field reaching here (not
-    /// `self.<field>` in a method of its struct, which `desugar_tensor_fields` already lowered)
-    /// gets the cause spelled out.
+    /// `self.<field>` in a method of its struct, nor `obj.<field>` on a typed local, which
+    /// `desugar_tensor_fields` already lowered) gets the cause spelled out.
     fn not_a_direct_operand(&mut self, operand: &Expr, line: usize, col: usize) {
         let msg = match &operand.kind {
             ExprKind::Field(base, field) if matches!(&base.kind, ExprKind::Var(_)) => format!(
                 "host tensor operands must be direct variables: `{field}` is a struct field, which is an \
-                 operand only as `self.{field}` (or a bare `{field}`) inside a method of its own struct — \
-                 elsewhere, pass the array to the function or method as a parameter"
+                 operand as `self.{field}` (or a bare `{field}`) inside a method of its own struct, or as \
+                 `obj.{field}` where `obj` is a local or parameter of an evident struct type — otherwise \
+                 (nested fields, a computed object), pass the array to the function or method as a parameter"
             ),
             _ => "host tensor operands must be direct variables".to_string(),
         };

@@ -255,7 +255,7 @@ impl MethodIndex {
 }
 
 /// Every `let` of `stmts`, nested blocks (`if`, loops, `match`, closures...) included.
-fn all_lets(stmts: &[Stmt]) -> Vec<LetStmt> {
+pub(crate) fn all_lets(stmts: &[Stmt]) -> Vec<LetStmt> {
     let mut stmts = stmts.to_vec();
     let mut out = Vec::new();
     {
@@ -671,7 +671,15 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
     }
 
     // --- apply -------------------------------------------------------------------------
+    // What each field's aliases resolved to, wherever they live: a method of the struct, a free
+    // function, the top level. (The aliases of one field share a group, so one value per field.)
     let mut field_quals: HashMap<(String, String), OwnerQual> = HashMap::new();
+    for ((_, name), id) in &let_nodes {
+        let Some((owner, field)) = aliases.by_alias.get(name) else { continue };
+        if let Some(q) = decided.get(id) {
+            field_quals.insert((owner.clone(), field.clone()), q.clone());
+        }
+    }
     for (i, item) in items.iter_mut().enumerate() {
         match item {
             Item::Let(l) => {
@@ -703,12 +711,6 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
                         }
                     }
                     requalify_lets(&mut m.body, fid, &let_nodes, &decided);
-                    for l in all_lets(&m.body) {
-                        let Some((owner, field)) = aliases.by_alias.get(&l.name) else { continue };
-                        if let Some(q) = let_nodes.get(&(fid, l.name.clone())).and_then(|id| decided.get(id)) {
-                            field_quals.insert((owner.clone(), field.clone()), q.clone());
-                        }
-                    }
                 }
                 // The field declaration takes what its aliases resolved to.
                 for f in st.fields.iter_mut() {
@@ -949,7 +951,7 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
 
 /// The struct name a type annotation names; the empty string for a type no struct method can
 /// be called on (arrays, strings, numbers...); `None` when unknown.
-fn type_owner(ty: &Type) -> Option<String> {
+pub(crate) fn type_owner(ty: &Type) -> Option<String> {
     match ty {
         Type::Mut(inner) | Type::Optional(inner) | Type::Qualified(inner, _) => type_owner(inner),
         Type::Named(n) => Some(n.clone()),
@@ -962,7 +964,11 @@ fn type_owner(ty: &Type) -> Option<String> {
 
 /// The type of each local whose struct is evident: from its annotation, else from a
 /// constructor-call initializer (`Op()`) or a call to a free function with a declared return type. A name declared with two different types maps to `None`.
-fn collect_var_types(params: &[Param], stmts: &[Stmt], fn_returns: &HashMap<String, String>) -> HashMap<String, Option<String>> {
+pub(crate) fn collect_var_types(
+    params: &[Param],
+    stmts: &[Stmt],
+    fn_returns: &HashMap<String, String>,
+) -> HashMap<String, Option<String>> {
     let mut out: HashMap<String, Option<String>> = HashMap::new();
     let mut note = |name: &str, ty: Option<String>| {
         match out.get(name) {

@@ -261,8 +261,12 @@ construction. Design decisions:
   followed.
 - **Cost and limits.** Inside a method, host tensor calls run the portable host loops on plain
   vectors, so a resident (`BoringKernelArg`) field is downloaded into the alias and the destination
-  is stored back as host data; the alias is a copy, not a view. Outside the struct (`l.w` in
-  `main`) a field is still not an operand; fields of nested structs (`self.a.w`) neither. Reading
+  is stored back as host data; the alias is a copy, not a view. Outside the struct's methods,
+  `l.w` (a free function, `main`, the top level; `l` a local or parameter of an evident struct
+  type) is an operand too: the call moves into a generated method of the struct and is replaced by
+  `l.__tf_call_N(..)`, with the other operands as its parameters (a destination field needs `l` to
+  be `mut`; a call that only reads leaves it immutable); fields of nested structs (`self.a.w`) are
+  still not operands, nor are fields of two different objects in one call. Reading
   a resident field directly from host code (`l.out[0]`) does not transpile on the GPU targets
   (existing limit, independent of this feature: read it through a method that passes it on, e.g.
   as an operand of another host call); the plain `std` target has no resident field type at all.
