@@ -294,3 +294,13 @@ The interpreter/stdlib written **in Boring itself** lives under `boring/interpre
 2. `cargo build` on that generated project.
 
 `tests/interpreter_build.rs` does step 1+2 for all four mode/threading combinations; `tests/interpreter_functional.rs` then runs `tests/cases/*.br` against all four compiled binaries and checks output against `.expected` files. That functional suite is what actually validates the self-hosted interpreter — always run both (`cargo test --test interpreter_build` before `cargo test --test interpreter_functional`) after changing anything under `boring/interpreter/`, not just `boring run` on the `.br` sources.
+
+## Running tests and disk usage
+
+Tests generate Cargo projects with their own build dirs (`target/tmp`, `target/transpile-cases`, `target/*_test_scratch`, `boring/interpreter/*_rust*/target`) — tens of GB on a full run. Launch them through the wrappers so these are purged afterwards, even on failure or Ctrl-C:
+
+- `tools/test.sh [cargo test args]` — e.g. `tools/test.sh --test metal_codegen`.
+- `tools/test-transpile.sh` — transpiler suite (forces `--test-threads=1`).
+- `tools/clean-build.sh` — manual purge of those regenerable artifacts (aborts if cargo is running).
+
+`BORING_TEST_KEEP=1` keeps the artifacts for faster re-runs. A bare `cargo test` cleans nothing (CI does this on purpose, to keep its cache). Prefer the wrappers over bare `cargo test` for suites that build generated projects (`transpile`, `*_codegen`, `interpreter_build`, `interpreter_functional`, `screen_*`).
