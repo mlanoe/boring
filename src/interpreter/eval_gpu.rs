@@ -437,7 +437,7 @@ pub(crate) fn to_thread_value(v: &Value) -> Option<ThreadValue> {
         Value::Float32(f)           => Some(ThreadValue::Float32(*f)),
         Value::Float64(f)           => Some(ThreadValue::Float64(*f)),
         Value::Str(s)             => Some(ThreadValue::Str(s.clone())),
-        Value::Fn { decl, .. }    => Some(ThreadValue::Fn(Box::new(decl.clone()))),
+        Value::Fn { decl, .. }    => Some(ThreadValue::Fn(decl.clone())),
         Value::Array(arr)         => {
             let tvs: Option<Vec<_>> = arr.iter().map(to_thread_value).collect();
             tvs.map(ThreadValue::Array)
@@ -484,7 +484,7 @@ pub(crate) fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
         ThreadValue::Float32(f)         => Value::Float32(f),
         ThreadValue::Float64(f)         => Value::Float64(f),
         ThreadValue::Str(s)           => Value::Str(s),
-        ThreadValue::Fn(decl)         => Value::Fn { decl: *decl, captured: Rc::clone(captured) },
+        ThreadValue::Fn(decl)         => Value::Fn { decl: Box::new(*decl), captured: Rc::clone(captured) },
         ThreadValue::Array(arr)       => Value::Array(
             arr.into_iter().map(|tv| from_thread_value(tv, captured)).collect::<Vec<_>>().into()
         ),
@@ -545,12 +545,71 @@ fn snapshot_env(env: &EnvRef) -> Vec<(String, ThreadValue)> {
     out
 }
 
+/// Counting semaphore bounding how many blocks of a barrier-synchronised kernel are simulated at once.
+struct BlockPermits {
+    free: Mutex<usize>,
+    cv:   std::sync::Condvar,
+}
+
+impl BlockPermits {
+    fn new(n: usize) -> Self { BlockPermits { free: Mutex::new(n.max(1)), cv: std::sync::Condvar::new() } }
+    fn acquire(&self) {
+        let mut free = self.free.lock().unwrap();
+        while *free == 0 { free = self.cv.wait(free).unwrap(); }
+        *free -= 1;
+    }
+    fn release(&self) {
+        *self.free.lock().unwrap() += 1;
+        self.cv.notify_one();
+    }
+}
+
+/// Number of `Value`s a thread-safe snapshot expands to once rebuilt as an interpreter value.
+fn thread_value_leaves(v: &ThreadValue) -> usize {
+    match v {
+        ThreadValue::Array(a) => 1 + a.iter().map(thread_value_leaves).sum::<usize>(),
+        ThreadValue::Object { fields, .. } => 1 + fields.iter().map(|(_, f)| thread_value_leaves(f)).sum::<usize>(),
+        ThreadValue::EnumVariant { fields, .. } => 1 + fields.iter().map(thread_value_leaves).sum::<usize>(),
+        _ => 1,
+    }
+}
+
+/// Memory budget (bytes) for the blocks of one barrier-synchronised kernel simulated concurrently.
+/// Override with `BORING_KERNEL_SIM_MEM_MB`.
+fn kernel_sim_budget_bytes() -> usize {
+    std::env::var("BORING_KERNEL_SIM_MEM_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024) * 1024 * 1024
+}
+
+/// Fixed interpreter cost of one simulated thread besides its fields (fresh global env with the stdlib,
+/// kernel AST clones, stack pages touched), measured at ~2 MB with a kernel that has no field data.
+const SIM_THREAD_BASE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Empties the given environments on drop so closures stored in them stop keeping them alive.
+struct EnvCycleBreaker(Vec<EnvRef>);
+
+impl Drop for EnvCycleBreaker {
+    fn drop(&mut self) {
+        for env in &self.0 {
+            // Take the map out first: dropping values may re-enter these envs through other Rcs.
+            let vars = std::mem::take(&mut env.borrow_mut().vars);
+            drop(vars);
+        }
+    }
+}
+
 // ─── Per-thread result ────────────────────────────────────────────────────────
 
 struct ThreadResult {
-    /// Changed mutable fields: (field_name, initial_value, new_value).
-    /// Stored as ThreadValue so it's Send.
-    fields: Vec<(String, ThreadValue, ThreadValue)>,
+    /// Changed mutable fields. Stored as ThreadValue so it's Send.
+    fields: Vec<(String, FieldDelta)>,
+}
+
+/// What one thread changed in a mutable field. An array field keeps only the elements that differ from
+/// the launch-time value (not a full copy of the array): every thread's result is retained until the
+/// merge, so full before/after copies cost threads x array length x element size.
+enum FieldDelta {
+    Elems(Vec<(usize, ThreadValue)>),
+    Whole(ThreadValue),
 }
 
 // ─── Core kernel simulation ───────────────────────────────────────────────────
@@ -742,8 +801,16 @@ fn run_kernel_parallel(
         // to their name are intercepted before ever consulting this binding, see
         // `Interpreter::sync_fields`'s doc comment), so non-kernel code paths that
         // check "is this name bound" keep working unchanged.
+        // Each field is materialised ONCE per simulated thread and the resulting `Value` is shared
+        // (an `Rc` clone for arrays) between the thread env binding and the `self` object below.
+        // Reconstructing it twice doubled the per-thread footprint: a block of 256 live threads
+        // each owned two private copies of every field (atlas, texel pool, ...), which is what
+        // exhausted memory on the tiled rasteriser test. The copy per thread itself is inherent:
+        // `Value` is `Rc`-based, so a field cannot be shared across the OS threads of a block.
+        let mut self_fields: Vec<(String, Value)> = Vec::with_capacity(initial_fields.len());
         for (field_decl, (name, tv)) in decl_fields.iter().zip(initial_fields.iter()) {
             let val = from_thread_value(tv.clone(), &thread_env);
+            self_fields.push((name.clone(), val.clone()));
             match field_decl.binding {
                 FieldBinding::Mut | FieldBinding::Var => {
                     thread_env.borrow_mut().define_mut(name, val);
@@ -784,14 +851,11 @@ fn run_kernel_parallel(
             col: 0,
         };
         ti.global.borrow_mut().define(decl_name, Value::Struct {
-            decl: synthetic_decl,
+            decl: Box::new(synthetic_decl),
             captured: Rc::clone(&ti.global),
         });
 
         // Reconstruct the kernel object as `self`.
-        let self_fields: Vec<(String, Value)> = initial_fields.iter()
-            .map(|(n, tv)| (n.clone(), from_thread_value(tv.clone(), &thread_env)))
-            .collect();
         let self_obj = Value::Object(Rc::new(RefCell::new(ObjectInner {
             type_name: decl_name.to_string(),
             fields: self_fields,
@@ -836,10 +900,17 @@ fn run_kernel_parallel(
         // Inject kernel methods.
         for method in decl_methods {
             if !method.name.is_empty() {
-                let fn_val = Value::Fn { decl: method.clone(), captured: Rc::clone(&thread_env) };
+                let fn_val = Value::Fn { decl: Box::new(method.clone()), captured: Rc::clone(&thread_env) };
                 thread_env.borrow_mut().define(&method.name, fn_val);
             }
         }
+
+        // Break the Rc cycles this thread built (a kernel method `Value::Fn` captures `thread_env` and
+        // is itself stored in it; the synthetic struct decl captures `ti.global` the same way). Without
+        // this the env, with its private copy of every field, is never freed: every simulated thread
+        // leaked its whole footprint, which is what ran `boring run` out of memory on the tiled
+        // rasteriser test (thousands of threads x tens of thousands of boxed elements).
+        let _cycle_breaker = EnvCycleBreaker(vec![Rc::clone(&ti.global), Rc::clone(&cap_env), Rc::clone(&thread_env)]);
 
         // Run the entry point.
         let result = ti.exec_block(entry_body, Rc::clone(&thread_env));
@@ -858,13 +929,19 @@ fn run_kernel_parallel(
         // `'sync` fields never escaping the kernel body, same as real hardware.
         let mut changed = Vec::new();
         for name in mutable_names {
-            let initial = initial_fields.iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, tv)| tv.clone())
-                .unwrap_or(ThreadValue::Nil);
+            let Some(initial) = initial_fields.iter().find(|(n, _)| n == name).map(|(_, tv)| tv) else { continue };
             if let Some(new_val) = thread_env.borrow().vars.get(name).and_then(to_thread_value) {
-                if new_val != initial {
-                    changed.push((name.clone(), initial, new_val));
+                if &new_val == initial { continue; }
+                match (initial, new_val) {
+                    (ThreadValue::Array(init_arr), ThreadValue::Array(new_arr)) => {
+                        let elems: Vec<(usize, ThreadValue)> = init_arr.iter().zip(new_arr)
+                            .enumerate()
+                            .filter(|(_, (a, b))| a != &b)
+                            .map(|(i, (_, b))| (i, b))
+                            .collect();
+                        changed.push((name.clone(), FieldDelta::Elems(elems)));
+                    }
+                    (_, new_val) => changed.push((name.clone(), FieldDelta::Whole(new_val))),
                 }
             }
         }
@@ -957,8 +1034,24 @@ fn run_kernel_parallel(
         let initial_fields_r    = initial_fields.as_ref();
         let mutable_names_r     = mutable_names.as_ref();
 
+        // Memory bound. Every simulated thread owns a private `Value` copy of every kernel field and of
+        // the captured env (`Value` is `Rc`-based so a field can't be shared between OS threads), and a
+        // `Value` is ~350 bytes, so a `[uint]` element costs ~350 bytes PER THREAD. All threads of a block
+        // are live at once (barriers), and rayon used to run one block per core: the tiled rasteriser test
+        // peaked at 5-7 GB. Cap the blocks in flight so that live threads x per-thread footprint stays
+        // within `kernel_sim_budget_bytes()`; the copy per live thread itself is inherent.
+        let leaves: usize = initial_fields.iter().map(|(_, v)| thread_value_leaves(v)).sum::<usize>()
+            + captured_snapshot.iter().map(|(_, v)| thread_value_leaves(v)).sum::<usize>();
+        let per_thread = SIM_THREAD_BASE_BYTES + leaves * (std::mem::size_of::<Value>() + std::mem::size_of::<ThreadValue>());
+        let permits = BlockPermits::new(kernel_sim_budget_bytes() / (per_thread * threads_per_block.max(1)));
+        let permits = &permits;
+
         kernel_pool().install(|| {
             (0..n_blocks).into_par_iter().map(|block_idx| {
+                permits.acquire();
+                struct Release<'a>(&'a BlockPermits);
+                impl Drop for Release<'_> { fn drop(&mut self) { self.0.release(); } }
+                let _release = Release(permits);
                 let block_idx_x = block_idx % grid_x;
                 let block_idx_y = (block_idx / grid_x) % grid_y;
                 let block_idx_z = block_idx / blocks_per_layer;
@@ -1057,18 +1150,12 @@ fn run_kernel_parallel(
                     // writes, so at most one thread changes each index.
                     let mut merged = base_arr.clone();
                     for tr in &all_results {
-                        for (f_name, f_init, f_new) in &tr.fields {
+                        for (f_name, delta) in &tr.fields {
                             if f_name != name { continue; }
-                            if let (ThreadValue::Array(init_arr), ThreadValue::Array(new_arr)) =
-                                (f_init, f_new)
-                            {
-                                for (i, (init_elem, new_elem)) in
-                                    init_arr.iter().zip(new_arr.iter()).enumerate()
-                                {
-                                    if new_elem != init_elem {
-                                        if let Some(slot) = merged.get_mut(i) {
-                                            *slot = new_elem.clone();
-                                        }
+                            if let FieldDelta::Elems(elems) = delta {
+                                for (i, new_elem) in elems {
+                                    if let Some(slot) = merged.get_mut(*i) {
+                                        *slot = new_elem.clone();
                                     }
                                 }
                             }
@@ -1080,9 +1167,9 @@ fn run_kernel_parallel(
                     // Scalar: last write wins (matches sequential semantics).
                     let mut last = base_tv;
                     for tr in &all_results {
-                        for (f_name, _, f_new) in &tr.fields {
+                        for (f_name, delta) in &tr.fields {
                             if f_name == name {
-                                last = f_new.clone();
+                                if let FieldDelta::Whole(f_new) = delta { last = f_new.clone(); }
                             }
                         }
                     }
@@ -1567,7 +1654,7 @@ impl Interpreter {
     pub(crate) fn exec_kernel_decl(&mut self, decl: &crate::ast::KernelDecl, env: EnvRef) -> Result<(), Signal> {
         let decl = lower_labeled_array_methods(decl);
         let decl = &decl;
-        let val = Value::KernelStruct { decl: decl.clone(), captured: Rc::clone(&env) };
+        let val = Value::KernelStruct { decl: Box::new(decl.clone()), captured: Rc::clone(&env) };
         env.borrow_mut().define(&decl.name, val.clone());
         if !Rc::ptr_eq(&env, &self.global) {
             self.global.borrow_mut().define(&decl.name, val);

@@ -352,7 +352,7 @@ impl Interpreter {
             }
             Stmt::Guard(g) => self.exec_guard(g, env),
             Stmt::Fn(decl) => {
-                let val = Value::Fn { decl: decl.clone(), captured: Rc::clone(&env) };
+                let val = Value::Fn { decl: Box::new(decl.clone()), captured: Rc::clone(&env) };
                 env.borrow_mut().define(&decl.name, val);
                 Ok(())
             }

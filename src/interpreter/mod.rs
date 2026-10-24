@@ -330,25 +330,25 @@ pub enum Value {
     },
     EnumNamespace {
         name: String,
-        variants: HashMap<String, Value>,
-        methods: Vec<FnDecl>,
-        setters: Vec<SetDecl>,
-        conversions: Vec<AsDecl>,
-        protocols: Vec<String>,
+        variants: Box<HashMap<String, Value>>,
+        methods: Box<Vec<FnDecl>>,
+        setters: Box<Vec<SetDecl>>,
+        conversions: Box<Vec<AsDecl>>,
+        protocols: Box<Vec<String>>,
         /// Type-level (`type def`/`type req`/`type set`) factory/static
         /// methods — mirrors `Struct`'s dispatch via `StructDecl::type_methods`.
-        type_methods: Vec<TypeMethod>,
+        type_methods: Box<Vec<TypeMethod>>,
         /// The environment at enum definition time, used as the parent scope
         /// when calling enum methods — mirrors `Struct::captured`.
         captured: EnvRef,
     },
     Struct {
-        decl: StructDecl,
+        decl: Box<StructDecl>,
         captured: EnvRef,
     },
     Future(Box<Value>),
     Fn {
-        decl: FnDecl,
+        decl: Box<FnDecl>,
         captured: EnvRef,
     },
     OverloadedFn {
@@ -397,7 +397,7 @@ pub enum Value {
     /// GPU kernel struct registered by `kernel Name:`.
     /// Stores the declaration and the environment at definition time.
     KernelStruct {
-        decl: crate::ast::KernelDecl,
+        decl: Box<crate::ast::KernelDecl>,
         captured: EnvRef,
     },
     /// GPU device handle, produced by `Device(index = n)` (simulation mode).
@@ -421,7 +421,7 @@ pub enum Value {
         /// before (no field to compute it from at all), so `screen.time` hit
         /// `get_field`'s generic "Screen has no field" error — confirmed via
         /// examples/plasma_metal.br, which reads it every frame.
-        created_at: std::time::Instant,
+        created_at: Box<std::time::Instant>,
     },
 }
 
@@ -3037,7 +3037,7 @@ impl Interpreter {
                     if let Some(val) = module_env.borrow().get(name) {
                         // For enum namespaces, also export each variant as a bare name.
                         if let Value::EnumNamespace { ref variants, .. } = val {
-                            for (variant_name, variant_val) in variants {
+                            for (variant_name, variant_val) in variants.iter() {
                                 env.borrow_mut().define(variant_name, variant_val.clone());
                             }
                         }
@@ -3225,7 +3225,7 @@ impl Interpreter {
                             }
                         }
                     } else {
-                        let new_fn = Value::Fn { decl: decl.clone(), captured: Rc::clone(&env) };
+                        let new_fn = Value::Fn { decl: Box::new(decl.clone()), captured: Rc::clone(&env) };
                         // Check if this name is already defined as a function — if so, upgrade to OverloadedFn.
                         let existing = env.borrow().vars.get(&decl.name).cloned();
                         match existing {
@@ -3235,7 +3235,7 @@ impl Interpreter {
                                 let overloaded = Value::OverloadedFn {
                                     name: decl.name.clone(),
                                     variants: vec![
-                                        (existing_decl, existing_cap),
+                                        (*existing_decl, existing_cap),
                                         (decl.clone(), Rc::clone(&env)),
                                     ],
                                 };
@@ -3291,7 +3291,7 @@ impl Interpreter {
                     self.type_var_store.insert(key, val);
                 }
                 // Register the merged struct
-                let val = Value::Struct { decl: merged, captured: Rc::clone(&env) };
+                let val = Value::Struct { decl: Box::new(merged), captured: Rc::clone(&env) };
                 env.borrow_mut().define(&decl.name, val.clone());
                 // Also register in global so call_method can find it by type_name regardless of nesting depth.
                 if !Rc::ptr_eq(&env, &self.global) {
@@ -3350,19 +3350,19 @@ impl Interpreter {
                 }
                 let ns = Value::EnumNamespace {
                     name: decl.name.clone(),
-                    variants,
-                    methods: decl.methods.clone(),
-                    setters: decl.setters.clone(),
-                    conversions: decl.conversions.clone(),
-                    protocols: decl.protocols.clone(),
-                    type_methods: decl.type_methods.clone(),
+                    variants: Box::new(variants),
+                    methods: Box::new(decl.methods.clone()),
+                    setters: Box::new(decl.setters.clone()),
+                    conversions: Box::new(decl.conversions.clone()),
+                    protocols: Box::new(decl.protocols.clone()),
+                    type_methods: Box::new(decl.type_methods.clone()),
                     captured: Rc::clone(&env),
                 };
                 self.enums.insert(decl.name.clone(), decl.clone());
                 // Also define each variant as a bare name so they're accessible from
                 // struct methods whose captured env is this module env.
                 if let Value::EnumNamespace { ref variants, .. } = ns {
-                    for (vname, vval) in variants {
+                    for (vname, vval) in variants.iter() {
                         env.borrow_mut().define(vname, vval.clone());
                     }
                 }

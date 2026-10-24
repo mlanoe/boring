@@ -831,6 +831,12 @@ interp_test!(kernel_float32_math_method_args);
 // and CHANGELOG.md.
 interp_test!(kernel_float32_array_index_literal_assign);
 
+// Kernel simulation memory: every simulated thread owns a private copy of each field, so the
+// footprint is live threads x field size x `size_of::<Value>()`. See the case's own header, the
+// block-permit comment in `run_kernel_parallel` (src/interpreter/eval_gpu.rs) and the
+// `value_stays_small` unit test.
+interp_test!(kernel_sim_many_threads_big_field);
+
 // Ordinary (non-kernel) struct construction/field-assignment never coerced
 // field values to their declared field type under `boring run` — see each
 // case's own doc comment and CHANGELOG.md.

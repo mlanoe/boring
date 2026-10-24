@@ -2349,3 +2349,12 @@ fn integer_pow_preserves_width_and_reports_invalid_inputs() {
         assert!(interp.call_method(Value::Int(3), "pow", args, 1, &mut None).is_err());
     }
 }
+
+/// `Value` is the element type of every interpreted array, and a kernel simulation gives each simulated
+/// thread a private copy of every field, so its size multiplies directly into `boring run` memory (it was
+/// 352 bytes because `Fn`/`Struct`/`KernelStruct`/`EnumNamespace`/`Screen` held their declarations inline).
+/// Box any new large variant payload instead of raising this bound.
+#[test]
+fn value_stays_small() {
+    assert!(std::mem::size_of::<Value>() <= 96, "Value grew to {} bytes", std::mem::size_of::<Value>());
+}

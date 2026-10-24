@@ -562,7 +562,7 @@ impl Interpreter {
                     resized: Rc::new(RefCell::new(false)),
                     keys:    Rc::new(RefCell::new(vec![])),
                     pixels:  Rc::new(RefCell::new(vec![])),
-                    created_at: std::time::Instant::now(),
+                    created_at: Box::new(std::time::Instant::now()),
                 });
             }
             // Device(index = n) — built-in execution-device handle (simulation mode).

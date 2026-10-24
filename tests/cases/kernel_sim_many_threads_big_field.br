@@ -1,0 +1,38 @@
+# Regression: simulating a kernel must not leak or multiply its fields per simulated thread.
+#
+# Every simulated thread rebuilds its own `Value` copy of each kernel field (`Value` is `Rc`-based, so it
+# cannot be shared across the OS threads of a block). Two things used to make that cost explode:
+#   * the per-thread env and the `self` object each held a private copy (2x per thread), and
+#   * kernel methods are stored in the thread env with `captured = thread env` (an `Rc` cycle), so
+#     the env, and its copy of every field, was never freed: memory grew with the total thread count.
+# `boring run raster_tile_test.br` (boring-ui) hit 5+ GB and was OOM-killed. This case launches
+# 4 x 4 blocks of 16 x 16 threads (4096 threads, with an `'actor` tile, hence real OS threads and
+# barriers) that each read a 30000-element `'global` field; it must finish with a
+# small footprint (it used to need several GB, bounded now by the live threads of the running blocks).
+kernel BigReadKernel:
+    let [uint]'global big
+    mut [uint]'unified out
+    mut [uint, 256]'actor tile
+
+    init([uint]'global b):
+        big = b
+        out = [0 as uint for ..<4096]
+
+    def ():
+        let tid = .thread.y * 16 + .thread.x
+        let gid = (.block.y * 4 + .block.x) * 256 + tid
+        tile[tid] = big[gid]
+        sync
+        out[gid] = tile[(tid + 1) % 256] * 3 + big[29999 - gid]
+
+def main() throws:
+    mut [uint] b = []
+    for i in 0..<30000:
+        b.push(i as uint)
+    mut k = BigReadKernel(b)
+    kernel:
+        k(block = (16, 16), grid = (4, 4))
+    var uint sum = 0
+    for i in 0..<4096:
+        sum += k.out[i]
+    print "{k.out[0]} {k.out[255]} {k.out[4095]} {sum}"

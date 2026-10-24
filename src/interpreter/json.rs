@@ -453,9 +453,9 @@ impl Interpreter {
     /// carries at runtime.
     fn lookup_struct_decl(&self, name: &str, env: &EnvRef) -> Option<StructDecl> {
         match env.borrow().get(name) {
-            Some(Value::Struct { decl, .. }) => Some(decl),
+            Some(Value::Struct { decl, .. }) => Some(*decl),
             _ => match self.global.borrow().get(name) {
-                Some(Value::Struct { decl, .. }) => Some(decl),
+                Some(Value::Struct { decl, .. }) => Some(*decl),
                 _ => None,
             },
         }
