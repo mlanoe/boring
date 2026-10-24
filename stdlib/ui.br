@@ -186,6 +186,9 @@ pub view Text:
     # At most this many lines: the text wraps first, then the last visible line is truncated with an
     # ellipsis (draft, "Text").
     int? lineLimit = nil
+    # Explicit style on top of the font role's own weight (the theme makes titles bold): a bold or an italic cut of the font.
+    bool bold = false
+    bool italic = false
     body(): native
 
 pub view Column:
