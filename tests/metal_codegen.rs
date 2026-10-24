@@ -372,6 +372,74 @@ kernel LocalField:
         "expected inferred 'local field declaration in entry point;\ngot:\n{msl}");
 }
 
+#[test]
+fn imported_kernel_touching_fn_preserves_static_fs_call_and_string_abi() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen")
+        .join("imported_static_fs_call");
+
+    // GPU targets intentionally only support the thread-safe runtime; `single`
+    // is rejected by the CLI. This exercises Metal's one pertinent mode (`multi`).
+    for (threading, string_ty) in [("multi", "std::sync::Arc<str>")] {
+        let tmp = root.join(threading);
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("storage.br"),
+            r#"
+use std.fs.File
+
+kernel Touch:
+    mut [float32]'unified out
+    init():
+        out = [0.0 as float32 for ..<1]
+    def ():
+        out[.thread.x] = 1.0
+
+pub def save(string path) throws:
+    let created = try? File.create(path)
+    guard let created else throw "create failed"
+    mut touch = Touch()
+    kernel:
+        touch(block = 1)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("test.br"),
+            r#"
+use storage.*
+
+def main() throws:
+    save("/tmp/boring-imported-static-call")
+"#,
+        )
+        .unwrap();
+
+        let result = Command::new(bin)
+            .args(["build", "--target", "metal", "--threading", threading])
+            .arg(tmp.join("test.br"))
+            .output()
+            .unwrap_or_else(|e| panic!("[{threading}] failed to invoke boring: {e}"));
+        assert!(
+            result.status.success(),
+            "[{threading}] build failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let rs = fs::read_to_string(tmp.join("test_metal/src/main.rs")).unwrap();
+        assert!(
+            rs.contains(&format!("pub fn save(path: {string_ty}")),
+            "[{threading}] imported specialized function must match the general string ABI:\n{rs}"
+        );
+        assert!(rs.contains("let created = File::create((&*path)).ok();"),
+            "[{threading}] static File.create inside imported specialized function was not lowered:\n{rs}");
+        assert!(!rs.contains("/* expr */"),
+            "[{threading}] imported specialized function still contains an unsupported expression:\n{rs}");
+    }
+}
+
 /// Invoke `boring build --target metal <file>` and return the generated
 /// (kernels/main.metal, src/main.rs) text pair.
 ///

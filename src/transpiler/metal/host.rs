@@ -6,8 +6,8 @@
 
 use crate::ast::*;
 use crate::transpiler::helpers::{
+    camel_to_snake, desugared_labeled_array_shadow_fields, labeled_array_grid_dim_expr,
     shadow_grid_axes,
-    labeled_array_grid_dim_expr, desugared_labeled_array_shadow_fields,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -75,6 +75,12 @@ struct HostEmitter {
     /// treatment as `string_vars`. Populated once from every `Item::Struct`,
     /// mirrors `dict_fields`.
     string_fields: std::collections::HashSet<String>,
+    /// Struct fields already represented as `BoringKernelArg` values.
+    gpu_fields: std::collections::HashSet<String>,
+    /// Rust representation chosen by the general pass for Boring `string`.
+    /// The specialized Metal host emitter must use the same ABI at splice
+    /// boundaries (`Arc<str>` in multi-threaded builds, `Rc<str>` in single).
+    string_rust_type: String,
     /// Names of every free (non-method) `throws` function. See `cuda::host`'s
     /// identical field for the full rationale and its documented scope limit
     /// (does not cover `throws` struct methods calling each other).
@@ -227,6 +233,11 @@ fn is_float_array_param(ty: &Type) -> bool {
     }
 }
 
+fn is_string_type(ty: &Type) -> bool {
+    matches!(ty.without_mut(), Type::Str)
+        || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+}
+
 impl HostEmitter {
     fn new(kernel_names: &[String]) -> Self {
         Self {
@@ -250,6 +261,8 @@ impl HostEmitter {
             dict_fields: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
             string_fields: std::collections::HashSet::new(),
+            gpu_fields: std::collections::HashSet::new(),
+            string_rust_type: "std::sync::Arc<str>".into(),
             fn_throws: std::collections::HashSet::new(),
             in_throws: false,
             variant_to_enum: std::collections::HashMap::new(),
@@ -366,6 +379,11 @@ impl HostEmitter {
         boring_main_throws: bool,
         top_level_kernel_touching: bool,
     ) {
+        self.string_rust_type = if general_code.contains("Rc<str>") {
+            "std::rc::Rc<str>".into()
+        } else {
+            "std::sync::Arc<str>".into()
+        };
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
         {
             let mut fn_used: Vec<String> = Vec::new();
@@ -403,6 +421,9 @@ impl HostEmitter {
             }
             if let Item::Struct(s) = item {
                 for f in &s.fields {
+                    if is_gpu_array_param(&f.ty) {
+                        self.gpu_fields.insert(f.name.clone());
+                    }
                     if matches!(f.ty, Type::Dict(..)) {
                         self.dict_fields.insert(f.name.clone());
                     }
@@ -2173,33 +2194,50 @@ impl HostEmitter {
         self.fn_locals = f.params.iter().map(|p| p.name.clone()).collect();
         crate::transpiler::helpers::collect_local_decl_names(&f.body, &mut self.fn_locals);
         let vis = if f.is_pub { "pub " } else { "" };
-        let params: Vec<String> = f.params.iter().map(|p| {
-            let mut_gpu = p.mutable && p.ty.as_ref().is_some_and(is_gpu_array_param) && self_ty.is_none();
-            let name = if p.mutable && !mut_gpu { format!("mut {}", p.name) } else { p.name.clone() };
-            match &p.ty {
-                Some(ty) if mut_gpu => format!("{}: &mut BoringKernelArg<{}>", name, general_host_elem_type(ty)),
-                Some(ty) => {
-                    // boring's by-ref contract for array/dict/set/struct/enum
-                    // params -- see `cuda::host`'s identical fix for the full
-                    // rationale (confirmed necessary for cross-calls between
-                    // this emitter and the general-pipeline splice to type-check).
-                    let base = if is_gpu_array_param(ty) {
-                        format!("BoringKernelArg<{}>", general_host_elem_type(ty))
-                    } else if is_float_array_param(ty) {
-                        "Vec<f64>".to_string()
-                    } else {
-                        rust_type(ty)
-                    };
-                    let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
-                        format!("&{}", base)
-                    } else {
-                        base
-                    };
-                    format!("{}: {}", name, rendered)
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| {
+                let mut_gpu =
+                    p.mutable && p.ty.as_ref().is_some_and(is_gpu_array_param) && self_ty.is_none();
+                let name = if p.mutable && !mut_gpu {
+                    format!("mut {}", p.name)
+                } else {
+                    p.name.clone()
+                };
+                match &p.ty {
+                    Some(ty) if mut_gpu => format!(
+                        "{}: &mut BoringKernelArg<{}>",
+                        name,
+                        general_host_elem_type(ty)
+                    ),
+                    Some(ty) => {
+                        // boring's by-ref contract for array/dict/set/struct/enum
+                        // params -- see `cuda::host`'s identical fix for the full
+                        // rationale (confirmed necessary for cross-calls between
+                        // this emitter and the general-pipeline splice to type-check).
+                        let base = if is_gpu_array_param(ty) {
+                            format!("BoringKernelArg<{}>", general_host_elem_type(ty))
+                        } else if is_float_array_param(ty) {
+                            "Vec<f64>".to_string()
+                        } else {
+                            if is_string_type(ty) {
+                                self.string_rust_type.clone()
+                            } else {
+                                rust_type(ty)
+                            }
+                        };
+                        let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
+                            format!("&{}", base)
+                        } else {
+                            base
+                        };
+                        format!("{}: {}", name, rendered)
+                    }
+                    None => name,
                 }
-                None => name,
-            }
-        }).collect();
+            })
+            .collect();
         let all_params = match self_ty {
             Some(_) => {
                 let s = if f.mutating { "&mut self" } else { "&self" };
@@ -2227,7 +2265,17 @@ impl HostEmitter {
                     }).collect();
                     format!("({})", parts.join(", "))
                 }
-                _ => f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into()),
+                _ => f
+                    .return_ty
+                    .as_ref()
+                    .map(|ty| {
+                        if is_string_type(ty) {
+                            self.string_rust_type.clone()
+                        } else {
+                            rust_type(ty)
+                        }
+                    })
+                    .unwrap_or_else(|| "()".into()),
             },
         };
         // `throws` → `Result<T, Box<dyn std::error::Error + Send + Sync>>`. See
@@ -2494,18 +2542,45 @@ impl HostEmitter {
             }
             // `guard <cond> else throw "..."` — see `cuda::host`'s identical case for
             // the full rationale and scope limit (only `GuardCond::Expr` is handled).
-            Stmt::Guard(g) => {
-                if let GuardCond::Expr(cond) = &g.cond {
+            Stmt::Guard(g) => match &g.cond {
+                GuardCond::Expr(cond) => {
                     let c = self.expr(cond);
                     self.line(&format!("if !({}) {{", c));
                     self.indent += 1;
                     for s in &g.else_body { self.emit_stmt(s); }
                     self.indent -= 1;
                     self.line("}");
-                } else {
-                    self.line("/* unsupported stmt */");
                 }
-            }
+                GuardCond::Clauses(clauses) => {
+                    for clause in clauses {
+                        match clause {
+                            CondClause::Let(name, value) => {
+                                let value = self.expr(value);
+                                self.line(&format!("let Some({name}) = {value} else {{"));
+                                self.indent += 1;
+                                for s in &g.else_body {
+                                    self.emit_stmt(s);
+                                }
+                                self.indent -= 1;
+                                self.line("};");
+                            }
+                            CondClause::Expr(cond) => {
+                                let c = self.expr(cond);
+                                self.line(&format!("if !({c}) {{"));
+                                self.indent += 1;
+                                for s in &g.else_body {
+                                    self.emit_stmt(s);
+                                }
+                                self.indent -= 1;
+                                self.line("}");
+                            }
+                            CondClause::LetPat(_, _) => {
+                                self.line("/* unsupported guard pattern */")
+                            }
+                        }
+                    }
+                }
+            },
             // `throw "msg"` — see `cuda::host`'s identical case.
             Stmt::Throw(t) => {
                 if self.in_throws {
@@ -2845,6 +2920,8 @@ impl HostEmitter {
             dict_fields: self.dict_fields.clone(),
             string_vars: self.string_vars.clone(),
             string_fields: self.string_fields.clone(),
+            gpu_fields: self.gpu_fields.clone(),
+            string_rust_type: self.string_rust_type.clone(),
             fn_throws: self.fn_throws.clone(),
             in_throws: self.in_throws,
             variant_to_enum: self.variant_to_enum.clone(),
@@ -3209,9 +3286,18 @@ impl HostEmitter {
                 // `cuda::host`'s identical case for the full rationale.
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
-                let float_flags = callee_name.and_then(|n| self.fn_float_array_params.get(n)).cloned();
-                let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
-                let mut_gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_mut_params.get(n)).cloned();
+                let general_param_types = callee_name
+                    .map(|n| self.general_fn_param_types(n))
+                    .unwrap_or_default();
+                let float_flags = callee_name
+                    .and_then(|n| self.fn_float_array_params.get(n))
+                    .cloned();
+                let gpu_flags = callee_name
+                    .and_then(|n| self.fn_gpu_array_params.get(n))
+                    .cloned();
+                let mut_gpu_flags = callee_name
+                    .and_then(|n| self.fn_gpu_array_mut_params.get(n))
+                    .cloned();
                 // `mut` GPU array arguments passed by `&mut`, with the callee's write
                 // back into a host-array local copied back after the call:
                 // (temp name, local name, device buffer element type).
@@ -3230,6 +3316,9 @@ impl HostEmitter {
                                 write_backs.push((tmp.clone(), name.clone(), mut_dev_elem.clone().unwrap_or_default()));
                                 return format!("&mut {}", tmp);
                             }
+                        }
+                        if matches!(&a.value.kind, ExprKind::Field(_, field) if self.gpu_fields.contains(field.as_str())) {
+                            return self.expr(&a.value);
                         }
                         if is_mut_pos {
                             let value = self.expr(&a.value);
@@ -3253,11 +3342,16 @@ impl HostEmitter {
                         let s = self.expr(&a.value);
                         return format!("&(({}).iter().map(|&x| x as f64).collect::<Vec<f64>>())", s);
                     }
-                    let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                    let param_ty = general_param_types.get(i).map(String::as_str).unwrap_or("");
+                    if param_ty.starts_with("&mut ") {
+                        return format!("&mut ({})", self.expr(&a.value));
+                    }
+                    let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied())
+                        .unwrap_or_else(|| param_ty.starts_with('&'));
                     // `screen.key_events` / `key_up_events` (`Vec<String>` here) to a `[string]` parameter,
                     // and a float host value (`screen.time`, an `f64`) to a `float32` one.
-                    if let Some(n) = callee_name {
-                        let pty = self.general_fn_param_types(n).get(i).cloned().unwrap_or_default();
+                    if callee_name.is_some() {
+                        let pty = general_param_types.get(i).cloned().unwrap_or_default();
                         if let ExprKind::Field(o, m) = &a.value.kind {
                             if matches!(&o.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref()) {
                                 if let Some(list) = crate::transpiler::screen_input::event_list_field(m) {
@@ -3340,6 +3434,30 @@ impl HostEmitter {
                 })
             }
             ExprKind::MethodCall(obj, method, args) => {
+                // Associated function on an external Rust type. The general emitter
+                // lowers `File.create(path)` to `File::create(&*path)`; functions that
+                // touch a GPU kernel are re-emitted here and must preserve that lowering.
+                if let ExprKind::Var(type_name) = &obj.kind {
+                    if type_name.chars().next().is_some_and(char::is_uppercase)
+                        && !self.struct_names.contains(type_name.as_str())
+                    {
+                        let rust_method = camel_to_snake(method);
+                        let args_s: Vec<String> = args
+                            .iter()
+                            .map(|a| {
+                                let value = self.expr(&a.value);
+                                if type_name == "File"
+                                    && matches!(rust_method.as_str(), "open" | "create")
+                                {
+                                    format!("(&*{})", value)
+                                } else {
+                                    value
+                                }
+                            })
+                            .collect();
+                        return format!("{}::{}({})", type_name, rust_method, args_s.join(", "));
+                    }
+                }
                 // A method of a struct value the setup code built (`pace.frame(rt, host, ..)`): each
                 // argument is passed the way the method's generated signature takes it.
                 if let Some(modes) = self.setup_method_modes(obj, method).filter(|m| m.len() == args.len()) {
@@ -3563,6 +3681,20 @@ impl HostEmitter {
             }
             ExprKind::Else(val, default) => {
                 format!("{}.unwrap_or({})", self.expr(val), self.expr(default))
+            }
+            ExprKind::TryElse(inner, default) => {
+                // `try? expr` is represented as `TryElse(expr, Nil)`. Do not let
+                // the ambient throws context append `?`: this expression consumes
+                // the Result locally and turns it into an Option.
+                let outer_in_throws = self.in_throws;
+                self.in_throws = false;
+                let inner_s = self.expr(inner);
+                self.in_throws = outer_in_throws;
+                if matches!(default.kind, ExprKind::Nil) {
+                    format!("{}.ok()", inner_s)
+                } else {
+                    format!("{}.unwrap_or_else(|_| {})", inner_s, self.expr(default))
+                }
             }
             ExprKind::If(i) => {
                 let mut out = String::new();

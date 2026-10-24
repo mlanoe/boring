@@ -192,3 +192,46 @@ def main() throws:
     assert_eq!(out, "hi!\n", "{rust}");
     assert!(!rust.contains("shout((&*"), "{rust}");
 }
+
+#[test]
+fn imported_static_file_call_uses_the_threading_specific_string_type() {
+    for (threading, pointer) in [("multi", "Arc"), ("single", "Rc")] {
+        let dir = project(
+            &format!("fs_imported_static_{threading}"),
+            "use storage.*\n\ndef main() throws:\n    save(\"snapshot.tmp\")\n",
+        );
+        std::fs::write(
+            dir.join("storage.br"),
+            "use std.fs.File\n\npub def save(string path) throws:\n    let created = try? File.create(path)\n    guard let created else throw \"create failed\"\n",
+        )
+        .unwrap();
+
+        let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .current_dir(&dir)
+            .args(["build", "main.br", "--emit-rust", "--threading", threading])
+            .output()
+            .expect("failed to invoke boring");
+        assert!(
+            out.status.success(),
+            "[{threading}] boring build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rust = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            rust.contains(&format!("fn save(path: {pointer}<str>")),
+            "[{threading}] imported function used the wrong string ABI:\n{rust}"
+        );
+        assert!(
+            rust.contains("File::create((&*path)).ok()"),
+            "[{threading}] imported File.create was not lowered as a static call:\n{rust}"
+        );
+
+        let rs = dir.join("gen.rs");
+        std::fs::write(&rs, &rust).unwrap();
+        let output = rustc_and_run(&rs, &dir);
+        assert!(
+            output.is_empty(),
+            "[{threading}] unexpected output: {output}"
+        );
+    }
+}
