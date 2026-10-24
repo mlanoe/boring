@@ -626,3 +626,145 @@ fn clipboard_string_conversions_on_other_hosts() {
         }
     }
 }
+
+// ── touch ────────────────────────────────────────────────────────────────────────────────────
+// No touch screen is needed: generation is checked per host, and the shared state machine is
+// exercised by injecting synthetic `touch_event`s into the runtime sliced out of a generated crate.
+
+const TOUCH_LOOP: &str = r#"
+kernel:
+    loop:
+        if screen.touching and screen.touchCount >= 2:
+            k.mode = 1
+        k.tick = screen.touch.x + screen.touch.y
+        if screen.touchStarted or screen.touchEnded or screen.touchCancelled:
+            k.mode = 2
+        if screen.touchCount > 1:
+            k.tick = screen.touchAt(1).x - screen.touchAt(1).y
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+
+#[test]
+fn wgpu_touch_members() {
+    let (project, rs) = build("wgpu", "touch", &events(TOUCH_LOOP));
+    assert!(rs.contains("WindowEvent::Touch(__boring_t) =>"), "{rs}");
+    assert!(rs.contains("self.__input.touch_event(__boring_ph, __boring_t.id, (__boring_t.location.x * self.__buf_w / (ws.width.max(1) as f64)).floor() as isize,"), "buffer-scaled like the cursor:\n{rs}");
+    assert!(rs.contains("(!self.__input.touches.is_empty())"), "{rs}");
+    assert!(rs.contains("(self.__input.touches.len() as isize)"), "{rs}");
+    assert!(rs.contains("self.__input.touch_started"), "{rs}");
+    assert!(rs.contains("self.__input.touch_x"), "{rs}");
+    assert!(rs.contains("self.__input.touch_at_x(1)"), "{rs}");
+    cargo_check(&project, "wgpu");
+}
+
+#[test]
+fn touch_invalidates_on_demand_windows() {
+    let src = events(TOUCH_LOOP).replace(r#"title = "input")"#, r#"title = "input", redraw = "demand")"#);
+    let (_, rs) = build("wgpu", "touch_demand", &src);
+    assert!(rs.contains("WindowEvent::Focused(_) | WindowEvent::Touch(_)) {"), "{rs}");
+    for target in ["metal", "cuda", "rocm"] {
+        let (_, rs) = build(target, "touch_demand", &src);
+        assert!(rs.contains("winit::event::WindowEvent::Focused(_) | winit::event::WindowEvent::Touch(_), .. }) { boring_dirty = true; }"), "[{target}] {rs}");
+    }
+}
+
+#[test]
+fn simd_touch_members() {
+    let (project, rs) = build("simd", "touch", &events(TOUCH_LOOP));
+    assert!(rs.contains("WindowEvent::Touch(t)"), "{rs}");
+    assert!(rs.contains("touch_event(phase, t.id,"), "{rs}");
+    assert!(rs.contains("fn touch_at(&self, i: isize) -> Touch"), "{rs}");
+    assert!(rs.contains("screen.touching"), "{rs}");
+    assert!(rs.contains("screen.touchCount"), "{rs}");
+    assert!(rs.contains("screen.touch.x"), "{rs}");
+    assert!(rs.contains("screen.touch_at(1).x"), "{rs}");
+    cargo_check(&project, "simd");
+}
+
+fn assert_winit028_touch(target: &str, rs: &str) {
+    assert!(rs.contains("winit::event::WindowEvent::Touch(__boring_t)"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_event(__boring_ph, __boring_t.id, (__boring_t.location.x * boring_buf_w / (__boring_ws.width.max(1) as f64)).floor() as isize,"), "[{target}] {rs}");
+    assert!(rs.contains("(!boring_input.touches.is_empty())"), "[{target}] {rs}");
+    assert!(rs.contains("(boring_input.touches.len() as isize)"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_started"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_ended"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_cancelled"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_x"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_y"), "[{target}] {rs}");
+    assert!(rs.contains("boring_input.touch_at_x(1)"), "[{target}] {rs}");
+}
+
+#[test]
+fn metal_touch_members() {
+    let (project, rs) = build("metal", "touch", &events(TOUCH_LOOP));
+    assert_winit028_touch("metal", &rs);
+    if cfg!(target_os = "macos") {
+        cargo_check(&project, "metal");
+    }
+}
+
+#[test]
+fn cuda_touch_members() {
+    let (project, rs) = build("cuda", "touch", &events(TOUCH_LOOP));
+    assert_winit028_touch("cuda", &rs);
+    cargo_check(&project, "cuda");
+}
+
+#[test]
+fn rocm_touch_members() {
+    let (project, rs) = build("rocm", "touch", &events(TOUCH_LOOP));
+    assert_winit028_touch("rocm", &rs);
+    cargo_check(&project, "rocm");
+}
+
+#[test]
+fn touch_state_machine_with_synthetic_events() {
+    let (_, generated) = build("simd", "touch_source", &events(TOUCH_LOOP));
+    let from = generated.find("// ---- Screen input (shared by every Screen host) ----").expect("input runtime");
+    let to = generated.find("fn __boring_vk_name").expect("key table");
+    let runtime = generated[from..to].trim_end_matches("#[allow(dead_code)]\n").to_string();
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_input_events").join("touch_state");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let src = format!(
+        "{runtime}\nfn main() {{\n    \
+         let mut i = __BoringInput::new();\n    \
+         // Tap shorter than a frame: started and ended in the same frame, nothing left down.\n    \
+         i.touch_event(0, 7, 10, 20); i.touch_event(2, 7, 11, 21);\n    \
+         let s = i.snapshot();\n    \
+         assert!(s.touch_started && s.touch_ended && !s.touch_cancelled && s.touches.is_empty());\n    \
+         assert_eq!((s.touch_x, s.touch_y), (11, 21));\n    \
+         assert!(!i.touch_started && !i.touch_ended);\n    \
+         // Two fingers: the first placed is primary while it stays down.\n    \
+         i.touch_event(0, 1, 5, 6); i.touch_event(0, 2, 50, 60); i.touch_event(1, 2, 51, 61);\n    \
+         let s = i.snapshot();\n    \
+         assert!(s.touch_started && s.touches.len() == 2 && (s.touch_x, s.touch_y) == (5, 6));\n    \
+         assert_eq!((s.touch_at_x(1), s.touch_at_y(1), s.touch_at_x(9)), (51, 61, 0));\n    \
+         // Secondary finger lifting is not the primary ending.\n    \
+         i.touch_event(2, 2, 52, 62);\n    \
+         let s = i.snapshot();\n    \
+         assert!(!s.touch_ended && s.touches.len() == 1);\n    \
+         // The primary moves; a new finger placed meanwhile does not become primary.\n    \
+         i.touch_event(1, 1, 8, 9); i.touch_event(0, 3, 100, 100); i.touch_event(1, 3, 101, 101);\n    \
+         let s = i.snapshot();\n    \
+         assert!(!s.touch_started && (s.touch_x, s.touch_y) == (8, 9) && s.touches.len() == 2);\n    \
+         // Primary cancelled: cancelled, not ended; last position kept; finger 3 still down.\n    \
+         i.touch_event(3, 1, 9, 10);\n    \
+         let s = i.snapshot();\n    \
+         assert!(s.touch_cancelled && !s.touch_ended && s.touches.len() == 1 && (s.touch_x, s.touch_y) == (9, 10));\n    \
+         // Unknown ids never panic or change state.\n    \
+         i.touch_event(1, 99, 1, 1); i.touch_event(2, 99, 1, 1);\n    \
+         let s = i.snapshot();\n    \
+         assert!(!s.touch_ended && s.touches.len() == 1);\n}}\n"
+    );
+    let rs = tmp.join("main.rs");
+    fs::write(&rs, src).unwrap();
+    let exe = tmp.join("touch_state");
+    let out = Command::new("rustc").args(["--edition", "2021", "-A", "warnings", "-o"]).arg(&exe).arg(&rs).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().unwrap();
+    assert!(run.status.success(), "{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+}

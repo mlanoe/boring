@@ -1450,7 +1450,7 @@ impl<'a> HostEmitter<'a> {
         if on_demand {
             // Input and resize invalidate the window; everything else (including the
             // frame's own RedrawRequested) does not.
-            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Ime(_) | WindowEvent::ModifiersChanged(_) | WindowEvent::MouseWheel { .. } | WindowEvent::Focused(_)) {");
+            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Ime(_) | WindowEvent::ModifiersChanged(_) | WindowEvent::MouseWheel { .. } | WindowEvent::Focused(_) | WindowEvent::Touch(_)) {");
             self.line("            if let Some(w) = &self.window { w.request_redraw(); }");
             self.line("        }");
         }
@@ -1503,6 +1503,14 @@ impl<'a> HostEmitter<'a> {
         self.line("                    let ws = w.inner_size();");
         self.line("                    self.__mouse_x = (position.x * self.__buf_w / (ws.width.max(1) as f64)).floor() as isize;");
         self.line("                    self.__mouse_y = (position.y * self.__buf_h / (ws.height.max(1) as f64)).floor() as isize;");
+        self.line("                }");
+        self.line("            }");
+        self.line("            WindowEvent::Touch(__boring_t) => {");
+        self.line("                if let Some(w) = &self.window {");
+        self.line("                    let ws = w.inner_size();");
+        for l in crate::transpiler::screen_input::touch_arm_body("self.__input",
+            "__boring_t.location.x * self.__buf_w / (ws.width.max(1) as f64)",
+            "__boring_t.location.y * self.__buf_h / (ws.height.max(1) as f64)") { self.line(&format!("                    {l}")); }
         self.line("                }");
         self.line("            }");
         self.line("            WindowEvent::MouseInput { state, button, .. } => {");
@@ -2232,6 +2240,23 @@ impl<'a> HostEmitter<'a> {
             {
                 let (e, kind) = crate::transpiler::screen_input::property(field, &format!("{pfx}__input")).unwrap();
                 if kind == crate::transpiler::screen_input::InKind::Str { crate::transpiler::screen_input::str_to_string(&e) } else { e }
+            }
+            // `screen.touch.x` / `.y`
+            ExprKind::Field(obj, field)
+                if matches!(&obj.kind, ExprKind::Field(sv, m) if m == "touch"
+                    && matches!(&sv.kind, ExprKind::Var(n) if n == "screen"))
+                    && crate::transpiler::screen_input::touch_property(field, "").is_some() =>
+            {
+                crate::transpiler::screen_input::touch_property(field, &format!("{pfx}__input")).unwrap()
+            }
+            // `screen.touchAt(i).x` / `.y`
+            ExprKind::Field(obj, field)
+                if matches!(&obj.kind, ExprKind::MethodCall(sv, m, a) if m == "touchAt" && a.len() == 1
+                    && matches!(&sv.kind, ExprKind::Var(n) if n == "screen"))
+                    && crate::transpiler::screen_input::touch_at_property(field, "", "").is_some() =>
+            {
+                let ExprKind::MethodCall(_, _, a) = &obj.kind else { unreachable!() };
+                crate::transpiler::screen_input::touch_at_property(field, &self.host_expr(&a[0].value), &format!("{pfx}__input")).unwrap()
             }
             // `screen.mouse.scroll_x` / `.scroll_y`
             ExprKind::Field(obj, field)

@@ -34,6 +34,14 @@ struct __BoringInput {
     btn_released: u8,
     scroll_x: f32,       // pixels; a wheel notch is 40
     scroll_y: f32,       // positive = wheel rolled away from the user (content moves down)
+    // Touch (buffer coordinates, already scaled by the host). `touches` is in placement order.
+    touches: Vec<(u64, isize, isize)>,
+    touch_primary: Option<u64>, // the first finger placed, while it stays down
+    touch_x: isize,             // primary finger's position (last known once it lifted)
+    touch_y: isize,
+    touch_started: bool,        // per-frame: the primary finger went down / up / was cancelled
+    touch_ended: bool,
+    touch_cancelled: bool,
 }
 #[allow(dead_code)]
 impl __BoringInput {
@@ -71,6 +79,33 @@ impl __BoringInput {
     fn mouse_pressed(&self, name: &str) -> bool { self.btn_pressed & Self::button_bit(name) != 0 }
     fn mouse_released(&self, name: &str) -> bool { self.btn_released & Self::button_bit(name) != 0 }
     fn scroll(&mut self, dx: f32, dy: f32) { self.scroll_x += dx; self.scroll_y += dy; }
+    // One `WindowEvent::Touch`: `phase` 0 started, 1 moved, 2 ended, 3 cancelled; `x`/`y` in buffer pixels.
+    fn touch_event(&mut self, phase: u8, id: u64, x: isize, y: isize) {
+        match phase {
+            0 | 1 => {
+                if let Some(t) = self.touches.iter_mut().find(|t| t.0 == id) { t.1 = x; t.2 = y; }
+                else if phase == 0 { self.touches.push((id, x, y)); }
+                else { return; }
+                if phase == 0 && self.touch_primary.is_none() {
+                    self.touch_primary = Some(id);
+                    self.touch_started = true;
+                }
+                if self.touch_primary == Some(id) { self.touch_x = x; self.touch_y = y; }
+            }
+            _ => {
+                let before = self.touches.len();
+                self.touches.retain(|t| t.0 != id);
+                if self.touches.len() == before { return; }
+                if self.touch_primary == Some(id) {
+                    self.touch_x = x; self.touch_y = y;
+                    self.touch_primary = None;
+                    if phase == 2 { self.touch_ended = true } else { self.touch_cancelled = true }
+                }
+            }
+        }
+    }
+    fn touch_at_x(&self, i: isize) -> isize { self.touches.get(i.max(0) as usize).map_or(0, |t| t.1) }
+    fn touch_at_y(&self, i: isize) -> isize { self.touches.get(i.max(0) as usize).map_or(0, |t| t.2) }
     fn end_frame(&mut self) {
         self.focus_gained = false;
         self.focus_lost = false;
@@ -83,6 +118,9 @@ impl __BoringInput {
         self.btn_released = 0;
         self.scroll_x = 0.0;
         self.scroll_y = 0.0;
+        self.touch_started = false;
+        self.touch_ended = false;
+        self.touch_cancelled = false;
     }
     // The state as the frame body sees it (live part copied, per-frame part moved out).
     fn snapshot(&mut self) -> __BoringInput { let out = self.clone(); self.end_frame(); out }
@@ -222,6 +260,11 @@ pub(super) fn property(name: &str, inp: &str) -> Option<(String, InKind)> {
         "focused" => (format!("{inp}.focused"), Bool),
         "focus_gained" => (format!("{inp}.focus_gained"), Bool),
         "focus_lost" => (format!("{inp}.focus_lost"), Bool),
+        "touching" => (format!("(!{inp}.touches.is_empty())"), Bool),
+        "touchCount" => (format!("({inp}.touches.len() as isize)"), Int),
+        "touchStarted" => (format!("{inp}.touch_started"), Bool),
+        "touchEnded" => (format!("{inp}.touch_ended"), Bool),
+        "touchCancelled" => (format!("{inp}.touch_cancelled"), Bool),
         // Read lazily: only when the expression is evaluated (see `CLIPBOARD_RUNTIME`).
         "clipboard" => ("__boring_clipboard_get()".to_string(), Str),
         _ => return None,
@@ -235,6 +278,25 @@ pub(super) fn mouse_property(name: &str, inp: &str) -> Option<(String, InKind)> 
         "scroll_y" => Some((format!("{inp}.scroll_y"), InKind::Float)),
         _ => None,
     }
+}
+
+/// `screen.touch.<x|y>`: the primary finger's position.
+pub(super) fn touch_property(name: &str, inp: &str) -> Option<String> {
+    match name { "x" => Some(format!("{inp}.touch_x")), "y" => Some(format!("{inp}.touch_y")), _ => None }
+}
+
+/// `screen.touchAt(i).<x|y>`; `arg` is a Rust integer expression.
+pub(super) fn touch_at_property(name: &str, arg: &str, inp: &str) -> Option<String> {
+    match name { "x" => Some(format!("{inp}.touch_at_x({arg})")), "y" => Some(format!("{inp}.touch_at_y({arg})")), _ => None }
+}
+
+/// The body of a `WindowEvent::Touch(__boring_t)` arm (winit 0.28 and 0.30 share the event shape).
+/// `x`/`y` are Rust `f64` expressions turning `__boring_t.location` into buffer pixels.
+pub(super) fn touch_arm_body(inp: &str, x: &str, y: &str) -> Vec<String> {
+    vec![
+        "let __boring_ph = match __boring_t.phase { winit::event::TouchPhase::Started => 0u8, winit::event::TouchPhase::Moved => 1, winit::event::TouchPhase::Ended => 2, winit::event::TouchPhase::Cancelled => 3 };".into(),
+        format!("{inp}.touch_event(__boring_ph, __boring_t.id, ({x}).floor() as isize, ({y}).floor() as isize);"),
+    ]
 }
 
 /// `screen.<method>(arg)`; `arg` is a Rust expression that derefs to `str`.
@@ -281,7 +343,7 @@ pub(super) fn winit028_arms(inp: &str) -> Vec<(String, Vec<String>)> {
 
 /// A `matches!` pattern list of the 0.28 events that invalidate the window in on-demand mode.
 pub(super) const WINIT028_INVALIDATING: &str =
-    "winit::event::WindowEvent::ReceivedCharacter(_) | winit::event::WindowEvent::Ime(_) | winit::event::WindowEvent::ModifiersChanged(_) | winit::event::WindowEvent::MouseWheel { .. } | winit::event::WindowEvent::Focused(_)";
+    "winit::event::WindowEvent::ReceivedCharacter(_) | winit::event::WindowEvent::Ime(_) | winit::event::WindowEvent::ModifiersChanged(_) | winit::event::WindowEvent::MouseWheel { .. } | winit::event::WindowEvent::Focused(_) | winit::event::WindowEvent::Touch(_)";
 
 /// The `Event::WindowEvent` arm for a winit 0.28 `MouseInput` already exists on every host;
 /// the line it must add to feed the shared state (`button` is the winit button value).

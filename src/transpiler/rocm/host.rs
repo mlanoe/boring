@@ -1138,6 +1138,15 @@ impl HostEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        // Touch: window pixels -> pixel-buffer coordinates, same scaling as the cursor.
+        self.line("winit::event::Event::WindowEvent { event: winit::event::WindowEvent::Touch(__boring_t), .. } => {");
+        self.indent += 1;
+        self.line("let __boring_ws = boring_window.inner_size();");
+        for l in crate::transpiler::screen_input::touch_arm_body("boring_input",
+            "__boring_t.location.x * boring_buf_w / (__boring_ws.width.max(1) as f64)",
+            "__boring_t.location.y * boring_buf_h / (__boring_ws.height.max(1) as f64)") { self.line(&l); }
+        self.indent -= 1;
+        self.line("}");
         for (__pat, __body) in crate::transpiler::screen_input::winit028_arms("boring_input") {
             self.line(&format!("winit::event::Event::WindowEvent {{ event: {__pat}, .. }} => {{"));
             self.indent += 1;
@@ -3071,6 +3080,21 @@ impl HostEmitter {
                 // state var from `emit_screen_setup`/`emit_render_loop`.
                 // Mirrors `cuda::host`'s identical Field-case mapping.
                 // Input members of the shared runtime (`screen.text`, `.shift`, `.focused`, `screen.mouse.scroll_y`, ...).
+                // `screen.touch.x` / `.y` and `screen.touchAt(i).x` / `.y`.
+                match &obj.kind {
+                    ExprKind::Field(inner, t) if t == "touch"
+                        && matches!(&inner.kind, ExprKind::Var(sv) if self.screen_var.as_deref() == Some(sv.as_str())) =>
+                    {
+                        if let Some(e) = crate::transpiler::screen_input::touch_property(field, "boring_input") { return e; }
+                    }
+                    ExprKind::MethodCall(inner, m, margs) if m == "touchAt" && margs.len() == 1
+                        && matches!(&inner.kind, ExprKind::Var(sv) if self.screen_var.as_deref() == Some(sv.as_str())) =>
+                    {
+                        let i = self.expr(&margs[0].value);
+                        if let Some(e) = crate::transpiler::screen_input::touch_at_property(field, &i, "boring_input") { return e; }
+                    }
+                    _ => {}
+                }
                 if let ExprKind::Field(inner, mouse) = &obj.kind {
                     if let ExprKind::Var(sv) = &inner.kind {
                         if self.screen_var.as_deref() == Some(sv.as_str()) && mouse == "mouse" {

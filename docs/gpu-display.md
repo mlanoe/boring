@@ -165,6 +165,7 @@ The input members (`screen.key…`, `screen.mouse…`, `screen.text`, …) are l
 | `screen.key(k)` | `bool` — true while key `k` is held |
 | `screen.key_pressed(k)` / `key_repeat(k)` / `key_released(k)` | key edges — see [Input](#input-simd-metal-cuda-rocm-wgpu) |
 | `screen.mouse_pressed(b)` / `mouse_released(b)` | mouse-button edges |
+| `screen.touchAt(i)` | `.x` / `.y` of the i-th finger down — see [Touch](#touch) |
 
 ### Key strings
 
@@ -377,6 +378,11 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
 | `screen.marked_start`, `.marked_end` | `int` | the caret/selection inside `marked` as byte offsets, `-1` when there is no composition or the IME gave none |
 | `screen.focused` | `bool` | the window has keyboard focus (true until the first focus change) |
 | `screen.focus_gained`, `.focus_lost` | `bool` | focus changed this frame |
+| `screen.touching` | `bool` | at least one finger is down |
+| `screen.touchCount` | `int` | number of fingers down |
+| `screen.touch.x`, `.y` | `int` | the **primary** finger's position in pixel-buffer coordinates (scaled like `screen.mouse`): the first finger placed, for as long as it stays down; its last known position afterwards (`0, 0` before any touch) |
+| `screen.touchStarted`, `.touchEnded`, `.touchCancelled` | `bool` | the primary finger went down / was lifted / was cancelled by the system this frame (a touch shorter than a frame is both started and ended) |
+| `screen.touchAt(i).x`, `.y` | `int` | position of the `i`-th finger down, `0 <= i < touchCount` (`0, 0` out of range). Order is placement order but not promised stable beyond the primary |
 
 - **Key names** are the canonical names under [Key strings](#key-strings): `screen.key(name)` works with any string
   expression, e.g. a key table read from data.
@@ -397,6 +403,16 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
   `string` type when passed to a Boring function (like `screen.text`). `setClipboard`'s argument may be a literal,
   a `string` or `screen.text` everywhere. Use
   `screen.meta`/`screen.ctrl` with `key_events` to bind Cmd/Ctrl+C/X/V yourself.
+- <a id="touch"></a>**Touch.** Fed from winit's `WindowEvent::Touch` (`Started`/`Moved`/`Ended`/`Cancelled`) on all five
+  hosts, with the cursor's buffer scaling (HiDPI and resized windows included); in `redraw = "demand"` mode a touch
+  invalidates the window like any input event. Touches do **not** emulate the mouse: a program that wants both reads
+  both. The primary finger is the first one placed while no other primary exists; when it lifts, the next finger placed
+  becomes primary (fingers already down are not promoted), so `touch.x/.y` keep the lifted finger's last position until
+  then. A secondary finger lifting never sets `touch_ended`. Limits per backend: simd, Metal, CUDA, ROCm use winit 0.28,
+  wgpu winit 0.30 — same members and semantics, but touch input only exists where winit delivers it (iOS/Android,
+  Windows, Wayland/X11 touchscreens; **macOS desktop windows get no touch events**, trackpads report the wheel and
+  mouse instead). Force/pressure and gestures (pinch, rotate) are not exposed; build them from `touchAt`. Verified
+  by generated-code checks and a synthetic-event test of the state machine, not on a physical touch screen.
 - Only the field forms of `screen.mouse` are supported (not a bare `screen.mouse` value on the GPU hosts).
 - State is consistent within one loop iteration on every host.
 - Caveat: kernel `int` fields are `i32` on simd/wgpu (the host narrows what you assign) but `isize` on Metal.

@@ -90,6 +90,8 @@ fn __boring_send(cmd: __BoringCmd) {
 // `screen.mouse`: cursor position in pixel-buffer coordinates (the window's pixel count equals
 // the buffer's) and button state, snapshotted once per `Screen::present`.
 #[allow(dead_code)] #[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Touch { x: isize, y: isize }
+#[allow(dead_code)] #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Mouse { x: isize, y: isize, left: bool, right: bool, middle: bool, scroll_x: f32, scroll_y: f32 }
 
 #[allow(dead_code)]
@@ -113,6 +115,13 @@ struct Screen {
     focused: bool,
     focus_gained: bool,
     focus_lost: bool,
+    // `screen.touching` & co. and `screen.touch.x/.y` (the primary finger).
+    touching: bool,
+    touchCount: isize,
+    touchStarted: bool,
+    touchEnded: bool,
+    touchCancelled: bool,
+    touch: Touch,
     dimension: Dimension,
     width: isize,
     height: isize,
@@ -154,6 +163,12 @@ impl Screen {
             focused: true,
             focus_gained: false,
             focus_lost: false,
+            touching: false,
+            touchCount: 0,
+            touchStarted: false,
+            touchEnded: false,
+            touchCancelled: false,
+            touch: Touch::default(),
             dimension,
             width: dimension.width,
             height: dimension.height,
@@ -190,6 +205,9 @@ impl Screen {
     // True on the frame mouse button "left" / "right" / "middle" went down (up).
     fn mouse_pressed<T: AsRef<str>>(&self, button: T) -> bool { self.input.mouse_pressed(button.as_ref()) }
     fn mouse_released<T: AsRef<str>>(&self, button: T) -> bool { self.input.mouse_released(button.as_ref()) }
+    // `screen.touchAt(i).x` / `.y`: the i-th finger down (0 = the first placed while it stays down;
+    // no stable order beyond that). (0, 0) when `i` is out of range.
+    fn touch_at(&self, i: isize) -> Touch { Touch { x: self.input.touch_at_x(i), y: self.input.touch_at_y(i) } }
     fn present(&mut self, pixels: &[u32]) {
         use std::sync::atomic::Ordering::SeqCst;
         let display = __boring_display();
@@ -240,6 +258,12 @@ impl Screen {
         self.focused = self.input.focused;
         self.focus_gained = self.input.focus_gained;
         self.focus_lost = self.input.focus_lost;
+        self.touching = !self.input.touches.is_empty();
+        self.touchCount = self.input.touches.len() as isize;
+        self.touchStarted = self.input.touch_started;
+        self.touchEnded = self.input.touch_ended;
+        self.touchCancelled = self.input.touch_cancelled;
+        self.touch = Touch { x: self.input.touch_x, y: self.input.touch_y };
         let buttons = display.mouse_buttons.load(SeqCst);
         self.mouse = Mouse {
             x: display.mouse_x.load(SeqCst) as isize,
@@ -369,6 +393,18 @@ fn __boring_display_run<F: FnOnce() + Send + 'static>(program: F) {
                     ElementState::Pressed => { display.mouse_buttons.fetch_or(bit, SeqCst); }
                     ElementState::Released => { display.mouse_buttons.fetch_and(!bit, SeqCst); }
                 }
+                display.invalidate();
+            }
+            Event::WindowEvent { event: WindowEvent::Touch(t), .. } => {
+                // The software window's pixel count equals the buffer's: no scaling (same as the cursor).
+                let (x, y) = (t.location.x, t.location.y);
+                let phase = match t.phase {
+                    winit::event::TouchPhase::Started => 0u8,
+                    winit::event::TouchPhase::Moved => 1,
+                    winit::event::TouchPhase::Ended => 2,
+                    winit::event::TouchPhase::Cancelled => 3,
+                };
+                display.input.lock().unwrap().touch_event(phase, t.id, x.floor() as isize, y.floor() as isize);
                 display.invalidate();
             }
             Event::WindowEvent { event: WindowEvent::ReceivedCharacter(c), .. } => {
