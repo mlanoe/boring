@@ -4360,6 +4360,16 @@ impl Transpiler {
                 .or_else(|| self.resolve_expr_external_type_name(obj))
                 .and_then(|qualifier| self.external_fn_arg_borrows(&qualifier, &rust_method))
         };
+        } else if matches!(method, "map" | "filter") && args.len() == 1
+            && !matches!(&args[0].value.kind, ExprKind::Closure(..))
+            && self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
+                // A typed external value (`let Charmap charmap = ...`) given a plain variable:
+                // not an iterator adaptor. Collection/iterator/Option-like names stay `map`.
+                !["Iter", "Option", "Result", "Range", "Map", "Vec", "Set", "Stream", "Chars", "Bytes"]
+                    .iter().any(|k| n.contains(k))
+            })
+        {
+            (method.to_string(), None)
         // HashSet::contains needs a plain reference; HashMap::contains_key needs &String.
         let args_s: Vec<String> = if let Some(borrows) = &external_arg_borrows {
             let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
@@ -4367,6 +4377,14 @@ impl Transpiler {
         } else if !is_user_struct_receiver && self.is_external_mut_buffer_call(&rust_method, args) {
             // `std::io::Read`-style buffer fill (`sock.read(buf)`): see
             // `EXTERNAL_MUT_BUFFER_METHODS`.
+                && !self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
+                    // A receiver typed as an external (non-user) type is a Rust-side call even when
+                    // a user trait happens to declare the same Boring method name.
+                    !self.struct_fields.contains_key(&n) && !self.all_enum_types.contains(&n)
+                        && !self.trait_method_names.contains_key(&n)
+                        && !self.struct_method_overload_decls.keys().any(|k| k.starts_with(&format!("{}::", n)))
+                        && n.chars().next().is_some_and(|c| c.is_uppercase())
+                })
             args.iter().map(|a| self.emit_external_mut_buffer_arg(&rust_method, &a.value)).collect()
         } else if rust_method == "contains_key" && receiver_is_dict_var {
             // Use emit_dict_key_borrow so the key is &str (Arc<str> via Deref).

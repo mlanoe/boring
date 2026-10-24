@@ -3136,7 +3136,7 @@ fn emit_cuda(path: &str, version: &str) {
 
     // Cargo.toml
     let cargo_toml = project_dir.join("Cargo.toml");
-    if let Err(e) = std::fs::write(&cargo_toml, &cuda_out.cargo_toml) {
+    if let Err(e) = std::fs::write(&cargo_toml, kernel_target_cargo_toml(&cuda_out.cargo_toml, false, &path)) {
         eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
         process::exit(1);
     }
@@ -3207,7 +3207,7 @@ fn emit_rocm(path: &str, version: &str) {
 
     // Cargo.toml
     let cargo_toml = project_dir.join("Cargo.toml");
-    if let Err(e) = std::fs::write(&cargo_toml, &rocm_out.cargo_toml) {
+    if let Err(e) = std::fs::write(&cargo_toml, kernel_target_cargo_toml(&rocm_out.cargo_toml, false, &path)) {
         eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
         process::exit(1);
     }
@@ -3271,7 +3271,7 @@ fn emit_metal(path: &str, version: &str) {
 
     // Cargo.toml (no build.rs â€” MSL compiled at runtime via newLibraryWithSource)
     let cargo_toml = project_dir.join("Cargo.toml");
-    if let Err(e) = std::fs::write(&cargo_toml, &metal_out.cargo_toml) {
+    if let Err(e) = std::fs::write(&cargo_toml, kernel_target_cargo_toml(&metal_out.cargo_toml, false, &path)) {
         eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
         process::exit(1);
     }

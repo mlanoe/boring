@@ -49,3 +49,25 @@ fn file_arg_build_applies_toml_dependencies_and_external_types() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn file_arg_metal_target_applies_toml_dependencies() {
+    let dir = std::env::temp_dir().join(format!("boring_file_mode_metal_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.br"), "def main():\n    print \"hi\"\n").unwrap();
+    std::fs::write(
+        dir.join("boring.toml"),
+        "[project]\nname = \"fm\"\nversion = \"0.1.0\"\nmain = \"src/main.br\"\n\n[dependencies]\nswash = \"0.2.10\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .current_dir(&dir)
+        .args(["build", "--target", "metal", "src/main.br"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cargo = std::fs::read_to_string(dir.join("src/main_metal/Cargo.toml")).unwrap();
+    assert!(cargo.contains("swash"), "[dependencies] ignored on --target metal:\n{cargo}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
