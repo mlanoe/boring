@@ -33,6 +33,7 @@ impl Transpiler {
         self.task_method_call_vars.clear();
         self.unresolved_call_args.clear();
         self.cpu_decision_notes.clear();
+        self.cpu_decision_reasons.clear();
 
         // Re-seed `'observed`-qualified parameters right after the clear above (not in
         // `seed_param_locals`, which runs *before* this function's first call for the
@@ -466,6 +467,11 @@ impl Transpiler {
                     ));
                 }
                 1 => {
+                    let mut why = format!("the usage constraints leave only {}", cpu_qual_text(&remaining[0]));
+                    if matches!(remaining[0], OwnerQual::ActorTask | OwnerQual::GuardTask) {
+                        why.push_str(" (a task-declared method is called on it, or it is held across an await: the tokio lock)");
+                    }
+                    self.record_cpu_reason(var_name, why, alias_of.get(var_name.as_str()));
                     self.inferred_qualifiers.insert(var_name.clone(), remaining[0].clone());
                 }
                 _ => {
@@ -477,6 +483,11 @@ impl Transpiler {
                     {
                         let is_mut = self.fn_current_params_mut.contains(var_name.as_str());
                         let qual = if is_mut { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
+                        self.record_cpu_reason(var_name, if is_mut {
+                            "no storage signal (never stored, returned or captured) and the parameter is `mut`: lent as `&mut`".to_string()
+                        } else {
+                            "no storage signal (never stored, returned or captured): borrowed read-only".to_string()
+                        }, alias_of.get(var_name.as_str()));
                         self.inferred_qualifiers.insert(var_name.clone(), qual);
                         continue;
                     }
@@ -484,10 +495,35 @@ impl Transpiler {
                     let type_size = var_struct_types.get(var_name.as_str())
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))
                         .copied();
+                    let size_boxing = self.config.mode == crate::transpiler::TranspileMode::Strict;
                     if let Some(q) = resolve_fallback(
-                        &remaining, false, type_size, self.config.inline_auto_bytes,
-                        self.config.mode == crate::transpiler::TranspileMode::Strict,
+                        &remaining, false, type_size, self.config.inline_auto_bytes, size_boxing,
                     ) {
+                        let left = remaining.iter().map(cpu_qual_text).collect::<Vec<_>>().join(", ");
+                        let inline_possible = remaining.iter().any(|c| quals_equal(c, &OwnerQual::Inline));
+                        let chain = "the first of owned > shared > actor > atomic > guard that remains";
+                        let why = if !inline_possible {
+                            format!("constraints left several candidates ({left}), `'inline` ruled out by a storage signal: {chain}")
+                        } else if matches!(q, OwnerQual::Inline) {
+                            match type_size {
+                                Some(size) if size_boxing => format!(
+                                    "no constraint narrowed it ({left} remain): fallback keeps it inline, {size} bytes <= --inline-auto-bytes {}",
+                                    self.config.inline_auto_bytes
+                                ),
+                                Some(_) => format!(
+                                    "no constraint narrowed it ({left} remain): fallback keeps it inline (size boxing only applies in strict mode)"
+                                ),
+                                None => format!(
+                                    "no constraint narrowed it ({left} remain): fallback keeps it inline (its size is not known)"
+                                ),
+                            }
+                        } else {
+                            format!(
+                                "no constraint narrowed it ({left} remain), and {} bytes > --inline-auto-bytes {}: {chain}",
+                                type_size.unwrap_or(0), self.config.inline_auto_bytes
+                            )
+                        };
+                        self.record_cpu_reason(var_name, why, alias_of.get(var_name.as_str()));
                         self.inferred_qualifiers.insert(var_name.clone(), q);
                     }
                 }
@@ -501,6 +537,8 @@ impl Transpiler {
         // and a struct method (whose call sites can't be told anything else).
         for name in self.fn_current_params_lent.clone() {
             if self.fn_current_params.contains_key(name.as_str()) {
+                self.cpu_decision_reasons.insert(name.clone(),
+                    "a `mut` array/dict/set parameter is always lent as `&mut`, whatever the body does".to_string());
                 self.inferred_qualifiers.insert(name, OwnerQual::BorrowMut);
             }
         }
@@ -2554,6 +2592,8 @@ pub struct CpuDecision {
     pub col: usize,
     pub qual: String,
     pub kind: &'static str,
+    /// Which constraint or default decided it.
+    pub why: Option<String>,
     /// Why this choice is a guess rather than a proof, when it is one.
     pub note: Option<String>,
 }
@@ -2584,6 +2624,15 @@ fn cpu_qual_text(q: &OwnerQual) -> String {
 }
 
 impl Transpiler {
+    /// Remembers why `var` got its qualifier; an alias (`let y = x`) says whose group it is in.
+    fn record_cpu_reason(&mut self, var: &str, why: String, alias_of: Option<&String>) {
+        let why = match alias_of {
+            Some(root) if root != var => format!("{why}; alias of `{root}`, they share one qualifier"),
+            _ => why,
+        };
+        self.cpu_decision_reasons.insert(var.to_string(), why);
+    }
+
     /// Records, for `--show-qualifiers`, every qualifier `infer_qualifiers` just resolved for
     /// a parameter or `let` of `f`. Called once per function (the pre-inference pass in
     /// `emit_fn`), after `self.inferred_qualifiers` is populated.
@@ -2607,7 +2656,7 @@ impl Transpiler {
             } else {
                 continue;
             };
-            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), kind, note: self.cpu_decision_notes.get(name).cloned() });
+            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), kind, why: self.cpu_decision_reasons.get(name).cloned(), note: self.cpu_decision_notes.get(name).cloned() });
         }
         out.sort_by_key(|d| (d.line, d.col));
         CPU_DECISIONS.with(|d| d.borrow_mut().extend(out));

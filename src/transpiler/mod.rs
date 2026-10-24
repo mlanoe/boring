@@ -1331,6 +1331,8 @@ struct Transpiler {
     pub(crate) unresolved_call_args: std::collections::HashMap<String, String>,
     /// Variable → note for `--show-qualifiers`, filled by the last `infer_qualifiers` pass.
     pub(crate) cpu_decision_notes: std::collections::HashMap<String, String>,
+    /// Variable → why `infer_qualifiers` chose its qualifier, for `--show-qualifiers`.
+    pub(crate) cpu_decision_reasons: std::collections::HashMap<String, String>,
     /// Struct field names (bare, unqualified within `infer_struct_field_qualifiers`'s scope)
     /// on which a `task`-declared method was called during struct field qualifier inference.
     /// Same purpose as `task_method_call_vars` but for `self.field` captures. Cleared per struct.
@@ -1770,6 +1772,7 @@ impl Transpiler {
             task_method_call_vars: std::collections::HashSet::new(),
             unresolved_call_args: std::collections::HashMap::new(),
             cpu_decision_notes: std::collections::HashMap::new(),
+            cpu_decision_reasons: std::collections::HashMap::new(),
             task_method_call_fields: std::collections::HashSet::new(),
             lazy_vars: std::collections::HashSet::new(),
             lazy_var_types: std::collections::HashMap::new(),

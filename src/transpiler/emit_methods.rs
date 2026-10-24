@@ -6600,6 +6600,7 @@ impl Transpiler {
             task_method_call_vars: std::collections::HashSet::new(),
             unresolved_call_args: std::collections::HashMap::new(),
             cpu_decision_notes: std::collections::HashMap::new(),
+            cpu_decision_reasons: std::collections::HashMap::new(),
             task_vars: self.task_vars.clone(),
             throws_fn_params: self.throws_fn_params.clone(),
             arc_vars: self.arc_vars.clone(),

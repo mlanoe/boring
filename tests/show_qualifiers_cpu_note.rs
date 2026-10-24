@@ -72,3 +72,52 @@ fn a_chain_declared_in_reverse_order_propagates_the_task_lock_to_its_head() {
         assert!(report.contains(&format!("{name}  'actor'task")), "{name}: {report}");
     }
 }
+
+// --- the reason printed after each decision -------------------------------------------------
+
+const REPORT_SRC: &str = "struct Counter:\n    var int value = 0\n    def inc():\n        value += 1\n\n\
+def bump(mut Counter c):\n    c.inc()\n\ndef show(Counter c):\n    print \"{c.value}\"\n\n\
+def grow(mut [int] xs):\n    xs.push(1)\n\ndef main():\n    var mut c = Counter(0)\n    bump(c)\n    show(c)\n    let d = Counter(1)\n    let e = d\n    show(e)\n    mut [int] xs = []\n    grow(xs)\n";
+
+fn line_of<'a>(report: &'a str, name: &str) -> &'a str {
+    report.lines().find(|l| l.contains(&format!("{name}  "))).unwrap_or_else(|| panic!("no line for {name}:\n{report}"))
+}
+
+#[test]
+fn a_read_only_parameter_says_it_is_borrowed_because_nothing_stores_it() {
+    let report = show_qualifiers(REPORT_SRC, "why_borrow");
+    let l = line_of(&report, "show::c");
+    assert!(l.contains("& (borrow)") && l.contains("no storage signal") && l.contains("borrowed read-only"), "{l}");
+}
+
+#[test]
+fn a_mut_parameter_says_it_is_lent_mutably() {
+    let report = show_qualifiers(REPORT_SRC, "why_mutborrow");
+    assert!(line_of(&report, "bump::c").contains("`mut`: lent as `&mut`"), "{report}");
+    assert!(line_of(&report, "grow::xs").contains("always lent as `&mut`"), "{report}");
+}
+
+#[test]
+fn an_inline_fallback_names_the_size_and_the_threshold() {
+    let report = show_qualifiers(REPORT_SRC, "why_inline");
+    let l = line_of(&report, "main::d");
+    assert!(l.contains("'inline") && l.contains("8 bytes <= --inline-auto-bytes 256"), "{l}");
+}
+
+#[test]
+fn an_alias_says_whose_qualifier_it_shares() {
+    let report = show_qualifiers(REPORT_SRC, "why_alias");
+    assert!(line_of(&report, "main::e").contains("alias of `d`"), "{report}");
+}
+
+#[test]
+fn a_ruled_out_inline_and_a_task_lock_are_explained() {
+    let src = format!(
+        "{COUNTER}def void run(mut Counter c):\n    task c.inc()\n\n\
+         task def void a(mut Counter x):\n    b(x)\n\n\
+         task def void b(mut Counter y):\n    with y:\n        y.inc()\n        wait(Duration.fromMillis(10))\n"
+    );
+    let report = show_qualifiers(&src, "why_task");
+    assert!(line_of(&report, "run::c").contains("`'inline` ruled out by a storage signal"), "{report}");
+    assert!(line_of(&report, "a::x").contains("the tokio lock"), "{report}");
+}

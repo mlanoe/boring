@@ -315,7 +315,11 @@ inferred GPU qualifiers (mm.br):
 ```
 
 The same flag also prints an `inferred CPU qualifiers` block: the ownership qualifier (`'inline`,
-`'owned`, `'actor`, `& (borrow)`...) chosen for each unannotated parameter and `let` of a function.
+`'owned`, `'actor`, `& (borrow)`...) chosen for each unannotated parameter and `let` of a function,
+followed by the reason — which constraint left a single candidate, which default applied (a read-only
+borrow with no storage signal, the `--inline-auto-bytes` size fallback with the type's size, the
+ordered chain once `'inline` is ruled out), and whose qualifier an alias shares. A guess the pass
+could not prove gets a `note:` line (see `docs/qualifiers.md`, "The residual gap").
 
 A group spanning several functions says so (`shares its qualifier with mm::x`), and a qualifier
 that comes from an explicit annotation names it (`demanded by parameter 1 of `mm` is explicitly

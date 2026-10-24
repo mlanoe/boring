@@ -217,7 +217,10 @@ fn report_inferred_cpu_qualifiers(path: &Path) {
     }
     eprintln!("inferred CPU qualifiers ({}):", path.display());
     for d in &decisions {
-        eprintln!("  {}:{}:{}  {}::{}  {}  - {}", path.display(), d.line, d.col, d.scope, d.name, d.qual, d.kind);
+        match &d.why {
+            Some(why) => eprintln!("  {}:{}:{}  {}::{}  {}  - {}: {}", path.display(), d.line, d.col, d.scope, d.name, d.qual, d.kind, why),
+            None => eprintln!("  {}:{}:{}  {}::{}  {}  - {}", path.display(), d.line, d.col, d.scope, d.name, d.qual, d.kind),
+        }
         if let Some(note) = &d.note { eprintln!("      note: {note}"); }
     }
 }
