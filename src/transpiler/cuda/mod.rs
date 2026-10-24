@@ -198,7 +198,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
     // existing driver (mirrors metal/wgpu's own `has_screen` carve-out) --
     // treated the same way as bare top-level kernel dispatch for the general
     // pass's `gpu_top_level_handled_by_host` flag.
-    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
+    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set, &kernel_touching);
 
     let renamed_program = crate::transpiler::rename_top_level_main(program, "boring_main");
     let general_config = crate::transpiler::TranspileConfig {

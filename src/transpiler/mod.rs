@@ -5990,6 +5990,30 @@ fn first_kernel_decl(items: &[Item]) -> Option<&KernelDecl> {
     None
 }
 
+/// A parameter typed as a `'kernel'global`/`'kernel'unified` array (emitted by the host
+/// emitter as a `BoringKernelArg<T>` parameter).
+fn is_gpu_array_param(p: &Param) -> bool {
+    p.ty.as_ref().is_some_and(|ty| {
+        matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+            if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+    })
+}
+
+fn fn_returns_resident(g: &FnDecl) -> bool {
+    g.return_ty.as_ref().is_some_and(|ty| match ty {
+        Type::Tuple(elems) => elems.iter().any(|t| t.gpu_resident_qual().is_some()),
+        other => other.gpu_resident_qual().is_some(),
+    })
+}
+
+/// Names of the kernel-touching free functions whose arguments the host emitter must wrap.
+fn host_wrapped_fn_names(program: &Program, kernel_touching: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    program.items.iter().filter_map(|it| match it {
+        Item::Fn(g) if kernel_touching.contains(&g.name) && g.params.iter().any(is_gpu_array_param) && !fn_returns_resident(g) => Some(g.name.clone()),
+        _ => None,
+    }).collect()
+}
+
 /// Names of free functions whose body directly constructs a `kernel` instance
 /// (`KernelName(...)`) or contains a `kernel: ...` dispatch block. These are the
 /// only functions cuda/metal can't hand off to the general pipeline (see this
@@ -6018,17 +6042,9 @@ pub(crate) fn kernel_touching_fn_names(program: &Program, kernel_names: &std::co
     // `Vec<T>` (rustc E0308), so every free function that calls such a function
     // is kernel-touching too (transitively), keeping the whole call chain on the
     // host emitter, which wraps/forwards the argument correctly.
-    let is_gpu_array_param = |p: &Param| p.ty.as_ref().is_some_and(|ty| {
-        matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
-            if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
-    });
     // (A callee that returns a resident value is already handled by the general
     // pipeline: `compute_gpu_arg_params` flags its qualified parameters, so its
     // callers wrap/forward the argument themselves.)
-    let returns_resident = |g: &FnDecl| g.return_ty.as_ref().is_some_and(|ty| match ty {
-        Type::Tuple(elems) => elems.iter().any(|t| t.gpu_resident_qual().is_some()),
-        other => other.gpu_resident_qual().is_some(),
-    });
     loop {
         let mut changed = false;
         for item in &program.items {
@@ -6040,7 +6056,7 @@ pub(crate) fn kernel_touching_fn_names(program: &Program, kernel_names: &std::co
                     if let crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Call(callee, _), .. }) = node {
                         if let ExprKind::Var(name) = &callee.kind {
                             if out.contains(name) && program.items.iter().any(|it| matches!(it,
-                                Item::Fn(g) if g.name == *name && g.params.iter().any(is_gpu_array_param) && !returns_resident(g)))
+                                Item::Fn(g) if g.name == *name && g.params.iter().any(is_gpu_array_param) && !fn_returns_resident(g)))
                             {
                                 found = true;
                             }
@@ -6093,7 +6109,26 @@ pub(crate) fn kernel_touching_struct_names(program: &Program, kernel_names: &std
 /// `TranspileConfig::gpu_top_level_handled_by_host`) — the general pipeline's
 /// kernel-aware codegen for that fold-in is wgpu-shaped and can't run with
 /// `gpu_kernels` empty (see `cuda::mod`'s doc comment for the full story).
-pub(crate) fn top_level_touches_kernel(program: &Program, kernel_names: &std::collections::HashSet<String>) -> bool {
+///
+/// A top-level call to a kernel-touching free function (`kernel_touching`, from
+/// `kernel_touching_fn_names`) counts too, bare or as a `let` initializer or nested
+/// in an `if`/`for` block, when it takes a `'kernel'global`/`'kernel'unified` array
+/// parameter: that function is emitted by the host emitter with `BoringKernelArg<T>`
+/// parameters, and only the host emitter wraps the arguments. (A call with no such
+/// argument stays on the general pass, which promotes top-level arrays to statics.)
+pub(crate) fn top_level_touches_kernel(
+    program: &Program,
+    kernel_names: &std::collections::HashSet<String>,
+    kernel_touching: &std::collections::HashSet<String>,
+) -> bool {
+    let kernel_touching = &host_wrapped_fn_names(program, kernel_touching);
+    let calls_kernel_touching = |found: &mut bool, node: crate::ast::WalkNode| {
+        if let crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Call(callee, _), .. }) = node {
+            if matches!(&callee.kind, ExprKind::Var(n) if kernel_touching.contains(n)) {
+                *found = true;
+            }
+        }
+    };
     for item in &program.items {
         match item {
             Item::Let(s)
@@ -6101,7 +6136,21 @@ pub(crate) fn top_level_touches_kernel(program: &Program, kernel_names: &std::co
             {
                 return true;
             }
+            Item::Let(s) if !kernel_touching.is_empty() && s.value.as_ref().is_some_and(|v| {
+                let mut found = false;
+                crate::ast::walk_expr(v, &mut |n| calls_kernel_touching(&mut found, n));
+                found
+            }) => {
+                return true;
+            }
             Item::Stmt(s) if stmt_touches_kernel(s, kernel_names) || stmt_uses_gpu_device(s) => {
+                return true;
+            }
+            Item::Stmt(s) if !kernel_touching.is_empty() && {
+                let mut found = false;
+                crate::ast::walk_stmts(std::slice::from_ref(s), &mut |n| calls_kernel_touching(&mut found, n));
+                found
+            } => {
                 return true;
             }
             _ => {}

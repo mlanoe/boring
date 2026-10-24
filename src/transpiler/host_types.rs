@@ -24,6 +24,16 @@ pub(crate) struct HostTypeEnv {
     array_fields: HashSet<(String, String)>,
     array_fns: HashSet<String>,
     array_locals: HashSet<String>,
+    ctors: HashMap<String, StructCtor>,
+}
+
+/// How a call `Name(args)` to a user struct is constructed in host code: a literal
+/// `Name { field: value, .. }` (declared fields, in order), or `Name::new(args)` when the
+/// struct has an `init` with a body (computed fields can't be written in a literal).
+#[derive(Clone)]
+struct StructCtor {
+    fields: Vec<(String, Type, Option<Expr>)>,
+    via_new: bool,
 }
 
 impl HostTypeEnv {
@@ -39,6 +49,7 @@ impl HostTypeEnv {
         for item in &program.items {
             match item {
                 Item::Struct(s) => {
+                    env.register_ctor(s);
                     let m = env.members.entry(s.name.clone()).or_default();
                     for f in &s.fields { m.insert(f.name.clone()); }
                     for f in &s.methods { m.insert(f.name.clone()); }
@@ -68,6 +79,59 @@ impl HostTypeEnv {
             }
         }
         env
+    }
+
+    fn register_ctor(&mut self, s: &StructDecl) {
+        if !s.type_params.is_empty() || s.is_view || s.is_native { return; }
+        let mut fields: Vec<(String, Type, Option<Expr>)> =
+            s.fields.iter().map(|f| (f.name.clone(), f.ty.clone(), f.default.clone())).collect();
+        if fields.is_empty() {
+            for init in s.inits.iter().filter(|i| i.body.is_empty()) {
+                for p in &init.params {
+                    if let Some(ty) = &p.ty { fields.push((p.name.clone(), ty.clone(), None)); }
+                }
+            }
+        }
+        let via_new = s.inits.iter().any(|i| !i.body.is_empty());
+        self.ctors.insert(s.name.clone(), StructCtor { fields, via_new });
+    }
+
+    /// Rust text for the construction call `name(args)` when `name` is a user struct, so a
+    /// host emitter does not fall through to a plain function call `Name(..)` (E0423).
+    /// `value` renders one argument for a field of the given declared type. `None` when
+    /// `name` is not a plain constructible struct or the call shape isn't understood
+    /// (spread, `_` fill, unknown label, missing field without a default).
+    pub(crate) fn struct_ctor_call(
+        &self,
+        name: &str,
+        args: &[Arg],
+        value: &mut dyn FnMut(&Type, &Expr) -> String,
+    ) -> Option<String> {
+        let ctor = self.ctors.get(name)?;
+        if args.iter().any(|a| a.spread || a.default_rest) { return None; }
+        if ctor.via_new {
+            let rendered: Vec<String> = args.iter().enumerate().map(|(i, a)| match ctor.fields.get(i) {
+                Some((_, ty, _)) => value(ty, &a.value),
+                None => value(&Type::Int, &a.value),
+            }).collect();
+            return Some(format!("{}::new({})", name, rendered.join(", ")));
+        }
+        if args.len() > ctor.fields.len() { return None; }
+        let mut given: Vec<Option<&Expr>> = vec![None; ctor.fields.len()];
+        for (i, a) in args.iter().enumerate() {
+            let idx = match &a.label {
+                Some(l) => ctor.fields.iter().position(|(n, _, _)| n == l)?,
+                None => i,
+            };
+            if given[idx].is_some() { return None; }
+            given[idx] = Some(&a.value);
+        }
+        let mut parts = Vec::new();
+        for ((fname, fty, default), g) in ctor.fields.iter().zip(given) {
+            let e = g.or(default.as_ref())?;
+            parts.push(format!("{}: {}", fname, value(fty, e)));
+        }
+        Some(format!("{} {{ {} }}", name, parts.join(", ")))
     }
 
     fn type_struct(&self, ty: &Type) -> Option<String> {

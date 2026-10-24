@@ -128,7 +128,7 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
     // existing driver (mirrors wgpu's own `has_screen` carve-out) -- treated
     // the same way as `top_level_kernel_touching` for the general pass's
     // `gpu_top_level_handled_by_host` flag.
-    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
+    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set, &kernel_touching);
 
     // A `Screen` program's struct values / `var` scalars the render loop reads (`let Root host =
     // Root(5)`, `mut Pace pace = Pace()`, `var dirty = false`) are built by the general pass in

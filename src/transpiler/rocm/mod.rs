@@ -175,7 +175,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     // A `Screen` program gets the same treatment (mirrors metal/wgpu's own
     // `has_screen` carve-out) -- it keeps its ENTIRE top-level on this
     // backend's own existing driver too.
-    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set);
+    let top_level_kernel_touching = has_screen || crate::transpiler::top_level_touches_kernel(program, &kernel_names_set, &kernel_touching);
 
     // A `Screen` program's struct values / `var` scalars the render loop reads (`let Root host =
     // Root(5)`, `mut Pace pace = Pace()`, `var dirty = false`) are built by the general pass in

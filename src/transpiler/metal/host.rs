@@ -3320,6 +3320,30 @@ impl HostEmitter {
                         return "println!()".into();
                     }
                 }
+                // `Layer(w, out)` -- a user struct: a literal, never a call of the struct name
+                // (E0423). A resident-array field (`'kernel'global`/`'kernel'unified`) holds a
+                // `BoringKernelArg`, so a host array wraps in `Host(..)`.
+                if let ExprKind::Var(name) = &callee.kind {
+                    if !self.kernel_names.contains(name.as_str()) {
+                        let tenv = self.tenv.clone();
+                        let mut render = |fty: &Type, v: &Expr| -> String {
+                            if is_gpu_array_param(fty) {
+                                if let ExprKind::Var(n) = &v.kind {
+                                    if self.resident_locals.contains(n.as_str()) {
+                                        return format!("{}.clone()", n);
+                                    }
+                                }
+                                let elem = general_host_elem_type(fty.without_mut());
+                            format!("BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", self.expr(v))
+                            } else {
+                                self.coerce_call_arg(v, false)
+                            }
+                        };
+                        if let Some(lit) = tenv.struct_ctor_call(name, args, &mut render) {
+                            return lit;
+                        }
+                    }
+                }
                 // Ordinary function call -- coerce each argument to match the
                 // callee's own by-ref/owned parameter convention. See
                 // `cuda::host`'s identical case for the full rationale.
