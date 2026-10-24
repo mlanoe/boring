@@ -3000,6 +3000,7 @@ impl HostEmitter {
                             "width"    => return "boring_screen_width".into(),
                             "height"   => return "boring_screen_height".into(),
                             "resized"  => return "boring_screen_resized".into(),
+                            "scale"    => return "1.0f32".into(),
                             "closed"   => return "boring_screen_closed".into(),
                             _ => {}
                         }

@@ -121,6 +121,34 @@ fn wgpu_on_demand_redraw_waits_for_events() {
 }
 
 #[test]
+fn wgpu_hidpi_uses_logical_window_and_exposes_scale() {
+    let src = source(false)
+        .replace("title = \"test\"", "title = \"test\", hidpi = true")
+        .replace("let enc = encode(screen.frame)", "let sc = screen.scale\n        let enc = encode(screen.frame)");
+    let (project, rs) = build("wgpu", "hidpi", &src);
+    assert!(rs.contains("winit::dpi::LogicalSize::new("), "{rs}");
+    assert!(!rs.contains("winit::dpi::PhysicalSize::new(") || rs.contains("set_ime_cursor_area"), "{rs}");
+    assert!(rs.contains("WindowEvent::ScaleFactorChanged { scale_factor, .. }"), "{rs}");
+    assert!(rs.contains("self.__scale = window.scale_factor() as f32;"), "{rs}");
+    assert!(rs.contains("let sc = self.__scale"), "{rs}");
+    cargo_check(&project, "wgpu");
+    // Without `hidpi` the window stays physical-sized.
+    let (_p, plain) = build("wgpu", "hidpi_off", &source(false));
+    assert!(plain.contains("winit::dpi::PhysicalSize::new(") && !plain.contains("LogicalSize::new("), "{plain}");
+}
+
+#[test]
+fn screen_scale_is_portable_and_hidpi_flag_is_ignored_elsewhere() {
+    let src = source(false)
+        .replace("title = \"test\"", "title = \"test\", hidpi = true")
+        .replace("let enc = encode(screen.frame)", "let sc = screen.scale\n        let enc = encode(screen.frame)");
+    for target in ["metal", "simd", "cuda", "rocm"] {
+        let (_p, rs) = build(target, &format!("scale_{target}"), &src);
+        assert!(rs.contains("1.0"), "{target}: {rs}");
+    }
+}
+
+#[test]
 fn metal_render_loop_replaces_array_fields_and_reads_frame() {
     let (project, rs) = build("metal", "continuous", &source(false));
     assert!(rs.contains("k.colors = { let __v = &(enc.f); boring_screen_upload(&k.__device"), "{rs}");

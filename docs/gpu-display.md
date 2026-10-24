@@ -149,7 +149,8 @@ let screen = Screen(Dimension(800, 600), title = "My app")
 | `screen.dimension` | `Dimension` | window size at creation |
 | `screen.width` | `int` | **current** window width in pixels (follows resizes) |
 | `screen.height` | `int` | **current** window height in pixels |
-| `screen.resized` | `bool` | true for the frame that follows a resize — see [Resizing](#resizing) |
+| `screen.resized` | `bool` | true for the frame that follows a resize (or a scale-factor change) — see [Resizing](#resizing) |
+| `screen.scale` | `float32` | the window's scale factor (2.0 on a Retina display); wgpu only reads the real value (`window.scale_factor()`, updated on `ScaleFactorChanged`, which also sets `screen.resized`); simd/CUDA/ROCm/Metal and the interpreter always report `1.0` so programs stay portable — see [HiDPI](#hidpi) |
 | `screen.closed` | `bool` | true if the user closed the window |
 | `screen.frame` | `int` | frame counter, starts at 0 |
 | `screen.time` | `float` | seconds elapsed since loop start |
@@ -241,6 +242,21 @@ keyboard, mouse or resize event, or `screen.requestRedraw()` called in the body 
 for an animation). The loop otherwise sleeps (wgpu `ControlFlow::Wait`; Metal/CUDA/ROCm `Wait` with `Poll` only
 while a redraw is pending; SIMD blocks inside `screen.present` on a condition variable). `screen.requestRedraw()`
 is a no-op in the default continuous mode. Regression tests: `tests/screen_render_loop_arrays.rs`.
+
+
+### HiDPI
+
+```boring
+let screen = Screen(Dimension(640, 360), title = "UI", hidpi = true)
+```
+
+By default `Dimension` is in physical pixels, so on a Retina display (scale 2) a `Dimension(640, 360)` window is only
+320x180 points and everything looks half-size. With `hidpi = true` (wgpu host) `Dimension` is **logical points**: the
+window is created with a `LogicalSize`, while the pixel buffer, `screen.width`/`screen.height` and mouse / `setImeArea`
+coordinates stay in **physical pixels** (= logical x `screen.scale`). The first frame (and every scale-factor change)
+sets `screen.resized`, so the usual `if screen.resized:` reallocation picks up the physical size; multiply a
+points-based layout by `screen.scale` when drawing. Without `hidpi` nothing changes. Other hosts ignore the flag and
+report `screen.scale == 1.0`. Regression test: `tests/screen_render_loop_arrays.rs`.
 
 
 ### Dispatch grid

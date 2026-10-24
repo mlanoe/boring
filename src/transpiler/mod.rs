@@ -3024,7 +3024,7 @@ impl Transpiler {
         // kernel that runs the same construction again, for the current window size. Its parameters
         // are `screen` and every setup value the arguments read (`helpers::rebuild_captures`).
         if !rebuilds.is_empty() {
-            self.line("struct __ScreenSize { width: isize, height: isize }");
+            self.line("struct __ScreenSize { width: isize, height: isize, scale: f32 }");
         }
         for (var, rhs) in rebuilds {
             let Some(orig) = setup_items.iter().find_map(|i| match i { Item::Let(s) if &s.name == var => Some(s), _ => None }) else { continue };

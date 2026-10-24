@@ -3045,6 +3045,7 @@ impl HostEmitter {
                             "time"      => "boring_start.elapsed().as_secs_f64()".into(),
                             "closed"    => "boring_screen_closed".into(),
                             "resized"   => "boring_screen_resized".into(),
+                            "scale"     => "1.0f32".into(),
                             "width"     => "boring_screen_width".into(),
                             "height"    => "boring_screen_height".into(),
                             "dimension" => "Dimension(boring_screen_width as u32, boring_screen_height as u32)".into(),

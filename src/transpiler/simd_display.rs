@@ -117,6 +117,8 @@ struct Screen {
     width: isize,
     height: isize,
     resized: bool,
+    /// Always 1.0: the SIMD window has no scale factor (portability member).
+    scale: f32,
     closed: bool,
     frame: isize,
     time: f64,
@@ -156,6 +158,7 @@ impl Screen {
             width: dimension.width,
             height: dimension.height,
             resized: false,
+            scale: 1.0,
             closed: false,
             frame: 0,
             time: 0.0,

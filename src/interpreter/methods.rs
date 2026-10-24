@@ -2050,6 +2050,8 @@ impl Interpreter {
                         Ok(Value::Object(Rc::new(RefCell::new(inner))))
                     }
                     "resized" => Ok(Value::Bool(*resized.borrow())),
+                    // No real window in simulation: scale factor is always 1.
+                    "scale"   => Ok(Value::Float32(1.0)),
                     "frame"   => Ok(Value::Uint(*frame.borrow())),
                     "width"   => Ok(Value::Uint(*width.borrow())),
                     "height"  => Ok(Value::Uint(*height.borrow())),

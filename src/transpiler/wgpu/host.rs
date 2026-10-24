@@ -1194,6 +1194,7 @@ impl<'a> HostEmitter<'a> {
     fn emit_screen_main(&mut self) {
         let on_demand = crate::transpiler::helpers::screen_redraw_on_demand(self.program);
         let (w_expr, h_expr, title, _) = self.extract_screen_info();
+        let hidpi = self.screen_hidpi();
         let scalars     = self.extract_top_level_scalars();
         let width       = resolve_scalar_expr(&w_expr, &scalars);
         let height      = resolve_scalar_expr(&h_expr, &scalars);
@@ -1295,6 +1296,7 @@ impl<'a> HostEmitter<'a> {
         self.line("    __win_w: isize,");
         self.line("    __win_h: isize,");
         self.line("    __resized: bool,");
+        self.line("    __scale: f32,");
         self.line("    __buf_w: f64,");
         self.line("    __buf_h: f64,");
         self.line("    __surface_cfg: Option<wgpu::SurfaceConfiguration>,");
@@ -1340,16 +1342,30 @@ impl<'a> HostEmitter<'a> {
         self.line("impl ApplicationHandler for __App {");
         // resumed(): create window + surface + blit pipeline
         self.line("    fn resumed(&mut self, event_loop: &ActiveEventLoop) {");
+        // `hidpi = true`: the Dimension is logical points; otherwise it is physical pixels.
+        let size_ty = if hidpi { "LogicalSize" } else { "PhysicalSize" };
         self.line(&format!(
-            "        let window = std::sync::Arc::new(event_loop.create_window(WindowAttributes::default().with_title(\"{title}\").with_inner_size(winit::dpi::PhysicalSize::new({width}u32, {height}u32))).unwrap());"
+            "        let window = std::sync::Arc::new(event_loop.create_window(WindowAttributes::default().with_title(\"{title}\").with_inner_size(winit::dpi::{size_ty}::new({width}u32, {height}u32))).unwrap());"
         ));
+        self.line("        self.__scale = window.scale_factor() as f32;");
+        if hidpi {
+            // Window and swapchain are in physical pixels; the app reallocates its buffer on `screen.resized`.
+            self.line("        let __ps = window.inner_size();");
+            self.line("        self.__win_w = __ps.width as isize;");
+            self.line("        self.__win_h = __ps.height as isize;");
+            self.line("        self.__resized = true;");
+        }
         self.line("        let surface: wgpu::Surface<'static> = self.instance.create_surface(window.clone()).unwrap();");
         self.line("        let caps = surface.get_capabilities(&self.adapter);");
         self.line("        let fmt  = caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Bgra8Unorm).copied().unwrap_or(caps.formats[0]);");
         self.line("        window.set_ime_allowed(true);");
         self.line("        let cfg = wgpu::SurfaceConfiguration {");
         self.line("            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt,");
-        self.line(&format!("            width: {width}, height: {height},"));
+        if hidpi {
+            self.line("            width: __ps.width.max(1), height: __ps.height.max(1),");
+        } else {
+            self.line(&format!("            width: {width}, height: {height},"));
+        }
         self.line("            present_mode: wgpu::PresentMode::Fifo,");
         self.line("            desired_maximum_frame_latency: 2,");
         self.line("            alpha_mode: caps.alpha_modes[0], view_formats: vec![],");
@@ -1434,7 +1450,7 @@ impl<'a> HostEmitter<'a> {
         if on_demand {
             // Input and resize invalidate the window; everything else (including the
             // frame's own RedrawRequested) does not.
-            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_) | WindowEvent::Ime(_) | WindowEvent::ModifiersChanged(_) | WindowEvent::MouseWheel { .. } | WindowEvent::Focused(_)) {");
+            self.line("        if matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Ime(_) | WindowEvent::ModifiersChanged(_) | WindowEvent::MouseWheel { .. } | WindowEvent::Focused(_)) {");
             self.line("            if let Some(w) = &self.window { w.request_redraw(); }");
             self.line("        }");
         }
@@ -1443,6 +1459,11 @@ impl<'a> HostEmitter<'a> {
         self.line("            WindowEvent::Resized(size) => {");
         self.line("                self.__win_w = size.width as isize;");
         self.line("                self.__win_h = size.height as isize;");
+        self.line("                self.__resized = true;");
+        self.line("            }");
+        self.line("            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {");
+        self.line("                self.__scale = scale_factor as f32;");
+        self.line("                if let Some(w) = &self.window { let ps = w.inner_size(); self.__win_w = ps.width as isize; self.__win_h = ps.height as isize; }");
         self.line("                self.__resized = true;");
         self.line("            }");
         self.line("            WindowEvent::KeyboardInput { event: ref key_event, .. } => {");
@@ -1645,7 +1666,7 @@ impl<'a> HostEmitter<'a> {
         self.line("        __mouse_x: 0, __mouse_y: 0,");
         self.line("        __mouse_left: false, __mouse_right: false, __mouse_middle: false,");
         self.line("        __input: __BoringInput::new(),");
-        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false,"));
+        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false, __scale: 1.0,"));
         self.line(&format!("        __buf_w: ({width}) as f64, __buf_h: ({height}) as f64, __surface_cfg: None,"));
         self.line("        __start_time: std::time::Instant::now(),");
         self.line("        __frame: 0, __redraw: false,");
@@ -1658,6 +1679,22 @@ impl<'a> HostEmitter<'a> {
     }
 
     // -- Screen helpers -------------------------------------------------------
+
+    /// `Screen(..., hidpi = true)`: `Dimension` is logical points and the window follows the display's scale.
+    fn screen_hidpi(&self) -> bool {
+        for item in &self.program.items {
+            if let Item::Let(s) = item {
+                if let Some(val) = &s.value {
+                    if let ExprKind::Call(callee, args) = &val.kind {
+                        if matches!(&callee.kind, ExprKind::Var(n) if n == "Screen") {
+                            return args.iter().any(|a| a.label.as_deref() == Some("hidpi") && matches!(&a.value.kind, ExprKind::Bool(true)));
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 
     fn extract_screen_info(&self) -> (String, String, String, String) {
         for item in &self.program.items {
@@ -1880,7 +1917,7 @@ impl<'a> HostEmitter<'a> {
                 let returns: Vec<String> = self.setup_fields.iter().map(|(n, _)| n.clone()).collect();
                 { let _ = rebuild_rhs;
                     let captured = crate::transpiler::helpers::rebuild_captures(name, rhs, &returns);
-                    let mut args = vec![format!("&__ScreenSize {{ width: {pfx}__win_w, height: {pfx}__win_h }}")];
+                    let mut args = vec![format!("&__ScreenSize {{ width: {pfx}__win_w, height: {pfx}__win_h, scale: {pfx}__scale }}")];
                     args.extend(captured.iter().map(|c| format!("&{pfx}{c}")));
                     return Some(format!(
                         "{pfx}{name} = __boring_screen_rebuild_{name}({}).expect(\"kernel rebuild failed\"); {pfx}__reblit();",
@@ -2172,12 +2209,13 @@ impl<'a> HostEmitter<'a> {
             }
             // `screen.width` / `.height` (live window size in pixels) / `.resized` (this frame follows a resize)
             ExprKind::Field(obj, field)
-                if matches!(field.as_str(), "width" | "height" | "resized")
+                if matches!(field.as_str(), "width" | "height" | "resized" | "scale")
                     && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
             {
                 match field.as_str() {
                     "width" => format!("{pfx}__win_w"),
                     "height" => format!("{pfx}__win_h"),
+                    "scale" => format!("{pfx}__scale"),
                     _ => format!("{pfx}__resized"),
                 }
             }
