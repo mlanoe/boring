@@ -130,7 +130,11 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
     let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some(), &general_out.screen_setup_fields);
-    let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
+    let mut host_rs = host_rs;
+    let uses_clipboard = crate::transpiler::screen_input::uses_clipboard(&host_rs);
+    if uses_clipboard { host_rs.push_str(crate::transpiler::screen_input::CLIPBOARD_RUNTIME); }
+    let mut cargo_toml  = emit_cargo_toml(stem, version, has_screen);
+    if uses_clipboard { cargo_toml.push_str("arboard = \"3\"\n"); }
 
     let mut errors = general_out.errors;
     errors.extend(device_errors);

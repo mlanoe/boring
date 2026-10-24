@@ -1724,6 +1724,8 @@ impl<'a> HostEmitter<'a> {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_ime_area(e) {
                     self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_set_clipboard(e) {
+                    self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_request_redraw(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_render_dispatch(e, width, height) {
@@ -1932,6 +1934,14 @@ impl<'a> HostEmitter<'a> {
         Some(format!(
             "if let Some(w) = &self.window {{ let ws = w.inner_size(); let (sx, sy) = (ws.width.max(1) as f64 / self.__buf_w, ws.height.max(1) as f64 / self.__buf_h); w.set_ime_cursor_area(winit::dpi::PhysicalPosition::new(({}) as f64 * sx, ({}) as f64 * sy), winit::dpi::PhysicalSize::new(({}) as f64 * sx, ({}) as f64 * sy)); }}",
             a[0], a[1], a[2], a[3]))
+    }
+
+    /// `screen.setClipboard(s)` -- write text to the system clipboard (failures ignored).
+    fn try_emit_set_clipboard(&self, e: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
+        if method != "setClipboard" || args.len() != 1 { return None; }
+        if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
+        Some(format!("__boring_clipboard_set(&*({}));", self.host_expr(&args[0].value)))
     }
 
     /// `screen.requestRedraw()` -- schedule another frame when the window redraws on demand.
@@ -2170,6 +2180,12 @@ impl<'a> HostEmitter<'a> {
                     "height" => format!("{pfx}__win_h"),
                     _ => format!("{pfx}__resized"),
                 }
+            }
+            // `screen.clipboard`: read the system clipboard now (lazily, only when evaluated).
+            ExprKind::Field(obj, field)
+                if field == "clipboard" && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
+            {
+                crate::transpiler::screen_input::str_to_string("__boring_clipboard_get()")
             }
             // Input members of the shared runtime: `screen.text`, `.marked`, `.shift`, `.focused`, ...
             ExprKind::Field(obj, field)

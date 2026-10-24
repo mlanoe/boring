@@ -368,3 +368,31 @@ pub(super) fn body_has_break(body: &[crate::ast::Stmt]) -> bool {
         _ => false,
     })
 }
+
+/// System clipboard access (`screen.clipboard` / `screen.setClipboard(s)`), pasted once at the end of
+/// a generated crate that uses it (together with the `arboard` dependency). Lazy: the clipboard is
+/// opened on first use, kept for the process lifetime (X11/Wayland drop owned content with the
+/// handle) and only read when `screen.clipboard` is evaluated. Every failure is swallowed: an
+/// unavailable clipboard reads as "" and ignores writes.
+pub(super) const CLIPBOARD_RUNTIME: &str = r##"
+// ---- Screen clipboard (arboard) ----
+thread_local! { static __BORING_CLIPBOARD: std::cell::RefCell<Option<arboard::Clipboard>> = std::cell::RefCell::new(None); }
+#[allow(dead_code)]
+fn __boring_clipboard_with<R>(f: impl FnOnce(&mut arboard::Clipboard) -> Option<R>) -> Option<R> {
+    __BORING_CLIPBOARD.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() { *c = arboard::Clipboard::new().ok(); }
+        c.as_mut().and_then(f)
+    })
+}
+#[allow(dead_code)]
+fn __boring_clipboard_get() -> String { __boring_clipboard_with(|c| c.get_text().ok()).unwrap_or_default() }
+#[allow(dead_code)]
+fn __boring_clipboard_set(s: &str) { let _ = __boring_clipboard_with(|c| c.set_text(s.to_string()).ok()); }
+"##;
+
+/// True when generated host code calls the clipboard runtime.
+pub(super) fn uses_clipboard(code: &str) -> bool {
+    (code.contains("__boring_clipboard_get()") || code.contains("__boring_clipboard_set(&"))
+        && !code.contains("fn __boring_clipboard_get()")
+}

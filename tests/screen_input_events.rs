@@ -79,6 +79,20 @@ kernel:
             break
 "#;
 
+/// System clipboard: read lazily, write on demand.
+const CLIPBOARD_LOOP: &str = r#"
+kernel:
+    loop:
+        if screen.key_pressed("v") and screen.clipboard != "":
+            k.mode = 1
+        if screen.key_pressed("c"):
+            screen.setClipboard("copied")
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+
 fn build(target: &str, name: &str, src: &str) -> (PathBuf, String) {
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_input_events").join(format!("{name}_{target}"));
     let _ = fs::remove_dir_all(&tmp);
@@ -180,6 +194,24 @@ fn wgpu_text_members_are_strings() {
     assert!(rs.contains("std::sync::Arc::<str>::from(self.__input.marked.clone())"), "{rs}");
     assert!(rs.contains("std::sync::Arc::<str>::from(self.__input.last_key.clone())"), "{rs}");
     cargo_check(&project, "wgpu");
+}
+
+#[test]
+fn wgpu_clipboard_read_write_and_dependency() {
+    let (project, rs) = build("wgpu", "clipboard", &events(CLIPBOARD_LOOP));
+    assert!(rs.contains("std::sync::Arc::<str>::from(__boring_clipboard_get())"), "{rs}");
+    assert!(rs.contains("__boring_clipboard_set(&*("), "{rs}");
+    assert!(rs.contains("fn __boring_clipboard_get() -> String"), "{rs}");
+    let cargo = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("arboard"), "{cargo}");
+    cargo_check(&project, "wgpu");
+}
+
+#[test]
+fn wgpu_without_clipboard_has_no_arboard() {
+    let (project, rs) = build("wgpu", "noclip", &events(TEXT_LOOP));
+    assert!(!rs.contains("arboard"), "{rs}");
+    assert!(!fs::read_to_string(project.join("Cargo.toml")).unwrap().contains("arboard"));
 }
 
 // ── simd ─────────────────────────────────────────────────────────────────────────────────────
