@@ -7527,7 +7527,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(!code.contains("(&*si)") && !code.contains("si = Rc::<str>::from") && !code.contains("si = Arc::<str>::from"),
             "got:\n{}", code);
-        assert!(code.contains("si = (si + 1)") || code.contains("si = si + 1"), "got:\n{}", code);
+        assert!(code.contains("si += 1") || code.contains("si = (si + 1)") || code.contains("si = si + 1"), "got:\n{}", code);
     }
 
     #[test]
