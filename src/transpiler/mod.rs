@@ -182,6 +182,9 @@ pub struct TranspileConfig {
     /// overrides a built-in entry. Empty unless `boring build` populated it from
     /// `BoringToml`.
     pub external_fns: Vec<(String, String, Vec<String>)>,
+    /// `boring.toml`'s `[external_fields]`: `(type, field, field_type)` for fields of external types,
+    /// so a chained call on such a field resolves its receiver type.
+    pub external_field_types: Vec<(String, String, String)>,
 }
 
 impl Default for TranspileConfig {
@@ -205,6 +208,7 @@ impl Default for TranspileConfig {
             external_optional_fields: Vec::new(),
             known_derives: Vec::new(),
             external_fns: Vec::new(),
+            external_field_types: Vec::new(),
         }
     }
 }

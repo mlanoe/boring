@@ -282,10 +282,19 @@ impl Transpiler {
                 self.kernel_field_decl(inner, field).map(|f| f.ty.clone())
             }
             ExprKind::Field(inner, field) => {
-                let owner = self.resolve_expr_struct_type(inner)?;
-                self.struct_fields.get(owner.as_str())?
-                    .iter().find(|(fname, _)| fname == field)
-                    .map(|(_, fty)| fty.clone())
+                if let Some(owner) = self.resolve_expr_struct_type(inner) {
+                    if let Some(fty) = self.struct_fields.get(owner.as_str())
+                        .and_then(|fs| fs.iter().find(|(fname, _)| fname == field))
+                        .map(|(_, fty)| fty.clone())
+                    {
+                        return Some(fty);
+                    }
+                }
+                // `[external_fields]`: a field of an external type declared in `boring.toml`.
+                let owner = self.resolve_expr_type(inner).as_ref().and_then(receiver_type_name)?;
+                self.config.external_field_types.iter()
+                    .find(|(t, f, _)| *t == owner && f == field)
+                    .map(|(_, _, fty)| Type::Named(fty.clone()))
             }
             ExprKind::Index(inner, index) => {
                 let inner_ty = self.resolve_expr_type(inner)?;

@@ -303,6 +303,10 @@ struct BoringToml {
     /// drained by `resolve_external_fns_includes` — empty again once `load_project_toml`
     /// returns.
     external_fns_includes: Vec<String>,
+    /// `[external_fields]` entries — `"Type.field" = "FieldType"`, declaring the type of a field of an
+    /// external (Rust-side) type so `para.level.isRtl()` can resolve its receiver. Threaded into
+    /// `TranspileConfig::external_field_types` as `(type, field, field_type)`.
+    external_field_types: Vec<(String, String, String)>,
     tensor_linear: transpiler::tensor_host::TensorLinearConfig,
 }
 
@@ -372,6 +376,8 @@ impl BoringToml {
         let mut deps = Vec::new();
         let mut external_fns = Vec::new();
         let mut external_fns_includes = Vec::new();
+        let mut external_field_types = Vec::new();
+        let mut in_external_fields = false;
         let mut tensor_linear = transpiler::tensor_host::TensorLinearConfig::default();
         let mut in_dependencies = false;
         let mut in_external_types = false;
@@ -391,6 +397,7 @@ impl BoringToml {
                 in_derives = line == "[derives]";
                 in_deps = line == "[deps]";
                 in_external_fns = line == "[external_fns]";
+                in_external_fields = line == "[external_fields]";
                 tensor_linear_section = match line {
                     "[tensor.matmul]" => Some("matmul"),
                     "[tensor.linear]" => Some("all"),
@@ -426,6 +433,16 @@ impl BoringToml {
                 // first `=` into (name, raw_value). `resolve_deps` interprets `raw_value`.
                 if let Some((name, value)) = line.split_once('=') {
                     deps.push((name.trim().to_string(), value.trim().to_string()));
+                }
+            } else if in_external_fields {
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim().trim_matches('"');
+                    let value = value.trim().trim_matches('"');
+                    if let Some((ty, field)) = key.rsplit_once('.') {
+                        if !ty.is_empty() && !field.is_empty() && !value.is_empty() {
+                            external_field_types.push((ty.to_string(), field.to_string(), value.to_string()));
+                        }
+                    }
                 }
             } else if in_external_fns {
                 if let Some(rest) = line.strip_prefix("include") {
@@ -483,7 +500,7 @@ impl BoringToml {
             name, version, main, dependencies,
             external_tuple_structs, external_const_fns, external_optional_fields, external_types_includes,
             derive_traits, derive_includes, deps,
-            external_fns, external_fns_includes,
+            external_fns, external_fns_includes, external_field_types,
             tensor_linear,
         }
     }
@@ -1528,6 +1545,7 @@ fn config_with_toml(config: transpiler::TranspileConfig, toml: &BoringToml) -> t
         external_optional_fields: toml.external_optional_fields.clone(),
         known_derives: toml.derive_traits.clone(),
         external_fns: toml.external_fns.clone(),
+        external_field_types: toml.external_field_types.clone(),
         ..config
     }
 }
@@ -1955,6 +1973,7 @@ fn build_project_with_config(config: transpiler::TranspileConfig) {
         external_optional_fields: toml.external_optional_fields.clone(),
         known_derives: toml.derive_traits.clone(),
         external_fns: toml.external_fns.clone(),
+        external_field_types: toml.external_field_types.clone(),
         ..config
     };
     emit_rust_with_version_and_config(&toml.main, &toml.version, config, &toml.dependencies);
@@ -2213,7 +2232,7 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, is_simd_target: false, gpu_top_level_handled_by_host: false, screen_setup: None, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
+    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, is_simd_target: false, gpu_top_level_handled_by_host: false, screen_setup: None, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new(), external_field_types: Vec::new() };
 
     if emit_rust {
         match file {
@@ -2246,6 +2265,7 @@ fn parse_build_command(build_args: &[String]) {
                     external_optional_fields: toml.external_optional_fields.clone(),
                     known_derives: toml.derive_traits.clone(),
                     external_fns: toml.external_fns.clone(),
+        external_field_types: toml.external_field_types.clone(),
                     ..config
                 };
                 print_rust(&toml.main, config);
@@ -3387,6 +3407,7 @@ fn install_kernel_target_project_config(source: &Path) {
         external_optional_fields: toml.external_optional_fields.clone(),
         known_derives: toml.derive_traits.clone(),
         external_fns: toml.external_fns.clone(),
+        external_field_types: toml.external_field_types.clone(),
         ..Default::default()
     });
 }
