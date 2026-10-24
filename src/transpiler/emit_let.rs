@@ -1570,6 +1570,19 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
+        self.var_scalar_types.remove(s.name.as_str());
+        if s.ty.is_none() {
+            if let Some(v) = &s.value {
+                if matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
+                    | ExprKind::Str(_) | ExprKind::StringInterp(_))
+                {
+                    let (no_vars, no_fields) = (Default::default(), Default::default());
+                    if let Some(t) = infer_overload_expr_type(v, &no_vars, &no_vars, &no_fields) {
+                        self.var_scalar_types.insert(s.name.clone(), t);
+                    }
+                }
+            }
+        }
         // GPU targets only (see emit_kernel.rs): a `let`/`mut`/`var` initialized from a
         // `kernel Name(...)` constructor needs GPU-specific codegen, not the plain
         // tuple-constructor call the rest of this function would otherwise emit.

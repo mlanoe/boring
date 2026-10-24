@@ -1009,6 +1009,10 @@ struct Transpiler {
     pub(crate) match_subject_enum: Option<String>,
     /// Local variable name → its declared boring type (for match subject enum inference).
     pub(crate) var_types: std::collections::HashMap<String, Type>,
+    /// Scalar type (`int`/`float`/`bool`/`string`) of an unannotated `let` bound to a literal.
+    /// Kept apart from `var_types`, whose entries steer many other decisions; only overload
+    /// resolution reads it (`overload_arg_type`).
+    pub(crate) var_scalar_types: std::collections::HashMap<String, Type>,
     /// Local variable name → its `let`/`var` initializer expression, recorded regardless of
     /// whether `var_types` itself got an entry (e.g. an unannotated `let rad = a * b` binop
     /// initializer isn't tracked into `var_types` at all). Used by `infer_float_width` as a
@@ -1683,6 +1687,7 @@ impl Transpiler {
             current_trait_assoc_names: std::collections::HashSet::new(),
             match_subject_enum: None,
             var_types: std::collections::HashMap::new(),
+            var_scalar_types: std::collections::HashMap::new(),
             var_init_exprs: std::collections::HashMap::new(),
             var_std_types: std::collections::HashMap::new(),
             struct_operator_methods: std::collections::HashSet::new(),

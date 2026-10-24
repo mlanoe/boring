@@ -185,6 +185,17 @@ impl Transpiler {
         self.fn_return_types.get(name).cloned()
     }
 
+    /// Type of a call argument for overload resolution: the quick inference, then the declared-type
+    /// walk, then the scalar type of an unannotated literal-initialised local (`let s = "x"`).
+    pub(crate) fn overload_arg_type(&self, e: &Expr) -> Option<Type> {
+        infer_overload_expr_type(e, &self.var_types, &self.fn_return_types, &self.struct_fields)
+            .or_else(|| self.resolve_expr_type(e))
+            .or_else(|| match &e.kind {
+                ExprKind::Var(v) => self.var_scalar_types.get(v.as_str()).cloned(),
+                _ => None,
+            })
+    }
+
     /// Return type of a call to an overloaded free function: the overloads whose arity and
     /// (inferable) argument types match the call. `fn_return_types` holds only the last
     /// registered overload's return type, which is wrong for a call that resolves to another
@@ -201,8 +212,7 @@ impl Transpiler {
                     if let ExprKind::DotIdent(variant) = &a.value.kind {
                         self.dotident_matches_enum_type(variant, expected)
                     } else {
-                        let actual = infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types, &self.struct_fields)
-                            .or_else(|| self.resolve_expr_type(&a.value));
+                        let actual = self.overload_arg_type(&a.value);
                         match actual {
                             Some(actual) => types_compatible(expected, &actual),
                             None => true,
@@ -6759,6 +6769,7 @@ impl Transpiler {
             var_types: self.var_types.clone(),
             var_init_exprs: self.var_init_exprs.clone(),
             var_std_types: self.var_std_types.clone(),
+            var_scalar_types: self.var_scalar_types.clone(),
             string_vars: self.string_vars.clone(),
             str_index_cache_vars: self.str_index_cache_vars.clone(),
             struct_operator_methods: self.struct_operator_methods.clone(),

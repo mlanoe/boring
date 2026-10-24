@@ -69,6 +69,8 @@ struct HostEmitter<'a> {
     setup_fields: Vec<(String, String)>,
     /// Names of the `let`s of the render loop body seen so far (assignable when `var`).
     frame_locals: std::cell::RefCell<Vec<String>>,
+    /// Declared/inferred types of those locals, for resolving overloaded free-function calls.
+    frame_local_types: std::cell::RefCell<std::collections::HashMap<String, Type>>,
     /// Errors found while checking a `Screen` program's shape (see
     /// `check_screen_program_shape`/`emit_render_stmt`'s error fallbacks).
     /// Non-empty means `out` is incomplete/wrong and must not be written out
@@ -97,7 +99,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), frame_locals: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), frame_locals: Default::default(), frame_local_types: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -1782,7 +1784,7 @@ impl<'a> HostEmitter<'a> {
                 } else if let Some(s) = self.try_emit_kernel_realloc(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if matches!(&e.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(f)
-                    if self.general_fn_param_modes(f).is_some()))
+                    if self.is_general_fn(f)))
                     || matches!(&e.kind, ExprKind::MethodCall(o, m, a)
                         if self.setup_method_modes(o, m).is_some_and(|modes| modes.len() == a.len()))
                     || matches!(&e.kind, ExprKind::Call(c, a) if matches!(&c.kind, ExprKind::Field(o, m)
@@ -1809,6 +1811,11 @@ impl<'a> HostEmitter<'a> {
                 self.tenv.track_local(&ls.name, ls.ty.as_ref(), ls.value.as_ref(), None);
                 let v = self.host_expr(ls.value.as_ref().unwrap());
                 let mutability = if ls.binding.is_mutable() { "mut " } else { "" };
+                let local_ty = ls.ty.clone().or_else(|| self.host_arg_type(ls.value.as_ref().unwrap()));
+                match local_ty {
+                    Some(t) => { self.frame_local_types.borrow_mut().insert(ls.name.clone(), t); }
+                    None => { self.frame_local_types.borrow_mut().remove(&ls.name); }
+                }
                 self.frame_locals.borrow_mut().push(ls.name.clone());
                 self.line(&format!("{indent}let {mutability}{} = {v};", ls.name));
             }
@@ -1948,7 +1955,7 @@ impl<'a> HostEmitter<'a> {
                 } else { String::new() };
                 format!("{kname}::new({dim_args}std::sync::Arc::clone(&{pfx}device), std::sync::Arc::clone(&{pfx}queue))")
             }
-            (ExprKind::Call(c, _), _) if matches!(&c.kind, ExprKind::Var(f) if self.general_fn_param_modes(f).is_some()) => {
+            (ExprKind::Call(c, _), _) if matches!(&c.kind, ExprKind::Var(f) if self.is_general_fn(f)) => {
                 self.host_expr(rhs)
             }
             _ => return None,
@@ -2411,6 +2418,7 @@ impl<'a> HostEmitter<'a> {
                 // A call to an ordinary Boring function: pass each argument the way the function's
                 // generated signature takes it (`&x`, `&mut x`, or by value).
                 if let ExprKind::Var(fname) = &callee.kind {
+                    let fname = &self.resolve_free_overload(fname, args);
                     if let Some(modes) = self.general_fn_param_modes(fname) {
                         if modes.len() == args.len() {
                             let args_s = self.call_args(args, &modes);
@@ -2499,6 +2507,46 @@ impl<'a> HostEmitter<'a> {
 
     /// How the general pass's `fn name(...)` takes each parameter: `"&mut"`, `"&"` or `""` (by
     /// value), read back from the generated signature. `None` when `name` isn't one of its functions.
+    /// Boring type of a host-side argument expression, where it can be told.
+    fn host_arg_type(&self, e: &Expr) -> Option<Type> {
+        if let ExprKind::Var(n) = &e.kind {
+            if self.event_vars.borrow().contains(n) { return Some(Type::Str); }
+            if let Some(t) = self.frame_local_types.borrow().get(n) { return Some(t.clone()); }
+            if let Some((_, t)) = self.setup_fields.iter().find(|(f, _)| f == n) {
+                return Some(match t.as_str() { "String" | "Arc<str>" | "std::sync::Arc<str>" => Type::Str, _ => Type::Named(t.clone()) });
+            }
+            return None;
+        }
+        let types = self.frame_local_types.borrow();
+        crate::transpiler::helpers::infer_overload_expr_type(e, &types, &Default::default(), &Default::default())
+    }
+
+    /// Free-function overload candidates declared under `name` (empty unless overloaded).
+    fn free_overloads(&self, name: &str) -> Vec<&FnDecl> {
+        let v: Vec<&FnDecl> = self.program.items.iter().filter_map(|i| match i {
+            Item::Fn(f) if f.name == name => Some(f), _ => None }).collect();
+        if v.len() > 1 { v } else { Vec::new() }
+    }
+
+    fn is_general_fn(&self, name: &str) -> bool {
+        self.general_fn_param_modes(name).is_some() || !self.free_overloads(name).is_empty()
+    }
+
+    /// The mangled Rust name of the overload of `name` that `args` select (`name` itself when not
+    /// overloaded). An argument of unknown type matches any candidate; the first match wins.
+    fn resolve_free_overload(&self, name: &str, args: &[Arg]) -> String {
+        let decls = self.free_overloads(name);
+        let chosen = decls.iter().find(|d| d.params.len() == args.len()
+            && d.params.iter().zip(args).all(|(p, a)| match (&p.ty, self.host_arg_type(&a.value)) {
+                (Some(exp), Some(act)) => crate::transpiler::helpers::types_compatible(exp, &act),
+                _ => true,
+            }));
+        match chosen.or(decls.first()) {
+            Some(d) => crate::transpiler::helpers::mangle_overload_name(name, &d.params),
+            None => name.to_string(),
+        }
+    }
+
     fn general_fn_param_modes(&self, name: &str) -> Option<Vec<&'static str>> {
         let needle = format!("fn {name}(");
         let at = self.general_code.lines().find_map(|l| {
