@@ -6170,7 +6170,8 @@ impl Transpiler {
                         || matches!(&e.kind, ExprKind::Var(n) if self.collection_vars.contains(n))
                         || matches!(&e.kind, ExprKind::Array(_))
                         || self.expr_returns_collection(e);
-                    let (expr_s, spec) = boring_vec_fmt(expr_s, is_col, is_vec_var);
+                    let (expr_s, spec) = self.typed_collection_fmt(e, &expr_s)
+                        .unwrap_or_else(|| boring_vec_fmt(expr_s, is_col, is_vec_var));
                     fmt.push_str(spec);
                     args.push(expr_s);
                 }
@@ -6217,6 +6218,24 @@ impl Transpiler {
                 }
             }
         }
+    /// Interpolation-hole formatting driven by the hole's *resolved type*: an array/dict/set
+    /// whose elements are plain displayable values renders like the interpreter
+    /// (`[1, 2]`, `[a, b]`, `{k: 1}`, `{7}`). `None` when the type is unknown or nested, so
+    /// the caller falls back to its name-based heuristics.
+    pub(crate) fn typed_collection_fmt(&self, e: &Expr, expr_s: &str) -> Option<(String, &'static str)> {
+        let ty = self.resolve_expr_type(e)?;
+        let ty = ty.without_mut();
+        let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
+        let flat = |t: &Type| !is_collection_type(Some(t))
+            && !matches!(t.without_mut(), Type::Optional(_) | Type::Tuple(_));
+        match ty {
+            Type::Array(el) if flat(el) => Some((format!("BoringFmt(&{})", expr_s), "{}")),
+            Type::Dict(k, v) if flat(k) && flat(v) => Some((format!("BoringFmtMap(&{})", expr_s), "{}")),
+            Type::Set(el) if flat(el) => Some((format!("BoringFmtSet(&{})", expr_s), "{}")),
+            _ => None,
+        }
+    }
+
         (fmt, args)
     }
 
@@ -6265,7 +6284,8 @@ impl Transpiler {
                         || matches!(&e.kind, ExprKind::Var(n) if self.collection_vars.contains(n))
                         || matches!(&e.kind, ExprKind::Array(_))
                         || self.expr_returns_collection(e);
-                    let (expr_s, spec) = boring_vec_fmt(expr_s, is_col, is_vec_var);
+                    let (expr_s, spec) = self.typed_collection_fmt(e, &expr_s)
+                        .unwrap_or_else(|| boring_vec_fmt(expr_s, is_col, is_vec_var));
                     fmt.push_str(spec);
                     combined.push(expr_s);
                 }

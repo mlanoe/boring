@@ -1,0 +1,27 @@
+# Interpolating collections: `{x}` renders like the interpreter in both `boring run`
+# and `boring build` -- `[1, 2, 3]`, `[a, b]` (strings unquoted), `{k: 1}`, `{7}`.
+# Dict/set iteration order is unspecified, so every dict/set here has ONE element.
+struct Holder:
+    [uint] ids
+    [string] names
+    {string=int} scores
+
+[uint] make():
+    [4, 5]
+
+def show([uint] ids, [string] ss, {string=int} d, {int} s):
+    print "param {ids} {ss} {d} {s}"
+
+def main():
+    let [int] a = [1, 2, 3]
+    let [string] b = ["a", "b"]
+    let {string=int} d = {"k" = 1}
+    let {int} s = {7}
+    print "locals {a} {b} {d} {s}"
+    show([1, 2, 3], ["x", "y"], {"z" = 9}, {5})
+    let h = Holder([1, 2], ["p"], {"q" = 3})
+    print "fields {h.ids} {h.names} {h.scores}"
+    let ids = make()
+    print "inferred {ids}"
+    let msg = "ids {ids} / {b}"
+    print msg

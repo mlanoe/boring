@@ -5946,7 +5946,8 @@ impl Transpiler {
                 || matches!(&a.value.kind, ExprKind::Var(n) if self.collection_vars.contains(n.as_str()))
                 || matches!(&a.value.kind, ExprKind::Array(_))
                 || self.expr_returns_collection(&a.value);
-            let (expr_s, spec) = boring_vec_fmt(expr_s, is_col, is_vec_var);
+            let (expr_s, spec) = self.typed_collection_fmt(&a.value, &expr_s)
+                .unwrap_or_else(|| boring_vec_fmt(expr_s, is_col, is_vec_var));
             (expr_s, spec)
         }).collect();
         let placeholders: String = args_with_specs.iter().map(|(_, s)| *s).collect::<Vec<_>>().join(" ");

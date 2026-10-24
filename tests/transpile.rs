@@ -1021,6 +1021,7 @@ transpile_test!(try_wrap_double_handling);
 transpile_test!(throws_call_else_default);
 transpile_test!(throws_optional_return);
 transpile_test!(throws_optional_else_interp);
+transpile_test!(collection_interp);
 
 // docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and `boring build`
 // printed completely different things for `fromJson<T>` on a `@serde(untagged)` enum,

@@ -509,6 +509,8 @@ println!("Name: {}, Age: {}", name, age);
 println!("Next year: {}", age + 1);
 ```
 
+**Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type (`BoringFmt`/`BoringFmtMap`/`BoringFmtSet`); collections nested inside collections, optionals or tuples fall back to Rust's `{:?}` (strings quoted). Regression: `tests/cases/collection_interp.br`.
+
 ### Multi-line strings — `"""..."""`
 
 Triple-quoted strings span multiple lines. The indentation of the closing `"""` is stripped from every content line automatically, so the string body can be aligned with the surrounding code.

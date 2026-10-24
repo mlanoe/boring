@@ -1,0 +1,5 @@
+locals [1, 2, 3] [a, b] {k: 1} {7}
+param [1, 2, 3] [x, y] {z: 9} {5}
+fields [1, 2] [p] {q: 3}
+inferred [4, 5]
+ids [4, 5] / [a, b]

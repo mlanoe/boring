@@ -2449,6 +2449,29 @@ impl Transpiler {
              // Every user-defined error enum automatically satisfies the blanket impl below.\n\
              trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync {\n\
              \x20   fn as_any(&self) -> &dyn std::any::Any;\n\
+             // BoringFmtMap / BoringFmtSet — same unquoted rendering as the interpreter: {k: v} / {a, b}.\n\
+             struct BoringFmtMap<'a, K: std::fmt::Display, V: std::fmt::Display, S>(pub &'a std::collections::HashMap<K, V, S>);\n\
+             impl<'a, K: std::fmt::Display, V: std::fmt::Display, S> std::fmt::Display for BoringFmtMap<'a, K, V, S> {\n\
+             \x20   fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n\
+             \x20       write!(f, \"{{\")?;\n\
+             \x20       for (i, (k, v)) in self.0.iter().enumerate() {\n\
+             \x20           if i > 0 { write!(f, \", \")?; }\n\
+             \x20           write!(f, \"{}: {}\", k, v)?;\n\
+             \x20       }\n\
+             \x20       write!(f, \"}}\")\n\
+             \x20   }\n\
+             }\n\
+             struct BoringFmtSet<'a, T: std::fmt::Display, S>(pub &'a std::collections::HashSet<T, S>);\n\
+             impl<'a, T: std::fmt::Display, S> std::fmt::Display for BoringFmtSet<'a, T, S> {\n\
+             \x20   fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n\
+             \x20       write!(f, \"{{\")?;\n\
+             \x20       for (i, v) in self.0.iter().enumerate() {\n\
+             \x20           if i > 0 { write!(f, \", \")?; }\n\
+             \x20           write!(f, \"{}\", v)?;\n\
+             \x20       }\n\
+             \x20       write!(f, \"}}\")\n\
+             \x20   }\n\
+             }\n\n\
              }\n\
              impl<T: std::fmt::Display + std::any::Any + Send + Sync + 'static> BoringVal for T {\n\
              \x20   fn as_any(&self) -> &dyn std::any::Any { self }\n\
