@@ -1491,6 +1491,47 @@ mod boring_toml_tests {
     }
 }
 
+/// File-mode counterpart of `load_project_toml`: finds the `boring.toml` next to (or above)
+/// `path` via `find_project_root` and returns its parsed, include-resolved tables, or `None`
+/// when the file lives outside any project. Lets `boring build some/file.br` honour the same
+/// `[dependencies]`/`[external_types]`/`[derives]`/`[external_fns]` as project mode.
+fn load_toml_for_file(path: &str) -> Option<BoringToml> {
+    let root = find_project_root(Path::new(path))?;
+    let toml_src = std::fs::read_to_string(root.join("boring.toml")).ok()?;
+    let mut toml = BoringToml::parse(&toml_src);
+    for r in [
+        toml.resolve_external_types_includes(&root),
+        toml.resolve_derive_includes(&root),
+        toml.resolve_external_fns_includes(&root),
+    ] {
+        if let Err(e) = r {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+    }
+    Some(toml)
+}
+
+/// Config plus extra `[dependencies]` lines for a file-argument build.
+fn file_mode_config(path: &str, config: transpiler::TranspileConfig) -> (transpiler::TranspileConfig, Vec<String>) {
+    match load_toml_for_file(path) {
+        Some(toml) => (config_with_toml(config, &toml), toml.dependencies.clone()),
+        None => (config, Vec::new()),
+    }
+}
+
+/// Layers a project's transpile-affecting tables onto a CLI-derived config.
+fn config_with_toml(config: transpiler::TranspileConfig, toml: &BoringToml) -> transpiler::TranspileConfig {
+    transpiler::TranspileConfig {
+        external_tuple_structs: toml.external_tuple_structs.clone(),
+        external_const_fns: toml.external_const_fns.clone(),
+        external_optional_fields: toml.external_optional_fields.clone(),
+        known_derives: toml.derive_traits.clone(),
+        external_fns: toml.external_fns.clone(),
+        ..config
+    }
+}
+
 /// Load `boring.toml` from the current directory, or exit with an error.
 fn load_project_toml() -> (BoringToml, PathBuf) {
     let toml_path = PathBuf::from("boring.toml");
@@ -2184,35 +2225,9 @@ fn parse_build_command(build_args: &[String]) {
                 // same transpile config for the same source file. `find_project_root` is the
                 // same helper `print_rust`'s own `[deps]` resolution below already uses to
                 // locate this file's `boring.toml`.
-                let config = if let Some(root) = find_project_root(Path::new(path)) {
-                    match std::fs::read_to_string(root.join("boring.toml")) {
-                        Ok(toml_src) => {
-                            let mut toml = BoringToml::parse(&toml_src);
-                            if let Err(e) = toml.resolve_external_types_includes(&root) {
-                                eprintln!("error: {}", e);
-                                process::exit(1);
-                            }
-                            if let Err(e) = toml.resolve_derive_includes(&root) {
-                                eprintln!("error: {}", e);
-                                process::exit(1);
-                            }
-                            if let Err(e) = toml.resolve_external_fns_includes(&root) {
-                                eprintln!("error: {}", e);
-                                process::exit(1);
-                            }
-                            transpiler::TranspileConfig {
-                                external_tuple_structs: toml.external_tuple_structs.clone(),
-                                external_const_fns: toml.external_const_fns.clone(),
-                                external_optional_fields: toml.external_optional_fields.clone(),
-                                known_derives: toml.derive_traits.clone(),
-                                external_fns: toml.external_fns.clone(),
-                                ..config
-                            }
-                        }
-                        Err(_) => config,
-                    }
-                } else {
-                    config
+                let config = match load_toml_for_file(path) {
+                    Some(toml) => config_with_toml(config, &toml),
+                    None => config,
                 };
                 print_rust(path, config)
             }
@@ -2242,14 +2257,19 @@ fn parse_build_command(build_args: &[String]) {
     let project_dir = match (target_kernel, file, output_dir) {
         (true,  Some(path), _)          => { emit_kernel(path); return; }
         (true,  None, _)                => { build_project_kernel(); return; }
-        (false, Some(path), Some(dir))  => { emit_rust_to_dir(path, "0.1.0", config, dir.clone(), &[]); dir }
+        (false, Some(path), Some(dir))  => {
+            let (config, deps) = file_mode_config(path, config);
+            emit_rust_to_dir(path, "0.1.0", config, dir.clone(), &deps);
+            dir
+        }
         (false, Some(path), None)       => {
             let stem = std::path::Path::new(path)
                 .file_stem().map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "output".to_string());
             let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
             let dir = base.join(rust_dir_name_full(&stem, &config.threading, &config.mode));
-            emit_rust_with_config(path, config);
+            let (config, deps) = file_mode_config(path, config);
+            emit_rust_with_version_and_config(path, "0.1.0", config, &deps);
             dir
         }
         (false, None, _)                => {
@@ -2450,10 +2470,6 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
 }
 
 // â”€â”€â”€ Core: transpile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-fn emit_rust_with_config(path: &str, config: transpiler::TranspileConfig) {
-    emit_rust_with_version_and_config(path, "0.1.0", config, &[]);
-}
 
 /// Transpile a `.br` file and print the generated Rust source to stdout.
 fn print_rust(path: &str, config: transpiler::TranspileConfig) {
