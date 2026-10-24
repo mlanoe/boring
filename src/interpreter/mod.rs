@@ -2725,7 +2725,18 @@ impl Interpreter {
             return Err(e);
         }
 
+        // Function declarations are module-scoped, not executable statements. Register
+        // all free functions before evaluating top-level lets/statements so a module can
+        // initialize a value by calling a function declared later in the same file. The
+        // transpilers already collect these declarations up front during `pre_scan`.
+        if let Err(Signal::Error(e)) = self.pre_register_free_functions(&program.items, Rc::clone(&self.global)) {
+            return Err(e);
+        }
+
         for item in &program.items {
+            if Self::is_pre_registered_free_function(item) {
+                continue;
+            }
             if let Err(sig) = self.exec_item(item, Rc::clone(&self.global)) {
                 match sig {
                     Signal::Error(e) => return Err(e),
@@ -2768,6 +2779,27 @@ impl Interpreter {
             }
         }
 
+        Ok(())
+    }
+
+    fn is_pre_registered_free_function(item: &Item) -> bool {
+        matches!(item, Item::Fn(decl) if !decl.is_native && decl.qualifier.is_none())
+    }
+
+    fn pre_register_free_functions(&mut self, items: &[Item], env: EnvRef) -> Result<(), Signal> {
+        for item in items {
+            match item {
+                Item::Fn(_) if Self::is_pre_registered_free_function(item) => {
+                    self.exec_item(item, Rc::clone(&env))?;
+                }
+                // `mod` is flat-scoped in the interpreter, so its free functions belong
+                // to the same environment and need the same forward-reference semantics.
+                Item::Mod(decl) => {
+                    self.pre_register_free_functions(&decl.items, Rc::clone(&env))?;
+                }
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -2967,7 +2999,12 @@ impl Interpreter {
 
         let module_env = Env::child(Rc::clone(&env));
         self.module_files.push((Rc::clone(&module_env), canonical.clone()));
+        let r = self.pre_register_free_functions(&program.items, Rc::clone(&module_env));
+        self.tag_error_file(&module_env, r)?;
         for item in &program.items {
+            if Self::is_pre_registered_free_function(item) {
+                continue;
+            }
             let r = self.exec_item(item, Rc::clone(&module_env));
             self.tag_error_file(&module_env, r)?;
         }
@@ -3070,7 +3107,11 @@ impl Interpreter {
         let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
+        self.pre_register_free_functions(&program.items, Rc::clone(&module_env))?;
         for item in &program.items {
+            if Self::is_pre_registered_free_function(item) {
+                continue;
+            }
             self.exec_item(item, Rc::clone(&module_env))?;
         }
         self.loaded.remove(&synthetic);
@@ -3133,7 +3174,12 @@ impl Interpreter {
 
         let module_env = Env::child(Rc::clone(&env));
         self.module_files.push((Rc::clone(&module_env), canonical.clone()));
+        let r = self.pre_register_free_functions(&program.items, Rc::clone(&module_env));
+        self.tag_error_file(&module_env, r)?;
         for item in &program.items {
+            if Self::is_pre_registered_free_function(item) {
+                continue;
+            }
             let r = self.exec_item(item, Rc::clone(&module_env));
             self.tag_error_file(&module_env, r)?;
         }
@@ -3603,7 +3649,11 @@ impl Interpreter {
             // `mod name:` — flat scoping: items are executed in the current env.
             // Module structure is preserved in the AST for the Rust transpiler.
             Item::Mod(decl) => {
+                // The containing program/module pre-pass recursively registered these.
                 for item in &decl.items {
+                    if Self::is_pre_registered_free_function(item) {
+                        continue;
+                    }
                     self.exec_item(item, Rc::clone(&env))?;
                 }
                 Ok(())
