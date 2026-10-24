@@ -67,3 +67,34 @@ fn metal_build_accepts_the_same_forward_function_graph() {
     assert!(dir.join("test_metal/src/main.rs").is_file());
     assert!(dir.join("test_metal/kernels/main.metal").is_file());
 }
+
+// A module's own `def` must overload a same-named function it imports with a glob `use`
+// (pre-registration used to define the local one first, so the import then clobbered it).
+#[test]
+fn run_overloads_local_function_with_glob_imported_same_name() {
+    let dir = fixture_dir("import_overload");
+    fs::write(
+        dir.join("lib.br"),
+        "def float clampTo(float v, float lo, float hi):\n    return v\n",
+    )
+    .unwrap();
+    let source = dir.join("test.br");
+    fs::write(
+        &source,
+        "use lib.*\n\ndef int clampTo(int v, int lo, int hi):\n    return v\n\nlet int a = 3\nprint(clampTo(a + 1, 0, 9))\nprint(clampTo(1.5, 0.0, 9.0))\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .arg("run")
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "boring run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4\n1.5");
+}

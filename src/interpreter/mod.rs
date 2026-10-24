@@ -2784,9 +2784,28 @@ impl Interpreter {
 
     fn is_pre_registered_free_function(item: &Item) -> bool {
         matches!(item, Item::Fn(decl) if !decl.is_native && decl.qualifier.is_none())
+            || matches!(item, Item::Use(_))
     }
 
     fn pre_register_free_functions(&mut self, items: &[Item], env: EnvRef) -> Result<(), Signal> {
+        // Imports first: a module's own `def` must overload an imported same-named function
+        // (merged by `exec_item`), not be clobbered when the `use` binds afterwards.
+        self.pre_register_uses(items, Rc::clone(&env))?;
+        self.pre_register_fns(items, env)
+    }
+
+    fn pre_register_uses(&mut self, items: &[Item], env: EnvRef) -> Result<(), Signal> {
+        for item in items {
+            match item {
+                Item::Use(_) => self.exec_item(item, Rc::clone(&env))?,
+                Item::Mod(decl) => self.pre_register_uses(&decl.items, Rc::clone(&env))?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn pre_register_fns(&mut self, items: &[Item], env: EnvRef) -> Result<(), Signal> {
         for item in items {
             match item {
                 Item::Fn(_) if Self::is_pre_registered_free_function(item) => {
@@ -2795,7 +2814,7 @@ impl Interpreter {
                 // `mod` is flat-scoped in the interpreter, so its free functions belong
                 // to the same environment and need the same forward-reference semantics.
                 Item::Mod(decl) => {
-                    self.pre_register_free_functions(&decl.items, Rc::clone(&env))?;
+                    self.pre_register_fns(&decl.items, Rc::clone(&env))?;
                 }
                 _ => {}
             }
