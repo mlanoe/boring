@@ -14,10 +14,11 @@ pub(super) fn adapters(
     plain_kernel_names: &[String],
     block_sizes: &std::collections::HashMap<String, (u32, u32, u32)>,
     needs_subgroups: bool,
+    needs_f16: bool,
 ) -> (String, Vec<(String, Vec<RouteField>)>) {
     let mut out = String::new();
     out.push_str("\n// ---- multi-target adapters ----\n");
-    out.push_str(&init_fn(needs_subgroups));
+    out.push_str(&init_fn(needs_subgroups, needs_f16));
     let mut routes = Vec::new();
     for k in kernels {
         if !plain_kernel_names.contains(&k.name) {
@@ -31,12 +32,10 @@ pub(super) fn adapters(
     (out, routes)
 }
 
-fn init_fn(needs_subgroups: bool) -> String {
-    let features = if needs_subgroups {
-        "        let use_subgroups = adapter.features().contains(wgpu::Features::SUBGROUP);\n        let required_features = if use_subgroups { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() };\n"
-    } else {
-        "        let required_features = wgpu::Features::empty();\n"
-    };
+fn init_fn(needs_subgroups: bool, needs_f16: bool) -> String {
+    let subgroup = if needs_subgroups { "        if adapter.features().contains(wgpu::Features::SUBGROUP) { required_features |= wgpu::Features::SUBGROUP; }\n" } else { "" };
+    let f16 = if needs_f16 { "        if !adapter.features().contains(wgpu::Features::SHADER_F16) { return false; }\n        required_features |= wgpu::Features::SHADER_F16;\n" } else { "" };
+    let features = format!("        let mut required_features = wgpu::Features::empty();\n{subgroup}{f16}");
     format!(
         "pub fn __boring_unified_init() -> bool {{
     if __BORING_GPU_DEVICE.get().is_some() {{ return true; }}

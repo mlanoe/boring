@@ -359,7 +359,7 @@ impl Transpiler {
                     }
                 }
             };
-            self.line(&format!("{}{}: {},", fvis, f.name, ty_s));
+            self.line(&format!("{}{}: {},", fvis, escape_rust_keyword(&f.name), ty_s));
         }
 
         // Fields from init (no-body form)
@@ -453,14 +453,14 @@ impl Transpiler {
                 let is_transient = self.transient_fields.contains_key(&key);
                 if let Some(def) = &f.default {
                     let val = self.emit_field_default_value(&s.name, &f.name, &f.ty, def);
-                    self.line(&format!("{}: {},", f.name, val));
+                    self.line(&format!("{}: {},", escape_rust_keyword(&f.name), val));
                 } else if is_transient {
                     // transient fields without explicit default → Cell/RefCell::new(None)
                     let is_copy = Self::is_copy_type(&f.ty);
                     let init = if is_copy { "std::cell::Cell::new(None)" } else { "std::cell::RefCell::new(None)" };
-                    self.line(&format!("{}: {},", f.name, init));
+                    self.line(&format!("{}: {},", escape_rust_keyword(&f.name), init));
                 } else {
-                    self.line(&format!("{}: None,", f.name));
+                    self.line(&format!("{}: None,", escape_rust_keyword(&f.name)));
                 }
             }
             self.indent -= 1;
@@ -834,17 +834,17 @@ impl Transpiler {
                             // branch/doc in the auto-`new()` path above.
                             let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
                             let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
-                            self.line(&format!("{}: BoringObserved::new({}),", f.name, wrapped));
+                            self.line(&format!("{}: BoringObserved::new({}),", escape_rust_keyword(&f.name), wrapped));
                         } else if is_actor || is_actor_task {
                             let inner = Self::mutex_inner(&f.ty).unwrap_or(&f.ty);
                             let raw = self.emit_let_value(Some(inner), def);
                             let init = if is_actor_task { self.emit_actor_task_new(&raw) } else { self.emit_actor_new(&raw) };
-                            self.line(&format!("{}: {},", f.name, init));
+                            self.line(&format!("{}: {},", escape_rust_keyword(&f.name), init));
                         } else if is_guard || is_guard_task {
                             let inner = Self::rwlock_inner(&f.ty).unwrap_or(&f.ty);
                             let raw = self.emit_let_value(Some(inner), def);
                             let init = if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) };
-                            self.line(&format!("{}: {},", f.name, init));
+                            self.line(&format!("{}: {},", escape_rust_keyword(&f.name), init));
                         } else {
                             let val = self.emit_let_value(Some(&f.ty), def);
                             if f.transient {
@@ -854,9 +854,9 @@ impl Transpiler {
                                 } else {
                                     format!("std::cell::RefCell::new({})", val)
                                 };
-                                self.line(&format!("{}: {},", f.name, wrapped));
+                                self.line(&format!("{}: {},", escape_rust_keyword(&f.name), wrapped));
                             } else {
-                                self.line(&format!("{}: {},", f.name, val));
+                                self.line(&format!("{}: {},", escape_rust_keyword(&f.name), val));
                             }
                         }
                     }
@@ -960,12 +960,12 @@ impl Transpiler {
                             // auto-`new()` path above.
                             let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), def);
                             let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
-                            extras.push(format!("{}: BoringObserved::new({})", f.name, wrapped));
+                            extras.push(format!("{}: BoringObserved::new({})", escape_rust_keyword(&f.name), wrapped));
                         } else if let Some(def) = &f.default {
                             let val = self.emit_let_value(Some(&f.ty), def);
-                            extras.push(format!("{}: {}", f.name, val));
+                            extras.push(format!("{}: {}", escape_rust_keyword(&f.name), val));
                         } else if matches!(f.ty, Type::Optional(_)) {
-                            extras.push(format!("{}: None", f.name));
+                            extras.push(format!("{}: None", escape_rust_keyword(&f.name)));
                         } else {
                             // Zero-initialize numeric/bool fields
                             let zero = match &f.ty {
@@ -975,12 +975,12 @@ impl Transpiler {
                                 Type::Str   => "Arc::<str>::from(\"\")".to_string(),
                                 _           => "Default::default()".to_string(),
                             };
-                            extras.push(format!("{}: {}", f.name, zero));
+                            extras.push(format!("{}: {}", escape_rust_keyword(&f.name), zero));
                         }
                     }
                 }
                 let mut all_fields: Vec<String> = field_vals.iter()
-                    .map(|(f, v)| format!("{}: {}", f, v)).collect();
+                    .map(|(f, v)| format!("{}: {}", escape_rust_keyword(f), v)).collect();
                 all_fields.extend(extras);
                 self.line(&format!("{} {{ {} }}", struct_name, all_fields.join(", ")));
             } else {
@@ -994,7 +994,7 @@ impl Transpiler {
                         Type::Str   => "Arc::<str>::from(\"\")".to_string(),
                         _           => "Default::default()".to_string(),
                     };
-                    format!("{}: {}", f.name, zero)
+                    format!("{}: {}", escape_rust_keyword(&f.name), zero)
                 }).collect();
                 if !zero_fields.is_empty() {
                     self.line(&format!("let mut __self = {} {{ {} }};", struct_name, zero_fields.join(", ")));

@@ -12,9 +12,10 @@ mut [float16]'kernel'unified cache = [0.0 as float16 for ..<count]
 ```
 
 Metal emits native MSL `half`, CUDA emits `__half`, and ROCm/HIP emits
-`_Float16`. The wgpu backend currently rejects `float16` with a shader diagnostic:
-its WGSL pipeline does not yet request the optional `shader-f16` feature, so it
-must not silently widen storage to `f32`.
+`_Float16`. The wgpu backend emits WGSL `f16`, enables the optional language
+extension, and requests `wgpu::Features::SHADER_F16` whenever a generated
+shader uses it. Device creation reports a clear capability error if the selected
+adapter lacks `shader-f16`; buffers are never silently widened to `f32`.
 
 The interpreter stores scalar f16 values in its generic numeric value container,
 but rounds them through IEEE binary16 on every explicit conversion. Transpiled

@@ -29,6 +29,11 @@ pub(super) fn emit_device_wgsl(
     real.program_uses_warp = uses_warp;
     real.emit_program(program, effective_kernels, kernel_consts);
 
+    let mut real_out = real.out;
+    let uses_f16 = wgsl_uses_f16(&real_out);
+    if uses_f16 {
+        real_out.insert_str(0, "enable f16;\n");
+    }
     let mut errors = real.errors;
 
     let emulated = if uses_warp {
@@ -48,12 +53,20 @@ pub(super) fn emit_device_wgsl(
                 errors.push(err);
             }
         }
-        Some(e.out)
+        let mut out = e.out;
+        if uses_f16 {
+            out.insert_str(0, "enable f16;\n");
+        }
+        Some(out)
     } else {
         None
     };
 
-    (real.out, emulated, errors)
+    (real_out, emulated, errors)
+}
+
+fn wgsl_uses_f16(source: &str) -> bool {
+    source.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|word| word == "f16")
 }
 
 /// Which `.warp.*` codegen path this emitter pass produces. wgpu is the
@@ -803,10 +816,7 @@ impl DeviceEmitter {
             if is_buffer_field(f) {
                 if let Some(inner) = buffer_field_elem_ty(f) {
                     if let Some(name) = buffer_elem_unsupported_width_name(inner) {
-                        let message = if name == "float16" {
-                            format!("kernel {}: buffer field '{}' has element type `float16`, which is not supported on --target wgpu — this backend does not enable WGSL's optional `f16` feature. Use `float32` or select metal/cuda/rocm/simd", decl.name, f.name)
-                        } else {
-                            format!(
+                        let message = format!(
                                 "kernel {}: buffer field '{}' has element type `{}`, which is not \
                                  supported as a storage-buffer element on --target wgpu — WGSL has no \
                                  matching integer width, so this field would be declared as a 4-byte \
@@ -815,8 +825,7 @@ impl DeviceEmitter {
                                  address the wrong bytes. Use `int32`/`uint32` (or `float32`) instead",
                                 decl.name, f.name, name,
                                 if name.starts_with('u') { "u32" } else { "i32" }, name
-                            )
-                        };
+                            );
                         self.errors.push(TranspileError::at(message, f.line, f.col));
                     } else if packed_byte_kind_of_ty(inner).is_some()
                         && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
@@ -946,15 +955,15 @@ impl DeviceEmitter {
                         self.line(&format!("{name}_h: i32,"));
                     }
                     Type::ArrayN(inner, n) => {
-                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_scalar(inner), n));
+                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_param_scalar(inner), n));
                     }
                     ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
                         let (elem, _) = ty.as_labeled_array().unwrap();
                         let len = ty.labeled_array_len().unwrap();
-                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_scalar(elem), len));
+                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_param_scalar(elem), len));
                     }
                     _ => {
-                        self.line(&format!("{}: {},", name, wgsl_scalar(&f.ty)));
+                        self.line(&format!("{}: {},", name, wgsl_param_scalar(&f.ty)));
                     }
                 }
             }
@@ -1056,7 +1065,11 @@ impl DeviceEmitter {
                             // Fixed arrays are accessed as {pvar}.field[i] directly.
                         }
                         _ => {
-                            self.line(&format!("let {name}: {} = {pvar}.{name};", wgsl_scalar(&f.ty)));
+                            if is_float16_type(&f.ty) {
+                                self.line(&format!("let {name}: f16 = f16({pvar}.{name});"));
+                            } else {
+                                self.line(&format!("let {name}: {} = {pvar}.{name};", wgsl_scalar(&f.ty)));
+                            }
                         }
                     }
                 }
@@ -1847,9 +1860,18 @@ impl DeviceEmitter {
                     if let Some(field) = self.current_fields.iter().find(|f| f.name == *name) {
                         let is_fixed_array = matches!(field.ty, Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some();
                         if is_params_field(field) && is_fixed_array {
+                            let elem_is_f16 = match &field.ty {
+                                Type::ArrayN(inner, _) => is_float16_type(inner),
+                                ty => ty.as_labeled_array().is_some_and(|(inner, _)| is_float16_type(inner)),
+                            };
                             let pvar = format!("{}_params", self.current_kernel.to_lowercase());
                             let idx_s = self.expr(idx);
-                            return format!("{}.{}[u32({})]", pvar, wgsl_safe_ident(name), idx_s);
+                            let indexed = format!("{}.{}[u32({})]", pvar, wgsl_safe_ident(name), idx_s);
+                            return if elem_is_f16 {
+                                format!("f16({indexed})")
+                            } else {
+                                indexed
+                            };
                         }
                     }
                     // A `uint8`/`int8`/`uint16`/`int16` buffer field — its backing
@@ -2148,20 +2170,18 @@ fn buffer_field_elem_ty(f: &KernelFieldDecl) -> Option<&Type> {
 /// generated Rust) uploads/sizes the buffer at the type's real, different byte width. Any
 /// element read/written beyond the first ends up at the wrong offset — not a narrowing,
 /// an outright stride mismatch. Returns `None` for types WGSL represents natively
-/// (`int32`/`uint32`/`float32`), narrows self-consistently (`int`/`uint`/`float64`,
+/// (`int32`/`uint32`/`float16`/`float32`), narrows self-consistently (`int`/`uint`/`float64`,
 /// handled by `wgsl_narrowed_width`/`wgsl_unsupported_f64` instead), or is transparently
 /// packed into `array<u32>` words (`uint8`/`int8`/`uint16`/`int16`, see
 /// `packed_byte_kind_of_ty` and `wgsl_buffer_type`) — still genuinely unrepresentable:
 /// `int64`/`uint64`/`int128`/`uint128` (64/128-bit ints have no packing story here).
 fn buffer_elem_unsupported_width_name(ty: &Type) -> Option<&'static str> {
     match ty {
-        Type::Float16 => Some("float16"),
         Type::Int64 => Some("int64"),
         Type::Uint64 => Some("uint64"),
         Type::Int128 => Some("int128"),
         Type::Uint128 => Some("uint128"),
         Type::Named(n) => match n.as_str() {
-            "float16" | "f16" => Some("float16"),
             "int64" | "i64" | "int128" | "i128" => Some("int64/int128"),
             "uint64" | "u64" | "uint128" | "u128" => Some("uint64/uint128"),
             _ => None,
@@ -2285,6 +2305,19 @@ fn wgsl_narrowed_width(name: &str, fallback: &str) -> String {
     format!("/* WARNING: `{}` is narrowed to 32-bit on --target wgpu (WGSL has no 64-bit integers) — values outside {} range wrap silently */ {}", name, fallback, fallback)
 }
 
+fn is_float16_type(ty: &Type) -> bool {
+    match ty {
+        Type::Float16 => true,
+        Type::Named(n) => matches!(n.as_str(), "float16" | "f16"),
+        Type::Qualified(inner, _) => is_float16_type(inner),
+        _ => false,
+    }
+}
+
+fn wgsl_param_scalar(ty: &Type) -> String {
+    if is_float16_type(ty) { "f32".into() } else { wgsl_scalar(ty) }
+}
+
 fn wgsl_scalar(ty: &Type) -> String {
     match ty {
         Type::Int              => wgsl_narrowed_width("int", "i32"),
@@ -2299,7 +2332,7 @@ fn wgsl_scalar(ty: &Type) -> String {
         Type::Uint64              => wgsl_unsupported_width("uint64", "u32"),
         Type::Int128              => wgsl_unsupported_width("int128", "i32"),
         Type::Uint128              => wgsl_unsupported_width("uint128", "u32"),
-        Type::Float16            => "f32 /* ERROR: `float16` is not supported by the wgpu backend (shader-f16 is not enabled) */".into(),
+        Type::Float16            => "f16".into(),
         Type::Float32            => "f32".into(),
         Type::Float64            => wgsl_unsupported_f64("f32"),
         // bool is not allowed in storage/uniform buffers in WGSL — use u32.
@@ -2309,7 +2342,7 @@ fn wgsl_scalar(ty: &Type) -> String {
             "uint"  => wgsl_narrowed_width("uint", "u32"),
             "i32" => "i32".to_string(),
             "u32" => "u32".to_string(),
-            "float16" | "f16" => "f32 /* ERROR: `float16` is not supported by the wgpu backend (shader-f16 is not enabled) */".to_string(),
+            "float16" | "f16" => "f16".to_string(),
             "float32" | "f32" => "f32".to_string(),
             "float" | "float64" | "f64" => wgsl_unsupported_f64("f32"),
             "bool"                  => "u32".to_string(),
@@ -2629,7 +2662,8 @@ fn map_builtin_fn(name: &str) -> String {
         // all here (see `wgsl_unsupported_f64`'s doc comment) — emit the same
         // clean compile-error comment the type-level check already produces,
         // instead of passing the call through verbatim as invalid WGSL.
-        "float32" => "f32".into(),
+        "float16" | "f16" => "f16".into(),
+        "float32" | "f32" => "f32".into(),
         "float64" => wgsl_unsupported_f64("f32"),
         "abs"   => "abs".into(),
         "min"   => "min".into(),

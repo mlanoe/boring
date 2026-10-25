@@ -1931,3 +1931,128 @@ with c:
     assert!(host.contains("clone_htod::<f32, _>(&(*A))"), "{host}");
     assert!(host.contains("C.lock()"), "{host}");
 }
+
+// ─── Rust keywords used as Boring identifiers ───
+
+const KEYWORD_IDENTS: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+int twice(int ref, int final):
+    ref * final
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+let where = kernel.lastChoice(k)
+let gen = twice(3, 7)
+for dyn in [1, 2]:
+    print "dyn {dyn}"
+var virtual = 3
+virtual = virtual + 1
+let f = (int box): box + 1
+print "{where} {gen} {f(1)} {k.buf[3]}"
+"#;
+
+fn assert_keyword_idents_escaped(rs: &str) {
+    for needle in [
+        "let r#where = ", "let r#gen = ", "r#where, r#gen, f(1)", "fn twice(r#ref: isize, r#final: isize)",
+        "r#ref.wrapping_mul(r#final)", "for r#dyn in ", "|r#box| ",
+    ] {
+        assert!(rs.contains(needle), "missing `{needle}` in generated host code:\n{rs}");
+    }
+    for bad in ["let where ", "let gen ", "for dyn in ", "|box|", "let mut virtual "] {
+        assert!(!rs.contains(bad), "unescaped `{bad}` in generated host code:\n{rs}");
+    }
+}
+
+#[test]
+fn rust_keyword_identifiers_are_escaped_in_cuda_host_code() {
+    let (_dev, rs) = cuda_codegen("keyword_idents", KEYWORD_IDENTS);
+    assert_keyword_idents_escaped(&rs);
+}
+
+const TOP_LEVEL_VAR_SHARED_WITH_FN: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+var counter = 3
+
+int readCounter():
+    counter
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+counter = counter + 1
+print "main {counter} helper {readCounter()}"
+"#;
+
+/// `main` and a helper function must share one `static`, not `main` a local copy.
+#[test]
+fn top_level_var_read_by_function_goes_through_the_static_in_cuda_main() {
+    let (_dev, rs) = cuda_codegen("toplevel_var_shared", TOP_LEVEL_VAR_SHARED_WITH_FN);
+    assert!(rs.contains("static COUNTER: std::sync::LazyLock"), "missing static:\n{rs}");
+    assert!(!rs.contains("let mut counter"), "main shadows the static with a local:\n{rs}");
+    assert!(rs.contains("*COUNTER.lock()"), "main does not write through the static:\n{rs}");
+}
+
+const KEYWORD_FIELDS: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+struct Box2:
+    var int final = 1
+    var int move = 2
+
+    def bump():
+        final += 1
+        move = move + final
+
+    req int total():
+        final + move
+
+struct Wrap:
+    var Box2 inner = Box2()
+    var int priv = 0
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+mut b = Box2()
+b.final = 5
+b.final += 1
+b.bump()
+print "b {b.final} {b.move} {b.total()}"
+mut w = Wrap()
+w.inner.final = 9
+w.priv = w.inner.final + 1
+print "w {w.inner.final} {w.priv}"
+let c = Box2(final = 7, move = 8)
+print "c {c.final} {c.move}"
+"#;
+const KEYWORD_FIELDS_OUTPUT: &str = "b 7 9 16\nw 9 10\nc 7 8";
+
+fn assert_keyword_fields_escaped(rs: &str) {
+    for needle in ["r#final: ", "r#move: ", "self.r#final", "b.r#final = ", "w.inner.r#final = ", "Box2 { r#final: 7, r#move: 8 }", "w.r#priv = "] {
+        assert!(rs.contains(needle), "missing `{needle}` in generated host code:\n{rs}");
+    }
+}
+
+#[test]
+fn rust_keyword_struct_fields_are_escaped_in_cuda_host_code() {
+    let (_dev, rs) = cuda_codegen("keyword_fields", KEYWORD_FIELDS);
+    assert_keyword_fields_escaped(&rs);
+}

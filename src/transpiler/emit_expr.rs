@@ -4800,11 +4800,11 @@ impl Transpiler {
                                 } else {
                                     format!("std::cell::RefCell::new({})", default_val)
                                 };
-                                Some(format!("{}: {}", fname, init))
+                                Some(format!("{}: {}", escape_rust_keyword(fname), init))
                             } else if let Some(Some(def)) = init_defaults.get(i) {
-                                Some(format!("{}: {}", fname, def))
+                                Some(format!("{}: {}", escape_rust_keyword(fname), def))
                             } else if let Some(def) = self.struct_field_defaults.get(&key).cloned() {
-                                Some(format!("{}: {}", fname, self.emit_field_default_value(name, fname, fty, &def)))
+                                Some(format!("{}: {}", escape_rust_keyword(fname), self.emit_field_default_value(name, fname, fty, &def)))
                             } else if matches!(fty, Type::Optional(_)) {
                                 Some(format!("{}: None", fname))
                             } else {
@@ -4841,7 +4841,7 @@ impl Transpiler {
                         .and_then(|fs| fs.iter().find(|(n, _)| n == label))
                         .map(|(_, ty)| ty);
                     let val = self.emit_struct_field_value(field_ty, &a.value);
-                    format!("{}: {}", label, val)
+                    format!("{}: {}", escape_rust_keyword(label), val)
                 })
                 .collect();
             // Combine: explicit fields first, then spread bases.
@@ -5031,7 +5031,7 @@ impl Transpiler {
                     } else {
                         self.emit_struct_field_value(field_ty, eff_value)
                     };
-                    format!("{}: {}", label, val)
+                    format!("{}: {}", escape_rust_keyword(label), val)
                 })
                 .collect();
             // Append transient fields that weren't provided by the user.
@@ -5052,7 +5052,7 @@ impl Transpiler {
                         } else {
                             format!("std::cell::RefCell::new({})", default_val)
                         };
-                        fields.push(format!("{}: {}", field_name, init));
+                        fields.push(format!("{}: {}", escape_rust_keyword(field_name), init));
                     }
                 }
             }
@@ -5077,7 +5077,7 @@ impl Transpiler {
                             crate::transpiler::ThreadingMode::Multi => self.emit_actor_new(&raw),
                             crate::transpiler::ThreadingMode::Single => format!("Rc::new(RefCell::new({}))", raw),
                         };
-                        fields.push(format!("{}: {}", field_name, init));
+                        fields.push(format!("{}: {}", escape_rust_keyword(field_name), init));
                     }
                 }
             }
@@ -5086,7 +5086,7 @@ impl Transpiler {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
                         let raw = missing_lock_init(key, Self::mutex_inner);
-                        fields.push(format!("{}: {}", field_name, self.emit_actor_task_new(&raw)));
+                        fields.push(format!("{}: {}", escape_rust_keyword(field_name), self.emit_actor_task_new(&raw)));
                     }
                 }
             }
@@ -5094,7 +5094,7 @@ impl Transpiler {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
                         let raw = missing_lock_init(key, Self::rwlock_inner);
-                        fields.push(format!("{}: {}", field_name, self.emit_guard_new(&raw)));
+                        fields.push(format!("{}: {}", escape_rust_keyword(field_name), self.emit_guard_new(&raw)));
                     }
                 }
             }
@@ -5102,7 +5102,7 @@ impl Transpiler {
                 if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
                     if !provided.contains(field_name) {
                         let raw = missing_lock_init(key, Self::rwlock_inner);
-                        fields.push(format!("{}: {}", field_name, self.emit_guard_task_new(&raw)));
+                        fields.push(format!("{}: {}", escape_rust_keyword(field_name), self.emit_guard_task_new(&raw)));
                     }
                 }
             }
@@ -5145,7 +5145,7 @@ impl Transpiler {
                             // Omitted field with a declared `= expr` default: always take it
                             // (not only under `_`) — otherwise rustc fails with E0063.
                             let val = self.emit_struct_field_value(Some(fty), &def);
-                            fields.push(format!("{}: {}", fname, val));
+                            fields.push(format!("{}: {}", escape_rust_keyword(fname), val));
                         } else if has_default_rest {
                             // `_` present: prefer the field's own declared `= expr` default
                             // (e.g. `float scale = 1.0`) over the blanket `Default::default()`
@@ -5154,7 +5154,7 @@ impl Transpiler {
                             // rwlock fields were already filled (with their own defaults) above.
                             if let Some(def) = self.struct_field_defaults.get(&tkey).cloned() {
                                 let val = self.emit_struct_field_value(Some(fty), &def);
-                                fields.push(format!("{}: {}", fname, val));
+                                fields.push(format!("{}: {}", escape_rust_keyword(fname), val));
                             }
                         }
                     }
@@ -5298,7 +5298,7 @@ impl Transpiler {
                             } else {
                                 self.emit_struct_field_value(Some(fty), effective_value)
                             };
-                            format!("{}: {}", fname, val)
+                            format!("{}: {}", escape_rust_keyword(fname), val)
                         })
                         .collect();
                     // Fill missing fields with defaults if any.
@@ -5314,12 +5314,12 @@ impl Transpiler {
                                 } else {
                                     format!("std::cell::RefCell::new({})", default_val)
                                 };
-                                Some(format!("{}: {}", fname, init))
+                                Some(format!("{}: {}", escape_rust_keyword(fname), init))
                             } else if let Some(Some(def)) = init_defaults.get(param_idx) {
                                 // Init param had an explicit default value.
-                                Some(format!("{}: {}", fname, def))
+                                Some(format!("{}: {}", escape_rust_keyword(fname), def))
                             } else if let Some(def) = self.struct_field_defaults.get(&key).cloned() {
-                                Some(format!("{}: {}", fname, self.emit_struct_field_value(Some(fty), &def)))
+                                Some(format!("{}: {}", escape_rust_keyword(fname), self.emit_struct_field_value(Some(fty), &def)))
                             } else if matches!(fty, Type::Optional(_)) {
                                 Some(format!("{}: None", fname))
                             } else {

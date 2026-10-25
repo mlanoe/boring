@@ -938,12 +938,16 @@ pub(crate) fn camel_to_snake(s: &str) -> String {
 /// Wrap a boring identifier in `r#` if it's a Rust keyword.
 pub(crate) fn escape_rust_keyword(name: &str) -> String {
     match name {
+        // Keywords that cannot be raw identifiers (`r#super` is a hard error): rename instead.
+        // `self`/`Self` are the method receiver, never a user binding, so they pass through.
+        "super" | "crate" => format!("{name}_"),
         "fn" | "type" | "let" | "use" | "mod" | "impl" | "trait" | "enum" | "struct"
         | "match" | "loop" | "while" | "for" | "if" | "else" | "return" | "break"
-        | "continue" | "move" | "ref" | "in" | "as" | "where" | "pub" | "super"
-        | "crate" | "const" | "static" | "mut" | "unsafe" | "extern" | "async"
+        | "continue" | "move" | "ref" | "in" | "as" | "where" | "pub"
+        | "const" | "static" | "mut" | "unsafe" | "extern" | "async"
         | "await" | "dyn" | "box" | "abstract" | "become" | "do" | "final"
         | "override" | "priv" | "typeof" | "unsized" | "virtual" | "yield" | "try"
+        | "gen" | "macro"
         => format!("r#{}", name),
         other => other.to_string(),
     }

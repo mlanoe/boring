@@ -21,10 +21,12 @@ pub(super) fn emit_host_rs(
     has_boring_main: bool,
     boring_main_throws: bool,
     has_emulated_shader: bool,
+    requires_f16: bool,
     screen_setup_fields: &[(String, String)],
 ) -> (String, Vec<TranspileError>) {
     let mut e = HostEmitter::new(program, kernel_names, effective_kernels, general_code, has_boring_main, boring_main_throws);
     e.has_emulated_shader = has_emulated_shader;
+    e.requires_f16 = requires_f16;
     e.setup_fields = screen_setup_fields.to_vec();
     e.emit();
     let pending = std::mem::take(&mut *e.expr_errors.borrow_mut());
@@ -67,6 +69,9 @@ struct HostEmitter<'a> {
     /// the `wgpu::Features::SUBGROUP` runtime detection and dual-shader-module
     /// dispatch in `emit_pipeline_init`/wherever the shader module is created.
     has_emulated_shader: bool,
+    /// The emitted WGSL uses the optional `f16` extension, so device creation
+    /// must require `Features::SHADER_F16` instead of failing later at pipeline creation.
+    requires_f16: bool,
     /// `(name, type)` of the values `__boring_screen_setup` returns (`__App` fields).
     setup_fields: Vec<(String, String)>,
     /// Names of the `let`s of the render loop body seen so far (assignable when `var`).
@@ -103,7 +108,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), frame_locals: Default::default(), frame_local_types: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new(), expr_errors: Default::default() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, requires_f16: false, setup_fields: Vec::new(), frame_locals: Default::default(), frame_local_types: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new(), expr_errors: Default::default() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -1069,31 +1074,24 @@ impl<'a> HostEmitter<'a> {
             self.line("async fn async_main() {");
             self.line("    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
             self.line("    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.expect(\"No GPU adapter found\");");
+            self.line("    let mut __boring_required_features = wgpu::Features::empty();");
             if self.has_emulated_shader {
                 // `.warp.*` is used somewhere in this program — opportunistically
                 // request `Features::SUBGROUP` (only if the adapter actually supports
                 // it; `request_device` hard-fails if you require an unsupported
                 // feature) so `device.features()` at shader-creation time can pick
                 // the real-subgroup module over the shared-memory-emulated one.
-                self.line("    let __boring_use_subgroups = adapter.features().contains(wgpu::Features::SUBGROUP);");
-                self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {");
-                self.line("        required_features: if __boring_use_subgroups { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },");
-                // `wgpu::Limits::default()` is the conservative,
-                // portable-across-everything default (128 MiB storage-buffer
-                // binding, 256 MiB buffer size) — far below what a real
-                // desktop/discrete GPU actually supports. Requesting the
-                // adapter's own reported limits instead lets buffers larger
-                // than that artificial cap (e.g. large ML model weights) bind
-                // successfully on hardware that supports it.
-                self.line("        required_limits: adapter.limits(),");
-                self.line("        ..Default::default()");
-                self.line("    }, None).await.expect(\"Failed to create device\");");
-            } else {
-                self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {");
-                self.line("        required_limits: adapter.limits(),");
-                self.line("        ..Default::default()");
-                self.line("    }, None).await.expect(\"Failed to create device\");");
+                self.line("    if adapter.features().contains(wgpu::Features::SUBGROUP) { __boring_required_features |= wgpu::Features::SUBGROUP; }");
             }
+            if self.requires_f16 {
+                self.line("    assert!(adapter.features().contains(wgpu::Features::SHADER_F16), \"This GPU adapter does not support the shader-f16 feature required by this program\");");
+                self.line("    __boring_required_features |= wgpu::Features::SHADER_F16;");
+            }
+            self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {");
+            self.line("        required_features: __boring_required_features,");
+            self.line("        required_limits: adapter.limits(),");
+            self.line("        ..Default::default()");
+            self.line("    }, None).await.expect(\"Failed to create device\");");
             // Defensive: make sure the device is fully settled before any real
             // dispatch work begins. There's nothing queued yet, so this returns
             // essentially immediately -- it's here only to rule out adapter/device
@@ -1492,25 +1490,21 @@ impl<'a> HostEmitter<'a> {
         self.line("        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
         self.line("        let adapter  = instance.request_adapter(&wgpu::RequestAdapterOptions::default())");
         self.line("            .await.expect(\"No GPU adapter found\");");
-        self.line("        let (device, queue) = adapter");
+        self.line("        let mut __boring_required_features = wgpu::Features::empty();");
         if self.has_emulated_shader {
-            self.line("            .request_device(&wgpu::DeviceDescriptor {");
-            self.line("                required_features: if adapter.features().contains(wgpu::Features::SUBGROUP) { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },");
-            // See the non-Screen async_main path's identical call for why:
-            // adapter.limits() instead of the conservative Limits::default(),
-            // so buffers larger than the 128 MiB portable-default cap can
-            // bind successfully on hardware that actually supports it.
-            self.line("                required_limits: adapter.limits(),");
-            self.line("                ..Default::default()");
-            self.line("            }, None)");
-            self.line("            .await.expect(\"Failed to create device\");");
-        } else {
-            self.line("            .request_device(&wgpu::DeviceDescriptor {");
-            self.line("                required_limits: adapter.limits(),");
-            self.line("                ..Default::default()");
-            self.line("            }, None)");
-            self.line("            .await.expect(\"Failed to create device\");");
+            self.line("        if adapter.features().contains(wgpu::Features::SUBGROUP) { __boring_required_features |= wgpu::Features::SUBGROUP; }");
         }
+        if self.requires_f16 {
+            self.line("        assert!(adapter.features().contains(wgpu::Features::SHADER_F16), \"This GPU adapter does not support the shader-f16 feature required by this program\");");
+            self.line("        __boring_required_features |= wgpu::Features::SHADER_F16;");
+        }
+        self.line("        let (device, queue) = adapter");
+        self.line("            .request_device(&wgpu::DeviceDescriptor {");
+        self.line("                required_features: __boring_required_features,");
+        self.line("                required_limits: adapter.limits(),");
+        self.line("                ..Default::default()");
+        self.line("            }, None)");
+        self.line("            .await.expect(\"Failed to create device\");");
         self.line("        (instance, adapter, device, queue)");
         self.line("    });");
         // Defensive: see the non-Screen async_main path for why.
@@ -2837,6 +2831,7 @@ fn host_scalar_type(ty: &Type) -> &'static str {
         Type::Named(n) => match n.as_str() {
             "int" | "i32"   => "i32",
             "uint" | "u32"  => "u32",
+            "float16" | "f16" => "half::f16",
             "float32" | "f32" => "f32",
             "float" | "float64" | "f64" => "f32",
             "bool"                  => "bool",

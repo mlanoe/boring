@@ -3998,3 +3998,204 @@ fn tensor_matmul_through_function_runs_on_metal() {
         assert_eq!(stdout.trim_end(), "64 64", "{qual}");
     }
 }
+
+// ─── Rust keywords used as Boring identifiers ───
+
+const KEYWORD_IDENTS: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+int twice(int ref, int final):
+    ref * final
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+let where = kernel.lastChoice(k)
+let gen = twice(3, 7)
+for dyn in [1, 2]:
+    print "dyn {dyn}"
+var virtual = 3
+virtual = virtual + 1
+let f = (int box): box + 1
+print "{where} {gen} {f(1)} {k.buf[3]}"
+"#;
+
+fn assert_keyword_idents_escaped(rs: &str) {
+    for needle in [
+        "let r#where = ", "let r#gen = ", "r#where, r#gen, f(1)", "fn twice(r#ref: isize, r#final: isize)",
+        "r#ref.wrapping_mul(r#final)", "for r#dyn in ", "|r#box| ",
+    ] {
+        assert!(rs.contains(needle), "missing `{needle}` in generated host code:\n{rs}");
+    }
+    for bad in ["let where ", "let gen ", "for dyn in ", "|box|", "let mut virtual "] {
+        assert!(!rs.contains(bad), "unescaped `{bad}` in generated host code:\n{rs}");
+    }
+}
+
+#[test]
+fn rust_keyword_identifiers_are_escaped_in_metal_host_code() {
+    let (_dev, rs) = metal_codegen("keyword_idents", KEYWORD_IDENTS);
+    assert_keyword_idents_escaped(&rs);
+}
+
+#[test]
+fn rust_keyword_identifiers_build_and_run_on_metal() {
+    let test_name = "keyword_idents_run";
+    let _ = run_metal(test_name, KEYWORD_IDENTS);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "program failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "dyn 1\ndyn 2\nmetal 21 2 5");
+}
+
+/// A top-level `var` in a program that also launches a kernel at top level was inlined as its
+/// initial value at every use in `main`, so later writes were invisible (`x = x + 1` printed 3).
+#[test]
+fn top_level_var_reassignment_is_visible_in_main_on_metal() {
+    let test_name = "toplevel_var_reassign_run";
+    let _ = run_metal(test_name, r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+var x = 3
+x = x + 1
+print "{x} {k.buf[3]}"
+"#);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "program failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(stdout.trim_end(), "4 5");
+}
+
+const TOP_LEVEL_VAR_SHARED_WITH_FN: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+var counter = 3
+
+int readCounter():
+    counter
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+counter = counter + 1
+print "main {counter} helper {readCounter()}"
+"#;
+
+#[test]
+fn top_level_var_read_by_function_is_shared_with_main_on_metal() {
+    let test_name = "toplevel_var_shared_run";
+    let _ = run_metal(test_name, TOP_LEVEL_VAR_SHARED_WITH_FN);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "program failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(stdout.trim_end(), "main 4 helper 4");
+}
+
+const KEYWORD_FIELDS: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+struct Box2:
+    var int final = 1
+    var int move = 2
+
+    def bump():
+        final += 1
+        move = move + final
+
+    req int total():
+        final + move
+
+struct Wrap:
+    var Box2 inner = Box2()
+    var int priv = 0
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+mut b = Box2()
+b.final = 5
+b.final += 1
+b.bump()
+print "b {b.final} {b.move} {b.total()}"
+mut w = Wrap()
+w.inner.final = 9
+w.priv = w.inner.final + 1
+print "w {w.inner.final} {w.priv}"
+let c = Box2(final = 7, move = 8)
+print "c {c.final} {c.move}"
+"#;
+const KEYWORD_FIELDS_OUTPUT: &str = "b 7 9 16\nw 9 10\nc 7 8";
+
+fn assert_keyword_fields_escaped(rs: &str) {
+    for needle in ["r#final: ", "r#move: ", "self.r#final", "b.r#final = ", "w.inner.r#final = ", "Box2 { r#final: 7, r#move: 8 }", "w.r#priv = "] {
+        assert!(rs.contains(needle), "missing `{needle}` in generated host code:\n{rs}");
+    }
+}
+
+#[test]
+fn rust_keyword_struct_fields_are_escaped_in_metal_host_code() {
+    let (_dev, rs) = metal_codegen("keyword_fields", KEYWORD_FIELDS);
+    assert_keyword_fields_escaped(&rs);
+}
+
+#[test]
+fn rust_keyword_struct_fields_build_and_run_on_metal() {
+    let test_name = "keyword_fields_run";
+    let _ = run_metal(test_name, KEYWORD_FIELDS);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "program failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(stdout.trim_end(), KEYWORD_FIELDS_OUTPUT);
+}

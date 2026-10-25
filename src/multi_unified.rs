@@ -74,6 +74,7 @@ macro_rules! arg_types {
 }
 
 arg_types!(
+    (F16, BufF16, half::f16, as_f16, buf_f16),
     (F32, BufF32, f32, as_f32, buf_f32),
     (F64, BufF64, f64, as_f64, buf_f64),
     (I8, BufI8, i8, as_i8, buf_i8),

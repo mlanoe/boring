@@ -1328,7 +1328,9 @@ impl HostEmitter {
     /// every other access reads/writes through `.as_ref()`/`.as_mut().unwrap()`.
     /// A no-op (bare name) outside the render loop or for a non-kernel var.
     fn screen_kvar_ref(&self, kvar: &str, mutable: bool) -> String {
-        if self.in_render_loop && self.var_kernel_type.contains_key(kvar) {
+        let in_kernel_vars = self.in_render_loop && self.var_kernel_type.contains_key(kvar);
+        let kvar = &crate::transpiler::helpers::escape_rust_keyword(kvar);
+        if in_kernel_vars {
             if mutable { format!("{kvar}.as_mut().unwrap()") } else { format!("{kvar}.as_ref().unwrap()") }
         } else {
             kvar.to_string()
@@ -1673,6 +1675,7 @@ impl HostEmitter {
         self.blank();
 
         self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        self.fn_locals.clear();
         self.indent += 1;
         if !kernel_names.is_empty() {
             self.line("boring_gpu_init()?;");
@@ -1717,7 +1720,20 @@ impl HostEmitter {
                             self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                             let rhs = self.expr(val);
                             let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
-                            if is_scalar {
+                            // A mutable scalar a helper function also reads is a module `static` emitted by the
+                            // general pass: `main` must go through it too, not shadow it with a local.
+                            let shares_static = is_scalar && s.binding.is_mutable()
+                                && self.general_code_text.contains(&format!("static {}: std::sync::LazyLock<std::sync::Mutex<", s.name.to_uppercase()));
+                            if shares_static {
+                                self.global_statics.insert(s.name.clone(), true);
+                                self.top_level_scalars.remove(&s.name);
+                                continue;
+                            }
+                            if is_scalar && s.binding.is_mutable() {
+                                // A rebindable scalar is a real local of `main` from here on: inlining its
+                                // initial value would hide every later write.
+                                self.top_level_scalars.remove(&s.name);
+                            } else if is_scalar {
                                 self.top_level_scalars.insert(s.name.clone(), rhs.clone());
                             }
                             // A Screen program's kernel vars are wrapped in
@@ -1731,9 +1747,9 @@ impl HostEmitter {
                             // repeated closure calls, only an `Option`'s
                             // `.take()` can.
                             if self.screen_var.is_some() && self.var_kernel_type.contains_key(s.name.as_str()) {
-                                self.line(&format!("{} {}{} = Some({});", binding, s.name, ty_ann, rhs));
+                                self.line(&format!("{} {}{} = Some({});", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann, rhs));
                             } else {
-                                if !(is_scalar && crate::transpiler::helpers::is_scalar_let_value(val, None) && s.name == s.name.to_uppercase()) { self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs)); }
+                                if !(is_scalar && crate::transpiler::helpers::is_scalar_let_value(val, None) && s.name == s.name.to_uppercase()) { self.line(&format!("{} {}{} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann, rhs)); }
                             }
                         }
                     }
@@ -2156,7 +2172,7 @@ impl HostEmitter {
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
-                    self.line(&format!("{} {} = {};", binding, s.name, rhs));
+                    self.line(&format!("{} {} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), rhs));
                 }
             }
             _ => self.emit_stmt(stmt),
@@ -2368,7 +2384,7 @@ impl HostEmitter {
         crate::transpiler::helpers::collect_local_decl_names(&f.body, &mut self.fn_locals);
         let vis = if f.is_pub { "pub " } else { "" };
         let params: Vec<String> = f.params.iter().map(|p| {
-            let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
+            let name = if p.mutable { format!("mut {}", crate::transpiler::helpers::escape_rust_keyword(&p.name)) } else { crate::transpiler::helpers::escape_rust_keyword(&p.name) };
             match &p.ty {
                 Some(ty) => {
                     let base = if is_gpu_array_param(ty) {
@@ -2401,7 +2417,7 @@ impl HostEmitter {
         } else {
             plain_ret
         };
-        let sig = format!("{}fn {}({}) -> {}", vis, f.name, all_params, ret);
+        let sig = format!("{}fn {}({}) -> {}", vis, crate::transpiler::helpers::escape_rust_keyword(&f.name), all_params, ret);
         if f.body.is_empty() {
             self.line(&format!("{} {{}}", sig));
             return;
@@ -2493,16 +2509,16 @@ impl HostEmitter {
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
                     let rhs = if is_resident_preserving && !resident_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr(val) };
-                    self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
+                    self.line(&format!("{} {}{} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
                     self.track_string_var(&s.name, s.ty.as_ref(), None);
-                    self.line(&format!("{} {}{};", binding, s.name, ty_ann));
+                    self.line(&format!("{} {}{};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann));
                 }
             }
             Stmt::LetDestructure(s) => {
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
-                let names: Vec<String> = s.bindings.iter().map(|b| b.name.clone()).collect();
+                let names: Vec<String> = s.bindings.iter().map(|b| crate::transpiler::helpers::escape_rust_keyword(&b.name)).collect();
                 let rhs = self.expr(&s.value);
                 self.line(&format!("{} ({}) = {};", binding, names.join(", "), rhs));
             }
@@ -2609,9 +2625,9 @@ impl HostEmitter {
             Stmt::For(f) => {
                 let is_enumerate = f.vars.len() >= 2;
                 let var = if is_enumerate {
-                    format!("({}, {})", f.vars[0], f.vars[1])
+                    format!("({}, {})", crate::transpiler::helpers::escape_rust_keyword(&f.vars[0]), crate::transpiler::helpers::escape_rust_keyword(&f.vars[1]))
                 } else {
-                    f.vars.first().cloned().unwrap_or_else(|| "_i".into())
+                    f.vars.first().map(|v| crate::transpiler::helpers::escape_rust_keyword(v)).unwrap_or_else(|| "_i".into())
                 };
                 match &f.iterable.kind {
                     ExprKind::Range { start, end, inclusive } => {
@@ -2803,7 +2819,7 @@ impl HostEmitter {
     fn emit_pattern(&mut self, p: &Pattern) -> String {
         match p {
             Pattern::Wildcard => "_".into(),
-            Pattern::Bind(name) => name.clone(),
+            Pattern::Bind(name) => crate::transpiler::helpers::escape_rust_keyword(name),
             Pattern::Lit(lit) => match lit {
                 LitPattern::Int(n) => n.to_string(),
                 LitPattern::Float(f) => format!("{}", f),
@@ -3001,7 +3017,7 @@ impl HostEmitter {
                         format!("(*{st})")
                     };
                 }
-                self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                self.top_level_scalars.get(name).cloned().unwrap_or_else(|| crate::transpiler::helpers::escape_rust_keyword(name))
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
@@ -3553,7 +3569,7 @@ impl HostEmitter {
                 format!("({})", s.join(", "))
             }
             ExprKind::Closure(params, _ret_ty, body, _throws, _task) => {
-                let ps: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                let ps: Vec<String> = params.iter().map(|p| crate::transpiler::helpers::escape_rust_keyword(&p.name)).collect();
                 let body_s = match body {
                     ClosureBody::Expr(be) => self.expr(be),
                     ClosureBody::Block(stmts) => self.emit_sub_block(stmts),

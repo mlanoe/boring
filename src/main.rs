@@ -27,6 +27,7 @@ pub mod desugar_gpu_optional;
 pub mod desugar_gpu_struct;
 pub mod view_perm;
 pub mod ast_walk;
+pub mod escape_keyword_fields;
 pub mod downcast;
 pub mod lower_view;
 pub mod interpreter;
@@ -2585,6 +2586,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
         }
     }
     let program = desugar_inject_or_exit(&path, &source, program, &deps);
+    let program = escape_keyword_fields::escape_keyword_fields(program);
     if report_check_result(&path, &source, check_with_imports(&path, &program, &deps)) { process::exit(1); }
     // Same `source_dir` derivation as `emit_rust_to_dir` — without it, a local
     // `use <file>` resolves relative to the *process* cwd instead of the source
@@ -2685,6 +2687,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
         }
     }
     let program = desugar_inject_or_exit(&path, &source, program, &deps);
+    let program = escape_keyword_fields::escape_keyword_fields(program);
 
     if report_check_result(&path, &source, check_with_imports(&path, &program, &deps)) {
         process::exit(1);
@@ -2928,7 +2931,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), &deps)
         .and_then(lower_view::lower_module)
     {
-        Ok(p) => p,
+        Ok(p) => escape_keyword_fields::escape_keyword_fields(p),
         Err(e) => {
             eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
             process::exit(1);

@@ -208,6 +208,17 @@ its own. When a `kernel:` block omits `grid =`:
 
 WGSL is compiled by wgpu at runtime using the `naga` compiler (bundled in the wgpu crate). No external toolchain is required. The generated project has no `build.rs`.
 
+### Half precision (`float16`)
+
+`float16` storage buffers remain two bytes per element and are emitted as WGSL
+`array<f16>`. When any generated shader uses that type, Boring places
+`enable f16;` before all WGSL declarations, verifies that the selected adapter
+advertises `wgpu::Features::SHADER_F16`, and requests that feature when creating
+the device. An adapter without the optional capability fails immediately with a
+clear message rather than silently widening the buffer to `f32`. Values inside
+the shared params struct—including fixed arrays—retain a portable `f32` ABI and
+are converted to `f16` when loaded by the shader.
+
 An optional AOT path (`boring build --target wgpu --aot`) may be added in a future iteration to emit pre-compiled SPIR-V or DirectX bytecode for workloads where startup latency matters.
 
 ---

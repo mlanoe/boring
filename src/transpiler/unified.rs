@@ -21,6 +21,9 @@ pub struct RouteField {
 impl RouteField {
     /// `Arg` variant holding this field, e.g. `F32` / `BufF32`.
     pub fn variant(&self) -> String {
+        if self.rust_ty == "half::f16" {
+            return if self.array { "BufF16".into() } else { "F16".into() };
+        }
         let mut chars = self.rust_ty.chars();
         let head = chars.next().map(|c| c.to_ascii_uppercase()).unwrap_or('X');
         let scalar = format!("{head}{}", chars.as_str());
@@ -29,6 +32,9 @@ impl RouteField {
 
     /// Accessor on `Arg`: `as_f32` for a scalar, `buf_f32` for a buffer.
     pub fn accessor(&self) -> String {
+        if self.rust_ty == "half::f16" {
+            return if self.array { "buf_f16".into() } else { "as_f16".into() };
+        }
         if self.array { format!("buf_{}", self.rust_ty) } else { format!("as_{}", self.rust_ty) }
     }
 }
@@ -52,9 +58,11 @@ fn numeric_rust(t: &Type) -> Option<&'static str> {
         Type::Uint16 => "u16",
         Type::Uint64 => "u64",
         Type::Float32 => "f32",
+        Type::Float16 => "half::f16",
         Type::Float64 => "f64",
         Type::Bool => "bool",
         Type::Named(n) => match n.as_str() {
+            "float16" | "f16" => "half::f16",
             "float32" => "f32",
             "float" | "float64" => "f64",
             "int" | "int32" => "i32",
@@ -115,13 +123,17 @@ mod tests {
 
     #[test]
     fn plain_scalars_and_buffers_are_routable() {
-        let k = kernel("    let float32 alpha\n    let int n\n    let [float32]'unified x\n    mut [uint8]'global y\n");
+        let k = kernel("    let float32 alpha\n    let int n\n    let float16 gain\n    let [float32]'unified x\n    mut [uint8]'global y\n    mut [float16]'unified z\n");
         let fields = route_fields(&k).expect("routable");
         let names: Vec<_> = fields.iter().map(|f| (f.name.as_str(), f.rust_ty, f.array, f.mutable)).collect();
-        assert_eq!(names, [("alpha", "f32", false, false), ("n", "i32", false, false), ("x", "f32", true, false), ("y", "u8", true, true)]);
-        assert_eq!(fields[2].variant(), "BufF32");
+        assert_eq!(names, [("alpha", "f32", false, false), ("n", "i32", false, false), ("gain", "half::f16", false, false), ("x", "f32", true, false), ("y", "u8", true, true), ("z", "half::f16", true, true)]);
+        assert_eq!(fields[3].variant(), "BufF32");
         assert_eq!(fields[1].accessor(), "as_i32");
-        assert_eq!(fields[3].accessor(), "buf_u8");
+        assert_eq!(fields[4].accessor(), "buf_u8");
+        assert_eq!(fields[2].variant(), "F16");
+        assert_eq!(fields[2].accessor(), "as_f16");
+        assert_eq!(fields[5].variant(), "BufF16");
+        assert_eq!(fields[5].accessor(), "buf_f16");
     }
 
     #[test]

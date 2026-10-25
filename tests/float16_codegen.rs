@@ -2,16 +2,20 @@ use std::{fs, path::PathBuf, process::Command};
 
 const SOURCE: &str = r#"
 kernel HalfBuffer:
+    let float16 scale
+    let [float16, 2] offsets
     mut [float16]'unified values
-    init([float16]'unified input):
+    init(float16 factor, [float16, 2] bias, [float16]'unified input):
+        scale = factor
+        offsets = bias
         values = input
     def ():
         let i = .thread.x
         let float32 wide = values[i] as float32
-        values[i] = float16(wide + 1.0)
+        values[i] = float16(wide * (scale as float32) + (offsets[0] as float32))
 
 pub req [float16]'kernel'unified increment([float16]'kernel'unified input) throws:
-    mut k = HalfBuffer(input)
+    mut k = HalfBuffer(float16(1.0), [float16(1.0), float16(0.0)], input)
     kernel:
         k(block = input.length)
     k.values
@@ -120,17 +124,24 @@ fn supported_gpu_backends_keep_f16_storage() {
 }
 
 #[test]
-fn wgpu_reports_float16_as_unsupported() {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/wgpu_error");
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let source = root.join("main.br");
-    fs::write(&source, SOURCE).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_boring"))
-        .args(["build", "--target", "wgpu"]).arg(&source).output().unwrap();
-    assert!(!output.status.success(), "wgpu unexpectedly accepted float16");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("does not enable WGSL's optional `f16` feature"), "{stderr}");
+fn wgpu_enables_shader_f16_and_preserves_two_byte_storage() {
+    let (device, host, manifest) = generate("wgpu", "wgpu");
+    assert!(device.starts_with("enable f16;"), "missing WGSL f16 directive:\n{device}");
+    assert!(device.contains("array<f16>"), "wgpu widened the float16 buffer:\n{device}");
+    assert!(device.contains("scale: f32") && device.contains("offsets: array<f32, 2>"),
+        "wgpu params ABI did not widen float16 values consistently:\n{device}");
+    assert!(device.contains("let scale: f16 = f16(") && device.contains("f16(halfbuffer_params.offsets"),
+        "wgpu did not restore float16 after loading widened params:\n{device}");
+    assert!(!device.contains("float16("), "wgpu left an unresolved float16 conversion:\n{device}");
+    assert!(host.contains("wgpu::Features::SHADER_F16"), "host does not request shader-f16:\n{host}");
+    assert!(host.contains("Vec<half::f16>"), "host ABI is not f16:\n{host}");
+    assert!(manifest.contains("half ="), "wgpu manifest lacks half dependency");
+
+    let generated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/wgpu/main_wgpu");
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(generated.join("Cargo.toml")).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
 }
 
 #[test]

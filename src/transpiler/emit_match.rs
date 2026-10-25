@@ -1861,8 +1861,8 @@ impl Transpiler {
                         match pat {
                             Pattern::Wildcard => format!("{}: _", fname),
                             Pattern::Bind(b) if b == fname => fname.to_string(),
-                            Pattern::Bind(b) => format!("{}: {}", fname, b),
-                            _ => format!("{}: {}", fname, self.emit_pattern(pat)),
+                            Pattern::Bind(b) => format!("{}: {}", escape_rust_keyword(fname), b),
+                            _ => format!("{}: {}", escape_rust_keyword(fname), self.emit_pattern(pat)),
                         }
                     }).collect();
                     return format!("{} {{ {} }}", name, pairs.join(", "));

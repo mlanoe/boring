@@ -143,6 +143,18 @@ fn wgpu_codegen(test_name: &str, src: &str) -> (String, String) {
 }
 
 #[test]
+fn shader_f16_is_not_requested_for_float32_only_programs() {
+    let (wgsl, host) = wgpu_codegen("no_unneeded_shader_f16", r#"
+kernel Scale:
+    mut [float32]'unified values
+    def ():
+        values[.thread.x] *= 2.0
+"#);
+    assert!(!wgsl.contains("enable f16;"), "{wgsl}");
+    assert!(!host.contains("Features::SHADER_F16"), "{host}");
+}
+
+#[test]
 fn mutable_static_used_by_host_function_is_emitted_once() {
     let (_, host) = wgpu_codegen("mutable_static_once", GPU_STATIC_VAR_REPRO);
     assert_eq!(host.matches("static FLAG:").count(), 1, "{host}");

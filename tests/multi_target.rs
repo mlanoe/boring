@@ -104,6 +104,51 @@ fn explicit_list_generates_one_crate_with_every_backend() {
 }
 
 #[test]
+fn float16_is_routed_and_compiles_for_wgpu_and_simd() {
+    let dir = project("float16");
+    std::fs::write(source(&dir), r#"
+kernel HalfScale:
+    let float16 gain
+    mut [float16]'unified values
+    init(float16 factor, [float16]'unified input):
+        gain = factor
+        values = input
+    def ():
+        let i = .thread.x
+        values[i] = values[i] * gain
+
+mut k = HalfScale(float16(2.0), [float16(1.0), float16(2.0)])
+kernel:
+    k(block = 2, grid = 1)
+print "{k.values[1] as float32}"
+"#).unwrap();
+
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let generated = root(&dir);
+    let unified = std::fs::read_to_string(generated.join("src/unified.rs")).unwrap();
+    assert!(unified.contains("(F16, BufF16, half::f16, as_f16, buf_f16)"), "{unified}");
+
+    let wgpu = std::fs::read_to_string(generated.join("src/backend_wgpu.rs")).unwrap();
+    assert!(wgpu.contains("wgpu::Features::SHADER_F16"), "{wgpu}");
+    assert!(wgpu.contains("args[0].as_f16()"), "{wgpu}");
+    assert!(wgpu.contains("args[1].buf_f16()"), "{wgpu}");
+    let simd = std::fs::read_to_string(generated.join("src/backend_simd.rs")).unwrap();
+    assert!(simd.contains("Arg::F16(self.gain)"), "{simd}");
+    assert!(simd.contains("Arg::BufF16(&mut self.values)"), "{simd}");
+
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(generated.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(Path::new(env!("CARGO_TARGET_TMPDIR")).join("multi_target_shared"))
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn all_skips_what_the_host_cannot_build() {
     let dir = project("all");
     let out = build(&dir, "all");
