@@ -93,3 +93,4 @@ tests/cases/cross_project_dep_monomorphize/src/main_rust_managed_single/
 Cargo.lock
 .claude/worktrees/
 *.ppm
+/snapshot.tmp
