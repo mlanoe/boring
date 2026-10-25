@@ -27,6 +27,8 @@ pub(super) fn emit_host_rs(
     e.has_emulated_shader = has_emulated_shader;
     e.setup_fields = screen_setup_fields.to_vec();
     e.emit();
+    let pending = std::mem::take(&mut *e.expr_errors.borrow_mut());
+    e.errors.extend(pending);
     (e.out, e.errors)
 }
 
@@ -76,6 +78,8 @@ struct HostEmitter<'a> {
     /// Non-empty means `out` is incomplete/wrong and must not be written out
     /// — see `emit_host_rs`'s doc comment.
     errors: Vec<TranspileError>,
+    /// Errors found by `host_expr` (which only has `&self`); folded into `errors` when emission ends.
+    expr_errors: std::cell::RefCell<Vec<TranspileError>>,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -99,7 +103,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), frame_locals: Default::default(), frame_local_types: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new() }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, tenv: crate::transpiler::host_types::HostTypeEnv::from_program(program), has_boring_main, boring_main_throws, has_emulated_shader: false, setup_fields: Vec::new(), frame_locals: Default::default(), frame_local_types: Default::default(), screen_pixels_buf: String::new(), event_vars: Default::default(), errors: Vec::new(), expr_errors: Default::default() }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -1811,7 +1815,10 @@ impl<'a> HostEmitter<'a> {
                 self.tenv.track_local(&ls.name, ls.ty.as_ref(), ls.value.as_ref(), None);
                 let v = self.host_expr(ls.value.as_ref().unwrap());
                 let mutability = if ls.binding.is_mutable() { "mut " } else { "" };
-                let local_ty = ls.ty.clone().or_else(|| self.host_arg_type(ls.value.as_ref().unwrap()));
+                let local_ty = ls.ty.clone()
+                    .or_else(|| self.host_arg_type(ls.value.as_ref().unwrap()))
+                    .or_else(|| self.host_float_kind(ls.value.as_ref().unwrap())
+                        .map(|k| if k == "f32" { Type::Float32 } else { Type::Float64 }));
                 match local_ty {
                     Some(t) => { self.frame_local_types.borrow_mut().insert(ls.name.clone(), t); }
                     None => { self.frame_local_types.borrow_mut().remove(&ls.name); }
@@ -2311,6 +2318,10 @@ impl<'a> HostEmitter<'a> {
             ExprKind::Field(obj, field) => {
                 format!("{}.{}", self.host_expr(obj), field)
             }
+            // `caret[0]` on a host array (a `let` bound to a call returning `[int]`, a setup value, ...).
+            ExprKind::Index(base, idx) => {
+                format!("{}[({}) as usize]", self.host_expr(base), self.host_expr(idx))
+            }
             ExprKind::Array(elems) => {
                 let es: Vec<_> = elems.iter().map(|x| self.host_expr(x)).collect();
                 format!("vec![{}]", es.join(", "))
@@ -2366,7 +2377,7 @@ impl<'a> HostEmitter<'a> {
             ExprKind::If(ifs) if ifs.else_body.is_some() => {
                 let val = |b: &Vec<Stmt>| b.last().map(|st| match st {
                     Stmt::Expr(e) => self.host_expr(e),
-                    _ => "/* unsupported expr */".into(),
+                    _ => self.unsupported_expr(e, "a statement other than a plain value as the last line of an `if` expression branch"),
                 }).unwrap_or_default();
                 let mut out = String::new();
                 for (i, (c, b)) in ifs.branches.iter().enumerate() {
@@ -2447,11 +2458,60 @@ impl<'a> HostEmitter<'a> {
                     BinOp::Lt => "<", BinOp::Gt => ">", BinOp::LtEq => "<=", BinOp::GtEq => ">=",
                     BinOp::And => "&&", BinOp::Or => "||",
                     BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "^",
-                    _ => "/* op */",
+                    _ => return self.unsupported_expr(e, "this operator"),
                 };
-                format!("({} {op_s} {})", self.host_expr(l), self.host_expr(r))
+                let (mut ls, mut rs) = (self.host_expr(l), self.host_expr(r));
+                // `screen.time` is f32, `as float` values are f64: widen the f32 side so the mix type-checks.
+                if !matches!(op, BinOp::And | BinOp::Or) {
+                    match (self.host_float_kind(l), self.host_float_kind(r)) {
+                        (Some("f32"), Some("f64")) => ls = format!("({ls} as f64)"),
+                        (Some("f64"), Some("f32")) => rs = format!("({rs} as f64)"),
+                        _ => {}
+                    }
+                }
+                format!("({ls} {op_s} {rs})")
             }
-            _ => "/* unsupported expr */".into(),
+            _ => self.unsupported_expr(e, "this expression"),
+        }
+    }
+
+    /// A host expression the emitter cannot translate: record a compile error (never a placeholder
+    /// comment in the generated Rust, which would silently drop code) and return a harmless token.
+    fn unsupported_expr(&self, e: &Expr, what: &str) -> String {
+        self.expr_errors.borrow_mut().push(TranspileError::at(
+            format!("wgpu target: {what} is not supported inside a Screen render loop; \
+                     move it into an ordinary Boring function and call that (`let v = helper(args)`)"),
+            e.line, e.col));
+        "()".into()
+    }
+
+    /// The float width a host expression evaluates to (`"f32"` or `"f64"`), when it is known.
+    /// Untyped literals and non-float values are `None`.
+    fn host_float_kind(&self, e: &Expr) -> Option<&'static str> {
+        match &e.kind {
+            ExprKind::Field(o, f) if f == "time" && matches!(&o.kind, ExprKind::Var(n) if n == "screen") => Some("f32"),
+            ExprKind::Cast(_, ty) => match host_cast_type(ty) { Some(t @ ("f32" | "f64")) => Some(t), _ => None },
+            ExprKind::Call(c, a) if a.len() == 1 && matches!(&c.kind, ExprKind::Var(n) if matches!(n.as_str(), "float32" | "float" | "float64")) => Some("f32"),
+            ExprKind::Var(n) => {
+                let ty = self.frame_local_types.borrow().get(n).cloned()
+                    .or_else(|| self.setup_fields.iter().find(|(f, _)| f == n).map(|(_, t)| Type::Named(t.clone())));
+                match ty {
+                    Some(Type::Float32) => Some("f32"),
+                    Some(Type::Float64) => Some("f64"),
+                    Some(Type::Named(t)) => match t.as_str() { "f32" | "float32" => Some("f32"), "f64" | "float" | "float64" => Some("f64"), _ => None },
+                    _ => None,
+                }
+            }
+            ExprKind::UnaryOp(UnaryOp::Neg, i) => self.host_float_kind(i),
+            ExprKind::BinOp(op, l, r) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) => {
+                match (self.host_float_kind(l), self.host_float_kind(r)) {
+                    (Some("f32"), Some("f32")) | (Some("f32"), None) | (None, Some("f32")) => Some("f32"),
+                    (Some(_), Some(_)) => Some("f64"),
+                    (Some("f64"), None) | (None, Some("f64")) => Some("f64"),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 

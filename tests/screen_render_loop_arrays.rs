@@ -204,3 +204,70 @@ fn cuda_and_rocm_render_loops_replace_array_fields() {
         assert!(rs.contains("boring_dirty = true;"), "[{target}] {rs}");
     }
 }
+
+// Expression shapes that used to leave `/* unsupported expr */` in the generated host Rust, or fail to
+// type-check there: indexing a call's array result, top-level `var` assignment from the loop,
+// `screen.key_events.length`, and f32 (`screen.time`) / f64 (`as float`) mixes.
+const SHAPES: &str = r#"
+let screen = Screen(Dimension(8, 8), title = "test")
+
+[int] caretAt(int w, int h):
+    [w, h]
+
+kernel Fill:
+    mut [uint]'surface pixels
+
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        if col < 8:
+            pixels[col] = 1
+
+var mut k = Fill(Dimension(8, 8))
+var counter = 0
+var seen = 0.0
+kernel:
+    loop:
+        if screen.mouse_pressed("left"):
+            let caret = caretAt(8, 8)
+            screen.setImeArea(caret[0], caret[1], 2, 16)
+        counter += 1
+        if screen.key_events.length == 0:
+            counter = 0
+        let doubled = screen.time * 2.0
+        seen = screen.time as float * 2.0
+        let mixed = screen.time * 2.0 + seen
+        if mixed > doubled:
+            counter = 1
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+
+#[test]
+fn wgpu_loop_indexes_call_results_assigns_vars_and_mixes_float_widths() {
+    let (project, rs) = build("wgpu", "shapes", SHAPES);
+    assert!(!rs.contains("/* unsupported"), "{rs}");
+    assert!(rs.contains("caret[(0) as usize]"), "{rs}");
+    assert!(rs.contains("self.counter = 0;"), "{rs}");
+    assert!(rs.contains("self.__input.key_repeat.len() as isize"), "{rs}");
+    assert!(rs.contains("as f64) + self.seen"), "f32 side widened:\n{rs}");
+    cargo_check(&project, "wgpu");
+}
+
+#[test]
+fn wgpu_loop_untranslatable_expression_is_a_compile_error_not_a_comment() {
+    let src = SHAPES.replace("        counter += 1\n", "        let bad = [1, 2, 3].map(x: x + 1)\n");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_arrays").join("unsupported_expr");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br = tmp.join("test.br");
+    fs::write(&br, src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--target", "wgpu"]).arg(&br).output().unwrap();
+    assert!(!out.status.success(), "must fail at compile time");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not supported inside a Screen render loop") && err.contains("helper"), "{err}");
+}
