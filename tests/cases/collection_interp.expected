@@ -3,3 +3,10 @@ param [1, 2, 3] [x, y] {z: 9} {5}
 fields [1, 2] [p] {q: 3}
 inferred [4, 5]
 ids [4, 5] / [a, b]
+nested [[1, 2], [3]] [[a], [b, c]]
+dict/set of arrays {k: [1, 2]} {[7, 8]}
+tuple ([1], [a])
+optional [1, 2] nil
+row [1, 2]
+row [3]
+pairs [(1, a), (2, b)]

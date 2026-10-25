@@ -5932,6 +5932,10 @@ impl Transpiler {
                 format!("{}.as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", v)
             } else {
                 self.emit_expr(&a.value)
+            if is_optional {
+                let raw = self.emit_expr(&a.value);
+                if let Some(r) = self.typed_collection_fmt(&a.value, &raw) { return r; }
+            }
             };
             if is_optional {
                 return (expr_s, "{}");

@@ -509,7 +509,7 @@ println!("Name: {}, Age: {}", name, age);
 println!("Next year: {}", age + 1);
 ```
 
-**Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type (`BoringFmt`/`BoringFmtMap`/`BoringFmtSet`); collections nested inside collections, optionals or tuples fall back to Rust's `{:?}` (strings quoted). Regression: `tests/cases/collection_interp.br`.
+**Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type and recurses through nested arrays/dicts/sets, tuples (`([1], [a])`) and optionals (`nil` when absent), including `for` loop variables over collections; a hole whose type it cannot resolve falls back to Rust's `{:?}` (strings quoted). Regression: `tests/cases/collection_interp.br`.
 
 ### Multi-line strings — `"""..."""`
 

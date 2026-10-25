@@ -511,6 +511,7 @@ transpile_test!(tuple_map);
 transpile_test!(array_pop_remove);
 transpile_test!(optional_pop_tail_call);
 transpile_test!(transpiler_coerce);
+transpile_test!(external_method_vs_user_trait_name);
 transpile_test!(string_len_chars);
 // Merged scenarios (one cargo build instead of seven) -- generated from the individual
 // string_*.br cases by tools/merge_cases.py; see that script's header.

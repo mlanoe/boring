@@ -1,0 +1,22 @@
+# A user trait method sharing its Boring name with an external Rust method keeps that
+# name only for user receivers: `r.start` (usize, external) still gets `is_positive`.
+
+use std.ops.Range
+
+trait Measurer:
+    req bool isPositive(string s)
+
+struct M as Measurer:
+    req bool isPositive(string s): true
+
+bool pow2(Range<int> r):
+    r.start.isPositive()
+
+bool viaLocal(Range<int> r):
+    let s = r.start
+    s.isPositive()
+
+def main():
+    let r = Range(start = 4, end = 9)
+    let m = M()
+    print "{pow2(r)} {viaLocal(r)} {m.isPositive("x")}"

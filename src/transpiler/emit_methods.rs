@@ -3533,6 +3533,10 @@ impl Transpiler {
     /// the payload of `p: (TcpStream, SocketAddr)?`.
     pub(crate) fn track_std_binding(&mut self, name: &str, value: &Expr, unwrap_optional: bool) {
         self.var_std_types.remove(name);
+        self.external_rooted_locals.remove(name);
+        if self.receiver_is_external_value(value) || self.resolve_expr_external_type_name(value).is_some() {
+            self.external_rooted_locals.insert(name.to_string());
+        }
         let Some(mut ty) = self.infer_std_type(value) else { return };
         if unwrap_optional {
             let Type::Optional(inner) = ty else { return };
@@ -3599,6 +3603,32 @@ impl Transpiler {
         } else {
             None
         }
+    }
+
+    /// Whether `obj` is positively a value of an external (non-user) Rust type: a local typed as
+    /// one, or a field/method-call result hanging off such a value (`para.level` with `para:
+    /// ParagraphInfo`), where the field's own type is unknowable here. A Rust-side call, even
+    /// when a user trait declares the same Boring method name.
+    fn receiver_is_external_value(&self, obj: &Expr) -> bool {
+        if let Some(ty) = self.resolve_expr_type(obj) {
+            let mut cur = ty.without_mut();
+            while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+            let name = match cur { Type::Generic(n, _) => Some(n.clone()), t => receiver_type_name(t) };
+            if let Some(n) = name { return self.is_external_type_name(&n); }
+        }
+        match &obj.kind {
+            ExprKind::Var(v) => self.external_rooted_locals.contains(v.as_str()),
+            ExprKind::Field(inner, _) | ExprKind::MethodCall(inner, ..) | ExprKind::Index(inner, _) =>
+                self.receiver_is_external_value(inner),
+            _ => false,
+        }
+    }
+
+    fn is_external_type_name(&self, n: &str) -> bool {
+        !self.struct_fields.contains_key(n) && !self.all_enum_types.contains(n)
+            && !self.trait_method_names.contains_key(n)
+            && !self.struct_method_overload_decls.keys().any(|k| k.starts_with(&format!("{}::", n)))
+            && n.chars().next().is_some_and(|c| c.is_uppercase())
     }
 
     /// Whether `rust_method(args)` on a non-user receiver is an `EXTERNAL_MUT_BUFFER_METHODS`
@@ -4488,14 +4518,7 @@ impl Transpiler {
             // the generic camel→snake fallback would call a method that doesn't exist.
             if w.is_none() && m == camel_to_snake(method) && m != method
                 && self.trait_method_names.values().any(|ms| ms.contains(method))
-                && !self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name).is_some_and(|n| {
-                    // A receiver typed as an external (non-user) type is a Rust-side call even when
-                    // a user trait happens to declare the same Boring method name.
-                    !self.struct_fields.contains_key(&n) && !self.all_enum_types.contains(&n)
-                        && !self.trait_method_names.contains_key(&n)
-                        && !self.struct_method_overload_decls.keys().any(|k| k.starts_with(&format!("{}::", n)))
-                        && n.chars().next().is_some_and(|c| c.is_uppercase())
-                })
+                && !self.receiver_is_external_value(obj)
             {
                 (method.to_string(), None)
             } else {
@@ -6232,6 +6255,69 @@ impl Transpiler {
         (emit(l, l_lit), emit(r, r_lit))
     }
 
+    /// Rust expression (a `String`) rendering `ex` of type `ty` interpreter-style, recursing
+    /// through arrays, dicts, sets, tuples and optionals; anything else is a `Display` leaf.
+    fn show_expr(&self, ty: &Type, ex: &str, depth: usize) -> String {
+        let ty = ty.without_mut();
+        let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
+        let v = format!("x{}", depth);
+        let w = format!("y{}", depth);
+        match ty {
+            Type::Array(el) => format!("bw_seq(&({}), |{}| {})", ex, v, self.show_expr(el, &v, depth + 1)),
+            Type::Set(el) => format!("bw_set(&({}), |{}| {})", ex, v, self.show_expr(el, &v, depth + 1)),
+            Type::Dict(k, val) => format!("bw_map(&({}), |{}| {}, |{}| {})", ex,
+                v, self.show_expr(k, &v, depth + 1), w, self.show_expr(val, &w, depth + 1)),
+            Type::Tuple(ts) if ts.len() > 1 => {
+                let fmt = vec!["{}"; ts.len()].join(", ");
+                let parts: Vec<String> = ts.iter().enumerate()
+                    .map(|(i, t)| self.show_expr(t, &format!("({}).{}", ex, i), depth + 1)).collect();
+                format!("format!(\"({})\", {})", fmt, parts.join(", "))
+            }
+            Type::Optional(el) => format!("match &({}) {{ Some({}) => {}, None => \"nil\".to_string() }}",
+                ex, v, self.show_expr(el, &v, depth + 1)),
+            _ => format!("format!(\"{{}}\", {})", ex),
+        }
+    }
+
+    /// True when `ty` is a collection/tuple/optional that contains a collection or tuple
+    /// (or is itself a tuple): the shapes the flat `BoringFmt*` wrappers cannot render.
+    fn needs_deep_show(ty: &Type) -> bool {
+        let ty = ty.without_mut();
+        let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
+        let nested = |t: &Type| {
+            let t = t.without_mut();
+            is_collection_type(Some(t)) || matches!(t, Type::Optional(_) | Type::Tuple(_))
+        };
+        match ty {
+            Type::Tuple(ts) => ts.len() > 1,
+            Type::Array(el) | Type::Set(el) => nested(el),
+            Type::Dict(k, v) => nested(k) || nested(v),
+            Type::Optional(el) => is_collection_type(Some(el.without_mut())) || Self::needs_deep_show(el),
+            _ => false,
+        }
+    }
+
+    /// Interpolation-hole formatting driven by the hole's *resolved type*: an array/dict/set
+    /// whose elements are plain displayable values renders like the interpreter
+    /// (`[1, 2]`, `[a, b]`, `{k: 1}`, `{7}`). `None` when the type is unknown or nested, so
+    /// the caller falls back to its name-based heuristics.
+    pub(crate) fn typed_collection_fmt(&self, e: &Expr, expr_s: &str) -> Option<(String, &'static str)> {
+        let ty = self.resolve_expr_type(e)?;
+        if Self::needs_deep_show(&ty) {
+            return Some((self.show_expr(&ty, expr_s, 0), "{}"));
+        }
+        let ty = ty.without_mut();
+        let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
+        let flat = |t: &Type| !is_collection_type(Some(t))
+            && !matches!(t.without_mut(), Type::Optional(_) | Type::Tuple(_));
+        match ty {
+            Type::Array(el) if flat(el) => Some((format!("BoringFmt(&{})", expr_s), "{}")),
+            Type::Dict(k, v) if flat(k) && flat(v) => Some((format!("BoringFmtMap(&{})", expr_s), "{}")),
+            Type::Set(el) if flat(el) => Some((format!("BoringFmtSet(&{})", expr_s), "{}")),
+            _ => None,
+        }
+    }
+
     pub(crate) fn emit_interp(&self, segs: &[StringSegment]) -> String {
         let (fmt, args) = self.build_format_string(segs);
         let str_ty = match self.config.threading {
@@ -6882,6 +6968,7 @@ impl Transpiler {
             stream_iter_fns: self.stream_iter_fns.clone(),
             stream_throws_fns: self.stream_throws_fns.clone(),
             has_streams: self.has_streams,
+            external_rooted_locals: self.external_rooted_locals.clone(),
             channel_receivers: self.channel_receivers.clone(),
             string_channel_receivers: self.string_channel_receivers.clone(),
             channel_senders: self.channel_senders.clone(),

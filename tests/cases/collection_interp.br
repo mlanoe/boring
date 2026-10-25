@@ -25,3 +25,21 @@ def main():
     print "inferred {ids}"
     let msg = "ids {ids} / {b}"
     print msg
+    nested()
+
+def nested():
+    let [[int]] grid = [[1, 2], [3]]
+    let [[string]] words = [["a"], ["b", "c"]]
+    print "nested {grid} {words}"
+    let {string=[int]} dl = {"k" = [1, 2]}
+    let {[int]} sl = {[7, 8]}
+    print "dict/set of arrays {dl} {sl}"
+    let ([int], [string]) tup = ([1], ["a"])
+    print "tuple {tup}"
+    let [int]? some = [1, 2]
+    let [int]? none = nil
+    print "optional {some} {none}"
+    for row in grid:
+        print "row {row}"
+    let [(int, string)] pairs = [(1, "a"), (2, "b")]
+    print "pairs {pairs}"

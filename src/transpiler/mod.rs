@@ -1026,6 +1026,9 @@ struct Transpiler {
     /// the few std calls in `std_call_return_type`'s table; no entry = unknown). Lets an untyped
     /// `let s = pair.0` (`pair` from `listener.accept()`) be recognized as a non-`Clone` handle.
     pub(crate) var_std_types: std::collections::HashMap<String, Type>,
+    /// Locals bound (untyped) from a value reached through an external Rust type
+    /// (`let para = info.paragraphs[0]` with `info = BidiInfo.new(..)`): their methods are Rust-side.
+    pub(crate) external_rooted_locals: std::collections::HashSet<String>,
     /// "StructName::method_name" for methods that are operator overloads (add, sub, mul, div,
     /// rem, neg, eq, ne, lt, le, gt, ge). BinOp dispatch emits `a.clone().method(b.clone())`
     /// instead of `(a op b)` when the left operand's struct has the method registered.
@@ -1694,6 +1697,7 @@ impl Transpiler {
             var_scalar_types: std::collections::HashMap::new(),
             var_init_exprs: std::collections::HashMap::new(),
             var_std_types: std::collections::HashMap::new(),
+            external_rooted_locals: std::collections::HashSet::new(),
             struct_operator_methods: std::collections::HashSet::new(),
             struct_operator_param_types: std::collections::HashMap::new(),
             var_struct_type: std::collections::HashMap::new(),
@@ -2472,6 +2476,20 @@ impl Transpiler {
              \x20       for (i, v) in self.0.iter().enumerate() {\n\
              \x20           if i > 0 { write!(f, \", \")?; }\n\
              \x20           write!(f, \"{}\", v)?;\n\
+             // Recursive collection/tuple/optional rendering (interpreter-style); callers build a closure per element type.\n\
+             fn bw_seq<T, F: Fn(&T) -> String>(v: &[T], f: F) -> String {\n\
+             \x20   format!(\"[{}]\", v.iter().map(|x| f(x)).collect::<Vec<_>>().join(\", \"))\n\
+             }\n\
+             fn bw_set<T, S, F: Fn(&T) -> String>(v: &std::collections::HashSet<T, S>, f: F) -> String {\n\
+             \x20   format!(\"{{{}}}\", v.iter().map(|x| f(x)).collect::<Vec<_>>().join(\", \"))\n\
+             }\n\
+             fn bw_map<K, V, S, FK: Fn(&K) -> String, FV: Fn(&V) -> String>(m: &std::collections::HashMap<K, V, S>, fk: FK, fv: FV) -> String {\n\
+             \x20   format!(\"{{{}}}\", m.iter().map(|(k, v)| format!(\"{}: {}\", fk(k), fv(v))).collect::<Vec<_>>().join(\", \"))\n\
+             }\n\n\
+             // BoringVal — bridge trait that gives BoringError::Other both Display and Any (downcast).\n\
+             // Every user-defined error enum automatically satisfies the blanket impl below.\n\
+             trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync {\n\
+             \x20   fn as_any(&self) -> &dyn std::any::Any;\n\
              \x20       }\n\
              \x20       write!(f, \"}}\")\n\
              \x20   }\n\
