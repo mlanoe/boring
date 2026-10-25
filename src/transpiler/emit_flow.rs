@@ -575,10 +575,10 @@ impl Transpiler {
                     "Uint", "uint", "Uint8", "uint8",
                     "Int8", "int8", "Int16", "int16", "Int32", "int32", "Int64", "int64", "Int128", "int128",
                     "Uint16", "uint16", "Uint32", "uint32", "Uint64", "uint64", "Uint128", "uint128",
-                    // The two float widths route through BoringError::Scalar, same as the
+                    // The fixed float widths route through BoringError::Scalar, same as the
                     // fixed-width ints above (docs/float-width-types.md §7) — `Float`/`float`
                     // (bare) above stays on its own BoringError::Float fast path, unaffected.
-                    "Float32", "float32", "f32", "Float64", "float64", "f64",
+                    "Float16", "float16", "f16", "Float32", "float32", "f32", "Float64", "float64", "f64",
                 ];
                 let prim_clauses: Vec<_> = typed_clauses.iter()
                     .filter(|c| c.types.iter().any(|t| PRIM_TYPES.contains(&t.as_str())))

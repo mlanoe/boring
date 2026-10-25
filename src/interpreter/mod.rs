@@ -1635,7 +1635,39 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
 
     define_float_conv_builtin!(e, "float32", Float32, f32);
     define_float_conv_builtin!(e, "float64", Float64, f64);
-
+    e.define("float16", Value::NativeFn {
+        name: "float16".into(),
+        func: |args, line| {
+            if args.len() != 1 {
+                return Err(err("float16() takes 1 argument", line));
+            }
+            let value = match &args[0] {
+                Value::Float64(n) => *n as f32,
+                Value::Float32(n) => *n,
+                Value::Int(n) => *n as f32,
+                Value::Uint(n) => *n as f32,
+                Value::Uint8(n) => *n as f32,
+                Value::Int8(n) => *n as f32,
+                Value::Int16(n) => *n as f32,
+                Value::Int32(n) => *n as f32,
+                Value::Int64(n) => *n as f32,
+                Value::Int128(n) => *n as f32,
+                Value::Uint16(n) => *n as f32,
+                Value::Uint32(n) => *n as f32,
+                Value::Uint64(n) => *n as f32,
+                Value::Uint128(n) => *n as f32,
+                Value::Bool(n) => if *n { 1.0 } else { 0.0 },
+                Value::Str(s) => s.trim().parse::<f32>().map_err(|_| {
+                    err(format!("cannot convert '{}' to float16", s), line)
+                })?,
+                other => return Err(err(
+                    format!("cannot convert {} to float16", other.type_name()),
+                    line,
+                )),
+            };
+            Ok(Value::Float32(half::f16::from_f32(value).to_f32()))
+        },
+    });
 }
 
 fn register_string_and_math_builtins(e: &mut Env) {

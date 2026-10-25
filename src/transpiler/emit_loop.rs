@@ -412,13 +412,13 @@ impl Transpiler {
                 // Primitive element types: `int`/`uint`/`float`/`bool` parse as `Type::Named`
                 // (lowercase source syntax), not the bare `Type::Int` etc. builtin variants —
                 // match both forms.
-                Some(ty @ (Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+                Some(ty @ (Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
                     | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                     | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)) => {
                     self.var_types.insert(s.vars[0].clone(), ty.clone());
                 }
                 Some(Type::Named(n)) if matches!(n.as_str(),
-                    "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
+                    "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64" | "bool"
                     | "int8" | "int16" | "int32" | "int64" | "int128"
                     | "uint16" | "uint32" | "uint64" | "uint128") => {
                     let canonical = match n.as_str() {
@@ -434,6 +434,7 @@ impl Transpiler {
                         "uint32" => Type::Uint32,
                         "uint64" => Type::Uint64,
                         "uint128" => Type::Uint128,
+                        "float16" | "f16" => Type::Float16,
                         "float32" => Type::Float32,
                         "float" | "float64" => Type::Float64,
                         _ => Type::Bool,

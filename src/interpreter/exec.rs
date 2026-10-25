@@ -1138,7 +1138,7 @@ impl Interpreter {
                 Type::Uint | Type::Uint8
                     | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                     | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                    | Type::Float32 | Type::Float64 => Some(ty.clone()),
+                    | Type::Float16 | Type::Float32 | Type::Float64 => Some(ty.clone()),
                 Type::Qualified(inner, _) => base(inner),
                 _ => None,
             }
@@ -1198,6 +1198,12 @@ impl Interpreter {
             // (`float32_var + float64_var`) is rejected by `eval_binop`'s stricter
             // check, which does have the source-expression context to distinguish
             // a literal from a resolved value and this function does not.
+            Some(Type::Float16) => match val {
+                Value::Int(n) => Value::Float32(half::f16::from_f32(n as f32).to_f32()),
+                Value::Float32(f) => Value::Float32(half::f16::from_f32(f).to_f32()),
+                Value::Float64(f) => Value::Float32(half::f16::from_f32(f as f32).to_f32()),
+                other => other,
+            },
             Some(Type::Float32) => match val {
                 Value::Int(n) => Value::Float32(n as f32),
                 Value::Float64(f) => Value::Float32(f as f32),

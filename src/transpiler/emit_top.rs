@@ -860,7 +860,7 @@ impl Transpiler {
         // Derive Copy for primitive inner types (stack values, no heap allocation).
         // f64 cannot be Eq/Hash (NaN); String cannot be Copy.
         let derives = match inner.as_str() {
-            "f64" | "f32" => "#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]",
+            "half::f16" | "f64" | "f32" => "#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]",
             "u64" | "i64" | "u32" | "i32" | "u8" | "i8" | "u16" | "i16" |
             "u128" | "i128" | "usize" | "isize" | "bool" =>
                 "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]",
@@ -1129,6 +1129,7 @@ impl Transpiler {
                         Type::Uint32 => Some("u32".to_string()),
                         Type::Uint64 => Some("u64".to_string()),
                         Type::Uint128 => Some("u128".to_string()),
+                        Type::Float16 => Some("half::f16".to_string()),
                         Type::Float32 => Some("f32".to_string()),
                         Type::Float64 => Some("f64".to_string()),
                         Type::Bool  => Some("bool".to_string()),
@@ -1148,6 +1149,7 @@ impl Transpiler {
                             "uint128" | "u128" => Some("u128".to_string()),
                             // Pre-existing bug fixed alongside float32/float64: "f32" used to
                             // return "f64" here regardless (docs/float-width-types.md).
+                            "float16" | "f16" => Some("half::f16".to_string()),
                             "float32" | "f32" => Some("f32".to_string()),
                             "float" | "float64" | "f64" => Some("f64".to_string()),
                             "bool"   => Some("bool".to_string()),
@@ -2216,10 +2218,10 @@ impl Transpiler {
             // bare builtin variants — match both forms.
             ExprKind::Var(v) if matches!(
                 self.var_types.get(v.as_str()),
-                Some(Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)
+                Some(Type::Int | Type::Uint | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool)
             ) || matches!(
                 self.var_types.get(v.as_str()),
-                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "float32" | "float64" | "bool")
+                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "float16" | "float32" | "float64" | "bool")
             ) => format!("&{}", v),
             ExprKind::Var(v) => format!("&*{}", v), // Arc<str> → &str via Deref
             _ => {
@@ -3631,7 +3633,7 @@ impl Transpiler {
     /// Determines whether a `transient` field should use `Cell<T>` (Copy) or `RefCell<T>` (!Copy).
     pub(crate) fn is_copy_type(ty: &Type) -> bool {
         match ty {
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool | Type::Nil | Type::Void => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool | Type::Nil | Type::Void => true,
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
             // Lowercase aliases: `int`, `float`, `bool`, `uint` parse as Named in the user source.
@@ -3639,7 +3641,7 @@ impl Transpiler {
             // every fixed-width int alias but not the float ones) closed alongside
             // adding float32/float64 (docs/float-width-types.md).
             Type::Named(n) => matches!(n.as_str(),
-                "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
+                "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64" | "bool"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"

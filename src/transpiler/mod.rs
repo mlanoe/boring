@@ -3192,11 +3192,11 @@ impl Transpiler {
     fn top_level_let_is_const_safe(&self, s: &LetStmt) -> bool {
         fn is_scalar(t: &Type) -> bool {
             match t {
-                Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool => true,
+                Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool => true,
                 Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                     | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
                 Type::Named(n) => matches!(n.as_str(),
-                    "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
+                    "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64" | "bool"
                     | "int8" | "int16" | "int32" | "int64" | "int128"
                     | "uint16" | "uint32" | "uint64" | "uint128"
                     | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"

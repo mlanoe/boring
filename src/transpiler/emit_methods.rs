@@ -333,6 +333,12 @@ impl Transpiler {
             ExprKind::Call(callee, call_args) => {
                 let ExprKind::Var(name) = &callee.kind else { return None };
                 if self.known_local_vars.contains(name.as_str()) { return None; }
+                match name.as_str() {
+                    "float16" => return Some(Type::Float16),
+                    "float32" => return Some(Type::Float32),
+                    "float" | "float64" => return Some(Type::Float64),
+                    _ => {}
+                }
                 if self.struct_fields.contains_key(name.as_str()) {
                     return Some(Type::Named(name.clone()));
                 }
@@ -5756,7 +5762,7 @@ impl Transpiler {
                 (self.struct_derives_clone.contains(n.as_str()) && !self.struct_holds_dyn(n, false, &mut vec![])) || self.all_enum_types.contains(n.as_str())
             }
             Type::Str => true,
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
             _ => false,
@@ -7445,7 +7451,7 @@ fn is_unqualified_actor_source_param(ty: Option<&Type>, actor_source_types: &std
 /// Returns true when param_ty is a primitive Copy type that never needs .clone().
 fn param_ty_is_copy(ty: Option<&Type>) -> bool {
     matches!(ty,
-        Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+        Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
             | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128) |
         Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))

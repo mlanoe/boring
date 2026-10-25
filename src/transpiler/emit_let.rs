@@ -348,7 +348,7 @@ impl Transpiler {
             // it; the field read is a move, as in hand-written Rust (`EXTERNAL_NON_CLONE_TYPES`). Without a
             // declared type the element type comes from `infer_std_type`'s small std-return table.
             && !self.let_field_read_is_external_non_clone(s.ty.as_ref(), s_value)
-            && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+            && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128))
         {
@@ -1181,11 +1181,11 @@ impl Transpiler {
             if let ExprKind::Cast(src_expr, dst_ty) = &s_value.kind {
                 let src_is_str = matches!(&src_expr.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
                     || matches!(&src_expr.kind, ExprKind::Var(v) if self.string_vars.contains(v.as_str()));
-                let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
+                let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64
                         | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                         | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
                     || matches!(dst_ty, Type::Named(n) if matches!(n.as_str(),
-                        "int" | "uint" | "uint8" | "float" | "float32" | "float64"
+                        "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64"
                         | "int8" | "int16" | "int32" | "int64" | "int128"
                         | "uint16" | "uint32" | "uint64" | "uint128"
                         | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -2541,7 +2541,7 @@ impl Transpiler {
         let is_nil = matches!(value.kind, ExprKind::Nil);
         // A Cast to a numeric type (or directly to Optional) already returns Option<T>
         let is_option_cast = matches!(&value.kind, ExprKind::Cast(_, ty)
-            if matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
+            if matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
                 | Type::Named(_) | Type::Optional(_)));
@@ -2970,6 +2970,15 @@ impl Transpiler {
     /// struct fields — everywhere else Rust would otherwise move out from under the binding.
     fn emit_let_value_fallback(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
         let s = self.emit_expr(value);
+        let declared_f16 = declared_ty.is_some_and(|ty|
+            matches!(ty.without_mut(), Type::Float16)
+                || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+        if declared_f16 {
+            let value_f16 = self.resolve_expr_type(value).is_some_and(|ty|
+                matches!(ty.without_mut(), Type::Float16)
+                    || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+            return if value_f16 { s } else { format!("half::f16::from_f64(({}) as f64)", s) };
+        }
         // Implicit clone for 'shared / 'actor / 'guard: cloning an Rc/Arc is just a
         // refcount increment, not a deep copy — assignment is always an alias.
         // 'inline and 'owned are owned types; move is the default there.

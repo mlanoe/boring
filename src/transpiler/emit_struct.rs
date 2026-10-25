@@ -969,6 +969,7 @@ impl Transpiler {
                         } else {
                             // Zero-initialize numeric/bool fields
                             let zero = match &f.ty {
+                                Type::Float16 => "half::f16::ZERO".to_string(),
                                 Type::Float32 | Type::Float64 => "0.0".to_string(),
                                 Type::Bool  => "false".to_string(),
                                 Type::Str   => "Arc::<str>::from(\"\")".to_string(),
@@ -987,6 +988,7 @@ impl Transpiler {
                 // Wrap in a local `let mut __self = ...` pattern.
                 let zero_fields: Vec<String> = fields.iter().map(|f| {
                     let zero = match &f.ty {
+                        Type::Float16 => "half::f16::ZERO".to_string(),
                         Type::Float32 | Type::Float64 => "0.0".to_string(),
                         Type::Bool  => "false".to_string(),
                         Type::Str   => "Arc::<str>::from(\"\")".to_string(),
@@ -1025,11 +1027,11 @@ impl Transpiler {
     /// initializer — see `emit_type_var_const`'s doc comment.
     pub(crate) fn type_is_scalar_primitive(ty: &Type) -> bool {
         match ty {
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool => true,
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
             Type::Named(n) => matches!(n.as_str(),
-                "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
+                "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64" | "bool"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -1415,6 +1417,7 @@ impl Transpiler {
             Type::Uint32 => Some("u32".to_string()),
             Type::Uint64 => Some("u64".to_string()),
             Type::Uint128 => Some("u128".to_string()),
+            Type::Float16 => Some("half::f16".to_string()),
             Type::Float32 => Some("f32".to_string()),
             Type::Float64 => Some("f64".to_string()),
             Type::Bool => Some("bool".to_string()),

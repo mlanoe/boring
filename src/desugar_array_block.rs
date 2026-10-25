@@ -296,8 +296,8 @@ fn strip_perm(ty: &Type) -> Type {
 /// not `Hash`; a mutable-shared qualifier isn't an owned snapshot.
 fn non_key_reason(ty: &Type) -> Option<&'static str> {
     match ty {
-        Type::Float32 | Type::Float64 => Some("floating-point values have no total equality (NaN)"),
-        Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64") =>
+        Type::Float16 | Type::Float32 | Type::Float64 => Some("floating-point values have no total equality (NaN)"),
+        Type::Named(n) if matches!(n.as_str(), "float" | "float16" | "float32" | "float64") =>
             Some("floating-point values have no total equality (NaN)"),
         Type::Dict(..) | Type::Set(_) => Some("dictionaries and sets are not hashable"),
         Type::Fn(..) => Some("function values are not hashable"),
@@ -376,6 +376,7 @@ fn describe_type(ty: &Type) -> String {
         Type::Uint32 => "uint32".into(),
         Type::Uint64 => "uint64".into(),
         Type::Uint128 => "uint128".into(),
+        Type::Float16 => "float16".into(),
         Type::Float32 => "float32".into(),
         Type::Float64 => "float".into(),
         Type::Str => "string".into(),

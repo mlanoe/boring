@@ -11,16 +11,16 @@ use super::helpers::*;
 /// test so an `as` cast on either emits a plain `as T` widen, not the
 /// string-parsing codegen (`.trim().parse::<T>()`) meant for `string` sources.
 fn is_known_numeric_scalar_type(ty: &Type) -> bool {
-    matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
+    matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64
         | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
         | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
     || matches!(ty, Type::Named(n) if matches!(n.as_str(),
-        "int" | "uint" | "uint8" | "float" | "float32" | "float64"
+        "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64"
         | "int8" | "int16" | "int32" | "int64" | "int128"
         | "uint16" | "uint32" | "uint64" | "uint128"
         | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
         | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-        | "f32" | "f64"))
+        | "f16" | "f32" | "f64"))
 }
 
 /// Minimum argument count `emit_builtin_call` needs before it's safe to index
@@ -37,7 +37,7 @@ fn builtin_min_arity(name: &str) -> Option<usize> {
         | "int" | "uint" | "uint8"
         | "int8" | "int16" | "int32" | "int64" | "int128"
         | "uint16" | "uint32" | "uint64" | "uint128"
-        | "float" | "float64" | "float32"
+        | "float" | "float64" | "float16" | "float32"
         | "sqrt" | "abs" | "floor" | "ceil" | "round"
         | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
         | "exp" | "tanh" | "log" | "log2" | "log10"
@@ -84,8 +84,8 @@ impl Transpiler {
                                 // Only in read (RHS) context — not when the field is being assigned to.
                                 // Do NOT clone collections (dict/array/set/vec) — they are mutated
                                 // in-place via method calls on self; cloning would make mutations no-ops.
-                                let is_primitive = matches!(fty, Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)
-                                    || matches!(fty, Type::Named(s) if matches!(s.as_str(), "int" | "uint" | "float" | "float32" | "float64" | "bool" | "usize" | "isize"));
+                                let is_primitive = matches!(fty, Type::Int | Type::Uint | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool)
+                                    || matches!(fty, Type::Named(s) if matches!(s.as_str(), "int" | "uint" | "float" | "float16" | "float32" | "float64" | "f16" | "bool" | "usize" | "isize"));
                                 // `.without_mut()` — a `var mut {K=V} field` / `mut [T] field`
                                 // struct field declaration wraps its type in `Type::Mut(..)`
                                 // (see `wrap_type_mut` in src/parser/mod.rs), so a direct
@@ -350,6 +350,7 @@ impl Transpiler {
                     return match ty {
                         Type::Float64 => format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
                         Type::Float32 => format!("{}.trim().parse::<f32>().unwrap_or({})", src, dv),
+                        Type::Float16 => format!("{}.trim().parse::<f32>().map(half::f16::from_f32).unwrap_or({})", src, dv),
                         // Deref before comparing: `Arc<str>`/`Rc<str>` (boring `string`) has no
                         // `PartialEq<&str>` impl, only `PartialEq<Self>` — `&*(src) == "true"`
                         // derefs to a real `&str` first, which does compare against a `&'static
@@ -359,6 +360,8 @@ impl Transpiler {
                             format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
                         Type::Named(n) if n == "float32" || n == "f32" =>
                             format!("{}.trim().parse::<f32>().unwrap_or({})", src, dv),
+                        Type::Named(n) if n == "float16" || n == "f16" =>
+                            format!("{}.trim().parse::<f32>().map(half::f16::from_f32).unwrap_or({})", src, dv),
                         Type::Named(n) if n == "bool" => format!("(&*({}) == \"true\")", src),
                         // `f32`/`f64` used to be excluded here (routed to the generic
                         // `.unwrap_or()` fallback below, with no real parse-and-validate
@@ -1343,6 +1346,8 @@ impl Transpiler {
                 Some("f64".to_string())
             } else if matches!(inner.as_ref(), Type::Float32) || matches!(inner.as_ref(), Type::Named(n) if n == "float32" || n == "f32") {
                 Some("f32".to_string())
+            } else if matches!(inner.as_ref(), Type::Float16) || matches!(inner.as_ref(), Type::Named(n) if n == "float16" || n == "f16") {
+                return format!("{}.trim().parse::<f32>().ok().map(half::f16::from_f32)", src);
             } else if crate::transpiler::helpers::is_specific_numeric_type(&inner_dst) {
                 Some(inner_dst)
             } else {
@@ -5547,6 +5552,18 @@ impl Transpiler {
         self.infer_float_width(e).unwrap_or("f64")
     }
 
+    fn emit_math_operand(&self, e: &Expr, ty: &str) -> String {
+        let value = self.emit_expr(e);
+        let is_f16 = self.resolve_expr_type(e).is_some_and(|t|
+            matches!(t.without_mut(), Type::Float16)
+                || matches!(t.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+        if is_f16 {
+            format!("{ty}::from({value})")
+        } else {
+            format!("({value} as {ty})")
+        }
+    }
+
     pub(crate) fn emit_builtin_call(&self, name: &str, args: &[Arg]) -> String {
         match name {
             // some(x) → Some(x): wrap a value in Option
@@ -5663,6 +5680,8 @@ impl Transpiler {
             }
             "float" | "float64" if self.is_string_expr(&args[0].value) =>
                 format!("{}.trim().parse::<f64>().unwrap_or(0.0)", self.emit_expr(&args[0].value)),
+            "float16" if self.is_string_expr(&args[0].value) =>
+                format!("{}.trim().parse::<f32>().map(half::f16::from_f32).unwrap_or(half::f16::ZERO)", self.emit_expr(&args[0].value)),
             "float32" if self.is_string_expr(&args[0].value) =>
                 format!("{}.trim().parse::<f32>().unwrap_or(0.0)", self.emit_expr(&args[0].value)),
             "int" | "uint" | "uint8"
@@ -5672,6 +5691,7 @@ impl Transpiler {
                 format!("({} as {})", self.emit_expr(&args[0].value), rust_ty)
             }
             "float" | "float64" => format!("({} as f64)", self.emit_expr(&args[0].value)),
+            "float16" => format!("half::f16::from_f32(({}) as f32)", self.emit_expr(&args[0].value)),
             "float32" => format!("({} as f32)", self.emit_expr(&args[0].value)),
             "str"   => {
                 // Single non-string arg → conversion.
@@ -5687,79 +5707,79 @@ impl Transpiler {
             // Cast argument to f64 to avoid "ambiguous numeric type" errors on literals.
             "sqrt" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).sqrt()", self.emit_expr(&args[0].value))
+                format!("{}.sqrt()", self.emit_math_operand(&args[0].value, ty))
             }
             "abs" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).abs()", self.emit_expr(&args[0].value))
+                format!("{}.abs()", self.emit_math_operand(&args[0].value, ty))
             }
             "floor" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).floor()", self.emit_expr(&args[0].value))
+                format!("{}.floor()", self.emit_math_operand(&args[0].value, ty))
             }
             "ceil" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).ceil()", self.emit_expr(&args[0].value))
+                format!("{}.ceil()", self.emit_math_operand(&args[0].value, ty))
             }
             "round" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).round()", self.emit_expr(&args[0].value))
+                format!("{}.round()", self.emit_math_operand(&args[0].value, ty))
             }
             "sin" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).sin()", self.emit_expr(&args[0].value))
+                format!("{}.sin()", self.emit_math_operand(&args[0].value, ty))
             }
             "cos" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).cos()", self.emit_expr(&args[0].value))
+                format!("{}.cos()", self.emit_math_operand(&args[0].value, ty))
             }
             "tan" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).tan()", self.emit_expr(&args[0].value))
+                format!("{}.tan()", self.emit_math_operand(&args[0].value, ty))
             }
             "asin" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).asin()", self.emit_expr(&args[0].value))
+                format!("{}.asin()", self.emit_math_operand(&args[0].value, ty))
             }
             "acos" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).acos()", self.emit_expr(&args[0].value))
+                format!("{}.acos()", self.emit_math_operand(&args[0].value, ty))
             }
             "atan" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).atan()", self.emit_expr(&args[0].value))
+                format!("{}.atan()", self.emit_math_operand(&args[0].value, ty))
             }
             "atan2"      => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                let y = self.emit_expr(&args[0].value);
-                let x = self.emit_expr(&args[1].value);
-                format!("({} as {ty}).atan2({} as {ty})", y, x)
+                let y = self.emit_math_operand(&args[0].value, ty);
+                let x = self.emit_math_operand(&args[1].value, ty);
+                format!("{}.atan2({})", y, x)
             }
             "exp" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).exp()", self.emit_expr(&args[0].value))
+                format!("{}.exp()", self.emit_math_operand(&args[0].value, ty))
             }
             "tanh" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).tanh()", self.emit_expr(&args[0].value))
+                format!("{}.tanh()", self.emit_math_operand(&args[0].value, ty))
             }
             "log"        => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).ln()", self.emit_expr(&args[0].value))
+                format!("{}.ln()", self.emit_math_operand(&args[0].value, ty))
             }
             "log2" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).log2()", self.emit_expr(&args[0].value))
+                format!("{}.log2()", self.emit_math_operand(&args[0].value, ty))
             }
             "log10" => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                format!("({} as {ty}).log10()", self.emit_expr(&args[0].value))
+                format!("{}.log10()", self.emit_math_operand(&args[0].value, ty))
             }
             "pow"        => {
                 let ty = self.math_builtin_float_ty(&args[0].value);
-                let b = self.emit_expr(&args[0].value);
-                let e = self.emit_expr(&args[1].value);
-                format!("({} as {ty}).powf({} as {ty})", b, e)
+                let b = self.emit_math_operand(&args[0].value, ty);
+                let e = self.emit_math_operand(&args[1].value, ty);
+                format!("{}.powf({})", b, e)
             }
             "min"        => {
                 if args.len() == 1 {
@@ -5993,7 +6013,7 @@ impl Transpiler {
 /// A primitive scalar: copied, never moved, so a by-value read of it needs no `.clone()`.
 fn param_ty_is_copy_scalar(t: &Type) -> bool {
     matches!(t,
-        Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
+        Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
             | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
 }

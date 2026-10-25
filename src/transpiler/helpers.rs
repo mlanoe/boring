@@ -169,7 +169,7 @@ pub(crate) fn is_scalar_let_value(val: &Expr, ty: Option<&Type>) -> bool {
         }
     }
     is_scalar_literal(val)
-        || ty.map(|t| matches!(t, Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)).unwrap_or(false)
+        || ty.map(|t| matches!(t, Type::Int | Type::Uint | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool)).unwrap_or(false)
 }
 
 /// Rust source for boring's built-in `Dimension` type, used by 2-D kernels.

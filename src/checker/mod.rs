@@ -1721,12 +1721,12 @@ impl Checker {
         }
         match ty {
             Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
-            | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 | Type::Float32
+            | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 | Type::Float16 | Type::Float32
             | Type::Float64 => Some((ArgClass::Num, num_type_name(ty).to_string())),
             Type::Str => Some((ArgClass::Str, "string".into())),
             Type::Bool => Some((ArgClass::Bool, "bool".into())),
             Type::Named(n) if !self.is_user_type(n) => match n.as_str() {
-                "int" | "uint" | "float" | "float32" | "float64" | "int8" | "int16" | "int32" | "int64"
+                "int" | "uint" | "float" | "float16" | "float32" | "float64" | "int8" | "int16" | "int32" | "int64"
                 | "int128" | "uint8" | "uint16" | "uint32" | "uint64" | "uint128" | "byte" =>
                     Some((ArgClass::Num, n.clone())),
                 "string" => Some((ArgClass::Str, "string".into())),
