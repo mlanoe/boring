@@ -3873,6 +3873,9 @@ impl Emitter {
                         ("parseFloat32", []) => {
                             return format!("{}.trim().parse::<f32>().ok()", self.expr(o));
                         }
+                        ("parseFloat16", []) => {
+                            return format!("{}.trim().parse::<f32>().ok().map(half::f16::from_f32)", self.expr(o));
+                        }
                         ("chars", []) => {
                             return format!(
                                 "{}.chars().map(|__boring_char| __boring_char.to_string()).collect::<Vec<String>>()",
@@ -5865,6 +5868,12 @@ impl Emitter {
                     && self.expr_type(object).as_deref() == Some("String") =>
             {
                 Some("f32".into())
+            }
+            ExprKind::MethodCall(object, method, _)
+                if method == "parseFloat16"
+                    && self.expr_type(object).as_deref() == Some("String") =>
+            {
+                Some("half::f16".into())
             }
             ExprKind::MethodCall(object, method, _) if method == "filter" => self.expr_type(object),
             ExprKind::MethodCall(_, method, args) if method == "map" => args

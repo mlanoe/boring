@@ -5302,7 +5302,7 @@ primitives below.
 | `split(sep)`, `chars()`, `lines()` | `[string]` |
 | `graphemes()` | `[string]` — extended grapheme clusters (UAX #29) |
 | `graphemeSlice(from, to)` | `string` — cut by grapheme index, never splits a cluster; out-of-range bounds clamp to `0...graphemeCount`, an inverted range is `""` |
-| `parseInt()`, `parseFloat()`, `parseFloat32()` | `int?` / `float?` / `float32?` |
+| `parseInt()`, `parseFloat()`, `parseFloat16()`, `parseFloat32()` | `int?` / `float?` / `float16?` / `float32?` |
 | `.length` (property, not a call) | `int` — number of Unicode scalar values |
 | `.graphemeCount` (property) | `int` — number of grapheme clusters (`"e\u0301".graphemeCount` is `1`) |
 | `.displayWidth` (property) | `int` — terminal cell width: the sum over grapheme clusters of the cluster's width capped at 2 (East Asian wide/fullwidth and emoji presentation = 2, combining marks and zero-width = 0, everything else 1) |

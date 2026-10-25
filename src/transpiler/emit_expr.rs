@@ -5509,7 +5509,7 @@ impl Transpiler {
         self.infer_float_width(e).unwrap_or("f64")
     }
 
-    fn emit_math_operand(&self, e: &Expr, ty: &str) -> String {
+    pub(crate) fn emit_math_operand(&self, e: &Expr, ty: &str) -> String {
         let value = self.emit_expr(e);
         let is_f16 = self.resolve_expr_type(e).is_some_and(|t|
             matches!(t.without_mut(), Type::Float16)

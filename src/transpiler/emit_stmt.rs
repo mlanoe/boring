@@ -980,9 +980,11 @@ impl Transpiler {
             match t {
                 Type::Float64 => Some("f64"),
                 Type::Float32 => Some("f32"),
+                Type::Float16 => Some("half::f16"),
                 Type::Named(n) => match n.as_str() {
                     "float" | "float64" | "f64" => Some("f64"),
                     "float32" | "f32" => Some("f32"),
+                    "float16" | "f16" => Some("half::f16"),
                     _ => None,
                 },
                 _ => None,

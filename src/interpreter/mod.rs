@@ -2859,9 +2859,9 @@ impl Interpreter {
     /// unhashable/unowned categories.
     fn is_identity_key_type(ty: &Type) -> bool {
         match ty {
-            Type::Float32 | Type::Float64 | Type::Dict(..) | Type::Set(_) | Type::Fn(..) | Type::Dyn(_) => false,
+            Type::Float16 | Type::Float32 | Type::Float64 | Type::Dict(..) | Type::Set(_) | Type::Fn(..) | Type::Dyn(_) => false,
             // Lowercase primitives reach here as plain names (normalized later).
-            Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64" | "Float" | "Float32" | "Float64" | "f32" | "f64") => false,
+            Type::Named(n) if matches!(n.as_str(), "float" | "float16" | "float32" | "float64" | "Float" | "Float16" | "Float32" | "Float64" | "f16" | "f32" | "f64") => false,
             Type::Optional(t) | Type::Array(t) | Type::ArrayN(t, _) | Type::Mut(t) => Self::is_identity_key_type(t),
             Type::Tuple(ts) => ts.iter().all(Self::is_identity_key_type),
             _ => true,

@@ -7,6 +7,7 @@ bytes per element. Conversions are explicit:
 ```boring
 let float16 compact = value as float16
 let float32 restored = compact as float32
+let float16 parsed = "1.5".parseFloat16() else float16(0.0)
 mut [float16]'kernel'unified cache = [0.0 as float16 for ..<count]
 ```
 

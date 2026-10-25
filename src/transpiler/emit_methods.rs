@@ -337,6 +337,9 @@ impl Transpiler {
                     "float16" => return Some(Type::Float16),
                     "float32" => return Some(Type::Float32),
                     "float" | "float64" => return Some(Type::Float64),
+                    "min" | "max" | "clamp" | "sign" if !call_args.is_empty() => {
+                        return self.resolve_expr_type(&call_args[0].value);
+                    }
                     _ => {}
                 }
                 if self.struct_fields.contains_key(name.as_str()) {
@@ -347,6 +350,9 @@ impl Transpiler {
                 }
                 self.fn_return_types.get(name.as_str()).cloned()
             }
+            ExprKind::MethodCall(_, method, _) if method == "parseFloat16" => {
+                Some(Type::Optional(Box::new(Type::Float16)))
+            }
             // `<T?-typed expr>.unwrap_or(x)` (and the other unwrap-style adapters) is the
             // optional's inner `T`.
             ExprKind::MethodCall(recv, method, _)
@@ -355,6 +361,15 @@ impl Transpiler {
             {
                 match self.resolve_expr_type(recv)? {
                     Type::Optional(inner) => Some(*inner),
+                    _ => None,
+                }
+            }
+            ExprKind::MethodCall(recv, method, _)
+                if matches!(method.as_str(), "sum" | "min" | "max") =>
+            {
+                match self.resolve_expr_type(recv)?.without_mut() {
+                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _)
+                        | Type::LabeledArray(inner, _) => Some((**inner).clone()),
                     _ => None,
                 }
             }
@@ -722,7 +737,7 @@ impl Transpiler {
                 // spurious extra `Some(...)` wrapped around the already-`Option<T>` `Vec::
                 // pop()` call, because this function said "not proven Optional" for a plain
                 // array receiver.
-                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find", "parseInt", "parseFloat", "parseFloat32"];
+                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find", "parseInt", "parseFloat", "parseFloat16", "parseFloat32"];
                 if ALWAYS_OPTION.contains(&method.as_str()) { return true; }
                 // `get(k)` (1-arg dict form, try_emit_dict_method) is the same story as the
                 // names above -- always Option<T>. The 2-arg `get(k, default)` form unwraps
@@ -2549,6 +2564,9 @@ impl Transpiler {
             "parseFloat32" => {
                 return Some(format!("{}.trim().parse::<f32>().ok()", obj_s));
             }
+            "parseFloat16" => {
+                return Some(format!("{}.trim().parse::<f32>().ok().map(half::f16::from_f32)", obj_s));
+            }
             "chars" => {
                 // Use threading-mode-aware string type (Rc<str> in single-thread, Arc<str> in multi).
                 let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
@@ -3084,22 +3102,10 @@ impl Transpiler {
         let receiver_is_float = match &obj.kind {
             ExprKind::Float(_) => true,
             ExprKind::Int(_)   => true,
-            ExprKind::Var(v) => matches!(
-                self.var_types.get(v.as_str()),
-                Some(crate::ast::Type::Float32) | Some(crate::ast::Type::Float64) | Some(crate::ast::Type::Int) | Some(crate::ast::Type::Uint)
-                | Some(crate::ast::Type::Uint8)
-                | Some(crate::ast::Type::Int8) | Some(crate::ast::Type::Int16) | Some(crate::ast::Type::Int32)
-                | Some(crate::ast::Type::Int64) | Some(crate::ast::Type::Int128)
-                | Some(crate::ast::Type::Uint16) | Some(crate::ast::Type::Uint32)
-                | Some(crate::ast::Type::Uint64) | Some(crate::ast::Type::Uint128)
-            ),
-            ExprKind::Cast(_, ty) => matches!(*ty, crate::ast::Type::Float32 | crate::ast::Type::Float64 | crate::ast::Type::Int | crate::ast::Type::Uint
-                | crate::ast::Type::Uint8
-                | crate::ast::Type::Int8 | crate::ast::Type::Int16 | crate::ast::Type::Int32
-                | crate::ast::Type::Int64 | crate::ast::Type::Int128
-                | crate::ast::Type::Uint16 | crate::ast::Type::Uint32
-                | crate::ast::Type::Uint64 | crate::ast::Type::Uint128),
-            _ => false,
+            ExprKind::Var(_) | ExprKind::Cast(_, _) => self.resolve_expr_type(obj).as_ref()
+                .and_then(Self::numeric_scalar_is_float).is_some(),
+            _ => self.resolve_expr_type(obj).as_ref()
+                .and_then(Self::numeric_scalar_is_float).is_some(),
         };
         if !receiver_is_float { return None; }
         const FLOAT_UNARY_METHODS: &[(&str, &str)] = &[
@@ -3114,24 +3120,30 @@ impl Transpiler {
             ("toRadians","to_radians"), ("toDegrees","to_degrees"),
         ];
         if let Some(&(_, rust_name)) = FLOAT_UNARY_METHODS.iter().find(|&&(n, _)| n == method) {
-            let obj_s = self.emit_expr(obj);
-            return Some(format!("({} as f64).{}()", obj_s, rust_name));
+            let ty = self.math_builtin_float_ty(obj);
+            let obj_s = self.emit_math_operand(obj, ty);
+            return Some(format!("{}.{}()", obj_s, rust_name));
         }
         if method == "log" {
-            let obj_s = self.emit_expr(obj);
-            let base = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "std::f64::consts::E".to_string());
-            return Some(format!("({} as f64).log({} as f64)", obj_s, base));
+            let ty = self.math_builtin_float_ty(obj);
+            let obj_s = self.emit_math_operand(obj, ty);
+            let base = args.first().map(|a| self.emit_math_operand(&a.value, ty))
+                .unwrap_or_else(|| format!("std::{ty}::consts::E"));
+            return Some(format!("{}.log({})", obj_s, base));
         }
         if method == "atan2" {
-            let obj_s = self.emit_expr(obj);
-            let other = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0.0f64".to_string());
-            return Some(format!("({} as f64).atan2({} as f64)", obj_s, other));
+            let ty = self.math_builtin_float_ty(obj);
+            let obj_s = self.emit_math_operand(obj, ty);
+            let other = args.first().map(|a| self.emit_math_operand(&a.value, ty))
+                .unwrap_or_else(|| format!("0.0 as {ty}"));
+            return Some(format!("{}.atan2({})", obj_s, other));
         }
         if method == "clamp" && args.len() >= 2 {
-            let obj_s = self.emit_expr(obj);
-            let lo = self.emit_expr(&args[0].value);
-            let hi = self.emit_expr(&args[1].value);
-            return Some(format!("({} as f64).clamp({} as f64, {} as f64)", obj_s, lo, hi));
+            let ty = self.math_builtin_float_ty(obj);
+            let obj_s = self.emit_math_operand(obj, ty);
+            let lo = self.emit_math_operand(&args[0].value, ty);
+            let hi = self.emit_math_operand(&args[1].value, ty);
+            return Some(format!("{}.clamp({}, {})", obj_s, lo, hi));
         }
         None
     }
@@ -3148,12 +3160,12 @@ impl Transpiler {
     /// used by `is_known_numeric_scalar_type` (`emit_expr.rs`).
     fn numeric_scalar_is_float(ty: &Type) -> Option<bool> {
         match ty {
-            Type::Float32 | Type::Float64 => Some(true),
+            Type::Float16 | Type::Float32 | Type::Float64 => Some(true),
             Type::Int | Type::Uint | Type::Uint8
             | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Some(false),
             Type::Named(n) => match n.as_str() {
-                "float32" | "float64" | "float" | "f32" | "f64" => Some(true),
+                "float16" | "float32" | "float64" | "float" | "f16" | "f32" | "f64" => Some(true),
                 "int" | "uint" | "uint8" | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -3213,13 +3225,16 @@ impl Transpiler {
         let is_float = match &obj.kind {
             ExprKind::Float(_) => true,
             ExprKind::Cast(_, ty) => Self::numeric_scalar_is_float(ty)?,
-            _ => self.infer_float_width(obj).is_some(),
+            _ => self.resolve_expr_type(obj).as_ref()
+                .and_then(Self::numeric_scalar_is_float) == Some(true)
+                || self.infer_float_width(obj).is_some(),
         };
         if is_float {
             let ty = self.math_builtin_float_ty(obj);
-            let obj_s = self.emit_expr(obj);
-            let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1.0".to_string());
-            return Some(format!("({} as {ty}).powf({} as {ty})", obj_s, exp));
+            let obj_s = self.emit_math_operand(obj, ty);
+            let exp = args.first().map(|a| self.emit_math_operand(&a.value, ty))
+                .unwrap_or_else(|| format!("1.0 as {ty}"));
+            return Some(format!("{}.powf({})", obj_s, exp));
         }
         if method == "pow" && self.is_int_scalar_receiver(obj) {
             let obj_s = self.emit_expr(obj);

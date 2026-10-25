@@ -1304,6 +1304,12 @@ impl Interpreter {
                     Err(_) => Ok(Some(Value::Nil)),
                 }
             }
+            "parseFloat16" => {
+                match s.trim().parse::<f32>() {
+                    Ok(f) => Ok(Some(Value::Float32(half::f16::from_f32(f).to_f32()))),
+                    Err(_) => Ok(Some(Value::Nil)),
+                }
+            }
             "indexOf" => {
                 let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 // Offsets are in Unicode scalar values (same unit as `length`/`slice`/`s[i]`),
