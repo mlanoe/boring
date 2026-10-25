@@ -1,0 +1,5 @@
+use lib
+
+def main():
+    let rt = Runtime()
+    print selectionOf(Handle(id = 1), rt)

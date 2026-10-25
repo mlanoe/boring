@@ -1,0 +1,14 @@
+# Swapped positional arguments: caught by the checker in `run` and `build`.
+struct Runtime:
+    var int n = 0
+
+struct Handle:
+    int id
+
+int selectionOf(Runtime rt, Handle h):
+    h.id
+
+def main():
+    let rt = Runtime()
+    let h = Handle(1)
+    print selectionOf(h, rt)

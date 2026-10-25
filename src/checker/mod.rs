@@ -47,7 +47,16 @@ pub struct CheckResult {
 }
 
 pub fn check(program: &Program) -> CheckResult {
+    check_with_imports(program, &[])
+}
+
+/// `check`, plus the fn/struct/enum items of files the program `use`s
+/// (`desugar_inject::collect_imported_items`). Imported items feed ONLY the
+/// call-argument type check (`check_call_arg_types`); every other check still
+/// sees just the entry file, as before.
+pub fn check_with_imports(program: &Program, imported: &[Item]) -> CheckResult {
     let mut checker = Checker::new();
+    checker.collect_imported(program, imported);
     checker.collect_signatures(program);
     // Second pass: depends on `kernel_decls` being fully populated (a function may
     // be declared before the kernel it constructs), so it can't be folded into the
@@ -223,6 +232,17 @@ struct Checker {
     /// `Type::LabeledArray`. See docs/array-multidim-proposal.md,
     /// "Cross-label compatibility between same-shape types".
     fn_param_types: HashMap<String, Vec<Option<Type>>>,
+    /// Every type-parameter name declared by any fn/method/struct in the program;
+    /// a `Named` type with one of these names is never treated as a concrete type
+    /// by `check_call_arg_types`.
+    generic_names: std::collections::HashSet<String>,
+    /// Struct/enum names declared only in an imported file (see `check_with_imports`).
+    imported_types: std::collections::HashSet<String>,
+    /// Imported free fns: name -> `(param name, type)` list; `None` when ambiguous
+    /// (declared twice) or variadic, i.e. never checked.
+    imported_fns: HashMap<String, Option<Vec<(String, Option<Type>)>>>,
+    /// Imported struct methods, same encoding keyed by (struct, method).
+    imported_methods: HashMap<(String, String), Option<Vec<(String, Option<Type>)>>>,
     /// Free function name -> arity/labeled-argument info, for `check_call_arity`.
     /// Absent, or present but also listed in `fn_overloaded`, means "don't
     /// check" — see that check's own doc comment for both guards.
@@ -343,6 +363,10 @@ impl Checker {
             fn_gpu_arg_params: HashMap::new(),
             fn_returns_resident_tuple: HashMap::new(),
             fn_param_types: HashMap::new(),
+            generic_names: std::collections::HashSet::new(),
+            imported_types: std::collections::HashSet::new(),
+            imported_fns: HashMap::new(),
+            imported_methods: HashMap::new(),
             fn_arity: HashMap::new(),
             fn_overloaded: std::collections::HashSet::new(),
             fn_returns_collection: std::collections::HashSet::new(),
@@ -444,7 +468,9 @@ impl Checker {
         let ctor_type = if ty.is_none() {
             value.and_then(|v| match &v.kind {
                 ExprKind::Call(callee, _) => match &callee.kind {
-                    ExprKind::Var(n) if self.struct_field_types.contains_key(n.as_str()) => Some(n.clone()),
+                    ExprKind::Var(n) if self.struct_field_types.contains_key(n.as_str())
+                        || (self.imported_types.contains(n.as_str()) && !self.imported_fns.contains_key(n.as_str())
+                            && !self.enums.contains_key(n.as_str())) => Some(n.clone()),
                     _ => None,
                 },
                 _ => None,
@@ -552,6 +578,42 @@ impl Checker {
     // body, matching how `def`/`req` legality is already resolved without reading
     // the called method's body.
 
+    fn collect_imported(&mut self, program: &Program, imported: &[Item]) {
+        let mut local = Checker::new();
+        local.collect_signatures(program);
+        fn sig(ps: &[Param]) -> Option<Vec<(String, Option<Type>)>> {
+            if ps.iter().any(|p| p.variadic) { return None; }
+            Some(ps.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+        }
+        for it in imported {
+            match it {
+                Item::Fn(f) => {
+                    self.generic_names.extend(f.type_params.iter().cloned());
+                    let dup = self.imported_fns.contains_key(&f.name);
+                    self.imported_fns.insert(f.name.clone(), if dup { None } else { sig(&f.params) });
+                }
+                Item::Struct(s) => {
+                    self.generic_names.extend(s.type_params.iter().cloned());
+                    self.imported_types.insert(s.name.clone());
+                    for m in &s.methods {
+                        self.generic_names.extend(m.type_params.iter().cloned());
+                        let key = (s.name.clone(), m.name.clone());
+                        let dup = self.imported_methods.contains_key(&key);
+                        self.imported_methods.insert(key, if dup { None } else { sig(&m.params) });
+                    }
+                }
+                Item::Enum(e) => { self.imported_types.insert(e.name.clone()); }
+                _ => {}
+            }
+        }
+        // A name the entry file declares itself always wins over an imported one.
+        for n in local.user_types.iter().chain(local.fn_arity.keys()) {
+            self.imported_types.remove(n);
+            self.imported_fns.remove(n);
+        }
+        self.imported_methods.retain(|(s, _), _| !local.user_types.contains(s));
+    }
+
     fn collect_signatures(&mut self, program: &Program) {
         self.type_traits = crate::downcast::TypeTraits::collect(&program.items);
         for item in &program.items { self.collect_item_signatures(item); }
@@ -594,6 +656,7 @@ impl Checker {
         let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_var_params.insert(f.name.clone(), var_flags);
         self.fn_param_types.insert(f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect());
+        self.generic_names.extend(f.type_params.iter().cloned());
         {
             let mut param_names = Vec::new();
             let mut has_default = Vec::new();
@@ -632,6 +695,8 @@ impl Checker {
 
     fn collect_struct_signature(&mut self, s: &StructDecl) {
         self.user_types.insert(s.name.clone());
+        self.generic_names.extend(s.type_params.iter().cloned());
+        for m in &s.methods { self.generic_names.extend(m.type_params.iter().cloned()); }
         self.struct_field_types.insert(s.name.clone(), s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect());
         for m in &s.methods {
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
@@ -1634,6 +1699,134 @@ impl Checker {
         for (v, ty) in checks { self.check_dot_variant(v, &ty); }
     }
 
+    // ── Call-argument type check ──────────────────────────────────────────────
+    // Only flags an argument whose type is positively known (constructor call,
+    // literal, typed binding, cast, `x else <known>`) and whose class differs from
+    // the declared parameter's: user struct/enum vs another user type, or vs
+    // string/bool/numeric. Numeric-vs-numeric is never flagged (literals coerce),
+    // nor is anything involving generics, traits, optionals-as-argument, aliases.
+
+    fn is_user_type(&self, n: &str) -> bool {
+        self.user_types.contains(n) || self.imported_types.contains(n)
+    }
+
+    fn type_class(&self, ty: &Type) -> Option<(ArgClass, String)> {
+        let mut ty = ty;
+        loop {
+            match ty {
+                Type::Mut(t) => ty = t,
+                Type::Qualified(t, _) => ty = t,
+                _ => break,
+            }
+        }
+        match ty {
+            Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+            | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 | Type::Float32
+            | Type::Float64 => Some((ArgClass::Num, num_type_name(ty).to_string())),
+            Type::Str => Some((ArgClass::Str, "string".into())),
+            Type::Bool => Some((ArgClass::Bool, "bool".into())),
+            Type::Named(n) if !self.is_user_type(n) => match n.as_str() {
+                "int" | "uint" | "float" | "float32" | "float64" | "int8" | "int16" | "int32" | "int64"
+                | "int128" | "uint8" | "uint16" | "uint32" | "uint64" | "uint128" | "byte" =>
+                    Some((ArgClass::Num, n.clone())),
+                "string" => Some((ArgClass::Str, "string".into())),
+                "bool" => Some((ArgClass::Bool, "bool".into())),
+                _ => None,
+            },
+            Type::Named(n) if self.is_user_type(n) && !self.generic_names.contains(n) =>
+                Some((ArgClass::User(n.clone()), n.clone())),
+            _ => None,
+        }
+    }
+
+    fn arg_class(&self, e: &Expr) -> Option<(ArgClass, String)> {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::UInt64(_) => Some((ArgClass::Num, "int".into())),
+            ExprKind::Float(_) => Some((ArgClass::Num, "float".into())),
+            ExprKind::Str(_) | ExprKind::StringInterp(_) => Some((ArgClass::Str, "string".into())),
+            ExprKind::Bool(_) => Some((ArgClass::Bool, "bool".into())),
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(n) if self.lookup(n).is_none()
+                    && !self.fn_arity.contains_key(n.as_str())
+                    && !self.imported_fns.contains_key(n.as_str())
+                    && (self.struct_field_types.contains_key(n.as_str()) || self.enums.contains_key(n.as_str())
+                        || self.imported_types.contains(n.as_str()))
+                    && self.is_user_type(n) && !self.generic_names.contains(n) =>
+                    Some((ArgClass::User(n.clone()), n.clone())),
+                _ => None,
+            },
+            ExprKind::Var(n) => {
+                let b = self.lookup(n)?;
+                if let Some(c) = &b.ctor_type {
+                    if self.is_user_type(c) && !self.generic_names.contains(c) {
+                        return Some((ArgClass::User(c.clone()), c.clone()));
+                    }
+                }
+                self.type_class(b.ty.as_ref()?)
+            }
+            ExprKind::Cast(_, t) => self.type_class(t),
+            ExprKind::Else(_, d) => self.arg_class(d),
+            _ => None,
+        }
+    }
+
+    fn check_call_arg_types(&mut self, callee: &Expr, args: &[Arg]) {
+        if self.kernel_dispatch_only { return; }
+        if args.iter().any(|a| a.spread || a.default_rest) { return; }
+        let ExprKind::Var(name) = &callee.kind else { return };
+        if self.fn_overloaded.contains(name.as_str()) || self.lookup(name).is_some() { return; }
+        if self.struct_field_types.contains_key(name.as_str()) || self.imported_types.contains(name.as_str()) { return; }
+        let params: Vec<(String, Option<Type>)> =
+            if let (Some(tys), Some(arity)) = (self.fn_param_types.get(name.as_str()), self.fn_arity.get(name.as_str())) {
+                if arity.variadic.is_some() || arity.param_names.len() != tys.len() { return; }
+                arity.param_names.iter().cloned().zip(tys.iter().cloned()).collect()
+            } else if let Some(Some(ps)) = self.imported_fns.get(name.as_str()) {
+                ps.clone()
+            } else { return };
+        self.report_arg_mismatches(&name.clone(), &params, args);
+    }
+
+    fn check_method_arg_types(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
+        if self.kernel_dispatch_only { return; }
+        if args.iter().any(|a| a.spread || a.default_rest) { return; }
+        let Some((ArgClass::User(s), _)) = self.arg_class(recv) else { return };
+        let key = (s.clone(), method.to_string());
+        let params: Vec<(String, Option<Type>)> = if let Some(overloads) = self.struct_methods.get(&key) {
+            if overloads.len() != 1 || overloads[0].iter().any(|p| p.variadic) { return; }
+            overloads[0].iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+        } else if let Some(Some(ps)) = self.imported_methods.get(&key) {
+            ps.clone()
+        } else { return };
+        self.report_arg_mismatches(&format!("{}.{}", s, method), &params, args);
+    }
+
+    fn report_arg_mismatches(&mut self, fname: &str, params: &[(String, Option<Type>)], args: &[Arg]) {
+        let mut pos = 0;
+        let mut found: Vec<(usize, String, String, String, usize, usize)> = Vec::new();
+        for a in args {
+            let idx = match &a.label {
+                Some(l) => params.iter().position(|p| &p.0 == l),
+                None => { pos += 1; Some(pos - 1) }
+            };
+            let Some(i) = idx else { continue };
+            let Some((pn, Some(pty))) = params.get(i) else { continue };
+            let pty = match Self::strip_qualifiers(pty) {
+                Type::Optional(inner) => (**inner).clone(),
+                t => t.clone(),
+            };
+            let Some((pc, pname)) = self.type_class(&pty) else { continue };
+            let Some((ac, aname)) = self.arg_class(&a.value) else { continue };
+            if pc == ac || (pc == ArgClass::Num && ac == ArgClass::Num) { continue; }
+            found.push((i + 1, pn.clone(), pname, aname, a.value.line, a.value.col));
+        }
+        for (n, pn, pname, aname, line, col) in found {
+            self.error(
+                format!("argument {} of {} (parameter '{}') expects {}, got {}", n, fname, pn, pname, aname),
+                line, col,
+            );
+        }
+    }
+
     fn check_call_arity(&mut self, callee: &Expr, args: &[Arg], line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
         let ExprKind::Var(name) = &callee.kind else { return };
@@ -2251,6 +2444,7 @@ impl Checker {
                 self.check_removed_device_syntax(callee, expr.line, expr.col);
                 self.check_call_arity(callee, args, expr.line, expr.col);
                 self.check_call_dot_variants(callee, args);
+                self.check_call_arg_types(callee, args);
                 // A resident value passed as a bare argument at a position the callee
                 // is known to consume residently (`fn_gpu_arg_params`, populated by
                 // `scan_fn_gpu_arg_params`) is legal without `with` first — that's the
@@ -2317,6 +2511,7 @@ impl Checker {
                 }
                 if matches!(&expr.kind, ExprKind::MethodCall(..)) {
                     self.check_same_object_lend(recv, method, args);
+                    self.check_method_arg_types(recv, method, args);
                 }
             }
             ExprKind::GenericCall(callee, _, args) => {
@@ -4206,5 +4401,67 @@ mod dot_variant_tests {
         assert_clean("struct Box:\n    Axis alignment = .Center\n\ndef f(Axis a):\n    print \"{a}\"\n\ndef main():\n    let b = Box(alignment = .Leading)\n    f(.Trailing)\n    let Axis a = .Center\n");
         // Expected type is not a known enum: nothing to check against.
         assert_clean("struct Box:\n    int n\n\ndef main():\n    let x = .Top\n");
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ArgClass { User(String), Str, Bool, Num }
+
+fn num_type_name(ty: &Type) -> &'static str {
+    match ty {
+        Type::Int => "int", Type::Uint => "uint", Type::Uint8 => "uint8", Type::Int8 => "int8",
+        Type::Int16 => "int16", Type::Int32 => "int32", Type::Int64 => "int64", Type::Int128 => "int128",
+        Type::Uint16 => "uint16", Type::Uint32 => "uint32", Type::Uint64 => "uint64", Type::Uint128 => "uint128",
+        Type::Float32 => "float32", _ => "float",
+    }
+}
+
+#[cfg(test)]
+mod call_arg_type_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    const DECLS: &str = "struct Runtime:\n    var int n = 0\nstruct Handle:\n    int id\nint sel(Runtime rt, Handle h):\n    1\n";
+
+    #[test]
+    fn swapped_struct_arguments_are_rejected() {
+        let src = format!("{DECLS}def main():\n    let rt = Runtime()\n    let h = Handle(1)\n    print sel(h, rt)\n");
+        let errs = errors_for(&src);
+        assert!(errs.iter().any(|e| e.contains("argument 1 of sel") && e.contains("expects Runtime, got Handle")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("argument 2 of sel") && e.contains("expects Handle, got Runtime")), "{errs:?}");
+    }
+
+    #[test]
+    fn constructor_else_and_labeled_arguments_are_rejected() {
+        let src = format!("{DECLS}def f(Runtime rt, Handle? o):\n    print sel(o else (Handle(-1)), rt)\n    print sel(rt = Handle(1), h = rt)\n");
+        let errs = errors_for(&src);
+        assert!(errs.iter().any(|e| e.contains("argument 1 of sel")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("argument 2 of sel")), "{errs:?}");
+    }
+
+    #[test]
+    fn primitive_mismatch_is_rejected() {
+        let errs = errors_for("int f(int a, string s):\n    a\ndef main():\n    print f(\"x\", 3)\n");
+        assert_eq!(errs.len(), 2, "{errs:?}");
+    }
+
+    #[test]
+    fn method_argument_mismatch_is_rejected() {
+        let src = "struct Apple:\n    int x\nstruct Berry:\n    int y\nstruct Crate:\n    req int take(Apple a):\n        1\ndef main():\n    let c = Crate()\n    print c.take(Berry(1))\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("argument 1 of Crate.take") && e.contains("expects Apple, got Berry")), "{errs:?}");
+    }
+
+    #[test]
+    fn legitimate_coercions_and_unknowns_pass() {
+        let src = "struct A:\n    int x\ntrait T:\n    req int v()\nstruct B as T:\n    int y\n    req int v():\n        y\nfloat f(float a, A? o, T t):\n    a\nU id<U>(U u):\n    u\ndef g(A a):\n    print f(1, a, B(1))\n    print f(2.5, nil, B(2))\n    print id(A(1))\n    print id(3)\n";
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "{errs:?}");
     }
 }

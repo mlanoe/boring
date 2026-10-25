@@ -113,6 +113,20 @@ fn desugar_array_block_or_exit(path: &Path, source: &str, program: ast::Program)
 /// resolution/desugaring pass) and reports+exits on a resolution error the
 /// same way every other pipeline stage here does — mirrors
 /// `desugar_array_block_or_exit` immediately above, for the identical reason.
+/// `checker::check`, additionally told about the fn/struct/enum signatures of the files
+/// `program` `use`s (only the call-argument type check consumes them).
+fn check_with_imports(
+    path: &Path,
+    program: &ast::Program,
+    deps: &std::collections::HashMap<String, PathBuf>,
+) -> checker::CheckResult {
+    let imported = match path.parent() {
+        Some(dir) => desugar_inject::collect_imported_items(&program.items, dir, deps),
+        None => Vec::new(),
+    };
+    checker::check_with_imports(program, &imported)
+}
+
 fn desugar_inject_or_exit(
     path: &Path,
     source: &str,
@@ -2387,7 +2401,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
 
     let program = desugar_inject_or_exit(&path, &source, program, &deps);
 
-    if report_check_result(&path, &source, checker::check(&program)) {
+    if report_check_result(&path, &source, check_with_imports(&path, &program, &deps)) {
         process::exit(1);
     }
 
@@ -2529,7 +2543,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
         }
     }
     let program = desugar_inject_or_exit(&path, &source, program, &deps);
-    if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
+    if report_check_result(&path, &source, check_with_imports(&path, &program, &deps)) { process::exit(1); }
     // Same `source_dir` derivation as `emit_rust_to_dir` — without it, a local
     // `use <file>` resolves relative to the *process* cwd instead of the source
     // file's own directory, so `--emit-rust` run from anywhere other than the
@@ -2630,7 +2644,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     }
     let program = desugar_inject_or_exit(&path, &source, program, &deps);
 
-    if report_check_result(&path, &source, checker::check(&program)) {
+    if report_check_result(&path, &source, check_with_imports(&path, &program, &deps)) {
         process::exit(1);
     }
 

@@ -1,0 +1,8 @@
+pub struct Runtime:
+    var int n = 0
+
+pub struct Handle:
+    int id
+
+pub int selectionOf(Runtime rt, Handle h):
+    h.id

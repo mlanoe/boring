@@ -873,3 +873,56 @@ pub fn desugar_inject(
     program.items = desugar_items(program.items, &reg, current_env, &trait_names)?;
     Ok(program)
 }
+
+/// Every top-level item of every file reachable from `items` through `use`
+/// (same-project bare `use` and `[deps]`-qualified `use`, transitively),
+/// flattened through `mod`s. Read-only: used by the checker to learn imported
+/// signatures (`checker::check_with_imports`); unreadable/unparsable files and
+/// unresolved paths (e.g. embedded stdlib `boring.*`) are silently skipped.
+pub fn collect_imported_items(
+    items: &[Item],
+    source_dir: &std::path::Path,
+    deps: &HashMap<String, std::path::PathBuf>,
+) -> Vec<Item> {
+    fn flatten(items: &[Item], out: &mut Vec<Item>) {
+        for it in items {
+            match it {
+                Item::Mod(m) => flatten(&m.items, out),
+                Item::Fn(_) | Item::Struct(_) | Item::Enum(_) => out.push(it.clone()),
+                _ => {}
+            }
+        }
+    }
+    fn walk(
+        items: &[Item],
+        source_dir: &std::path::Path,
+        deps: &HashMap<String, std::path::PathBuf>,
+        visited: &mut HashSet<std::path::PathBuf>,
+        out: &mut Vec<Item>,
+    ) {
+        for item in items {
+            match item {
+                Item::Use(u) if !u.path.is_empty() => {
+                    let (root, rel): (&std::path::Path, std::path::PathBuf) =
+                        if u.path.len() >= 2 && deps.contains_key(&u.path[0]) {
+                            (&deps[&u.path[0]], u.path[1..].iter().collect())
+                        } else {
+                            (source_dir, u.path.iter().collect())
+                        };
+                    let Ok(candidate) = root.join(rel).with_extension("br").canonicalize() else { continue };
+                    if !visited.insert(candidate.clone()) { continue; }
+                    let Ok(source) = std::fs::read_to_string(&candidate) else { continue };
+                    let Ok(tokens) = crate::lexer::lex_all(&source) else { continue };
+                    let Ok(file) = crate::parser::parse(tokens) else { continue };
+                    flatten(&file.items, out);
+                    walk(&file.items, root, deps, visited, out);
+                }
+                Item::Mod(m) => walk(&m.items, source_dir, deps, visited, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(items, source_dir, deps, &mut HashSet::new(), &mut out);
+    out
+}
