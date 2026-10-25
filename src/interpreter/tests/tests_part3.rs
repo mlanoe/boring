@@ -1570,6 +1570,38 @@ let _name = "ok"
     }
 }
 
+// Imported std::fs::File values are opaque to most of the interpreter, but the
+// common metadata/len path must execute rather than falling through to the
+// generic "no method on type File" error.
+#[test]
+fn test_rust_file_open_metadata_len() {
+    let path = std::env::temp_dir().join(format!(
+        "boring-interpreter-file-metadata-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test"),
+    ));
+    std::fs::write(&path, b"boring").expect("write fixture");
+    let src = format!(
+        r#"
+use std.fs.File
+
+def uint64 fileLen(string path) throws:
+    let f = try? File.open(path)
+    guard let f else throw "open failed"
+    let m = try? f.metadata()
+    guard let m else throw "metadata failed"
+    return m.len()
+
+let _len = try? fileLen("{}")
+"#,
+        path.display()
+    );
+    let (interp, res) = run(&src);
+    let _ = std::fs::remove_file(&path);
+    res.expect("File.open(...).metadata().len() should run");
+    assert_eq!(get_var(&interp, "_len"), Value::Uint64(6));
+}
+
 // Multiple items from the same std module.
 #[test]
 fn test_rust_multi_import() {

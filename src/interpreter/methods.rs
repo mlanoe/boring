@@ -139,6 +139,23 @@ impl Interpreter {
 
         // RustType method dispatch — `HashMap.new()`, `Vec.with_capacity(n)`, etc.
         if let Value::RustType { ref name } = obj {
+            if name == "File" && method == "open" {
+                let path = match args.first() {
+                    Some(Value::Str(path)) => path.clone(),
+                    Some(other) => {
+                        return Err(err(
+                            format!("File.open: expected Str, got {}", other.type_name()),
+                            line,
+                        ))
+                    }
+                    None => return Err(err("File.open: missing path", line)),
+                };
+                std::fs::File::open(&path)
+                    .map_err(|e| Signal::Exception(Value::Str(e.to_string())))?;
+                return Ok(make_object("File".to_string(), vec![
+                    ("path".to_string(), Value::Str(path)),
+                ]));
+            }
             if name == "SystemTime" && method == "now" {
                 let nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -573,6 +590,39 @@ impl Interpreter {
                     let inner = inner_rc.borrow();
                     (inner.type_name.clone(), inner.fields.clone())
                 };
+                if type_name == "File" && method == "metadata" {
+                    let path = fields
+                        .iter()
+                        .find_map(|(name, value)| {
+                            if name == "path" {
+                                if let Value::Str(path) = value {
+                                    Some(path)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| err("invalid File value", line))?;
+                    let metadata = std::fs::metadata(path)
+                        .map_err(|e| Signal::Exception(Value::Str(e.to_string())))?;
+                    return Ok(make_object("Metadata".to_string(), vec![
+                        ("len".to_string(), Value::Uint64(metadata.len())),
+                    ]));
+                }
+                if type_name == "Metadata" && method == "len" {
+                    return fields
+                        .iter()
+                        .find_map(|(name, value)| {
+                            if name == "len" {
+                                Some(value.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| err("invalid Metadata value", line));
+                }
                 if type_name == "SystemTime" && method == "durationSince" {
                     let current = fields.iter().find_map(|(name, value)| {
                         if name == "unixNanos" {
