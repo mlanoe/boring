@@ -8634,6 +8634,24 @@ Not covered (use `boring.toml`'s `[external_fns]` above, or a Boring wrapper): o
 
 **By-value arguments of non-`Clone` std types.** Boring's value semantics normally auto-`.clone()` a non-`Copy` argument passed to a Boring function. For std types that are deliberately not `Clone` (`TcpStream`, `TcpListener`, `UdpSocket`, `File`, `Stdin`/`Stdout`/`Stderr`, `BufReader`/`BufWriter`, `Child*`, `JoinHandle`, `Receiver`, `Mutex`, `RwLock`, ...) the argument is **moved** instead, exactly as in hand-written Rust: use it afterwards and rustc reports a use-after-move — call the type's own `try_clone()` first if you need two handles, or declare the parameter `var TcpStream s` to lend a `&mut` instead. A parameter or non-`mut` receiver of such a type that is only used through `&mut self` methods (`sock.read(..)`) must itself be declared `mut`/`var` (`def f(mut TcpStream sock)`), as Rust requires. The same holds for a `let`/`var` binding whose declared type is one of these and whose value is a field read: `var TcpStream server = pair.0` (with `pair` from `listener.accept()`) is a move of the tuple element, not a `.clone()`; `Clone` types (`Duration`, your own structs) keep cloning. The type may also be left off: a small fixed table of well-known std results lets the compiler type the element itself — `TcpListener.accept()`/`UnixListener.accept()` → `(TcpStream, SocketAddr)`/`(UnixStream, SocketAddr)`, `Command.spawn()` → `Child` (whose `stdin`/`stdout`/`stderr` fields are non-`Clone` too) — followed through `try?` and `guard let` (`let l = try? TcpListener.bind(..)`, `guard let listener = l`, `let p = try? listener.accept()`, `guard let pair = p`, `var server = pair.0`). Anything outside that table (a handle returned by your own function, an `if let` binding, a type behind a chain the table does not know) is untyped, so the read still clones: declare the type (`var TcpStream s = pair.0`) or destructure (`var (s, peer) = pair`). A Boring `struct` that reuses a std name (`struct TcpListener`) is your own type and is never looked up in the table.
 
+### Advanced — `char`s and tuple-item iterators with external crates
+
+Boring has no `char` type: `s.chars()` is a builtin returning `[string]` (one scalar per element) and `ord(ch)` takes such a string. Rust APIs bounded on `char` (`swash::text::analyze<I: IntoIterator + Clone>(chars) where I::Item: Borrow<char>`, `String::from_iter`, ...) would reject that representation, so:
+
+- **`x.chars()` written directly as an argument of an external callee** (an imported free function, an associated function or a method of an external type, without `[external_fns]` metadata) is emitted as the real `(&*x).chars()` iterator, `Item = char`, unchanged. Anywhere else (`let cs = x.chars()`, a Boring function argument) it stays the `[string]` builtin. There is deliberately no `char` literal or `toChar()`: a `char` only ever flows from `str::chars()` into an external API, never into Boring values.
+- **Iterating an external call's result.** `for item in analyze(text.chars()):` works (`.into_iter()` is added; the iterator need not be `Clone`-able). Two loop variables over a call to a free function imported with `use` *destructure* the tuple items — `for props, boundary in analyze(text.chars()):` — instead of auto-enumerating as they do over a Boring array. The explicit form `item.0` / `item.1` always works too.
+
+```boring
+use swash.text.analyze
+use swash.text.cluster.Boundary
+
+for props, boundary in analyze(text.chars()):
+    if boundary == Boundary.Mandatory:
+        ...
+```
+
+Limits: only the direct `x.chars()` argument form is rewritten (not `x.chars().filter(..)`, which is the Boring array builtin), and the tuple-destructuring rule applies to imported free functions only; for an external method returning a tuple iterator use `item.0`/`item.1`.
+
 ### Advanced — String literals as external call arguments (known limitation)
 
 A string literal passed **directly** as an argument to a method or function call on an

@@ -5846,6 +5846,8 @@ impl Transpiler {
     /// Is a bare `name(...)` call a free function Boring never saw a declaration for — i.e. an
     /// external Rust function brought in by `use`? Not a Boring `def`, not a local/parameter
     /// (closure or function value), not a callable-struct instance.
+    pub(crate) fn is_imported_external_fn(&self, name: &str) -> bool { self.is_external_free_fn(name) }
+
     fn is_external_free_fn(&self, name: &str) -> bool {
         !self.fn_sigs.contains_key(name)
             && !self.known_local_vars.contains(name)

@@ -141,6 +141,19 @@ impl Transpiler {
         // fall back to its recorded initializer's own literal shape (covers
         // `let pairs = [(1, "one"), ...]` with no type annotation, which
         // `var_types`/`resolve_iterable_type` below can't see at all).
+        // A call to a free function imported with `use` (`for p, b in analyze(text.chars()):`):
+        // an external iterator Boring cannot see the item type of. Two loop variables
+        // destructure its tuple items (the Query/`Res` precedent below), never auto-enumerate.
+        if let ExprKind::Call(callee, _) = &iterable.kind {
+            if let ExprKind::Var(name) = &callee.kind {
+                let suffix = format!("::{name}");
+                if self.is_imported_external_fn(name)
+                    && self.emitted_external_uses.iter().any(|u| u.ends_with(&suffix))
+                {
+                    return true;
+                }
+            }
+        }
         if let ExprKind::Var(v) = &iterable.kind {
             if self.dict_vars.contains(v.as_str()) { return true; }
             if let Some(shape) = self.var_init_exprs.get(v.as_str())

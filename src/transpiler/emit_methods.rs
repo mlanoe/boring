@@ -2397,6 +2397,15 @@ impl Transpiler {
     /// their `Arc<str>`/`Rc<str>` representation. Explicit `[external_fns]` metadata
     /// bypasses this fallback, which preserves owned arguments where an API requires one.
     pub(crate) fn emit_external_fallback_arg(&self, arg: &Expr) -> String {
+        // `x.chars()` handed to an external callee: pass the real `str::chars()` iterator
+        // (Item = `char`), not the builtin's `Vec<Arc<str>>` of one-scalar strings — external
+        // APIs bounded on `char` (`swash::text::analyze`, `String::from_iter`, ...) cannot
+        // accept the latter.
+        if let ExprKind::MethodCall(recv, m, margs) = &arg.kind {
+            if m == "chars" && margs.is_empty() && self.expr_is_string_receiver(recv) {
+                return format!("(&*{}).chars()", self.emit_expr(recv));
+            }
+        }
         let raw = self.emit_expr(arg);
         let is_string = self.is_string_expr(arg)
             || self.expr_is_string_receiver(arg)
