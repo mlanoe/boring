@@ -244,6 +244,14 @@ for an animation). The loop otherwise sleeps (wgpu `ControlFlow::Wait`; Metal/CU
 while a redraw is pending; SIMD blocks inside `screen.present` on a condition variable). `screen.requestRedraw()`
 is a no-op in the default continuous mode. Regression tests: `tests/screen_render_loop_arrays.rs`.
 
+**Frame pacing / CPU cost (wgpu, macOS).** A body that calls `screen.requestRedraw()` every frame runs at the display
+rate: each frame's `surface.get_current_texture()` blocks on the vsync (`PresentMode::Fifo`; a `sample` shows the thread
+parked in `CAMetalLayer nextDrawable`, not spinning), so the host itself is cheap. Measured on Apple Silicon (`ps -o time=`
+over 10 s, 60 fps): a gradient kernel + `screen.present` + `requestRedraw()` every frame uses ~7-8 % of a core at
+640x360, 1600x1000 and 2880x1700 alike, with or without `screen.setImeArea` each frame. A program that still shows a high
+figure while redrawing continuously is spending it in its own loop body (the Todo window redrawing unconditionally
+spends it in layout/encode allocation and cloning, not in the host); request a redraw only while something animates.
+
 
 ### HiDPI
 
