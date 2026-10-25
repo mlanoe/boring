@@ -2542,7 +2542,7 @@ impl Transpiler {
              \x20   fn scalar_u32(v: u32) -> Self { BoringError::Scalar(ScalarKind::Uint32, v as u128) }\n\
              \x20   fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }\n\
              \x20   fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }\n\
-             \x20   fn scalar_f16(v: half::f16) -> Self { BoringError::Scalar(ScalarKind::Float16, v.to_bits() as u128) }\n\
+             \x20   fn scalar_f16_bits(v: u16) -> Self { BoringError::Scalar(ScalarKind::Float16, v as u128) }\n\
              \x20   fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }\n\
              }\n\
              #[derive(Debug)]\n\
@@ -2574,7 +2574,7 @@ impl Transpiler {
              \x20               ScalarKind::Uint32  => write!(f, \"{}\", *bits as u32),\n\
              \x20               ScalarKind::Uint64  => write!(f, \"{}\", *bits as u64),\n\
              \x20               ScalarKind::Uint128 => write!(f, \"{}\", *bits),\n\
-             \x20               ScalarKind::Float16 => write!(f, \"{}\", half::f16::from_bits(*bits as u16)),\n\
+             \x20               ScalarKind::Float16 => write!(f, \"{}\", __boring_scalar_f16_to_f32(*bits as u16)),\n\
              \x20               ScalarKind::Float32 => write!(f, \"{}\", f32::from_bits(*bits as u32)),\n\
              \x20           },\n\
              \x20           BoringError::Other(_, e)    => write!(f, \"{}\", e),\n\
@@ -2582,6 +2582,18 @@ impl Transpiler {
              \x20   }\n\
              }\n\
              impl std::error::Error for BoringError {}\n\n\
+             fn __boring_scalar_f16_to_f32(bits: u16) -> f32 {\n\
+             \x20   let sign = if bits & 0x8000 == 0 { 1.0f32 } else { -1.0f32 };\n\
+             \x20   let exponent = ((bits >> 10) & 0x1f) as i32;\n\
+             \x20   let fraction = (bits & 0x03ff) as u32;\n\
+             \x20   let magnitude = match exponent {\n\
+             \x20       0 => (fraction as f32) * 2.0f32.powi(-24),\n\
+             \x20       31 if fraction == 0 => f32::INFINITY,\n\
+             \x20       31 => f32::NAN,\n\
+             \x20       _ => (1.0 + fraction as f32 / 1024.0) * 2.0f32.powi(exponent - 15),\n\
+             \x20   };\n\
+             \x20   sign * magnitude\n\
+             }\n\n\
              // Boring standard error enum — always available without import.\n\
              // Use `throw Error.Expired` / `catch Error:` / `match err: Error.Expired: ...`\n\
              #[derive(Debug, Clone)]\n\

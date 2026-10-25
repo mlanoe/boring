@@ -232,6 +232,11 @@ impl Transpiler {
                         ).as_ref().and_then(crate::transpiler::helpers::scalar_ctor_name);
                         if let Some(ctor) = scalar_ctor {
                             let val = self.emit_expr(e);
+                            let val = if ctor == "scalar_f16_bits" {
+                                format!("({}).to_bits()", val)
+                            } else {
+                                val
+                            };
                             self.line(&make_err(&format!("Box::new(BoringError::{}({}))", ctor, val)));
                             return;
                         }

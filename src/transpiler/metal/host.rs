@@ -3967,7 +3967,8 @@ impl HostEmitter {
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         return format!(
-                            "(match &{v} {{ BoringKernelArg::Resident(buf, _) => {resident}, BoringKernelArg::Host(v) => {dev}.new_buffer_with_data((v.iter().copied().collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            "(match &{v} {{ BoringKernelArg::Resident(buf, _) => {resident}, BoringKernelArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| {host_convert}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            host_convert = if elem == "half::f16" { "x".to_string() } else { convert.clone() },
                             resident = if is_read_only_buffer { "buf.clone()".to_string() } else { format!("__boring_metal_buffer_copy(&{dev}, &buf)?") },
                             v = vname, dev = dev, elem = elem
                         );

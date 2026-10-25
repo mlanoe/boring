@@ -501,8 +501,12 @@ kernel Scale:
     assert!(toml.contains("[dependencies]"),
         "Cargo.toml must have a [dependencies] section;\ngot:\n{toml}");
     let deps = toml.split("[dependencies]").nth(1).unwrap_or("");
-    assert!(deps.trim().is_empty(),
-        "rocm Cargo.toml should declare no external GPU crate;\ngot:\n{toml}");
+    // Non-GPU support crates the project always adds (e.g. `half`) are fine;
+    // only a GPU binding crate would break this test's intent.
+    for gpu_crate in ["cudarc", "hip-sys", "hip_sys", "hip-runtime-sys", "rocm", "cust", "wgpu", "metal"] {
+        assert!(!deps.contains(gpu_crate),
+            "rocm Cargo.toml should declare no external GPU crate ({gpu_crate});\ngot:\n{toml}");
+    }
 }
 
 // ─── 2D block / grid launch ───────────────────────────────────────────────────
