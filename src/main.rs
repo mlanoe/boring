@@ -32,6 +32,11 @@ pub mod lower_view;
 pub mod interpreter;
 pub mod checker;
 mod git_deps;
+mod multi_bench;
+#[cfg(test)]
+#[allow(dead_code)]
+mod multi_policy;
+mod multi_target;
 mod semver;
 pub mod stdlib_embed;
 pub mod transpiler;
@@ -2009,6 +2014,7 @@ fn parse_build_command(build_args: &[String]) {
     let mut target_metal  = false;
     let mut target_wgpu   = false;
     let mut target_simd   = false;
+    let mut multi_skipped: Vec<(multi_target::Backend, String)> = Vec::new();
     let mut mode = TranspileMode::Strict;
     let mut threading = ThreadingMode::Multi;
     let mut inline_auto_bytes: usize = 256;
@@ -2025,20 +2031,28 @@ fn parse_build_command(build_args: &[String]) {
         match build_args[i].as_str() {
             "--target" => {
                 i += 1;
-                match build_args.get(i).map(|s| s.as_str()) {
-                    Some("cuda")   => target_cuda   = true,
-                    Some("rocm")   => target_rocm   = true,
-                    Some("metal")  => target_metal  = true,
-                    Some("wgpu")   => target_wgpu   = true,
-                    Some("simd")   => target_simd   = true,
-                    Some(t) => {
-                        eprintln!("error: unknown target '{}'", t);
-                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu, simd (use --linux for Rust-for-Linux)");
-                        process::exit(1);
+                // A backend name, `all`, or a comma-separated list (`cuda,metal`).
+                let Some(value) = build_args.get(i) else {
+                    eprintln!("error: --target requires a value");
+                    eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu, simd, all, or a comma-separated list (use --linux for Rust-for-Linux)");
+                    process::exit(1);
+                };
+                match multi_target::parse_targets(value) {
+                    Ok((backends, skipped)) => {
+                        for backend in &backends {
+                            match backend {
+                                multi_target::Backend::Cuda  => target_cuda  = true,
+                                multi_target::Backend::Rocm  => target_rocm  = true,
+                                multi_target::Backend::Metal => target_metal = true,
+                                multi_target::Backend::Wgpu  => target_wgpu  = true,
+                                multi_target::Backend::Simd  => target_simd  = true,
+                            }
+                        }
+                        multi_skipped.extend(skipped);
                     }
-                    None => {
-                        eprintln!("error: --target requires a value");
-                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu, simd (use --linux for Rust-for-Linux)");
+                    Err(msg) => {
+                        eprintln!("error: {}", msg);
+                        eprintln!("hint:  supported targets: cuda, rocm, metal, wgpu, simd, all, or a comma-separated list (use --linux for Rust-for-Linux)");
                         process::exit(1);
                     }
                 }
@@ -2152,11 +2166,20 @@ fn parse_build_command(build_args: &[String]) {
         i += 1;
     }
 
-    let target_count = [target_kernel, target_cuda, target_rocm, target_metal, target_wgpu, target_simd]
-        .into_iter().filter(|selected| *selected).count();
-    if target_count > 1 {
-        eprintln!("error: select exactly one build target; multi-target builds are not implemented yet");
-        eprintln!("hint:  run one build per target (for example, --target wgpu and --target simd)");
+    let selected_backends: Vec<multi_target::Backend> = [
+        (target_cuda, multi_target::Backend::Cuda),
+        (target_rocm, multi_target::Backend::Rocm),
+        (target_metal, multi_target::Backend::Metal),
+        (target_wgpu, multi_target::Backend::Wgpu),
+        (target_simd, multi_target::Backend::Simd),
+    ].into_iter().filter(|(on, _)| *on).map(|(_, b)| b).collect();
+    let multi_target_build = selected_backends.len() > 1;
+    if target_kernel && !selected_backends.is_empty() {
+        eprintln!("error: --linux cannot be combined with --target");
+        process::exit(1);
+    }
+    if multi_target_build && emit_rust {
+        eprintln!("error: --emit-rust does not support several targets; select one");
         process::exit(1);
     }
 
@@ -2185,6 +2208,22 @@ fn parse_build_command(build_args: &[String]) {
     if target_simd && threading != ThreadingMode::Multi {
         eprintln!("error: --threading is not available for the simd target");
         process::exit(1);
+    }
+
+    // Several backends in one crate (`--target all` / `--target cuda,metal`).
+    if multi_target_build {
+        let (path, version) = match file {
+            Some(path) => (path.to_string(), "0.1.0".to_string()),
+            None => {
+                let (toml, _) = load_project_toml();
+                (toml.main.clone(), toml.version.clone())
+            }
+        };
+        let project_dir = multi_target::emit_multi(&path, &version, &selected_backends, &multi_skipped);
+        if compile {
+            run_cargo_build(&project_dir, &rust_options);
+        }
+        return;
     }
 
     // CUDA target â€” short-circuit before the general config path.

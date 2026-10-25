@@ -68,6 +68,7 @@ Boring compiles the same source to several distinct Rust targets — from usersp
 | `boring build --target metal` | Rust + MSL (Apple Silicon/macOS) | GPU compute |
 | `boring build --target wgpu` | Rust + WGSL (any DX12/Vulkan/Metal GPU) | GPU compute, cross-platform |
 | `boring build --target simd` | Rust + native CPU SIMD | CPU compute, no GPU required |
+| `boring build --target all` / `--target cuda,metal` | one Rust crate, several backends | backend picked at run time |
 | `boring build --mode managed` | Rust std + tokio | managed memory (unqualified `T` → `Arc<Mutex<T>>`) |
 | `boring build --threading single` | Rust std + tokio | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
 | `boring build --linux` | Rust-for-Linux (`no_std`) | Linux drivers, subsystems, kernel modules |
@@ -113,6 +114,8 @@ Ownership qualifiers carry the host/device split: `'unified` (zero-copy managed 
 boring build --target metal main.br    # → Rust + MSL project
 cd main_rust && cargo run
 ```
+
+Several backends can share one binary: `--target all` (everything this host can build) or a list such as `--target cuda,metal`. The generated crate has one Cargo feature per backend. At start-up it benchmarks the usable backends once (cached per device), ranks them by measured speed discounted by how many other boring programs are already using them, and runs on the best one. `BORING_BACKEND=wgpu,simd` forces an order, `BORING_BENCH=off` disables the ranking, and `BORING_BACKEND=list` shows what is available.
 
 See [`docs/gpu-module.md`](docs/gpu-module.md) for the full language reference (kernel structs, generics, qualifier inference), and [`docs/cuda-module.md`](docs/cuda-module.md), [`docs/rocm-backend.md`](docs/rocm-backend.md), [`docs/metal-backend.md`](docs/metal-backend.md), [`docs/wgpu-backend.md`](docs/wgpu-backend.md), and [`docs/simd-backend.md`](docs/simd-backend.md) for backend-specific codegen.
 
