@@ -207,24 +207,6 @@ impl Transpiler {
             ExprKind::Pipe(lhs, name, args) => self.emit_pipe(lhs, name, args),
             ExprKind::GenericCall(callee, type_args, args) => self.emit_generic_call(callee, type_args, args),
 
-            ExprKind::New { ctor, arena } => {
-                // `kernel(device) Name(args)` reuses the target's kernel
-                // constructor.  Unlike the retired `new` syntax, this branch is
-                // reached only for explicit kernel placement (the checker rejects
-                // non-kernel constructors with an arena/device).
-                if let (Some(device), ExprKind::Call(callee, args)) = (arena, &ctor.kind) {
-                    if let ExprKind::Var(name) = &callee.kind {
-                        if self.config.gpu_kernels.iter().any(|kernel| kernel.name == *name) {
-                            let device = self.emit_expr(device);
-                            let args = args.iter().map(|arg| self.emit_expr(&arg.value)).collect::<Vec<_>>();
-                            let all = std::iter::once(device).chain(args).collect::<Vec<_>>();
-                            return format!("{}::new({})", name, all.join(", "));
-                        }
-                    }
-                }
-                // Legacy ASTs with no placement remain ordinary constructors.
-                self.emit_expr(ctor)
-            }
 
             ExprKind::KernelLaunch { .. } => {
                 // A GPU kernel launch only lowers on the GPU targets (`--target cuda|rocm|metal|wgpu`),
@@ -3996,31 +3978,6 @@ impl Transpiler {
             }
         }
         if let ExprKind::Var(name) = &callee.kind {
-            // `Device(index = n)` — a device handle. Emitted as a plain `usize` index into the
-            // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
-            // startup (`instance.enumerate_adapters`) — `n` genuinely selects a
-            // different physical adapter for `.name()`/`.maxThreads()`/etc when more
-            // than one is present (2026-09-01). This is still introspection only:
-            // every kernel still dispatches on the single global `device`/`queue`
-            // regardless of which `Device(index = n)` it was constructed with — `kernel(g) K`
-            // (placing actual kernel *dispatch* on a specific adapter) is not
-            // implemented, unlike CUDA/Metal's real per-device dispatch. Must be
-            // checked before the `is_type` constructor branch below — "Device" is
-            // capitalized like a type name, but no `struct GPU` exists to construct.
-            if name == "Device" && self.is_gpu_target {
-                let expected_target = if self.config.is_simd_target { "SIMD" } else { "WGPU" };
-                if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
-                    if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
-                        if value.to_ascii_uppercase() != expected_target {
-                            return format!("compile_error!(\"Device target {} is not available in this build\")", value);
-                        }
-                    }
-                }
-                let idx = args.iter().find(|a| a.label.as_deref() == Some("index"))
-                    .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten())
-                    .map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0".into());
-                return format!("(({}) as usize)", idx);
-            }
             // Type constructors (PascalCase) — emit as struct literal or ::new()
             let is_type = name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
             if is_type {

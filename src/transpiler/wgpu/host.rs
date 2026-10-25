@@ -214,76 +214,6 @@ impl<'a> HostEmitter<'a> {
         self.line("fn __boring_gpu_device() -> std::sync::Arc<wgpu::Device> { std::sync::Arc::clone(__BORING_GPU_DEVICE.get().expect(\"GPU device not initialized\")) }");
         self.line("fn __boring_gpu_queue() -> std::sync::Arc<wgpu::Queue> { std::sync::Arc::clone(__BORING_GPU_QUEUE.get().expect(\"GPU queue not initialized\")) }");
         self.blank();
-        self.emit_gpu_introspection_globals();
-    }
-
-    /// Backing storage + accessors for the `GPU` type (`Device(index = n)`, `GPU.all()`,
-    /// `.name()`/`.totalMem()`/etc — see `emit_expr.rs`'s `gpu_device_vars`
-    /// handling). Real per-adapter introspection (2026-09-01): the full list of
-    /// adapters the system actually exposes is enumerated once at startup
-    /// (`instance.enumerate_adapters`, see `emit_main`/`emit_screen_main`) and
-    /// `Device(index = n)` indexes into it directly, index 0 always being the adapter
-    /// `device`/`queue` were actually created from. This is introspection
-    /// only, same scope as CUDA/ROCm's own docs describe for the analogous
-    /// case — `kernel(g) K` (placing a kernel's actual dispatch on a specific
-    /// non-default adapter) is still not implemented on this backend; every
-    /// kernel still dispatches on the single global `device`/`queue`
-    /// regardless of which `Device(index = n)` it was constructed with. See
-    /// docs/wgpu-backend.md's "`GPU` type on wgpu" section.
-    fn emit_gpu_introspection_globals(&mut self) {
-        self.line("static __BORING_GPU_ADAPTERS: std::sync::OnceLock<Vec<std::sync::Arc<wgpu::Adapter>>> = std::sync::OnceLock::new();");
-        self.line("fn __boring_gpu_adapter(idx: usize) -> std::sync::Arc<wgpu::Adapter> {");
-        self.line("    let adapters = __BORING_GPU_ADAPTERS.get().expect(\"GPU adapters not initialized\");");
-        self.line("    adapters.get(idx).map(std::sync::Arc::clone)");
-        self.line("        .unwrap_or_else(|| panic!(\"Device(index = {}) out of range -- {} adapter(s) found\", idx, adapters.len()))");
-        self.line("}");
-        self.line("fn __boring_gpu_all() -> Vec<usize> {");
-        self.line("    (0..__BORING_GPU_ADAPTERS.get().map(|a| a.len()).unwrap_or(0)).collect()");
-        self.line("}");
-        self.line("fn __boring_gpu_name(idx: usize) -> String { __boring_gpu_adapter(idx).get_info().name }");
-        // wgpu's AdapterInfo has no memory-size fields on any backend -- there is
-        // no real value to report, so these match the interpreter's/CUDA docs'
-        // own "not available" convention (0) rather than fabricating a number.
-        self.line("fn __boring_gpu_total_mem(_idx: usize) -> i64 { 0 }");
-        self.line("fn __boring_gpu_free_mem(_idx: usize) -> i64 { 0 }");
-        self.line("fn __boring_gpu_compute_capability(_idx: usize) -> Vec<i64> { vec![0, 0] }"); // CUDA-only concept
-        self.line("fn __boring_gpu_warp_size(_idx: usize) -> i64 { 32 }"); // conservative default, not queryable via wgpu
-        self.line("fn __boring_gpu_max_threads(idx: usize) -> i64 { __boring_gpu_adapter(idx).limits().max_compute_invocations_per_workgroup as i64 }");
-        self.line("fn __boring_gpu_max_shared_mem(idx: usize) -> i64 { __boring_gpu_adapter(idx).limits().max_compute_workgroup_storage_size as i64 }");
-        self.blank();
-    }
-
-    /// Builds the introspection adapter list for `__BORING_GPU_ADAPTERS`: the
-    /// adapter actually selected for `device`/`queue` goes first (so `Device(index = 0)`
-    /// always means "the adapter your kernels actually run on"), followed by
-    /// any other physical adapter `enumerate_adapters` finds.
-    ///
-    /// `primary_var` must already be a `std::sync::Arc<wgpu::Adapter>` binding
-    /// (matching the existing `device`/`queue` convention of wrapping right
-    /// after creation) — **`wgpu::Adapter` itself implements neither `Clone`
-    /// nor `PartialEq`** (confirmed against the real pinned `wgpu = "22"`
-    /// source, `wgpu-22.1.0/src/lib.rs`'s `pub struct Adapter` only derives
-    /// `Debug` — an earlier version of this function assumed otherwise from
-    /// docs.rs for a newer wgpu release and failed a real `cargo check` with
-    /// E0599/E0369 the moment it was tried against the actual generated
-    /// project). Arc-wrapping the primary adapter once at the top lets this
-    /// function `Arc::clone` it cheaply into the list while the caller's own
-    /// `primary_var` binding stays valid afterward (needed in
-    /// `emit_screen_main`, where `adapter` is later moved into the `__App`
-    /// struct literal). Dedup compares `AdapterInfo` (`.get_info()`) instead,
-    /// which *does* derive `PartialEq`/`Eq` (`wgpu-types-22.0.0/src/lib.rs`) —
-    /// a real physical GPU can otherwise appear twice if the platform exposes
-    /// it through more than one backend (e.g. Vulkan and GL on the same Linux
-    /// box).
-    fn emit_gpu_adapter_enumeration(&mut self, primary_var: &str) {
-        self.line(&format!("    let __boring_primary_info = {primary_var}.get_info();"));
-        self.line(&format!("    let mut __boring_gpu_adapters: Vec<std::sync::Arc<wgpu::Adapter>> = vec![std::sync::Arc::clone(&{primary_var})];"));
-        self.line("    for __boring_other in instance.enumerate_adapters(wgpu::Backends::all()) {");
-        self.line("        if __boring_other.get_info() != __boring_primary_info {");
-        self.line("            __boring_gpu_adapters.push(std::sync::Arc::new(__boring_other));");
-        self.line("        }");
-        self.line("    }");
-        self.line("    let _ = __BORING_GPU_ADAPTERS.set(__boring_gpu_adapters);");
     }
 
     fn emit_header(&mut self) {
@@ -1177,11 +1107,7 @@ impl<'a> HostEmitter<'a> {
             self.line("    let queue = std::sync::Arc::new(queue);");
             self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
             self.line("    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));");
-            // `wgpu::Adapter` has no `Clone` of its own -- Arc-wrap it here (same
-            // convention as device/queue above) so `emit_gpu_adapter_enumeration`
-            // can cheaply `Arc::clone` it into the introspection list below.
             self.line("    let adapter = std::sync::Arc::new(adapter);");
-            self.emit_gpu_adapter_enumeration("adapter");
             self.blank();
             if self.has_boring_main {
                 if self.boring_main_throws {
@@ -1272,9 +1198,7 @@ impl<'a> HostEmitter<'a> {
         // ── __App struct ──────────────────────────────────────────────────────
         self.line("struct __App {");
         self.line("    instance: wgpu::Instance,");
-        // Arc-wrapped, not a bare `wgpu::Adapter` -- `wgpu::Adapter` has no `Clone`
-        // of its own, and the introspection list (`__BORING_GPU_ADAPTERS`) needs a
-        // second, cheap owner of the same adapter alongside this struct field's own.
+        // Arc-wrapped, not a bare `wgpu::Adapter` (which has no `Clone` of its own).
         self.line("    adapter:  std::sync::Arc<wgpu::Adapter>,");
         self.line("    device:   std::sync::Arc<wgpu::Device>,");
         self.line("    queue:    std::sync::Arc<wgpu::Queue>,");
@@ -1593,27 +1517,13 @@ impl<'a> HostEmitter<'a> {
         self.line("    let queue  = std::sync::Arc::new(queue);");
         self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
         self.line("    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));");
-        // `wgpu::Adapter` has no `Clone` of its own -- Arc-wrap it here (same
-        // convention as device/queue above, and the `__App.adapter` field is typed
-        // `Arc<wgpu::Adapter>` to match) so it can be `Arc::clone`d into the
-        // introspection list below AND still moved into the `__App` struct literal
-        // further down. This path used to skip GPU introspection entirely ("GPU
-        // introspection is unsupported inside a Screen program"). Populating the
-        // adapters global here removes the panic a `Device(index = n)` call anywhere reachable
-        // would have hit against an uninitialized `OnceLock`. `emit_screen_main`'s
-        // own top-level (`scalar_fields`/`kernel_fields` above) and render-loop
-        // (`emit_render_stmt`) emitters are still narrow, hardcoded shape-matchers,
-        // not a splice into the general per-statement pipeline the way a plain
-        // `def` function's body is -- but a bare `let g = Device(index = 0)` / `print`
-        // statement at a Screen program's top level, or inside the render loop, no
-        // longer vanishes silently: `check_screen_program_shape` (called from
-        // `emit()`) and `emit_render_stmt`'s own error fallback both reject anything
-        // outside the recognized whitelist with a `TranspileError` instead, so
-        // `boring build` fails loudly (see `emit_host_rs`'s doc comment) rather than
-        // quietly losing code. `emit_gpu_adapter_enumeration` is the same call the
-        // non-Screen async_main path makes.
+        // Arc-wrapped (like device/queue above) because `wgpu::Adapter` has no `Clone`; the
+        // `__App.adapter` field is typed `Arc<wgpu::Adapter>` to match.
+        // This emitter and the render-loop one (`emit_render_stmt`) are narrow shape-matchers,
+        // not a splice into the general per-statement pipeline: `check_screen_program_shape`
+        // and `emit_render_stmt`'s error fallback reject anything outside the recognized
+        // whitelist with a `TranspileError` instead of silently dropping it.
         self.line("    let adapter = std::sync::Arc::new(adapter);");
-        self.emit_gpu_adapter_enumeration("adapter");
         for (name, val) in &scalar_fields {
             self.line(&format!("    let {name}: i64 = {val};"));
         }

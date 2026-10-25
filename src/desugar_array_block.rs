@@ -788,10 +788,6 @@ fn desugar_expr(e: Expr, sigs: &Signatures) -> Result<Expr, ParseError> {
         ExprKind::OptionalMethodCall(obj, m, args) => ExprKind::OptionalMethodCall(Box::new(desugar_expr(*obj, sigs)?), m, desugar_args(args, sigs)?),
         ExprKind::GenericCall(callee, tys, args) => ExprKind::GenericCall(Box::new(desugar_expr(*callee, sigs)?), tys, desugar_args(args, sigs)?),
         ExprKind::Pipe(l, name, args) => ExprKind::Pipe(Box::new(desugar_expr(*l, sigs)?), name, desugar_args(args, sigs)?),
-        ExprKind::New { arena, ctor } => ExprKind::New {
-            arena: arena.map(|a| desugar_expr(*a, sigs)).transpose()?.map(Box::new),
-            ctor: Box::new(desugar_expr(*ctor, sigs)?),
-        },
         ExprKind::KernelLaunch { mut config, kernel } => {
             config.block = config.block.take().map(|e| desugar_expr(e, sigs)).transpose()?;
             config.grid = config.grid.take().map(|e| desugar_expr(e, sigs)).transpose()?;

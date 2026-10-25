@@ -33,7 +33,6 @@ struct HostEmitter {
     kernel_names: std::collections::HashSet<String>,
     kernel_decls: std::collections::HashMap<String, KernelDecl>,
     var_kernel_type: std::collections::HashMap<String, String>,
-    gpu_vars: std::collections::HashSet<String>,
     // Top-level scalar lets (name → Rust expression), used to inline scalars
     // that are in scope in main() but not in kernel new() functions.
     top_level_scalars: std::collections::HashMap<String, String>,
@@ -247,7 +246,6 @@ impl HostEmitter {
             kernel_names: kernel_names.iter().cloned().collect(),
             kernel_decls: std::collections::HashMap::new(),
             var_kernel_type: std::collections::HashMap::new(),
-            gpu_vars: std::collections::HashSet::new(),
             top_level_scalars: std::collections::HashMap::new(),
             global_statics: std::collections::HashMap::new(),
             fn_locals: std::collections::HashSet::new(),
@@ -638,7 +636,6 @@ impl HostEmitter {
         self.line("thread_local! {");
         self.indent += 1;
         self.line("static __BORING_METAL_DEVICE: std::cell::RefCell<Option<Device>> = std::cell::RefCell::new(None);");
-        self.line("static __BORING_METAL_DEVICES: std::cell::RefCell<Option<Vec<Device>>> = std::cell::RefCell::new(None);");
         self.line("static __BORING_METAL_LIBRARY: std::cell::RefCell<Option<Library>> = std::cell::RefCell::new(None);");
         self.line("static __BORING_METAL_PIPELINES: std::cell::RefCell<std::collections::HashMap<&'static str, ComputePipelineState>> = std::cell::RefCell::new(std::collections::HashMap::new());");
         self.indent -= 1;
@@ -707,22 +704,6 @@ impl HostEmitter {
         self.line("let device = Device::system_default().expect(\"no Metal device found — macOS 10.14+ required\");");
         self.line("*c.borrow_mut() = Some(device.clone());");
         self.line("device");
-        self.indent -= 1;
-        self.line("})");
-        self.indent -= 1;
-        self.line("}");
-        self.blank();
-        // Device(index = n) → indexed device. Cache enumeration too, while preserving the
-        // existing index semantics and error for an out-of-range device.
-        self.line("fn boring_metal_device_n(idx: usize) -> Result<Device, Box<dyn std::error::Error + Send + Sync>> {");
-        self.indent += 1;
-        self.line("__BORING_METAL_DEVICES.with(|c| {");
-        self.indent += 1;
-        self.line("if c.borrow().is_none() { *c.borrow_mut() = Some(Device::all()); }");
-        self.line("c.borrow().as_ref().and_then(|devices| devices.get(idx).cloned())");
-        self.indent += 1;
-        self.line(".ok_or_else(|| format!(\"GPU index {} out of range\", idx).into())");
-        self.indent -= 1;
         self.indent -= 1;
         self.line("})");
         self.indent -= 1;
@@ -2938,7 +2919,6 @@ impl HostEmitter {
             kernel_names: self.kernel_names.clone(),
             kernel_decls: self.kernel_decls.clone(),
             var_kernel_type: self.var_kernel_type.clone(),
-            gpu_vars: self.gpu_vars.clone(),
             top_level_scalars: self.top_level_scalars.clone(),
             global_statics: self.global_statics.clone(),
             fn_locals: self.fn_locals.clone(),
@@ -3208,22 +3188,6 @@ impl HostEmitter {
                 // preserving call passed as an argument to this outer call
                 // isn't incorrectly suppressed too. See its field doc.
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
-                // `Device(index = n)` → `boring_metal_device_n(n)?`
-                if let ExprKind::Var(name) = &callee.kind {
-                    if name == "Device" {
-                        if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
-                            if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
-                                if !value.eq_ignore_ascii_case("METAL") {
-                                    return format!("compile_error!(\"Device target {} is not available in a Metal build\")", value);
-                                }
-                            }
-                        }
-                        let idx = args.iter().find(|a| a.label.as_deref() == Some("index"))
-                            .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten())
-                            .map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
-                        return format!("boring_metal_device_n({} as usize)?", idx);
-                    }
-                }
                 // `abs(x)`/`sqrt(x)`/… → `(x).abs()`/`(x).sqrt()`/…
                 if let ExprKind::Var(name) = &callee.kind {
                     if let Some(arg) = args.first() {
@@ -3583,12 +3547,6 @@ impl HostEmitter {
                 }
                 // `GPU.all()` → Device::all()
                 if let ExprKind::Var(name) = &obj.kind {
-                    if name == "Device" && method == "all" {
-                        return "Device::all().into_iter().enumerate().map(|(i, d)| (i, d)).collect::<Vec<_>>()".into();
-                    }
-                    if self.gpu_vars.contains(name.as_str()) {
-                        return self.emit_gpu_property(name, method);
-                    }
                     // `fs.writeBytes(path, bytes)` — write Vec<isize> as binary file
                     if name == "fs" && method == "writeBytes" {
                         let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
@@ -3687,32 +3645,6 @@ impl HostEmitter {
                 } else {
                     format!("{k}.__boring_launch({block}, {grid}, &[])?")
                 }
-            }
-            ExprKind::New { arena, ctor } => {
-                // args go through the same buffer-upload handling as a plain
-                // `Scale(data)` call -- see `emit_kernel_ctor_args`'s doc.
-                if let ExprKind::Call(callee, args) = &ctor.kind {
-                    if let ExprKind::Var(name) = &callee.kind {
-                        if self.kernel_names.contains(name.as_str()) {
-                            let default_dev = if self.screen_var.is_some() {
-                                "boring_device.clone()".to_string()
-                            } else {
-                                "boring_metal_device()".to_string()
-                            };
-                            let dev = arena.as_ref()
-                                .map(|a| self.expr(a))
-                                .unwrap_or(default_dev);
-                            let args_s = self.emit_kernel_ctor_args(name, &dev, args);
-                            let all = std::iter::once(dev).chain(args_s).collect::<Vec<_>>();
-                            return if self.in_render_loop {
-                            format!("{}::new({}).expect(\"kernel construction failed\")", name, all.join(", "))
-                        } else {
-                            format!("{}::new({})?", name, all.join(", "))
-                        };
-                        }
-                    }
-                }
-                self.expr(ctor)
             }
             ExprKind::Array(elems) => {
                 let s: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
@@ -3859,35 +3791,9 @@ impl HostEmitter {
         if let Some(t) = self.resolve_kernel_type(val) {
             self.var_kernel_type.insert(name.to_string(), t);
         }
-        if self.is_gpu_expr(val) {
-            self.gpu_vars.insert(name.to_string());
-        }
     }
 
-    fn is_gpu_expr(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Call(callee, _) => {
-                if let ExprKind::Var(n) = &callee.kind { n == "Device" } else { false }
-            }
-            ExprKind::Var(n) => self.gpu_vars.contains(n.as_str()),
-            _ => false,
-        }
-    }
 
-    /// Map a GPU variable method call to Metal API.
-    fn emit_gpu_property(&self, var: &str, method: &str) -> String {
-        match method {
-            "name"              => format!("{var}.name().to_string()"),
-            "totalMem"          => format!("{var}.recommended_max_working_set_size() as isize"),
-            "freeMem"           => format!("({var}.recommended_max_working_set_size().saturating_sub({var}.current_allocated_size())) as isize"),
-            "computeCapability" => format!("boring_gpu_family(&{var})"),
-            "warpSize"          => "32isize".into(),
-            "maxThreads"        => "1024isize".into(),
-            "maxSharedMem"      => format!("{var}.max_threadgroup_memory_length() as isize"),
-            "index"             => format!("Device::all().iter().position(|d| d.name() == {var}.name()).unwrap_or(0) as isize"),
-            other               => format!("{var}.{other}()"),
-        }
-    }
 
     fn resolve_kernel_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
@@ -3911,7 +3817,6 @@ impl HostEmitter {
                 None
             }
             ExprKind::KernelLaunch { kernel, .. } => self.resolve_kernel_type(kernel),
-            ExprKind::New { ctor, .. }             => self.resolve_kernel_type(ctor),
             ExprKind::Pipe(lhs, method, _) if method == "wait" => self.resolve_kernel_type(lhs),
             ExprKind::Var(n) => self.var_kernel_type.get(n.as_str()).cloned(),
             _ => None,
@@ -3995,12 +3900,7 @@ impl HostEmitter {
     /// device `dev`, uploading each buffer-passthrough argument (see
     /// `kernel_ctor_buffer_flags`) via `new_buffer_with_data` -- or reusing
     /// it directly if already GPU-resident -- exactly the way a plain
-    /// `Scale(data)` constructor call has always worked. Shared by both
-    /// constructor call sites: plain `Scale(data)` (`ExprKind::Call`) and
-    /// placed `kernel(g) Scale(data)` (`ExprKind::New`) -- the latter
-    /// used to skip this entirely and pass `data` straight through as a bare
-    /// `Vec`, the same E0308 `cuda::host`'s identical fix found and fixed
-    /// there (see that module's `emit_kernel_ctor_args` doc).
+    /// `Scale(data)` constructor call has always worked.
     fn emit_kernel_ctor_args(&mut self, name: &str, dev: &str, args: &[Arg]) -> Vec<String> {
         let buffer_flags = self.kernel_ctor_buffer_flags(name);
         args.iter().enumerate().map(|(i, a)| {

@@ -591,13 +591,6 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // Multi-GPU context accessor: `Device(index = n)` → `boring_gpu_ctx_n(n)?`.
-        self.line("fn boring_gpu_ctx_n(idx: usize) -> Result<Arc<HipContext>, Box<dyn std::error::Error + Send + Sync>> {");
-        self.indent += 1;
-        self.line("Ok(HipContext::new(idx)?)");
-        self.indent -= 1;
-        self.line("}");
-        self.blank();
         // See `cuda::host`'s identical `BoringKernelArg` contract. Returned kernel
         // buffers remain resident across functions; read-only consumers retain
         // the Arc while mutable consumers receive independent storage.
@@ -698,9 +691,6 @@ struct HostEmitter {
     /// Tracks which local variables hold a kernel struct instance and which type.
     /// Used to emit `k.read_buf()?` instead of `k.buf` for device-side fields.
     var_kernel_type: std::collections::HashMap<String, String>,
-    /// Variables that hold an `Arc<HipContext>` (from `Device(index = n)` or `kernel(g) ...`).
-    /// Used to map `.name()`, `.total_mem()` etc. to this backend's HipContext API.
-    gpu_vars: std::collections::HashSet<String>,
     /// Local variables (by name, unscoped) whose declared type or initializer is a
     /// `{K=V}` dict literal/type — used so `d[key]`/`d[key] = v` emit `HashMap`
     /// `.get(&key).cloned()`/`.insert(key, v)` instead of Vec-style `[key as usize]`
@@ -876,7 +866,6 @@ impl HostEmitter {
             kernel_names: kernel_names.iter().cloned().collect(),
             kernel_decls: std::collections::HashMap::new(),
             var_kernel_type: std::collections::HashMap::new(),
-            gpu_vars: std::collections::HashSet::new(),
             dict_vars: std::collections::HashSet::new(),
             dict_fields: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
@@ -2920,7 +2909,6 @@ impl HostEmitter {
             kernel_names: self.kernel_names.clone(),
             kernel_decls: self.kernel_decls.clone(),
             var_kernel_type: self.var_kernel_type.clone(),
-            gpu_vars: self.gpu_vars.clone(),
             dict_vars: self.dict_vars.clone(),
             dict_fields: self.dict_fields.clone(),
             string_vars: self.string_vars.clone(),
@@ -3178,22 +3166,6 @@ impl HostEmitter {
             }
             ExprKind::Call(callee, args) => {
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
-                // `Device(index = n)` → `boring_gpu_ctx_n(n)?`
-                if let ExprKind::Var(name) = &callee.kind {
-                    if name == "Device" {
-                        if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
-                            if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
-                                if !value.eq_ignore_ascii_case("ROCM") {
-                                    return format!("compile_error!(\"Device target {} is not available in a ROCm build\")", value);
-                                }
-                            }
-                        }
-                        let idx = args.iter().find(|a| a.label.as_deref() == Some("index"))
-                            .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten())
-                            .map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
-                        return format!("boring_gpu_ctx_n({} as usize)?", idx);
-                    }
-                }
                 // `ord(c)` — char → isize (Boring built-in)
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "ord" {
@@ -3435,12 +3407,6 @@ impl HostEmitter {
                 }
                 // `GPU.all()` → iterator over all HIP devices.
                 if let ExprKind::Var(name) = &obj.kind {
-                    if name == "Device" && method == "all" {
-                        return "(0..HipContext::device_count()? as usize).map(|i| boring_gpu_ctx_n(i).unwrap())".into();
-                    }
-                    if self.gpu_vars.contains(name.as_str()) {
-                        return self.emit_gpu_property(name, method);
-                    }
                     if name == "fs" && method == "writeBytes" {
                         let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
                         let bytes = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
@@ -3538,27 +3504,6 @@ impl HostEmitter {
                     }
                 };
                 format!("{k}.__boring_launch({block}, {grid}, {after_arg})?")
-            }
-            ExprKind::New { arena, ctor } => {
-                // args go through the same buffer-upload handling as a plain
-                // `Scale(data)` call -- see `emit_kernel_ctor_args`'s doc.
-                if let ExprKind::Call(callee, args) = &ctor.kind {
-                    if let ExprKind::Var(name) = &callee.kind {
-                        if self.kernel_names.contains(name.as_str()) {
-                            let dev = arena.as_ref()
-                                .map(|a| self.expr(a))
-                                .unwrap_or_else(|| "boring_gpu_ctx()".into());
-                            let args_s = self.emit_kernel_ctor_args(name, args);
-                            let all = std::iter::once(dev).chain(args_s).collect::<Vec<_>>();
-                            return if self.in_render_loop {
-                            format!("{}::new({}).expect(\"kernel construction failed\")", name, all.join(", "))
-                        } else {
-                            format!("{}::new({})?", name, all.join(", "))
-                        };
-                        }
-                    }
-                }
-                self.expr(ctor)
             }
             ExprKind::Array(elems) => {
                 let s: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
@@ -3670,38 +3615,9 @@ impl HostEmitter {
         if let Some(t) = ty {
             self.var_kernel_type.insert(name.to_string(), t);
         }
-        if self.is_gpu_expr(val) {
-            self.gpu_vars.insert(name.to_string());
-        }
     }
 
-    fn is_gpu_expr(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Call(callee, _) => {
-                if let ExprKind::Var(n) = &callee.kind { n == "Device" }
-                else { false }
-            }
-            ExprKind::Var(n) => self.gpu_vars.contains(n.as_str()),
-            _ => false,
-        }
-    }
 
-    /// Map a GPU variable method call to this backend's `HipContext` API.
-    fn emit_gpu_property(&self, var: &str, method: &str) -> String {
-        match method {
-            "name"              => format!("{var}.name()?"),
-            "totalMem"          => format!("{var}.total_mem()?"),
-            "freeMem"           => format!("{var}.mem_get_info()?.0"),
-            "computeCapability" => format!("{var}.compute_capability()?"),
-            // See `HipContext::warp_size`'s doc (in the prelude) for why these
-            // three report a clear error instead of a possibly-wrong number.
-            "warpSize"          => format!("{var}.warp_size()?"),
-            "maxThreads"        => format!("{var}.max_threads()?"),
-            "maxSharedMem"      => format!("{var}.max_shared_mem()?"),
-            "index"             => format!("{var}.ordinal()"),
-            other               => format!("{var}.{other}()"),
-        }
-    }
 
     fn resolve_kernel_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
@@ -3723,7 +3639,6 @@ impl HostEmitter {
                 None
             }
             ExprKind::KernelLaunch { kernel, .. } => self.resolve_kernel_type(kernel),
-            ExprKind::New { ctor, .. } => self.resolve_kernel_type(ctor),
             ExprKind::Pipe(lhs, method, _) if method == "wait" => self.resolve_kernel_type(lhs),
             ExprKind::Var(n) => self.var_kernel_type.get(n.as_str()).cloned(),
             _ => None,
@@ -3766,11 +3681,7 @@ impl HostEmitter {
     /// each buffer-passthrough argument (see `kernel_ctor_buffer_flags`) via
     /// `clone_htod` -- or sharing it when a read-only argument is already resident --
     /// exactly the way a plain `Scale(data)` constructor call has always
-    /// worked. Shared by both constructor call sites: plain `Scale(data)`
-    /// (`ExprKind::Call`) and placed `kernel(g) Scale(data)`
-    /// (`ExprKind::New`) -- see `cuda::host`'s identical fix/doc for the bug
-    /// this closes (the `New` arm used to skip this and pass `data` straight
-    /// through as a bare `Vec` where `Scale::new` expects a `DeviceBuffer`).
+    /// worked. `Scale::new` expects already-uploaded `DeviceBuffer`s.
     fn emit_kernel_ctor_args(&mut self, name: &str, args: &[Arg]) -> Vec<String> {
         let buffer_flags = self.kernel_ctor_buffer_flags(name);
         args.iter().enumerate().map(|(i, a)| {

@@ -565,20 +565,6 @@ impl Interpreter {
                     created_at: Box::new(std::time::Instant::now()),
                 });
             }
-            // Device(index = n) — built-in execution-device handle (simulation mode).
-            if name.as_str() == "Device" {
-                let index_arg = args.iter().find(|a| a.label.as_deref() == Some("index"))
-                    .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten());
-                let idx = match index_arg {
-                    Some(a) => match self.eval_expr(&a.value, Rc::clone(&env))? {
-                        Value::Int(n) => n as usize,
-                        Value::Uint(n) => n as usize,
-                        _ => 0,
-                    },
-                    None => 0,
-                };
-                return Ok(Value::GpuDevice(idx));
-            }
             // print / write / log-level — use `as string:` conversions for Object args
             if matches!(name.as_str(), "print" | "write" | "error" | "warn" | "info" | "debug" | "trace") {
                 let arg_vals = self.eval_args(args, Rc::clone(&env))?;
@@ -652,7 +638,6 @@ impl Interpreter {
                 let block_expr = args.iter().find(|a| a.label.as_deref() == Some("block")).map(|a| a.value.clone());
                 let grid_expr  = args.iter().find(|a| a.label.as_deref() == Some("grid")).map(|a| a.value.clone());
                 let config = crate::ast::KernelConfig {
-                    device: None, target: None,
                     block: block_expr, grid: grid_expr, after: None, priority: None, line, col: 0,
                 };
                 return self.eval_kernel_launch(&config, callee_expr, env);
@@ -669,7 +654,6 @@ impl Interpreter {
                     .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
                 let _after_val = after_arg.and_then(|r| r.ok());
                 let config = crate::ast::KernelConfig {
-                    device: None, target: None,
                     block: Some(Expr { kind: crate::ast::ExprKind::Nil, line, col: 0, len: 0 }),
                     grid: None, after: None, priority: None, line, col: 0,
                 };
@@ -808,10 +792,6 @@ impl Interpreter {
                 let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                 return self.call_fs_method(method, arg_vals, line);
             }
-            // Device.all() — iterate all devices (simulation: a single device).
-            if v == "Device" && method == "all" {
-                return Ok(Value::Array(vec![Value::GpuDevice(0)].into()));
-            }
         }
 
         // Type-level call: `Counter.zero()` or `Counter.set_count(v)`
@@ -898,25 +878,6 @@ impl Interpreter {
                     return self.call_value(callee, arg_vals, line, false);
                 }
             }
-        }
-        // GPU device property methods — simulation mock values.
-        if let Value::GpuDevice(idx) = &obj {
-            let idx = *idx;
-            let p = &self.gpu_profile;
-            let (cc_major, cc_minor) = p.compute_capability;
-            return Ok(match method {
-                "name"              => Value::Str(format!("{} (sim {})", p.name, idx)),
-                "totalMem"          => Value::Int(p.total_mem),
-                "freeMem"           => Value::Int(p.total_mem),  // nothing else running
-                "computeCapability" => Value::Array(vec![Value::Int(cc_major), Value::Int(cc_minor)].into()),
-                "warpSize"          => Value::Int(p.warp_size),
-                "maxThreads"        => Value::Int(p.max_threads),
-                "maxSharedMem"      => Value::Int(p.max_shared_mem),
-                "index"             => Value::Int(idx as i64),
-                other => return Err(err(
-                    format!("GPU has no property '{other}'"), line,
-                )),
-            });
         }
         // Enforce: mutating method cannot be called on an immutable (let) binding
         // Built-in non-mutating methods (e.g. `upgrade`) bypass this check.
@@ -1731,10 +1692,6 @@ impl Interpreter {
                 res
             }
 
-            ExprKind::New { ctor, .. } => {
-                // Arena placement has no runtime effect — just evaluate the constructor.
-                self.eval_expr(ctor, env)
-            }
 
             ExprKind::KernelLaunch { config, kernel } => {
                 self.eval_kernel_launch(config, kernel, env)

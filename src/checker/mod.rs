@@ -455,13 +455,6 @@ impl Checker {
                 ExprKind::Var(n) if self.kernel_decls.contains_key(n.as_str()) => Some(n.clone()),
                 _ => None,
             },
-            ExprKind::New { arena: Some(_), ctor } => match &ctor.kind {
-                ExprKind::Call(callee, _) => match &callee.kind {
-                    ExprKind::Var(n) if self.kernel_decls.contains_key(n.as_str()) => Some(n.clone()),
-                    _ => None,
-                },
-                _ => None,
-            },
             _ => None,
         });
 
@@ -1622,26 +1615,29 @@ impl Checker {
     // construction-only feature (see `Arg`'s own doc comment) that shouldn't
     // reach a plain function call at all; if one somehow does, this bails out
     // rather than guess what it means here.
-    /// `GPU(n)` and `new(device) Kernel(...)` were replaced by `Device(index = n)` and
-    /// `kernel(device) Kernel(...)`; rejected unless the program defines its own `GPU`
-    /// type or `new` function.
+    /// `GPU(n)`, `Device(...)`, `Device.all()` and `new(device) Kernel(...)` were removed: the
+    /// backend and device a kernel runs on are chosen at run time, not named in the source.
+    /// Rejected unless the program defines its own `GPU`/`Device` type or `new` function.
     fn check_removed_device_syntax(&mut self, callee: &Expr, line: usize, col: usize) {
         let ExprKind::Var(name) = &callee.kind else { return };
         if self.lookup(name).is_some() || self.fn_arity.contains_key(name.as_str()) {
             return;
         }
+        const PLACEMENT: &str = "the backend and device are chosen at run time (see `BORING_BACKEND` in a multi-target build)";
         match name.as_str() {
-            "GPU" if !self.struct_field_types.contains_key("GPU") => self.error(
-                "`GPU(n)` was removed; use `Device(index = n)` (or `Device(target = .METAL, index = n)`)",
-                line,
-                col,
-            ),
-            "new" => self.error(
-                "`new(device) Kernel(...)` was removed; use `kernel(device) Kernel(...)`",
-                line,
-                col,
-            ),
+            "GPU" | "Device" if !self.struct_field_types.contains_key(name.as_str()) => {
+                self.error(&format!("`{name}(...)` was removed; {PLACEMENT}"), line, col)
+            }
+            "new" => self.error(&format!("`new(device) Kernel(...)` was removed; {PLACEMENT}"), line, col),
             _ => {}
+        }
+    }
+
+    /// `Device.all()` — the removed device enumeration.
+    fn check_removed_device_enumeration(&mut self, recv: &Expr, line: usize, col: usize) {
+        let ExprKind::Var(name) = &recv.kind else { return };
+        if name == "Device" && self.lookup(name).is_none() && !self.struct_field_types.contains_key("Device") {
+            self.error("`Device.all()` was removed; the backend and device are chosen at run time (see `BORING_BACKEND` in a multi-target build)", line, col);
         }
     }
 
@@ -2500,6 +2496,7 @@ impl Checker {
                 }
             }
             ExprKind::MethodCall(recv, method, args) | ExprKind::OptionalMethodCall(recv, method, args) => {
+                self.check_removed_device_enumeration(recv, expr.line, expr.col);
                 self.check_expr(recv);
                 for a in args { self.check_expr(&a.value); }
                 if matches!(&expr.kind, ExprKind::MethodCall(..))
@@ -2521,21 +2518,6 @@ impl Checker {
             ExprKind::Pipe(lhs, _, args) => {
                 self.check_expr(lhs);
                 for a in args { self.check_expr(&a.value); }
-            }
-            ExprKind::New { ctor, arena } => {
-                if arena.is_some() {
-                    let is_kernel_ctor = matches!(&ctor.kind,
-                        ExprKind::Call(callee, _) if matches!(&callee.kind,
-                            ExprKind::Var(name) if self.kernel_decls.contains_key(name.as_str())));
-                    if !is_kernel_ctor {
-                        self.errors.push(CheckError::at(
-                            "kernel placement requires a declared `kernel` constructor",
-                            expr.line, expr.col,
-                        ));
-                    }
-                }
-                self.check_expr(ctor);
-                if let Some(a) = arena { self.check_expr(a); }
             }
             ExprKind::Cast(e, ty) => {
                 self.check_expr(e);

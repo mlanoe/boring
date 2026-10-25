@@ -1622,10 +1622,6 @@ impl Transpiler {
             self.known_local_vars.insert(s.name.clone());
             return;
         }
-        if self.try_emit_gpu_device_let(s) {
-            self.known_local_vars.insert(s.name.clone());
-            return;
-        }
         // Validate `mut` qualifier combinations.
         if s.binding == BindingKind::Mut {
             if let Some(ty) = &s.ty {

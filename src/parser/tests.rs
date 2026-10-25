@@ -14,14 +14,10 @@ fn inline_kernel_is_a_launch_expression_with_a_block_value() {
 }
 
 #[test]
-fn inline_kernel_accepts_a_reusable_device() {
-    let src = "req f(int n, Device d):\n    kernel(d, block = 64, grid = n):\n        mut [int]'unified out = [0 for ..<n]\n        out\n";
-    let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
-    let ast::Item::Fn(function) = &program.items[0] else { panic!("expected function") };
-    let ast::Stmt::Expr(ast::Expr { kind: ast::ExprKind::KernelLaunch { config, .. }, .. }) = &function.body[0] else {
-        panic!("expected inline kernel expression")
-    };
-    assert!(matches!(config.device.as_ref().map(|value| &value.kind), Some(ast::ExprKind::Var(name)) if name == "d"));
+fn inline_kernel_rejects_a_device_argument() {
+    let src = "req f(int n):\n    kernel(0, block = 64, grid = n):\n        mut [int]'unified out = [0 for ..<n]\n        out\n";
+    let error = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect_err("placement must be rejected");
+    assert!(error.msg().contains("kernel placement was removed"), "{}", error.msg());
 }
 
 #[test]
@@ -32,21 +28,11 @@ fn inline_kernel_rejects_return_like_a_closure() {
 }
 
 #[test]
-fn kernel_placement_accepts_a_reusable_device_or_selectors() {
-    let src = "kernel Scale:\n    init(int n):\n        let x = n\ndef f():\n    let d = Device(target = .SIMD, index = 0)\n    let a = kernel(d) Scale(4)\n    let b = kernel(target = .SIMD, device = 0) Scale(4)\n";
-    let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
-    let ast::Item::Fn(function) = &program.items[1] else { panic!("expected function") };
-    for stmt in function.body.iter().skip(1) {
-        let ast::Stmt::Let(binding) = stmt else { panic!("expected binding") };
-        let Some(ast::Expr { kind: ast::ExprKind::New { arena: Some(device), ctor }, .. }) = &binding.value else {
-            panic!("expected kernel placement")
-        };
-        assert!(matches!(ctor.kind, ast::ExprKind::Call(..)));
-        if binding.name == "a" {
-            assert!(matches!(device.kind, ast::ExprKind::Var(ref name) if name == "d"));
-        } else {
-            assert!(matches!(device.kind, ast::ExprKind::Call(..)));
-        }
+fn kernel_placement_selectors_are_rejected() {
+    for placement in ["kernel(d) Scale(4)", "kernel(target = .SIMD, device = 0) Scale(4)"] {
+        let src = format!("kernel Scale:\n    init(int n):\n        let x = n\ndef f():\n    let a = {placement}\n");
+        let error = crate::parser::parse(crate::lexer::lex(&src).expect("lex")).expect_err("placement must be rejected");
+        assert!(error.msg().contains("kernel placement was removed"), "{placement}: {}", error.msg());
     }
 }
 

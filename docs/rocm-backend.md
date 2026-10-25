@@ -78,26 +78,6 @@ kernels/main.hip  --hipcc --genco-->  code object (embedded via include_bytes!)
 
 ---
 
-## `Device` type on ROCm
-
-| Boring method | ROCm/HIP API |
-|---|---|
-| `name()` | `hipDeviceGetName` |
-| `totalMem()` | `hipDeviceTotalMem` |
-| `freeMem()` | `hipMemGetInfo().0` |
-| `computeCapability()` | `hipDeviceComputeCapability` |
-| `warpSize()` | `hipDeviceGetAttribute` + build-time header probe — see below |
-| `maxThreads()` | `hipDeviceGetAttribute` + build-time header probe — see below |
-| `maxSharedMem()` | `hipDeviceGetAttribute` + build-time header probe — see below |
-| `index()` | index passed to `Device(index = i)` |
-
-`hipDeviceAttribute_t`'s numeric enum values are not guaranteed ABI-stable across ROCm releases, unlike CUDA's driver enum (which cudarc depends on directly). Rather than hardcode an attribute ID that could silently mean something different on a different ROCm version, `build.rs` compiles and runs a tiny C probe against whatever `hip/hip_runtime_api.h` is actually installed on the build machine, reads back the real `hipDeviceAttributeWarpSize`/`hipDeviceAttributeMaxThreadsPerBlock`/`hipDeviceAttributeSharedMemPerBlock` values, and bakes them into a generated `OUT_DIR/boring_hip_attrs.rs` that the host prelude `include!()`s. `warpSize()`/`maxThreads()`/`maxSharedMem()` then call `hipDeviceGetAttribute` with those probed constants. If the probe can't be compiled or run (e.g. no ROCm headers available at build time), the constants fall back to `-1` and the three methods report a clean runtime error instead of querying with a guessed ID.
-
-`Device(index = 0)` → `hipSetDevice(0)` (HIP has no separate context-creation call the way the CUDA driver API does — a `HipContext` records which device ordinal every subsequent op should target).
-`Device.all()` → `hipGetDeviceCount()`, indexed 0..count.
-
----
-
 ## GPU display (`Screen`)
 
 For the language-level `Screen`/`'surface`/`screen.present()` reference, see

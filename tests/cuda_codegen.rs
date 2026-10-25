@@ -717,74 +717,6 @@ kernel P:
         "expected printf with %lld for int;\ngot:\n{cu}");
 }
 
-// ─── Item 10 — GPU as built-in type ─────────────────────────────────────────
-
-#[test]
-fn item10_gpu_n_emits_boring_gpu_device_n() {
-    let (_, rs) = cuda_codegen("gpu_n", r#"
-kernel Scale:
-    mut [float]'unified buf
-    init([float]'unified data):
-        buf = data
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-"#);
-    assert!(rs.contains("boring_gpu_ctx_n(0 as usize)?"),
-        "expected boring_gpu_ctx_n(0) for Device(index = 0);\ngot:\n{rs}");
-}
-
-#[test]
-fn item10_gpu_all_emits_device_iterator() {
-    let (_, rs) = cuda_codegen("gpu_all", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let devs = Device.all()
-"#);
-    assert!(rs.contains("CudaContext::device_count"),
-        "expected CudaContext::device_count in Device.all() expansion;\ngot:\n{rs}");
-}
-
-// ─── Item 6 — Multi-GPU: kernel(g) Scale(data) ──────────────────────────────────
-
-#[test]
-fn item6_new_with_arena_emits_scale_new_with_device() {
-    let (_, rs) = cuda_codegen("new_arena", r#"
-kernel Scale:
-    mut [float]'unified buf
-    init([float]'unified data):
-        buf = data
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g0 = Device(index = 0)
-let data = [1.0, 2.0]
-let k = kernel(g0) Scale(data)
-"#);
-    assert!(rs.contains("Scale::new("),
-        "expected Scale::new( for kernel(g0) Scale(data);\ngot:\n{rs}");
-    // The arena expression (g0) must appear as the first arg to Scale::new.
-    assert!(rs.contains("Scale::new(g0,") || rs.contains("Scale::new(g0 ,"),
-        "expected g0 as first arg to Scale::new;\ngot:\n{rs}");
-    // `data` is a plain host Vec<f64> at this point -- the arena-qualified
-    // constructor call must upload it via clone_htod exactly like the plain
-    // `Scale(data)` call site does (see `emit_kernel_ctor_args`), not pass it
-    // straight through as a bare Vec where Scale::new expects a CudaSlice<f64>.
-    // This was a real E0308 ("expected CudaSlice<f64>, found Vec<{float}>"),
-    // confirmed via cargo check against real cudarc 0.19.8, before the `New`
-    // arm of `expr()` was fixed to route through `emit_kernel_ctor_args`
-    // instead of emitting each arg raw.
-    assert!(rs.contains("clone_htod"),
-        "expected clone_htod at the kernel(g0) Scale(data) call site;\ngot:\n{rs}");
-}
-
 // ─── Item 4 — sequential kernel launches in kernel: block ───────────────────
 
 #[test]
@@ -867,43 +799,6 @@ kernel:
         "must not reference the nonexistent ka.stream field;\ngot:\n{rs}");
 }
 
-#[test]
-fn multi_device_contexts_attempt_peer_access() {
-    // Cross-device `after =` needs `cuStreamWaitEvent` (what `stream.join`
-    // uses under the hood) to work across two different CUDA contexts, which
-    // itself requires peer access enabled between them first -- confirmed via
-    // NVIDIA's own docs. `boring_gpu_init`/`boring_gpu_ctx_n` now register
-    // every context they create and attempt bidirectional peer access with
-    // every other one already known, checking real hardware capability via
-    // `cuDeviceCanAccessPeer` first (skipping silently if unsupported) rather
-    // than requiring a `--peer-access` opt-in flag (see docs/cuda-module.md's
-    // "Multi-device" section).
-    let (_, rs) = cuda_codegen("multi_device_peer_access", r#"
-kernel Scale:
-    mut [float]'unified buf
-    init([float]'unified data):
-        buf = data
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g0 = Device(index = 0)
-let g1 = Device(index = 1)
-let data = [1.0, 2.0]
-mut ka = kernel(g0) Scale(data)
-mut kb = kernel(g1) Scale(data)
-kernel:
-    ka(block = 2)
-    kb(block = 2, after = ka)
-"#);
-    assert!(rs.contains("__boring_gpu_enable_peer_access(&ctx)?;"),
-        "expected boring_gpu_init/boring_gpu_ctx_n to register+enable peer access for every context;\ngot:\n{rs}");
-    assert!(rs.contains("cuDeviceCanAccessPeer"),
-        "expected a real hardware-capability check before enabling peer access;\ngot:\n{rs}");
-    assert!(rs.contains("cuCtxEnablePeerAccess"),
-        "expected the actual peer-access-enabling call;\ngot:\n{rs}");
-}
-
 // ─── Item 5 — dtod inference (analysis comment) ──────────────────────────────
 
 #[test]
@@ -942,54 +837,6 @@ print "{k1.buf[0]}"
 }
 
 // ─── GPU device properties ────────────────────────────────────────────────────
-
-#[test]
-fn host_gpu_name_property() {
-    let (_, rs) = cuda_codegen("gpu_name", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _name = g.name()
-"#);
-    assert!(rs.contains(".name()?"),
-        "expected .name()? for GPU name property;\ngot:\n{rs}");
-}
-
-#[test]
-fn host_gpu_total_mem_property() {
-    let (_, rs) = cuda_codegen("gpu_total_mem", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _mem = g.totalMem()
-"#);
-    assert!(rs.contains(".total_mem()?"),
-        "expected .total_mem()? for GPU total_mem property;\ngot:\n{rs}");
-}
-
-#[test]
-fn host_gpu_compute_capability_property() {
-    let (_, rs) = cuda_codegen("gpu_compute", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _cc = g.computeCapability()
-"#);
-    assert!(rs.contains(".compute_capability()?"),
-        "expected .compute_capability()? for GPU compute property;\ngot:\n{rs}");
-}
 
 // ─── saxpy example ────────────────────────────────────────────────────────────
 
@@ -2054,8 +1901,7 @@ fn opt_in_tensor_cores_check_the_gpu_architecture_at_startup() {
     assert!(tf32_host.contains("fn __boring_check_arch"), "{tf32_host}");
     assert!(tf32_host.contains("if sm < 80 {"), "{tf32_host}");
     assert!(tf32_host.contains("algorithm = \\\"tf32\\\""), "{tf32_host}");
-    // Both the default context and `Device(index = n)` contexts are checked.
-    assert_eq!(tf32_host.matches("__boring_check_arch(&ctx)?;").count(), 2, "{tf32_host}");
+    assert_eq!(tf32_host.matches("__boring_check_arch(&ctx)?;").count(), 1, "{tf32_host}");
 
     let config = "[tensor.linear.prefill]\nprecision = \"half\"\n";
     let (_, half_host, _, _) = run_cuda_with_config("arch_check_half", QUANT_LINEAR, Some(config));

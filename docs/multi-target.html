@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Boring — Kernel placement</title>
+<title>Boring — Multi-target builds</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -125,27 +125,28 @@ li { margin-bottom: 0.3rem; }
   <nav id="toc"></nav>
 </aside>
 <main class="main" id="content">
-<h1 id="kernel-placement">Kernel placement</h1>
-<p><code>new</code> is not a Boring placement operator. Ordinary values use their ordinary constructors; storage decisions are expressed by ownership qualifiers such as <code>&#x27;owned</code>, <code>&#x27;shared</code>, and <code>&#x27;actor</code>.</p>
-<p>GPU and SIMD placement belongs to a declared <code>kernel</code> instance. A kernel with no explicit placement chooses the target&#x27;s default device:</p>
+<h1 id="multi-target-builds">Multi-target builds</h1>
+<p>One binary can contain several GPU/CPU backends and pick one when it starts.</p>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target all main.br          # every backend this host can build
+boring build --target cuda,metal main.br   # an explicit list
+cd main_multi &amp;&amp; cargo build --release</code></pre></div>
+<p><code>--target</code> takes a backend (<code>cuda</code>, <code>rocm</code>, <code>metal</code>, <code>wgpu</code>, <code>simd</code>), <code>all</code>, or a comma-separated list. <code>all</code> keeps what the host can build — Metal only on macOS, CUDA when <code>nvcc</code> is on <code>PATH</code>, ROCm when <code>hipcc</code> is found, wgpu and simd always — and prints the others as skipped with the reason. An explicit list is taken as written. <code>--linux</code> and <code>--emit-rust</code> cannot be combined with several targets.</p>
+<h2 id="there-is-no-placement-syntax">There is no placement syntax</h2>
+<p>A kernel does not name the backend or device it runs on. <code>Device(...)</code>, <code>Device.all()</code>, <code>kernel(device) Name(...)</code> and <code>kernel(target = ..., device = ...)</code> were removed (the compiler rejects them with a diagnostic): the choice belongs to the run-time policy below, so the same source works unchanged on any machine and with any subset of backends.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> scale = <span class="fn">Scale</span>(n)
 <span class="fn">scale</span>(block = <span class="nb">256</span>, grid = <span class="nb">64</span>)</code></pre></div>
-<p>Use <code>Device</code> when several kernels share a backend and physical device:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> device = <span class="fn">Device</span>(target = .WGPU, index = <span class="nb">0</span>)
-<span class="kw">mut</span> scale = <span class="kw">kernel</span>(device) <span class="fn">Scale</span>(n)
-<span class="kw">mut</span> reduce = <span class="kw">kernel</span>(device) <span class="fn">Reduce</span>(n)</code></pre></div>
-<p><code>Device</code> resolves its target/device once. <code>target</code> and the selector are both optional; the selector may be an integer index or a backend-specific name or address:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> automatic = <span class="fn">Device</span>()
-<span class="kw">let</span> first = <span class="fn">Device</span>(target = .METAL)
-<span class="kw">let</span> second = <span class="fn">Device</span>(target = .WGPU, index = <span class="nb">1</span>)
-<span class="kw">let</span> address = <span class="fn">Device</span>(target = .CUDA, name = <span class="s">"pci:0000:03:00.0"</span>)</code></pre></div>
-<p>For a one-off instance, put the selection directly on <code>kernel</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> scale = <span class="kw">kernel</span>(target = .WGPU, device = <span class="nb">0</span>) <span class="fn">Scale</span>(n)</code></pre></div>
-<p>Inline kernels use the same form, followed by their launch dimensions:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>(device, block = <span class="nb">256</span>, grid = <span class="nb">64</span>):
-    <span class="co"># device code</span>
-    out</code></pre></div>
-<p>Only declared kernel constructors accept <code>kernel(...)</code>; using it with an ordinary <code>struct</code> is a compile-time error. This makes the allocation and execution context explicit without giving ordinary construction a special operator.</p>
+<h2 id="the-generated-crate">The generated crate</h2>
+<p><code>&lt;stem&gt;_multi/</code> is one Cargo project:</p>
+<table><thead><tr><th>File</th><th>Content</th></tr></thead><tbody><tr><td><code>src/backend_&lt;name&gt;.rs</code></td><td>that backend&#x27;s host code, behind the Cargo feature <code>&lt;name&gt;</code></td></tr><tr><td><code>src/policy.rs</code></td><td>the start-up policy (standard library only)</td></tr><tr><td><code>src/main.rs</code></td><td>probes the compiled-in backends, ranks them, runs the winner</td></tr><tr><td><code>kernels/</code>, <code>shaders/</code></td><td>the device sources, one per backend (<code>main.cu</code>, <code>main.hip</code>, <code>main.metal</code>, <code>main.wgsl</code>)</td></tr><tr><td><code>build.rs</code></td><td>one section per toolchain step (<code>nvcc</code>, <code>hipcc</code>), run only for enabled features</td></tr><tr><td><code>Cargo.toml</code></td><td>one feature per backend; crates only one backend needs are optional</td></tr></tbody></table>
+<p>If backends need different versions of a crate (for example <code>winit</code> 0.28 and 0.30 in programs with a <code>Screen</code>), each gets it under its own key and its module imports it back under the real name. The crates require Rust 1.89 or later (<code>File::try_lock</code>).</p>
+<h2 id="start-up-policy">Start-up policy</h2>
+<ol><li><strong>Probe.</strong> Each compiled-in backend reports the device it would use, or that it is unusable</li></ol>
+<p>   (no driver, no adapter). Probing never prints a panic. 2. <strong>Measure.</strong> Each usable backend runs the same compute-bound benchmark once (1M elements,    256 dependent multiply-adds each; the score is millions of multiply-adds per second). A    memory-bound kernel would fit in a CPU cache and wrongly favour the CPU. Scores are cached per    device for 30 days in <code>$BORING_CACHE_DIR</code>, else <code>~/.cache/boring</code> (<code>%LOCALAPPDATA%\boring</code> on    Windows). A different device, or an expired entry, measures again. 3. <strong>Load.</strong> A running program holds a <em>lease</em> on its backend: an operating-system file lock that    disappears when the process exits or crashes. Other programs count the leases held on each    backend as its load. 4. <strong>Rank.</strong> <code>score / (1 + load)</code>, best first. A backend earlier in the static order (cuda, rocm,    metal, wgpu, simd) wins over a later one that is less than 25% faster, since measurements are    noisy and a native backend is the safer choice.</p>
+<p>A backend that cannot be measured keeps a fixed prior (cuda 10M, rocm 8M, metal 2M, wgpu 1M, simd 0.1M). ROCm is always in that case: its kernels are code objects built ahead of time, so there is no run-time compiler to build a benchmark with. The CUDA benchmark goes through nvrtc.</p>
+<h2 id="environment-variables">Environment variables</h2>
+<table><thead><tr><th>Variable</th><th>Effect</th></tr></thead><tbody><tr><td><code>BORING_BACKEND=a,b</code></td><td>use the first usable backend of this list, in this order; no benchmark</td></tr><tr><td><code>BORING_BACKEND=list</code></td><td>print each backend with its device and cached score, then exit</td></tr><tr><td><code>BORING_BENCH=off</code></td><td>skip ranking: the static order applies</td></tr><tr><td><code>BORING_BENCH=force</code></td><td>measure again, ignoring the cache</td></tr><tr><td><code>BORING_BACKEND_VERBOSE=1</code></td><td>print the ranking and the chosen backend</td></tr><tr><td><code>BORING_CACHE_DIR=dir</code></td><td>where scores and leases are kept</td></tr></tbody></table>
+<h2 id="not-implemented-yet">Not implemented yet</h2>
+<p>The policy ranks whole programs. Choosing a device per kernel (from the kernel&#x27;s cost and the current load) needs a backend-independent kernel interface that the five host emitters do not share yet. Within one program, every kernel runs on the chosen backend&#x27;s default device.</p>
 </main>
 <script>
 // Build TOC from headings

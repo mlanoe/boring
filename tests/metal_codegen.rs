@@ -1340,7 +1340,7 @@ kernel Scale:
 }
 
 #[test]
-fn host_caches_default_and_indexed_metal_devices() {
+fn host_caches_the_default_metal_device() {
     let (_, rs) = metal_codegen("host_device_cache", r#"
 kernel Scale:
     mut [float]'unified buf
@@ -1352,12 +1352,9 @@ kernel Scale:
         "expected a process-thread device cache;\ngot:\n{rs}");
     assert!(rs.contains("if let Some(device) = &*c.borrow() { return device.clone(); }"),
         "expected boring_metal_device() to return the cached handle;\ngot:\n{rs}");
-    assert!(rs.contains("static __BORING_METAL_DEVICES: std::cell::RefCell<Option<Vec<Device>>>"),
-        "expected Device(index = n) enumeration to be cached too;\ngot:\n{rs}");
     assert_eq!(rs.matches("Device::system_default()").count(), 1,
         "default-device discovery must appear only in the cache miss path;\ngot:\n{rs}");
-    assert_eq!(rs.matches("Device::all()").count(), 1,
-        "indexed-device enumeration must appear only in the cache miss path;\ngot:\n{rs}");
+    assert_eq!(rs.matches("Device::all()").count(), 0, "no device enumeration is emitted;\ngot:\n{rs}");
 }
 
 #[test]
@@ -1416,33 +1413,6 @@ mut k = Scale(data)
     // missing this cast doesn't fail to compile, it silently copies half the
     // intended bytes (mem::size_of::<f32>() against actual f64 data),
     // confirmed by inspecting the generated Rust directly before this fix.
-    assert!(rs.contains("as f32"),
-        "expected an explicit f64->f32 cast before uploading the host array;\ngot:\n{rs}");
-}
-
-#[test]
-fn host_new_with_arena_uploads_array_via_new_buffer_with_data() {
-    // Same upload requirement as the plain `Scale(data)` call site above,
-    // but through the arena-qualified `kernel(g) Scale(data)` constructor path
-    // -- this used to skip the whole buffer-upload dance and pass `data`
-    // straight through as a bare `Vec<f64>` where `Scale::new` expects a
-    // `Buffer`, a real type mismatch confirmed via cargo check (mirrors the
-    // identical bug fixed in cuda::host's `kernel(g) Scale(data)` handling).
-    let (_, rs) = metal_codegen("host_htod_arena", r#"
-kernel Scale:
-    mut [float]'unified buf
-    init([float]'unified data):
-        buf = data
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g0 = Device(index = 0)
-let data = [1.0, 2.0]
-let k = kernel(g0) Scale(data)
-"#);
-    assert!(rs.contains("new_buffer_with_data"),
-        "expected new_buffer_with_data at the kernel(g0) Scale(data) call site;\ngot:\n{rs}");
     assert!(rs.contains("as f32"),
         "expected an explicit f64->f32 cast before uploading the host array;\ngot:\n{rs}");
 }

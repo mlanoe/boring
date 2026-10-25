@@ -724,10 +724,6 @@ fn desugar_expr(e: Expr, scope: &ArrayScope) -> Expr {
             name,
             args.into_iter().map(|a| desugar_arg(a, scope)).collect(),
         ),
-        ExprKind::New { arena, ctor } => ExprKind::New {
-            arena: arena.map(|a| Box::new(desugar_expr(*a, scope))),
-            ctor: Box::new(desugar_expr(*ctor, scope)),
-        },
         ExprKind::KernelLaunch { mut config, kernel } => {
             config.block = config.block.take().map(|e| desugar_expr(e, scope));
             config.grid = config.grid.take().map(|e| desugar_expr(e, scope));

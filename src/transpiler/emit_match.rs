@@ -654,10 +654,6 @@ impl Transpiler {
                     walk_expr(obj, string_typed, out);
                     for a in args { walk_expr(&a.value, string_typed, out); }
                 }
-                ExprKind::New { arena, ctor } => {
-                    if let Some(a) = arena { walk_expr(a, string_typed, out); }
-                    walk_expr(ctor, string_typed, out);
-                }
                 ExprKind::KernelLaunch { kernel, .. } => walk_expr(kernel, string_typed, out),
                 ExprKind::TryElse(a, b) => { walk_expr(a, string_typed, out); walk_expr(b, string_typed, out); }
                 ExprKind::TryElseBlock(body, else_body) => {

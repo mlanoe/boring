@@ -1122,10 +1122,6 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         // Write-once / nil-coalescing assign: recurse both sides
         ExprKind::QuestionAssign(target, rhs) => { collect_vars_in(target, out); collect_vars_in(rhs, out); }
 
-        ExprKind::New { arena, ctor } => {
-            if let Some(a) = arena { collect_vars_in(a, out); }
-            collect_vars_in(ctor, out);
-        }
 
         ExprKind::KernelLaunch { config, kernel } => {
             if let Some(e) = &config.block { collect_vars_in(e, out); }
@@ -1445,10 +1441,6 @@ fn scan_expr_for_default_rest(expr: &Expr, out: &mut std::collections::HashSet<S
         ExprKind::LabeledIndex(obj, args) => {
             scan_expr_for_default_rest(obj, out);
             for a in args { scan_expr_for_default_rest(&a.value, out); }
-        }
-        ExprKind::New { arena, ctor } => {
-            if let Some(a) = arena { scan_expr_for_default_rest(a, out); }
-            scan_expr_for_default_rest(ctor, out);
         }
         ExprKind::TryElseBlock(body, else_body) => {
             scan_stmts_for_default_rest(body, out);

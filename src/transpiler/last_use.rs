@@ -353,10 +353,6 @@ impl<'a> Walker<'a> {
                 self.expr(x);
                 self.args(args);
             }
-            ExprKind::New { arena, ctor } => {
-                if let Some(a) = arena { self.expr(a); }
-                self.expr(ctor);
-            }
             ExprKind::KernelLaunch { config, kernel } => self.opaquely(|s| {
                 for c in [&config.block, &config.grid, &config.after].into_iter().flatten() {
                     s.expr(c);

@@ -349,10 +349,6 @@ pub(crate) fn substitute_types_in_expr(expr: &mut Expr, subst: &HashMap<String, 
             substitute_types_in_args(args, subst);
         }
         ExprKind::Pipe(lhs, _, args) => { substitute_types_in_expr(lhs, subst); substitute_types_in_args(args, subst); }
-        ExprKind::New { arena, ctor } => {
-            if let Some(a) = arena { substitute_types_in_expr(a, subst); }
-            substitute_types_in_expr(ctor, subst);
-        }
         ExprKind::KernelLaunch { config, kernel } => {
             substitute_types_in_kernel_config(config, subst);
             substitute_types_in_expr(kernel, subst);
@@ -821,10 +817,6 @@ fn collect_in_expr(expr: &Expr, enclosing: &[String], ctx: &mut CollectCtx) {
             record_candidate(callee, type_args, enclosing, ctx);
         }
         ExprKind::Pipe(lhs, _, args) => { collect_in_expr(lhs, enclosing, ctx); collect_in_args(args, enclosing, ctx); }
-        ExprKind::New { arena, ctor } => {
-            if let Some(a) = arena { collect_in_expr(a, enclosing, ctx); }
-            collect_in_expr(ctor, enclosing, ctx);
-        }
         ExprKind::KernelLaunch { config, kernel } => {
             if let Some(e) = &config.block { collect_in_expr(e, enclosing, ctx); }
             if let Some(e) = &config.grid { collect_in_expr(e, enclosing, ctx); }
@@ -1200,10 +1192,6 @@ fn rewrite_in_expr(expr: &mut Expr, instantiations: &InstantiationMap, method_in
             rewrite_in_args(args, instantiations, method_instantiations);
         }
         ExprKind::Pipe(lhs, _, args) => { rewrite_in_expr(lhs, instantiations, method_instantiations); rewrite_in_args(args, instantiations, method_instantiations); }
-        ExprKind::New { arena, ctor } => {
-            if let Some(a) = arena { rewrite_in_expr(a, instantiations, method_instantiations); }
-            rewrite_in_expr(ctor, instantiations, method_instantiations);
-        }
         ExprKind::KernelLaunch { kernel, .. } => rewrite_in_expr(kernel, instantiations, method_instantiations),
         ExprKind::TryElse(a, b) => { rewrite_in_expr(a, instantiations, method_instantiations); rewrite_in_expr(b, instantiations, method_instantiations); }
         ExprKind::TryElseBlock(body, else_body) => {

@@ -1053,61 +1053,6 @@ kernel:
     assert!(rs.contains("NamedKey::Escape"), "Escape named key in key handler");
 }
 
-#[test]
-fn test_screen_program_gpu_adapters_global_now_populated() {
-    // A `Screen` program used to leave `__BORING_GPU_ADAPTER`/`__BORING_GPU_ADAPTERS`
-    // entirely unset ("GPU introspection is unsupported inside a Screen program"):
-    // any GPU introspection call reachable from a Screen program would have hit a
-    // guaranteed runtime panic against an uninitialized `OnceLock`, uncaught by any
-    // test. Real per-adapter introspection (2026-09-01) closes this the same way as
-    // the non-Screen path: `adapter` is Arc-wrapped once (`wgpu::Adapter` has no
-    // `Clone` of its own, confirmed against the real pinned `wgpu = "22"` source) so
-    // it can be shared between the introspection list and the `__App` struct's own
-    // `adapter` field, which is moved into the struct literal further down.
-    //
-    // A bare `let g = Device(index = 0)` / `print` statement at a Screen program's top level, or
-    // inside the render loop, used to be silently dropped by `emit_screen_main`'s own
-    // narrow, hardcoded shape-matchers, confirmed against a real generated project --
-    // that gap is now closed (see `check_screen_program_shape`'s and
-    // `emit_render_stmt`'s error fallbacks below, and
-    // `wgpu_screen_top_level_statement_runs_in_setup` /
-    // `wgpu_screen_unsupported_render_loop_statement_is_rejected_not_dropped`) --
-    // this test only verifies the adapters global itself is populated and available.
-    let src = r#"
-let screen = Screen(Dimension(800, 600), title = "Test")
-
-kernel Plasma:
-    mut [uint]'surface pixels
-    let Dimension dim
-
-    init(Dimension d):
-        pixels = [0 for ..<d.width * d.height]
-        dim    = d
-
-    def ():
-        pixels[0] = 0xFF000000
-
-var mut k = Plasma(Dimension(800, 600))
-
-kernel:
-    loop:
-        k(block = (16, 16))
-        screen.present(k.pixels)
-        if screen.key("\x1B"):
-            break
-"#;
-    let (_wgsl, rs) = wgpu_codegen("screen_gpu_adapters_populated", src);
-
-    assert!(rs.contains("adapter:  std::sync::Arc<wgpu::Adapter>,"), "App.adapter field should be Arc-wrapped:\n{rs}");
-    assert!(rs.contains("let adapter = std::sync::Arc::new(adapter);"), "adapter should be Arc-wrapped once in fn main():\n{rs}");
-    assert!(rs.contains("let _ = __BORING_GPU_ADAPTERS.set("), "Screen path must populate the adapters global, unlike before:\n{rs}");
-    assert!(rs.contains("instance.enumerate_adapters(wgpu::Backends::all())"), "Screen path should enumerate real adapters:\n{rs}");
-    // `adapter` must still reach the later `__App` struct literal unmoved-out --
-    // i.e. still present as a bare field name in the literal, not consumed
-    // entirely by the introspection list above it.
-    assert!(rs.contains("instance, adapter, device, queue,"), "adapter must still be available for the __App struct literal:\n{rs}");
-}
-
 // ── `with` GPU-residency materialization (docs/scoped-access-blocks.md) ────────
 //
 // `let py'kernel'unified = k.y` followed by `with py:` should read the kernel field
@@ -1708,59 +1653,6 @@ def main() throws:
     assert!(rs.contains("BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf)"),
         "unannotated resident position should materialize through the free d2h helper by default:\n{rs}");
     assert!(rs.contains("let r ="), "default-materialized binding should still end up bound to the plain name `r`:\n{rs}");
-}
-
-// ── `GPU` introspection (portable between the interpreter's simulation and
-// --target wgpu — see examples/saxpy.br's `Device(index = 0)`/`.name()`/`.totalMem()`) ────
-
-#[test]
-fn test_gpu_device_handle_and_properties() {
-    let src = r#"
-let g = Device(index = 0)
-print g.name()
-print g.totalMem()
-print g.freeMem()
-print g.computeCapability()
-print g.warpSize()
-print g.maxThreads()
-print g.maxSharedMem()
-print g.index()
-"#;
-    let (_wgsl, rs) = wgpu_codegen("gpu_device_properties", src);
-
-    assert!(rs.contains("let g = ((0) as usize);"), "Device(index = 0) should emit a plain usize:\n{rs}");
-    assert!(rs.contains("__boring_gpu_name(g)"), "missing .name() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_total_mem(g)"), "missing .totalMem() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_free_mem(g)"), "missing .freeMem() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_compute_capability(g)"), "missing .computeCapability() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_warp_size(g)"), "missing .warpSize() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_max_threads(g)"), "missing .maxThreads() rewrite:\n{rs}");
-    assert!(rs.contains("__boring_gpu_max_shared_mem(g)"), "missing .maxSharedMem() rewrite:\n{rs}");
-    assert!(rs.contains("(g as i64)"), "missing .index() rewrite:\n{rs}");
-    // Backing globals/helpers must actually be emitted, and index real adapters
-    // (2026-09-01: real per-adapter introspection, not a single simulated device).
-    assert!(rs.contains("static __BORING_GPU_ADAPTERS"), "missing adapters global:\n{rs}");
-    assert!(rs.contains("fn __boring_gpu_name(idx: usize) -> String { __boring_gpu_adapter(idx).get_info().name }"), "missing name() helper body:\n{rs}");
-    assert!(rs.contains("let _ = __BORING_GPU_ADAPTERS.set("), "adapters global is never populated:\n{rs}");
-    assert!(rs.contains("instance.enumerate_adapters(wgpu::Backends::all())"), "adapter list should come from a real enumeration, not a fake single device:\n{rs}");
-}
-
-#[test]
-fn test_gpu_all_enumerates_real_adapters_and_loop_var_gets_properties() {
-    let src = r#"
-for g in Device.all():
-    print g.name()
-    print g.index()
-"#;
-    let (_wgsl, rs) = wgpu_codegen("gpu_all_loop", src);
-
-    // Device.all() now reflects however many real adapters enumerate_adapters()
-    // actually finds, not a hardcoded single-element vec — see
-    // docs/wgpu-backend.md's "GPU type on wgpu" (2026-09-01).
-    assert!(rs.contains("for g in __boring_gpu_all().into_iter()"), "Device.all() should enumerate the real adapter list:\n{rs}");
-    assert!(rs.contains("fn __boring_gpu_all() -> Vec<usize>"), "missing __boring_gpu_all() helper:\n{rs}");
-    assert!(rs.contains("__boring_gpu_name(g)"), "loop var should get the .name() rewrite, indexed by g:\n{rs}");
-    assert!(rs.contains("(g as i64)"), "loop var should get the .index() rewrite:\n{rs}");
 }
 
 // ─── typed KernelError ─────────────────────────────────────────────────────────
@@ -2551,8 +2443,7 @@ kernel:
 #[test]
 fn wgpu_screen_top_level_let_runs_in_setup() {
     // Same gap, `Let` side: a top-level `let` whose initializer isn't a
-    // `Screen(...)`/kernel-constructor call or a scalar literal (here, real GPU
-    // introspection: `let g = Device(index = 0)`) used to vanish from the generated Rust
+    // `Screen(...)`/kernel-constructor call or a scalar literal (here, a computed value) used to vanish from the generated Rust
     // with no diagnostic, confirmed against a real generated project (see
     // `test_screen_program_gpu_adapters_global_now_populated`'s original doc
     // comment). It's rejected up front now instead.
@@ -2560,7 +2451,7 @@ fn wgpu_screen_top_level_let_runs_in_setup() {
 let width = 4
 let height = 4
 let screen = Screen(Dimension(width, height), title = "test")
-let g = Device(index = 0)
+let g = width + 1
 
 kernel T:
     mut [uint]'surface pixels

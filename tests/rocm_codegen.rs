@@ -641,72 +641,6 @@ kernel P:
         "expected printf with %lld for int;\ngot:\n{hip}");
 }
 
-// ─── GPU as built-in type ─────────────────────────────────────────────────────
-
-#[test]
-fn gpu_n_emits_boring_gpu_ctx_n() {
-    let (_, rs) = rocm_codegen("gpu_n", r#"
-kernel Scale:
-    mut [float]'unified buf
-    init([float]'unified data):
-        buf = data
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-"#);
-    assert!(rs.contains("boring_gpu_ctx_n(0 as usize)?"),
-        "expected boring_gpu_ctx_n(0) for Device(index = 0);\ngot:\n{rs}");
-}
-
-#[test]
-fn gpu_all_emits_device_iterator() {
-    let (_, rs) = rocm_codegen("gpu_all", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let devs = Device.all()
-"#);
-    assert!(rs.contains("HipContext::device_count"),
-        "expected HipContext::device_count in Device.all() expansion;\ngot:\n{rs}");
-}
-
-// ─── Multi-GPU: kernel(g) Scale(data) ─────────────────────────────────────────────
-
-#[test]
-fn new_with_arena_emits_scale_new_with_device() {
-    let (_, rs) = rocm_codegen("new_arena", r#"
-kernel Scale:
-    mut [float]'unified buf
-    init([float]'unified data):
-        buf = data
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g0 = Device(index = 0)
-let data = [1.0, 2.0]
-let k = kernel(g0) Scale(data)
-"#);
-    assert!(rs.contains("Scale::new("),
-        "expected Scale::new( for kernel(g0) Scale(data);\ngot:\n{rs}");
-    // The arena expression (g0) must appear as the first arg to Scale::new.
-    assert!(rs.contains("Scale::new(g0,") || rs.contains("Scale::new(g0 ,"),
-        "expected g0 as first arg to Scale::new;\ngot:\n{rs}");
-    // `data` is a plain host Vec<f64> at this point -- the arena-qualified
-    // constructor call must upload it via clone_htod exactly like the plain
-    // `Scale(data)` call site does (see `emit_kernel_ctor_args`), not pass it
-    // straight through as a bare Vec where Scale::new expects a
-    // DeviceBuffer<f64> (mirrors the identical bug fixed in cuda::host's
-    // `kernel(g) Scale(data)` handling).
-    assert!(rs.contains("clone_htod"),
-        "expected clone_htod at the kernel(g0) Scale(data) call site;\ngot:\n{rs}");
-}
-
 // ─── sequential kernel launches in kernel: block ───────────────────────────────
 
 #[test]
@@ -820,58 +754,6 @@ print "{k1.buf[0]}"
         "expected a real device-to-device .clone(), not a bare move, so k1 stays usable afterward, and not a D2H+H2D round trip;\ngot:\n{rs}");
 }
 
-// ─── GPU device properties ────────────────────────────────────────────────────
-
-#[test]
-fn host_gpu_name_property() {
-    let (_, rs) = rocm_codegen("gpu_name", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _name = g.name()
-"#);
-    assert!(rs.contains(".name()?"),
-        "expected .name()? for GPU name property;\ngot:\n{rs}");
-}
-
-#[test]
-fn host_gpu_total_mem_property() {
-    let (_, rs) = rocm_codegen("gpu_total_mem", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _mem = g.totalMem()
-"#);
-    assert!(rs.contains(".total_mem()?"),
-        "expected .total_mem()? for GPU total_mem property;\ngot:\n{rs}");
-}
-
-#[test]
-fn host_gpu_compute_capability_property() {
-    let (_, rs) = rocm_codegen("gpu_compute", r#"
-kernel Scale:
-    mut [float]'unified buf
-    def ():
-        let tid = .thread.x
-        buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _cc = g.computeCapability()
-"#);
-    assert!(rs.contains(".compute_capability()?"),
-        "expected .compute_capability()? for GPU compute property;\ngot:\n{rs}");
-}
-
-// ─── Device().warpSize()/maxThreads()/maxSharedMem() via build-time header probe ──
-
 #[test]
 fn gpu_device_attribute_queries_use_probed_constants() {
     // hipDeviceAttribute_t enum values aren't ABI-stable across ROCm
@@ -889,18 +771,7 @@ kernel Scale:
     def ():
         let tid = .thread.x
         buf[tid] = buf[tid] * 2.0
-
-let g = Device(index = 0)
-let _ws = g.warpSize()
-let _mt = g.maxThreads()
-let _sm = g.maxSharedMem()
 "#);
-    assert!(rs.contains(".warp_size()?"),
-        "expected .warp_size()? call site for Device().warpSize();\ngot:\n{rs}");
-    assert!(rs.contains(".max_threads()?"),
-        "expected .max_threads()? call site for Device().maxThreads();\ngot:\n{rs}");
-    assert!(rs.contains(".max_shared_mem()?"),
-        "expected .max_shared_mem()? call site for Device().maxSharedMem();\ngot:\n{rs}");
     assert!(rs.contains("include!(concat!(env!(\"OUT_DIR\"), \"/boring_hip_attrs.rs\"))"),
         "expected the prelude to include! the build-time-probed attribute constants;\ngot:\n{rs}");
     assert!(rs.contains("self.get_attribute(BORING_HIP_ATTR_WARP_SIZE"),

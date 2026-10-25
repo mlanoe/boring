@@ -9016,34 +9016,16 @@ particular storage representation is required. Ownership transfer between
 bindings is implicit — see ["Move semantics"](#move-semantics) above; there is
 no explicit move-marker syntax.
 
-GPU/SIMD placement is specific to declared `kernel` constructors. A kernel
-without an explicit placement uses the selected target's default device:
+GPU/SIMD kernels have no placement syntax: a declared `kernel` is constructed like any
+other struct, and the backend and device it runs on are chosen at run time (see
+[multi-target builds](multi-target.html)). The older `Device(...)`, `Device.all()`,
+`kernel(device) Name(...)`, and `kernel(target = ..., device = ...)` forms were
+removed and are rejected with a diagnostic.
 
 ```boring
 mut scale = Scale(n)
 scale(block = 256, grid = 64)
 ```
-
-Use a reusable `Device` when several kernel instances share the same resolved
-backend and physical device:
-
-```boring
-let device = Device(target = .WGPU, index = 0)
-mut scale = kernel(device) Scale(n)
-mut reduce = kernel(device) Reduce(n)
-```
-
-For one-off placement, selectors can be written directly. `target` and
-`device` are independently optional; `device` accepts an index or a
-backend-specific name/address:
-
-```boring
-mut scale = kernel(target = .WGPU, device = 0) Scale(n)
-mut other = kernel(device = "pci:0000:03:00.0") Scale(n)
-```
-
-`kernel(...)` is rejected for ordinary `struct` constructors. It is not an
-allocation operator; it binds a kernel instance to an execution context.
 
 `'new` remains a compatibility qualifier for delayed initialisation. It is not
 related to device placement:
@@ -9647,18 +9629,6 @@ of such buffers. The result stays resident when the enclosing function has a
 `'kernel'unified` or `'kernel'global` return type. `block` is required; `grid`,
 `after`, and `priority` have the same semantics as a named-kernel dispatch.
 
-An inline kernel can use the same reusable execution context as a named
-kernel. The positional first argument is a `Device`; the remaining arguments
-are launch configuration:
-
-```boring
-let device = Device(target = .WGPU, index = 0)
-
-kernel(device, block = 256, grid = 64):
-    mut [float32]'unified out = [0.0 for ..<16]
-    out
-```
-
 The compiler lowers this form to a private anonymous `kernel` struct, its
 constructor, a synchronous launch, and a final field read. Named
 `kernel Name:` structs remain the appropriate form for reusable kernels,
@@ -9963,8 +9933,8 @@ All ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`, `'
 **[Binding and mutability](binding-mutability.html)**
 Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.
 
-**[Kernel placement](new-placement.html)**
-`Device(...)`, `kernel(device) Name(...)`, and inline-kernel placement syntax. Covers reusable execution contexts and backend/device selection.
+**[Multi-target builds](multi-target.html)**
+`boring build --target all` / `--target cuda,metal`: several backends in one binary, benchmarked and ranked at start-up, with `BORING_BACKEND`/`BORING_BENCH` controls.
 
 **[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
 Full design and implementation notes for `with` — see [chapter 21](#scoped-access-blocks--with) above for the `'actor`/`'guard` per-block locking language reference, and [chapter 32, GPU Computing](#32-gpu-computing) for GPU materialization, function-boundary residency, and resident struct fields. These features are implemented on the GPU host targets; the design document records the generated Rust and current backend limitations.

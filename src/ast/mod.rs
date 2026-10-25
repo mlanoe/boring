@@ -355,10 +355,6 @@ pub struct KernelDecl {
 /// Launch configuration passed to the `kernel(...)` expression.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
-    /// Reusable execution device (`kernel(device, ...)`).
-    pub device: Option<Expr>,
-    /// Optional backend selector (`target = .CUDA`, `.ROCM`, `.METAL`, `.WGPU`, `.SIMD`).
-    pub target: Option<String>,
     /// Threads per block: int or tuple.
     pub block: Option<Expr>,
     /// Blocks per grid: int or tuple (inferred if None).
@@ -1019,11 +1015,6 @@ pub enum ExprKind {
     // A parenthesis-free `lhs |> field` is parsed directly as `ExprKind::Field`;
     // `.method(args)` is parsed directly as `ExprKind::MethodCall`.
     Pipe(Box<Expr>, String, Vec<Arg>),
-
-    /// Internal kernel-placement node. User syntax is
-    /// `kernel(device) Scale(...)` or `kernel(target = .WGPU, device = 0) Scale(...)`.
-    /// The historical `new` spelling is no longer accepted by the lexer/parser.
-    New { arena: Option<Box<Expr>>, ctor: Box<Expr> },
 
     /// `kernel(block = N, ...) expr` — GPU kernel launch expression.
     /// Returns a `KernelHandle<T>` value.
@@ -2184,7 +2175,6 @@ fn scan_expr_var_arg(
         }
         ExprKind::GenericCall(callee, _, args) => { e!(callee); for a in args { e!(&a.value); } }
         ExprKind::Pipe(lhs, _, args) => { e!(lhs); for a in args { e!(&a.value); } }
-        ExprKind::New { ctor, arena } => { e!(ctor); if let Some(a) = arena { e!(a); } }
         ExprKind::BinOp(_, l, r) => { e!(l); e!(r); }
         ExprKind::UnaryOp(_, ex) | ExprKind::Cast(ex, _) => e!(ex),
         // `<name>.length`/`.count` is a size query, not a host materialization -- a
@@ -2345,7 +2335,6 @@ fn with_expr_mutates(
         }
         ExprKind::GenericCall(callee, _, args) => e(callee, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm)),
         ExprKind::Pipe(lhs, _, args) => e(lhs, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm)),
-        ExprKind::New { ctor, arena } => e(ctor, ivp, imm) || arena.as_ref().map(|a| e(a, ivp, imm)).unwrap_or(false),
         ExprKind::BinOp(_, l, r) => e(l, ivp, imm) || e(r, ivp, imm),
         ExprKind::UnaryOp(_, ex) | ExprKind::Cast(ex, _) => e(ex, ivp, imm),
         ExprKind::Field(ex, _) | ExprKind::OptionalField(ex, _) => e(ex, ivp, imm),
@@ -2500,10 +2489,6 @@ pub fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(WalkNode<'a>)) {
         | ExprKind::GenericCall(obj, _, args) | ExprKind::Pipe(obj, _, args) => {
             walk_expr(obj, f);
             for a in args { walk_expr(&a.value, f); }
-        }
-        ExprKind::New { ctor, arena } => {
-            walk_expr(ctor, f);
-            if let Some(a) = arena { walk_expr(a, f); }
         }
         ExprKind::KernelLaunch { kernel, config } => {
             walk_expr(kernel, f);

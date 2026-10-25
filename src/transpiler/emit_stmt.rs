@@ -152,27 +152,11 @@ impl Transpiler {
                 }
             }
             Stmt::For(s)            => {
-                // `for g in GPU.all():` — track the loop var as a GPU-device handle
-                // for the body's duration (see `gpu_device_vars`'s doc comment),
-                // restored via a snapshot here rather than threading extra
-                // bookkeeping through emit_for's several iterable-shape branches.
-                let is_gpu_all = self.is_gpu_target && s.vars.len() == 1 && matches!(
-                    &s.iterable.kind,
-                    ExprKind::MethodCall(obj, method, _)
-                        if method == "all" && matches!(&obj.kind, ExprKind::Var(v) if v == "Device")
-                );
                 // A `break` inside this `for` loop's body must never be
                 // mistaken for exiting an enclosing while-let-shorthand loop —
                 // see the `Stmt::Break` arm above.
                 let prev_break_sync = self.while_let_break_sync.take();
-                if is_gpu_all {
-                    let saved_gpu_device_vars = self.gpu_device_vars.clone();
-                    self.gpu_device_vars.insert(s.vars[0].clone());
-                    self.emit_for(s);
-                    self.gpu_device_vars = saved_gpu_device_vars;
-                } else {
-                    self.emit_for(s);
-                }
+                self.emit_for(s);
                 self.while_let_break_sync = prev_break_sync;
             }
             Stmt::Guard(s)          => self.emit_guard(s),

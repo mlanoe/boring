@@ -381,7 +381,6 @@ fn expr_use_name(e: &Expr, name: &str, escapes: &mut bool, bad_op: &mut bool) {
                 }
             }
         }
-        ExprKind::New { ctor, .. } => expr_use_name(ctor, name, escapes, bad_op),
         // Leaves and anything else not specifically walked: no sub-expressions of
         // interest (literals, bare `Var` reads not covered above, etc.) — a bare
         // `Var(name)` read reaching here is an ordinary, single `.load()`-mapped

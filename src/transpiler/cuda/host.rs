@@ -41,9 +41,6 @@ struct HostEmitter {
     /// Tracks which local variables hold a kernel struct instance and which type.
     /// Used to emit `k.read_buf()?` instead of `k.buf` for device-side fields.
     var_kernel_type: std::collections::HashMap<String, String>,
-    /// Variables that hold an `Arc<CudaContext>` (from `Device(index = n)` or `kernel(g) ...`).
-    /// Used to map `.name()`, `.total_mem()` etc. to cudarc 0.19 methods.
-    gpu_vars: std::collections::HashSet<String>,
     /// Local variables (by name, unscoped) whose declared type or initializer is a
     /// `{K=V}` dict literal/type — used so `d[key]`/`d[key] = v` emit `HashMap`
     /// `.get(&key).cloned()`/`.insert(key, v)` instead of Vec-style `[key as usize]`
@@ -222,7 +219,6 @@ impl HostEmitter {
             kernel_names: kernel_names.iter().cloned().collect(),
             kernel_decls: std::collections::HashMap::new(),
             var_kernel_type: std::collections::HashMap::new(),
-            gpu_vars: std::collections::HashSet::new(),
             dict_vars: std::collections::HashSet::new(),
             dict_fields: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
@@ -609,84 +605,11 @@ impl HostEmitter {
         // produced `Arc<Arc<_>>`, a real E0308 confirmed via `cargo check`.
         self.line("let ctx = CudaContext::new(0)?;");
         if self.min_arch.is_some() { self.line("__boring_check_arch(&ctx)?;"); }
-        self.line("__boring_gpu_enable_peer_access(&ctx)?;");
         self.line("let ptx = Ptx::from_src(BORING_PTX);");
         self.line("let module = ctx.load_module(ptx)?;");
         self.line("let _ = BORING_CTX.set(ctx);");
         self.line("let _ = BORING_MODULE.set(module);");
         self.line("Ok(())");
-        self.indent -= 1;
-        self.line("}");
-        self.blank();
-        // Multi-GPU context accessor: `Device(index = n)` → `boring_gpu_ctx_n(n)?`.
-        self.line("fn boring_gpu_ctx_n(idx: usize) -> Result<Arc<CudaContext>, Box<dyn std::error::Error + Send + Sync>> {");
-        self.indent += 1;
-        // `CudaContext::new` already returns `Arc<Self>` -- see `boring_gpu_init`'s
-        // identical fix.
-        self.line("let ctx = CudaContext::new(idx)?;");
-        if self.min_arch.is_some() { self.line("__boring_check_arch(&ctx)?;"); }
-        self.line("__boring_gpu_enable_peer_access(&ctx)?;");
-        self.line("Ok(ctx)");
-        self.indent -= 1;
-        self.line("}");
-        self.blank();
-        self.line("thread_local! {");
-        self.indent += 1;
-        self.line("static __BORING_GPU_PEER_CTXS: std::cell::RefCell<Vec<Arc<CudaContext>>> = std::cell::RefCell::new(Vec::new());");
-        self.indent -= 1;
-        self.line("}");
-        self.blank();
-        // Automatically enables bidirectional peer access between `ctx` and every
-        // other GPU context this program has already created, wherever the real
-        // hardware topology actually supports it (checked via
-        // `cuDeviceCanAccessPeer` first, per pair, per direction -- a grant is
-        // one-directional, confirmed against the CUDA driver API docs). This is
-        // the prerequisite `stream.join(dep)` (`cuStreamWaitEvent`) needs to
-        // work AT ALL across two different devices -- without it, a cross-
-        // device `after =` fails at runtime with a real (if generic) DriverError
-        // instead of the `cudaStreamWaitEvent` actually succeeding. A pair the
-        // topology doesn't support is silently skipped -- `after =` between
-        // that specific pair still surfaces its own real error, unchanged from
-        // before this existed; there is deliberately no user-facing flag to opt
-        // in or out (see docs/cuda-module.md's "Multi-device" section) since
-        // this is cheap and harmless to always attempt: single-GPU programs
-        // never have a second context to loop over.
-        self.line("fn __boring_gpu_enable_peer_access(ctx: &Arc<CudaContext>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
-        self.indent += 1;
-        self.line("__BORING_GPU_PEER_CTXS.with(|ctxs| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
-        self.indent += 1;
-        self.line("let mut ctxs = ctxs.borrow_mut();");
-        self.line("for other in ctxs.iter() {");
-        self.indent += 1;
-        self.line("if Arc::ptr_eq(other, ctx) { continue; }");
-        self.line("for (a, b) in [(ctx, other), (other, ctx)] {");
-        self.indent += 1;
-        self.line("let mut can_access: std::ffi::c_int = 0;");
-        self.line("unsafe {");
-        self.indent += 1;
-        self.line("cudarc::driver::sys::cuDeviceCanAccessPeer(&mut can_access, a.cu_device(), b.cu_device()).result()?;");
-        self.indent -= 1;
-        self.line("}");
-        self.line("if can_access != 0 {");
-        self.indent += 1;
-        self.line("a.bind_to_thread()?;");
-        self.line("let code = unsafe { cudarc::driver::sys::cuCtxEnablePeerAccess(b.cu_ctx(), 0) };");
-        self.line("// Already-enabled (e.g. `a`/`b` swapped on a later call) is not an error.");
-        self.line("if code != cudarc::driver::sys::CUresult::CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED {");
-        self.indent += 1;
-        self.line("code.result()?;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line("ctxs.push(Arc::clone(ctx));");
-        self.line("Ok(())");
-        self.indent -= 1;
-        self.line("})");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -2797,7 +2720,6 @@ impl HostEmitter {
             kernel_names: self.kernel_names.clone(),
             kernel_decls: self.kernel_decls.clone(),
             var_kernel_type: self.var_kernel_type.clone(),
-            gpu_vars: self.gpu_vars.clone(),
             dict_vars: self.dict_vars.clone(),
             dict_fields: self.dict_fields.clone(),
             string_vars: self.string_vars.clone(),
@@ -3085,22 +3007,6 @@ impl HostEmitter {
                 // preserving call passed as an argument to this outer call
                 // isn't incorrectly suppressed too. See its field doc.
                 let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
-                // `Device(index = n)` → `boring_gpu_ctx_n(n)?`
-                if let ExprKind::Var(name) = &callee.kind {
-                    if name == "Device" {
-                        if let Some(target) = args.iter().find(|a| a.label.as_deref() == Some("target")) {
-                            if let ExprKind::Str(value) | ExprKind::DotIdent(value) | ExprKind::Var(value) = &target.value.kind {
-                                if !value.eq_ignore_ascii_case("CUDA") {
-                                    return format!("compile_error!(\"Device target {} is not available in a CUDA build\")", value);
-                                }
-                            }
-                        }
-                        let idx = args.iter().find(|a| a.label.as_deref() == Some("index"))
-                            .or_else(|| (!args.iter().any(|a| a.label.is_some())).then(|| args.first()).flatten())
-                            .map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
-                        return format!("boring_gpu_ctx_n({} as usize)?", idx);
-                    }
-                }
                 // `ord(c)` — char → isize (Boring built-in)
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "ord" {
@@ -3325,13 +3231,6 @@ impl HostEmitter {
                 }
                 // `GPU.all()` → iterator over all CUDA devices.
                 if let ExprKind::Var(name) = &obj.kind {
-                    if name == "Device" && method == "all" {
-                        return "(0..CudaContext::device_count()? as usize).map(|i| boring_gpu_ctx_n(i).unwrap())".into();
-                    }
-                    // GPU property methods on a GPU variable.
-                    if self.gpu_vars.contains(name.as_str()) {
-                        return self.emit_gpu_property(name, method);
-                    }
                     // `fs.writeBytes(path, bytes)` — write Vec<isize> as binary file
                     if name == "fs" && method == "writeBytes" {
                         let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
@@ -3448,29 +3347,6 @@ impl HostEmitter {
                     }
                 };
                 format!("{k}.__boring_launch({block}, {grid}, {after_arg})?")
-            }
-            ExprKind::New { arena, ctor } => {
-                // `kernel(g) Scale(data)` → `Scale::new(<g>, data)?` (explicit device
-                // placement) -- args go through the same buffer-upload handling as
-                // a plain `Scale(data)` call (see `emit_kernel_ctor_args`'s doc).
-                if let ExprKind::Call(callee, args) = &ctor.kind {
-                    if let ExprKind::Var(name) = &callee.kind {
-                        if self.kernel_names.contains(name.as_str()) {
-                            let dev = arena.as_ref()
-                                .map(|a| self.expr(a))
-                                .unwrap_or_else(|| "boring_gpu_ctx()".into());
-                            let args_s = self.emit_kernel_ctor_args(name, args);
-                            let all = std::iter::once(dev).chain(args_s).collect::<Vec<_>>();
-                            return if self.in_render_loop {
-                            format!("{}::new({}).expect(\"kernel construction failed\")", name, all.join(", "))
-                        } else {
-                            format!("{}::new({})?", name, all.join(", "))
-                        };
-                        }
-                    }
-                }
-                // Non-kernel new: ignore arena, emit the constructor directly.
-                self.expr(ctor)
             }
             ExprKind::Array(elems) => {
                 let s: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
@@ -3591,37 +3467,9 @@ impl HostEmitter {
         if let Some(t) = ty {
             self.var_kernel_type.insert(name.to_string(), t);
         }
-        // Track GPU device variables: `Device(index = n)` or `boring_gpu_ctx_n(...)`.
-        if self.is_gpu_expr(val) {
-            self.gpu_vars.insert(name.to_string());
-        }
     }
 
-    fn is_gpu_expr(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Call(callee, _) => {
-                if let ExprKind::Var(n) = &callee.kind { n == "Device" }
-                else { false }
-            }
-            ExprKind::Var(n) => self.gpu_vars.contains(n.as_str()),
-            _ => false,
-        }
-    }
 
-    /// Map a GPU variable method call to cudarc 0.19 API.
-    fn emit_gpu_property(&self, var: &str, method: &str) -> String {
-        match method {
-            "name"                => format!("{var}.name()?"),
-            "totalMem"            => format!("{var}.total_mem()?"),
-            "freeMem"             => format!("{var}.mem_get_info()?.0"),
-            "computeCapability"   => format!("{var}.compute_capability()?"),
-            "warpSize"            => format!("{var}.attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_WARP_SIZE)?"),
-            "maxThreads"          => format!("{var}.attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?"),
-            "maxSharedMem"        => format!("{var}.attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?"),
-            "index"               => format!("{var}.ordinal()"),
-            other                 => format!("{var}.{other}()"),
-        }
-    }
 
     fn resolve_kernel_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
@@ -3645,8 +3493,6 @@ impl HostEmitter {
             }
             // `kernel(...) k` — launch; same type as the kernel variable
             ExprKind::KernelLaunch { kernel, .. } => self.resolve_kernel_type(kernel),
-            // `kernel(g) Scale(args)` — placement; same type as the constructor
-            ExprKind::New { ctor, .. } => self.resolve_kernel_type(ctor),
             // `expr |> .wait()` — unwrap handle; same type as the launch
             ExprKind::Pipe(lhs, method, _) if method == "wait" => self.resolve_kernel_type(lhs),
             // bare variable — look up in tracked map
@@ -3698,13 +3544,8 @@ impl HostEmitter {
     /// each buffer-passthrough argument (see `kernel_ctor_buffer_flags`) via
     /// `clone_htod` -- or sharing it when a read-only argument is already resident --
     /// exactly the way a plain `Scale(data)` constructor call has always
-    /// worked. Shared by both constructor call sites: plain `Scale(data)`
-    /// (`ExprKind::Call`) and placed `kernel(g) Scale(data)`
-    /// (`ExprKind::New`) -- the latter used to skip this entirely and just
-    /// pass `data` straight through as a bare `Vec`, a real E0308 (`expected
-    /// CudaSlice<f64>, found Vec<{float}>`) confirmed via `cargo check`
-    /// against the stubbed-cudarc build, since `Scale::new` takes an
-    /// already-uploaded `CudaSlice` (its body no longer uploads internally).
+    /// worked. Used by the plain `Scale(data)` constructor call site (`ExprKind::Call`);
+    /// `Scale::new` takes already-uploaded buffers (its body no longer uploads internally).
     fn emit_kernel_ctor_args(&mut self, name: &str, args: &[Arg]) -> Vec<String> {
         let buffer_flags = self.kernel_ctor_buffer_flags(name);
         args.iter().enumerate().map(|(i, a)| {

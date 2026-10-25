@@ -133,10 +133,6 @@ impl Walker<'_> {
             }
             ExprKind::MethodCall(o, _, args) | ExprKind::Pipe(o, _, args)
             | ExprKind::OptionalMethodCall(o, _, args) => { self.expr(o); self.args(args); }
-            ExprKind::New { arena, ctor } => {
-                if let Some(a) = arena { self.expr(a); }
-                self.expr(ctor);
-            }
             ExprKind::KernelLaunch { config, kernel } => {
                 for x in [&mut config.block, &mut config.grid, &mut config.after].into_iter().flatten() {
                     self.expr(x);

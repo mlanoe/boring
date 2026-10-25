@@ -866,40 +866,11 @@ impl Transpiler {
         self.enum_variant_fields.contains_key(&format!("{}::{}", base, variant))
     }
 
-    /// Built-in `fs`/`GPU` module namespace calls, and property access on a tracked
-    /// `Device(index = n)` device handle — intercepted before any other method-call dispatch.
+    /// Built-in `fs` module namespace calls — intercepted before any other method-call dispatch.
     fn try_emit_builtin_namespace_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         if let ExprKind::Var(v) = &obj.kind {
             if v == "fs" {
                 return Some(self.emit_fs_call(method, args));
-            }
-            // `GPU.all()` — iterate all real GPU adapters the system exposes
-            // (`instance.enumerate_adapters` in `wgpu::host::emit_gpu_adapter_enumeration`),
-            // not a fake single-element array — see docs/wgpu-backend.md's "`GPU` type
-            // on wgpu" (2026-09-01: real per-adapter introspection).
-            if v == "Device" && method == "all" && self.is_gpu_target {
-                return Some("__boring_gpu_all()".to_string());
-            }
-        }
-        // `g.name()`/`.totalMem()`/etc on a tracked `Device(index = n)` handle (`let g = Device(index = 0)`,
-        // or a `for g in GPU.all():` loop variable) — rewritten to the introspection
-        // helpers `wgpu::host::emit_gpu_introspection_globals` emits, indexed by `g`
-        // itself (a plain `usize`, see `emit_expr.rs`'s `Device(index = n)` handling) against the
-        // real adapter list `wgpu::host::emit_gpu_adapter_enumeration` builds at
-        // startup. `.index()` is just the stored usize itself.
-        if let ExprKind::Var(v) = &obj.kind {
-            if self.gpu_device_vars.contains(v.as_str()) {
-                return Some(match method {
-                    "name"              => format!("__boring_gpu_name({v})"),
-                    "totalMem"          => format!("__boring_gpu_total_mem({v})"),
-                    "freeMem"           => format!("__boring_gpu_free_mem({v})"),
-                    "computeCapability" => format!("__boring_gpu_compute_capability({v})"),
-                    "warpSize"          => format!("__boring_gpu_warp_size({v})"),
-                    "maxThreads"        => format!("__boring_gpu_max_threads({v})"),
-                    "maxSharedMem"      => format!("__boring_gpu_max_shared_mem({v})"),
-                    "index"             => format!("({} as i64)", v),
-                    _ => format!("{}.{}({})", v, method, args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ")),
-                });
             }
         }
         None
@@ -7090,7 +7061,6 @@ impl Transpiler {
             current_fn_body: Vec::new(),
             current_fn_gpu_arg_params: self.current_fn_gpu_arg_params.clone(),
             current_fn_gpu_arg_param_names: self.current_fn_gpu_arg_param_names.clone(),
-            gpu_device_vars: self.gpu_device_vars.clone(),
             is_gpu_target: self.is_gpu_target,
             currently_in_main: self.currently_in_main,
             static_backing_names: self.static_backing_names.clone(),

@@ -1450,14 +1450,6 @@ struct Transpiler {
     /// branch, `emit_call`'s argument-wrapping), which don't have the enclosing
     /// `FnDecl`'s param list available to translate a position back to a name.
     pub(crate) current_fn_gpu_arg_param_names: std::collections::HashSet<String>,
-    /// Local variable names bound to a `Device(index = n)` device handle (`let g = Device(index = 0)`), or a
-    /// `for` loop variable iterating `GPU.all()` — tracked so a later `g.name()`/
-    /// `.totalMem()`/etc. method call can be rewritten to the introspection helpers
-    /// emitted by `wgpu::host::emit_gpu_introspection_globals`. wgpu only ever has one
-    /// real adapter (see that function's doc comment), so every `Device(index = n)` and every
-    /// element of `GPU.all()` resolves to it regardless of index — matching the
-    /// interpreter's own single mock `GpuDevice` in simulation mode. GPU targets only.
-    pub(crate) gpu_device_vars: std::collections::HashSet<String>,
     /// Names of every top-level `let` (across the whole reachable `use` graph, collected
     /// by `pre_scan`/`deep_pre_scan` before the prelude is emitted). Used to skip the
     /// prelude's `use std::f64::consts::{PI, E, TAU}` for any of those three names a
@@ -1815,7 +1807,6 @@ impl Transpiler {
             current_fn_body: Vec::new(),
             current_fn_gpu_arg_params: Vec::new(),
             current_fn_gpu_arg_param_names: std::collections::HashSet::new(),
-            gpu_device_vars: std::collections::HashSet::new(),
             user_top_level_names: std::collections::HashSet::new(),
             is_gpu_target,
             currently_in_main: false,
@@ -6184,7 +6175,7 @@ pub(crate) fn top_level_touches_kernel(
     for item in &program.items {
         match item {
             Item::Let(s)
-                if s.value.as_ref().is_some_and(|v| expr_constructs_kernel(v, kernel_names) || expr_uses_gpu_device(v)) =>
+                if s.value.as_ref().is_some_and(|v| expr_constructs_kernel(v, kernel_names)) =>
             {
                 return true;
             }
@@ -6195,7 +6186,7 @@ pub(crate) fn top_level_touches_kernel(
             }) => {
                 return true;
             }
-            Item::Stmt(s) if stmt_touches_kernel(s, kernel_names) || stmt_uses_gpu_device(s) => {
+            Item::Stmt(s) if stmt_touches_kernel(s, kernel_names) => {
                 return true;
             }
             Item::Stmt(s) if !kernel_touching.is_empty() && {
@@ -6211,45 +6202,14 @@ pub(crate) fn top_level_touches_kernel(
     false
 }
 
-fn stmt_uses_gpu_device(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Let(s) => s.value.as_ref().is_some_and(expr_uses_gpu_device),
-        Stmt::Expr(e) => expr_uses_gpu_device(e),
-        _ => false,
-    }
-}
 
 fn expr_constructs_kernel(e: &Expr, kernel_names: &std::collections::HashSet<String>) -> bool {
     match &e.kind {
         ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if kernel_names.contains(n.as_str())),
-        // `kernel(g) Scale(data)` — explicit-device kernel construction wraps the
-        // same constructor call in `ExprKind::New`.
-        ExprKind::New { ctor, .. } => expr_constructs_kernel(ctor, kernel_names),
         _ => false,
     }
 }
 
-/// True when `e` is a `Device(...)`/`Device.all()` use — cuda/metal's own custom
-/// emitters have working GPU-device-introspection codegen (`gpu_vars`/
-/// `emit_gpu_property`), but the general pipeline ALSO has its own version of
-/// this (`emit_methods.rs`'s `.name()`/`.totalMem()`/etc mapping to
-/// `__boring_gpu_name()` etc.), gated on `is_gpu_target` alone — unconditional,
-/// same as the kernel-construction/resident-return issues this module's other
-/// helpers work around — and only wgpu actually DEFINES those `__boring_gpu_*`
-/// helpers. Used alongside `expr_constructs_kernel` so top-level `Device(...)` use
-/// also stays on cuda/metal's own custom emitter instead of the general splice.
-fn expr_uses_gpu_device(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Call(callee, _) => {
-            matches!(&callee.kind, ExprKind::Var(n) if n == "Device")
-        }
-        // `Device.all()` and the legacy `GPU.all()` spelling.
-        ExprKind::MethodCall(obj, _, _) => {
-            matches!(&obj.kind, ExprKind::Var(n) if n == "Device")
-        }
-        _ => false,
-    }
-}
 
 fn stmts_touch_kernel(body: &[Stmt], kernel_names: &std::collections::HashSet<String>) -> bool {
     body.iter().any(|s| stmt_touches_kernel(s, kernel_names))

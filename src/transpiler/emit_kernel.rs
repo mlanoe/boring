@@ -331,29 +331,6 @@ impl Transpiler {
         ))
     }
 
-    /// If `s`'s initializer is `Device(...)` , registers
-    /// `s.name` as a GPU-device handle
-    /// (`gpu_device_vars`) and emits it as a plain `usize` index. See
-    /// `emit_call`'s own `"Device"` special case (this function only adds the
-    /// tracking `try_emit_gpu_device_let` needs on top of that shared emission —
-    /// `n` now indexes a real, per-adapter list on wgpu, see
-    /// `wgpu::host::emit_gpu_adapter_enumeration`) and `emit_methods.rs`'s
-    /// method-call rewrite for `.name()`/`.totalMem()`/etc on a tracked variable.
-    pub(crate) fn try_emit_gpu_device_let(&mut self, s: &LetStmt) -> bool {
-        if !self.is_gpu_target {
-            return false;
-        }
-        let Some(val) = &s.value else { return false };
-        let ExprKind::Call(callee, _) = &val.kind else { return false };
-        let ExprKind::Var(name) = &callee.kind else { return false };
-        if name != "Device" { return false; }
-        // Routes through emit_call's device special case (emits a plain usize).
-        let expr_s = self.emit_expr(val);
-        self.gpu_device_vars.insert(s.name.clone());
-        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
-        self.line(&format!("{} {} = {};", kw, s.name, expr_s));
-        true
-    }
 
     /// If `s`'s initializer is a call to a known kernel type, emit the GPU
     /// construction code (device/queue-backed wrapper + host->device buffer
@@ -365,12 +342,6 @@ impl Transpiler {
             return false;
         }
         let Some(val) = &s.value else { return false };
-        // `kernel(device) Name(args)`: the CPU backend has a single device, so the
-        // placement wrapper is just the constructor call.
-        let val = match &val.kind {
-            ExprKind::New { ctor, .. } if self.config.is_simd_target => ctor.as_ref(),
-            _ => val,
-        };
         // Two call shapes construct a kernel: a plain `KernelName(args...)` (`ExprKind::
         // Call`), or a const-generic kernel's turbofish instantiation `KernelName<W, H>
         // (args...)` (`ExprKind::GenericCall`) -- the latter still spells the *original*

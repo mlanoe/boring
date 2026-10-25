@@ -264,7 +264,4 @@ checks generated code and `cargo check`s the crates but never opens a window.
 
 (`screen.key_pressed()` / `screen.mouse` are implemented here — see the Input section of [gpu-display.md](gpu-display.html).)
 
-* `Device` introspection: `name()` is the CPU ISA, `totalMem()`/`freeMem()` the system
-  memory, `warpSize()` 32, `maxThreads()` 1024, `maxSharedMem()` 32768,
-  `computeCapability()` `[lane count, 0]`, `Device.all()` one device; GPU usage,
-  temperature and power read 0.
+* No host-side device queries: the backend and device are chosen at run time (see [multi-target builds](multi-target.html)).

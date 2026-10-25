@@ -719,9 +719,6 @@ fn expr_uses_tensor(e: &Expr) -> bool {
         ExprKind::Pipe(lhs, _, args) => {
             expr_uses_tensor(lhs) || args.iter().any(|a| expr_uses_tensor(&a.value))
         }
-        ExprKind::New { arena, ctor } => {
-            arena.as_ref().map(|a| expr_uses_tensor(a)).unwrap_or(false) || expr_uses_tensor(ctor)
-        }
         ExprKind::KernelLaunch { config, kernel } => {
             expr_uses_tensor(kernel)
                 || config.block.as_ref().map(expr_uses_tensor).unwrap_or(false)

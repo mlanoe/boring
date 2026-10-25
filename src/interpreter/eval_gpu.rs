@@ -85,8 +85,6 @@ fn expr_uses_gpu_warp(e: &Expr) -> bool {
             expr_uses_gpu_warp(callee) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
         ExprKind::Pipe(lhs, _, args) =>
             expr_uses_gpu_warp(lhs) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
-        ExprKind::New { arena, ctor } =>
-            arena.as_ref().map(|a| expr_uses_gpu_warp(a)).unwrap_or(false) || expr_uses_gpu_warp(ctor),
         ExprKind::KernelLaunch { config, kernel } =>
             expr_uses_gpu_warp(kernel)
                 || config.block.as_ref().map(expr_uses_gpu_warp).unwrap_or(false)

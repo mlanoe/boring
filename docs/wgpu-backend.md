@@ -300,53 +300,6 @@ doesn't inherit any WGSL `atomic<T>` + direct-mapping risk: the `atomic<i32>`/
 
 ---
 
-## `Device` type on wgpu
-
-**Real per-adapter introspection (2026-09-01), dispatch still single-device.**
-At startup, `instance.enumerate_adapters(wgpu::Backends::all())` builds the
-real list of adapters the system exposes (`__BORING_GPU_ADAPTERS`,
-`src/transpiler/wgpu/host.rs`'s `emit_gpu_adapter_enumeration`) — index 0 is
-always the adapter `device`/`queue` were actually created from (the one
-`request_adapter`'s own heuristic picked), so `Device(index = 0)` reliably means "the
-adapter your kernels actually run on"; any other index is a real, distinct
-physical adapter if the system has one, purely for introspection. `Device(index = n)`
-and `Device.all()`'s elements resolve to genuinely different adapters when more
-than one is present — this replaces the previous single-simulated-device
-stand-in (every index resolving to the same adapter, `docs/gpu-compute-display-split.md`'s
-"category A" work).
-
-Deduplication (a physical GPU can be enumerated once per backend it's
-reachable through, e.g. Vulkan and GL on the same Linux box) compares
-`AdapterInfo` (`.get_info()`, which derives `PartialEq`/`Eq`) rather than the
-`wgpu::Adapter` handle itself — **`wgpu::Adapter` implements neither `Clone`
-nor `PartialEq`** on the pinned `wgpu = "22"` (confirmed against the real
-`wgpu-22.1.0`/`wgpu-types-22.0.0` source, not docs.rs, which can describe a
-newer release's API by default) — this is why the adapter is Arc-wrapped
-once right after creation (same convention as `device`/`queue`) rather than
-cloned.
-
-**Still not implemented**: real per-device *dispatch* — `kernel(d) K(...)` (placing
-a kernel's actual GPU work on a specific non-default adapter, like CUDA's
-`CudaContext::new(idx)`/Metal's per-index `MTLDevice`). Every kernel still
-dispatches on the single global `device`/`queue` regardless of which
-`Device(index = n)` it was constructed with — see "Known limitations vs CUDA" below and
-`docs/gpu-compute-display-split.md`'s "category A, part (b)".
-
-| Boring method | wgpu API | Notes |
-|---|---|---|
-| `Device(index = n)` | — | a plain `usize` index into the real enumerated adapter list |
-| `Device.all()` | — | one element per real adapter found, `0..count` |
-| `.name()` | `adapter.get_info().name` | real, per-adapter name |
-| `.totalMem()` | — | always `0` — `wgpu::AdapterInfo` has no memory-size field on any backend (checked against `wgpu-types` 22.0.0's struct definition) |
-| `.freeMem()` | — | always `0`, same reason |
-| `.computeCapability()` | — | always `[0, 0]` — a CUDA-only concept |
-| `.warpSize()` | — | always `32` — a conservative default, not queryable via wgpu |
-| `.maxThreads()` | `limits.max_compute_invocations_per_workgroup` | real, per-adapter limit |
-| `.maxSharedMem()` | `limits.max_compute_workgroup_storage_size` | real, per-adapter limit, bytes per workgroup |
-| `.index()` | — | echoes back whatever index was passed to `Device(index = n)` — now a real index into the adapter list |
-
----
-
 ## `after =` ordering
 
 wgpu uses a single command queue per device. Command buffers submitted to the same queue execute in order. The transpiler maps `after =` to submission ordering — kernels with `after =` dependencies are submitted in a separate `submit` call after the dependency's `submit` has been flushed.
@@ -475,7 +428,6 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 | `priority =` | `cuStreamCreateWithPriority` | no-op — wgpu has no queue priority API |
 | `freeMem()` | `cuMemGetInfo` | always 0 — wgpu does not expose free VRAM |
 | `computeCapability()` | CUDA SM version | always `[0, 0]` — not applicable |
-| Multi-device (`Device(index = 1)`, `kernel(d1) K(...)`) | full support — distinct `CudaContext` per index | `Device(index = n)`/`.name()`/`.maxThreads()`/etc. resolve to real, distinct physical adapters when more than one is present (see "`Device` type on wgpu" above) — introspection only. `kernel(d1) K(...)` (actually placing a kernel's *dispatch* on a specific device) is still not implemented; every kernel dispatches on the single global `device`/`queue` regardless of which `Device(index = n)` it was constructed with |
 | Windows / Linux / macOS | Windows + Linux | yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu) |
 | Tensor-core (`kernel.tensors.*`) | not yet implemented | not yet implemented — WGSL has no cooperative-matrix primitive at this project's pinned wgpu version (~v22); real upstream work exists (`Features::EXPERIMENTAL_COOPERATIVE_MATRIX`, merged wgpu ~28.x) but postdates the pin. See [tensor-core primitives](tensor-core-primitives.html) for the proposed design and revisit trigger. |
 
@@ -487,15 +439,9 @@ above split into two very different buckets for how likely (and how soon)
 they are to close:
 
 **Boring-side integration gaps, not wgpu gaps** — closable by Boring
-engineering alone, no upstream dependency: multi-device introspection
-(`Device(index = n)`/`.name()`/etc. above) was exactly this, and is now real (real
-per-adapter enumeration, 2026-09-01 — see "`Device` type on wgpu" above).
-`kernel(d1) K(...)` real per-device *dispatch* remains in this bucket — a bigger
-task (needs a `wgpu::Device`/`wgpu::Queue` per selected adapter instead of
-today's single global pair, plus routing every kernel instance's
-buffers/dispatch through the device it was actually constructed on;
-comparable in scope to CUDA's real per-context multi-device model), but
-still just Boring's own work whenever a project needs cross-GPU placement.
+engineering alone, no upstream dependency: running one program across several
+adapters (every kernel dispatches on the single global `device`/`queue` pair
+today).
 
 **Genuine WebGPU-spec-level gaps, outside wgpu's own control** — these are
 structural to the spec, not a wgpu backlog item, and unlikely to close on

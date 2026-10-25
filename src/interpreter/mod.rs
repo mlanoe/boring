@@ -401,8 +401,6 @@ pub enum Value {
         decl: Box<crate::ast::KernelDecl>,
         captured: EnvRef,
     },
-    /// GPU device handle, produced by `Device(index = n)` (simulation mode).
-    GpuDevice(usize),
     /// `Screen` built-in (simulation mode).
     /// Tracks the current virtual canvas size and key/resize state.
     Screen {
@@ -525,7 +523,6 @@ impl fmt::Debug for Value {
             Value::OverloadedFn { name, .. } => write!(f, "OverloadedFn({})", name),
             Value::KernelHandle { result } => write!(f, "KernelHandle({:?})", result),
             Value::KernelStruct { decl, .. } => write!(f, "KernelStruct({})", decl.name),
-            Value::GpuDevice(n) => write!(f, "GpuDevice({})", n),
             Value::Screen { title, .. } => write!(f, "Screen({:?})", title),
         }
     }
@@ -602,7 +599,6 @@ impl Value {
             Value::OverloadedFn { name, .. } => name.clone(),
             Value::KernelHandle { .. } => "KernelHandle".into(),
             Value::KernelStruct { decl, .. } => decl.name.clone(),
-            Value::GpuDevice(_) => "GpuDevice".into(),
             Value::Screen { .. } => "Screen".into(),
         }
     }
@@ -803,7 +799,6 @@ impl fmt::Display for Value {
             Value::OverloadedFn { name, .. } => write!(f, "<overloaded fn {}>", name),
             Value::KernelHandle { result } => write!(f, "<KernelHandle: {}>", result),
             Value::KernelStruct { decl, .. } => write!(f, "<kernel {}>", decl.name),
-            Value::GpuDevice(n) => write!(f, "<GPU {}>", n),
             Value::Screen { title, width, height, .. } => {
                 write!(f, "Screen({}x{}, {:?})", width.borrow(), height.borrow(), title)
             }
@@ -2338,7 +2333,7 @@ thread_local! {
 // ─── Interpreter ─────────────────────────────────────────────────────────────
 
 pub struct Interpreter {
-    /// GPU simulation profile — used by `GpuDevice` property evaluation.
+    /// GPU simulation profile — the simulated hardware limits (warp size, shared memory, ...).
     pub gpu_profile: gpu_profile::GpuProfile,
     pub global: EnvRef,
     pub traits: HashMap<String, TraitDecl>,
