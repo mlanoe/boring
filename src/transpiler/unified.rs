@@ -188,41 +188,79 @@ fn cast(value: &str, from: &str, to: &str) -> String {
 
 fn stream_adapter_fn(flavor: StreamFlavor, k: &KernelDecl, fields: &[RouteField], element_ty: fn(&Type) -> String, scalar_ty: fn(&Type) -> String) -> String {
     let name = &k.name;
+    let decl_of = |f: &RouteField| k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
+    // A buffer from the CPU copy, converted to the element type the backend uses.
+    let buffer = |i: usize, f: &RouteField| {
+        let decl = decl_of(f);
+        let target = element_ty(&decl.ty);
+        let convert = cast("e", f.rust_ty, &target);
+        let upload = match flavor {
+            StreamFlavor::Cuda => format!("stream.clone_htod::<{target}, _>(&v)?"),
+            StreamFlavor::Rocm => format!("stream.clone_htod::<{target}>(&v)?"),
+        };
+        let upload = format!("{{ let v: Vec<{target}> = args[{i}].{}().iter().map(|&e| {convert}).collect(); {upload} }}", f.accessor());
+        if matches!(decl.binding, FieldBinding::Let) { format!("Arc::new({upload})") } else { upload }
+    };
+    let scalar = |i: usize, f: &RouteField| {
+        let target = scalar_ty(&decl_of(f).ty);
+        cast(&format!("args[{i}].{}()", f.accessor()), f.rust_ty, &target)
+    };
     let mut s = format!(
-        "pub fn __boring_unified_{name}(args: &mut [crate::unified::Arg<'_>], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+        "static __BORING_STORE_{name}: std::sync::Mutex<Option<std::collections::HashMap<u64, crate::unified::AssertSend<{name}>>>> = std::sync::Mutex::new(None);
+pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], upload: &[bool], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let ctx = boring_gpu_ctx();
     let stream = boring_new_stream_with_priority(&ctx, 0)?;
-    let mut k = {name} {{
-        __ctx: ctx.clone(),
-        __stream: stream.clone(),
+    let mut store = __BORING_STORE_{name}.lock().unwrap();
+    let instances = store.get_or_insert_with(Default::default);
+    let mut k = match instances.remove(&id) {{
+        Some(resident) => {{
+            let mut k = resident.0;
 "
     );
     for (i, f) in fields.iter().enumerate() {
-        let decl = k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
         if f.array {
-            let target = element_ty(&decl.ty);
-            let convert = cast("e", f.rust_ty, &target);
-            let upload = match flavor {
-                StreamFlavor::Cuda => format!("stream.clone_htod::<{target}, _>(&v)?"),
-                StreamFlavor::Rocm => format!("stream.clone_htod::<{target}>(&v)?"),
-            };
-            let upload = format!("{{ let v: Vec<{target}> = args[{i}].{}().iter().map(|&e| {convert}).collect(); {upload} }}", f.accessor());
-            if matches!(decl.binding, FieldBinding::Let) {
-                s.push_str(&format!("        {}: Arc::new({upload}),\n", f.name));
-            } else {
-                s.push_str(&format!("        {}: {upload},\n", f.name));
-            }
+            s.push_str(&format!("            if upload[{i}] {{ k.{} = {}; }}\n", f.name, buffer(i, f)));
         } else {
-            let target = scalar_ty(&decl.ty);
-            s.push_str(&format!("        {}: {},\n", f.name, cast(&format!("args[{i}].{}()", f.accessor()), f.rust_ty, &target)));
+            s.push_str(&format!("            k.{} = {};\n", f.name, scalar(i, f)));
         }
     }
-    s.push_str("    };\n");
-    s.push_str("    k = k.__boring_launch((block[0], block[1], block[2]), Some((grid[0], grid[1], grid[2])), &[], 0i32)?.inner;\n");
+    s.push_str(&format!(
+        "            k
+        }}
+        // First launch of this instance on this backend: every buffer comes from the CPU copy.
+        None => {name} {{
+            __ctx: ctx.clone(),
+            __stream: stream.clone(),
+"
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array {
+            s.push_str(&format!("            {}: {},\n", f.name, buffer(i, f)));
+        } else {
+            s.push_str(&format!("            {}: {},\n", f.name, scalar(i, f)));
+        }
+    }
+    s.push_str(
+        "        },
+    };
+    k = k.__boring_launch((block[0], block[1], block[2]), Some((grid[0], grid[1], grid[2])), &[], 0i32)?.inner;
+    instances.insert(id, crate::unified::AssertSend(k));
+    Ok(())
+}
+",
+    );
+    // Copy one buffer back to the CPU host.
+    s.push_str(&format!(
+        "pub fn __boring_unified_read_{name}(id: u64, index: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(resident) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    let k = &resident.0;
+    match index {{
+"
+    ));
     for (i, f) in fields.iter().enumerate() {
         if f.array && f.mutable {
-            let decl = k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
-            let source = element_ty(&decl.ty);
+            let source = element_ty(&decl_of(f).ty);
             let convert = cast("e", &source, f.rust_ty);
             let (download, sync) = match flavor {
                 StreamFlavor::Cuda => (
@@ -231,10 +269,15 @@ fn stream_adapter_fn(flavor: StreamFlavor, k: &KernelDecl, fields: &[RouteField]
                 ),
                 StreamFlavor::Rocm => (format!("k.__stream.clone_dtoh(&k.{})?", f.name), "k.__stream.synchronize()?;"),
             };
-            s.push_str(&format!("    let v = {download};\n    {sync}\n"));
-            s.push_str(&format!("    *args[{i}].{}() = v.into_iter().map(|e| {convert}).collect();\n", f.accessor()));
+            s.push_str(&format!("        {i} => {{ let v = {download}; {sync} *out.{}() = v.into_iter().map(|e| {convert}).collect(); }}\n", f.accessor()));
         }
     }
-    s.push_str("    Ok(())\n}\n");
+    s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+    s.push_str(&format!(
+        "pub fn __boring_unified_release_{name}(id: u64) {{
+    if let Some(instances) = __BORING_STORE_{name}.lock().unwrap().as_mut() {{ instances.remove(&id); }}
+}}
+"
+    ));
     s
 }

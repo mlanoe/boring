@@ -1242,13 +1242,21 @@ impl Transpiler {
         // Assigning through it (`k.output[i] = v`, `k.output[i] /= x`) would emit Rust
         // that tries to mutate a temporary. Fall through to the plain field access
         // instead, matching the analogous guard for array-index assignment above.
-        if self.in_lhs_assign.get() {
+        let ExprKind::Var(var_name) = &obj.kind else {
             return None;
-        }
-        let ExprKind::Var(var_name) = &obj.kind else { return None };
+        };
         let kname = self.kernel_vars.get(var_name.as_str())?;
         let decl = self.kernel_decls.get(kname)?;
         let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| f.name == field)?;
+        if self.in_lhs_assign.get() {
+            // A host write into a routable kernel's buffer (`k.buf[i] = v`) edits the CPU copy
+            // in place: the multi-target CPU host first brings the newest data back from the
+            // backend that holds it (see `__cpu_<field>` in `simd.rs`).
+            let routable = self.config.unified_routing
+                && matches!(field_decl.ty, Type::Array(_))
+                && crate::transpiler::unified::route_fields(decl).is_some();
+            return routable.then(|| format!("{var_name}.__cpu_{field}()"));
+        }
         if !matches!(
             field_decl.qual,
             GpuQual::Unified

@@ -158,7 +158,12 @@ print <span class="s">"scale ran on <span class="si">{kernel.lastChoice(k)}</spa
 <p>The program runs <strong>once, on the CPU host</strong> (the simd backend, always part of a multi-target build). Every kernel launch asks the run-time router (<code>unified.rs</code>) where to run:</p>
 <ol><li>If the launch is small (under 16384 threads, <code>BORING_GPU_MIN_THREADS</code>), it stays on the CPU:</li></ol>
 <p>   uploading, launching and reading back costs more than computing. 2. Otherwise the backends ranked above the CPU (see &quot;Start-up policy&quot;) are tried in order. A    backend takes the launch if it has an <strong>adapter</strong> for that kernel, can initialise its device,    and accepts this launch. 3. If none does, the CPU runs the kernel itself.</p>
-<p>An adapter takes the kernel&#x27;s fields as host copies, uploads them, launches the backend&#x27;s own build of the kernel, and copies every <code>mut</code>/<code>var</code> buffer back, so the CPU host and later launches see the result. The cost is one transfer each way per launch; keeping data resident between launches is not implemented.</p>
+<p>Buffers stay on the backend between launches. The router tracks, for each kernel instance and each buffer, whether the backend&#x27;s copy is valid and whether it is newer than the CPU&#x27;s:</p>
+<ul><li>an unchanged input is uploaded once, however many times the kernel is launched;</li><li>a result is copied back only when the CPU needs it: the program reads the field</li></ul>
+<p>  (<code>k.buf[i]</code>), edits it (<code>k.buf[i] = v</code>), launches the kernel on the CPU, or the instance moves   to another backend (its newer data comes back first);</p>
+<ul><li>when the program drops the kernel, the backend&#x27;s copy is freed.</li></ul>
+<p>Scalars are re-sent at every launch. <code>BORING_BACKEND_VERBOSE=1</code> ends with <code>boring: buffer transfers: N up, M down</code>.</p>
+<p>Each host read of a buffer field downloads it whole; to read many elements after a launch, bind the field once (<code>let result = k.buf</code>) and read the binding.</p>
 <p>A kernel is routable when its fields are numeric/bool scalars and plain <code>[T]</code> buffers in <code>&#x27;unified</code> or <code>&#x27;global</code> memory. Anything else (<code>&#x27;surface</code>, shared memory, atomics, struct or fixed-array fields, generic kernels, programs with a <code>Screen</code>) runs on the CPU. An adapter can also decline one launch: wgpu fixes the workgroup size in the shader from the kernel&#x27;s launch site, so a launch with another block size goes elsewhere.</p>
 <h2 id="the-generated-crate">The generated crate</h2>
 <p><code>&lt;stem&gt;_multi/</code> is one Cargo project:</p>
@@ -173,7 +178,7 @@ print <span class="s">"scale ran on <span class="si">{kernel.lastChoice(k)}</spa
 <h2 id="not-implemented-yet">Not implemented yet</h2>
 <ul><li>Finer device classes (<code>.discrete</code>, <code>.integrated</code>, a remote service) and an inventory of the</li></ul>
 <p>  backends from Boring code (<code>kernel.backends()</code>, with each backend&#x27;s score and load).</p>
-<ul><li>Device residency between launches: each routed launch copies its buffers in and out.</li><li>Routing for programs with a <code>Screen</code>, and for kernels with shared memory, atomics or struct</li></ul>
+<ul><li>Routing for programs with a <code>Screen</code>, and for kernels with shared memory, atomics or struct</li></ul>
 <p>  fields.</p>
 </main>
 <script>

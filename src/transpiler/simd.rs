@@ -1015,6 +1015,23 @@ impl Emitter {
             }
             crate::transpiler::helpers::collect_local_decl_names(&method.body, &mut self.locals);
         }
+        // A routable kernel of a multi-target build keeps its buffers resident on a backend
+        // between launches; `__id` names the instance to the router (see `multi_unified.rs`).
+        let route = if self.unified { super::unified::route_fields(k) } else { None };
+        if let Some(fields) = &route {
+            let kinds: Vec<&str> = fields
+                .iter()
+                .map(|f| match (f.array, f.mutable) {
+                    (false, _) => "crate::unified::Kind::Scalar",
+                    (true, false) => "crate::unified::Kind::Buffer",
+                    (true, true) => "crate::unified::Kind::MutBuffer",
+                })
+                .collect();
+            self.line(0, &format!(
+                "const __BORING_SPEC_{}: crate::unified::Spec = crate::unified::Spec {{ name: \"{}\", args: &[{}] }};",
+                k.name, k.name, kinds.join(", ")
+            ));
+        }
         self.line(0, &format!("#[derive(Debug)] struct {} {{", k.name));
         for f in &k.fields {
             if matches!(f.qual, GpuQual::Actor)
@@ -1027,6 +1044,9 @@ impl Emitter {
         if self.unified {
             // A launch's `prefer = .cpu|.gpu` argument, consumed by the next `dispatch`.
             self.line(1, "__prefer: Option<crate::unified::Class>,");
+        }
+        if route.is_some() {
+            self.line(1, "__id: u64,");
         }
         self.line(0, "}");
         self.line(0, &format!("impl {} {{", k.name));
@@ -1074,26 +1094,54 @@ impl Emitter {
         if self.unified {
             self.line(3, "__prefer: None,");
         }
+        if route.is_some() {
+            self.line(3, "__id: crate::unified::new_instance(),");
+        }
         self.line(2, "}");
         self.line(1, "}");
         for f in &k.fields {
             if is_array(&f.ty) && !matches!(f.qual, GpuQual::Local | GpuQual::Actor) {
                 let t = elem_ty(&f.ty);
-                self.line(
-                    1,
-                    &format!(
-                        "fn copy_{}_to_host(&self) -> Vec<{}> {{ self.{}.clone() }}",
-                        f.name, t, f.name
-                    ),
-                );
-                self.line(
-                    1,
-                    &format!(
-                        "fn copy_{}_to_device(&mut self, v: &[{}]) {{ self.{} = v.to_vec(); }}",
-                        f.name, t, f.name
-                    ),
-                );
-                self.line(1, &format!("fn resize_{}(&mut self, n: usize) {{ self.{}.resize(n, Default::default()); }}", f.name, f.name));
+                let routed = route.as_ref().and_then(|fields| {
+                    fields.iter().position(|r| r.name == f.name).map(|index| (index, fields[index].variant()))
+                });
+                if let Some((index, variant)) = routed {
+                    // The newest data may be on a backend: read it from there, and tell the
+                    // router before the CPU replaces or edits the buffer.
+                    self.line(1, &format!(
+                        "fn copy_{n}_to_host(&self) -> Vec<{t}> {{ let mut v = self.{n}.clone(); if crate::unified::is_remote(self.__id, {index}) {{ crate::unified::fetch(self.__id, {index}, &mut crate::unified::Arg::{variant}(&mut v)); }} v }}",
+                        n = f.name
+                    ));
+                    self.line(1, &format!(
+                        "fn copy_{n}_to_device(&mut self, v: &[{t}]) {{ crate::unified::invalidate(self.__id, {index}); self.{n} = v.to_vec(); }}",
+                        n = f.name
+                    ));
+                    self.line(1, &format!(
+                        "fn resize_{n}(&mut self, n: usize) {{ crate::unified::prepare_write(self.__id, {index}, &mut crate::unified::Arg::{variant}(&mut self.{n})); self.{n}.resize(n, Default::default()); }}",
+                        n = f.name
+                    ));
+                    // A place expression for element writes from the host (`k.buf[i] = v`).
+                    self.line(1, &format!(
+                        "#[allow(dead_code)] fn __cpu_{n}(&mut self) -> &mut Vec<{t}> {{ crate::unified::prepare_write(self.__id, {index}, &mut crate::unified::Arg::{variant}(&mut self.{n})); &mut self.{n} }}",
+                        n = f.name
+                    ));
+                } else {
+                    self.line(
+                        1,
+                        &format!(
+                            "fn copy_{}_to_host(&self) -> Vec<{}> {{ self.{}.clone() }}",
+                            f.name, t, f.name
+                        ),
+                    );
+                    self.line(
+                        1,
+                        &format!(
+                            "fn copy_{}_to_device(&mut self, v: &[{}]) {{ self.{} = v.to_vec(); }}",
+                            f.name, t, f.name
+                        ),
+                    );
+                    self.line(1, &format!("fn resize_{}(&mut self, n: usize) {{ self.{}.resize(n, Default::default()); }}", f.name, f.name));
+                }
             }
         }
         self.line(1, "#[inline(never)] fn dispatch(&mut self, gx: u32, gy: u32, gz: u32, dx: u32, dy: u32, dz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
@@ -1104,7 +1152,7 @@ impl Emitter {
                     None => "None".to_string(),
                 };
                 self.line(2, &format!(
-                    "if let Some(__routed) = crate::unified::dispatch(\"{}\", &mut [{}], [gx, gy, gz], [dx, dy, dz], crate::unified::Hints {{ prefer: self.__prefer.take().or({}), only: {} }}) {{ return __routed; }}",
+                    "if let Some(__routed) = crate::unified::dispatch(&__BORING_SPEC_{}, self.__id, &mut [{}], [gx, gy, gz], [dx, dy, dz], crate::unified::Hints {{ prefer: self.__prefer.take().or({}), only: {} }}) {{ return __routed; }}",
                     k.name, args.join(", "), class(k.prefer), class(k.only)
                 ));
             }
@@ -1809,6 +1857,9 @@ impl Emitter {
         self.line(1, "}");
         self.raw(&block_method);
         self.line(0, "}");
+        if route.is_some() {
+            self.line(0, &format!("impl Drop for {} {{ fn drop(&mut self) {{ crate::unified::release(self.__id); }} }}", k.name));
+        }
     }
     /// Runs the grid's blocks on several cores: the per-block loop body becomes a method
     /// that worker threads call through `__boring_blocks`. Kernels using atomics keep the

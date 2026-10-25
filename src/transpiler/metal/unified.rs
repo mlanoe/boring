@@ -33,41 +33,77 @@ fn cast(value: &str, from: &str, to: &str) -> String {
 
 fn adapter_fn(k: &KernelDecl, fields: &[RouteField]) -> String {
     let name = &k.name;
+    let decl_of = |f: &RouteField| k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
+    // A buffer from the CPU copy, converted to the element type Metal uses.
+    let buffer = |i: usize, f: &RouteField| {
+        let target = elem_rust_type(&decl_of(f).ty);
+        let convert = cast("e", f.rust_ty, &target);
+        format!(
+            "{{ let v: Vec<{target}> = args[{i}].{}().iter().map(|&e| {convert}).collect(); device.new_buffer_with_data(v.as_ptr() as *const _, (v.len() * std::mem::size_of::<{target}>()) as u64, MTLResourceOptions::StorageModeShared) }}",
+            f.accessor()
+        )
+    };
+    let scalar = |i: usize, f: &RouteField| {
+        let target = rust_type(&decl_of(f).ty);
+        cast(&format!("args[{i}].{}()", f.accessor()), f.rust_ty, &target)
+    };
     let mut s = format!(
-        "pub fn __boring_unified_{name}(args: &mut [crate::unified::Arg<'_>], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+        "static __BORING_STORE_{name}: std::sync::Mutex<Option<std::collections::HashMap<u64, crate::unified::AssertSend<{name}>>>> = std::sync::Mutex::new(None);
+pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], upload: &[bool], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let device = boring_metal_device();
-    let mut k = {name} {{
-        __queue: __boring_metal_queue(&device),
-        __pipeline: __boring_metal_pipeline(&device, \"{name}_kernel\")?,
-        __device: device.clone(),
+    let mut store = __BORING_STORE_{name}.lock().unwrap();
+    let instances = store.get_or_insert_with(Default::default);
+    if !instances.contains_key(&id) {{
+        // First launch of this instance on Metal: every buffer comes from the CPU copy.
+        let k = {name} {{
+            __queue: __boring_metal_queue(&device),
+            __pipeline: __boring_metal_pipeline(&device, \"{name}_kernel\")?,
+            __device: device.clone(),
 "
     );
     for (i, f) in fields.iter().enumerate() {
-        let decl = k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
         if f.array {
-            let target = elem_rust_type(&decl.ty);
-            let convert = cast("e", f.rust_ty, &target);
-            s.push_str(&format!(
-                "        {}: {{ let v: Vec<{target}> = args[{i}].{}().iter().map(|&e| {convert}).collect(); device.new_buffer_with_data(v.as_ptr() as *const _, (v.len() * std::mem::size_of::<{target}>()) as u64, MTLResourceOptions::StorageModeShared) }},\n",
-                f.name,
-                f.accessor()
-            ));
+            s.push_str(&format!("            {}: {},\n", f.name, buffer(i, f)));
         } else {
-            let target = rust_type(&decl.ty);
-            s.push_str(&format!("        {}: {},\n", f.name, cast(&format!("args[{i}].{}()", f.accessor()), f.rust_ty, &target)));
+            s.push_str(&format!("            {}: {},\n", f.name, scalar(i, f)));
         }
     }
-    s.push_str("    };\n");
-    s.push_str("    k.__boring_launch((block[0], block[1], block[2]), Some((grid[0], grid[1], grid[2])), &[])?;\n");
-    s.push_str("    __boring_metal_flush()?;\n");
+    s.push_str(&format!(
+        "        }};
+        instances.insert(id, crate::unified::AssertSend(k));
+    }}
+    let k = &mut instances.get_mut(&id).unwrap().0;
+"
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array {
+            s.push_str(&format!("    if upload[{i}] {{ k.{} = {}; }}\n", f.name, buffer(i, f)));
+        } else {
+            s.push_str(&format!("    k.{} = {};\n", f.name, scalar(i, f)));
+        }
+    }
+    // The launch is committed, not awaited: reading a buffer back waits for it.
+    s.push_str("    k.__boring_launch((block[0], block[1], block[2]), Some((grid[0], grid[1], grid[2])), &[])?;\n    Ok(())\n}\n");
+    s.push_str(&format!(
+        "pub fn __boring_unified_read_{name}(id: u64, index: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(k) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    match index {{
+"
+    ));
     for (i, f) in fields.iter().enumerate() {
         if f.array && f.mutable {
-            let decl = k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
-            let source = elem_rust_type(&decl.ty);
+            let source = elem_rust_type(&decl_of(f).ty);
             let convert = cast("e", &source, f.rust_ty);
-            s.push_str(&format!("    *args[{i}].{}() = k.read_{}()?.into_iter().map(|e| {convert}).collect();\n", f.accessor(), f.name));
+            s.push_str(&format!("        {i} => *out.{}() = k.0.read_{}()?.into_iter().map(|e| {convert}).collect(),\n", f.accessor(), f.name));
         }
     }
-    s.push_str("    Ok(())\n}\n");
+    s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+    s.push_str(&format!(
+        "pub fn __boring_unified_release_{name}(id: u64) {{
+    if let Some(instances) = __BORING_STORE_{name}.lock().unwrap().as_mut() {{ instances.remove(&id); }}
+}}
+"
+    ));
     s
 }

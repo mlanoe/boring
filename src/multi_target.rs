@@ -445,7 +445,12 @@ fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> 
     let mut arms = String::new();
     for (backend, kernels) in routed {
         let n = backend.name();
-        let list: Vec<String> = kernels.iter().map(|k| format!("(\"{k}\", backend_{n}::__boring_unified_{k} as unified::Adapter)")).collect();
+        let list: Vec<String> = kernels
+            .iter()
+            .map(|k| format!(
+                "unified::KernelRoute {{ name: \"{k}\", run: backend_{n}::__boring_unified_{k}, read: backend_{n}::__boring_unified_read_{k}, release: backend_{n}::__boring_unified_release_{k} }}"
+            ))
+            .collect();
         arms.push_str(&format!(
             "        #[cfg(feature = \"{n}\")]\n        \"{n}\" => Some(unified::Routes {{ name: \"{n}\", init: backend_{n}::__boring_unified_init, kernels: vec![{}] }}),\n",
             list.join(", ")
@@ -522,7 +527,12 @@ fn main() {
     let lease_dir = dir.clone();
     unified::install(order, forced, Box::new(move |name| take_lease(&lease_dir, name)));
 
-    if let Err(e) = backend_simd::__boring_entry() {
+    let result = backend_simd::__boring_entry();
+    if verbose() {
+        let (up, down) = unified::transfers();
+        eprintln!("boring: buffer transfers: {up} up, {down} down");
+    }
+    if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }

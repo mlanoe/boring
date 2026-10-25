@@ -60,29 +60,49 @@ fn init_fn(needs_subgroups: bool, needs_f16: bool) -> String {
 
 fn adapter_fn(k: &KernelDecl, fields: &[RouteField], block: (u32, u32, u32)) -> String {
     let (bx, by, bz) = block;
+    let name = &k.name;
     let mut s = format!(
-        "pub fn __boring_unified_{name}(args: &mut [crate::unified::Arg<'_>], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+        "static __BORING_STORE_{name}: std::sync::Mutex<Option<std::collections::HashMap<u64, crate::unified::AssertSend<{name}>>>> = std::sync::Mutex::new(None);
+pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], upload: &[bool], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     // The workgroup size is fixed in the shader at build time, from the kernel's launch site.
     if block != [{bx}, {by}, {bz}] {{
         return Err(Box::new(crate::unified::Unsupported(format!(\"block {{:?}}, this build is fixed to [{bx}, {by}, {bz}]\", block))));
     }}
-    let mut k = {name}::new(__boring_gpu_device(), __boring_gpu_queue());
-",
-        name = k.name
+    let mut store = __BORING_STORE_{name}.lock().unwrap();
+    let k = &mut store
+        .get_or_insert_with(Default::default)
+        .entry(id)
+        .or_insert_with(|| crate::unified::AssertSend({name}::new(__boring_gpu_device(), __boring_gpu_queue())))
+        .0;
+"
     );
     for (i, f) in fields.iter().enumerate() {
         if f.array {
-            s.push_str(&format!("    k.copy_{}_to_device(args[{i}].{}().as_slice());\n", f.name, f.accessor()));
+            s.push_str(&format!("    if upload[{i}] {{ k.copy_{}_to_device(args[{i}].{}().as_slice()); }}\n", f.name, f.accessor()));
         } else {
             s.push_str(&format!("    k.{} = args[{i}].{}();\n", f.name, f.accessor()));
         }
     }
-    s.push_str("    k.dispatch(grid[0], grid[1], grid[2])?;\n");
+    s.push_str("    k.dispatch(grid[0], grid[1], grid[2])?;\n    Ok(())\n}\n");
+    // Copy one buffer back to the CPU host.
+    s.push_str(&format!(
+        "pub fn __boring_unified_read_{name}(id: u64, index: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(k) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    match index {{
+"
+    ));
     for (i, f) in fields.iter().enumerate() {
         if f.array && f.mutable {
-            s.push_str(&format!("    *args[{i}].{}() = k.copy_{}_to_host();\n", f.accessor(), f.name));
+            s.push_str(&format!("        {i} => *out.{}() = k.0.copy_{}_to_host(),\n", f.accessor(), f.name));
         }
     }
-    s.push_str("    Ok(())\n}\n");
+    s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+    s.push_str(&format!(
+        "pub fn __boring_unified_release_{name}(id: u64) {{
+    if let Some(instances) = __BORING_STORE_{name}.lock().unwrap().as_mut() {{ instances.remove(&id); }}
+}}
+"
+    ));
     s
 }

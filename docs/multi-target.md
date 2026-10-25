@@ -81,10 +81,20 @@ build). Every kernel launch asks the run-time router (`unified.rs`) where to run
    and accepts this launch.
 3. If none does, the CPU runs the kernel itself.
 
-An adapter takes the kernel's fields as host copies, uploads them, launches the backend's own
-build of the kernel, and copies every `mut`/`var` buffer back, so the CPU host and later launches
-see the result. The cost is one transfer each way per launch; keeping data resident between
-launches is not implemented.
+Buffers stay on the backend between launches. The router tracks, for each kernel instance and
+each buffer, whether the backend's copy is valid and whether it is newer than the CPU's:
+
+- an unchanged input is uploaded once, however many times the kernel is launched;
+- a result is copied back only when the CPU needs it: the program reads the field
+  (`k.buf[i]`), edits it (`k.buf[i] = v`), launches the kernel on the CPU, or the instance moves
+  to another backend (its newer data comes back first);
+- when the program drops the kernel, the backend's copy is freed.
+
+Scalars are re-sent at every launch. `BORING_BACKEND_VERBOSE=1` ends with
+`boring: buffer transfers: N up, M down`.
+
+Each host read of a buffer field downloads it whole; to read many elements after a launch, bind
+the field once (`let result = k.buf`) and read the binding.
 
 A kernel is routable when its fields are numeric/bool scalars and plain `[T]` buffers in
 `'unified` or `'global` memory. Anything else (`'surface`, shared memory, atomics, struct or
@@ -148,6 +158,5 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 
 - Finer device classes (`.discrete`, `.integrated`, a remote service) and an inventory of the
   backends from Boring code (`kernel.backends()`, with each backend's score and load).
-- Device residency between launches: each routed launch copies its buffers in and out.
 - Routing for programs with a `Screen`, and for kernels with shared memory, atomics or struct
   fields.

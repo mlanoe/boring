@@ -287,9 +287,9 @@ fn kernels_are_routed_per_launch() {
     let wgpu = std::fs::read_to_string(root.join("src/backend_wgpu.rs")).unwrap();
     assert!(wgpu.contains("pub fn __boring_unified_Saxpy(") && wgpu.contains("pub fn __boring_unified_init()"), "{wgpu}");
     let simd = std::fs::read_to_string(root.join("src/backend_simd.rs")).unwrap();
-    assert!(simd.contains("crate::unified::dispatch(\"Saxpy\""), "{simd}");
+    assert!(simd.contains("crate::unified::dispatch(&__BORING_SPEC_Saxpy, self.__id"), "{simd}");
     let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
-    assert!(main_rs.contains("__boring_unified_Saxpy as unified::Adapter"), "{main_rs}");
+    assert!(main_rs.contains("run: backend_wgpu::__boring_unified_Saxpy,"), "{main_rs}");
 
     // A launch the adapter cannot run (here: another block size than the one baked into the
     // shader) falls back to the CPU instead of computing the wrong thing.
@@ -514,6 +514,125 @@ fn last_choice_names_the_backend_that_ran_the_kernel() {
     if listed.contains("wgpu: available") {
         let (stdout, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu")]);
         assert_eq!(stdout.trim(), "5 on wgpu");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const ITERATE: &str = r#"
+kernel Step:
+    let float32 gain
+    let [float32]'unified bias
+    mut [float32]'unified state
+    init(float32 g, [float32]'unified b, [float32]'unified s):
+        gain = g
+        bias = b
+        state = s
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        state[i] = state[i] * gain + bias[i]
+
+let n = 32
+mut k = Step(1.5, [1.0 as float32 for ..<n], [0.0 as float32 for ..<n])
+for round in 0..<20:
+    kernel:
+        k(block = 16, grid = 2)
+print "{k.state[0]} {k.state[31]}"
+"#;
+
+const MIXED: &str = r#"
+kernel Step:
+    let float32 gain
+    let [float32]'unified bias
+    mut [float32]'unified state
+    init(float32 g, [float32]'unified b, [float32]'unified s):
+        gain = g
+        bias = b
+        state = s
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        state[i] = state[i] * gain + bias[i]
+
+let n = 32
+mut k = Step(2.0, [1.0 as float32 for ..<n], [0.0 as float32 for ..<n])
+for round in 0..<5:
+    kernel:
+        k(block = 16, grid = 2)
+print "a {k.state[0]} {k.state[31]}"
+k.state[3] = 100.0
+k.state[4] += 1.0
+for round in 0..<3:
+    kernel:
+        k(block = 16, grid = 2)
+print "b {k.state[3]} {k.state[4]} {k.state[5]}"
+for i in 0..<n:
+    k.state[i] = 0.0
+kernel:
+    k(block = 16, grid = 2)
+print "c {k.state[0]} {k.state[31]}"
+mut other = Step(1.0, [2.0 as float32 for ..<n], [0.0 as float32 for ..<n])
+kernel:
+    other(block = 16, grid = 2)
+kernel:
+    k(block = 16, grid = 2)
+kernel:
+    other(block = 16, grid = 2)
+print "d {other.state[0]} {k.state[0]}"
+"#;
+
+/// Run the program on one backend with `BORING_BACKEND` forced; (stdout, stderr).
+fn run_forced(dir: &Path, cache: &Path, backend: &str) -> (String, String) {
+    run_crate(dir, cache, &[("BORING_BACKEND", backend)])
+}
+
+/// A kernel launched 20 times uploads its two buffers once and reads one back per host read,
+/// instead of copying everything in and out on every launch.
+#[test]
+fn buffers_stay_resident_between_launches() {
+    let dir = project("resident");
+    std::fs::write(source(&dir), ITERATE).unwrap();
+    let out = build(&dir, "all");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    let (cpu, cpu_stderr) = run_forced(&dir, &cache, "simd");
+    assert!(cpu_stderr.contains("buffer transfers: 0 up, 0 down"), "{cpu_stderr}");
+    for backend in ["wgpu", "metal", "cuda", "rocm"] {
+        if !listed.contains(&format!("{backend}: available")) {
+            continue;
+        }
+        let (stdout, stderr) = run_forced(&dir, &cache, backend);
+        assert_eq!(stdout, cpu, "{backend}: {stderr}");
+        // bias + state up once; the two `k.state[..]` reads of the program download one each.
+        assert!(stderr.contains("buffer transfers: 2 up, 2 down"), "{backend}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Host reads, element writes, in-place edits, a launch kept on the CPU and a second instance
+/// between launches must give what the CPU alone gives, and what the interpreter gives.
+#[test]
+fn host_access_between_launches_stays_coherent() {
+    let dir = project("coherent");
+    std::fs::write(source(&dir), MIXED).unwrap();
+    let out = build(&dir, "all");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(source(&dir)).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    let expected = String::from_utf8_lossy(&interpreted.stdout).into_owned();
+    assert!(expected.starts_with("a 31 31"), "{expected}");
+    for backend in ["simd", "wgpu", "metal", "cuda", "rocm"] {
+        if !listed.contains(&format!("{backend}: available")) {
+            continue;
+        }
+        let (stdout, stderr) = run_forced(&dir, &cache, backend);
+        assert_eq!(stdout, expected, "{backend}: {stderr}");
+    }
+    // Both GPU backends at once: an instance may move between them.
+    if listed.contains("wgpu: available") && listed.contains("metal: available") {
+        let (stdout, stderr) = run_forced(&dir, &cache, "metal,wgpu");
+        assert_eq!(stdout, expected, "{stderr}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
