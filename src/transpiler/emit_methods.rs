@@ -4671,6 +4671,11 @@ impl Transpiler {
                 None => args.iter().map(|a| self.emit_collection_elem_arg(obj, &a.value)).collect(),
             }
             }
+        } else if self.receiver_trait_method_params(obj, method).is_some() {
+            // A call to a method the receiver's trait declares (`self.width(s, size)` from a
+            // trait default body): the trait's own signature takes `string` as the owned
+            // `Rc<str>`/`Arc<str>`, so pass it that way, not as the external `(&*s)` `&str`.
+            args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
         } else {
             args.iter().map(|a| self.emit_external_fallback_arg(&a.value)).collect()
         };

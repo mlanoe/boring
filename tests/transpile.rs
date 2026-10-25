@@ -411,6 +411,7 @@ transpile_test!(struct_scenarios);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);
 transpile_test!(trait_scenarios_4);
+transpile_test!(trait_default_string_forward);
 
 // `do: ...` used as a value (`let x = do: ...`) whose body contains a `for`
 // loop must evaluate to its tail expression, not silently degrade to `()`

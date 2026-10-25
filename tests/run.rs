@@ -212,6 +212,7 @@ interp_test!(struct_scenarios);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);
 interp_test!(trait_scenarios_4);
+interp_test!(trait_default_string_forward);
 interp_test!(trait_enum_param);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);

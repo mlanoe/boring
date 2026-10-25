@@ -2720,6 +2720,9 @@ impl Transpiler {
             self.emit_fn_sig(sig, false);
         }
         // Default method implementations — use Some("") so &self is emitted
+        // `self` in a default body is the trait itself, so `self.sibling(..)` resolves
+        // against the trait's own method signatures.
+        let prev_self_type = self.self_type.replace(t.name.clone());
         for default in &t.defaults {
             match self.contract_borrowed_params(&default.params) {
                 Some(params) => {
@@ -2730,6 +2733,7 @@ impl Transpiler {
             }
             self.blank();
         }
+        self.self_type = prev_self_type;
         self.indent -= 1;
         self.line("}");
         // `IdentityKey` is a marker with a native blanket implementation (boring-ui draft,

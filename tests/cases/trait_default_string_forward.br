@@ -1,0 +1,17 @@
+# A trait method with a default body forwards its `string` parameter to a sibling method of
+# the same trait. The argument must be passed as the declared `string` type, not as the
+# `(&*s)` borrow used for `&str` parameters.
+
+trait TraitDefaultStringForwardMeasurer:
+    req float width(string s, float size)
+    req float widthStyled(string s, float size, int style): self.width(s, size)
+
+struct TraitDefaultStringForwardImpl as TraitDefaultStringForwardMeasurer:
+    req float width(string s, float size):
+        size * 2.0
+
+def main():
+    let m = TraitDefaultStringForwardImpl()
+    print(m.widthStyled("hi", 3.0, 1))
+    let TraitDefaultStringForwardMeasurer'shared d = TraitDefaultStringForwardImpl()
+    print(d.widthStyled("hello", 1.5, 0))
