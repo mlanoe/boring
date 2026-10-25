@@ -4394,7 +4394,7 @@ fn num_type_name(ty: &Type) -> &'static str {
         Type::Int => "int", Type::Uint => "uint", Type::Uint8 => "uint8", Type::Int8 => "int8",
         Type::Int16 => "int16", Type::Int32 => "int32", Type::Int64 => "int64", Type::Int128 => "int128",
         Type::Uint16 => "uint16", Type::Uint32 => "uint32", Type::Uint64 => "uint64", Type::Uint128 => "uint128",
-        Type::Float32 => "float32", _ => "float",
+        Type::Float16 => "float16", Type::Float32 => "float32", _ => "float",
     }
 }
 

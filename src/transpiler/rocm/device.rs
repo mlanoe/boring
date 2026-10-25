@@ -1000,6 +1000,7 @@ fn map_builtin_fn(name: &str) -> String {
         // `Type::Named` cast-name table just above, for the same call-style
         // casts (`uint8(x)`, `bool(x)`, ...) that table already resolves for
         // `x as T`-style casts.
+        "float16" | "f16"  => "(_Float16)".into(),
         "float32" | "f32"  => "(float)".into(),
         "uint"    | "u64"  => "(uint64_t)".into(),
         "uint8"             => "(uint8_t)".into(),

@@ -2517,6 +2517,7 @@ fn map_builtin_fn(name: &str) -> String {
         // field/local touching float data needs `float32`, not the bare
         // `float`/`float64` alias — see docs/float-width-types.md and
         // examples/saxpy.br's identical requirement).
+        "float16" | "f16" => "(half)".into(),
         "float32" => "(float)".into(),
         "abs"   => "abs".into(),
         "min"   => "min".into(),

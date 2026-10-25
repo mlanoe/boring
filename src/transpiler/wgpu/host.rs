@@ -288,10 +288,10 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("    {}_h: i32,", f.name));
                     }
                     Type::ArrayN(inner, n) => {
-                        self.line(&format!("    {}: [{}; {}],", f.name, host_scalar_type(inner), n));
+                        self.line(&format!("    {}: [{}; {}],", f.name, params_slot_type(inner), n));
                     }
                     ty => {
-                        self.line(&format!("    {}: {},", f.name, host_scalar_type(ty)));
+                        self.line(&format!("    {}: {},", f.name, params_slot_type(ty)));
                     }
                 }
             }
@@ -662,11 +662,16 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("            {}_w: self.{}.0,", f.name, f.name));
                         self.line(&format!("            {}_h: self.{}.1,", f.name, f.name));
                     }
-                    Type::ArrayN(_, _) => {
-                        self.line(&format!("            {}: self.{},", f.name, f.name));
+                    Type::ArrayN(inner, _) => {
+                        let conv = params_slot_conv(inner, "__x");
+                        if conv == "__x" {
+                            self.line(&format!("            {}: self.{},", f.name, f.name));
+                        } else {
+                            self.line(&format!("            {}: self.{}.map(|__x| {}),", f.name, f.name, conv));
+                        }
                     }
-                    _ => {
-                        self.line(&format!("            {}: self.{},", f.name, f.name));
+                    ty => {
+                        self.line(&format!("            {}: {},", f.name, params_slot_conv(ty, &format!("self.{}", f.name))));
                     }
                 }
             }
@@ -2742,6 +2747,33 @@ fn host_cast_type(ty: &Type) -> Option<&'static str> {
         },
         _ => return None,
     })
+}
+
+/// Host type of a scalar slot in the `{Kernel}Params` struct. Every slot is exactly
+/// 32 bits, matching the WGSL params struct (`wgsl_scalar`: sub-32-bit and `bool`
+/// fields fall back to `i32`/`u32`/`f32` there): `bytemuck::Pod` forbids both
+/// implicit padding (a lone `u8` next to 4-byte fields) and `bool`.
+fn params_slot_type(ty: &Type) -> &'static str {
+    let t = host_scalar_type(ty);
+    match t {
+        "i8" | "i16" | "i64" | "i128" => "i32",
+        "u8" | "u16" | "u64" | "u128" | "bool" => "u32",
+        "half::f16" => "f32",
+        other => other,
+    }
+}
+
+/// Expression converting host value `expr` (of `host_scalar_type(ty)`) to its params slot type.
+fn params_slot_conv(ty: &Type, expr: &str) -> String {
+    let t = host_scalar_type(ty);
+    let slot = params_slot_type(ty);
+    if t == slot {
+        expr.to_string()
+    } else if t == "half::f16" {
+        format!("{}.to_f32()", expr)
+    } else {
+        format!("{} as {}", expr, slot)
+    }
 }
 
 fn host_scalar_type(ty: &Type) -> &'static str {

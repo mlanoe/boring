@@ -3702,7 +3702,12 @@ impl Emitter {
                     }
                     if let Some(cast_ty) = primitive_cast_type(name) {
                         if args.len() == 1 {
-                            return format!("({} as {cast_ty})", self.expr(&args[0].value));
+                            let value = self.expr(&args[0].value);
+                            return if cast_ty == "half::f16" {
+                                format!("half::f16::from_f32(({}) as f32)", value)
+                            } else {
+                                format!("({value} as {cast_ty})")
+                            };
                         }
                     }
                 }

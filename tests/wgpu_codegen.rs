@@ -4449,3 +4449,64 @@ with c:
     assert!(host.contains("copy_a_to_device(&A.iter()"), "{host}");
     assert!(host.contains("C.lock()"), "{host}");
 }
+
+#[test]
+fn wgpu_params_struct_widens_sub_word_scalars_and_compiles() {
+    // A `uint8`/`int8`/`uint16`/`bool` scalar field used to be emitted at its own width in
+    // the host `{Kernel}Params` struct, which `#[derive(Pod)]` rejects (implicit padding;
+    // `bool` is not Pod at all), and which disagreed with the WGSL layout (32-bit slots).
+    let src = r#"
+kernel Mix:
+    mut [float32]'unified out
+    let [int32]'unified ints
+    let [uint8]'global bytes
+    let int n
+    let uint m
+    let float32 a
+    let uint8 b
+    let int8 c
+    let uint16 d
+    let bool e
+
+    init(int nn, uint mm, float32 aa, uint8 bb, int8 cc, uint16 dd, bool ee, [int32]'unified i, [uint8]'global by, [float32]'unified o):
+        n = nn
+        m = mm
+        a = aa
+        b = bb
+        c = cc
+        d = dd
+        e = ee
+        ints = i
+        bytes = by
+        out = o
+
+    def ():
+        let t = .thread.x
+        if t < n:
+            out[t] = a * float32(ints[t]) + float32(bytes[t]) + float32(b) + float32(m) + float32(c) + float32(d)
+
+def main() throws:
+    mut k = Mix(4, 5, 2.0, 7, -1, 3, true, [1, 2, 3, 4], [10, 20, 30, 40], [0.0, 0.0, 0.0, 0.0])
+    kernel:
+        k(block = 4, grid = 1)
+    print k.out[0]
+"#;
+    let (_wgsl, rs) = wgpu_codegen("params_sub_word_scalars", src);
+    let params = &rs[rs.find("struct MixParams").expect("Params struct")..];
+    let params = &params[..params.find('}').unwrap()];
+    for bad in [": u8", ": i8", ": u16", ": bool"] {
+        assert!(!params.contains(bad), "params struct must use 32-bit slots, found `{bad}`:\n{params}");
+    }
+    assert!(params.contains("b: u32") && params.contains("c: i32") && params.contains("e: u32"), "{params}");
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("params_sub_word_scalars");
+    let build = common::SharedCargo::new("wgpu_codegen")
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(tmp.join("test_wgpu").join("Cargo.toml"))
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(build.status.success(), "generated wgpu project failed to compile:\n{}",
+        String::from_utf8_lossy(&build.stderr));
+}

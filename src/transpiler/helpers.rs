@@ -818,6 +818,11 @@ pub(crate) fn boring_type_to_boring_val_arms(ty: &str) -> Vec<(String, String, S
             "f32".to_string(),
             "f32::from_bits(__boring_bits as u32)".to_string(),
         )],
+        "Float16" | "float16" | "f16" => vec![(
+            "BoringError::Scalar(ScalarKind::Float16, __boring_bits)".to_string(),
+            "half::f16".to_string(),
+            "half::f16::from_bits(__boring_bits as u16)".to_string(),
+        )],
         other => vec![
             // Unknown type: will be handled by the named-clause path (BoringError::Other)
             (format!("/* unreachable catch {} */ ref __boring_other", other),
@@ -1907,6 +1912,7 @@ pub(crate) fn scalar_ctor_name(ty: &Type) -> Option<&'static str> {
         // `catch Float64:` alias-matching note. `float32` has no such pre-existing
         // path (it was never a distinct type before), so it has no equivalent
         // conflict and stays routed through `Scalar`.
+        Type::Float16 => Some("scalar_f16"),
         Type::Float32 => Some("scalar_f32"),
         Type::Qualified(inner, _) => scalar_ctor_name(inner),
         Type::Named(n) => match n.as_str() {
@@ -1920,6 +1926,7 @@ pub(crate) fn scalar_ctor_name(ty: &Type) -> Option<&'static str> {
             "uint32" | "u32" => Some("scalar_u32"),
             "uint64" | "u64" => Some("scalar_u64"),
             "uint128" | "u128" => Some("scalar_u128"),
+            "float16" | "f16" => Some("scalar_f16"),
             "float32" | "f32" => Some("scalar_f32"),
             _ => None,
         },

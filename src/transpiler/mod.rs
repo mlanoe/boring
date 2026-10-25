@@ -2526,7 +2526,7 @@ impl Transpiler {
              // variants). `Other` still exists, narrowed to what only it can do: genuine\n\
              // user-defined enums/structs the compiler can't enumerate in advance.\n\
              #[derive(Debug, Clone, Copy, PartialEq)]\n\
-             enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32 }\n\
+             enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float16, Float32 }\n\
              impl BoringError {\n\
              \x20   fn scalar_i8(v: i8) -> Self { BoringError::Scalar(ScalarKind::Int8, v as i128 as u128) }\n\
              \x20   fn scalar_i16(v: i16) -> Self { BoringError::Scalar(ScalarKind::Int16, v as i128 as u128) }\n\
@@ -2538,6 +2538,7 @@ impl Transpiler {
              \x20   fn scalar_u32(v: u32) -> Self { BoringError::Scalar(ScalarKind::Uint32, v as u128) }\n\
              \x20   fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }\n\
              \x20   fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }\n\
+             \x20   fn scalar_f16(v: half::f16) -> Self { BoringError::Scalar(ScalarKind::Float16, v.to_bits() as u128) }\n\
              \x20   fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }\n\
              }\n\
              #[derive(Debug)]\n\
@@ -2569,6 +2570,7 @@ impl Transpiler {
              \x20               ScalarKind::Uint32  => write!(f, \"{}\", *bits as u32),\n\
              \x20               ScalarKind::Uint64  => write!(f, \"{}\", *bits as u64),\n\
              \x20               ScalarKind::Uint128 => write!(f, \"{}\", *bits),\n\
+             \x20               ScalarKind::Float16 => write!(f, \"{}\", half::f16::from_bits(*bits as u16)),\n\
              \x20               ScalarKind::Float32 => write!(f, \"{}\", f32::from_bits(*bits as u32)),\n\
              \x20           },\n\
              \x20           BoringError::Other(_, e)    => write!(f, \"{}\", e),\n\
