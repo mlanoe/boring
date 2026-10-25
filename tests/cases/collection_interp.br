@@ -43,3 +43,17 @@ def nested():
         print "row {row}"
     let [(int, string)] pairs = [(1, "a"), (2, "b")]
     print "pairs {pairs}"
+    let r = Reporter([1, 2], {"k" = 1}, {4})
+    r.report()
+    let Reporter'actor ra = Reporter([3], {"j" = 2}, {5})
+    ra.report()
+
+struct Reporter:
+    [int] items
+    {string=int} table
+    {int} seen
+
+    req report():
+        print "method {items} {table} {seen}"
+        let local = items
+        print "local {local}"

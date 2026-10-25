@@ -10,3 +10,7 @@ optional [1, 2] nil
 row [1, 2]
 row [3]
 pairs [(1, a), (2, b)]
+method [1, 2] {k: 1} {4}
+local [1, 2]
+method [3] {j: 2} {5}
+local [3]
