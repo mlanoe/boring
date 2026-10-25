@@ -801,6 +801,15 @@ impl Interpreter {
                 return self.call_fs_method(method, arg_vals, line);
             }
             // `kernel.lastChoice(k)`: the interpreter has no backends, so everything "ran" on the CPU.
+            // `kernel.backends()`: the interpreter has one pretend backend, the CPU.
+            if v == "kernel" && method == "backends" {
+                return Ok(Value::Array(Rc::new(vec![make_object("Backend".to_string(), vec![
+                    ("name".to_string(), Value::Str("cpu".to_string())),
+                    ("kind".to_string(), Value::Str("cpu".to_string())),
+                    ("score".to_string(), Value::Float64(0.0)),
+                    ("load".to_string(), Value::Int(0)),
+                ])])));
+            }
             if v == "kernel" && method == "lastChoice" {
                 self.eval_args(args, Rc::clone(&env))?;
                 return Ok(Value::Str("cpu".to_string()));

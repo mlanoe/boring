@@ -130,6 +130,18 @@ pub struct KernelRoute {
     pub release: Release,
 }
 
+/// What `kernel.backends()` reports for one backend.
+#[derive(Clone, Debug)]
+pub struct BackendInfo {
+    pub name: &'static str,
+    /// `"gpu"` or `"cpu"`.
+    pub kind: &'static str,
+    /// The start-up benchmark score, or the prior for a backend that cannot be measured.
+    pub score: f64,
+    /// How many other programs were using this backend at start-up.
+    pub load: usize,
+}
+
 /// What one non-CPU backend can run.
 pub struct Routes {
     pub name: &'static str,
@@ -156,6 +168,7 @@ struct State {
     /// `BORING_BACKEND_VERBOSE`: report where each kernel runs, when that changes.
     verbose: bool,
     on_use: Box<dyn Fn(&str) + Send + Sync>,
+    infos: Vec<BackendInfo>,
     initialized: Mutex<HashMap<&'static str, bool>>,
     last: Mutex<HashMap<String, &'static str>>,
     instances: Mutex<HashMap<u64, Instance>>,
@@ -165,6 +178,14 @@ static STATE: OnceLock<State> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static UPLOADS: AtomicU64 = AtomicU64::new(0);
 static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
+
+/// The backends this program may run kernels on, best first, the CPU among them.
+pub fn backends() -> Vec<BackendInfo> {
+    match STATE.get() {
+        Some(state) => state.infos.clone(),
+        None => vec![BackendInfo { name: "cpu", kind: "cpu", score: 0.0, load: 0 }],
+    }
+}
 
 /// A fresh id for a kernel instance on the CPU host.
 pub fn new_instance() -> u64 {
@@ -185,7 +206,7 @@ unsafe impl<T> Send for AssertSend<T> {}
 /// Register the ranked backends. `forced` is set when the user named the backends
 /// (`BORING_BACKEND`): the small-launch rule is then skipped. `on_use` is called the first time
 /// a backend runs a kernel (the caller takes its load lease there). A second call is ignored.
-pub fn install(order: Vec<Routes>, forced: bool, on_use: Box<dyn Fn(&str) + Send + Sync>) {
+pub fn install(order: Vec<Routes>, forced: bool, infos: Vec<BackendInfo>, on_use: Box<dyn Fn(&str) + Send + Sync>) {
     let min_threads = std::env::var("BORING_GPU_MIN_THREADS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_MIN_THREADS);
     let _ = STATE.set(State {
         order,
@@ -193,6 +214,7 @@ pub fn install(order: Vec<Routes>, forced: bool, on_use: Box<dyn Fn(&str) + Send
         min_threads,
         verbose: std::env::var_os("BORING_BACKEND_VERBOSE").is_some(),
         on_use,
+        infos,
         initialized: Mutex::new(HashMap::new()),
         last: Mutex::new(HashMap::new()),
         instances: Mutex::new(HashMap::new()),
@@ -510,8 +532,10 @@ mod tests {
                 Routes { name: "b", init: up, kernels: vec![KernelRoute { name: "Affine", run: run_b, read: read_b, release: release_b }] },
             ],
             true,
+            vec![BackendInfo { name: "a", kind: "gpu", score: 2.0, load: 0 }, BackendInfo { name: "cpu", kind: "cpu", score: 1.0, load: 1 }],
             Box::new(|_| {}),
         );
+        assert_eq!(backends().iter().map(|b| (b.name, b.kind, b.load)).collect::<Vec<_>>(), [("a", "gpu", 0), ("cpu", "cpu", 1)]);
         let id = new_instance();
         let (mut bias, mut data) = (vec![10.0f32], vec![1.0f32, 2.0]);
         let uploaded = || transfers().0;

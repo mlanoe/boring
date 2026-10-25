@@ -398,10 +398,16 @@ fn verbose() -> bool {
 
 /// Order the usable backends by measured speed and current load (see `policy.rs`).
 /// `BORING_BENCH=off` keeps the static order, `BORING_BENCH=force` measures again.
-fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> Vec<&'a Backend> {
+/// A backend that was not ranked (forced order, ranking off, a single candidate).
+fn unranked(backend: &Backend) -> policy::Ranked {
+    let score = policy::prior(backend.name);
+    policy::Ranked { name: backend.name.to_string(), score, measured: false, load: 0, effective: score }
+}
+
+fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> Vec<(&'a Backend, policy::Ranked)> {
     let mode = std::env::var("BORING_BENCH").unwrap_or_default().trim().to_lowercase();
     if mode == "off" || usable.len() < 2 {
-        return usable.iter().map(|(backend, _)| *backend).collect();
+        return usable.iter().map(|(backend, _)| (*backend, unranked(backend))).collect();
     }
     let mut cache = dir.map(policy::load_cache).unwrap_or_default();
     let now = policy::now();
@@ -438,7 +444,7 @@ fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> 
             );
         }
     }
-    ranked.iter().filter_map(|r| usable.iter().map(|(b, _)| *b).find(|b| b.name == r.name)).collect()
+    ranked.into_iter().filter_map(|r| usable.iter().map(|(b, _)| *b).find(|b| b.name == r.name).map(|b| (b, r))).collect()
 }
 "#,
     );
@@ -515,17 +521,24 @@ fn main() {
         compiled.iter().collect()
     };
     let usable: Vec<(&Backend, String)> = wanted.into_iter().filter_map(|b| silently(b.device_name).map(|d| (b, d))).collect();
-    let ranked: Vec<&Backend> = if forced { usable.iter().map(|(b, _)| *b).collect() } else { rank(&usable, dir.as_deref()) };
+    let ranked: Vec<(&Backend, policy::Ranked)> = if forced { usable.iter().map(|(b, _)| (*b, unranked(b))).collect() } else { rank(&usable, dir.as_deref()) };
 
     // Backends ranked above the CPU get the kernels they can run; the CPU takes the rest.
-    let order: Vec<unified::Routes> = ranked.iter().take_while(|b| b.name != "simd").filter_map(|b| routes_for(b.name)).collect();
+    let order: Vec<unified::Routes> = ranked.iter().take_while(|(b, _)| b.name != "simd").filter_map(|(b, _)| routes_for(b.name)).collect();
+    let infos: Vec<unified::BackendInfo> = ranked
+        .iter()
+        .map(|(b, r)| {
+            let cpu = b.name == "simd";
+            unified::BackendInfo { name: if cpu { "cpu" } else { b.name }, kind: if cpu { "cpu" } else { "gpu" }, score: r.score, load: r.load }
+        })
+        .collect();
     if verbose() {
         let names: Vec<&str> = order.iter().map(|r| r.name).collect();
         eprintln!("boring: kernels run on [{}], else on the CPU", names.join(", "));
     }
     take_lease(&dir, "simd");
     let lease_dir = dir.clone();
-    unified::install(order, forced, Box::new(move |name| take_lease(&lease_dir, name)));
+    unified::install(order, forced, infos, Box::new(move |name| take_lease(&lease_dir, name)));
 
     let result = backend_simd::__boring_entry();
     if verbose() {

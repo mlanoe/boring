@@ -144,6 +144,15 @@ mod tests {
     }
 }
 
+/// The Rust side of `kernel.backends()`: one entry per backend the program may run kernels on.
+/// Named with a `__Boring` prefix so it cannot clash with a program's own `Backend` type.
+pub const BACKEND_STRUCT: &str = "#[allow(dead_code)] #[derive(Debug, Clone)] pub struct __BoringBackend { pub name: std::sync::Arc<str>, pub kind: std::sync::Arc<str>, pub score: f64, pub load: isize }\n";
+
+/// `__boring_backends()` for a single-target build: that one backend.
+pub fn single_backends_fn(name: &str, kind: &str) -> String {
+    format!("{BACKEND_STRUCT}#[allow(dead_code)] fn __boring_backends() -> Vec<__BoringBackend> {{ vec![__BoringBackend {{ name: \"{name}\".into(), kind: \"{kind}\".into(), score: 0.0, load: 0 }}] }}\n")
+}
+
 /// CUDA and HIP share one host shape (a context, a cached stream, `clone_htod`/`clone_dtoh`,
 /// a consuming `__boring_launch`); they differ only in a few names.
 #[derive(Clone, Copy)]

@@ -1031,6 +1031,7 @@ impl HostEmitter {
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"metal\".into() }");
+        self.out.push_str(&crate::transpiler::unified::single_backends_fn("metal", "gpu"));
         self.line("#[allow(dead_code)]");
         self.line("fn __boring_gpu_copy_d2h<T: Copy>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<T> {");
         self.indent += 1;
@@ -3568,6 +3569,9 @@ impl HostEmitter {
                 }
                 if let ExprKind::Var(name) = &obj.kind {
                     // `kernel.lastChoice(k)`: the backend `k`'s most recent launch ran on.
+                    if name == "kernel" && method == "backends" {
+                        return "__boring_backends()".to_string();
+                    }
                     if name == "kernel" && method == "lastChoice" {
                         let kernel = args.first().and_then(|a| match &a.value.kind {
                             ExprKind::Var(v) => self.var_kernel_type.get(v.as_str()),

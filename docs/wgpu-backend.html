@@ -203,6 +203,8 @@ device.<span class="fn">create_compute_pipeline</span>(&amp;wgpu::<span class="k
 <hr>
 <h2 id="wgsl-compilation">WGSL compilation</h2>
 <p>WGSL is compiled by wgpu at runtime using the <code>naga</code> compiler (bundled in the wgpu crate). No external toolchain is required. The generated project has no <code>build.rs</code>.</p>
+<h3 id="half-precision-float16">Half precision (<code>float16</code>)</h3>
+<p><code>float16</code> storage buffers remain two bytes per element and are emitted as WGSL <code>array&lt;f16&gt;</code>. When any generated shader uses that type, Boring places <code>enable f16;</code> before all WGSL declarations, verifies that the selected adapter advertises <code>wgpu::Features::SHADER_F16</code>, and requests that feature when creating the device. An adapter without the optional capability fails immediately with a clear message rather than silently widening the buffer to <code>f32</code>. Values inside the shared params struct—including fixed arrays—retain a portable <code>f32</code> ABI and are converted to <code>f16</code> when loaded by the shader.</p>
 <p>An optional AOT path (<code>boring build --target wgpu --aot</code>) may be added in a future iteration to emit pre-compiled SPIR-V or DirectX bytecode for workloads where startup latency matters.</p>
 <hr>
 <h2 id="naming-restrictions">Naming restrictions</h2>

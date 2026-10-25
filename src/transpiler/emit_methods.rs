@@ -889,6 +889,9 @@ impl Transpiler {
             }
             // `kernel.lastChoice(k)`: the backend `k`'s most recent launch ran on. Every kernel
             // target defines `__boring_last_choice` (a multi-target build asks its router).
+            if v == "kernel" && method == "backends" && self.is_gpu_target {
+                return Some("__boring_backends()".to_string());
+            }
             if v == "kernel" && method == "lastChoice" && self.is_gpu_target {
                 let kernel = args.first().and_then(|a| match &a.value.kind {
                     ExprKind::Var(name) => self.kernel_vars.get(name.as_str()),

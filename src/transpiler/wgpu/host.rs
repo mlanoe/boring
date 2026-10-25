@@ -219,6 +219,7 @@ impl<'a> HostEmitter<'a> {
         self.line("fn __boring_gpu_device() -> std::sync::Arc<wgpu::Device> { std::sync::Arc::clone(__BORING_GPU_DEVICE.get().expect(\"GPU device not initialized\")) }");
         self.line("fn __boring_gpu_queue() -> std::sync::Arc<wgpu::Queue> { std::sync::Arc::clone(__BORING_GPU_QUEUE.get().expect(\"GPU queue not initialized\")) }");
         self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"wgpu\".into() }");
+        self.out.push_str(&crate::transpiler::unified::single_backends_fn("wgpu", "gpu"));
         self.blank();
     }
 

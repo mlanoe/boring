@@ -69,6 +69,20 @@ print "scale ran on {kernel.lastChoice(k)}"     # cpu, wgpu, metal, cuda or rocm
 multi-target build it is the router's answer; in a single-target build it is that target (`cpu`
 for simd); `boring run` has no backends and always answers `cpu`. It takes a kernel variable.
 
+## Which backends can I use?
+
+```boring
+for b in kernel.backends():
+    print "{b.name} ({b.kind}): score {b.score}, load {b.load}"
+```
+
+`kernel.backends()` lists the backends the program may run kernels on, best first, the CPU
+among them (`b.name` is `cpu`, `wgpu`, `metal`, `cuda` or `rocm`; `b.kind` is `gpu` or `cpu`;
+`b.score` is the start-up benchmark score, or the prior of a backend that cannot be measured;
+`b.load` is how many other programs were using it at start-up). It lists only what this run
+installed: with `BORING_BACKEND=wgpu,simd` that is those two. A single-target build lists its own
+target and `boring run` lists the CPU, both with score 0 and load 0.
+
 ## How a build runs
 
 The program runs **once, on the CPU host** (the simd backend, always part of a multi-target
@@ -156,7 +170,6 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 
 ## Not implemented yet
 
-- Finer device classes (`.discrete`, `.integrated`, a remote service) and an inventory of the
-  backends from Boring code (`kernel.backends()`, with each backend's score and load).
+- Finer device classes (`.discrete`, `.integrated`, a remote service).
 - Routing for programs with a `Screen`, and for kernels with shared memory, atomics or struct
   fields.

@@ -636,3 +636,45 @@ fn host_access_between_launches_stays_coherent() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const BACKENDS: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+mut k = Bump([1.0 as float32, 2.0])
+kernel:
+    k(block = 2, grid = 1)
+for b in kernel.backends():
+    print "{b.name} {b.kind} {b.load}"
+"#;
+
+/// `kernel.backends()` lists the backends a program may run kernels on, best first, with each
+/// one's kind, score and load; the CPU is always there.
+#[test]
+fn backends_lists_what_the_program_can_use() {
+    let dir = project("backends");
+    std::fs::write(source(&dir), BACKENDS).unwrap();
+
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(source(&dir)).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "cpu cpu 0");
+
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (stdout, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert_eq!(stdout.trim(), "cpu cpu 0");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+        assert_eq!(stdout.trim(), "wgpu gpu 0\ncpu cpu 0");
+    }
+    // A single-target build knows only its own target.
+    let single = build(&dir, "simd");
+    assert!(single.status.success(), "{}", String::from_utf8_lossy(&single.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
