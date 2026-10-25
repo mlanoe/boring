@@ -239,6 +239,149 @@ fn __boring_logical_key_name(key: &winit::keyboard::Key) -> String {
 }
 "##;
 
+/// Screen accessibility (docs/gpu-display.md, "Accessibility"): `screen.setAccessibility(nodes)` hands the
+/// program's flat accessibility tree (boring-ui's `AxNode`s) to the platform's assistive technology through
+/// AccessKit, and `screen.accessibilityRequests` brings back what the screen reader asked for. wgpu host only
+/// today (winit 0.30 + `accesskit_winit`); every other host ignores the API.
+pub(super) const AX_RUNTIME: &str = r##"
+// ---- Screen accessibility (AccessKit) ----
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Default)]
+struct __AxNode {
+    id: i64, parent: i64, role: String, name: String, value: String, hint: String, level: i64,
+    x: f64, y: f64, w: f64, h: f64, focused: bool, disabled: bool, actions: String, children: Vec<i64>,
+}
+// One request from the assistive technology: `action` is focus, activate, setValue, increment or decrement.
+#[allow(dead_code)]
+struct __AccessRequest { id: isize, action: std::sync::Arc<str>, arg: std::sync::Arc<str> }
+struct __AxEvent(accesskit_winit::Event);
+impl From<accesskit_winit::Event> for __AxEvent { fn from(e: accesskit_winit::Event) -> Self { __AxEvent(e) } }
+
+fn __boring_ax_role(role: &str) -> accesskit::Role {
+    use accesskit::Role;
+    match role {
+        "staticText" | "text" | "label" => Role::Label,
+        "heading" => Role::Heading,
+        "textField" => Role::TextInput,
+        "button" => Role::Button,
+        "toggle" => Role::Switch,
+        "checkbox" => Role::CheckBox,
+        "slider" => Role::Slider,
+        "image" => Role::Image,
+        "group" => Role::Group,
+        "list" => Role::List,
+        "listItem" => Role::ListItem,
+        "dialog" => Role::Dialog,
+        "link" => Role::Link,
+        _ => Role::GenericContainer,
+    }
+}
+
+// The whole tree as one update (AccessKit diffs it against the previous one itself). Bounds are physical
+// pixels (the program's points times `scale`). A node whose parent is unknown is dropped, as AccessKit
+// rejects orphans; the window is the root (id 0).
+fn __boring_ax_tree(title: &str, nodes: &[__AxNode], scale: f64) -> accesskit::TreeUpdate {
+    use accesskit::{Action, Node, NodeId, Rect, Role, Toggled, Tree, TreeId, TreeUpdate};
+    let mut kids_of: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    let mut by_id: std::collections::HashMap<i64, &__AxNode> = std::collections::HashMap::new();
+    for n in nodes { if n.id != 0 { by_id.insert(n.id, n); kids_of.entry(n.parent).or_default().push(n.id); } }
+    let kids = |id: i64| -> Vec<i64> {
+        let declared = by_id.get(&id).map(|n| n.children.clone()).unwrap_or_default();
+        if declared.is_empty() { kids_of.get(&id).cloned().unwrap_or_default() }
+        else { declared.into_iter().filter(|c| by_id.contains_key(c)).collect() }
+    };
+    let mut out: Vec<(NodeId, Node)> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut focus = NodeId(0);
+    let mut stack: Vec<i64> = vec![0];
+    seen.insert(0);
+    while let Some(id) = stack.pop() {
+        let ks: Vec<i64> = kids(id).into_iter().filter(|c| seen.insert(*c)).collect();
+        let mut node = if id == 0 {
+            let mut w = Node::new(Role::Window);
+            w.set_label(title);
+            w
+        } else {
+            let n = by_id[&id];
+            let mut node = Node::new(__boring_ax_role(&n.role));
+            if !n.name.is_empty() { node.set_label(n.name.as_str()); }
+            if !n.hint.is_empty() { node.set_description(n.hint.as_str()); }
+            match n.role.as_str() {
+                "toggle" | "checkbox" => node.set_toggled(Toggled::from(n.value == "true")),
+                "slider" => { if let Ok(v) = n.value.parse::<f64>() { node.set_numeric_value(v); } }
+                _ => { if !n.value.is_empty() { node.set_value(n.value.as_str()); } }
+            }
+            if n.role == "heading" && n.level > 0 { node.set_level(n.level as usize); }
+            if n.disabled { node.set_disabled(); }
+            node.set_bounds(Rect { x0: n.x * scale, y0: n.y * scale, x1: (n.x + n.w) * scale, y1: (n.y + n.h) * scale });
+            for a in n.actions.split(',').map(str::trim) {
+                match a {
+                    "focus" => node.add_action(Action::Focus),
+                    "activate" | "toggle" => node.add_action(Action::Click),
+                    "setValue" => node.add_action(Action::SetValue),
+                    "increment" => node.add_action(Action::Increment),
+                    "decrement" => node.add_action(Action::Decrement),
+                    _ => {}
+                }
+            }
+            if n.focused { focus = NodeId(id as u64); }
+            node
+        };
+        if !ks.is_empty() { node.set_children(ks.iter().map(|c| NodeId(*c as u64)).collect::<Vec<_>>()); }
+        out.push((NodeId(id as u64), node));
+        stack.extend(ks.into_iter().rev());
+    }
+    TreeUpdate { nodes: out, tree: Some(Tree::new(NodeId(0))), tree_id: TreeId::ROOT, focus }
+}
+
+fn __boring_ax_request(r: &accesskit::ActionRequest) -> Option<__AccessRequest> {
+    use accesskit::{Action, ActionData};
+    let (action, arg) = match r.action {
+        Action::Focus => ("focus", String::new()),
+        Action::Click => ("activate", String::new()),
+        Action::Increment => ("increment", String::new()),
+        Action::Decrement => ("decrement", String::new()),
+        Action::SetValue => ("setValue", match &r.data {
+            Some(ActionData::Value(v)) => v.to_string(),
+            Some(ActionData::NumericValue(n)) => n.to_string(),
+            _ => String::new(),
+        }),
+        _ => return None,
+    };
+    Some(__AccessRequest { id: r.target_node.0 as isize, action: action.into(), arg: arg.into() })
+}
+"##;
+
+/// Cargo dependency lines of a generated crate that uses the accessibility API.
+pub(super) const AX_DEPS: &str = "accesskit = \"0.24\"\naccesskit_winit = \"0.32\"\n";
+
+/// For the hosts without an accessibility bridge (simd, Metal, CUDA, ROCm): drops `screen.setAccessibility(..)`
+/// statements and `for r in screen.accessibilityRequests:` loops, so the API is a clean no-op there (no
+/// request ever arrives, and the tree expression is never evaluated).
+pub(super) fn strip_accessibility(program: &crate::ast::Program) -> crate::ast::Program {
+    use crate::ast::{ExprKind, Item, Stmt};
+    let is_screen = |e: &crate::ast::Expr| matches!(&e.kind, ExprKind::Var(n) if n == "screen");
+    let mut out = program.clone();
+    let mut expr = |_: &mut crate::ast::Expr| {};
+    let mut stmt = |s: &mut Stmt| {
+        let drop = match s {
+            Stmt::Expr(e) => match &e.kind {
+                ExprKind::MethodCall(o, m, _) => m == "setAccessibility" && is_screen(o),
+                ExprKind::Call(c, _) => matches!(&c.kind, ExprKind::Field(o, m) if m == "setAccessibility" && is_screen(o)),
+                _ => false,
+            },
+            Stmt::For(f) => matches!(&f.iterable.kind, ExprKind::Field(o, m) if m == "accessibilityRequests" && is_screen(o)),
+            _ => false,
+        };
+        if drop { *s = Stmt::Comment("accessibility: not supported on this target".into()); }
+    };
+    let mut w = crate::ast_walk::Walker { expr: &mut expr, stmt: &mut stmt };
+    for item in &mut out.items {
+        if let Item::Stmt(s) = item { w.stmt(s); }
+    }
+    out
+}
+
 /// The type of a lowered `screen.*` input member, so a host can adapt it (`Str` to its own
 /// `string` representation, `Int` to a kernel field's width).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

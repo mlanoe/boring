@@ -130,6 +130,9 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
     let program = &optional_lowered;
+    // `screen.setAccessibility` / `screen.accessibilityRequests` are wgpu-only: a no-op here.
+    let accessibility_stripped = crate::transpiler::screen_input::strip_accessibility(program);
+    let program = &accessibility_stripped;
     // Collect all kernel names.
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }

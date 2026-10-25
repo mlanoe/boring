@@ -157,6 +157,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     if uses_clipboard { host_rs.push_str(crate::transpiler::screen_input::CLIPBOARD_RUNTIME); }
     let mut cargo_toml  = emit_cargo_toml(stem, version, has_screen);
     if uses_clipboard { cargo_toml.push_str("arboard = \"3\"\n"); }
+    if host_rs.contains("fn __boring_ax_tree(") { cargo_toml.push_str(crate::transpiler::screen_input::AX_DEPS); }
 
     let mut errors = general_out.errors;
     errors.extend(device_errors);

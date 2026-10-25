@@ -34,6 +34,9 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
     // Plain-data structs in kernel bodies / device functions are scalar-replaced first.
     let struct_lowered = crate::desugar_gpu_struct::desugar(program);
     let program = &struct_lowered;
+    // `screen.setAccessibility` / `screen.accessibilityRequests` are wgpu-only: a no-op here.
+    let accessibility_stripped = crate::transpiler::screen_input::strip_accessibility(program);
+    let program = &accessibility_stripped;
     let kernel_names = program
         .items
         .iter()

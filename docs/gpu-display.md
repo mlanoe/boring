@@ -472,6 +472,63 @@ reads) from a host array of the new length — the swapchain/blit follow as abov
 
 ---
 
+## Accessibility (wgpu)
+
+`screen.setAccessibility(nodes)` hands the program's accessibility tree to the platform's assistive technology
+(VoiceOver, NVDA / Narrator, Orca) through [AccessKit](https://accesskit.dev) (`accesskit` + `accesskit_winit`, winit
+0.30); `screen.accessibilityRequests` brings back what the screen reader asked for. The tree is the flat list boring-ui
+produces (`axFrame` in `boring-ui/src/accessibility.br`), so a window drawn by a kernel is as readable as a native one:
+
+```boring
+kernel:
+    loop:
+        screen.setAccessibility(axFrame(rt, placed))
+        for r in screen.accessibilityRequests:
+            axPerform(rt, host, r.id, r.action, r.arg)
+        ...
+```
+
+| Member | Kind | Meaning |
+|---|---|---|
+| `screen.setAccessibility(nodes)` | statement | `nodes` is an array of structs with the fields below (any struct type: they are read by name, so boring-ui's `AxNode` fits). Send it every frame: nothing is sent to the system unless the tree changed. |
+| `screen.accessibilityRequests` | `for r in ...:` source | the requests received since the last frame, in arrival order; each `r` has `id: int`, `action: string`, `arg: string`. Cleared when the frame ends. |
+
+Node fields: `id: int` (nonzero, stable from one frame to the next), `parent: int` (`0` = the window), `role`, `name`,
+`value`, `hint`, `marked` (ignored for now), `level: int`, `x`, `y`, `w`, `h: float` in **points** (multiplied by
+`screen.scale` into the physical pixels AccessKit expects), `focused`, `disabled: bool`, `actions: string` (comma
+separated: `focus`, `activate`, `toggle`, `setValue`, `increment`, `decrement`) and `children: [int]` (the order of the
+children; when empty the nodes naming this one as `parent` are used, in array order). The window is the root node
+(`id` 0, role window, labelled with the `Screen` title). A node whose chain of parents does not reach the window is dropped.
+
+| `role` | AccessKit role | notes |
+|---|---|---|
+| `staticText` | `Label` | `name` (and `value`) |
+| `heading` | `Heading` | `level` |
+| `textField` | `TextInput` | `value` is the text (a text selection is not exposed yet) |
+| `button` | `Button` | |
+| `toggle` | `Switch` | `value` `"true"` / `"false"` -> toggled (`checkbox` -> `CheckBox` likewise) |
+| `slider` | `Slider` | `value` parsed as the numeric value |
+| `image`, `group`, `list`, `listItem`, `dialog`, `link` | the same name | |
+| anything else | `GenericContainer` | |
+
+Requests (`r.action`): `focus` (Focus), `activate` (Click, whatever the role: deciding between press and toggle is the
+program's job), `setValue` (`r.arg` is the text or the number), `increment`, `decrement` (Increment / Decrement). Other
+AccessKit actions are ignored. A request wakes a `redraw = "demand"` loop.
+
+Cost: AccessKit only asks for the tree once an assistive technology connects, so until then `setAccessibility` does
+**nothing** -- its argument is not even evaluated (`if self.__ax_active { ... }`). A program that never mentions the API
+gets none of it: no `accesskit` dependency, no user-event loop. When the tree is requested the host first sends a root-only
+tree, then the real one at the next frame (it wakes the loop for that).
+
+Other hosts (simd, Metal, CUDA, ROCm): the API is accepted and ignored -- `screen.setAccessibility(..)` statements and
+`for r in screen.accessibilityRequests:` loops are removed before code generation, so no request ever arrives and the
+tree expression is not evaluated.
+
+Verification: the wgpu crate (and every other host's) is `cargo check`ed by `tests/screen_accessibility.rs`; the tree
+builder was additionally run against `accesskit_consumer` (the consumer the platform adapters use) to check that it yields
+a valid tree (roles, labels, bounds scaled, focus, orphan dropped). No assistive technology was driven from an automated
+test.
+
 ## Backend notes (CPU SIMD)
 
 See [`simd-backend.md`](simd-backend.html#gpu-display) for the full writeup.

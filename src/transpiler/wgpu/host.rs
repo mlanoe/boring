@@ -1137,6 +1137,12 @@ impl<'a> HostEmitter<'a> {
         let loop_body   = self.find_render_loop_body();
         let pixels_buf  = self.find_present_buffer();
         self.screen_pixels_buf = pixels_buf.clone();
+        // `screen.setAccessibility(..)` / `screen.accessibilityRequests` in the loop: wire AccessKit in
+        // (a program without them gets none of it: no extra dependency, no user events, no adapter).
+        let uses_ax = {
+            let dbg = format!("{loop_body:?}");
+            dbg.contains("setAccessibility") || dbg.contains("accessibilityRequests")
+        };
 
         let items: Vec<Item> = self.program.items.clone();
 
@@ -1198,6 +1204,10 @@ impl<'a> HostEmitter<'a> {
         for chunk in [crate::transpiler::screen_input::INPUT_RUNTIME, crate::transpiler::screen_input::KEY_NAMES_WINIT_030] {
             for l in chunk.lines() { self.line(l); }
         }
+        if uses_ax {
+            for l in crate::transpiler::screen_input::AX_RUNTIME.lines() { self.line(l); }
+            self.line(&format!("const __AX_TITLE: &str = \"{title}\";"));
+        }
         self.blank();
         // ── __App struct ──────────────────────────────────────────────────────
         self.line("struct __App {");
@@ -1237,6 +1247,13 @@ impl<'a> HostEmitter<'a> {
         self.line("    __start_time: std::time::Instant,");
         self.line("    __frame: isize,");
         self.line("    __redraw: bool,");
+        if uses_ax {
+            self.line("    __ax: Option<accesskit_winit::Adapter>,");
+            self.line("    __ax_proxy: Option<winit::event_loop::EventLoopProxy<__AxEvent>>,");
+            self.line("    __ax_active: bool,");
+            self.line("    __ax_last: Option<(Vec<__AxNode>, f64)>,");
+            self.line("    __ax_requests: Vec<__AccessRequest>,");
+        }
         self.line("    window: Option<std::sync::Arc<Window>>,");
         self.line("    surface: Option<wgpu::Surface<'static>>,");
         self.line("    __blit_pipeline: Option<wgpu::RenderPipeline>,");
@@ -1248,6 +1265,16 @@ impl<'a> HostEmitter<'a> {
         // After the kernel was reallocated for the window's current size (`k = K(...)` in the loop):
         // resize the swapchain to that size and point the blit at the new pixel buffer.
         self.line("impl __App {");
+        if uses_ax {
+            // Send the tree to AccessKit when it changed (its own diff does the rest); only called while
+            // an assistive technology is connected.
+            self.line("    fn __ax_push(&mut self, nodes: Vec<__AxNode>) {");
+            self.line("        let scale = self.__scale as f64;");
+            self.line("        if self.__ax_last.as_ref().is_some_and(|(n, s)| *n == nodes && *s == scale) { return; }");
+            self.line("        if let Some(ax) = self.__ax.as_mut() { let tu = __boring_ax_tree(__AX_TITLE, &nodes, scale); ax.update_if_active(|| tu); }");
+            self.line("        self.__ax_last = Some((nodes, scale));");
+            self.line("    }");
+        }
         self.line("    fn __reblit(&mut self) {");
         self.line("        let (w, h) = (self.__win_w.max(1) as u32, self.__win_h.max(1) as u32);");
         self.line("        self.__buf_w = w as f64;");
@@ -1273,14 +1300,20 @@ impl<'a> HostEmitter<'a> {
         self.line("}");
         self.blank();
         // ── ApplicationHandler impl ───────────────────────────────────────────
-        self.line("impl ApplicationHandler for __App {");
+        self.line(if uses_ax { "impl ApplicationHandler<__AxEvent> for __App {" } else { "impl ApplicationHandler for __App {" });
         // resumed(): create window + surface + blit pipeline
         self.line("    fn resumed(&mut self, event_loop: &ActiveEventLoop) {");
         // `hidpi = true`: the Dimension is logical points; otherwise it is physical pixels.
         let size_ty = if hidpi { "LogicalSize" } else { "PhysicalSize" };
+        // AccessKit's adapter must exist before the window is first shown.
+        let visible = if uses_ax { ".with_visible(false)" } else { "" };
         self.line(&format!(
-            "        let window = std::sync::Arc::new(event_loop.create_window(WindowAttributes::default().with_title(\"{title}\").with_inner_size(winit::dpi::{size_ty}::new({width}u32, {height}u32))).unwrap());"
+            "        let window = std::sync::Arc::new(event_loop.create_window(WindowAttributes::default().with_title(\"{title}\"){visible}.with_inner_size(winit::dpi::{size_ty}::new({width}u32, {height}u32))).unwrap());"
         ));
+        if uses_ax {
+            self.line("        if let Some(p) = self.__ax_proxy.clone() { self.__ax = Some(accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, p)); }");
+            self.line("        window.set_visible(true);");
+        }
         self.line("        self.__scale = window.scale_factor() as f32;");
         if hidpi {
             // Window and swapchain are in physical pixels; the app reallocates its buffer on `screen.resized`.
@@ -1380,7 +1413,27 @@ impl<'a> HostEmitter<'a> {
         self.line("    }");
         self.blank();
         // window_event(): handle all window events
+        if uses_ax {
+            // An assistive technology asked for the tree / for an action: wake the loop (also `redraw = "demand"`).
+            self.line("    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: __AxEvent) {");
+            self.line("        match event.0.window_event {");
+            self.line("            accesskit_winit::WindowEvent::InitialTreeRequested => {");
+            self.line("                self.__ax_active = true;");
+            self.line("                self.__ax_last = None;");
+            self.line("                let scale = self.__scale as f64;");
+            self.line("                if let Some(ax) = self.__ax.as_mut() { let tu = __boring_ax_tree(__AX_TITLE, &[], scale); ax.update_if_active(|| tu); }");
+            self.line("            }");
+            self.line("            accesskit_winit::WindowEvent::ActionRequested(r) => { if let Some(q) = __boring_ax_request(&r) { self.__ax_requests.push(q); } }");
+            self.line("            accesskit_winit::WindowEvent::AccessibilityDeactivated => { self.__ax_active = false; self.__ax_last = None; return; }");
+            self.line("        }");
+            self.line("        if let Some(w) = &self.window { w.request_redraw(); }");
+            self.line("    }");
+            self.blank();
+        }
         self.line("    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {");
+        if uses_ax {
+            self.line("        if let (Some(ax), Some(w)) = (self.__ax.as_mut(), self.window.as_ref()) { ax.process_event(w, &event); }");
+        }
         if on_demand {
             // Input and resize invalidate the window; everything else (including the
             // frame's own RedrawRequested) does not.
@@ -1467,6 +1520,7 @@ impl<'a> HostEmitter<'a> {
         self.in_method = false;
         self.line("                self.__keys_pressed.clear();");
         self.line("                self.__input.end_frame();");
+        if uses_ax { self.line("                self.__ax_requests.clear();"); }
         self.line("                self.__resized = false;");
         self.line("                self.__frame += 1;");
         if on_demand {
@@ -1594,10 +1648,16 @@ impl<'a> HostEmitter<'a> {
         self.line(&format!("        __buf_w: ({width}) as f64, __buf_h: ({height}) as f64, __surface_cfg: None,"));
         self.line("        __start_time: std::time::Instant::now(),");
         self.line("        __frame: 0, __redraw: false,");
+        if uses_ax { self.line("        __ax: None, __ax_proxy: None, __ax_active: false, __ax_last: None, __ax_requests: Vec::new(),"); }
         self.line("        window: None, surface: None,");
         self.line("        __blit_pipeline: None, __blit_bg: None, __blit_dim_buf: None,");
         self.line("    };");
-        self.line("    let event_loop = EventLoop::new().unwrap();");
+        if uses_ax {
+            self.line("    let event_loop = EventLoop::<__AxEvent>::with_user_event().build().unwrap();");
+            self.line("    app.__ax_proxy = Some(event_loop.create_proxy());");
+        } else {
+            self.line("    let event_loop = EventLoop::new().unwrap();");
+        }
         self.line("    event_loop.run_app(&mut app).unwrap_or_else(|_| {});");
         self.line("}");
     }
@@ -1689,6 +1749,8 @@ impl<'a> HostEmitter<'a> {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_request_redraw(e) {
                     self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_set_accessibility(e) {
+                    self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_render_dispatch(e, width, height) {
                     self.line(&format!("{indent}{s};"));
                 } else if let Some(s) = self.try_emit_field_swap(e) {
@@ -1749,6 +1811,18 @@ impl<'a> HostEmitter<'a> {
                 let deeper = format!("{indent}    ");
                 self.line(&format!("{indent}for __ev in self.__input.{field}.clone() {{"));
                 self.line(&format!("{deeper}let {} = std::sync::Arc::<str>::from(__ev.as_str());", fs.vars[0]));
+                self.event_vars.borrow_mut().push(fs.vars[0].clone());
+                for st in &fs.body { self.emit_render_stmt(st, width, height, &deeper); }
+                self.event_vars.borrow_mut().pop();
+                self.line(&format!("{indent}}}"));
+            }
+            // `for r in screen.accessibilityRequests:` -- what the screen reader asked for this frame
+            // (`r.id`, `r.action`, `r.arg`), in arrival order.
+            Stmt::For(fs) if fs.vars.len() == 1 && matches!(&fs.iterable.kind, ExprKind::Field(o, m)
+                if m == "accessibilityRequests" && matches!(&o.kind, ExprKind::Var(n) if n == "screen")) =>
+            {
+                let deeper = format!("{indent}    ");
+                self.line(&format!("{indent}for {} in std::mem::take(&mut self.__ax_requests) {{", fs.vars[0]));
                 self.event_vars.borrow_mut().push(fs.vars[0].clone());
                 for st in &fs.body { self.emit_render_stmt(st, width, height, &deeper); }
                 self.event_vars.borrow_mut().pop();
@@ -1911,6 +1985,23 @@ impl<'a> HostEmitter<'a> {
         if method != "setClipboard" || args.len() != 1 { return None; }
         if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
         Some(format!("__boring_clipboard_set(&*({}));", self.host_expr(&args[0].value)))
+    }
+
+    /// `screen.setAccessibility(nodes)` -- hand the accessibility tree (a `[struct]` with the fields of boring-ui's
+    /// `AxNode`) to AccessKit. The expression is only evaluated while an assistive technology is connected.
+    fn try_emit_set_accessibility(&self, e: &Expr) -> Option<String> {
+        let (obj, args) = match &e.kind {
+            ExprKind::MethodCall(obj, m, args) if m == "setAccessibility" => (obj, args),
+            ExprKind::Call(c, args) => match &c.kind {
+                ExprKind::Field(obj, m) if m == "setAccessibility" => (obj, args),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if args.len() != 1 || !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
+        let nodes = self.host_expr(&args[0].value);
+        Some(format!(
+            "if self.__ax_active {{ let __ax_in = {nodes}; self.__ax_push(__ax_in.iter().map(|n| __AxNode {{ id: n.id as i64, parent: n.parent as i64, role: n.role.to_string(), name: n.name.to_string(), value: n.value.to_string(), hint: n.hint.to_string(), level: n.level as i64, x: n.x as f64, y: n.y as f64, w: n.w as f64, h: n.h as f64, focused: n.focused, disabled: n.disabled, actions: n.actions.to_string(), children: n.children.iter().map(|c| *c as i64).collect() }}).collect()); }}"))
     }
 
     /// `screen.requestRedraw()` -- schedule another frame when the window redraws on demand.
