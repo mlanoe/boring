@@ -3203,6 +3203,12 @@ impl HostEmitter {
                 // way it always has, unaffected by that new device-side error).
                 // `float32(expr)` → `expr as f32` too, natively (no narrowing at all).
                 if let ExprKind::Var(name) = &callee.kind {
+                    if name == "float16" || name == "f16" {
+                        if let Some(arg) = args.first() {
+                            let inner = self.expr(&arg.value);
+                            return format!("half::f16::from_f32(({}) as f32)", inner);
+                        }
+                    }
                     if name == "float" || name == "float64" || name == "float32" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);

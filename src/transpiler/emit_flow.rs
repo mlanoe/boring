@@ -606,7 +606,24 @@ impl Transpiler {
                                     self.line(&format!("{} => {{", arm_pat));
                                     self.indent += 1;
                                     self.line(&format!("let error: {} = {};", error_ty, error_bind));
+                                    let catch_float_ty = match ty_name.as_str() {
+                                        "Float16" | "float16" | "f16" => Some(Type::Float16),
+                                        "Float32" | "float32" | "f32" => Some(Type::Float32),
+                                        "Float" | "float" | "Float64" | "float64" | "f64" => Some(Type::Float64),
+                                        _ => None,
+                                    };
+                                    let previous_error_ty = self.var_types.get("error").cloned();
+                                    if let Some(ty) = catch_float_ty.clone() {
+                                        self.var_types.insert("error".into(), ty);
+                                    }
                                     self.emit_loop_body(&body_stmts);
+                                    if catch_float_ty.is_some() {
+                                        if let Some(ty) = previous_error_ty {
+                                            self.var_types.insert("error".into(), ty);
+                                        } else {
+                                            self.var_types.remove("error");
+                                        }
+                                    }
                                     self.line("None");
                                     self.indent -= 1;
                                     self.line("}");

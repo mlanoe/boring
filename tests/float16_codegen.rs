@@ -15,6 +15,10 @@ pub req [float16]'kernel'unified increment([float16]'kernel'unified input) throw
     kernel:
         k(block = input.length)
     k.values
+
+def main():
+    let float16 host_value = float16(1.25)
+    print "{host_value as float32}"
 "#;
 
 fn generate(target: &str, case: &str) -> (String, String, String) {
@@ -88,7 +92,7 @@ fn cpu_float16_newtype_compiles_with_float_derives() {
 
 #[test]
 fn cpu_float16_throw_and_typed_catch_compile() {
-    let source_text = "def risky() throws:\n    let float16 value = float16(1.5)\n    throw value\n\ndef main():\n    try:\n        risky()\n    catch float16:\n        print error\n";
+    let source_text = "def risky() throws:\n    let float16 value = float16(1.5)\n    throw value\n\ndef main():\n    try:\n        risky()\n    catch float16:\n        print \"{error as float32}\"\n";
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu_catch");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -109,6 +113,7 @@ fn supported_gpu_backends_keep_f16_storage() {
         let (device, host, manifest) = generate(target, target);
         assert!(device.contains(spelling), "{target} widened the buffer:\n{device}");
         assert!(!device.contains("float16("), "{target} left an unresolved float16 conversion:\n{device}");
+        assert!(!host.contains("float16("), "{target} host left an unresolved float16 conversion:\n{host}");
         assert!(host.contains("half::f16"), "{target} host ABI is not f16:\n{host}");
         assert!(manifest.contains("half ="), "{target} manifest lacks half dependency");
     }

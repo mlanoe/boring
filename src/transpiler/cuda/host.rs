@@ -3067,6 +3067,12 @@ impl HostEmitter {
                 }
                 // `float(expr)`/`float64(expr)` → `expr as f64`; `float32(expr)` → `expr as f32`
                 if let ExprKind::Var(name) = &callee.kind {
+                    if name == "float16" || name == "f16" {
+                        if let Some(arg) = args.first() {
+                            let inner = self.expr(&arg.value);
+                            return format!("half::f16::from_f32(({}) as f32)", inner);
+                        }
+                    }
                     if name == "float" || name == "float64" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
