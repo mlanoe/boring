@@ -399,6 +399,15 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     };
     let mut errors = t.errors.into_inner();
     errors.extend(box_clash);
+    {
+        // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).
+        let failed = !errors.is_empty();
+        errors.extend(helpers::placeholder_errors(&code, "Rust", failed));
+        for (name, c) in &t.modules {
+            let failed = !errors.is_empty();
+            errors.extend(helpers::placeholder_errors(c, &format!("Rust (module `{}`)", name), failed));
+        }
+    }
     TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get(), screen_setup_fields: t.screen_setup_fields.into_inner() }
 }
 

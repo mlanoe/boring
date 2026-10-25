@@ -2235,17 +2235,19 @@ kernel Scale:
 }
 
 #[test]
-fn atomic_method_call_in_nested_position_is_a_visible_marker_not_silent_wrong_wgsl() {
+fn atomic_method_call_in_nested_position_is_a_build_error_not_silent_wrong_wgsl() {
     // Non-atomic min/max/swap/cas only has a real (correct) codegen path when
     // the whole call is the direct RHS of a `let`/assignment -- WGSL can't
     // express "read old, mutate, yield old" as a single expression. Buried
-    // inside a larger expression, this used to either silently fall through
-    // to the *unrelated* pre-existing scalar `.min`/`.max` builtin (a pure,
-    // non-mutating comparison -- never touches the buffer) or, for
-    // `.swap`/`.cas`, emit genuinely invalid WGSL (confirmed via a real naga
-    // parse: "no definition in scope for identifier: 'swap'"). Now emits a
-    // visible, unambiguous marker instead of guessing.
-    let (wgsl, _) = wgpu_codegen("plain_atomic_nested", r#"
+    // inside a larger expression the device emitter leaves an `/* unsupported here: ... */`
+    // marker; the placeholder backstop (`helpers::placeholder_errors`) turns that into a
+    // build error instead of shipping a shader that fails later.
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wgpu_codegen").join("plain_atomic_nested");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, r#"
 kernel Scale:
     mut [int]'unified buf
     init([int]'unified data):
@@ -2253,9 +2255,12 @@ kernel Scale:
     def ():
         let tid = .thread.x
         let x = buf[tid].min(5) + 1
-"#);
-    assert!(wgsl.contains("/* unsupported here:") && wgsl.contains(".min(...) needs 'actor'global/'actor'unified"),
-        "expected a visible unsupported-position marker, not silently wrong WGSL;\ngot:\n{wgsl}");
+"#).unwrap();
+    let result = Command::new(bin).args(["build", "--target", "wgpu"]).arg(&br_file).output().unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "build unexpectedly succeeded");
+    assert!(stderr.contains("/* unsupported here:") && stderr.contains(".min(...) needs 'actor'global/'actor'unified"),
+        "expected an error quoting the unsupported-position marker;\ngot:\n{stderr}");
 }
 
 // ─── Host-side codegen for `Type::LabeledArray` fields (regressions found ───

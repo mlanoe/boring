@@ -2484,7 +2484,12 @@ impl HostEmitter {
                     self.indent -= 1;
                     self.line("}");
                 } else {
-                    self.line("/* unsupported stmt */");
+                    {
+                    let (line, col) = stmt.line_col();
+                    crate::transpiler::helpers::report_unsupported(line, col,
+                        "this statement is not supported in CUDA host code — use `let`/assignment/`if`/`for`/`while`/`return`/`throw`, \
+                         and `guard <cond> else:` (not `guard let`)");
+                }
                 }
             }
             // `throw "msg"` — only valid inside a `throws` function (checker-enforced),
@@ -2588,7 +2593,12 @@ impl HostEmitter {
                 self.indent -= 1;
                 self.line("}");
             }
-            _ => { self.line("/* unsupported stmt */"); }
+            _ => { {
+                    let (line, col) = stmt.line_col();
+                    crate::transpiler::helpers::report_unsupported(line, col,
+                        "this statement is not supported in CUDA host code — use `let`/assignment/`if`/`for`/`while`/`return`/`throw`, \
+                         and `guard <cond> else:` (not `guard let`)");
+                } }
         }
     }
 
@@ -2886,7 +2896,13 @@ impl HostEmitter {
             ExprKind::BinOp(op, lhs, rhs) => {
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
-                format!("({} {} {})", l, binop_rust(op), r)
+                {
+                    if matches!(op, BinOp::Is | BinOp::IsNot) {
+                        crate::transpiler::helpers::report_unsupported(e.line, e.col,
+                            "`is` / `is not` is not supported in CUDA host code — compare with `==` / `!=`");
+                    }
+                    format!("({} {} {})", l, binop_rust(op), r)
+                }
             }
             ExprKind::UnaryOp(op, operand) => {
                 let v = self.expr(operand);
@@ -3556,7 +3572,11 @@ impl HostEmitter {
                 parts.extend(args);
                 format!("format!({})", parts.join(", "))
             }
-            _ => "/* expr */".into(),
+            _ => {
+                crate::transpiler::helpers::report_unsupported(e.line, e.col,
+                    "this expression is not supported in CUDA host code — bind sub-expressions to `let` bindings or simplify it");
+                "()".into()
+            }
         }
     }
 

@@ -227,8 +227,13 @@ impl Transpiler {
             }
 
             ExprKind::KernelLaunch { .. } => {
-                // GPU kernel launch transpilation — not yet implemented.
-                "/* kernel launch */".to_string()
+                // A GPU kernel launch only lowers on the GPU targets (`--target cuda|rocm|metal|wgpu`),
+                // where the backend rewrites it before this emitter sees it.
+                self.push_error(expr.line, expr.col,
+                    "an inline GPU kernel launch cannot be transpiled for this target — build with \
+                     `--target cuda|rocm|metal|wgpu`, or move the launch into a `kernel` struct's \
+                     method and call that");
+                "unreachable!(\"unsupported kernel launch\")".to_string()
             }
 
             ExprKind::TryElse(e, default) => {

@@ -549,6 +549,42 @@ impl BindingKind {
 
 // ─── Statements ──────────────────────────────────────────────────────────────
 
+impl Stmt {
+    /// Best-effort `(line, col)` of the statement, for diagnostics. `Comment`/`Defer` carry no
+    /// position of their own and report `(0, 0)` (`SourceError`'s "position unknown").
+    pub fn line_col(&self) -> (usize, usize) {
+        match self {
+            Stmt::Let(s) => (s.line, s.col),
+            Stmt::LetDestructure(s) => (s.line, s.col),
+            Stmt::Return(s) => (s.line, s.col),
+            Stmt::Break(line, _) => (*line, 0),
+            Stmt::Continue(line) => (*line, 0),
+            Stmt::Throw(s) => (s.line, s.col),
+            Stmt::If(s) => (s.line, s.col),
+            Stmt::IfLet(s) => (s.line, s.col),
+            Stmt::Match(s) => (s.line, s.col),
+            Stmt::While(s) => (s.line, s.col),
+            Stmt::WhileLet(s) => (s.line, s.col),
+            Stmt::DoWhile(s) => (s.line, s.col),
+            Stmt::Loop(s) => (s.line, s.col),
+            Stmt::Wait(e, line) => (*line, e.col),
+            Stmt::For(s) => (s.line, s.col),
+            Stmt::Guard(s) => (s.line, s.col),
+            Stmt::Try(s) => (s.line, s.col),
+            Stmt::Expr(e) => (e.line, e.col),
+            Stmt::Fn(s) => (s.line, s.col),
+            Stmt::Struct(s) => (s.line, s.col),
+            Stmt::Enum(s) => (s.line, s.col),
+            Stmt::Mod(s) => (s.line, s.col),
+            Stmt::Alias(s) => (s.line, s.col),
+            Stmt::Yield(e, line) => (*line, e.col),
+            Stmt::KernelBlock(s) => (s.line, s.col),
+            Stmt::With(s) => (s.line, s.col),
+            Stmt::Defer(_) | Stmt::Comment(_) => (0, 0),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let(LetStmt),

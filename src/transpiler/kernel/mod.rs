@@ -29,14 +29,20 @@ use helpers::KernelTranspiler;
 pub struct KernelTranspileOutput {
     /// The generated Rust source code.
     pub code: String,
+    /// Constructs the emitter could not translate (empty when `code` is complete).
+    pub errors: Vec<crate::transpiler::TranspileError>,
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn transpile_kernel(program: &Program) -> KernelTranspileOutput {
+    crate::transpiler::helpers::clear_reported_errors();
     let mut t = KernelTranspiler::new();
     t.emit_kernel_program(program);
-    KernelTranspileOutput { code: t.out }
+    let mut errors = crate::transpiler::helpers::take_reported_errors();
+    let backstop = crate::transpiler::helpers::placeholder_errors(&t.out, "kernel", !errors.is_empty());
+    errors.extend(backstop);
+    KernelTranspileOutput { code: t.out, errors }
 }
 
 // ─── Program emission ─────────────────────────────────────────────────────────

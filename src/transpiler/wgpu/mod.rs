@@ -140,6 +140,11 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     errors.extend(device_errors);
     errors.extend(host_errors);
     errors.extend(tensor_host.errors);
+    // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "wgpu host", failed));
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&device_wgsl, "wgpu device", failed));
     WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, errors }
 }
 

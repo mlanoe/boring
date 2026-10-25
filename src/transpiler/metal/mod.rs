@@ -173,6 +173,7 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
     // `use`), so the general pass's own import doesn't need stripping here.
     let general_code = crate::transpiler::strip_top_level_fns(&general_out.code, &strip_names);
 
+    crate::transpiler::helpers::clear_reported_errors();
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
         has_boring_main, boring_main_throws, top_level_kernel_touching, &general_out.screen_setup_fields,
@@ -185,6 +186,12 @@ pub(crate) fn transpile_metal_with_tensor_config(program: &Program, stem: &str, 
     errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
+    errors.extend(crate::transpiler::helpers::take_reported_errors());
+    // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "Metal host", failed));
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&device_msl, "Metal device", failed));
     MetalOutput { host_rs, device_msl, kernel_names, cargo_toml, errors }
 }
 

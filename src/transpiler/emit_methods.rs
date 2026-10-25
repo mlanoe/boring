@@ -5531,10 +5531,13 @@ impl Transpiler {
                 };
                 result.push(emitted);
             } else {
-                result.push(
-                    defaults.get(i).and_then(|d| d.clone())
-                        .unwrap_or_else(|| "/* missing arg */".to_string())
-                );
+                // No default for a parameter the call does not supply: omit it (rustc then reports
+                // the arity mismatch). Never write a placeholder -- a trailing `/* missing arg */`
+                // used to compile by luck (`add(10, )`) when a nested `def` shadowed a global one
+                // whose signature has more parameters.
+                if let Some(d) = defaults.get(i).and_then(|d| d.clone()) {
+                    result.push(d);
+                }
             }
             i += 1;
         }

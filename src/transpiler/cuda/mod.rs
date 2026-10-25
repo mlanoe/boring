@@ -227,6 +227,7 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
     // the whole file regardless of where either `use` line physically sits.
     let general_code = general_code.replace("use std::sync::Arc;\n", "");
 
+    crate::transpiler::helpers::clear_reported_errors();
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
         has_boring_main, boring_main_throws, top_level_kernel_touching, min_arch,
@@ -245,6 +246,12 @@ pub(crate) fn transpile_cuda_with_tensor_config(program: &Program, stem: &str, v
     errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
+    errors.extend(crate::transpiler::helpers::take_reported_errors());
+    // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "CUDA host", failed));
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&device_cu, "CUDA device", failed));
     CudaOutput { host_rs, device_cu, kernel_names, build_rs, cargo_toml, errors }
 }
 

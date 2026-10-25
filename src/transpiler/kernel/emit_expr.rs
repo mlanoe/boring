@@ -522,7 +522,10 @@ impl KernelTranspiler {
 
             ExprKind::KernelLaunch { .. } => {
                 // GPU kernel launch inside a Linux kernel module — not supported.
-                "/* unsupported: gpu kernel launch in kernel module */".to_string()
+                crate::transpiler::helpers::report_unsupported(expr.line, expr.col,
+                    "a GPU kernel launch cannot be transpiled for --target kernel (Linux kernel module) — \
+                     GPU launches only exist on --target cuda|rocm|metal|wgpu; remove the launch from the module");
+                "unreachable!()".to_string()
             }
             ExprKind::SliceRange { .. } => {
                 panic!("SliceRange cannot appear outside an index expression")
@@ -604,9 +607,26 @@ impl KernelTranspiler {
             }
             crate::ast::Stmt::Continue(_) => "continue; ".into(),
             crate::ast::Stmt::Comment(text) => format!("/* {} */ ", text),
-            _ => {
-                // For compound statements not trivially inlineable, emit a placeholder comment.
-                "/* complex stmt */; ".into()
+            other => {
+                // A compound statement (`for`, `while`, `loop`, destructuring `let`, ...) inside an
+                // expression-position block (closure body, `do:` block). This emitter can only
+                // inline simple statements; dropping it silently would miscompile.
+                let (line, col) = other.line_col();
+                let kind = match other {
+                    crate::ast::Stmt::For(_) => "`for` loop",
+                    crate::ast::Stmt::While(_) | crate::ast::Stmt::WhileLet(_) | crate::ast::Stmt::DoWhile(_) => "`while` loop",
+                    crate::ast::Stmt::Loop(_) => "`loop`",
+                    crate::ast::Stmt::If(_) | crate::ast::Stmt::IfLet(_) => "`if` statement",
+                    crate::ast::Stmt::Match(_) => "`match` statement",
+                    crate::ast::Stmt::LetDestructure(_) => "destructuring `let`",
+                    _ => "statement",
+                };
+                crate::transpiler::helpers::report_unsupported(line, col, format!(
+                    "a {} inside a closure/expression block cannot be transpiled for --target kernel yet — \
+                     move it into a named `def` and call that from the closure",
+                    kind,
+                ));
+                "unreachable!(); ".into()
             }
         }
     }

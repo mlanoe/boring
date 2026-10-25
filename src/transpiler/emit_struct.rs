@@ -97,6 +97,16 @@ impl Transpiler {
         has_custom_cmp || has_sync_mutex_field || has_shared_dyn_field
     }
 
+    /// A declaration with no type annotation reached an emitter that needs one: report it
+    /// (instead of writing a `/* unknown */` placeholder into the Rust output) and return `_`.
+    pub(crate) fn missing_type_error(&self, name: &str, line: usize, col: usize, what: &str) -> String {
+        self.push_error(line, col, format!(
+            "{} `{}` has no type and none can be inferred here — add an explicit type annotation (`{}: T`)",
+            what, name, name,
+        ));
+        "_".to_string()
+    }
+
     pub(crate) fn emit_struct(&mut self, s: &StructDecl) {
         if s.is_view {
             // Parsed and checked, but not lowered yet (draft, "Implementation sequence", step 1):
@@ -358,7 +368,7 @@ impl Transpiler {
                 for p in &init.params {
                     let fvis = if p.is_pub { "pub " } else { "" };
                     let fmut = if p.mutable { "/* var */ " } else { "" };
-                    let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| "/* unknown */".into());
+                    let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"));
                     self.line(&format!("{}{}{}: {},", fvis, fmut, p.name, ty));
                 }
             }
@@ -662,7 +672,7 @@ impl Transpiler {
             if !tv.mutable && is_scalar { continue; } // unchanged plain `const`, handled above
             let mangled = format!("{}_{}", s.name.to_uppercase(), tv.name.to_uppercase());
             let vis = if tv.is_pub { "pub " } else { "" };
-            let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".to_string());
+            let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| self.missing_type_error(&tv.name, tv.line, tv.col, "type variable"));
             let val_s = self.emit_let_value(tv.ty.as_ref(), &tv.default);
             self.blank();
             if tv.mutable {
@@ -797,7 +807,7 @@ impl Transpiler {
         if init.body.is_empty() {
             // Auto-field init: fn new(x: T, y: T) -> Self { Self { x, y } }
             let params_s: Vec<String> = init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| "/* unknown */".into());
+                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"));
                 let mut_kw = if p.mutable { "mut " } else { "" };
                 format!("{}{}:{}", mut_kw, p.name, ty)
             }).collect();
@@ -859,7 +869,7 @@ impl Transpiler {
         } else {
             // Body init: fn new(params) -> Self { body }
             let params_s: Vec<String> = init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| "/* unknown */".into());
+                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"));
                 format!("{}: {}", p.name, ty)
             }).collect();
             self.line(&format!("pub fn new({}) -> Self {{", params_s.join(", ")));
@@ -1067,7 +1077,7 @@ impl Transpiler {
     ///   part of the `'static` qualifier work.
     pub(crate) fn emit_type_var_const(&mut self, tv: &TypeVar) {
         let vis = if tv.is_pub { "pub " } else { "" };
-        let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "/* unknown */".to_string());
+        let ty_s = tv.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| self.missing_type_error(&tv.name, tv.line, tv.col, "type variable"));
         let val_s = self.emit_let_value(tv.ty.as_ref(), &tv.default);
         let is_scalar = tv.ty.as_ref().map(Self::type_is_scalar_primitive).unwrap_or(false);
         if tv.mutable {

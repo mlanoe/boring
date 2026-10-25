@@ -221,6 +221,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     // `use std::sync::Arc;` would otherwise collide (E0252).
     let general_code = general_code.replace("use std::sync::Arc;\n", "");
 
+    crate::transpiler::helpers::clear_reported_errors();
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
         has_boring_main, boring_main_throws, top_level_kernel_touching, rocblas, &general_out.screen_setup_fields,
@@ -234,6 +235,12 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
+    errors.extend(crate::transpiler::helpers::take_reported_errors());
+    // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "ROCm host", failed));
+    let failed = !errors.is_empty();
+    errors.extend(crate::transpiler::helpers::placeholder_errors(&device_hip, "ROCm device", failed));
     RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors }
 }
 

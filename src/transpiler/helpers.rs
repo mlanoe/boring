@@ -3164,3 +3164,86 @@ pub(crate) fn untyped_array_literal_elem(s: &LetStmt) -> Option<&'static str> {
     let first = lit(elems.first()?)?;
     elems.iter().all(|e| lit(e) == Some(first)).then_some(first)
 }
+
+// ─── "Never silently drop source code" safety net ────────────────────────────────────────────
+
+/// Substrings an emitter writes in place of code it could not translate. Every one of them
+/// must be accompanied by a real `error:` (the specific site reports it); the generic scan
+/// below (`placeholder_errors`) is the backstop for any site that forgets, and the
+/// `tests/cases/*.br` sweep in `tests/transpile.rs` asserts none appears in working output.
+/// Deliberately NOT listed: `/* var */` (a field-qualifier note), `/* ERROR: ... */` on the
+/// metal/wgsl 64-bit/f64 type names (flagged-but-translated types, not dropped code), the
+/// `/* rejected ... */` markers of `--target simd` (always paired with an error).
+pub(crate) const PLACEHOLDER_MARKERS: &[&str] = &[
+    "/* complex stmt */",
+    "/* kernel launch */",
+    "/* missing arg */",
+    "/* unknown */",
+    "/* unsupported",
+    "/* expr */",
+    "/* op */",
+    "/*op*/",
+    "/* range ",
+    "/* unreachable catch",
+    " -- unsupported */",
+];
+
+/// `(1-based line of the generated output, marker, offending line)` for every placeholder.
+pub fn find_placeholders(code: &str) -> Vec<(usize, &'static str, String)> {
+    let mut found = Vec::new();
+    for (i, l) in code.lines().enumerate() {
+        for m in PLACEHOLDER_MARKERS {
+            if l.contains(m) {
+                found.push((i + 1, *m, l.trim().to_string()));
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Backstop: one error per placeholder left in `code`, but only when nothing else already
+/// explained the failure (`already_failed`) — the specific per-construct errors are better.
+pub fn placeholder_errors(code: &str, target: &str, already_failed: bool) -> Vec<TranspileError> {
+    if already_failed { return Vec::new(); }
+    find_placeholders(code).into_iter().map(|(n, marker, text)| TranspileError::at_line(
+        format!(
+            "internal: the {target} transpiler could not translate part of this program and left \
+             the placeholder `{marker}` at line {n} of the generated output (`{text}`) instead of \
+             code — that Boring construct is not supported on this target yet; simplify the \
+             statement/expression around it (bind sub-expressions to a `let`, avoid the construct) \
+             or report it as a transpiler gap"
+        ),
+        0,
+    )).collect()
+}
+
+thread_local! {
+    static REPORTED: std::cell::RefCell<Vec<TranspileError>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Error sink for emitters that have no `errors` field of their own (the CUDA/ROCm/Metal host
+/// emitters, the kernel-module emitter). Backend entry points call `clear_reported_errors`
+/// before emitting and `take_reported_errors` after.
+pub(crate) fn report_unsupported(line: usize, col: usize, msg: impl Into<String>) {
+    REPORTED.with(|r| r.borrow_mut().push(TranspileError::at(msg, line, col)));
+}
+pub(crate) fn clear_reported_errors() { REPORTED.with(|r| r.borrow_mut().clear()); }
+pub(crate) fn take_reported_errors() -> Vec<TranspileError> { REPORTED.with(|r| std::mem::take(&mut *r.borrow_mut())) }
+
+#[cfg(test)]
+mod placeholder_net_tests {
+    use super::*;
+
+    #[test]
+    fn backstop_flags_each_placeholder_and_stays_quiet_otherwise() {
+        let code = "fn f() {\n    let x = 1;\n    shaper.shape_with(|c| { /* complex stmt */ });\n}\n";
+        let errs = placeholder_errors(code, "Rust", false);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("/* complex stmt */") && errs[0].message.contains("line 3"), "{}", errs[0].message);
+        // A specific error already explained the failure: no duplicate noise.
+        assert!(placeholder_errors(code, "Rust", true).is_empty());
+        // Field-qualifier notes and ordinary comments are not placeholders.
+        assert!(find_placeholders("pub /* var */ x: i32,\n/* a note */\n").is_empty());
+    }
+}

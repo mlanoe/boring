@@ -3537,6 +3537,10 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     }
 
     let kernel_out = transpiler::kernel::transpile_kernel(&program);
+    if !kernel_out.errors.is_empty() {
+        report_transpile_errors(&path, &source, &kernel_out.errors);
+        process::exit(1);
+    }
     let rust_code  = kernel_out.code;
 
     // Determine output project directory next to the source file.

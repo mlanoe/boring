@@ -257,7 +257,6 @@ kernel W:
         let tid = .thread.x
         let lane = .warp.lane
         let size = .warp.size
-        .warp.sync()
         let a = .warp.shuffle_down(buf[tid], 1)
         let b = .warp.shuffle_up(buf[tid], 1)
         let c = .warp.shuffle_xor(buf[tid], 1)
@@ -268,11 +267,9 @@ kernel W:
     // argument the way CUDA does (confirmed against a real ROCm 6.2 install's
     // own `amd_warp_functions.h`, and against a real `hipcc` compile failure
     // on `__shfl_sync`/`__shfl_xor_sync` -- "use of undeclared identifier").
-    // `.warp.sync()` has no HIP equivalent at all and is left as a visible
-    // unsupported-call marker rather than emitting a nonexistent intrinsic.
+    // (`.warp.sync()` has no HIP equivalent at all: see `rocm_warp_sync_is_a_build_error`.)
     assert!(hip.contains("warpSize"), "expected warpSize;\ngot:\n{hip}");
     assert!(hip.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{hip}");
-    assert!(hip.contains("/* unsupported:"), "expected .warp.sync() to be marked unsupported, not a nonexistent __syncwarp;\ngot:\n{hip}");
     assert!(hip.contains("__shfl_down(") && !hip.contains("__shfl_down_sync"), "expected __shfl_down (no _sync suffix, no mask);\ngot:\n{hip}");
     assert!(hip.contains("__shfl_up(") && !hip.contains("__shfl_up_sync"), "expected __shfl_up (no _sync suffix, no mask);\ngot:\n{hip}");
     assert!(hip.contains("__shfl_xor(") && !hip.contains("__shfl_xor_sync"), "expected __shfl_xor (no _sync suffix, no mask);\ngot:\n{hip}");
@@ -1660,7 +1657,6 @@ kernel W:
         let tid = .thread.x
         let lane = .warp.lane
         let size = .warp.size
-        .warp.sync()
         let a = .warp.shuffleDown(buf[tid], 1)
         let b = .warp.shuffleUp(buf[tid], 1)
         let c = .warp.shuffleXor(buf[tid], 1)
@@ -1671,11 +1667,9 @@ kernel W:
     // argument the way CUDA does (confirmed against a real ROCm 6.2 install's
     // own `amd_warp_functions.h`, and against a real `hipcc` compile failure
     // on `__shfl_sync`/`__shfl_xor_sync` -- "use of undeclared identifier").
-    // `.warp.sync()` has no HIP equivalent at all and is left as a visible
-    // unsupported-call marker rather than emitting a nonexistent intrinsic.
+    // (`.warp.sync()` has no HIP equivalent at all: see `rocm_warp_sync_is_a_build_error`.)
     assert!(hip.contains("warpSize"), "expected warpSize;\ngot:\n{hip}");
     assert!(hip.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{hip}");
-    assert!(hip.contains("/* unsupported:"), "expected .warp.sync() to be marked unsupported, not a nonexistent __syncwarp;\ngot:\n{hip}");
     assert!(hip.contains("__shfl_down(") && !hip.contains("__shfl_down_sync"), "expected __shfl_down (no _sync suffix, no mask);\ngot:\n{hip}");
     assert!(hip.contains("__shfl_up(") && !hip.contains("__shfl_up_sync"), "expected __shfl_up (no _sync suffix, no mask);\ngot:\n{hip}");
     assert!(hip.contains("__shfl_xor(") && !hip.contains("__shfl_xor_sync"), "expected __shfl_xor (no _sync suffix, no mask);\ngot:\n{hip}");
@@ -1800,4 +1794,27 @@ with c:
     assert!(host.contains("static A: std::sync::LazyLock<Vec<f32>>"), "{host}");
     assert!(host.contains("clone_htod::<f32>(&(*A))"), "{host}");
     assert!(host.contains("C.lock()"), "{host}");
+}
+
+#[test]
+fn rocm_warp_sync_is_a_build_error() {
+    // `.warp.sync()` has no HIP equivalent; it used to be dropped as an `/* unsupported: ... */`
+    // comment in the generated HIP, silently removing the barrier. It is a build error now.
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rocm_codegen").join("warp_sync_error");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, r#"
+kernel W:
+    mut [float]'unified buf
+    def ():
+        let tid = .thread.x
+        .warp.sync()
+        buf[tid] = 1.0
+"#).unwrap();
+    let out = Command::new(bin).args(["build", "--target", "rocm"]).arg(&br_file).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "build unexpectedly succeeded");
+    assert!(stderr.contains("error:") && stderr.contains("warp.sync"), "{stderr}");
 }

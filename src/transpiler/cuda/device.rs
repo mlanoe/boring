@@ -486,7 +486,12 @@ impl DeviceEmitter {
                     }
                     _ => {
                         let iter = self.expr(&f.iterable);
-                        self.line(&format!("/* for {var} in {iter} -- unsupported */"));
+                        self.errors.push(crate::transpiler::TranspileError::at(
+                            format!("`for {var} in <iterable>` in CUDA kernel device code only supports a range \
+                                     (`for {var} in a..<b` / `a..=b`), not `{iter}` — iterate an index range and \
+                                     index the array inside the loop"),
+                            f.line, f.col,
+                        ));
                         self.line("{");
                     }
                 }
@@ -502,7 +507,12 @@ impl DeviceEmitter {
             Stmt::Continue(_label)    => self.line("continue;"),
             Stmt::Comment(c) if c == "sync" => self.line("__syncthreads();"),
             Stmt::Comment(_) => {}
-            _ => { self.line("/* unsupported stmt in kernel */"); }
+            other => {
+                let (line, col) = other.line_col();
+                self.errors.push(crate::transpiler::TranspileError::at(
+                    "this statement is not supported in CUDA kernel device code — rewrite it with \
+                     `let`/assignment/`if`/`for ..<`/`while` statements", line, col));
+            }
         }
     }
 
@@ -692,7 +702,14 @@ impl DeviceEmitter {
             ExprKind::BinOp(op, lhs, rhs) => {
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
-                format!("({} {} {})", l, binop_c(op), r)
+                {
+                    if matches!(op, BinOp::Is | BinOp::IsNot) {
+                        self.errors.push(crate::transpiler::TranspileError::at(
+                            "`is` / `is not` is not supported in CUDA kernel device code — compare with `==` / `!=`",
+                            e.line, e.col));
+                    }
+                    format!("({} {} {})", l, binop_c(op), r)
+                }
             }
             ExprKind::UnaryOp(op, operand) => {
                 let v = self.expr(operand);
@@ -719,7 +736,13 @@ impl DeviceEmitter {
                 } else {
                     None
                 };
-                resolved.unwrap_or_else(|| "/* unsupported labeled index */".to_string())
+                resolved.unwrap_or_else(|| {
+                    self.errors.push(crate::transpiler::TranspileError::at(
+                        "labeled index `a[axis: i, ..]` in CUDA kernel device code needs a kernel field \
+                         declared with labeled axes and every axis named — index it with its declared axis labels",
+                        e.line, e.col));
+                    "0".to_string()
+                })
             }
             ExprKind::Field(obj, field) => {
                 if let Some(s) = self.try_labeled_array_field_access(obj, field) {
@@ -766,7 +789,12 @@ impl DeviceEmitter {
                     // in this minimal device emitter — leave a visible marker rather than
                     // silently discarding the call.
                     let obj_s = self.expr(obj);
-                    format!("/* unsupported: {}.{}({}) */", obj_s, method, args_s.join(", "))
+                    self.errors.push(crate::transpiler::TranspileError::at(
+                        format!("method call `{}.{}(..)` is not supported in CUDA kernel device code — \
+                                 only `self.method(..)` and built-in numeric methods (`x.sqrt()`, ...) are; \
+                                 call a sibling `self` method or inline the computation", obj_s, method),
+                        e.line, e.col));
+                    "0".to_string()
                 }
             }
             ExprKind::Cast(inner, ty) => {
@@ -788,8 +816,11 @@ impl DeviceEmitter {
                 }
                 acc
             }
-            ExprKind::Range { start, end, inclusive: _ } => {
-                format!("/* range {}..{} */", self.expr(start), self.expr(end))
+            ExprKind::Range { .. } => {
+                self.errors.push(crate::transpiler::TranspileError::at(
+                    "a range value is only supported as a `for` loop bound in CUDA kernel device code — \
+                     use `for i in a..<b` directly", e.line, e.col));
+                "0".to_string()
             }
             _ => {
                 self.errors.push(crate::transpiler::TranspileError::at(
