@@ -468,13 +468,96 @@ impl Transpiler {
     /// attempt `self`/field-access/array-index resolution the way `resolve_expr_struct_type` does
     /// for genuine user types, since there's no realistic external-type equivalent of "a struct
     /// field typed as some other external type" in the cases this table exists for.
+    ///
+    /// Also follows a *chain* on a temporary — `Render.new(src).format(f).render(sc, g)` — where
+    /// the receiver of each later call is itself an external call, with no local to read an
+    /// annotation from. The result type of such a call is tracked under the builder-pattern
+    /// assumption that it is `Self` (so the next call resolves against the same type's
+    /// `[external_fns]` entries): a static call `T.new/default/from*/with*(..)` on a type name
+    /// that is not a local (or any static call with an `[external_fns]` entry), or any method call
+    /// on an already-tracked receiver. A wrong guess is harmless — it only ever selects a table key, so a chained call
+    /// that isn't in the table is emitted exactly as before.
     pub(crate) fn resolve_expr_external_type_name(&self, expr: &Expr) -> Option<String> {
-        if let ExprKind::Var(v) = &expr.kind {
-            if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
-                return Some(n.clone());
+        match &expr.kind {
+            ExprKind::Var(v) => {
+                if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
+                    return Some(n.clone());
+                }
+                None
             }
+            ExprKind::MethodCall(obj, method, _) => {
+                let rust_method = camel_to_snake(method);
+                if let ExprKind::Var(t) = &obj.kind {
+                    let is_type_path = t.chars().next().is_some_and(|c| c.is_uppercase())
+                        && !self.var_types.contains_key(t.as_str())
+                        && !self.known_local_vars.contains(t.as_str())
+                        && !self.is_known_user_type(t);
+                    if !is_type_path { return None; }
+                    let ctor_like = rust_method == "new" || rust_method == "default"
+                        || rust_method.starts_with("from") || rust_method.starts_with("with");
+                    return (ctor_like || self.external_fn_arg_borrows(t, &rust_method).is_some())
+                        .then(|| t.clone());
+                }
+                // Any further call on a tracked external receiver keeps the type (builder
+                // pattern; `format`/`offset` need no table entry of their own to stay in the chain).
+                self.resolve_expr_external_type_name(obj)
+            }
+            _ => None,
         }
-        None
+    }
+
+    /// A list literal passed to a `"&"` slot of an `[external_fns]` entry (`Render.new([Source.Outline])`
+    /// with `"Render::new" = ["&"]`) would emit `Render::new(&vec![..])`: a temporary dropped at the end
+    /// of the statement while the call's result may still borrow it (E0716). Collects each such
+    /// literal reachable from `expr` (through call receivers/arguments, not into closures) so
+    /// `emit_stmt` can bind it to a hidden local in the enclosing block first.
+    pub(crate) fn collect_external_borrowed_arrays<'a>(&self, expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &expr.kind {
+            ExprKind::MethodCall(obj, method, args) => {
+                self.collect_external_borrowed_arrays(obj, out);
+                for a in args { self.collect_external_borrowed_arrays(&a.value, out); }
+                let rust_method = camel_to_snake(method);
+                let qualifier = match &obj.kind {
+                    ExprKind::Var(t) if t.chars().next().is_some_and(|c| c.is_uppercase())
+                        && !self.var_types.contains_key(t.as_str())
+                        && !self.known_local_vars.contains(t.as_str())
+                        && !self.is_known_user_type(t) => Some(t.clone()),
+                    _ => self.resolve_expr_external_type_name(obj),
+                };
+                let Some(borrows) = qualifier.and_then(|q| self.external_fn_arg_borrows(&q, &rust_method)) else { return };
+                for (i, a) in args.iter().enumerate() {
+                    if borrows.get(i).map(String::as_str) == Some("&")
+                        && matches!(&a.value.kind, ExprKind::Array(e) if !e.is_empty())
+                    {
+                        out.push(&a.value);
+                    }
+                }
+            }
+            ExprKind::Call(c, args) => {
+                self.collect_external_borrowed_arrays(c, out);
+                for a in args { self.collect_external_borrowed_arrays(&a.value, out); }
+            }
+            ExprKind::Field(x, _) | ExprKind::Cast(x, _) | ExprKind::UnaryOp(_, x) => {
+                self.collect_external_borrowed_arrays(x, out)
+            }
+            _ => {}
+        }
+    }
+
+    /// Emits `let __ext_L_C = vec![..];` for every literal `collect_external_borrowed_arrays` finds
+    /// in `expr`, and records the name so the literal then emits as that local (and the call
+    /// borrows it as `&__ext_L_C`, which outlives the statement).
+    pub(crate) fn hoist_external_borrowed_arrays(&mut self, expr: &Expr) {
+        let mut found = Vec::new();
+        self.collect_external_borrowed_arrays(expr, &mut found);
+        for arr in found {
+            let key = (arr.line, arr.col);
+            if self.hoisted_ext_arrays.borrow().contains_key(&key) { continue; }
+            let code = self.emit_expr(arr);
+            let name = format!("__ext_{}_{}", arr.line, arr.col);
+            self.line(&format!("let {} = {};", name, code));
+            self.hoisted_ext_arrays.borrow_mut().insert(key, name);
+        }
     }
 
     /// Is `name` a real user-declared type (struct or enum)? The shared "is this receiver a
@@ -6646,6 +6729,7 @@ impl Transpiler {
             config: self.config.clone(),
             out: String::new(),
             errors: std::cell::RefCell::new(Vec::new()),
+            hoisted_ext_arrays: Default::default(),
             warnings: std::cell::RefCell::new(Vec::new()),
             indent: self.indent,
             in_throws: self.in_throws,

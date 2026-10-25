@@ -408,6 +408,9 @@ struct Transpiler {
     pub(crate) config: TranspileConfig,
     pub(crate) out: String,
     pub(crate) errors: std::cell::RefCell<Vec<TranspileError>>,
+    /// List literals bound to a hidden `let __extN` ahead of the current statement, keyed by the
+    /// literal's source position — see `hoist_external_borrowed_arrays`. `emit_expr` consults it.
+    pub(crate) hoisted_ext_arrays: std::cell::RefCell<std::collections::HashMap<(usize, usize), String>>,
     pub(crate) warnings: std::cell::RefCell<Vec<TranspileError>>,
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
@@ -1495,6 +1498,7 @@ impl Transpiler {
             config,
             out: String::new(),
             errors: std::cell::RefCell::new(Vec::new()),
+            hoisted_ext_arrays: Default::default(),
             warnings: std::cell::RefCell::new(Vec::new()),
             indent: 0,
             in_throws: false,

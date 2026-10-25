@@ -64,6 +64,12 @@ impl Transpiler {
 
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
+            Stmt::Let(s) => if let Some(v) = &s.value { self.hoist_external_borrowed_arrays(v) },
+            Stmt::Expr(e) => self.hoist_external_borrowed_arrays(e),
+            Stmt::Return(r) => if let Some(v) = &r.value { self.hoist_external_borrowed_arrays(v) },
+            _ => {}
+        }
+        match stmt {
             // A `T'static` local inside `main` was already hoisted to a module-level
             // `static` before this function's body started emitting (see `emit_item`'s
             // `Item::Fn` arm) — skip it here, it would otherwise re-emit as an invalid

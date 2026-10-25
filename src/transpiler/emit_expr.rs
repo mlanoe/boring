@@ -471,6 +471,9 @@ impl Transpiler {
                 }
             }
 
+            ExprKind::Array(_) if self.hoisted_ext_arrays.borrow().contains_key(&(expr.line, expr.col)) => {
+                self.hoisted_ext_arrays.borrow()[&(expr.line, expr.col)].clone()
+            }
             ExprKind::Array(elems) => {
                 // [TypeName] where TypeName is a known struct/enum → typed empty Vec::<T>::new()
                 // This handles Boring's `[T]{}` typed-empty-array idiom (parser splits it into
