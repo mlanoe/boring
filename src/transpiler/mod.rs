@@ -2453,10 +2453,6 @@ impl Transpiler {
              \x20       write!(f, \"]\")\n\
              \x20   }\n\
              }\n\n\
-             // BoringVal — bridge trait that gives BoringError::Other both Display and Any (downcast).\n\
-             // Every user-defined error enum automatically satisfies the blanket impl below.\n\
-             trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync {\n\
-             \x20   fn as_any(&self) -> &dyn std::any::Any;\n\
              // BoringFmtMap / BoringFmtSet — same unquoted rendering as the interpreter: {k: v} / {a, b}.\n\
              struct BoringFmtMap<'a, K: std::fmt::Display, V: std::fmt::Display, S>(pub &'a std::collections::HashMap<K, V, S>);\n\
              impl<'a, K: std::fmt::Display, V: std::fmt::Display, S> std::fmt::Display for BoringFmtMap<'a, K, V, S> {\n\
@@ -2476,6 +2472,10 @@ impl Transpiler {
              \x20       for (i, v) in self.0.iter().enumerate() {\n\
              \x20           if i > 0 { write!(f, \", \")?; }\n\
              \x20           write!(f, \"{}\", v)?;\n\
+             \x20       }\n\
+             \x20       write!(f, \"}}\")\n\
+             \x20   }\n\
+             }\n\n\
              // Recursive collection/tuple/optional rendering (interpreter-style); callers build a closure per element type.\n\
              fn bw_seq<T, F: Fn(&T) -> String>(v: &[T], f: F) -> String {\n\
              \x20   format!(\"[{}]\", v.iter().map(|x| f(x)).collect::<Vec<_>>().join(\", \"))\n\
@@ -2490,10 +2490,6 @@ impl Transpiler {
              // Every user-defined error enum automatically satisfies the blanket impl below.\n\
              trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync {\n\
              \x20   fn as_any(&self) -> &dyn std::any::Any;\n\
-             \x20       }\n\
-             \x20       write!(f, \"}}\")\n\
-             \x20   }\n\
-             }\n\n\
              }\n\
              impl<T: std::fmt::Display + std::any::Any + Send + Sync + 'static> BoringVal for T {\n\
              \x20   fn as_any(&self) -> &dyn std::any::Any { self }\n\

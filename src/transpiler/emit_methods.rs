@@ -6411,24 +6411,6 @@ impl Transpiler {
                 }
             }
         }
-    /// Interpolation-hole formatting driven by the hole's *resolved type*: an array/dict/set
-    /// whose elements are plain displayable values renders like the interpreter
-    /// (`[1, 2]`, `[a, b]`, `{k: 1}`, `{7}`). `None` when the type is unknown or nested, so
-    /// the caller falls back to its name-based heuristics.
-    pub(crate) fn typed_collection_fmt(&self, e: &Expr, expr_s: &str) -> Option<(String, &'static str)> {
-        let ty = self.resolve_expr_type(e)?;
-        let ty = ty.without_mut();
-        let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
-        let flat = |t: &Type| !is_collection_type(Some(t))
-            && !matches!(t.without_mut(), Type::Optional(_) | Type::Tuple(_));
-        match ty {
-            Type::Array(el) if flat(el) => Some((format!("BoringFmt(&{})", expr_s), "{}")),
-            Type::Dict(k, v) if flat(k) && flat(v) => Some((format!("BoringFmtMap(&{})", expr_s), "{}")),
-            Type::Set(el) if flat(el) => Some((format!("BoringFmtSet(&{})", expr_s), "{}")),
-            _ => None,
-        }
-    }
-
         (fmt, args)
     }
 
@@ -6968,7 +6950,6 @@ impl Transpiler {
             stream_iter_fns: self.stream_iter_fns.clone(),
             stream_throws_fns: self.stream_throws_fns.clone(),
             has_streams: self.has_streams,
-            external_rooted_locals: self.external_rooted_locals.clone(),
             channel_receivers: self.channel_receivers.clone(),
             string_channel_receivers: self.string_channel_receivers.clone(),
             channel_senders: self.channel_senders.clone(),
@@ -6987,6 +6968,7 @@ impl Transpiler {
             var_scalar_types: self.var_scalar_types.clone(),
             var_init_exprs: self.var_init_exprs.clone(),
             var_std_types: self.var_std_types.clone(),
+            external_rooted_locals: self.external_rooted_locals.clone(),
             string_vars: self.string_vars.clone(),
             str_index_cache_vars: self.str_index_cache_vars.clone(),
             struct_operator_methods: self.struct_operator_methods.clone(),

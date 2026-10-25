@@ -5932,15 +5932,15 @@ impl Transpiler {
                 // an optional struct field): printed as `nil` or the value, like the interpreter.
                 || self.resolve_expr_type(&a.value)
                     .is_some_and(|ty| matches!(ty.without_mut(), Type::Optional(_)));
+            if is_optional {
+                let raw = self.emit_expr(&a.value);
+                if let Some(r) = self.typed_collection_fmt(&a.value, &raw) { return r; }
+            }
             let expr_s = if is_optional {
                 let v = self.emit_expr(&a.value);
                 format!("{}.as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", v)
             } else {
                 self.emit_expr(&a.value)
-            if is_optional {
-                let raw = self.emit_expr(&a.value);
-                if let Some(r) = self.typed_collection_fmt(&a.value, &raw) { return r; }
-            }
             };
             if is_optional {
                 return (expr_s, "{}");
