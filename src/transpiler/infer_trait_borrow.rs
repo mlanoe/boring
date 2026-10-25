@@ -247,6 +247,33 @@ impl Transpiler {
             self.trait_borrowed_fns.insert(f.name.clone(), flags);
         }
 
+        // Read-only heap-struct parameters of `req` methods (see `readonly_struct_param`).
+        for (ty, m) in &facts.methods {
+            if method_key_by_name.get(m.name.as_str()).map(|k| k.as_str()) != Some(format!("{}::{}", ty, m.name).as_str()) {
+                continue;
+            }
+            let protocol_free = facts.implementers.iter()
+                .find(|(n, _, ms)| n == ty && ms.iter().any(|x| x.name == m.name))
+                .is_some_and(|(_, protos, _)| protos.is_empty());
+            let labeled_call = facts.method_call_sites.iter().any(|(n, _, l)| *l && *n == m.name);
+            if !protocol_free || labeled_call || m.mutating || !self.method_is_trait_borrow_candidate(m) { continue; }
+            let mut types: Vec<Option<Type>> = vec![None; m.params.len()];
+            let mut any = false;
+            for (i, p) in m.params.iter().enumerate() {
+                if self.readonly_struct_param(m, p) {
+                    types[i] = p.ty.as_ref().map(|t| borrowed_ty(p, t));
+                    any = true;
+                }
+            }
+            if !any { continue; }
+            let key = format!("{}::{}", ty, m.name);
+            let entry = self.trait_borrowed_methods.entry(key.clone()).or_insert_with(|| vec![None; m.params.len()]);
+            for (i, t) in types.into_iter().enumerate() {
+                if t.is_some() { entry[i] = t; }
+            }
+            self.trait_borrowed_method_by_name.insert(m.name.clone(), key);
+        }
+
         // Contract call-by-name entries (trait/dyn receivers are handled from the trait's own
         // parameter list at the call site; these serve receivers of unknown type).
         for (key, m, flags) in &contract_keys {
@@ -352,7 +379,7 @@ impl Transpiler {
         let mut any = false;
         for (p, borrowed) in out.params.iter_mut().zip(&flags) {
             if let (true, Some(Type::Named(n))) = (*borrowed, p.ty.as_ref()) {
-                if self.trait_method_names.contains_key(n.as_str()) {
+                if self.trait_method_names.contains_key(n.as_str()) || self.struct_fields.contains_key(n.as_str()) {
                     let q = if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
                     p.ty = p.ty.take().map(|t| Type::Qualified(Box::new(t), q));
                     any = true;
@@ -412,6 +439,31 @@ impl Transpiler {
             && !value_names.contains(&f.name)
             && !called_method_names.contains(&f.name)
             && !self.overloaded_fn_names.contains(&f.name)
+    }
+
+    /// A bare parameter of a heap-owning struct type (cloning it is not free) that the body only
+    /// reads: lent as `&T`, as if written `T&`, instead of deep-cloned at every call. A recursive
+    /// walk over a value-semantics tree (`req Node? findIn(Node n, int id)`) would otherwise
+    /// clone the whole subtree at each level. Free functions get this from qualifier inference;
+    /// methods go through the tables above because a call site may not know its receiver's type.
+    fn readonly_struct_param(&self, f: &FnDecl, p: &Param) -> bool {
+        !p.mutable && !p.rebindable
+            && matches!(p.ty.as_ref(), Some(Type::Named(n))
+                if self.struct_fields.contains_key(n.as_str())
+                    && !self.type_sizes.contains_key(n.as_str())
+                    && !self.struct_holds_dyn(n, false, &mut vec![]))
+            && super::helpers::only_read_uses(&f.body, &p.name, &|callee, is_method| self.callee_lends_args(callee, is_method))
+    }
+
+    /// A user-declared function, method or struct constructor: its call emission borrows or
+    /// clones an argument, never moves the bare value (unlike a builtin collection method).
+    pub(crate) fn callee_lends_args(&self, callee: &str, is_method: bool) -> bool {
+        if is_method {
+            !super::helpers::MUTATING_COLLECTION_METHODS.contains(&callee)
+                && self.struct_method_names.values().any(|ms| ms.contains(callee))
+        } else {
+            self.fn_sigs.contains_key(callee) || self.struct_fields.contains_key(callee)
+        }
     }
 
     fn method_is_trait_borrow_candidate(&self, f: &FnDecl) -> bool {

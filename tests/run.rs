@@ -732,6 +732,7 @@ interp_test!(array_block_flat);
 interp_test!(array_block_nested);
 interp_test!(array_block_if);
 interp_test!(array_block_for);
+interp_test!(inline_ctor_field_method_call);
 interp_test!(array_block_keyed_for);
 interp_test!(array_block_keyed_for_identifiable);
 interp_test!(view_state_lowering);

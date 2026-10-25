@@ -1553,6 +1553,15 @@ impl Transpiler {
                 // dispatch — `is_known_user_type` covers both, see its doc comment).
                 // Smart-pointer-qualified types (T'auto, T'weak, etc.) are excluded here;
                 // they have their own dispatch path.
+                // A lent struct parameter (`T&`, written or desugared from a read-only bare one)
+                // is a reference to a known struct too: direct field/method dispatch applies.
+                if let crate::ast::Type::Qualified(inner, OwnerQual::Borrow) = ty {
+                    if let crate::ast::Type::Named(tname) = inner.as_ref() {
+                        if self.is_known_user_type(tname.as_str()) {
+                            self.var_struct_types.insert(p.name.clone(), tname.clone());
+                        }
+                    }
+                }
                 if let crate::ast::Type::Named(tname) = ty {
                     if self.is_known_user_type(tname.as_str()) {
                         self.var_struct_types.insert(p.name.clone(), tname.clone());

@@ -1497,3 +1497,4 @@ transpile_test!(closure_scenarios);
 // used in several calls compiles. See the fixture's header.
 transpile_test!(bytes_array_field_and_param_reuse);
 transpile_test!(len_int_return);
+transpile_test!(inline_ctor_field_method_call);

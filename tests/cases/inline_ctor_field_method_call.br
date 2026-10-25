@@ -1,0 +1,22 @@
+# Regression: a method call on a trait-typed field of an inline-constructed value
+# (`Ctor().field.method(...)`, optionally several field levels deep) must emit ordinary
+# field accesses, not a `Ctor::field::method` path.
+
+trait Measurer:
+    req int width(string text)
+
+struct Mono as Measurer:
+    int cell
+    req int width(string text): text.length * cell
+
+struct Theme:
+    Measurer measurer = Mono(cell = 7)
+
+struct Outer:
+    Theme theme = Theme()
+
+def main():
+    print Theme().measurer.width("abc")
+    print Outer().theme.measurer.width("hello")
+    let theme = Theme()
+    print theme.measurer.width("ab")

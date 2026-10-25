@@ -734,8 +734,22 @@ impl Transpiler {
             && self.resolve_iterable_type(&s.iterable).as_ref()
                 .is_some_and(|t| matches!(t.without_mut(), Type::Array(elem) if elem.is_mut()))
             && self.loop_body_mutates_var(&s.body, &s.vars[0]);
+        // `for c in n.children:` over heap structs whose body only reads `c`: iterate by reference
+        // — `.iter().cloned()` deep-clones every element (and its whole subtree) for nothing.
+        let borrow_loop = s.vars.len() == 1 && !needs_auto_enumerate && !iter_mut_loop
+            && matches!(&s.iterable.kind, ExprKind::Var(_) | ExprKind::Field(..))
+            && self.resolve_iterable_type(&s.iterable).as_ref()
+                .is_some_and(|t| matches!(t.without_mut(), Type::Array(elem)
+                    if matches!(elem.without_mut(), Type::Named(n)
+                        if self.struct_fields.contains_key(n.as_str())
+                            && !self.type_sizes.contains_key(n.as_str())
+                            && !self.struct_holds_dyn(n, false, &mut vec![]))))
+            && !self.loop_body_mutates_var(&s.body, &s.vars[0])
+            && crate::transpiler::helpers::only_read_uses(&s.body, &s.vars[0],
+                &|callee, is_method| self.callee_lends_args(callee, is_method));
         let iter_expr = match &s.iterable.kind {
             _ if iter_mut_loop => format!("{}.iter_mut()", iter),
+            _ if borrow_loop => format!("{}.iter()", iter),
             // A bound read through a lock (`0..st.items.length` on an `'actor`/`Slot` state)
             // leaves its guard alive as a temporary for the whole `for` — the body re-locking the
             // same cell would deadlock. Evaluate the range first, so the guard dies there.

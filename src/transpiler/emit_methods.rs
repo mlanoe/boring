@@ -4207,6 +4207,13 @@ impl Transpiler {
                     !is_struct_field
                 }
             }
+            // A field chain rooted in a call result (`Theme().measurer`, `Outer().a.b`) is a value
+            // however its rendered text looks (the inlined constructor may itself contain `::`).
+            ExprKind::Field(..) if {
+                let mut root = obj;
+                while let ExprKind::Field(inner, _) = &root.kind { root = inner; }
+                matches!(root.kind, ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..))
+            } => false,
             _ => obj_s.contains("::") && !obj_s.ends_with(')') && !obj_s.ends_with('}'),
         };
         if is_path_receiver {

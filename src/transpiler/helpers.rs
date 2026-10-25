@@ -3254,3 +3254,41 @@ mod placeholder_net_tests {
         assert!(find_placeholders("pub /* var */ x: i32,\n/* a note */\n").is_empty());
     }
 }
+
+/// True when every occurrence of the variable `name` in `body` is a plain read the emitter can
+/// serve from a shared reference: a field read, a method receiver, an unlabeled call argument
+/// (each emitted as a borrow or a `.clone()` of the pointee) or a `return name`. `arg_ok(callee,
+/// is_method)` says whether the callee is a user function/method/constructor whose call
+/// emission lends or clones its arguments (a builtin like `Vec::insert` takes the bare value). Anything else
+/// — assigned, stored, matched, interpolated, a tail expression, captured by a closure or task —
+/// needs the owned value.
+pub(crate) fn only_read_uses(body: &[Stmt], name: &str, arg_ok: &dyn Fn(&str, bool) -> bool) -> bool {
+    let is_p = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if v == name);
+    let (mut total, mut safe, mut escapes) = (0usize, 0usize, false);
+    walk_stmts(body, &mut |node| match node {
+        WalkNode::Stmt(Stmt::Return(r)) => {
+            if r.value.as_ref().is_some_and(is_p) { safe += 1; }
+        }
+        WalkNode::Stmt(_) => {}
+        WalkNode::Expr(e) => match &e.kind {
+            ExprKind::Var(v) if v == name => total += 1,
+            ExprKind::Field(obj, _) if is_p(obj) => safe += 1,
+            ExprKind::MethodCall(recv, m, args) => {
+                if is_p(recv) { safe += 1; }
+                if arg_ok(m, true) {
+                    safe += args.iter().filter(|a| a.label.is_none() && !a.spread && is_p(&a.value)).count();
+                }
+            }
+            ExprKind::Call(callee, args) => {
+                if matches!(&callee.kind, ExprKind::Var(f) if arg_ok(f, false)) {
+                    safe += args.iter().filter(|a| a.label.is_none() && !a.spread && is_p(&a.value)).count();
+                }
+            }
+            ExprKind::Closure(..) | ExprKind::Task(_) => {
+                walk_expr(e, &mut |n| if let WalkNode::Expr(x) = n { if is_p(x) { escapes = true; } });
+            }
+            _ => {}
+        },
+    });
+    total == safe && !escapes
+}
