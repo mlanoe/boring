@@ -888,6 +888,13 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
             assert!(host.contains("+ 15) / 16"), "{format}: {host}");
             continue;
         }
+        if format != "q6_k" {
+            // Q3_K/Q2_K: four-row SIMD-group schedule reduced with simd_sum
+            // (no butterfly shuffle), like Q4_K.
+            assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{format}: {msl}");
+            assert!(!msl.contains("simd_shuffle_xor"), "{format}: {msl}");
+            continue;
+        }
         assert!(msl.contains("simd_shuffle_xor"), "{format}: {msl}");
         if format == "q6_k" {
             assert!(msl.contains("bp_d = simd_shuffle(bp_d, 0)"), "{format}: {msl}");

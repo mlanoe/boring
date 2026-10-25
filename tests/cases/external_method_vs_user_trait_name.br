@@ -18,5 +18,6 @@ bool viaLocal(Range<int> r):
 
 def main():
     let r = Range(start = 4, end = 9)
+    let r2 = Range(start = 5, end = 9)
     let m = M()
-    print "{pow2(r)} {viaLocal(r)} {m.isPositive("x")}"
+    print "{pow2(r)} {viaLocal(r2)} {m.isPositive("x")}"
