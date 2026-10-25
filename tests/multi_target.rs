@@ -434,3 +434,41 @@ fn placement_hints_are_validated_and_checked_against_a_single_target() {
     assert!(ok, "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const LAST_CHOICE: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+print "{k.buf[3]} on {kernel.lastChoice(k)}"
+"#;
+
+/// `kernel.lastChoice(k)` names where a kernel's latest launch ran: the router's answer in a
+/// multi-target build, the target itself in a single-target one, the CPU in `boring run`.
+#[test]
+fn last_choice_names_the_backend_that_ran_the_kernel() {
+    let dir = project("last_choice");
+    std::fs::write(source(&dir), LAST_CHOICE).unwrap();
+
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(source(&dir)).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "5 on cpu");
+
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (stdout, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert_eq!(stdout.trim(), "5 on cpu");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu")]);
+        assert_eq!(stdout.trim(), "5 on wgpu");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

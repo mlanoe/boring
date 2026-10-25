@@ -634,6 +634,7 @@ impl HostEmitter {
         self.blank();
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Arc<HipContext> { boring_gpu_ctx() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Arc<HipContext> { boring_gpu_ctx() }");
+        self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"rocm\".into() }");
         self.line("#[allow(dead_code)]");
         self.line("fn __boring_gpu_copy_d2h<T: Copy + Default>(device: &Arc<HipContext>, _queue: &Arc<HipContext>, buf: &DeviceBuffer<T>) -> Vec<T> {");
         self.indent += 1;
@@ -3411,8 +3412,18 @@ impl HostEmitter {
                         }
                     }
                 }
-                // `GPU.all()` → iterator over all HIP devices.
                 if let ExprKind::Var(name) = &obj.kind {
+                    // `kernel.lastChoice(k)`: the backend `k`'s most recent launch ran on.
+                    if name == "kernel" && method == "lastChoice" {
+                        let kernel = args.first().and_then(|a| match &a.value.kind {
+                            ExprKind::Var(v) => self.var_kernel_type.get(v.as_str()),
+                            _ => None,
+                        });
+                        return match kernel {
+                            Some(kernel) => format!("__boring_last_choice(\"{kernel}\")"),
+                            None => "compile_error!(\"kernel.lastChoice takes a kernel variable\")".to_string(),
+                        };
+                    }
                     if name == "fs" && method == "writeBytes" {
                         let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
                         let bytes = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();

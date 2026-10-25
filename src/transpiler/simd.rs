@@ -169,6 +169,12 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
         unified,
     };
     e.raw(PRELUDE);
+    // `kernel.lastChoice(k)`: in a multi-target build the router knows where each kernel ran.
+    e.raw(if unified {
+        "#[allow(dead_code)] fn __boring_last_choice(kernel: &str) -> std::sync::Arc<str> { crate::unified::last_choice(kernel).unwrap_or(\"cpu\").into() }\n"
+    } else {
+        "#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"cpu\".into() }\n"
+    });
     let mirrors = device_struct_mirrors(program, &kernels, &mut e.errors);
     e.raw(&mirrors);
     for kernel in &kernels {

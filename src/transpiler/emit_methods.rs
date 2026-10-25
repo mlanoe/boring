@@ -887,6 +887,18 @@ impl Transpiler {
             if v == "fs" {
                 return Some(self.emit_fs_call(method, args));
             }
+            // `kernel.lastChoice(k)`: the backend `k`'s most recent launch ran on. Every kernel
+            // target defines `__boring_last_choice` (a multi-target build asks its router).
+            if v == "kernel" && method == "lastChoice" && self.is_gpu_target {
+                let kernel = args.first().and_then(|a| match &a.value.kind {
+                    ExprKind::Var(name) => self.kernel_vars.get(name.as_str()),
+                    _ => None,
+                });
+                return Some(match kernel {
+                    Some(kernel) => format!("__boring_last_choice(\"{kernel}\")"),
+                    None => "compile_error!(\"kernel.lastChoice takes a kernel variable\")".to_string(),
+                });
+            }
         }
         None
     }

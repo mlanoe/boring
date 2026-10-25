@@ -1016,6 +1016,7 @@ impl HostEmitter {
         self.blank();
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Device { boring_metal_device() }");
+        self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"metal\".into() }");
         self.line("#[allow(dead_code)]");
         self.line("fn __boring_gpu_copy_d2h<T: Copy>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<T> {");
         self.indent += 1;
@@ -3551,8 +3552,18 @@ impl HostEmitter {
                         }
                     }
                 }
-                // `GPU.all()` → Device::all()
                 if let ExprKind::Var(name) = &obj.kind {
+                    // `kernel.lastChoice(k)`: the backend `k`'s most recent launch ran on.
+                    if name == "kernel" && method == "lastChoice" {
+                        let kernel = args.first().and_then(|a| match &a.value.kind {
+                            ExprKind::Var(v) => self.var_kernel_type.get(v.as_str()),
+                            _ => None,
+                        });
+                        return match kernel {
+                            Some(kernel) => format!("__boring_last_choice(\"{kernel}\")"),
+                            None => "compile_error!(\"kernel.lastChoice takes a kernel variable\")".to_string(),
+                        };
+                    }
                     // `fs.writeBytes(path, bytes)` — write Vec<isize> as binary file
                     if name == "fs" && method == "writeBytes" {
                         let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();

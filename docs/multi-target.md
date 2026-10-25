@@ -57,6 +57,18 @@ build must also meet: `boring build --target simd` rejects an `@only(.gpu)` kern
 target rejects an `@only(.cpu)` one. `prefer =` and `@prefer` are accepted and ignored by
 single-target builds and by `boring run`. Anything other than `.cpu` or `.gpu` is a compile error.
 
+## Where did it run?
+
+```boring
+kernel:
+    k(block = 256, grid = 4096)
+print "scale ran on {kernel.lastChoice(k)}"     # cpu, wgpu, metal, cuda or rocm
+```
+
+`kernel.lastChoice(k)` is the name of the backend `k`'s most recent launch ran on. In a
+multi-target build it is the router's answer; in a single-target build it is that target (`cpu`
+for simd); `boring run` has no backends and always answers `cpu`. It takes a kernel variable.
+
 ## How a build runs
 
 The program runs **once, on the CPU host** (the simd backend, always part of a multi-target
@@ -135,7 +147,7 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 ## Not implemented yet
 
 - Finer device classes (`.discrete`, `.integrated`, a remote service) and an inventory of the
-  backends from Boring code (`kernel.backends()`, `kernel.lastChoice(k)`).
+  backends from Boring code (`kernel.backends()`, with each backend's score and load).
 - Device residency between launches: each routed launch copies its buffers in and out.
 - Routing for programs with a `Screen`, and for kernels with shared memory, atomics or struct
   fields.

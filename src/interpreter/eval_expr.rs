@@ -792,6 +792,11 @@ impl Interpreter {
                 let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                 return self.call_fs_method(method, arg_vals, line);
             }
+            // `kernel.lastChoice(k)`: the interpreter has no backends, so everything "ran" on the CPU.
+            if v == "kernel" && method == "lastChoice" {
+                self.eval_args(args, Rc::clone(&env))?;
+                return Ok(Value::Str("cpu".to_string()));
+            }
         }
 
         // Type-level call: `Counter.zero()` or `Counter.set_count(v)`
