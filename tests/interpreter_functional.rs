@@ -495,6 +495,7 @@ itest!(lend_disjoint_receiver_ok);
 itest!(lend_and_read_same_local_lock_wrapper);
 itest!(guard_let_else_panic_throws);
 itest!(array_index_as_cast);
+itest!(index_cast_expr);
 itest!(int_literal_overflow_cast);
 itest!(array_block_flat_transpile);
 itest!(array_block_keyed_for);

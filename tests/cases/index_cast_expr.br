@@ -1,0 +1,22 @@
+# Regression: any integer-typed index expression gets `as usize` at the index
+# site — casts (`a[x as int]`), unary, nested, calls — in reads, writes and
+# compound assignments. A cast index used to emit `a[(x as isize)]`, which
+# rustc rejects ("the type `[isize]` cannot be indexed by `isize`").
+
+def int two():
+    2
+
+def main():
+    mut [int] a = [10, 20, 30, 40, 50]
+    let [int] b = [1, 3]
+    let int8 small = 4
+    print a[(1 as int)]
+    print a[b[0] as int]
+    print a[small as int]
+    print a[(two() as int) + 1]
+    print a[b[b[0]]]
+    a[(2 as int)] = 99
+    a[b[1] as int] += 5
+    a[small as int] -= 1
+    a[b[0] as int] *= 2
+    print a

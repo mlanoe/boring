@@ -1675,7 +1675,8 @@ impl Transpiler {
             let cast_idx = |raw: String, e: &crate::ast::Expr| -> String {
                 match &e.kind {
                     ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
-                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) =>
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                | ExprKind::Cast(..) | ExprKind::UnaryOp(..) | ExprKind::Else(..) | ExprKind::If(..) | ExprKind::Match(..) =>
                         format!("({}) as usize", raw),
                     _ => raw,
                 }
@@ -1753,7 +1754,8 @@ impl Transpiler {
             let raw = self.emit_expr(idx);
             let idx_s = match &idx.kind {
                 ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
-                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) =>
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                | ExprKind::Cast(..) | ExprKind::UnaryOp(..) | ExprKind::Else(..) | ExprKind::If(..) | ExprKind::Match(..) =>
                     format!("({}) as usize", raw),
                 _ => raw,
             };
@@ -1875,6 +1877,7 @@ impl Transpiler {
             match &idx.kind {
                 ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
                 | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                | ExprKind::Cast(..) | ExprKind::UnaryOp(..) | ExprKind::Else(..) | ExprKind::If(..) | ExprKind::Match(..)
                 // Nested index read (`a[b[i]]`), also as the target of `a[b[i]] += v`.
                 | ExprKind::Index(..) => format!("({}) as usize", raw),
                 _ => raw,
@@ -3542,7 +3545,8 @@ impl Transpiler {
                 let cast_idx = |raw: String, e: &Expr| -> String {
                     match &e.kind {
                         ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
-                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..) =>
+                | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                | ExprKind::Cast(..) | ExprKind::UnaryOp(..) | ExprKind::Else(..) | ExprKind::If(..) | ExprKind::Match(..) =>
                             format!("({}) as usize", raw),
                         _ => raw,
                     }
@@ -3712,6 +3716,7 @@ impl Transpiler {
             let idx_s = match &idx_expr.kind {
                 ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..)
                 | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                | ExprKind::Cast(..) | ExprKind::UnaryOp(..) | ExprKind::Else(..) | ExprKind::If(..) | ExprKind::Match(..)
                 // Nested index read (`list[cursor[c]] = v`): the element is an `int` (`isize`).
                 | ExprKind::Index(..) => format!("({}) as usize", raw_idx),
                 _ => raw_idx,
