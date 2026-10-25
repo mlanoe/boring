@@ -2292,6 +2292,7 @@ fn msl_type(ty: &Type) -> String {
         Type::Uint64               => msl_unsupported_width("uint64", "uint64_t"),
         Type::Int128               => msl_unsupported_width("int128", "int64_t"),
         Type::Uint128               => msl_unsupported_width("uint128", "uint64_t"),
+        Type::Float16            => "half".into(),
         Type::Float32            => "float".into(),
         // MSL has no native `double` — a `float64` (or plain `float`, its alias) kernel
         // field used to be silently computed at 32-bit precision on-device with nothing
@@ -2312,6 +2313,7 @@ fn msl_type(ty: &Type) -> String {
         Type::ArrayNExpr(inner, _) => format!("{}*", msl_type(inner)),
         Type::LabeledArray(inner, _) => format!("{}*", msl_type(inner)),
         Type::Named(n) => match n.as_str() {
+            "float16" | "f16"       => "half".to_string(),
             "float32" | "f32"       => "float".to_string(),
             "float" | "float64" | "f64" => msl_unsupported_f64("float"),
             "int"                   => "int64_t".to_string(),

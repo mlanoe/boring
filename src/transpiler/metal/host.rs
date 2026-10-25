@@ -4016,6 +4016,7 @@ impl HostEmitter {
             // whose real Metal run produced all-zero output despite `cargo build`
             // and `cargo run` both succeeding cleanly.
             let elem = self.kernel_ctor_buffer_elem_type(name, i).unwrap_or_else(|| "f32".to_string());
+            let convert = if elem == "half::f16" { "half::f16::from_f32(x as f32)".to_string() } else { format!("x as {elem}") };
             if is_buffer_pos {
                 // `k_prev.field` passed directly as an argument (this
                 // codebase's common inline-chaining shape, e.g.
@@ -4049,15 +4050,15 @@ impl HostEmitter {
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         return format!(
-                            "(match &{v} {{ BoringKernelArg::Resident(buf, _) => {resident}, BoringKernelArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            "(match &{v} {{ BoringKernelArg::Resident(buf, _) => {resident}, BoringKernelArg::Host(v) => {dev}.new_buffer_with_data((v.iter().copied().collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
                             resident = if is_read_only_buffer { "buf.clone()".to_string() } else { format!("__boring_metal_buffer_copy(&{dev}, &buf)?") },
                             v = vname, dev = dev, elem = elem
                         );
                     }
                     if self.f64_array_locals.contains(vname.as_str()) {
                         return format!(
-                            "{dev}.new_buffer_with_data(({v}.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, ({v}.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared)",
-                            v = vname, dev = dev, elem = elem
+                            "{dev}.new_buffer_with_data(({v}.iter().map(|&x| {convert}).collect::<Vec<{elem}>>()).as_ptr() as *const _, ({v}.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared)",
+                            v = vname, dev = dev, elem = elem, convert = convert
                         );
                     }
                 }
@@ -4075,8 +4076,8 @@ impl HostEmitter {
                 // all-zero output despite a clean `cargo build`.
                 let s = self.coerce_call_arg(&a.value, false);
                 return format!(
-                    "{{ let __boring_buf: Vec<{elem}> = ({s}).iter().map(|&x| x as {elem}).collect(); {dev}.new_buffer_with_data(__boring_buf.as_ptr() as *const _, (__boring_buf.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }}",
-                    dev = dev, s = s, elem = elem
+                    "{{ let __boring_buf: Vec<{elem}> = ({s}).iter().map(|&x| {convert}).collect(); {dev}.new_buffer_with_data(__boring_buf.as_ptr() as *const _, (__boring_buf.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }}",
+                    dev = dev, s = s, elem = elem, convert = convert
                 );
             }
             // Scalar position -- unchanged. A `Vec<f64>` local bound
@@ -4216,8 +4217,10 @@ fn general_host_elem_type(ty: &Type) -> String {
         Type::Qualified(inner, _) => general_host_elem_type(inner),
         // `float32` keeps its own real width here — only the bare `float`/`float64`
         // spelling follows this function's "general pass" f64 convention.
+        Type::Float16 => "half::f16".into(),
         Type::Float32 => "f32".into(),
         Type::Float64 => "f64".into(),
+        Type::Named(n) if n == "float16" || n == "f16" => "half::f16".into(),
         Type::Named(n) if n == "float32" || n == "f32" => "f32".into(),
         Type::Named(n) if n == "float" || n == "float64" || n == "f64" => "f64".into(),
         other => rust_type(other),
@@ -4243,6 +4246,7 @@ fn rust_type(ty: &Type) -> String {
         // `msl_unsupported_width` in metal/device.rs), so this file's own convention
         // keeps a single host representation for both, unchanged from before for
         // Float64 and now extended to cover the new Float32 type too.
+        Type::Float16          => "half::f16".into(),
         Type::Float32          => "f32".into(),
         Type::Float64          => "f32".into(),
         Type::Bool           => "bool".into(),
@@ -4274,6 +4278,7 @@ fn rust_type(ty: &Type) -> String {
         Type::Optional(inner)  => format!("Option<{}>", rust_type(inner)),
         Type::Named(n) => match n.as_str() {
             "float" | "float64" | "f64" => "f32",
+            "float16" | "f16"           => "half::f16",
             "float32" | "f32"           => "f32",
             "int"           => "isize",
             "uint"          => "usize",
@@ -4310,6 +4315,7 @@ fn rust_type(ty: &Type) -> String {
 
 fn elem_size_bytes(ty: &Type) -> usize {
     match ty {
+        Type::Float16                                => 2,
         Type::Float32 | Type::Float64                => 4,
         Type::Int | Type::Uint                    => 8,
         Type::Uint8 | Type::Int8                   => 1,
@@ -4320,6 +4326,7 @@ fn elem_size_bytes(ty: &Type) -> usize {
         Type::Bool                                => 1,
         Type::Named(n) => match n.as_str() {
             "float" | "float64" | "f64" => 4,
+            "float16" | "f16"           => 2,
             "float32" | "f32"           => 4,
             "int"   | "i64" => 8,
             "uint"  | "u64" => 8,

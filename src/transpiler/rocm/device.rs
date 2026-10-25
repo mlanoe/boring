@@ -845,6 +845,7 @@ fn c_type(ty: &Type) -> String {
         Type::Uint32             => "uint32_t".into(),
         Type::Uint64             => "uint64_t".into(),
         Type::Uint128             => "unsigned __int128 /* GCC/HIP-clang extension */".into(),
+        Type::Float16            => "_Float16".into(),
         Type::Float32            => "float".into(),
         Type::Float64            => "double".into(),
         Type::Bool             => "int".into(),
@@ -859,6 +860,7 @@ fn c_type(ty: &Type) -> String {
         Type::LabeledArray(inner, _) => format!("{}*", c_type(inner)),
         // Named primitives — the kernel field parser may store raw keyword strings.
         Type::Named(n) => match n.as_str() {
+            "float16" | "f16" => "_Float16".to_string(),
             "float32" | "f32" => "float".to_string(),
             "float" | "float64" | "f64" => "double".to_string(),
             "int"   | "i64"         => "int64_t".to_string(),

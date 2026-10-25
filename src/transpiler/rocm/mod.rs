@@ -449,6 +449,7 @@ path = "src/main.rs"
 # added only for a `Screen` (display) program -- they're a CPU-side windowing/
 # present layer, not a GPU compute crate.
 [dependencies]
+half = {{ version = "2", features = ["bytemuck"] }}
 {extra_deps}"#,
         stem = stem,
         version = version,

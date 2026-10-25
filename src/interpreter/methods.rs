@@ -1183,6 +1183,7 @@ impl Interpreter {
             Type::Uint32 => matches!(val, Value::Uint32(_)),
             Type::Uint64 => matches!(val, Value::Uint64(_)),
             Type::Uint128 => matches!(val, Value::Uint128(_)),
+            Type::Float16  => matches!(val, Value::Float32(_)),
             Type::Float32  => matches!(val, Value::Float32(_)),
             Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
@@ -3117,6 +3118,18 @@ impl Interpreter {
             // `as float32` — bit-truncating narrowing from float64 (Rust `as f32`
             // semantics: silent precision loss, overflow saturates to infinity —
             // docs/float-width-types.md §4, no stricter checked narrowing invented here).
+            Type::Float16 => {
+                let f = match val {
+                    Value::Float32(f) => f,
+                    Value::Float64(f) => f as f32,
+                    Value::Int(n) => n as f32,
+                    Value::Uint(n) => n as f32,
+                    Value::Str(s) => return Ok(s.trim().parse::<f32>().ok()
+                        .map(|v| Value::Float32(half::f16::from_f32(v).to_f32())).unwrap_or(Value::Nil)),
+                    _ => return Ok(Value::Nil),
+                };
+                Ok(Value::Float32(half::f16::from_f32(f).to_f32()))
+            }
             Type::Float32 => match val {
                 Value::Float32(f) => Ok(Value::Float32(f)),
                 Value::Float64(f) => Ok(Value::Float32(f as f32)),
@@ -3336,7 +3349,7 @@ impl Interpreter {
             Type::Nil | Type::Void | Type::Never => Ok(()),
 
             // Bare primitive types: stack-allocated by default, always valid.
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool => Ok(()),
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool => Ok(()),
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Ok(()),
             // Bare String without qualifier: requires explicit qualification.

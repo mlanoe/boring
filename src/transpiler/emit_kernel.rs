@@ -617,6 +617,7 @@ impl Transpiler {
                     let a = self.emit_expr(&arg.value);
                     param_to_arg.insert(param_name, a.clone());
                     let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
+                    let convert = if inner == "half::f16" { "x".to_string() } else { format!("x as {inner}") };
                     // If this constructor argument is literally one of the *current*
                     // function's own parameters, and that parameter is typed
                     // `BoringKernelArg<T>` (`current_fn_gpu_arg_param_names` —
@@ -635,7 +636,7 @@ impl Transpiler {
                         self.line(&format!("match &{a} {{"));
                         self.line("    BoringKernelArg::Host(v) => {");
                         self.line(&format!(
-                            "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                            "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| {convert}).collect::<Vec<{inner}>>());"
                         ));
                         self.line("    }");
                         self.line("}");
@@ -657,13 +658,13 @@ impl Transpiler {
                         self.line("    }");
                         self.line("    BoringKernelArg::Host(v) => {");
                         self.line(&format!(
-                            "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                            "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| {convert}).collect::<Vec<{inner}>>());"
                         ));
                         self.line("    }");
                         self.line("}");
                     } else {
                         self.line(&format!(
-                            "{var_name}.copy_{field_name}_to_device(&{a}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                            "{var_name}.copy_{field_name}_to_device(&{a}.iter().map(|&x| {convert}).collect::<Vec<{inner}>>());"
                         ));
                     }
                     arg_rust = Some(a);
@@ -1450,6 +1451,7 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
         // struct field now does via `wgsl_unsupported_f64`/`msl_unsupported_f64` —
         // is real but pre-existing (identical to `float`'s behavior before this
         // feature), not introduced by float32/float64, and is left as-is.
+        Type::Float16 => "half::f16",
         Type::Float32 => "f32",
         Type::Float64 => "f32",
         Type::Bool  => "bool",
@@ -1466,6 +1468,7 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
             "uint32"                 => "u32",
             "uint64"                 => "u64",
             "uint128"                => "u128",
+            "float16" | "f16" => "half::f16",
             "float32" | "float" | "float64" => "f32",
             "bool"                   => "bool",
             _                        => "i64",
@@ -1494,6 +1497,7 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
         Type::Uint32 => "u32",
         Type::Uint64 => "u64",
         Type::Uint128 => "u128",
+        Type::Float16 => "half::f16",
         Type::Float32 => "f32",
         Type::Float64 => "f64",
         Type::Bool => "bool",
@@ -1510,6 +1514,7 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
             "uint32"       => "u32",
             "uint64"       => "u64",
             "uint128"      => "u128",
+            "float16" | "f16" => "half::f16",
             "float32"      => "f32",
             "float" | "float64" => "f64",
             "bool"         => "bool",

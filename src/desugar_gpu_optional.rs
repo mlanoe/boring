@@ -131,8 +131,8 @@ fn zero(ty: &Type, at: &Expr) -> Expr {
     mk(
         match unwrap_ty(ty) {
             Type::Bool => ExprKind::Bool(false),
-            Type::Float32 | Type::Float64 => ExprKind::Float(0.0),
-            Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64") => ExprKind::Float(0.0),
+            Type::Float16 | Type::Float32 | Type::Float64 => ExprKind::Float(0.0),
+            Type::Named(n) if matches!(n.as_str(), "float" | "float16" | "float32" | "float64") => ExprKind::Float(0.0),
             _ => ExprKind::Int(0),
         },
         at,

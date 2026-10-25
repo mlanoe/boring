@@ -255,6 +255,7 @@ impl Checker {
 
     fn describe_type_for_atomic_error(ty: &Type) -> String {
         match ty {
+            Type::Float16 => "float16".to_string(),
             Type::Float32 => "float32".to_string(),
             Type::Float64 => "float64 (`float`)".to_string(),
             Type::Int128 => "int128".to_string(),

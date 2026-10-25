@@ -227,6 +227,7 @@ impl Interpreter {
 
             // A JSON integer is a valid float (serde accepts `1` for an `f64` field),
             // which is exactly what makes the doc's `JNum(1.0)` output correct.
+            Type::Float16 => json.as_f64().map(|n| Value::Float32(half::f16::from_f32(n as f32).to_f32())),
             Type::Float32 => json.as_f64().map(|n| Value::Float32(n as f32)),
             Type::Float64 => json.as_f64().map(Value::Float64),
 

@@ -579,6 +579,7 @@ pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
         "uint128" | "Uint128" => "u128".into(),
         // `float`/`Float` are pure aliases of `float64` (docs/float-width-types.md §2) —
         // fold into the same "f64" bucket "float64"/"Float64" resolve to.
+        "float16" | "Float16" | "f16" => "half::f16".into(),
         "float32" | "Float32" => "f32".into(),
         "float"   | "Float" | "float64" | "Float64" => "f64".into(),
         "bool"   | "Bool"   => "bool".into(),
@@ -2286,6 +2287,7 @@ pub(crate) fn mangle_type_name(ty: &Type) -> String {
     match ty {
         Type::Int                  => "int".into(),
         Type::Uint                 => "uint".into(),
+        Type::Float16                => "float16".into(),
         Type::Float32                => "float32".into(),
         Type::Float64                => "float64".into(),
         Type::Bool                 => "bool".into(),
@@ -2409,6 +2411,7 @@ pub(crate) fn types_compatible(expected: &Type, actual: &Type) -> bool {
     match (expected, actual) {
         (Type::Int,   Type::Int)   => true,
         (Type::Uint,  Type::Uint)  => true,
+        (Type::Float16, Type::Float16) => true,
         (Type::Float32, Type::Float32) => true,
         (Type::Float64, Type::Float64) => true,
         (Type::Bool,  Type::Bool)  => true,
@@ -2418,6 +2421,7 @@ pub(crate) fn types_compatible(expected: &Type, actual: &Type) -> bool {
         (Type::Named(n), t) | (t, Type::Named(n)) => match n.as_str() {
             "int"    => matches!(t, Type::Int),
             "uint"   => matches!(t, Type::Uint),
+            "float16" | "f16" => matches!(t, Type::Float16),
             "float32" | "f32" => matches!(t, Type::Float32),
             "float" | "float64" | "f64" => matches!(t, Type::Float64),
             "bool"   => matches!(t, Type::Bool),

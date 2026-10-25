@@ -72,7 +72,7 @@ impl Decls {
         match ty {
             Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32
             | Type::Int64 | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64
-            | Type::Uint128 | Type::Float32 | Type::Float64 | Type::Str | Type::Bool
+            | Type::Uint128 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Str | Type::Bool
             | Type::Nil | Type::Void | Type::Never | Type::ConstInt(_)
             | Type::Tuple(_) | Type::Optional(_) | Type::Fn(..) => Value,
             Type::Array(_) | Type::ArrayN(..) | Type::ArrayNExpr(..) | Type::LabeledArray(..)
@@ -107,7 +107,7 @@ fn is_primitive_name(n: &str) -> bool {
         "int" | "uint" | "float" | "bool" | "string" | "byte" | "char"
             | "int8" | "int16" | "int32" | "int64" | "int128"
             | "uint8" | "uint16" | "uint32" | "uint64" | "uint128"
-            | "float32" | "float64"
+            | "float16" | "float32" | "float64"
     )
 }
 

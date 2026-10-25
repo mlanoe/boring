@@ -978,6 +978,7 @@ fn default_value_for_type(ty: &Type) -> Value {
         Type::Uint32 => Value::Uint32(0),
         Type::Uint64 => Value::Uint64(0),
         Type::Uint128 => Value::Uint128(0),
+        Type::Float16 => Value::Float32(0.0),
         Type::Float32 => Value::Float32(0.0),
         Type::Float64 => Value::Float64(0.0),
         Type::Bool => Value::Bool(false),

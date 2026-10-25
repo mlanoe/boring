@@ -221,6 +221,7 @@ path = "src/main.rs"
 
 [dependencies]
 metal = "0.29"
+half = {{ version = "2", features = ["bytemuck"] }}
 {extra_deps}"#,
         stem = stem,
         version = version,

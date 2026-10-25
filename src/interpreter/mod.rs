@@ -130,7 +130,7 @@ fn types_match_for_overload(a: &Type, b: &Type) -> bool {
     use Type::*;
     match (a, b) {
         (Int, Int) | (Uint, Uint) | (Uint8, Uint8) | (Bool, Bool) | (Str, Str) => true,
-        (Float32, Float32) | (Float64, Float64) => true,
+        (Float16, Float16) | (Float32, Float32) | (Float64, Float64) => true,
         (Int8, Int8) | (Int16, Int16) | (Int32, Int32) | (Int64, Int64) | (Int128, Int128) => true,
         (Uint16, Uint16) | (Uint32, Uint32) | (Uint64, Uint64) | (Uint128, Uint128) => true,
         (Named(x), Named(y)) => x == y,
@@ -147,6 +147,7 @@ fn types_match_for_overload(a: &Type, b: &Type) -> bool {
             "uint32" => matches!(t, Uint32),
             "uint64" => matches!(t, Uint64),
             "uint128" => matches!(t, Uint128),
+            "float16" | "f16" => matches!(t, Float16),
             "float32" | "f32" => matches!(t, Float32),
             "float" | "float64" | "f64" => matches!(t, Float64),
             "bool"   => matches!(t, Bool),
@@ -2493,6 +2494,7 @@ impl Interpreter {
         // `int`/`uint` are independent of `int64`/`uint64` (docs/float-width-types.md
         // §2). Every spelling below converges on the same two real Value variants.
         aliases.insert("float".into(),   Type::Float64);
+        aliases.insert("float16".into(), Type::Float16);
         aliases.insert("float32".into(), Type::Float32);
         aliases.insert("float64".into(), Type::Float64);
         aliases.insert("bool".into(),   Type::Bool);
@@ -2517,6 +2519,7 @@ impl Interpreter {
         // label over one shared float — same plain (unqualified) treatment as
         // `i8`/`u32`/etc. above, not the `Qualified(_, Stack)` wrapper this used to
         // carry back when both spellings collapsed onto the same `Type::Float`.
+        aliases.insert("f16".into(),   Type::Float16);
         aliases.insert("f32".into(),   Type::Float32);
         aliases.insert("f64".into(),   Type::Float64);
         // Uppercase base-type aliases — resolve Named("String") etc. to the primitive type so
@@ -2535,6 +2538,7 @@ impl Interpreter {
         aliases.insert("Uint64".into(),  Type::Uint64);
         aliases.insert("Uint128".into(), Type::Uint128);
         aliases.insert("Float".into(),   Type::Float64);
+        aliases.insert("Float16".into(), Type::Float16);
         aliases.insert("Float32".into(), Type::Float32);
         aliases.insert("Float64".into(), Type::Float64);
         aliases.insert("Bool".into(),   Type::Bool);

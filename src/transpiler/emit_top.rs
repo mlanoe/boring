@@ -3711,6 +3711,7 @@ impl Transpiler {
             Type::Uint32 => "u32".into(),
             Type::Uint64 => "u64".into(),
             Type::Uint128 => "u128".into(),
+            Type::Float16 => "half::f16".into(),
             Type::Float32 => "f32".into(),
             Type::Float64 => "f64".into(),
             Type::Str   => if self.use_rc_str() { "Rc<str>".into() } else { "Arc<str>".into() },

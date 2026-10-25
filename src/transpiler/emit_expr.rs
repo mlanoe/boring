@@ -1260,6 +1260,23 @@ impl Transpiler {
             return code;
         }
         let dst = self.emit_type(ty);
+        let dst_is_f16 = matches!(ty.without_mut(), Type::Float16)
+            || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16"));
+        let resolved_is_f16 = |expr: &Expr| self.resolve_expr_type(expr).is_some_and(|t|
+            matches!(t.without_mut(), Type::Float16)
+                || matches!(t.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+        let src_is_f16 = resolved_is_f16(e)
+            || matches!(&e.kind, ExprKind::BinOp(_, left, right) if resolved_is_f16(left) && resolved_is_f16(right));
+        if dst_is_f16 {
+            return if src_is_f16 {
+                src
+            } else {
+                format!("half::f16::from_f32(({}) as f32)", src)
+            };
+        }
+        if src_is_f16 {
+            return format!("(f32::from({}) as {})", src, dst);
+        }
         // User-defined `as Type:` conversion → call the generated `into_type()` method.
         // Use the lowercased emitted type name for primitive types (float → f64, etc.)
         // as well as named types. Only apply if the source is a struct/enum variable —
@@ -1354,8 +1371,8 @@ impl Transpiler {
         // Covers both float32 and float64 — the emitted cast always uses `dst`
         // (`self.emit_type(ty)`, "f32" or "f64" as appropriate), never a hardcoded
         // "f64", so this one flag serves both widths correctly.
-        let is_float_ty = matches!(ty, Type::Float64 | Type::Float32)
-            || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "float32" | "f32" | "f64"));
+        let is_float_ty = matches!(ty, Type::Float16 | Type::Float64 | Type::Float32)
+            || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "float16" | "float32" | "f16" | "f32" | "f64"));
         // Every fixed-width/pointer-width integer target (isize/usize/u8/i8/../u128/i128)
         // resolves through `dst` (== self.emit_type(ty)), which already normalizes both
         // the dedicated Type variants and the lowercase `Type::Named` aliases — so this

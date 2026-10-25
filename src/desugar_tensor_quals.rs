@@ -956,7 +956,7 @@ pub(crate) fn type_owner(ty: &Type) -> Option<String> {
         Type::Mut(inner) | Type::Optional(inner) | Type::Qualified(inner, _) => type_owner(inner),
         Type::Named(n) => Some(n.clone()),
         Type::Array(_) | Type::ArrayN(..) | Type::LabeledArray(..) | Type::Dict(..) | Type::Set(_)
-        | Type::Tuple(_) | Type::Str | Type::Int | Type::Uint | Type::Float32 | Type::Float64
+        | Type::Tuple(_) | Type::Str | Type::Int | Type::Uint | Type::Float16 | Type::Float32 | Type::Float64
         | Type::Bool => Some(String::new()),
         _ => None,
     }

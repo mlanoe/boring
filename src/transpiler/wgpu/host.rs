@@ -2823,11 +2823,11 @@ fn round_up_to_word_bytes(byte_len_expr: &str) -> String {
 fn host_cast_type(ty: &Type) -> Option<&'static str> {
     Some(match ty {
         Type::Int => "isize", Type::Uint => "usize",
-        Type::Float32 => "f32", Type::Float64 => "f64",
+        Type::Float16 => "half::f16", Type::Float32 => "f32", Type::Float64 => "f64",
         Type::Int8 => "i8", Type::Int16 => "i16", Type::Int32 => "i32", Type::Int64 => "i64",
         Type::Uint8 => "u8", Type::Uint16 => "u16", Type::Uint32 => "u32", Type::Uint64 => "u64",
         Type::Named(n) => match n.as_str() {
-            "float" | "float64" => "f64", "float32" => "f32", "int" => "isize", "uint" => "usize",
+            "float" | "float64" => "f64", "float16" | "f16" => "half::f16", "float32" => "f32", "int" => "isize", "uint" => "usize",
             _ => return None,
         },
         _ => return None,
@@ -2845,6 +2845,7 @@ fn host_scalar_type(ty: &Type) -> &'static str {
         // itself names the risk); this comment documents the host-side half of the same limit.
         Type::Int   => "i32",
         Type::Uint  => "u32",
+        Type::Float16 => "half::f16",
         Type::Float32 => "f32",
         Type::Bool  => "bool",
         // Explicit fixed-width fields keep their own exact width in the host-side buffer —

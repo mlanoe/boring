@@ -1951,6 +1951,7 @@ impl Transpiler {
     fn estimate_size_inner(ty: &Type, program: &Program, visiting: &mut std::collections::HashSet<String>) -> Option<usize> {
         match ty {
             Type::Int | Type::Uint | Type::Float64 => Some(8),
+            Type::Float16 => Some(2),
             Type::Float32 => Some(4),
             Type::Uint8 | Type::Int8 => Some(1),
             Type::Int16 | Type::Uint16 => Some(2),
@@ -1965,6 +1966,7 @@ impl Transpiler {
             // "f32" used to fall through to the catch-all below with no entry at all
             // (a pre-existing gap) — fixed alongside adding float32/float64 as real
             // types (docs/float-width-types.md).
+            Type::Named(n) if matches!(n.as_str(), "float16" | "f16") => Some(2),
             Type::Named(n) if matches!(n.as_str(), "float32" | "f32") => Some(4),
             Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "f64") => Some(8),
             Type::Named(n) if matches!(n.as_str(), "uint8" | "int8" | "u8" | "i8") => Some(1),

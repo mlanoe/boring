@@ -943,7 +943,7 @@ impl Checker {
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                | Type::Float32 | Type::Float64 | Type::Bool)
+                | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool)
         // Lowercase Boring keywords (`int`, `uint`, `float`, `bool`, sized
         // variants) parse as `Type::Named` — resolved to the variants above only
         // later (interpreter alias table / transpiler size lookup), which the
@@ -953,11 +953,11 @@ impl Checker {
         // covered every fixed-width int alias but not the float ones) closed
         // alongside adding float32/float64 (docs/float-width-types.md).
         || matches!(ty, Type::Named(n) if matches!(n.as_str(),
-            "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
+            "int" | "uint" | "uint8" | "float" | "float16" | "float32" | "float64" | "bool"
             | "int8" | "int16" | "int32" | "int64" | "int128"
             | "uint16" | "uint32" | "uint64" | "uint128"
             | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64"))
+            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f16" | "f32" | "f64"))
     }
 
     fn check_scalar_mut_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, value: &Option<Expr>, line: usize, col: usize) {

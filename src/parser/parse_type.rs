@@ -267,6 +267,7 @@ impl Parser {
                     "Uint64"  => Type::Uint64,
                     "Uint128" => Type::Uint128,
                     "Float"   => Type::Float64,
+                    "Float16" => Type::Float16,
                     "Float32" => Type::Float32,
                     "Float64" => Type::Float64,
                     "String" => Type::Str,
@@ -294,7 +295,7 @@ impl Parser {
                 let takes_generics = !matches!(s.as_str(),
                     "int" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uint128"
                     | "int8" | "int16" | "int32" | "int64" | "int128"
-                    | "float" | "float32" | "float64" | "bool" | "string" | "str");
+                    | "float" | "float16" | "float32" | "float64" | "f16" | "bool" | "string" | "str");
                 let built = if takes_generics && self.eat(&TokenKind::Lt) {
                     let mut args = Vec::new();
                     args.push(self.parse_generic_type_arg()?);

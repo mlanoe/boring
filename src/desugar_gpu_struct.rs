@@ -274,9 +274,9 @@ fn is_scalar(t: &Type) -> bool {
     matches!(
         unwrap_ty(t),
         Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
-            | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Float32 | Type::Float64 | Type::Bool
+            | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
     ) || matches!(unwrap_ty(t), Type::Named(n) if matches!(n.as_str(),
-        "int" | "uint" | "float" | "float32" | "float64" | "int8" | "int16" | "int32" | "int64"
+        "int" | "uint" | "float" | "float16" | "float32" | "float64" | "int8" | "int16" | "int32" | "int64"
         | "uint8" | "uint16" | "uint32" | "uint64" | "bool"))
 }
 
@@ -338,8 +338,8 @@ fn zero(ty: &Type, at: &Expr) -> Expr {
     mk(
         match unwrap_ty(ty) {
             Type::Bool => ExprKind::Bool(false),
-            Type::Float32 | Type::Float64 => ExprKind::Float(0.0),
-            Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64") => ExprKind::Float(0.0),
+            Type::Float16 | Type::Float32 | Type::Float64 => ExprKind::Float(0.0),
+            Type::Named(n) if matches!(n.as_str(), "float" | "float16" | "float32" | "float64") => ExprKind::Float(0.0),
             _ => ExprKind::Int(0),
         },
         at,

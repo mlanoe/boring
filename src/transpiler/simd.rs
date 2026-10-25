@@ -3593,7 +3593,21 @@ impl Emitter {
                 },
                 self.expr(a)
             ),
-            ExprKind::Cast(a, t) => format!("({} as {})", self.expr(a), ty(t)),
+            ExprKind::Cast(a, t) => {
+                let value = self.expr(a);
+                let target = ty(t);
+                if target == "half::f16" {
+                    if self.expr_type(a).as_deref() == Some("half::f16") {
+                        value
+                    } else {
+                        format!("half::f16::from_f32(({}) as f32)", value)
+                    }
+                } else if self.expr_type(a).as_deref() == Some("half::f16") {
+                    format!("(f32::from({}) as {})", value, target)
+                } else {
+                    format!("({} as {})", value, target)
+                }
+            }
             ExprKind::RelabelCast(value, _) => self.expr(value),
             ExprKind::Range {
                 start,
@@ -6074,6 +6088,7 @@ fn simd_top_level_const_type(value: &LetStmt) -> Option<String> {
             Type::Int
             | Type::Uint
             | Type::Uint8
+            | Type::Float16
             | Type::Float32
             | Type::Float64
             | Type::Bool
@@ -6092,6 +6107,7 @@ fn simd_top_level_const_type(value: &LetStmt) -> Option<String> {
                     | "uint"
                     | "uint8"
                     | "float"
+                    | "float16"
                     | "float32"
                     | "float64"
                     | "bool"
@@ -6270,7 +6286,7 @@ pub(crate) fn simd_scalar_ty(t: &Type) -> Option<&'static str> {
         return None;
     }
     let name = numeric_ty(t).or_else(|| matches!(base(t), Type::Bool).then(|| "bool".to_string()))?;
-    ["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64", "bool"]
+    ["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "half::f16", "f32", "f64", "bool"]
         .into_iter()
         .find(|candidate| *candidate == name)
 }
@@ -6330,9 +6346,9 @@ fn float_literal(value: f64) -> String {
 fn numeric_ty(t: &Type) -> Option<String> {
     match base(t) {
         Type::Int | Type::Uint | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
-        | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Float32
+        | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Float16 | Type::Float32
         | Type::Float64 => Some(ty(t)),
-        Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float" | "float32" | "float64"
+        Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float" | "float16" | "float32" | "float64"
             | "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64") => Some(ty(t)),
         _ => None,
     }
@@ -6607,10 +6623,12 @@ fn ty(t: &Type) -> String {
         Type::Uint64 => "u64".into(),
         Type::Uint128 => "u128".into(),
         Type::Float64 => "f64".into(),
+        Type::Float16 => "half::f16".into(),
         Type::Float32 => "f32".into(),
         Type::Str => "String".into(),
         Type::Bool => "bool".into(),
         Type::Named(n) => match n.as_str() {
+            "float16" | "f16" => "half::f16".into(),
             "float32" => "f32".into(),
             "float" | "float64" => "f64".into(),
             "string" => "String".into(),
@@ -6727,6 +6745,7 @@ fn simd_needs_as_cast(value_ty: &Type) -> bool {
         | Type::Uint32
         | Type::Uint64
         | Type::Uint128
+        | Type::Float16
         | Type::Float32
         | Type::Float64
         | Type::Bool => true,
@@ -6753,6 +6772,7 @@ fn default_value(t: &Type) -> String {
 }
 fn primitive_cast_type(name: &str) -> Option<&'static str> {
     match name {
+        "float16" | "f16" => Some("half::f16"),
         "float32" => Some("f32"),
         "float" | "float64" => Some("f64"),
         "int" | "int32" => Some("i32"),

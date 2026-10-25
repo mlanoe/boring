@@ -101,6 +101,9 @@ impl KernelValidator {
         match ty {
             // Rule 1 — float types (float/float64 and float32 alike — narrower
             // storage doesn't change whether the FPU exists)
+            Type::Float16 => {
+                self.error(line, "float16 is not allowed in Linux kernel context — FPU is disabled");
+            }
             Type::Float32 => {
                 self.error(line, "float32 is not allowed in kernel context — FPU is disabled");
             }
@@ -111,6 +114,9 @@ impl KernelValidator {
             // directly on the parsed AST, with no alias-table resolution pass of
             // its own) — matched by name for the same reason `checker::mod.rs`'s
             // `is_scalar_type` matches `Type::Named` spellings directly.
+            Type::Named(n) if matches!(n.as_str(), "float16" | "f16") => {
+                self.error(line, "float16 is not allowed in Linux kernel context — FPU is disabled");
+            }
             Type::Named(n) if matches!(n.as_str(), "float32" | "f32") => {
                 self.error(line, "float32 is not allowed in kernel context — FPU is disabled");
             }

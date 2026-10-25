@@ -803,16 +803,21 @@ impl DeviceEmitter {
             if is_buffer_field(f) {
                 if let Some(inner) = buffer_field_elem_ty(f) {
                     if let Some(name) = buffer_elem_unsupported_width_name(inner) {
-                        self.errors.push(TranspileError::at(format!(
-                            "kernel {}: buffer field '{}' has element type `{}`, which is not \
-                             supported as a storage-buffer element on --target wgpu — WGSL has no \
-                             matching integer width, so this field would be declared as a 4-byte \
-                             `array<{}>` while the host uploads/sizes it at `{}`'s real (different) \
-                             byte width; every WGSL-side index beyond the first element would then \
-                             address the wrong bytes. Use `int32`/`uint32` (or `float32`) instead",
-                            decl.name, f.name, name,
-                            if name.starts_with('u') { "u32" } else { "i32" }, name
-                        ), f.line, f.col));
+                        let message = if name == "float16" {
+                            format!("kernel {}: buffer field '{}' has element type `float16`, which is not supported on --target wgpu — this backend does not enable WGSL's optional `f16` feature. Use `float32` or select metal/cuda/rocm/simd", decl.name, f.name)
+                        } else {
+                            format!(
+                                "kernel {}: buffer field '{}' has element type `{}`, which is not \
+                                 supported as a storage-buffer element on --target wgpu — WGSL has no \
+                                 matching integer width, so this field would be declared as a 4-byte \
+                                 `array<{}>` while the host uploads/sizes it at `{}`'s real (different) \
+                                 byte width; every WGSL-side index beyond the first element would then \
+                                 address the wrong bytes. Use `int32`/`uint32` (or `float32`) instead",
+                                decl.name, f.name, name,
+                                if name.starts_with('u') { "u32" } else { "i32" }, name
+                            )
+                        };
+                        self.errors.push(TranspileError::at(message, f.line, f.col));
                     } else if packed_byte_kind_of_ty(inner).is_some()
                         && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
                         // `uint8`/`int8`/`uint16`/`int16` are otherwise supported on a buffer
@@ -2150,11 +2155,13 @@ fn buffer_field_elem_ty(f: &KernelFieldDecl) -> Option<&Type> {
 /// `int64`/`uint64`/`int128`/`uint128` (64/128-bit ints have no packing story here).
 fn buffer_elem_unsupported_width_name(ty: &Type) -> Option<&'static str> {
     match ty {
+        Type::Float16 => Some("float16"),
         Type::Int64 => Some("int64"),
         Type::Uint64 => Some("uint64"),
         Type::Int128 => Some("int128"),
         Type::Uint128 => Some("uint128"),
         Type::Named(n) => match n.as_str() {
+            "float16" | "f16" => Some("float16"),
             "int64" | "i64" | "int128" | "i128" => Some("int64/int128"),
             "uint64" | "u64" | "uint128" | "u128" => Some("uint64/uint128"),
             _ => None,
@@ -2292,6 +2299,7 @@ fn wgsl_scalar(ty: &Type) -> String {
         Type::Uint64              => wgsl_unsupported_width("uint64", "u32"),
         Type::Int128              => wgsl_unsupported_width("int128", "i32"),
         Type::Uint128              => wgsl_unsupported_width("uint128", "u32"),
+        Type::Float16            => "f32 /* ERROR: `float16` is not supported by the wgpu backend (shader-f16 is not enabled) */".into(),
         Type::Float32            => "f32".into(),
         Type::Float64            => wgsl_unsupported_f64("f32"),
         // bool is not allowed in storage/uniform buffers in WGSL — use u32.
@@ -2301,6 +2309,7 @@ fn wgsl_scalar(ty: &Type) -> String {
             "uint"  => wgsl_narrowed_width("uint", "u32"),
             "i32" => "i32".to_string(),
             "u32" => "u32".to_string(),
+            "float16" | "f16" => "f32 /* ERROR: `float16` is not supported by the wgpu backend (shader-f16 is not enabled) */".to_string(),
             "float32" | "f32" => "f32".to_string(),
             "float" | "float64" | "f64" => wgsl_unsupported_f64("f32"),
             "bool"                  => "u32".to_string(),
