@@ -391,3 +391,42 @@ cargo test --test transpile                              # full suite, ~10 min o
 - Transpiler issues worked around in boring-ui (card candidates): `(x.displayWidth as float)` emits a string-parse cast
   (`.trim().parse()` on an `isize`) — bind to a `let` first; `graphemeSlice` on a `var` receiver emits a non-existent
   `grapheme_slice` — go through a function parameter.
+
+## 2026-10-19 → 2026-10-25 — rendering, window, text, input (summary)
+
+Details of the renderer live in `boring-ui-renderer-draft.md` (Status sections); this is the map of what exists in
+`../boring-ui` and what is still open. Everything is committed on the local `main` of each repo, nothing pushed.
+
+**Rendering** (`render/`, own project, `render.<module>` via `[deps]`). Display list `Command` → CPU reference
+(`raster.br`) and two Boring kernels (`raster_gpu.br` per pixel, `raster_tile.br` workgroup per 16×16 tile), bit-identical,
+linear-light blending. Fill/stroke/shadow/clip/opacity groups, `DrawImage` (bilinear), `DrawGlyph` over a `GlyphAtlas`.
+Decoders written in Boring: PPM, PNG (inflate, 8-bit non-interlaced), JPEG (baseline + progressive, within 3 levels of
+libjpeg; tests against Pillow fixtures, run natively). Kernel tests: `render/tests/run_kernel_tests.sh` (simd + wgpu).
+
+**Window** (`examples/todo_window`, `Screen(redraw = "demand", hidpi = true)`; the loop works in points). Resize, hover,
+IME composition with candidate window, caret and selection drawing, mouse selection (drag, Shift, double/triple click),
+internal + system clipboard (`screen.clipboard`, all hosts), scroll indicators with thumb drag and track paging, touch
+gestures with fling (`screen.touch*` on all hosts; the right mouse button stands in on a desktop), animation (`AnimationScope`
++ `Transition`, frame pacing in `pace.br`). Verified in a real window by the user, except a real touch screen and a real
+IME (no hardware / input source available).
+
+**Text** (`text/`, swash called from Boring). Shaping with per-grapheme font fallback, quarter-pixel glyph positioning,
+bidi (UAX #9 levels, visual order, RTL caret/selection/paragraph alignment, bracket mirroring), bold/italic cuts, line
+breaking (UAX #14), measurer width memo, per-platform system font discovery (`fonts.br`).
+
+**Measured** (`examples/todo_window/bench_tree.sh`, 2026-10-25, 1000-row `List` of `TodoRow`, 5005 nodes, 8004 commands,
+36898 glyphs): mount (`Runtime.start`) 53 s — quadratic (5 ms / 0.43 s / 5.9 s for 10 / 100 / 400 rows; deep `Mounted` /
+`Theme` clones), then per frame on the host: layout ~320 ms (redone every frame), display list 216 ms, glyphify 150 ms,
+encode 43 ms, bin 11 ms. A 10-row tree costs ~10 ms per frame. Kernel time per frame: see `render/bench` (4.9 ms for
+1925 commands at 1920×1080).
+
+**Open**
+- Mount cost (card started), then incremental layout and a virtualized `List` (only visible rows laid out) and
+  per-identity invalidation (still "rebuild the window").
+- Accessibility: `semantics.br` is not connected to platform APIs (VoiceOver etc.).
+- Embedded font (system fonts make the picture differ per machine); `scene.br` emitting glyphs directly (today
+  `glyphify` converts `DrawText` before encoding).
+- Not verified on hardware: real touch screen, real IME. `task_4adfaf52`: a presented `'unified` field is not re-blitted
+  after a re-upload (workaround: rebuild the kernel on resize).
+- Compiler gotchas seen in generated crates: struct names clashing with `boring.ui` views or Rust traits (`Image`, `Frame`,
+  `Sized`) — prefix them.
