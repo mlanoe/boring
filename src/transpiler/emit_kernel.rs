@@ -1178,7 +1178,21 @@ impl Transpiler {
                     _ => (self.emit_expr(&b.value), "1".into(), "1".into()),
                 }
             } else { ("1".into(), "1".into(), "1".into()) };
-            Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32, ({bx}) as u32, ({by}) as u32, ({bz}) as u32)?;"))
+            // `prefer = .cpu|.gpu` on a launch of a multi-target build: a placement hint for
+            // this launch, handed to the kernel for the `dispatch` that follows.
+            let hint = if self.config.unified_routing {
+                args.iter()
+                    .find(|a| a.label.as_deref() == Some("prefer"))
+                    .and_then(|a| match &a.value.kind {
+                        ExprKind::DotIdent(class) => crate::ast::DeviceClass::from_name(class),
+                        _ => None,
+                    })
+                    .map(|class| format!("{var_name}.__prefer = Some(crate::unified::Class::{}); ", class.runtime_variant()))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Some(format!("{hint}{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32, ({bx}) as u32, ({by}) as u32, ({bz}) as u32)?;"))
         } else {
             Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
         }

@@ -186,6 +186,9 @@ pub struct TranspileConfig {
     /// `boring.toml`'s `[external_fields]`: `(type, field, field_type)` for fields of external types,
     /// so a chained call on such a field resolves its receiver type.
     pub external_field_types: Vec<(String, String, String)>,
+    /// The CPU host of a multi-target build: kernel launches go through `crate::unified::dispatch`,
+    /// and a launch's `prefer = .cpu|.gpu` argument is passed along as a placement hint.
+    pub unified_routing: bool,
 }
 
 impl Default for TranspileConfig {
@@ -210,6 +213,7 @@ impl Default for TranspileConfig {
             known_derives: Vec::new(),
             external_fns: Vec::new(),
             external_field_types: Vec::new(),
+            unified_routing: false,
         }
     }
 }

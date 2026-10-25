@@ -305,6 +305,20 @@ impl Checker {
             );
         }
     }
+    /// A launch's `prefer = ...` argument (a placement hint for multi-target builds) must be
+    /// `.cpu` or `.gpu`. Runs for every target, like the dispatch-qualifier check above.
+    pub(super) fn check_launch_placement(&mut self, kernel: &Expr, args: &[Arg]) {
+        let ExprKind::Var(name) = &kernel.kind else { return };
+        let Some(binding) = self.lookup(name) else { return };
+        if binding.kernel_type.is_none() { return; }
+        for arg in args.iter().filter(|a| a.label.as_deref() == Some("prefer")) {
+            let valid = matches!(&arg.value.kind, ExprKind::DotIdent(class) if DeviceClass::from_name(class).is_some());
+            if !valid {
+                self.error("`prefer` takes a device class: `.cpu` or `.gpu`", arg.value.line, arg.value.col);
+            }
+        }
+    }
+
     // ── Kernel field types: `LabeledArray` shape ────────────────────────────────
     //
     // Deliberately narrow: only `Type::labeled_array_shape_error` on each field's

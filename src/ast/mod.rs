@@ -331,6 +331,32 @@ pub struct KernelFieldDecl {
     pub col: usize,
 }
 
+/// A class of execution device, for the placement hints of multi-target builds
+/// (`@prefer(.gpu)`, `@only(.cpu)`, `k(prefer = .cpu)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceClass {
+    Cpu,
+    Gpu,
+}
+
+impl DeviceClass {
+    pub fn from_name(name: &str) -> Option<DeviceClass> {
+        match name {
+            "cpu" => Some(DeviceClass::Cpu),
+            "gpu" => Some(DeviceClass::Gpu),
+            _ => None,
+        }
+    }
+
+    /// The variant of the generated runtime's `unified::Class`.
+    pub fn runtime_variant(self) -> &'static str {
+        match self {
+            DeviceClass::Cpu => "Cpu",
+            DeviceClass::Gpu => "Gpu",
+        }
+    }
+}
+
 /// A `kernel` struct declaration.
 ///
 /// Kernel structs differ from regular structs in that:
@@ -348,6 +374,10 @@ pub struct KernelDecl {
     /// `"$W:i64"` = const generic `int W`, `"$N:usize"` = const generic `uint N`, `"T"` = type param.
     pub type_params: Vec<String>,
     pub where_clause: Vec<(String, String)>,
+    /// `@prefer(.cpu|.gpu)`: where a multi-target build should run this kernel when it can.
+    pub prefer: Option<DeviceClass>,
+    /// `@only(.cpu|.gpu)`: where a multi-target build must run this kernel, or fail.
+    pub only: Option<DeviceClass>,
     pub line: usize,
     pub col: usize,
 }

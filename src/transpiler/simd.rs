@@ -86,6 +86,7 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
         gpu_kernels: kernels.clone(),
         is_gpu_target: true,
         is_simd_target: true,
+        unified_routing: unified,
         ..crate::transpiler::kernel_target_base_config()
     };
     SIMD_HOST_TYPES.with(|flag| flag.set(true));
@@ -1017,6 +1018,10 @@ impl Emitter {
             }
             self.line(1, &format!("{}: {},", f.name, ty(&f.ty)));
         }
+        if self.unified {
+            // A launch's `prefer = .cpu|.gpu` argument, consumed by the next `dispatch`.
+            self.line(1, "__prefer: Option<crate::unified::Class>,");
+        }
         self.line(0, "}");
         self.line(0, &format!("impl {} {{", k.name));
         for helper in k.methods.iter().filter(|method| !method.name.is_empty()) {
@@ -1060,6 +1065,9 @@ impl Emitter {
             };
             self.line(3, &format!("{}: {},", f.name, initial));
         }
+        if self.unified {
+            self.line(3, "__prefer: None,");
+        }
         self.line(2, "}");
         self.line(1, "}");
         for f in &k.fields {
@@ -1085,9 +1093,13 @@ impl Emitter {
         self.line(1, "#[inline(never)] fn dispatch(&mut self, gx: u32, gy: u32, gz: u32, dx: u32, dy: u32, dz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
         if self.unified {
             if let Some(args) = unified_route_args(k) {
+                let class = |c: Option<DeviceClass>| match c {
+                    Some(c) => format!("Some(crate::unified::Class::{})", c.runtime_variant()),
+                    None => "None".to_string(),
+                };
                 self.line(2, &format!(
-                    "if let Some(__routed) = crate::unified::dispatch(\"{}\", &mut [{}], [gx, gy, gz], [dx, dy, dz]) {{ return __routed; }}",
-                    k.name, args.join(", ")
+                    "if let Some(__routed) = crate::unified::dispatch(\"{}\", &mut [{}], [gx, gy, gz], [dx, dy, dz], crate::unified::Hints {{ prefer: self.__prefer.take().or({}), only: {} }}) {{ return __routed; }}",
+                    k.name, args.join(", "), class(k.prefer), class(k.only)
                 ));
             }
         }

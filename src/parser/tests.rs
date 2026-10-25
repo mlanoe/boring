@@ -718,3 +718,37 @@ fn test_actor_first_qualifier_union_member_parses() {
         }
     }
 }
+
+fn kernel_with_attrs(attrs: &str) -> Result<ast::KernelDecl, String> {
+    let src = format!("{attrs}kernel Scale:\n    mut [float32]'unified buf\n    def ():\n        pass\n");
+    let tokens = crate::lexer::lex(&src).expect("lex");
+    match crate::parser::parse(tokens) {
+        Ok(program) => match program.items.into_iter().next() {
+            Some(ast::Item::Kernel(kernel)) => Ok(kernel),
+            _ => Err("expected a kernel".into()),
+        },
+        Err(e) => Err(e.msg()),
+    }
+}
+
+#[test]
+fn kernel_placement_hints_are_read_from_attributes() {
+    let kernel = kernel_with_attrs("@prefer(.gpu)\n").unwrap();
+    assert_eq!((kernel.prefer, kernel.only), (Some(ast::DeviceClass::Gpu), None));
+    let kernel = kernel_with_attrs("@only(.cpu)\n").unwrap();
+    assert_eq!((kernel.prefer, kernel.only), (None, Some(ast::DeviceClass::Cpu)));
+    let kernel = kernel_with_attrs("@prefer(.cpu)\n@only(.gpu)\n").unwrap();
+    assert_eq!((kernel.prefer, kernel.only), (Some(ast::DeviceClass::Cpu), Some(ast::DeviceClass::Gpu)));
+    let kernel = kernel_with_attrs("").unwrap();
+    assert_eq!((kernel.prefer, kernel.only), (None, None));
+}
+
+#[test]
+fn kernel_placement_hints_reject_unknown_classes_and_repeats() {
+    let error = kernel_with_attrs("@prefer(.tpu)\n").unwrap_err();
+    assert!(error.contains("`@prefer` takes one device class"), "{error}");
+    let error = kernel_with_attrs("@only\n").unwrap_err();
+    assert!(error.contains("`@only` takes one device class"), "{error}");
+    let error = kernel_with_attrs("@prefer(.gpu)\n@prefer(.cpu)\n").unwrap_err();
+    assert!(error.contains("`@prefer` is given twice"), "{error}");
+}

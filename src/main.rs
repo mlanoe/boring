@@ -2288,7 +2288,7 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, is_simd_target: false, gpu_top_level_handled_by_host: false, screen_setup: None, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new(), external_field_types: Vec::new() };
+    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, is_simd_target: false, gpu_top_level_handled_by_host: false, screen_setup: None, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new(), external_field_types: Vec::new(), unified_routing: false };
 
     if emit_rust {
         match file {
@@ -3150,10 +3150,33 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
     config
 }
 
+/// A kernel marked `@only(.gpu)` cannot be built for the CPU target, nor one marked `@only(.cpu)`
+/// for a GPU target: a single-target build has nowhere else to run it.
+fn check_only_placement(program: &ast::Program, path: &Path, target: &str, runs_on: ast::DeviceClass) {
+    let mut failed = false;
+    for item in &program.items {
+        if let ast::Item::Kernel(kernel) = item {
+            if kernel.only.is_some_and(|only| only != runs_on) {
+                let wants = if kernel.only == Some(ast::DeviceClass::Cpu) { "cpu" } else { "gpu" };
+                let runs = if runs_on == ast::DeviceClass::Cpu { "the CPU" } else { "a GPU" };
+                eprintln!(
+                    "error: {}:{}: kernel `{}` is `@only(.{wants})` but `--target {target}` runs on {runs}",
+                    path.display(), kernel.line, kernel.name
+                );
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        process::exit(1);
+    }
+}
+
 fn emit_cuda(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+    check_only_placement(&program, &path, "cuda", ast::DeviceClass::Gpu);
 
     // Kernel-dispatch-qualifier check only -- the four GPU emit_* functions used
     // to skip the checker entirely (only `run`/plain `build` called it), so e.g. a
@@ -3230,6 +3253,7 @@ fn emit_rocm(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+    check_only_placement(&program, &path, "rocm", ast::DeviceClass::Gpu);
 
     // See `emit_cuda`'s identical check for why this is needed here too.
     let source = std::fs::read_to_string(&path).unwrap_or_default();
@@ -3301,6 +3325,7 @@ fn emit_metal(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+    check_only_placement(&program, &path, "metal", ast::DeviceClass::Gpu);
 
     // See `emit_cuda`'s identical check for why this is needed here too.
     let source = std::fs::read_to_string(&path).unwrap_or_default();
@@ -3365,6 +3390,7 @@ fn emit_wgpu(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+    check_only_placement(&program, &path, "wgpu", ast::DeviceClass::Gpu);
 
     // See `emit_cuda`'s identical check for why this is needed here too.
     let source = std::fs::read_to_string(&path).unwrap_or_default();
@@ -3509,6 +3535,7 @@ fn emit_simd(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+    check_only_placement(&program, &path, "simd", ast::DeviceClass::Cpu);
     let source = std::fs::read_to_string(&path).unwrap_or_default();
     if report_check_result(&path, &source, checker::check_kernel_dispatch_only(&program)) { process::exit(1); }
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "output".into());

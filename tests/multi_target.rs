@@ -18,17 +18,32 @@ mod policy;
 
 const FIXTURE: &str = "examples/saxpy.br";
 
+/// Each test project's crate has its own name (its source file's stem): tests share one Cargo
+/// target directory, and two crates called `main` would overwrite each other's binary.
+fn stem(dir: &Path) -> String {
+    dir.file_name().unwrap().to_string_lossy().trim_start_matches("multi_target_").to_string()
+}
+
+fn source(dir: &Path) -> PathBuf {
+    dir.join(format!("{}.br", stem(dir)))
+}
+
+fn root(dir: &Path) -> PathBuf {
+    dir.join(format!("{}_multi", stem(dir)))
+}
+
 fn project(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("multi_target_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(FIXTURE, dir.join("main.br")).unwrap();
+    std::fs::copy(FIXTURE, source(&dir)).unwrap();
     dir
 }
 
 fn build(dir: &Path, target: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_boring"))
-        .args(["build", "--target", target, "main.br"])
+        .args(["build", "--target", target])
+        .arg(source(dir))
         .current_dir(dir)
         .output()
         .unwrap()
@@ -42,7 +57,8 @@ fn rejects_unknown_targets_and_linux_combination() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown target 'bogus'"));
 
     let out = Command::new(env!("CARGO_BIN_EXE_boring"))
-        .args(["build", "--linux", "--target", "wgpu,simd", "main.br"])
+        .args(["build", "--linux", "--target", "wgpu,simd"])
+        .arg(source(&dir))
         .current_dir(&dir)
         .output()
         .unwrap();
@@ -56,7 +72,7 @@ fn explicit_list_generates_one_crate_with_every_backend() {
     let dir = project("generate");
     let out = build(&dir, "cuda,rocm,metal,wgpu,simd");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let root = dir.join("main_multi");
+    let root = root(&dir);
 
     for backend in ["cuda", "rocm", "metal", "wgpu", "simd"] {
         let module = std::fs::read_to_string(root.join(format!("src/backend_{backend}.rs"))).unwrap();
@@ -96,7 +112,7 @@ fn all_skips_what_the_host_cannot_build() {
     assert!(stderr.contains("wgpu") && stderr.contains("simd"), "{stderr}");
     if cfg!(target_os = "macos") {
         assert!(stderr.contains("Skipped cuda") && stderr.contains("Skipped rocm"), "{stderr}");
-        assert!(dir.join("main_multi/src/backend_metal.rs").is_file());
+        assert!(root(&dir).join("src/backend_metal.rs").is_file());
     } else {
         assert!(stderr.contains("Skipped metal"), "{stderr}");
     }
@@ -108,7 +124,7 @@ fn backend_is_chosen_at_run_time() {
     let dir = project("run");
     let out = build(&dir, "simd,wgpu");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let manifest = dir.join("main_multi/Cargo.toml");
+    let manifest = root(&dir).join("Cargo.toml");
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("multi_target_shared");
 
     let run = |backend: &str| {
@@ -146,7 +162,7 @@ fn run_crate(dir: &Path, cache: &Path, envs: &[(&str, &str)]) -> (String, String
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("multi_target_shared");
     let mut cmd = Command::new("cargo");
     cmd.args(["run", "--quiet", "--manifest-path"])
-        .arg(dir.join("main_multi/Cargo.toml"))
+        .arg(root(&dir).join("Cargo.toml"))
         .arg("--target-dir")
         .arg(target_dir)
         .env("BORING_CACHE_DIR", cache)
@@ -220,7 +236,7 @@ fn kernels_are_routed_per_launch() {
     let dir = project("routed");
     let out = build(&dir, "wgpu,simd");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let root = dir.join("main_multi");
+    let root = root(&dir);
     // The CPU host is always part of a routed build, and the wgpu module carries one adapter per kernel.
     assert!(root.join("src/backend_simd.rs").is_file() && root.join("src/unified.rs").is_file());
     let wgpu = std::fs::read_to_string(root.join("src/backend_wgpu.rs")).unwrap();
@@ -288,7 +304,7 @@ print "{k2.out[0]} {k2.out[3]}"
 #[test]
 fn argument_types_survive_every_backend() {
     let dir = project("types");
-    std::fs::write(dir.join("main.br"), MIX).unwrap();
+    std::fs::write(source(&dir), MIX).unwrap();
     let out = build(&dir, "all");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let cache = dir.join("cache");
@@ -303,5 +319,118 @@ fn argument_types_survive_every_backend() {
         ran += 1;
     }
     assert!(ran >= 1, "simd is always available:\n{listed}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const PLACEMENT: &str = r#"
+@only(.cpu)
+kernel Cpu:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        let i = .thread.x
+        buf[i] = buf[i] + 1.0
+
+@prefer(.gpu)
+kernel Gpu:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        let i = .thread.x
+        buf[i] = buf[i] * 2.0
+
+kernel Plain:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        let i = .thread.x
+        buf[i] = buf[i] + 10.0
+
+mut a = Cpu([1.0 as float32, 2.0, 3.0, 4.0])
+mut b = Gpu([1.0 as float32, 2.0, 3.0, 4.0])
+mut c = Plain([1.0 as float32, 2.0, 3.0, 4.0])
+mut d = Plain([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    a(block = 4, grid = 1)
+kernel:
+    b(block = 4, grid = 1)
+kernel:
+    c(block = 4, grid = 1)
+kernel:
+    d(block = 4, grid = 1, prefer = .gpu)
+print "{a.buf[3]} {b.buf[3]} {c.buf[3]} {d.buf[3]}"
+"#;
+
+/// `@only`, `@prefer` and a launch's `prefer =` steer where a kernel runs; the results do not
+/// depend on where that is.
+#[test]
+fn placement_hints_steer_each_kernel() {
+    let dir = project("placement");
+    std::fs::write(source(&dir), PLACEMENT).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BENCH", "off")]);
+    assert_eq!(stdout.trim(), "5 8 14 14", "{stderr}");
+    assert!(stderr.contains("kernel Cpu -> cpu"), "{stderr}");
+    assert!(stderr.contains("kernel Plain -> cpu"), "a 4-thread launch is too small to move: {stderr}");
+    if listed.contains("wgpu: available") {
+        assert!(stderr.contains("kernel Gpu -> wgpu"), "@prefer(.gpu) ignores the small-launch rule: {stderr}");
+        // Forcing a backend overrides `@prefer`, never `@only`.
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu")]);
+        assert_eq!(stdout.trim(), "5 8 14 14", "{stderr}");
+        assert!(stderr.contains("kernel Cpu -> cpu"), "{stderr}");
+        assert!(stderr.contains("kernel Plain -> wgpu"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_gpu_fails_when_no_gpu_backend_runs_the_launch() {
+    let dir = project("only_gpu");
+    let program = PLACEMENT.replace("@only(.cpu)\nkernel Cpu", "@only(.gpu)\nkernel Cpu");
+    std::fs::write(source(&dir), program).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("multi_target_shared");
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(root(&dir).join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target_dir)
+        .env("BORING_CACHE_DIR", dir.join("cache"))
+        .env("BORING_BACKEND", "simd")
+        .output()
+        .unwrap();
+    assert!(!run.status.success(), "stdout {:?} stderr {:?}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    assert!(String::from_utf8_lossy(&run.stderr).contains("`@only(.gpu)`"), "{}", String::from_utf8_lossy(&run.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn placement_hints_are_validated_and_checked_against_a_single_target() {
+    let dir = project("placement_errors");
+    let kernel = "kernel K:\n    mut [float32]'unified buf\n    init([float32]'unified d):\n        buf = d\n    def ():\n        buf[.thread.x] = 1.0\n";
+    let try_build = |source: &str, target: &str| {
+        std::fs::write(self::source(&dir), source).unwrap();
+        let out = build(&dir, target);
+        (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (ok, err) = try_build(&format!("@prefer(.tpu)\n{kernel}"), "wgpu,simd");
+    assert!(!ok && err.contains("`@prefer` takes one device class"), "{err}");
+    let launch = "mut k = K([0.0 as float32, 0.0])\nkernel:\n    k(block = 2, grid = 1, prefer = 3)\n";
+    let (ok, err) = try_build(&format!("{kernel}{launch}"), "wgpu,simd");
+    assert!(!ok && err.contains("`prefer` takes a device class"), "{err}");
+    // A single-target build has nowhere else to run a kernel it is not allowed to run.
+    let (ok, err) = try_build(&format!("@only(.gpu)\n{kernel}"), "simd");
+    assert!(!ok && err.contains("`@only(.gpu)` but `--target simd` runs on the CPU"), "{err}");
+    let (ok, err) = try_build(&format!("@only(.cpu)\n{kernel}"), "wgpu");
+    assert!(!ok && err.contains("`@only(.cpu)` but `--target wgpu` runs on a GPU"), "{err}");
+    let (ok, err) = try_build(&format!("@only(.gpu)\n{kernel}"), "wgpu");
+    assert!(ok, "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

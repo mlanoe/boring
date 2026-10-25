@@ -197,7 +197,7 @@ fn lower_expr(
     generated.push(KernelDecl {
         name: kernel_name.clone(), is_pub: false, fields,
         inits: vec![InitDecl { params: init_params, body: init_body, line: expr.line, col: expr.col }],
-        methods: vec![entry], type_params: vec![], where_clause: vec![], line: expr.line, col: expr.col,
+        methods: vec![entry], type_params: vec![], where_clause: vec![], prefer: None, only: None, line: expr.line, col: expr.col,
     });
 
     let ctor = Expr {

@@ -26,6 +26,37 @@ mut scale = Scale(n)
 scale(block = 256, grid = 64)
 ```
 
+## Placement hints
+
+A kernel has no device in its source, but it can say what kind of device it wants. The classes
+are `.cpu` and `.gpu`:
+
+```boring
+@prefer(.gpu)              # wish: skip the small-launch rule, fall back to the CPU if no GPU can
+kernel MatMul:
+    ...
+
+@only(.cpu)                # requirement: always the CPU
+kernel Tally:
+    ...
+
+kernel:
+    big(block = 256, grid = 4096, prefer = .cpu)    # this launch only; wins over @prefer
+```
+
+| Hint | Effect |
+|---|---|
+| `@prefer(.gpu)` / `prefer = .gpu` | the small-launch rule does not apply; the CPU still runs it if no backend can |
+| `@prefer(.cpu)` / `prefer = .cpu` | the CPU runs it, even a large launch |
+| `@only(.cpu)` | always the CPU, even with `BORING_BACKEND` |
+| `@only(.gpu)` | a GPU backend must run it: the launch fails with an error otherwise (no GPU adapter, a launch the adapter cannot run, `BORING_BACKEND=simd`) |
+
+A launch's `prefer =` wins over the kernel's `@prefer`. `BORING_BACKEND=a,b` overrides a `prefer`
+(the user knows this machine) but never an `@only`. `@only` is a requirement a single-target
+build must also meet: `boring build --target simd` rejects an `@only(.gpu)` kernel, and a GPU
+target rejects an `@only(.cpu)` one. `prefer =` and `@prefer` are accepted and ignored by
+single-target builds and by `boring run`. Anything other than `.cpu` or `.gpu` is a compile error.
+
 ## How a build runs
 
 The program runs **once, on the CPU host** (the simd backend, always part of a multi-target
@@ -103,8 +134,8 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 
 ## Not implemented yet
 
-- Placement hints in the source (a preferred or required class of backend for a kernel or a
-  launch) and an inventory of the backends from Boring code.
+- Finer device classes (`.discrete`, `.integrated`, a remote service) and an inventory of the
+  backends from Boring code (`kernel.backends()`, `kernel.lastChoice(k)`).
 - Device residency between launches: each routed launch copies its buffers in and out.
 - Routing for programs with a `Screen`, and for kernels with shared memory, atomics or struct
   fields.

@@ -347,6 +347,10 @@ impl Parser {
                     TokenKind::Enum => {
                         Ok(Item::Enum(self.parse_enum_decl_with_attrs(is_pub, attrs)?))
                     }
+                    // `@prefer(.gpu)` / `@only(.cpu)` before a `kernel Name:` declaration.
+                    TokenKind::Kernel if self.is_kernel_decl_start() => {
+                        Ok(Item::Kernel(self.parse_kernel_decl_with_attrs(is_pub, attrs)?))
+                    }
                     // `@derive(..)` etc. on a `view` carry over to its lowered struct.
                     _ if self.is_view_decl_start() => Ok(Item::Struct(
                         self.parse_struct_or_view(is_pub, attrs, true)?,
@@ -448,12 +452,7 @@ impl Parser {
             TokenKind::Kernel => {
                 // `kernel Name:` / `kernel Name<...>:` → GPU kernel struct declaration.
                 // `kernel Name(` / `kernel:` / `kernel expr` → kernel block — handled in parse_stmt.
-                let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
-                let next2 = self.tokens.get(self.pos + 2).map(|t| &t.kind);
-                let is_decl = matches!(next, Some(TokenKind::Ident(_)))
-                    && (matches!(next2, Some(TokenKind::Colon))
-                        || matches!(next2, Some(TokenKind::Lt)));
-                if is_decl {
+                if self.is_kernel_decl_start() {
                     Ok(Item::Kernel(self.parse_kernel_decl(is_pub)?))
                 } else {
                     Ok(Item::Stmt(self.parse_stmt()?))
@@ -1744,7 +1743,52 @@ impl Parser {
 
     // ─── GPU kernel declaration ───────────────────────────────────────────────
 
+    /// At `kernel`: is this a `kernel Name:` / `kernel Name<...>:` declaration (rather than a
+    /// kernel launch block)?
+    fn is_kernel_decl_start(&self) -> bool {
+        let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+        let next2 = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+        matches!(next, Some(TokenKind::Ident(_)))
+            && (matches!(next2, Some(TokenKind::Colon)) || matches!(next2, Some(TokenKind::Lt)))
+    }
+
     fn parse_kernel_decl(&mut self, is_pub: bool) -> Result<KernelDecl, ParseError> {
+        self.parse_kernel_decl_with_attrs(is_pub, Vec::new())
+    }
+
+    /// The `@prefer(.gpu)` / `@only(.cpu)` placement hints among a kernel's attributes. Other
+    /// attributes are not meaningful on a kernel and are ignored, as they always were.
+    fn kernel_placement(attrs: &[Attr]) -> Result<(Option<DeviceClass>, Option<DeviceClass>), ParseError> {
+        let (mut prefer, mut only) = (None, None);
+        for attr in attrs {
+            if attr.name != "prefer" && attr.name != "only" {
+                continue;
+            }
+            // `.gpu` reaches here as `gpu`: the attribute-argument reader drops a leading dot.
+            let class = match attr.args.as_slice() {
+                [one] => DeviceClass::from_name(one.trim_start_matches('.')),
+                _ => None,
+            };
+            let Some(class) = class else {
+                return Err(ParseError::Generic {
+                    msg: format!("`@{}` takes one device class: `.cpu` or `.gpu`", attr.name),
+                    line: attr.line, col: attr.col, len: attr.name.len() + 1,
+                });
+            };
+            let slot = if attr.name == "prefer" { &mut prefer } else { &mut only };
+            if slot.is_some() {
+                return Err(ParseError::Generic {
+                    msg: format!("`@{}` is given twice", attr.name),
+                    line: attr.line, col: attr.col, len: attr.name.len() + 1,
+                });
+            }
+            *slot = Some(class);
+        }
+        Ok((prefer, only))
+    }
+
+    fn parse_kernel_decl_with_attrs(&mut self, is_pub: bool, attrs: Vec<Attr>) -> Result<KernelDecl, ParseError> {
+        let (prefer, only) = Self::kernel_placement(&attrs)?;
         let line = self.line();
         let col = self.col();
         self.expect(&TokenKind::Kernel)?;
@@ -1799,6 +1843,8 @@ impl Parser {
             methods,
             type_params,
             where_clause,
+            prefer,
+            only,
             line,
             col,
         })

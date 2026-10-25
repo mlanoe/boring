@@ -20,6 +20,22 @@ use std::sync::{Mutex, OnceLock};
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 
+/// A class of execution device, for placement hints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    Cpu,
+    Gpu,
+}
+
+/// Where a launch may run. `prefer` is a wish (`@prefer(.gpu)` on the kernel, `prefer = .cpu`
+/// on the launch, which wins); `only` is a requirement (`@only(.gpu)`) that fails the launch
+/// when it cannot be met.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hints {
+    pub prefer: Option<Class>,
+    pub only: Option<Class>,
+}
+
 /// Below this many threads a launch stays on the CPU: uploading, launching and reading back
 /// costs more than the computation. `BORING_GPU_MIN_THREADS` overrides it.
 const DEFAULT_MIN_THREADS: u64 = 1 << 14;
@@ -114,10 +130,25 @@ pub fn install(order: Vec<Routes>, forced: bool, on_use: Box<dyn Fn(&str) + Send
 }
 
 /// Run `kernel` on the best backend that can. `None` means: run it on the CPU.
-pub fn dispatch(kernel: &str, args: &mut [Arg<'_>], grid: [u32; 3], block: [u32; 3]) -> Option<Result<(), BoxError>> {
-    let state = STATE.get()?;
+///
+/// - `only = Cpu`: always the CPU. `only = Gpu`: a backend must take it, else the launch fails.
+/// - `prefer = Cpu`: the CPU, unless the user forced backends with `BORING_BACKEND`.
+/// - `prefer = Gpu` (or `only = Gpu`): the small-launch rule does not apply.
+pub fn dispatch(kernel: &str, args: &mut [Arg<'_>], grid: [u32; 3], block: [u32; 3], hints: Hints) -> Option<Result<(), BoxError>> {
+    let Some(state) = STATE.get() else {
+        // Not installed (no backend usable): the CPU runs everything.
+        return match hints.only {
+            Some(Class::Gpu) => Some(Err(Box::new(NoBackend::new(kernel)))),
+            _ => None,
+        };
+    };
+    if hints.only == Some(Class::Cpu) || (hints.prefer == Some(Class::Cpu) && hints.only.is_none() && !state.forced) {
+        state.record(kernel, "cpu");
+        return None;
+    }
+    let wants_gpu = hints.prefer == Some(Class::Gpu) || hints.only == Some(Class::Gpu);
     let threads: u64 = grid.iter().chain(block.iter()).map(|&d| d.max(1) as u64).product();
-    if !state.forced && threads < state.min_threads {
+    if !state.forced && !wants_gpu && threads < state.min_threads {
         state.record(kernel, "cpu");
         return None;
     }
@@ -136,9 +167,30 @@ pub fn dispatch(kernel: &str, args: &mut [Arg<'_>], grid: [u32; 3], block: [u32;
             Err(e) => return Some(Err(e)),
         }
     }
+    if hints.only == Some(Class::Gpu) {
+        return Some(Err(Box::new(NoBackend::new(kernel))));
+    }
     state.record(kernel, "cpu");
     None
 }
+
+/// `@only(.gpu)` could not be met.
+#[derive(Debug)]
+pub struct NoBackend(String);
+
+impl NoBackend {
+    fn new(kernel: &str) -> NoBackend {
+        NoBackend(format!("kernel `{kernel}` is `@only(.gpu)` but no GPU backend could run this launch"))
+    }
+}
+
+impl fmt::Display for NoBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for NoBackend {}
 
 /// The backend the most recent launch of `kernel` ran on (`"cpu"` for the CPU).
 pub fn last_choice(kernel: &str) -> Option<&'static str> {
@@ -217,7 +269,7 @@ mod tests {
         // A small launch stays on the CPU even though a backend could run it.
         let mut data = vec![1.0f32, 2.0];
         let mut args = [Arg::F32(3.0), Arg::BufF32(&mut data)];
-        assert!(dispatch("Scale", &mut args, [1, 1, 1], [2, 1, 1]).is_none());
+        assert!(dispatch("Scale", &mut args, [1, 1, 1], [2, 1, 1], Hints::default()).is_none());
         assert_eq!(last_choice("Scale"), Some("cpu"));
         assert_eq!(data, vec![1.0, 2.0], "the CPU path is the caller's to run");
 
@@ -225,7 +277,7 @@ mod tests {
         // refuses this launch, and runs on the next.
         let mut data = vec![1.0f32, 2.0];
         let mut args = [Arg::F32(3.0), Arg::BufF32(&mut data)];
-        let ran = dispatch("Scale", &mut args, [1024, 1, 1], [256, 1, 1]);
+        let ran = dispatch("Scale", &mut args, [1024, 1, 1], [256, 1, 1], Hints::default());
         assert!(matches!(ran, Some(Ok(()))));
         assert_eq!(data, vec![3.0, 6.0]);
         assert_eq!(last_choice("Scale"), Some("gpu"));
@@ -233,11 +285,37 @@ mod tests {
 
         // A kernel no backend knows about goes to the CPU.
         let mut args: [Arg; 0] = [];
-        assert!(dispatch("Unknown", &mut args, [1024, 1, 1], [256, 1, 1]).is_none());
+        assert!(dispatch("Unknown", &mut args, [1024, 1, 1], [256, 1, 1], Hints::default()).is_none());
+
+        let big = ([1024, 1, 1], [256, 1, 1]);
+        let small = ([1, 1, 1], [2, 1, 1]);
+
+        // `prefer = Gpu` ignores the small-launch rule; `prefer = Cpu` and `only = Cpu` keep even
+        // a large launch on the CPU.
+        let mut data = vec![1.0f32, 2.0];
+        let mut args = [Arg::F32(3.0), Arg::BufF32(&mut data)];
+        let hint = Hints { prefer: Some(Class::Gpu), only: None };
+        assert!(matches!(dispatch("Scale", &mut args, small.0, small.1, hint), Some(Ok(()))));
+        assert_eq!(data, vec![3.0, 6.0]);
+        let mut args = [Arg::F32(3.0), Arg::BufF32(&mut data)];
+        let hint = Hints { prefer: Some(Class::Cpu), only: None };
+        assert!(dispatch("Scale", &mut args, big.0, big.1, hint).is_none());
+        let hint = Hints { prefer: None, only: Some(Class::Cpu) };
+        assert!(dispatch("Scale", &mut args, big.0, big.1, hint).is_none());
+        assert_eq!(data, vec![3.0, 6.0], "the CPU path is the caller's to run");
+
+        // `only = Gpu` runs even a small launch on a backend, and fails when none can.
+        let mut args = [Arg::F32(2.0), Arg::BufF32(&mut data)];
+        let hint = Hints { prefer: None, only: Some(Class::Gpu) };
+        assert!(matches!(dispatch("Scale", &mut args, small.0, small.1, hint), Some(Ok(()))));
+        assert_eq!(data, vec![6.0, 12.0]);
+        let mut args: [Arg; 0] = [];
+        let failed = dispatch("Unknown", &mut args, big.0, big.1, hint);
+        assert!(matches!(failed, Some(Err(e)) if e.to_string().contains("@only(.gpu)")));
 
         // A real failure is reported, not retried elsewhere.
         let mut args: [Arg; 0] = [];
-        let failed = dispatch("Boom", &mut args, [1024, 1, 1], [256, 1, 1]);
+        let failed = dispatch("Boom", &mut args, [1024, 1, 1], [256, 1, 1], Hints::default());
         assert!(matches!(failed, Some(Err(e)) if e.to_string().contains("device lost")));
     }
 }

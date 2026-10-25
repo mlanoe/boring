@@ -2437,6 +2437,7 @@ impl Checker {
                 // call sites -- they parse as an ordinary `Call`, confirmed by
                 // grepping every parser file for `KernelLaunch` construction (none).
                 self.check_kernel_dispatch_qualifier(callee, expr.line, expr.col);
+                self.check_launch_placement(callee, args);
                 self.check_removed_device_syntax(callee, expr.line, expr.col);
                 self.check_call_arity(callee, args, expr.line, expr.col);
                 self.check_call_dot_variants(callee, args);
