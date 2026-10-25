@@ -28,6 +28,7 @@ mod emit_flow;
 mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
+pub(crate) mod unified;
 mod infer_qualifiers;
 pub use infer_qualifiers::{take_cpu_decisions, CpuDecision};
 mod infer_trait_borrow;

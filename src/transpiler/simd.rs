@@ -14,10 +14,23 @@ pub struct SimdOutput {
     /// Host code uses the grapheme / display-width string methods (needs `unicode-*` crates).
     pub uses_unicode: bool,
     pub kernel_names: Vec<String>,
+    /// Multi-target host only: the routable argument list of every kernel that launches through
+    /// `crate::unified::dispatch` (see `transpiler::unified`). Empty otherwise.
+    pub routes: Vec<(String, Vec<super::unified::RouteField>)>,
     pub errors: Vec<crate::transpiler::TranspileError>,
 }
 
 pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutput {
+    transpile_simd_with(program, stem, version, false)
+}
+
+/// The CPU host for a multi-target crate: identical, except that every kernel launch first asks
+/// `crate::unified::dispatch` (see `src/multi_unified.rs`) whether another backend should run it.
+pub fn transpile_simd_unified(program: &Program, stem: &str, version: &str) -> SimdOutput {
+    transpile_simd_with(program, stem, version, true)
+}
+
+fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bool) -> SimdOutput {
     // Plain-data structs in kernel bodies / device functions are scalar-replaced first.
     let struct_lowered = crate::desugar_gpu_struct::desugar(program);
     let program = &struct_lowered;
@@ -152,6 +165,7 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         needs_coop: false,
         written_fields: std::collections::HashSet::new(),
         atomic_fields: std::collections::HashMap::new(),
+        unified,
     };
     e.raw(PRELUDE);
     let mirrors = device_struct_mirrors(program, &kernels, &mut e.errors);
@@ -212,11 +226,17 @@ pub fn transpile_simd(program: &Program, stem: &str, version: &str) -> SimdOutpu
         String::new()
     };
     let cargo_toml = format!("[package]\nname = \"{}-simd\"\nversion = \"{}\"\nedition = \"2021\"\n\n[profile.release]\nopt-level = 3\nlto = \"thin\"\ncodegen-units = 1\n\n{display_deps}", stem.replace('_', "-"), version);
+    let routes = if unified {
+        kernels.iter().filter_map(|k| super::unified::route_fields(k).map(|fields| (k.name.clone(), fields))).collect()
+    } else {
+        Vec::new()
+    };
     SimdOutput {
         host_rs: e.out,
         cargo_toml,
         uses_unicode,
         kernel_names,
+        routes,
         errors: e.errors,
     }
 }
@@ -898,6 +918,8 @@ struct Emitter {
     needs_coop: bool,
     written_fields: std::collections::HashSet<String>,
     atomic_fields: std::collections::HashMap<String, String>,
+    /// Multi-target host: launches are routed through `crate::unified::dispatch` first.
+    unified: bool,
 }
 impl Emitter {
     fn raw(&mut self, s: &str) {
@@ -1061,6 +1083,14 @@ impl Emitter {
             }
         }
         self.line(1, "#[inline(never)] fn dispatch(&mut self, gx: u32, gy: u32, gz: u32, dx: u32, dy: u32, dz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        if self.unified {
+            if let Some(args) = unified_route_args(k) {
+                self.line(2, &format!(
+                    "if let Some(__routed) = crate::unified::dispatch(\"{}\", &mut [{}], [gx, gy, gz], [dx, dy, dz]) {{ return __routed; }}",
+                    k.name, args.join(", ")
+                ));
+            }
+        }
         self.line(
             2,
             "#[cfg(any(target_arch=\"x86\", target_arch=\"x86_64\"))] unsafe {",
@@ -6559,6 +6589,24 @@ fn stmt_position(stmt: &Stmt) -> (usize, usize) {
         Stmt::Defer(_) | Stmt::Comment(_) => (0, 0),
     }
 }
+/// The `Arg` constructors for a kernel's fields, in field order (see `unified::route_fields`);
+/// `None` keeps the kernel on the CPU.
+fn unified_route_args(k: &KernelDecl) -> Option<Vec<String>> {
+    let fields = super::unified::route_fields(k)?;
+    Some(
+        fields
+            .iter()
+            .map(|f| {
+                if f.array {
+                    format!("crate::unified::Arg::{}(&mut self.{})", f.variant(), f.name)
+                } else {
+                    format!("crate::unified::Arg::{}(self.{})", f.variant(), f.name)
+                }
+            })
+            .collect(),
+    )
+}
+
 fn base(t: &Type) -> &Type {
     match t {
         Type::Mut(x) | Type::Qualified(x, _) => base(x),

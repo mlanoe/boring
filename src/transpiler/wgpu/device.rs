@@ -2745,7 +2745,7 @@ fn tensor_scalar_fallback_preserves_wgsl_buffer_names() {
 /// every kernel construction+dispatch in its own function), not just as bare
 /// top-level statements — so every function body (and every nested statement
 /// container within it) must be walked, not only `program.items` directly.
-fn collect_block_sizes(program: &Program) -> std::collections::HashMap<String, (u32, u32, u32)> {
+pub(super) fn collect_block_sizes(program: &Program) -> std::collections::HashMap<String, (u32, u32, u32)> {
     let mut var_to_type: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut map = std::collections::HashMap::new();
     // A `k(block = N)` dispatch site commonly references a scalar `let`

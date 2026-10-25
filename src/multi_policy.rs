@@ -234,19 +234,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn settles_at(dir: &Path, backend: &str, expected: usize) -> bool {
+        for _ in 0..200 {
+            if current_load(dir, backend) == expected {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
     #[test]
     fn leases_count_concurrent_holders() {
         let dir = scratch("lease");
-        assert_eq!(current_load(&dir, "wgpu"), 0);
+        assert!(settles_at(&dir, "wgpu", 0), "load of wgpu stayed at {}", current_load(&dir, "wgpu"));
         let first = acquire(&dir, "wgpu");
-        assert_eq!(current_load(&dir, "wgpu"), 1);
+        assert!(settles_at(&dir, "wgpu", 1), "load of wgpu stayed at {}", current_load(&dir, "wgpu"));
         let second = acquire(&dir, "wgpu");
-        assert_eq!(current_load(&dir, "wgpu"), 2);
-        assert_eq!(current_load(&dir, "simd"), 0, "leases are per backend");
+        assert!(settles_at(&dir, "wgpu", 2), "load of wgpu stayed at {}", current_load(&dir, "wgpu"));
+        assert!(settles_at(&dir, "simd", 0), "leases are per backend");
+        // A lock is released when the last copy of its file descriptor closes. A child process
+        // another test forks at this very moment still holds a copy until its `exec`, so the
+        // release can be observed a few microseconds late: wait for it instead of racing it.
         drop(first);
-        assert_eq!(current_load(&dir, "wgpu"), 1);
+        assert!(settles_at(&dir, "wgpu", 1), "load stayed at {}", current_load(&dir, "wgpu"));
         drop(second);
-        assert_eq!(current_load(&dir, "wgpu"), 0);
+        assert!(settles_at(&dir, "wgpu", 0), "load stayed at {}", current_load(&dir, "wgpu"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

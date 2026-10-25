@@ -21,6 +21,8 @@ use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKin
 
 mod device;
 mod host;
+mod unified;
+use unified::adapters as unified_adapters;
 
 pub(crate) fn uses_packed_buffer_elements(ty: &Type) -> bool {
     device::packed_byte_kind_of_ty(ty).is_some()
@@ -52,6 +54,9 @@ pub struct WgpuOutput {
     /// instead of writing out `host_rs`/`device_wgsl`, exactly like the std target's
     /// own `TranspileOutput::errors` (see `main.rs`'s `report_transpile_errors`) --
     /// otherwise these errors are silently dropped instead of surfaced.
+    /// Multi-target host only: the kernels `__boring_unified_<name>` adapters were emitted for,
+    /// with their argument lists (see `transpiler::unified`). Empty otherwise.
+    pub routes: Vec<(String, Vec<crate::transpiler::unified::RouteField>)>,
     pub errors: Vec<crate::transpiler::TranspileError>,
 }
 
@@ -62,6 +67,16 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
 }
 
 pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> WgpuOutput {
+    transpile_wgpu_impl(program, stem, version, tensor_config, false)
+}
+
+/// The wgpu part of a multi-target crate: the usual host plus one adapter per routable kernel
+/// (see `src/multi_unified.rs`). The program itself runs on the CPU host there.
+pub(crate) fn transpile_wgpu_unified(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> WgpuOutput {
+    transpile_wgpu_impl(program, stem, version, tensor_config, true)
+}
+
+fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig, unified: bool) -> WgpuOutput {
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 32;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
@@ -131,6 +146,12 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
 
     let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some(), &general_out.screen_setup_fields);
     let mut host_rs = host_rs;
+    let mut routes = Vec::new();
+    if unified && !has_screen {
+        let (adapters, covered) = unified_adapters(&effective_kernels, &kernel_names, &device::collect_block_sizes(program), device_wgsl_emulated.is_some());
+        host_rs.push_str(&adapters);
+        routes = covered;
+    }
     let uses_clipboard = crate::transpiler::screen_input::uses_clipboard(&host_rs);
     if uses_clipboard { host_rs.push_str(crate::transpiler::screen_input::CLIPBOARD_RUNTIME); }
     let mut cargo_toml  = emit_cargo_toml(stem, version, has_screen);
@@ -145,7 +166,7 @@ pub(crate) fn transpile_wgpu_with_tensor_config(program: &Program, stem: &str, v
     errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "wgpu host", failed));
     let failed = !errors.is_empty();
     errors.extend(crate::transpiler::helpers::placeholder_errors(&device_wgsl, "wgpu device", failed));
-    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, errors }
+    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, routes, errors }
 }
 
 /// Does this kernel's body use `.warp.*` anywhere? WGSL subgroup builtins

@@ -115,7 +115,7 @@ boring build --target metal main.br    # → Rust + MSL project
 cd main_rust && cargo run
 ```
 
-Several backends can share one binary: `--target all` (everything this host can build) or a list such as `--target cuda,metal`. The generated crate has one Cargo feature per backend. At start-up it benchmarks the usable backends once (cached per device), ranks them by measured speed discounted by how many other boring programs are already using them, and runs on the best one. `BORING_BACKEND=wgpu,simd` forces an order, `BORING_BENCH=off` disables the ranking, and `BORING_BACKEND=list` shows what is available.
+Several backends can share one binary: `--target all` (everything this host can build) or a list such as `--target cuda,metal`. The program runs on the CPU and each kernel launch is routed at run time to the best backend that can run it (ranked at start-up by a cached benchmark, discounted by how many other boring programs already use that backend), staying on the CPU when the launch is too small to be worth the transfer. `BORING_BACKEND=wgpu,simd` forces an order, `BORING_BENCH=off` disables the ranking, and `BORING_BACKEND=list` shows what is available. See [`docs/multi-target.md`](docs/multi-target.md).
 
 See [`docs/gpu-module.md`](docs/gpu-module.md) for the full language reference (kernel structs, generics, qualifier inference), and [`docs/cuda-module.md`](docs/cuda-module.md), [`docs/rocm-backend.md`](docs/rocm-backend.md), [`docs/metal-backend.md`](docs/metal-backend.md), [`docs/wgpu-backend.md`](docs/wgpu-backend.md), and [`docs/simd-backend.md`](docs/simd-backend.md) for backend-specific codegen.
 

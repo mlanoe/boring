@@ -3702,7 +3702,7 @@ fn host_param_type(ty: &Type, _fields: &[KernelFieldDecl]) -> String {
     }
 }
 
-fn elem_rust_type(ty: &Type) -> String {
+pub(super) fn elem_rust_type(ty: &Type) -> String {
     match ty {
         Type::Array(inner)     => rust_type(inner),
         Type::ArrayN(inner, _) => rust_type(inner),
@@ -3716,7 +3716,7 @@ fn elem_rust_type(ty: &Type) -> String {
     }
 }
 
-fn rust_type(ty: &Type) -> String {
+pub(super) fn rust_type(ty: &Type) -> String {
     match ty {
         Type::Int            => "isize".into(),
         Type::Uint           => "usize".into(),

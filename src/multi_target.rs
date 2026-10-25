@@ -5,15 +5,18 @@
 //
 // Every backend's transpiler still produces what it always did (a host `main.rs` plus its device
 // source). Here those host files become modules (`src/backend_<name>.rs`, each behind a Cargo
-// feature of the same name), their `fn main` is renamed to an entry point, and a generated
-// `src/main.rs` probes the compiled-in backends at start-up and runs the first usable one.
-// The device sources keep their per-backend names (`kernels/main.metal`, `kernels/main.cu`,
-// `kernels/main.hip`, `shaders/main.wgsl`), so they sit side by side without collision.
+// feature of the same name) and the device sources keep their per-backend names
+// (`kernels/main.metal`, `kernels/main.cu`, `kernels/main.hip`, `shaders/main.wgsl`), so they sit
+// side by side without collision.
 //
-// This is whole-program backend selection. A per-kernel/per-device choice (a runtime `Device`
-// enum shared by all backends) is a separate, later step.
+// The program itself runs once, on the CPU host (the simd backend). Each kernel launch goes
+// through `unified::dispatch` (`src/multi_unified.rs`), which hands it to the best backend that
+// has an adapter for that kernel and keeps small launches on the CPU. The generated `main.rs`
+// ranks the usable backends at start-up (`src/multi_policy.rs`) and installs them there.
 
 use std::collections::BTreeMap;
+
+use crate::transpiler::unified::RouteField;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -111,6 +114,8 @@ struct Unit {
     files: Vec<(PathBuf, String)>,
     cargo_toml: String,
     build_rs: Option<String>,
+    /// Routed builds: the kernels this backend can run for the CPU host, with their arguments.
+    routes: Vec<(String, Vec<RouteField>)>,
 }
 
 pub fn emit_multi(path: &str, version: &str, backends: &[Backend], skipped: &[(Backend, String)]) -> PathBuf {
@@ -128,45 +133,57 @@ pub fn emit_multi(path: &str, version: &str, backends: &[Backend], skipped: &[(B
     let project_dir = base_dir.join(format!("{stem}_multi"));
     let tensor_config = crate::tensor_linear_config_for_source(&path);
 
+    // The program runs once, on the CPU host (simd), which routes each kernel launch to a
+    // backend (see `src/multi_unified.rs`): the CPU host always takes part.
+    let mut backends = backends.to_vec();
+    if !backends.contains(&Backend::Simd) {
+        backends.push(Backend::Simd);
+        backends.sort();
+    }
+    let backends = &backends[..];
+
     let mut units: Vec<Unit> = Vec::new();
     let mut kernel_names: Vec<String> = Vec::new();
     for &backend in backends {
         let (unit, names, errors) = match backend {
             Backend::Cuda => {
-                let out = crate::transpiler::cuda::transpile_cuda_with_tensor_config(&program, &stem, version, &tensor_config);
+                let out = crate::transpiler::cuda::transpile_cuda_unified(&program, &stem, version, &tensor_config);
                 let unit = Unit {
                     backend,
                     host_rs: out.host_rs,
                     files: vec![(PathBuf::from("kernels/main.cu"), out.device_cu)],
                     cargo_toml: crate::kernel_target_cargo_toml(&out.cargo_toml, false, &path),
                     build_rs: Some(out.build_rs),
+                    routes: out.routes,
                 };
                 (unit, out.kernel_names, out.errors)
             }
             Backend::Rocm => {
-                let out = crate::transpiler::rocm::transpile_rocm_with_tensor_config(&program, &stem, version, &tensor_config);
+                let out = crate::transpiler::rocm::transpile_rocm_unified(&program, &stem, version, &tensor_config);
                 let unit = Unit {
                     backend,
                     host_rs: out.host_rs,
                     files: vec![(PathBuf::from("kernels/main.hip"), out.device_hip)],
                     cargo_toml: crate::kernel_target_cargo_toml(&out.cargo_toml, false, &path),
                     build_rs: Some(out.build_rs),
+                    routes: out.routes,
                 };
                 (unit, out.kernel_names, out.errors)
             }
             Backend::Metal => {
-                let out = crate::transpiler::metal::transpile_metal_with_tensor_config(&program, &stem, version, &tensor_config);
+                let out = crate::transpiler::metal::transpile_metal_unified(&program, &stem, version, &tensor_config);
                 let unit = Unit {
                     backend,
                     host_rs: out.host_rs,
                     files: vec![(PathBuf::from("kernels/main.metal"), out.device_msl)],
                     cargo_toml: crate::kernel_target_cargo_toml(&out.cargo_toml, false, &path),
                     build_rs: None,
+                    routes: out.routes,
                 };
                 (unit, out.kernel_names, out.errors)
             }
             Backend::Wgpu => {
-                let out = crate::transpiler::wgpu::transpile_wgpu_with_tensor_config(&program, &stem, version, &tensor_config);
+                let out = crate::transpiler::wgpu::transpile_wgpu_unified(&program, &stem, version, &tensor_config);
                 let mut files = vec![(PathBuf::from("shaders/main.wgsl"), out.device_wgsl)];
                 if let Some(emulated) = out.device_wgsl_emulated {
                     files.push((PathBuf::from("shaders/main_emulated.wgsl"), emulated));
@@ -177,21 +194,30 @@ pub fn emit_multi(path: &str, version: &str, backends: &[Backend], skipped: &[(B
                     files,
                     cargo_toml: crate::kernel_target_cargo_toml(&out.cargo_toml, out.uses_unicode, &path),
                     build_rs: None,
+                    routes: out.routes,
                 };
                 (unit, out.kernel_names, out.errors)
             }
             Backend::Simd => {
-                let out = crate::transpiler::simd::transpile_simd(&program, &stem, version);
+                let out = crate::transpiler::simd::transpile_simd_unified(&program, &stem, version);
                 let unit = Unit {
                     backend,
                     host_rs: out.host_rs,
                     files: Vec::new(),
                     cargo_toml: crate::kernel_target_cargo_toml(&out.cargo_toml, out.uses_unicode, &path),
                     build_rs: None,
+                    routes: out.routes,
                 };
                 (unit, out.kernel_names, out.errors)
             }
         };
+        if !errors.is_empty() && backend != Backend::Simd {
+            eprintln!("warning: the {} backend cannot compile this program and is left out:", backend.name());
+            for e in &errors {
+                eprintln!("  line {}: {}", e.line, e.message);
+            }
+            continue;
+        }
         if !errors.is_empty() {
             eprintln!("error: transpiling for the {} backend failed", backend.name());
             crate::report_transpile_errors(&path, &source, &errors);
@@ -201,6 +227,22 @@ pub fn emit_multi(path: &str, version: &str, backends: &[Backend], skipped: &[(B
             kernel_names = names;
         }
         units.push(unit);
+    }
+
+    // Routed build: an adapter is usable only when the CPU host and the backend agree on the
+    // kernel's argument list (each may lower the program slightly differently).
+    let mut routed_kernels: Vec<(Backend, Vec<String>)> = Vec::new();
+    {
+        let cpu: BTreeMap<String, Vec<RouteField>> =
+            units.iter().find(|u| u.backend == Backend::Simd).map(|u| u.routes.iter().cloned().collect()).unwrap_or_default();
+        for unit in &units {
+            if unit.backend == Backend::Simd {
+                continue;
+            }
+            let covered: Vec<String> =
+                unit.routes.iter().filter(|(name, fields)| cpu.get(name) == Some(fields)).map(|(name, _)| name.clone()).collect();
+            routed_kernels.push((unit.backend, covered));
+        }
     }
 
     let manifest = combined_manifest(&stem, version, &units);
@@ -233,7 +275,9 @@ pub fn emit_multi(path: &str, version: &str, backends: &[Backend], skipped: &[(B
             write(rel, contents);
         }
     }
-    write(Path::new("src/main.rs"), &root_source(backends));
+    let present: Vec<Backend> = units.iter().map(|u| u.backend).collect();
+    write(Path::new("src/main.rs"), &root_source(&present, &routed_kernels));
+    write(Path::new("src/unified.rs"), include_str!("multi_unified.rs"));
     write(Path::new("src/policy.rs"), include_str!("multi_policy.rs"));
     write(Path::new("Cargo.toml"), &manifest.text);
     if let Some(build_rs) = combined_build_rs(&units) {
@@ -247,7 +291,7 @@ pub fn emit_multi(path: &str, version: &str, backends: &[Backend], skipped: &[(B
         eprintln!("  Skipped {}: {}", backend.name(), reason);
     }
     eprintln!("  cd {} && cargo build --release", project_dir.display());
-    eprintln!("  Run-time choice: BORING_BACKEND=<name>[,<name>...] (default order: {}); BORING_BACKEND=list shows availability.", names.join(", "));
+    eprintln!("  Each kernel launch picks its backend at run time; BORING_BACKEND=<name>[,<name>...] forces an order, BORING_BACKEND=list shows availability.");
     if !kernel_names.is_empty() {
         eprintln!("  Kernels: {}", kernel_names.join(", "));
     }
@@ -300,12 +344,13 @@ fn module_source(backend: Backend, host_rs: &str, aliases: &[(String, String)]) 
     Ok(out)
 }
 
-fn root_source(backends: &[Backend]) -> String {
+fn root_source(backends: &[Backend], routed: &[(Backend, Vec<String>)]) -> String {
     let mut s = String::new();
     s.push_str("// Generated by `boring build --target ...` (multi-target). Backends are modules behind\n");
     s.push_str("// Cargo features of the same name; `policy` ranks the usable ones at start-up.\n");
     s.push_str("#![allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_imports, unused_parens, non_snake_case, non_camel_case_types, non_upper_case_globals, unexpected_cfgs, private_interfaces)]\n\n");
     s.push_str("mod policy;\n");
+    s.push_str("mod unified;\n");
     for b in backends {
         let n = b.name();
         if *b == Backend::Metal {
@@ -395,6 +440,39 @@ fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> 
     }
     ranked.iter().filter_map(|r| usable.iter().map(|(b, _)| *b).find(|b| b.name == r.name)).collect()
 }
+"#,
+    );
+    let mut arms = String::new();
+    for (backend, kernels) in routed {
+        let n = backend.name();
+        let list: Vec<String> = kernels.iter().map(|k| format!("(\"{k}\", backend_{n}::__boring_unified_{k} as unified::Adapter)")).collect();
+        arms.push_str(&format!(
+            "        #[cfg(feature = \"{n}\")]\n        \"{n}\" => Some(unified::Routes {{ name: \"{n}\", init: backend_{n}::__boring_unified_init, kernels: vec![{}] }}),\n",
+            list.join(", ")
+        ));
+    }
+    s.push_str(&ROUTED_MAIN.replace("ROUTES_ARMS", &arms));
+    s
+}
+
+const ROUTED_MAIN: &str = r#"
+/// Backends that run kernels for the CPU host (see `unified.rs`), by name.
+fn routes_for(name: &str) -> Option<unified::Routes> {
+    match name {
+ROUTES_ARMS        _ => None,
+    }
+}
+
+/// Load leases taken on first use of a backend, held until the process exits.
+static LEASES: std::sync::Mutex<Vec<(String, policy::Lease)>> = std::sync::Mutex::new(Vec::new());
+
+fn take_lease(dir: &Option<std::path::PathBuf>, name: &str) {
+    let Some(dir) = dir else { return };
+    let mut leases = LEASES.lock().unwrap();
+    if !leases.iter().any(|(held, _)| held == name) {
+        leases.push((name.to_string(), policy::acquire(dir, name)));
+    }
+}
 
 fn main() {
     let compiled = compiled_backends();
@@ -416,9 +494,10 @@ fn main() {
         return;
     }
 
-    // An explicit BORING_BACKEND list is the user's own order: no benchmark, first usable wins.
-    let explicit = !requested.is_empty();
-    let wanted: Vec<&Backend> = if explicit {
+    // An explicit BORING_BACKEND list is the user's own order: no benchmark, and launches are not
+    // kept on the CPU for being small. The CPU (`simd`) runs whatever no listed backend can.
+    let forced = !requested.is_empty();
+    let wanted: Vec<&Backend> = if forced {
         let mut chosen = Vec::new();
         for name in requested.split(',').map(str::trim).filter(|n| !n.is_empty()) {
             match compiled.iter().find(|b| b.name == name) {
@@ -431,31 +510,24 @@ fn main() {
         compiled.iter().collect()
     };
     let usable: Vec<(&Backend, String)> = wanted.into_iter().filter_map(|b| silently(b.device_name).map(|d| (b, d))).collect();
+    let ranked: Vec<&Backend> = if forced { usable.iter().map(|(b, _)| *b).collect() } else { rank(&usable, dir.as_deref()) };
 
-    let order = if explicit { usable.iter().map(|(b, _)| *b).collect() } else { rank(&usable, dir.as_deref()) };
-    match order.first() {
-        Some(backend) => {
-            // Hold a lease for the whole run so concurrent boring programs see this backend as busy.
-            let _lease = dir.as_deref().map(|d| policy::acquire(d, backend.name));
-            if verbose() {
-                eprintln!("boring: using backend {}", backend.name);
-            }
-            if let Err(e) = (backend.run)() {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-        }
-        None => {
-            let names: Vec<&str> = compiled.iter().map(|b| b.name).collect();
-            eprintln!("error: no usable backend (compiled in: {}; BORING_BACKEND={requested:?})", names.join(", "));
-            std::process::exit(1);
-        }
+    // Backends ranked above the CPU get the kernels they can run; the CPU takes the rest.
+    let order: Vec<unified::Routes> = ranked.iter().take_while(|b| b.name != "simd").filter_map(|b| routes_for(b.name)).collect();
+    if verbose() {
+        let names: Vec<&str> = order.iter().map(|r| r.name).collect();
+        eprintln!("boring: kernels run on [{}], else on the CPU", names.join(", "));
+    }
+    take_lease(&dir, "simd");
+    let lease_dir = dir.clone();
+    unified::install(order, forced, Box::new(move |name| take_lease(&lease_dir, name)));
+
+    if let Err(e) = backend_simd::__boring_entry() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
 }
-"#,
-    );
-    s
-}
+"#;
 
 /// `build.rs` running each GPU toolchain step only for the features that are enabled.
 fn combined_build_rs(units: &[Unit]) -> Option<String> {
@@ -634,7 +706,7 @@ mod tests {
 
     #[test]
     fn manifest_makes_single_backend_deps_optional() {
-        let unit = |backend, toml: &str| Unit { backend, host_rs: String::new(), files: vec![], cargo_toml: toml.into(), build_rs: None };
+        let unit = |backend, toml: &str| Unit { backend, host_rs: String::new(), files: vec![], cargo_toml: toml.into(), build_rs: None, routes: vec![] };
         let units = [
             unit(Backend::Metal, "[dependencies]\nmetal = \"0.29\"\nhalf = { version = \"2\", features = [\"bytemuck\"] }\n"),
             unit(Backend::Wgpu, "[dependencies]\nwgpu = \"22\"\nhalf = { version = \"2\", features = [\"bytemuck\"] }\n"),
@@ -647,7 +719,7 @@ mod tests {
 
     #[test]
     fn conflicting_versions_get_distinct_keys_and_aliases() {
-        let unit = |backend, toml: &str| Unit { backend, host_rs: String::new(), files: vec![], cargo_toml: toml.into(), build_rs: None };
+        let unit = |backend, toml: &str| Unit { backend, host_rs: String::new(), files: vec![], cargo_toml: toml.into(), build_rs: None, routes: vec![] };
         let units = [
             unit(Backend::Metal, "[dependencies]\nwinit = \"0.28\"\n"),
             unit(Backend::Simd, "[dependencies]\nwinit = \"0.28\"\n"),

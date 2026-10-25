@@ -126,12 +126,14 @@ fn backend_is_chosen_at_run_time() {
     let forced = run("simd");
     let stdout = String::from_utf8_lossy(&forced.stdout);
     assert!(forced.status.success(), "{}", String::from_utf8_lossy(&forced.stderr));
-    assert!(String::from_utf8_lossy(&forced.stderr).contains("using backend simd"));
+    assert!(String::from_utf8_lossy(&forced.stderr).contains("kernel Saxpy -> cpu"));
     assert!(stdout.contains("y[0] = 1") && stdout.contains("y[15] = 31"), "{stdout}");
 
+    // A backend that is not compiled in is skipped; the CPU runs the program.
     let missing = run("cuda");
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("no usable backend"));
+    assert!(missing.status.success(), "{}", String::from_utf8_lossy(&missing.stderr));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("not compiled into this binary"));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("y[15] = 31"));
 
     let listed = run("list");
     let stdout = String::from_utf8_lossy(&listed.stdout);
@@ -176,7 +178,7 @@ fn policy_benchmarks_caches_and_reacts_to_load() {
     let (Some(wgpu_device), Some(simd_device)) = (device_of("wgpu"), device_of("simd")) else {
         // No GPU adapter on this host: the policy has nothing to compare, simd must just run.
         let (stdout, stderr) = run_crate(&dir, &cache, &[]);
-        assert!(stderr.contains("using backend simd"), "{stderr}");
+        assert!(stderr.contains("kernels run on []"), "{stderr}");
         assert!(stdout.contains("y[15] = 31"), "{stdout}");
         return;
     };
@@ -197,18 +199,109 @@ fn policy_benchmarks_caches_and_reacts_to_load() {
     )
     .unwrap();
     let (stdout, stderr) = run_crate(&dir, &cache, &[]);
-    assert!(stderr.contains("using backend wgpu"), "{stderr}");
+    assert!(stderr.contains("kernels run on [wgpu]"), "{stderr}");
     assert!(stdout.contains("y[15] = 31"), "{stdout}");
 
     // Another running program holds wgpu: its effective score halves and simd takes over.
     let _busy = policy::acquire(&cache, "wgpu");
     let (stdout, stderr) = run_crate(&dir, &cache, &[]);
     assert!(stderr.contains("load 1"), "{stderr}");
-    assert!(stderr.contains("using backend simd"), "{stderr}");
+    assert!(stderr.contains("kernels run on []"), "{stderr}");
     assert!(stdout.contains("y[15] = 31"), "{stdout}");
 
     // BORING_BENCH=off skips the ranking: the static order (wgpu first) applies again.
     let (_, stderr) = run_crate(&dir, &cache, &[("BORING_BENCH", "off")]);
-    assert!(stderr.contains("using backend wgpu"), "{stderr}");
+    assert!(stderr.contains("kernels run on [wgpu]"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn kernels_are_routed_per_launch() {
+    let dir = project("routed");
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let root = dir.join("main_multi");
+    // The CPU host is always part of a routed build, and the wgpu module carries one adapter per kernel.
+    assert!(root.join("src/backend_simd.rs").is_file() && root.join("src/unified.rs").is_file());
+    let wgpu = std::fs::read_to_string(root.join("src/backend_wgpu.rs")).unwrap();
+    assert!(wgpu.contains("pub fn __boring_unified_Saxpy(") && wgpu.contains("pub fn __boring_unified_init()"), "{wgpu}");
+    let simd = std::fs::read_to_string(root.join("src/backend_simd.rs")).unwrap();
+    assert!(simd.contains("crate::unified::dispatch(\"Saxpy\""), "{simd}");
+    let main_rs = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(main_rs.contains("__boring_unified_Saxpy as unified::Adapter"), "{main_rs}");
+
+    // A launch the adapter cannot run (here: another block size than the one baked into the
+    // shader) falls back to the CPU instead of computing the wrong thing.
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if !listed.contains("wgpu: available") {
+        return; // no GPU adapter on this host: nothing to route to
+    }
+    let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu")]);
+    assert!(stderr.contains("kernel Saxpy -> wgpu"), "{stderr}");
+    assert!(stdout.contains("y[0] = 1") && stdout.contains("y[15] = 31"), "{stdout}");
+    // Without forcing, a 16-thread launch is too small to be worth the transfer.
+    let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BENCH", "off")]);
+    assert!(stderr.contains("kernel Saxpy -> cpu"), "{stderr}");
+    assert!(stdout.contains("y[15] = 31"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const MIX: &str = r#"
+kernel Mix:
+    let int n
+    let uint m
+    let float32 a
+    let uint32 b
+    let [int32]'unified ints
+    let [uint8]'global bytes
+    mut [float32]'unified out
+    init(int nn, uint mm, float32 aa, uint32 bb, [int32]'unified i, [uint8]'global by, [float32]'unified o):
+        n = nn
+        m = mm
+        a = aa
+        b = bb
+        ints = i
+        bytes = by
+        out = o
+    def ():
+        let t = .thread.x + .block.x * .block_dim.x
+        if t < n:
+            out[t] = a * float32(ints[t]) + float32(bytes[t]) + float32(b) + float32(m)
+
+mut ints = [1 as int32, 2, 3, 4]
+let bytes = [1 as uint8, 2, 3, 4]
+mut out = [0.0 as float32, 0.0, 0.0, 0.0]
+mut k = Mix(4, 2, 0.5, 3, ints, bytes, out)
+kernel:
+    k(block = 4, grid = 1)
+print "{k.out[0]} {k.out[3]}"
+mut k2 = Mix(4, 2, 0.5, 3, ints, bytes, out)
+kernel:
+    k2(block = 2, grid = 2)
+print "{k2.out[0]} {k2.out[3]}"
+"#;
+
+/// Scalars of every width and `int`/`uint`/byte/float buffers must cross to each backend and
+/// back unchanged, including a launch whose block size differs from the one the wgpu shader
+/// was built for (that one falls back to another backend).
+#[test]
+fn argument_types_survive_every_backend() {
+    let dir = project("types");
+    std::fs::write(dir.join("main.br"), MIX).unwrap();
+    let out = build(&dir, "all");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    let mut ran = 0;
+    for backend in ["simd", "wgpu", "metal", "cuda", "rocm"] {
+        if !listed.contains(&format!("{backend}: available")) {
+            continue;
+        }
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", backend)]);
+        assert_eq!(stdout.trim(), "6.5 11\n6.5 11", "{backend}: {stderr}");
+        ran += 1;
+    }
+    assert!(ran >= 1, "simd is always available:\n{listed}");
     let _ = std::fs::remove_dir_all(&dir);
 }

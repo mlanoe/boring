@@ -36,6 +36,9 @@ mod multi_bench;
 #[cfg(test)]
 #[allow(dead_code)]
 mod multi_policy;
+#[cfg(test)]
+#[allow(dead_code)]
+mod multi_unified;
 mod multi_target;
 mod semver;
 pub mod stdlib_embed;

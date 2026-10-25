@@ -89,6 +89,9 @@ pub struct RocmOutput {
     pub cargo_toml: String,
     /// Errors accumulated while transpiling non-kernel-touching code through
     /// the general pass — see `cuda::CudaOutput::errors`'s identical field.
+    /// Multi-target host only: the kernels `__boring_unified_<name>` adapters were emitted for,
+    /// with their argument lists (see `transpiler::unified`). Empty otherwise.
+    pub routes: Vec<(String, Vec<crate::transpiler::unified::RouteField>)>,
     pub errors: Vec<crate::transpiler::TranspileError>,
 }
 
@@ -99,6 +102,16 @@ pub fn transpile_rocm(program: &Program, stem: &str, version: &str) -> RocmOutpu
 }
 
 pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> RocmOutput {
+    transpile_rocm_impl(program, stem, version, tensor_config, false)
+}
+
+/// The ROCM part of a multi-target crate: the usual host plus one adapter per routable kernel
+/// (see `src/multi_unified.rs`). The program itself runs on the CPU host there.
+pub(crate) fn transpile_rocm_unified(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig) -> RocmOutput {
+    transpile_rocm_impl(program, stem, version, tensor_config, true)
+}
+
+fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_config: &crate::transpiler::tensor_host::TensorLinearConfig, unified: bool) -> RocmOutput {
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 64;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
@@ -229,6 +242,15 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     let build_rs = emit_build_rs(rocblas);
     let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
     let mut host_rs = host_rs;
+    let mut routes = Vec::new();
+    if unified && !has_screen {
+        let kernels: Vec<crate::ast::KernelDecl> = program.items.iter().filter_map(|item| if let Item::Kernel(k) = item { Some(k.clone()) } else { None }).collect();
+        let (adapters, covered) = crate::transpiler::unified::stream_adapters(
+            crate::transpiler::unified::StreamFlavor::Rocm, &kernels, &kernel_names, host::elem_rust_type, host::rust_type,
+        );
+        host_rs.push_str(&adapters);
+        routes = covered;
+    }
     crate::transpiler::screen_input::add_clipboard(&mut host_rs, &mut cargo_toml);
 
     let mut errors = general_out.errors;
@@ -241,7 +263,7 @@ pub(crate) fn transpile_rocm_with_tensor_config(program: &Program, stem: &str, v
     errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "ROCm host", failed));
     let failed = !errors.is_empty();
     errors.extend(crate::transpiler::helpers::placeholder_errors(&device_hip, "ROCm device", failed));
-    RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, errors }
+    RocmOutput { host_rs, device_hip, kernel_names, build_rs, cargo_toml, routes, errors }
 }
 
 // ─── build.rs generation ─────────────────────────────────────────────────────
