@@ -4087,10 +4087,7 @@ impl Transpiler {
                                         &self.fn_return_types,
                                         &self.struct_fields,
                                     );
-                                    let inferred = inferred.or_else(|| match &arg.value.kind {
-                                        ExprKind::Var(v) => self.var_scalar_types.get(v.as_str()).cloned(),
-                                        _ => None,
-                                    });
+                                    let inferred = inferred.or_else(|| self.overload_local_or_method_type(&arg.value));
                                     // A loop variable / call result the quick inference can't type: the
                                     // declared-type walk (or the struct a local is known to hold) can.
                                     let inferred = inferred

@@ -190,10 +190,20 @@ impl Transpiler {
     pub(crate) fn overload_arg_type(&self, e: &Expr) -> Option<Type> {
         infer_overload_expr_type(e, &self.var_types, &self.fn_return_types, &self.struct_fields)
             .or_else(|| self.resolve_expr_type(e))
-            .or_else(|| match &e.kind {
-                ExprKind::Var(v) => self.var_scalar_types.get(v.as_str()).cloned(),
-                _ => None,
-            })
+            .or_else(|| self.overload_local_or_method_type(e))
+    }
+
+    /// Overload-resolution type of a literal-initialised local (`var_scalar_types`) or of a built-in
+    /// string/array method call (`text.graphemeSlice(i, i + 1)`), typed from its receiver.
+    pub(crate) fn overload_local_or_method_type(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Var(v) => self.var_scalar_types.get(v.as_str()).cloned(),
+            ExprKind::MethodCall(recv, m, _) => {
+                let recv_ty = self.overload_arg_type(recv)?;
+                builtin_method_result_type(&recv_ty, m)
+            }
+            _ => None,
+        }
     }
 
     /// Return type of a call to an overloaded free function: the overloads whose arity and

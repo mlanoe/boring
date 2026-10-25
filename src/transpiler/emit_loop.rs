@@ -480,6 +480,17 @@ impl Transpiler {
                 }
             }
         }
+        // Element type of the loop variable, for overload resolution (`for ch in text.chars()`).
+        for v in &s.vars { self.var_scalar_types.remove(v.as_str()); }
+        if s.vars.len() == 1 {
+            let elem = self.overload_arg_type(&s.iterable)
+                .or_else(|| match &s.iterable.kind {
+                    ExprKind::Var(v) if self.str_vec_vars.contains(v.as_str()) => Some(Type::Array(Box::new(Type::Str))),
+                    _ => None,
+                })
+                .and_then(|t| loop_element_type(&t));
+            if let Some(t) = elem { self.var_scalar_types.insert(s.vars[0].clone(), t); }
+        }
         // Track loop variables from Vec<Arc<str>> iterables so string methods dispatch correctly.
         let iterable_is_str_vec = match &s.iterable.kind {
             ExprKind::Var(v) => self.str_vec_vars.contains(v.as_str()),

@@ -2349,6 +2349,10 @@ pub(crate) fn infer_overload_expr_type(
                 fn_return_types.get(fn_name.as_str()).cloned()
             } else { None }
         }
+        ExprKind::MethodCall(recv, m, _) => {
+            let recv_ty = infer_overload_expr_type(recv, var_types, fn_return_types, struct_fields)?;
+            builtin_method_result_type(&recv_ty, m)
+        }
         // Field access: look up the field type from struct_fields using the object's type.
         ExprKind::Field(obj_expr, field_name) => {
             let obj_ty = infer_overload_expr_type(obj_expr, var_types, fn_return_types, struct_fields)?;
@@ -2360,6 +2364,40 @@ pub(crate) fn infer_overload_expr_type(
             let fields = struct_fields.get(struct_name)?;
             fields.iter().find(|(fname, _)| fname == field_name).map(|(_, ft)| ft.clone())
         }
+        _ => None,
+    }
+}
+
+/// Result type of a built-in string/array method on a receiver of type `recv`, for overload
+/// resolution. `None` when the receiver or method isn't one of the well-known built-ins.
+pub(crate) fn builtin_method_result_type(recv: &Type, method: &str) -> Option<Type> {
+    let recv = strip_qual_helper(recv);
+    let is_str = matches!(recv, Type::Str) || matches!(recv, Type::Named(n) if n == "string" || n == "str");
+    if is_str {
+        return match method {
+            "trim" | "trimStart" | "trimEnd" | "upper" | "toUpper" | "toUpperCase" | "uppercased"
+            | "lower" | "toLower" | "toLowerCase" | "lowercased" | "replace" | "slice" | "repeat"
+            | "graphemeSlice" => Some(Type::Str),
+            "length" | "count" | "graphemeCount" | "displayWidth" => Some(Type::Int),
+            "indexOf" => Some(Type::Optional(Box::new(Type::Int))),
+            "split" | "chars" | "graphemes" => Some(Type::Array(Box::new(Type::Str))),
+            _ => None,
+        };
+    }
+    match (recv, method) {
+        (Type::Array(_), "length" | "count") => Some(Type::Int),
+        (Type::Array(_), "slice") => Some(recv.clone()),
+        (Type::Array(e), "first" | "last") => Some(Type::Optional(e.clone())),
+        (Type::Array(e), "pop") => Some(Type::Optional(e.clone())),
+        (Type::Array(e), "join") if matches!(e.as_ref(), Type::Str) => Some(Type::Str),
+        _ => None,
+    }
+}
+
+/// Element type a `for` loop variable takes over an iterable of type `ty` (arrays only).
+pub(crate) fn loop_element_type(ty: &Type) -> Option<Type> {
+    match strip_qual_helper(ty) {
+        Type::Array(e) => Some((**e).clone()),
         _ => None,
     }
 }

@@ -1573,13 +1573,19 @@ impl Transpiler {
         self.var_scalar_types.remove(s.name.as_str());
         if s.ty.is_none() {
             if let Some(v) = &s.value {
-                if matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
+                let t = if matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
                     | ExprKind::Str(_) | ExprKind::StringInterp(_))
                 {
                     let (no_vars, no_fields) = (Default::default(), Default::default());
-                    if let Some(t) = infer_overload_expr_type(v, &no_vars, &no_vars, &no_fields) {
-                        self.var_scalar_types.insert(s.name.clone(), t);
-                    }
+                    infer_overload_expr_type(v, &no_vars, &no_vars, &no_fields)
+                } else if matches!(v.kind, ExprKind::MethodCall(..)) {
+                    // `let cluster = text.graphemeSlice(i, i + 1)`: a built-in method's result type.
+                    self.overload_local_or_method_type(v)
+                } else {
+                    None
+                };
+                if let Some(t) = t {
+                    self.var_scalar_types.insert(s.name.clone(), t);
                 }
             }
         }
