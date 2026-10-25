@@ -209,6 +209,7 @@ fn cuda_and_rocm_render_loops_replace_array_fields() {
 // type-check there: indexing a call's array result, top-level `var` assignment from the loop,
 // `screen.key_events.length`, and f32 (`screen.time`) / f64 (`as float`) mixes.
 const SHAPES: &str = r#"
+let width = 8
 let screen = Screen(Dimension(8, 8), title = "test")
 
 [int] caretAt(int w, int h):
@@ -231,7 +232,7 @@ var seen = 0.0
 kernel:
     loop:
         if screen.mouse_pressed("left"):
-            let caret = caretAt(8, 8)
+            let caret = caretAt(width, 8)
             screen.setImeArea(caret[0], caret[1], 2, 16)
         counter += 1
         if screen.key_events.length == 0:
@@ -252,6 +253,7 @@ fn wgpu_loop_indexes_call_results_assigns_vars_and_mixes_float_widths() {
     let (project, rs) = build("wgpu", "shapes", SHAPES);
     assert!(!rs.contains("/* unsupported"), "{rs}");
     assert!(rs.contains("caret[(0) as usize]"), "{rs}");
+    assert!(rs.contains("caretAt(WIDTH, 8)"), "top-level let read in the loop names the const:\n{rs}");
     assert!(rs.contains("self.counter = 0;"), "{rs}");
     assert!(rs.contains("self.__input.key_repeat.len() as isize"), "{rs}");
     assert!(rs.contains("as f64) + self.seen"), "f32 side widened:\n{rs}");

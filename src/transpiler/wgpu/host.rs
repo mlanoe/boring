@@ -2443,6 +2443,10 @@ impl<'a> HostEmitter<'a> {
             }
             // A value built by `__boring_screen_setup` lives on `__App`.
             ExprKind::Var(n) if self.setup_fields.iter().any(|(f, _)| f == n) => format!("{pfx}{n}"),
+            // A top-level `let width = 8` is emitted as `const WIDTH` (see `emit_top`); a read of it
+            // that is neither a setup value, a per-frame local nor an event variable names that const.
+            ExprKind::Var(n) if !self.frame_locals.borrow().contains(n) && !self.event_vars.borrow().contains(n)
+                && self.program.items.iter().any(|it| matches!(it, Item::Let(l) if &l.name == n)) => n.to_uppercase(),
             ExprKind::Var(n) => n.clone(),
             ExprKind::Int(v)   => format!("{v}"),
             // Untyped: takes the type of whatever it meets (`(x as f64) * 1000.0`, `k.t = 0.5` on an f32 field).
