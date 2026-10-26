@@ -449,7 +449,7 @@ of ≤ 64 rows keep the exact path; a horizontal span of a windowed list is its 
 ~30-45 ms and Placed nodes 5005 → 1105 (the box was heavily loaded by other builds: compare layout against `start` in the same
 run, 1.4× → ~0.3×). What is left is linear in the row count: the `Mounted` tree is deep-cloned by `rt.root` and `flatten`
 (`bench_tree` now prints the `rt.root` read). Compiler quirk met: assigning an `'actor` field to another `'actor` field double-wraps
-it in `boring build` (worked around with the constructor form; task_e103f7ca). Still open: cross-frame layout cache of unchanged
+it in `boring build` (worked around with the constructor form; task_e103f7ca). Still open (cache since done, see below): cross-frame layout cache of unchanged
 subtrees, per-identity invalidation, accessibility sees stubs without content for off-window rows.
 
 **Windowed `List`, second pass (2026-10-26).** The linear cost left after the windowing was copying: `flatten` clones every row's
@@ -457,3 +457,16 @@ subtree. A windowed list now indexes its rows (`Slots`: child path, id, kind, ke
 measures. `bench_tree`, 1000-row `List` (same loaded box, compare with `start`): layout 56 ms → 4.6 ms (4000 rows: 18 ms);
 `rt.root` read 0.3 ms. A `KeyedGroup` inside a `KeyedGroup` falls back to the exact path. Still open: layout is redone on every call
 (no cross-frame cache of unchanged subtrees), per-identity invalidation, `Mounted` copies in `rt.root`.
+
+**Cross-frame layout cache (2026-10-26, `src/layout.br` "Layout cache", `tests/layout_cache_test.br`).** `Mounted.rev` names a version
+of a subtree: the runtime bumps it on a node and its ancestors when props, theme (`sameTheme`, text measurer aside), scroll or the child
+list change (`reconcileNode`, `partialIn`, `withScroll`). `LayoutMemory.epoch` names the state of the remembered row heights. With
+`id.generation.rev.epoch` plus the size, `layout` reuses the placed subtree of the window root and of the rows of a windowed list
+(translated when moved: placement is position-independent), and the root size / row sizes. Only these points are cached (a node
+per entry would hold every subtree once per ancestor); an entry is stored only if the epoch did not change while it was computed, so
+a list converges one or two frames after its heights settle. Cached subtrees are cloned in and out: the live marks (focus, hover,
+caret) that `layout` adds afterwards must not reach the cache (hover_test caught it). Swapping the text measurer needs
+`rt.layoutMemory.bump()`. `bench_tree`, 1000 rows, same loaded box: layout on an unchanged tree 70 ms → 5.6 ms; what is left is the
+`rt.root` copy (~2.4 ms) and the clone. Compiler quirks met in `boring build` (worked around with methods on `LayoutMemory`): indexing
+or assigning a dict field of an `'actor` field directly (`memo.memory.placed[key]`), and `!= nil` on a dict lookup inside a struct
+method. Still open: accessibility for off-window stub rows, `rt.root` copies, cache of nodes inside non-windowed trees.
