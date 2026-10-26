@@ -33,12 +33,14 @@ pub struct AxNode:
     pub bool disabled
     pub string actions
     pub [int] children
+    pub int posInSet
+    pub int setSize
 
 def [AxNode] threeNodes(int frame):
     [
-        AxNode(id = 1, parent = 0, role = "group", name = "Form", value = "", hint = "", marked = "", level = 0, x = 0.0, y = 0.0, w = 64.0, h = 64.0, focused = false, disabled = false, actions = "", children = [2, 3]),
-        AxNode(id = 2, parent = 1, role = "staticText", name = "Hello", value = "", hint = "", marked = "", level = 0, x = 4.0, y = 4.0, w = 40.0, h = 12.0, focused = false, disabled = false, actions = "", children = []),
-        AxNode(id = 3, parent = 1, role = "button", name = "Press {frame}", value = "", hint = "Presses", marked = "", level = 0, x = 4.0, y = 20.0, w = 40.0, h = 16.0, focused = true, disabled = false, actions = "focus,activate", children = [])
+        AxNode(id = 1, parent = 0, role = "group", name = "Form", value = "", hint = "", marked = "", level = 0, x = 0.0, y = 0.0, w = 64.0, h = 64.0, focused = false, disabled = false, actions = "", children = [2, 3], posInSet = 0, setSize = 2),
+        AxNode(id = 2, parent = 1, role = "staticText", name = "Hello", value = "", hint = "", marked = "", level = 0, x = 4.0, y = 4.0, w = 40.0, h = 12.0, focused = false, disabled = false, actions = "", children = [], posInSet = 1, setSize = 0),
+        AxNode(id = 3, parent = 1, role = "button", name = "Press {frame}", value = "", hint = "Presses", marked = "", level = 0, x = 4.0, y = 20.0, w = 40.0, h = 16.0, focused = true, disabled = false, actions = "focus,activate,scrollIntoView", children = [], posInSet = 2, setSize = 0)
     ]
 
 def note(int id, string action, string arg):
@@ -137,8 +139,24 @@ fn wgpu_bridges_the_tree_and_the_requests_to_accesskit() {
     assert!(rs.contains("self.__ax_requests.clear();"), "{rs}");
     assert!(rs.contains("fn __boring_ax_request(r: &accesskit::ActionRequest) -> Option<__AccessRequest>"), "{rs}");
     assert!(rs.contains("Action::Click => (\"activate\", String::new())"), "{rs}");
+    // List position and the scrollIntoView action are relayed.
+    assert!(rs.contains("pos_in_set: n.posInSet as i64, set_size: n.setSize as i64"), "{rs}");
+    assert!(rs.contains("node.set_position_in_set(n.pos_in_set as usize)"), "{rs}");
+    assert!(rs.contains("node.set_size_of_set(n.set_size as usize)"), "{rs}");
+    assert!(rs.contains("\"scrollIntoView\" => node.add_action(Action::ScrollIntoView)"), "{rs}");
+    assert!(rs.contains("Action::ScrollIntoView => (\"scrollIntoView\", String::new())"), "{rs}");
     let cargo = fs::read_to_string(project.join("Cargo.toml")).unwrap();
     assert!(cargo.contains("accesskit = \"0.24\"") && cargo.contains("accesskit_winit = \"0.32\""), "{cargo}");
+    cargo_check(&project, "wgpu");
+}
+
+/// A node struct without `posInSet` / `setSize` (an older tree producer) still builds: the positions read as 0.
+#[test]
+fn wgpu_accepts_node_structs_without_list_positions() {
+    let src = PROGRAM.replace("    pub int posInSet\n    pub int setSize\n", "")
+        .replace(", posInSet = 0, setSize = 2", "").replace(", posInSet = 1, setSize = 0", "").replace(", posInSet = 2, setSize = 0", "");
+    let (project, rs) = build("wgpu", "nopos", &src);
+    assert!(rs.contains("pos_in_set: 0, set_size: 0"), "{rs}");
     cargo_check(&project, "wgpu");
 }
 

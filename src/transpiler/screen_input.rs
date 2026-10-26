@@ -250,8 +250,9 @@ pub(super) const AX_RUNTIME: &str = r##"
 struct __AxNode {
     id: i64, parent: i64, role: String, name: String, value: String, hint: String, level: i64,
     x: f64, y: f64, w: f64, h: f64, focused: bool, disabled: bool, actions: String, children: Vec<i64>,
+    pos_in_set: i64, set_size: i64,
 }
-// One request from the assistive technology: `action` is focus, activate, setValue, increment or decrement.
+// One request from the assistive technology: `action` is focus, activate, setValue, increment, decrement or scrollIntoView.
 #[allow(dead_code)]
 struct __AccessRequest { id: isize, action: std::sync::Arc<str>, arg: std::sync::Arc<str> }
 struct __AxEvent(accesskit_winit::Event);
@@ -312,6 +313,8 @@ fn __boring_ax_tree(title: &str, nodes: &[__AxNode], scale: f64) -> accesskit::T
                 _ => { if !n.value.is_empty() { node.set_value(n.value.as_str()); } }
             }
             if n.role == "heading" && n.level > 0 { node.set_level(n.level as usize); }
+            if n.pos_in_set > 0 { node.set_position_in_set(n.pos_in_set as usize); }
+            if n.set_size > 0 { node.set_size_of_set(n.set_size as usize); }
             if n.disabled { node.set_disabled(); }
             node.set_bounds(Rect { x0: n.x * scale, y0: n.y * scale, x1: (n.x + n.w) * scale, y1: (n.y + n.h) * scale });
             for a in n.actions.split(',').map(str::trim) {
@@ -321,6 +324,7 @@ fn __boring_ax_tree(title: &str, nodes: &[__AxNode], scale: f64) -> accesskit::T
                     "setValue" => node.add_action(Action::SetValue),
                     "increment" => node.add_action(Action::Increment),
                     "decrement" => node.add_action(Action::Decrement),
+                    "scrollIntoView" => node.add_action(Action::ScrollIntoView),
                     _ => {}
                 }
             }
@@ -341,6 +345,7 @@ fn __boring_ax_request(r: &accesskit::ActionRequest) -> Option<__AccessRequest> 
         Action::Click => ("activate", String::new()),
         Action::Increment => ("increment", String::new()),
         Action::Decrement => ("decrement", String::new()),
+        Action::ScrollIntoView => ("scrollIntoView", String::new()),
         Action::SetValue => ("setValue", match &r.data {
             Some(ActionData::Value(v)) => v.to_string(),
             Some(ActionData::NumericValue(n)) => n.to_string(),

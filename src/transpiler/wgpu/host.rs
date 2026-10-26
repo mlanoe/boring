@@ -2005,8 +2005,12 @@ impl<'a> HostEmitter<'a> {
         };
         if args.len() != 1 || !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
         let nodes = self.host_expr(&args[0].value);
+        // List-position fields exist only on newer node structs (boring-ui's `AxNode`): read them when declared.
+        let has = |f: &str| self.program.items.iter().any(|i| matches!(i, Item::Struct(s) if s.fields.iter().any(|x| x.name == f)));
+        let pos = if has("posInSet") { "n.posInSet as i64" } else { "0" };
+        let size = if has("setSize") { "n.setSize as i64" } else { "0" };
         Some(format!(
-            "if self.__ax_active {{ let __ax_in = {nodes}; self.__ax_push(__ax_in.iter().map(|n| __AxNode {{ id: n.id as i64, parent: n.parent as i64, role: n.role.to_string(), name: n.name.to_string(), value: n.value.to_string(), hint: n.hint.to_string(), level: n.level as i64, x: n.x as f64, y: n.y as f64, w: n.w as f64, h: n.h as f64, focused: n.focused, disabled: n.disabled, actions: n.actions.to_string(), children: n.children.iter().map(|c| *c as i64).collect() }}).collect()); }}"))
+            "if self.__ax_active {{ let __ax_in = {nodes}; self.__ax_push(__ax_in.iter().map(|n| __AxNode {{ id: n.id as i64, parent: n.parent as i64, role: n.role.to_string(), name: n.name.to_string(), value: n.value.to_string(), hint: n.hint.to_string(), level: n.level as i64, x: n.x as f64, y: n.y as f64, w: n.w as f64, h: n.h as f64, focused: n.focused, disabled: n.disabled, actions: n.actions.to_string(), children: n.children.iter().map(|c| *c as i64).collect(), pos_in_set: {pos}, set_size: {size} }}).collect()); }}"))
     }
 
     /// `screen.requestRedraw()` -- schedule another frame when the window redraws on demand.

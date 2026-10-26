@@ -496,8 +496,11 @@ kernel:
 Node fields: `id: int` (nonzero, stable from one frame to the next), `parent: int` (`0` = the window), `role`, `name`,
 `value`, `hint`, `marked` (ignored for now), `level: int`, `x`, `y`, `w`, `h: float` in **points** (multiplied by
 `screen.scale` into the physical pixels AccessKit expects), `focused`, `disabled: bool`, `actions: string` (comma
-separated: `focus`, `activate`, `toggle`, `setValue`, `increment`, `decrement`) and `children: [int]` (the order of the
-children; when empty the nodes naming this one as `parent` are used, in array order). The window is the root node
+separated: `focus`, `activate`, `toggle`, `setValue`, `increment`, `decrement`, `scrollIntoView`) and `children: [int]` (the order of the
+children; when empty the nodes naming this one as `parent` are used, in array order), plus the optional `posInSet`,
+`setSize: int` (a list row's 1-based position, the list's row count -> AccessKit position-in-set / size-of-set; read only
+if the struct declares them, `0` = unset). A `placeholder` field is not read by the host: boring-ui sends such a row as
+an unnamed `listItem` with bounds only. The window is the root node
 (`id` 0, role window, labelled with the `Screen` title). A node whose chain of parents does not reach the window is dropped.
 
 | `role` | AccessKit role | notes |
@@ -512,7 +515,7 @@ children; when empty the nodes naming this one as `parent` are used, in array or
 | anything else | `GenericContainer` | |
 
 Requests (`r.action`): `focus` (Focus), `activate` (Click, whatever the role: deciding between press and toggle is the
-program's job), `setValue` (`r.arg` is the text or the number), `increment`, `decrement` (Increment / Decrement). Other
+program's job), `setValue` (`r.arg` is the text or the number), `increment`, `decrement` (Increment / Decrement), `scrollIntoView` (ScrollIntoView, `r.arg` empty). Other
 AccessKit actions are ignored. A request wakes a `redraw = "demand"` loop.
 
 Cost: AccessKit only asks for the tree once an assistive technology connects, so until then `setAccessibility` does
