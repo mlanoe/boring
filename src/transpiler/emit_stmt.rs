@@ -990,13 +990,16 @@ impl Transpiler {
                 _ => None,
             }
         }
+        // Use the general resolver first so fields, indexed containers, and other
+        // typed expressions get the same treatment as plain local variables.
+        // `without_mut`: a `mut [float] e` binding is stored as `Type::Mut(Array(..))`
+        // (see `Type::Mut`'s doc) — `mut` has no bearing on the element type.
+        if let Some(Type::Array(inner)) = self.resolve_expr_type(expr).as_ref().map(Type::without_mut) {
+            if let Some(width) = float_width(inner) {
+                return Some(width);
+            }
+        }
         match &expr.kind {
-            // `without_mut`: a `mut [float] e` binding is stored as `Type::Mut(Array(..))`
-            // (see `Type::Mut`'s doc) — `mut` has no bearing on the element type.
-            ExprKind::Var(v) => match self.var_types.get(v.as_str()).map(Type::without_mut) {
-                Some(Type::Array(inner)) => float_width(inner),
-                _ => None,
-            },
             ExprKind::Array(elems) => elems.first().and_then(|e| match &e.kind {
                 ExprKind::Float(_) => Some("f64"),
                 _ => None,

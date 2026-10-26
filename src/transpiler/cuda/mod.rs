@@ -355,7 +355,7 @@ path = "src/main.rs"
 
 [dependencies]
 cudarc = {{ version = "0.19", features = ["driver", "nvrtc", "cublas", "f16", "cuda-version-from-build-system"] }}
-half = {{ version = "2", features = ["bytemuck"] }}
+half = {{ version = "2", features = ["bytemuck", "serde"] }}
 {extra_deps}"#,
         stem = stem,
         version = version,

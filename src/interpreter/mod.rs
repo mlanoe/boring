@@ -1511,6 +1511,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                 Value::Uint64(n) => Ok(Value::Int(*n as i64)),
                 Value::Uint128(n) => Ok(Value::Int(*n as i64)),
                 Value::Float64(f) => Ok(Value::Int(*f as i64)),
+                Value::Float16(f) => Ok(Value::Int(f.to_f32() as i64)),
                 // float32 was missing from every conversion/math builtin below (this one
                 // included) — added while fixing examples/mandelbrot_gpu.br, which passes
                 // a `float32` (mandatory for a `--target metal` kernel field — MSL has no
@@ -1567,6 +1568,15 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                     if *f < 0.0 { Err(err("cannot convert negative Float to Uint".to_string(), line)) }
                     else { Ok(Value::Uint(*f as u64)) }
                 }
+                Value::Float16(f) => {
+                    let f = f.to_f32();
+                    if f < 0.0 { Err(err("cannot convert negative Float16 to Uint".to_string(), line)) }
+                    else { Ok(Value::Uint(f as u64)) }
+                }
+                Value::Float32(f) => {
+                    if *f < 0.0 { Err(err("cannot convert negative Float32 to Uint".to_string(), line)) }
+                    else { Ok(Value::Uint(*f as u64)) }
+                }
                 Value::Str(s) => s.trim().parse::<u64>()
                     .map(Value::Uint)
                     .map_err(|_| err(format!("cannot convert '{}' to Uint", s), line)),
@@ -1594,6 +1604,15 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                 }
                 Value::Float64(f) => {
                     if *f < 0.0 || *f > 255.0 { Err(err("cannot convert Float to Uint8 (out of 0..=255 range)".to_string(), line)) }
+                    else { Ok(Value::Uint8(*f as u8)) }
+                }
+                Value::Float16(f) => {
+                    let f = f.to_f32();
+                    if !(0.0..=255.0).contains(&f) { Err(err("cannot convert Float16 to Uint8 (out of 0..=255 range)".to_string(), line)) }
+                    else { Ok(Value::Uint8(f as u8)) }
+                }
+                Value::Float32(f) => {
+                    if !(0.0..=255.0).contains(f) { Err(err("cannot convert Float32 to Uint8 (out of 0..=255 range)".to_string(), line)) }
                     else { Ok(Value::Uint8(*f as u8)) }
                 }
                 Value::Str(s) => s.trim().parse::<u8>()
@@ -1654,6 +1673,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                 return Err(err("float16() takes 1 argument", line));
             }
             let value = match &args[0] {
+                Value::Float16(n) => return Ok(Value::Float16(*n)),
                 Value::Float64(n) => *n as f32,
                 Value::Float32(n) => *n,
                 Value::Int(n) => *n as f32,
@@ -2087,6 +2107,8 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "floatToBits".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int((*f as f32).to_bits() as i64)),
+            Some(Value::Float16(f)) => Ok(Value::Int(f.to_f32().to_bits() as i64)),
+            Some(Value::Float32(f)) => Ok(Value::Int(f.to_bits() as i64)),
             Some(Value::Int(n))   => Ok(Value::Int((*n as f32).to_bits() as i64)),
             _ => Err(err("floatToBits: expected number", line)),
         },
@@ -2122,6 +2144,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Int(n))   => Ok(Value::Int(n.signum())),
             Some(Value::Float64(f)) => Ok(Value::Float64(f.signum())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().signum()))),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.signum())),
             _ => Err(err("sign: expected number", line)),
         },
@@ -2130,6 +2153,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "isNaN".into(),
         func: |args, _line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Bool(f.is_nan())),
+            Some(Value::Float16(f)) => Ok(Value::Bool(f.is_nan())),
             // A real float32 NaN must not fall through to the generic `false` arm
             // below — that would be a silent, undetectable false negative (unlike
             // the other math builtins' missing-arm gap, which at least fails loudly).
@@ -2142,6 +2166,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "isInfinite".into(),
         func: |args, _line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Bool(f.is_infinite())),
+            Some(Value::Float16(f)) => Ok(Value::Bool(f.is_infinite())),
             Some(Value::Float32(f)) => Ok(Value::Bool(f.is_infinite())),
             _                     => Ok(Value::Bool(false)),
         },

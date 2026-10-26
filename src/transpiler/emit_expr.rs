@@ -5664,12 +5664,29 @@ impl Transpiler {
                 format!("{}.trim().parse::<f32>().unwrap_or(0.0)", self.emit_expr(&args[0].value)),
             "int" | "uint" | "uint8"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint16" | "uint32" | "uint64" | "uint128"
+                if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
+                    matches!(ty.without_mut(), Type::Float16)
+                        || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16"))) => {
+                let rust_ty = normalize_type_name(name, self.use_rc_str());
+                format!("(f32::from({}) as {})", self.emit_expr(&args[0].value), rust_ty)
+            }
+            "int" | "uint" | "uint8"
+                | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128" => {
                 let rust_ty = normalize_type_name(name, self.use_rc_str());
                 format!("({} as {})", self.emit_expr(&args[0].value), rust_ty)
             }
+            "float" | "float64" if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
+                matches!(ty.without_mut(), Type::Float16)) =>
+                format!("(f32::from({}) as f64)", self.emit_expr(&args[0].value)),
             "float" | "float64" => format!("({} as f64)", self.emit_expr(&args[0].value)),
+            "float16" if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
+                matches!(ty.without_mut(), Type::Float16)) => self.emit_expr(&args[0].value),
             "float16" => format!("half::f16::from_f32(({}) as f32)", self.emit_expr(&args[0].value)),
+            "float32" if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
+                matches!(ty.without_mut(), Type::Float16)) =>
+                format!("f32::from({})", self.emit_expr(&args[0].value)),
             "float32" => format!("({} as f32)", self.emit_expr(&args[0].value)),
             "str"   => {
                 // Single non-string arg → conversion.

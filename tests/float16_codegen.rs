@@ -58,7 +58,7 @@ fn host_half_is_two_bytes_and_roundtrips() {
 
 #[test]
 fn cpu_interpreter_and_generated_rust_convert_and_compute_f16() {
-    let source_text = "def main():\n    let float16 a = float16(1.337)\n    let float16 b = float16(\"2.0\")\n    let float16 c = (a + b) as float16\n    let int16 narrow_int = 7\n    let float16 from_int = narrow_int as float16\n    let float16 parsed = \"1.5\".parseFloat16() else float16(0.0)\n    let float16 root = sqrt(float16(4.0)) as float16\n    let float16 method_root = float16(9.0).sqrt() as float16\n    let float16 squared = float16(4.0).pow(float16(2.0)) as float16\n    mut [float16] values = [float16(1.0), float16(2.0)]\n    let float16 total = values.sum()\n    values[0] = 1.337\n    let float16 bounded = clamp(float16(-2.0), float16(-1.0), float16(1.0))\n    let float32 smallest = min(float16(-2.0), float16(-1.0)) as float32\n    print \"{c as float32} {parsed as float32} {from_int as float32}\"\n    print \"{root as float32}\"\n    print \"{method_root as float32} {squared as float32}\"\n    print \"{total as float32}\"\n    print \"{bounded as float32} {smallest}\"\n    print \"{(float16(2048.0) + float16(1.0)) as float32} {values[0] as float32}\"\n";
+    let source_text = "def main():\n    let float16 a = float16(1.337)\n    let float16 b = float16(\"2.0\")\n    let float16 c = (a + b) as float16\n    let int16 narrow_int = 7\n    let float16 from_int = narrow_int as float16\n    let float16 parsed = \"1.5\".parseFloat16() else float16(0.0)\n    let float16 root = sqrt(float16(4.0))\n    let float16 method_root = float16(9.0).sqrt()\n    let float16 squared = float16(4.0).pow(float16(2.0))\n    mut [float16] values = [float16(1.0), float16(2.0)]\n    let float16 total = values.sum()\n    values[0] = 1.337\n    mut [float16] ordered = [float16(2.0), float16(1.0)]\n    ordered.sort()\n    let float16 bounded = clamp(float16(-2.0), float16(-1.0), float16(1.0))\n    let float32 smallest = min(float16(-2.0), float16(-1.0)) as float32\n    print \"{c as float32} {parsed as float32} {from_int as float32}\"\n    print \"{root as float32}\"\n    print \"{method_root as float32} {squared as float32}\"\n    print \"{total as float32}\"\n    print \"{bounded as float32} {smallest}\"\n    print \"{(float16(2048.0) + float16(1.0)) as float32} {values[0] as float32}\"\n    print \"{int(float16(3.5))} {float16(float16(1.5)) as float32} {float32(float16(1.5))}\"\n    print \"{float16(1.0) < float16(2.0)} {ordered[0] as float32}\"\n    print json(float16(1.5))\n";
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -67,7 +67,7 @@ fn cpu_interpreter_and_generated_rust_convert_and_compute_f16() {
     let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["run"]).arg(&source).output().unwrap();
     assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
-    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "3.3359375 1.5 7\n2\n3 16\n3\n-1 -2\n2048 1.3369141");
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "3.3359375 1.5 7\n2\n3 16\n3\n-1 -2\n2048 1.3369141\n3 1.5 1.5\ntrue 1\n1.5");
     let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["build"]).arg(&source).output().unwrap();
     assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
@@ -75,6 +75,66 @@ fn cpu_interpreter_and_generated_rust_convert_and_compute_f16() {
     let checked = Command::new("cargo")
         .args(["check", "--offline", "--manifest-path"]).arg(manifest).output().unwrap();
     assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+}
+
+#[test]
+fn cpu_generated_rust_sorts_and_sums_float16_struct_fields() {
+    let source_text = r#"
+struct HalfBag:
+    var [float16] values
+
+def main():
+    mut bag = HalfBag(values = [float16(4.0), float16(3.0)])
+    bag.values.sort()
+    print "{bag.values.sum() as float32} {bag.values[0] as float32}"
+"#;
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu_struct_field");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, source_text).unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["run"]).arg(&source).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "7 3");
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build"]).arg(&source).output().unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(root.join("main_rust/Cargo.toml")).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+}
+
+#[test]
+fn cpu_interpreter_executes_float16_kernel_fields_and_buffers() {
+    let source_text = r#"
+kernel HalfScale:
+    let float16 gain
+    mut [float16]'unified values
+    init(float16 factor, [float16]'unified input):
+        gain = factor
+        values = input
+    def ():
+        values[.thread.x] = values[.thread.x] * gain
+
+mut k = HalfScale(float16(2.0), [float16(1.337), float16(2.0)])
+kernel:
+    k(block = 2, grid = 1)
+print "{k.values[0] as float32} {k.values[1] as float32}"
+"#;
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu_kernel");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, source_text).unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["run"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "2.6738281 4");
 }
 
 #[test]

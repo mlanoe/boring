@@ -2923,6 +2923,17 @@ impl Transpiler {
             }
             // No closure: fallthrough to map_method which maps "count" → "len" as i64.
         }
+        // Rust floats only implement `PartialOrd`, so their in-place sort must use
+        // the same partial-comparison policy as `sorted()`/`min()`/`max()` below.
+        // This includes `half::f16`, as well as f32/f64 arrays that would otherwise
+        // fail to compile because Vec::sort requires Ord.
+        if method == "sort" && args.is_empty() && self.float_array_elem_ty(obj).is_some() {
+            let obj_s = self.emit_expr(obj);
+            return Some(format!(
+                "{}.sort_by(|__a, __b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal))",
+                obj_s
+            ));
+        }
         // `sortBy(closure)` — in-place sort by key extractor (mutating).
         // Emits: obj.sort_by_key(|param| key_expr)
         if method == "sortBy" {

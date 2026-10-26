@@ -2810,7 +2810,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = {{ version = "1", features = ["full"] }}
-half = {{ version = "2", features = ["bytemuck"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{unicode_dep}{local_channel_dep}{user_deps}"#
+half = {{ version = "2", features = ["bytemuck", "serde"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{unicode_dep}{local_channel_dep}{user_deps}"#
     );
     let cargo_path = project_dir.join("Cargo.toml");
     if let Err(e) = std::fs::write(&cargo_path, cargo_toml) {
@@ -3507,7 +3507,7 @@ fn kernel_target_cargo_toml(base: &str, uses_unicode: bool, source: &Path) -> St
         }
     }
     let mut extra: Vec<String> = Vec::new();
-    extra.push("half = { version = \"2\", features = [\"bytemuck\"] }".to_string());
+    extra.push("half = { version = \"2\", features = [\"bytemuck\", \"serde\"] }".to_string());
     if uses_unicode {
         extra.push("unicode-segmentation = \"1\"".to_string());
         extra.push("unicode-width = \"0.2\"".to_string());

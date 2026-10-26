@@ -1441,6 +1441,7 @@ impl Interpreter {
                 new_arr.sort_by(|a, b| {
                     match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Str(x), Value::Str(y)) => x.cmp(y),
@@ -1462,6 +1463,7 @@ impl Interpreter {
                 keyed.sort_by(|(ka, _), (kb, _)| {
                     match (ka, kb) {
                         (Value::Int(a), Value::Int(b))     => a.cmp(b),
+                        (Value::Float16(a), Value::Float16(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Int(a), Value::Float64(b))   => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
@@ -1811,6 +1813,7 @@ impl Interpreter {
                 indices.sort_by(|&i, &j| {
                     match (&keys[i], &keys[j]) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Str(x), Value::Str(y)) => x.cmp(y),
@@ -3040,11 +3043,13 @@ impl Interpreter {
                                     "o"  => if let Value::Int(n) = val { format!("{:o}", n) } else { format!("{}", val) },
                                     "e"  => match val {
                                         Value::Float64(f) => format!("{:e}", f),
+                                        Value::Float16(f) => format!("{:e}", f),
                                         Value::Float32(f) => format!("{:e}", f),
                                         _ => format!("{}", val),
                                     },
                                     "E"  => match val {
                                         Value::Float64(f) => format!("{:E}", f),
+                                        Value::Float16(f) => format!("{:E}", f),
                                         Value::Float32(f) => format!("{:E}", f),
                                         _ => format!("{}", val),
                                     },
@@ -3308,6 +3313,7 @@ impl Interpreter {
                 (LitPattern::Int(n), Value::Int(v)) => n == v,
                 // For NaN: treat NaN == NaN as true (pattern matching, not arithmetic).
                 (LitPattern::Float(f), Value::Float64(v)) => (f.is_nan() && v.is_nan()) || f == v,
+                (LitPattern::Float(f), Value::Float16(v)) => (f.is_nan() && v.is_nan()) || *f == v.to_f32() as f64,
                 (LitPattern::Float(f), Value::Float32(v)) => (f.is_nan() && v.is_nan()) || *f == *v as f64,
                 (LitPattern::Str(s), Value::Str(v)) => s == v,
                 (LitPattern::Bool(b), Value::Bool(v)) => b == v,
@@ -3566,6 +3572,7 @@ impl Interpreter {
             Value::Uint32(_) => Type::Uint32,
             Value::Uint64(_) => Type::Uint64,
             Value::Uint128(_) => Type::Uint128,
+            Value::Float16(_) => Type::Float16,
             Value::Float32(_) => Type::Float32,
             Value::Float64(_) => Type::Float64,
             Value::Str(_)   => Type::Str,

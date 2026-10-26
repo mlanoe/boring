@@ -483,6 +483,9 @@ impl Interpreter {
             Value::Uint32(n) => Json::from(*n),
             Value::Uint128(n) => Json::from(*n as u64),
 
+            Value::Float16(f) => {
+                serde_json::Number::from_f64(f.to_f32() as f64).map(Json::Number).unwrap_or(Json::Null)
+            }
             Value::Float32(f) => {
                 serde_json::Number::from_f64(*f as f64).map(Json::Number).unwrap_or(Json::Null)
             }

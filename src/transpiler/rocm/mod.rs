@@ -474,7 +474,7 @@ path = "src/main.rs"
 # added only for a `Screen` (display) program -- they're a CPU-side windowing/
 # present layer, not a GPU compute crate.
 [dependencies]
-half = {{ version = "2", features = ["bytemuck"] }}
+half = {{ version = "2", features = ["bytemuck", "serde"] }}
 {extra_deps}"#,
         stem = stem,
         version = version,

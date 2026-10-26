@@ -32,7 +32,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # when used), so both modes agree on every text-segmentation/width answer.
 unicode-segmentation = "1"
 unicode-width = "0.2"
-half = { version = "2", features = ["bytemuck"] }
+half = { version = "2", features = ["bytemuck", "serde"] }
 
 
 # Smaller target/debug (the dominant disk cost): keep line tables for backtraces, drop full DWARF.
