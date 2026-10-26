@@ -426,8 +426,8 @@ encode 43 ms, bin 11 ms. A 10-row tree costs ~10 ms per frame. Kernel time per f
 - Accessibility: `semantics.br` is not connected to platform APIs (VoiceOver etc.).
 - Embedded font (system fonts make the picture differ per machine); `scene.br` emitting glyphs directly (today
   `glyphify` converts `DrawText` before encoding).
-- Not verified on hardware: real touch screen, real IME. `task_4adfaf52`: a presented `'unified` field is not re-blitted
-  after a re-upload (workaround: rebuild the kernel on resize).
+- Not verified on hardware: real touch screen, real IME. `task_4adfaf52` is fixed (compiler 2836d305: re-uploading a presented
+  `'unified` field re-points the blit); `todo_window` now reallocates `k.out` on resize instead of rebuilding the kernel (c7b9742).
 - Compiler gotchas seen in generated crates: struct names clashing with `boring.ui` views or Rust traits (`Image`, `Frame`,
   `Sized`) — prefix them.
 
@@ -437,3 +437,17 @@ per question per level) and the focus/caret/hover/composition marks set in place
 commands 8004 → 196: a `List` paints only the rows within its viewport ± 48 pt (ea4606f; hit testing and semantics still see
 every row). A frame is now ~60 ms on the host at 1000 rows (was ~750 ms). Still open: layout is redone in full on every
 call (no cross-frame cache; a call per input event), and all rows are measured (a virtualized layout needs estimated row heights).
+
+**Windowed `List` layout (2026-10-26, `src/layout.br` "Windowed lists", `tests/list_window_test.br`).** A `List` of more than 64 rows,
+laid out through `layout` (a runtime in hand), measures and places only the rows within the viewport ± 96 pt. The others stay in
+`Placed.children` as stubs (id, kind, key, y, h, no content, `props["virtual"] = "true"`), so row keys, selection and the rows
+in view behave as before. A never-measured row is estimated by the mean of the list's known rows; a measured height is
+remembered by the runtime (`Runtime.layoutMemory`, an `'actor`, per list id and row key, dropped when the width changes) and a
+row entering the window corrects the offsets below it. The scroll extent is therefore exact for uniform rows and an estimate for
+mixed heights until they have been visited (the end of the list always lines up with the viewport). `measure`/`place` and lists
+of ≤ 64 rows keep the exact path; a horizontal span of a windowed list is its first row's. Layout, 1000 rows: ~56 ms →
+~30-45 ms and Placed nodes 5005 → 1105 (the box was heavily loaded by other builds: compare layout against `start` in the same
+run, 1.4× → ~0.3×). What is left is linear in the row count: the `Mounted` tree is deep-cloned by `rt.root` and `flatten`
+(`bench_tree` now prints the `rt.root` read). Compiler quirk met: assigning an `'actor` field to another `'actor` field double-wraps
+it in `boring build` (worked around with the constructor form; task_e103f7ca). Still open: cross-frame layout cache of unchanged
+subtrees, per-identity invalidation, accessibility sees stubs without content for off-window rows.
