@@ -688,7 +688,16 @@ impl Transpiler {
                     }
                 } else {
                     let cast = kernel_host_scalar_type(&field.ty);
-                    self.line(&format!("{var_name}.{field_name} = ({a}) as {cast};"));
+                    if cast == "half::f16" {
+                        let value = if self.infer_float_width(&arg.value) == Some("f16") {
+                            a.clone()
+                        } else {
+                            format!("half::f16::from_f32(({a}) as f32)")
+                        };
+                        self.line(&format!("{var_name}.{field_name} = {value};"));
+                    } else {
+                        self.line(&format!("{var_name}.{field_name} = ({a}) as {cast};"));
+                    }
                 }
             }
         }
@@ -710,7 +719,16 @@ impl Transpiler {
             if is_gpu_buffer_ty(&field.ty) { continue; }
             let cast = kernel_host_scalar_type(&field.ty);
             let rust_expr = self.substitute_and_emit(&expr, &param_to_arg, &param_to_len);
-            self.line(&format!("{var_name}.{field_name} = ({rust_expr}) as {cast};"));
+            if cast == "half::f16" {
+                let value = if self.infer_float_width(&expr) == Some("f16") {
+                    rust_expr
+                } else {
+                    format!("half::f16::from_f32(({rust_expr}) as f32)")
+                };
+                self.line(&format!("{var_name}.{field_name} = {value};"));
+            } else {
+                self.line(&format!("{var_name}.{field_name} = ({rust_expr}) as {cast};"));
+            }
         }
 
         // `'unified`/`'global` array fields the loop above never touched are outputs

@@ -2201,6 +2201,11 @@ impl<'a> HostEmitter<'a> {
                     };
                     if let Some(host) = host {
                         rhs_str = format!("({rhs_str}) as {host}");
+                    } else if (matches!(fty, Type::Float16)
+                        || matches!(fty, Type::Named(n) if n == "float16" || n == "f16"))
+                        && !crate::transpiler::host_types::gpu_host_expr_is_float16(rhs)
+                    {
+                        rhs_str = format!("half::f16::from_f32(({rhs_str}) as f32)");
                     }
                 }
                 return Some(format!("{pfx}{obj_name}.{field} = {rhs_str};"));
@@ -2437,13 +2442,20 @@ impl<'a> HostEmitter<'a> {
                 }
                 if let ExprKind::Var(n) = &callee.kind {
                     if (n == "float16" || n == "f16") && args.len() == 1 {
-                        return format!(
-                            "half::f16::from_f32(({}) as f32)",
-                            self.host_expr(&args[0].value)
-                        );
+                        let inner = self.host_expr(&args[0].value);
+                        return if crate::transpiler::host_types::gpu_host_expr_is_float16(&args[0].value) {
+                            inner
+                        } else {
+                            format!("half::f16::from_f32(({}) as f32)", inner)
+                        };
                     }
                     if (n == "float32" || n == "float" || n == "float64") && args.len() == 1 {
-                        return format!("({} as f32)", self.host_expr(&args[0].value));
+                        let inner = self.host_expr(&args[0].value);
+                        return if crate::transpiler::host_types::gpu_host_expr_is_float16(&args[0].value) {
+                            format!("f32::from({inner})")
+                        } else {
+                            format!("({inner} as f32)")
+                        };
                     }
                 }
                 // A call to an ordinary Boring function: pass each argument the way the function's

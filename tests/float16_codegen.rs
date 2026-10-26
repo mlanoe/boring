@@ -154,6 +154,46 @@ def main():
 }
 
 #[test]
+fn cpu_generated_rust_coerces_float16_reassignments() {
+    let source_text = r#"
+struct HalfBox:
+    var float16 value
+
+def reset(var float16 value):
+    value = 1.75
+
+def main():
+    var float16 scalar = float16(0.0)
+    scalar = 1.25
+    reset(scalar)
+    mut box = HalfBox(value = float16(0.0))
+    box.value = 1.5
+    print "{scalar as float32} {box.value as float32}"
+"#;
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("float16_codegen/cpu_reassignments");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, source_text).unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["run"]).arg(&source).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "1.75 1.5");
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build"]).arg(&source).output().unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let host = fs::read_to_string(root.join("main_rust/src/main.rs")).unwrap();
+    assert!(host.contains("scalar = half::f16::from_f32((1.25) as f32)"), "{host}");
+    assert!(host.contains("*value = half::f16::from_f32((1.75) as f32)"), "{host}");
+    assert!(host.contains("r#box.value = half::f16::from_f32((1.5) as f32)"), "{host}");
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(root.join("main_rust/Cargo.toml")).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+}
+
+#[test]
 fn cpu_generated_rust_preserves_inferred_float16_math_results() {
     let source_text = r#"
 def main():
@@ -367,10 +407,29 @@ kernel HalfScalar:
         let copy = value
 
 mut k = HalfScalar([float16(1.0), float16(2.0)].sum())
+mut k2 = HalfScalar(float16(float16(1.0) + float16(2.0)))
+mut k3 = HalfScalar(sqrt(float16(4.0)))
+mut k4 = HalfScalar(float16(float32(float16(2.0))))
+mut k5 = HalfScalar(float16(int(float16(2.0))))
+mut k6 = HalfScalar(float16(4.0).sqrt())
+mut k7 = HalfScalar(float16(2.0).pow(float16(3.0)))
+mut k8 = HalfScalar(float16(4.0).clamp(float16(0.0), float16(3.0)))
+mut k9 = HalfScalar(float16(float16(1.0) + 2.0))
+mut k10 = HalfScalar([float16(1.0), 2.0].sum())
+k.value = 1.5
 kernel:
     k(block = 1)
+    k2(block = 1)
+    k3(block = 1)
+    k4(block = 1)
+    k5(block = 1)
+    k6(block = 1)
+    k7(block = 1)
+    k8(block = 1)
+    k9(block = 1)
+    k10(block = 1)
 "#;
-    for target in ["metal", "cuda", "rocm"] {
+    for target in ["metal", "cuda", "rocm", "wgpu"] {
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen").join(format!("host_sum_{target}"));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -380,6 +439,52 @@ kernel:
             .args(["build", "--target", target]).arg(&source).output().unwrap();
         assert!(output.status.success(), "{target}: {}", String::from_utf8_lossy(&output.stderr));
         let host = fs::read_to_string(root.join(format!("main_{target}/src/main.rs"))).unwrap();
-        assert!(host.contains("sum::<half::f16>()"), "{target} widened a float16 host sum:\n{host}");
+        if target != "wgpu" {
+            assert!(host.contains("sum::<half::f16>()"), "{target} widened a float16 host sum:\n{host}");
+        }
+        assert!(
+            !host.contains("half::f16::from_f32(((half::f16::from_f32"),
+            "{target} double-converted a compound float16 host expression:\n{host}"
+        );
+        assert!(
+            !host.contains("as half::f16"),
+            "{target} emitted an invalid Rust cast to float16:\n{host}"
+        );
+        assert!(
+            host.contains("half::f16::from_f32(f32::from("),
+            "{target} did not evaluate float16 host math through f32:\n{host}"
+        );
+        assert!(
+            !host.contains("half::f16::from_f32((4.0) as f32).sqrt()"),
+            "{target} called a math method directly on float16:\n{host}"
+        );
+        assert!(
+            !host.contains("half::f16::from_f32((2.0) as f32).pow("),
+            "{target} called pow directly on float16:\n{host}"
+        );
+        assert!(
+            !host.contains("half::f16::from_f32((4.0) as f32).clamp("),
+            "{target} called clamp directly on float16:\n{host}"
+        );
+        assert!(
+            host.contains("+ half::f16::from_f32((2.0) as f32)"),
+            "{target} did not coerce a mixed float16 host literal:\n{host}"
+        );
+        assert!(
+            host.contains("vec![half::f16::from_f32((1.0) as f32), half::f16::from_f32((2.0) as f32)]"),
+            "{target} did not coerce a mixed float16 host array:\n{host}"
+        );
+        assert!(
+            host.contains("k.value = half::f16::from_f32((1.5) as f32)"),
+            "{target} did not coerce a float16 kernel-field assignment:\n{host}"
+        );
+        assert!(
+            host.contains("f32::from(half::f16::from_f32("),
+            "{target} cast float16 to float32 with an invalid primitive cast:\n{host}"
+        );
+        assert!(
+            host.contains("f32::from(half::f16::from_f32((2.0) as f32)) as isize"),
+            "{target} cast float16 to int with an invalid primitive cast:\n{host}"
+        );
     }
 }

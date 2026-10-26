@@ -1618,6 +1618,25 @@ impl HostEmitter {
     /// `emit_kernel_field_value`'s doc for why a mirroring kernel-field RHS needs
     /// its own, non-materializing emission instead of the ordinary `self.expr()`.
     fn emit_assign_rhs(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        let lhs_is_float16 = match &lhs.kind {
+            ExprKind::Field(obj, field) => match &obj.kind {
+                ExprKind::Var(obj_name) => self.var_kernel_type.get(obj_name.as_str())
+                    .and_then(|kernel| self.kernel_decls.get(kernel))
+                    .and_then(|decl| decl.fields.iter().find(|f| f.name == *field))
+                    .is_some_and(|f| matches!(f.ty.without_mut(), Type::Float16)
+                        || matches!(f.ty.without_mut(), Type::Named(name) if matches!(name.as_str(), "float16" | "f16"))),
+                _ => false,
+            },
+            _ => false,
+        };
+        if lhs_is_float16 {
+            let value = self.expr(rhs);
+            return if crate::transpiler::host_types::gpu_host_expr_is_float16(rhs) {
+                value
+            } else {
+                format!("half::f16::from_f32(({value}) as f32)")
+            };
+        }
         if matches!(&lhs.kind, ExprKind::Var(name) if self.resident_locals.contains(name.as_str())) {
             if let Some(value) = self.try_resident_field_expr(rhs) { return value; }
             if let ExprKind::Field(obj, field) = &rhs.kind {
@@ -3028,8 +3047,12 @@ impl HostEmitter {
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
-                let l = self.expr(lhs);
-                let r = self.expr(rhs);
+                let mut l = self.expr(lhs);
+                let mut r = self.expr(rhs);
+                if let Some((left, right)) = crate::transpiler::host_types::gpu_host_float16_binop_operands(lhs, l.clone(), rhs, r.clone()) {
+                    l = left;
+                    r = right;
+                }
                 {
                     if matches!(op, BinOp::Is | BinOp::IsNot) {
                         crate::transpiler::helpers::report_unsupported(e.line, e.col,
@@ -3222,13 +3245,21 @@ impl HostEmitter {
                     if name == "float16" || name == "f16" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
-                            return format!("half::f16::from_f32(({}) as f32)", inner);
+                            return if crate::transpiler::host_types::gpu_host_expr_is_float16(&arg.value) {
+                                inner
+                            } else {
+                                format!("half::f16::from_f32(({}) as f32)", inner)
+                            };
                         }
                     }
                     if name == "float" || name == "float64" || name == "float32" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
-                            return format!("({} as f32)", inner);
+                            return if crate::transpiler::host_types::gpu_host_expr_is_float16(&arg.value) {
+                                format!("f32::from({inner})")
+                            } else {
+                                format!("({inner} as f32)")
+                            };
                         }
                     }
                 }
@@ -3237,7 +3268,11 @@ impl HostEmitter {
                     if name == "int" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
-                            return format!("({} as isize)", inner);
+                            return if crate::transpiler::host_types::gpu_host_expr_is_float16(&arg.value) {
+                                format!("(f32::from({inner}) as isize)")
+                            } else {
+                                format!("({inner} as isize)")
+                            };
                         }
                     }
                 }
@@ -3246,7 +3281,11 @@ impl HostEmitter {
                     if name == "uint" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
-                            return format!("({} as usize)", inner);
+                            return if crate::transpiler::host_types::gpu_host_expr_is_float16(&arg.value) {
+                                format!("(f32::from({inner}) as usize)")
+                            } else {
+                                format!("({inner} as usize)")
+                            };
                         }
                     }
                 }
@@ -3265,7 +3304,11 @@ impl HostEmitter {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
                             let rust_ty = crate::transpiler::helpers::normalize_type_name(name, false);
-                            return format!("({} as {})", inner, rust_ty);
+                            return if crate::transpiler::host_types::gpu_host_expr_is_float16(&arg.value) {
+                                format!("(f32::from({inner}) as {rust_ty})")
+                            } else {
+                                format!("({inner} as {rust_ty})")
+                            };
                         }
                     }
                 }
@@ -3597,6 +3640,9 @@ impl HostEmitter {
                 }
                 let o = self.expr(obj);
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                if let Some(call) = crate::transpiler::host_types::gpu_host_float16_math_method(method, obj, &o, args, &args_s) {
+                    return call;
+                }
                 match method.as_str() {
                     "wait" => format!("{}.wait()", o),
                     "done" => format!("{}.done()", o),
@@ -3696,7 +3742,15 @@ impl HostEmitter {
                 }
             }
             ExprKind::Array(elems) => {
-                let s: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
+                let has_half = elems.iter().any(crate::transpiler::host_types::gpu_host_expr_is_float16);
+                let s: Vec<String> = elems.iter().map(|e| {
+                    let value = self.expr(e);
+                    if has_half && matches!(e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
+                        format!("half::f16::from_f32(({value}) as f32)")
+                    } else {
+                        value
+                    }
+                }).collect();
                 format!("vec![{}]", s.join(", "))
             }
             ExprKind::ArrayFill { value, count } => {

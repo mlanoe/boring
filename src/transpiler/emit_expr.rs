@@ -3005,6 +3005,27 @@ impl Transpiler {
                 }
             }
         }
+        // GPU host mirrors store float16 fields as `half::f16`; an untyped float RHS
+        // therefore needs the same explicit narrowing used by kernel constructors.
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let ExprKind::Var(kvar) = &obj.kind {
+                let field_decl = self.kernel_vars.get(kvar.as_str())
+                    .and_then(|kname| self.kernel_decls.get(kname))
+                    .and_then(|decl| decl.fields.iter().find(|f| f.name == *field));
+                if let Some(f) = field_decl {
+                    let fty = f.ty.without_mut();
+                    if (matches!(fty, Type::Float16)
+                        || matches!(fty, Type::Named(n) if n == "float16" || n == "f16"))
+                        && !crate::transpiler::host_types::gpu_host_expr_is_float16(value)
+                    {
+                        return format!(
+                            "{kvar}.{field} = half::f16::from_f32(({}) as f32)",
+                            self.emit_expr(value)
+                        );
+                    }
+                }
+            }
+        }
         // CPU/SIMD: `k.colors = <host array>` re-uploads the whole array through the
         // kernel's own `copy_<field>_to_device` (element-converted to the field's width),
         // so a render loop can replace an array of any length between frames.
@@ -3017,7 +3038,8 @@ impl Transpiler {
                     // `k.n = enc.n`: an `int`/`uint` host value (`isize`/`usize`) narrows to the
                     // kernel field's 32-bit mirror, as `k.t = float(..)` already does for floats.
                     if let Some(f) = field_decl {
-                        if (matches!(&f.ty, Type::Int | Type::Uint)
+                        let fty = f.ty.without_mut();
+                        if (matches!(fty, Type::Int | Type::Uint)
                             || matches!(&f.ty, Type::Named(n) if n == "int" || n == "uint"))
                             && !matches!(&value.kind, ExprKind::Int(_))
                         {
@@ -3109,7 +3131,17 @@ impl Transpiler {
                     let val_s = self.box_if_trait_typed(value, tn.as_str());
                     return format!("*{} = {}", var_name, val_s);
                 }
+                let param_is_f16 = self.fn_current_params.get(var_name.as_str()).is_some_and(|ty| {
+                    matches!(ty.without_mut(), Type::Float16)
+                        || matches!(ty.without_mut(), Type::Named(name)
+                            if name == "float16" || name == "f16")
+                });
                 let val_s = self.emit_expr(value);
+                let val_s = if param_is_f16 && self.infer_float_width(value) != Some("f16") {
+                    format!("half::f16::from_f32(({val_s}) as f32)")
+                } else {
+                    val_s
+                };
                 return format!("*{} = {}", var_name, val_s);
             }
             // `'atomic` bindings — operation mapping (Part 1, point 6):
@@ -3966,6 +3998,26 @@ impl Transpiler {
                     .and_then(|fields| fields.into_iter().find(|(n, _)| n == name).map(|(_, ty)| ty))
             }
             _ => None,
+        };
+        // Reassignments do not carry a Rust type annotation, so an untyped float
+        // literal cannot implicitly narrow to `half::f16`. Apply the destination
+        // type just as `emit_let_value` does for a typed declaration. This covers
+        // both local variables and explicit/implicit user-struct fields.
+        let target_scalar_ty = match &target.kind {
+            ExprKind::Var(name) if self.known_local_vars.contains(name.as_str()) => {
+                self.var_types.get(name.as_str())
+            }
+            _ => target_field_ty.as_ref(),
+        };
+        let target_is_f16 = target_scalar_ty.is_some_and(|ty| {
+            matches!(ty.without_mut(), Type::Float16)
+                || matches!(ty.without_mut(), Type::Named(name)
+                    if name == "float16" || name == "f16")
+        });
+        let rhs_s = if target_is_f16 && self.infer_float_width(value) != Some("f16") {
+            format!("half::f16::from_f32(({}) as f32)", rhs_s)
+        } else {
+            rhs_s
         };
         // External types (a real Rust struct Boring never parsed a `struct` declaration for,
         // e.g. Bevy's `Sprite`) never get an entry in `struct_fields` above, so

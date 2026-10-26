@@ -13,6 +13,44 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 
+/// True when a GPU-host expression is syntactically known to produce a half value.
+/// The specialized host emitters do not share the general transpiler's type inference,
+/// so keep this deliberately conservative and only recognize shapes whose width is
+/// explicit in the expression itself.
+pub(crate) fn gpu_host_expr_is_float16(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Call(callee, args) if args.len() == 1 =>
+            matches!(&callee.kind, ExprKind::Var(name) if matches!(name.as_str(), "float16" | "f16")),
+        ExprKind::Cast(_, ty) => matches!(ty.without_mut(), Type::Float16)
+            || matches!(ty.without_mut(), Type::Named(name) if matches!(name.as_str(), "float16" | "f16")),
+        ExprKind::UnaryOp(_, inner) => gpu_host_expr_is_float16(inner),
+        ExprKind::BinOp(_, left, right) => {
+            let literal = |e: &Expr| matches!(e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_));
+            (gpu_host_expr_is_float16(left) && (gpu_host_expr_is_float16(right) || literal(right)))
+                || (gpu_host_expr_is_float16(right) && literal(left))
+        }
+        _ => false,
+    }
+}
+
+/// Coerce an untyped numeric literal paired with an explicit float16 operand so
+/// Rust sees two `half::f16` operands. Returns `None` when the expression does not
+/// have a statically evident half width.
+pub(crate) fn gpu_host_float16_binop_operands(
+    left: &Expr,
+    left_rust: String,
+    right: &Expr,
+    right_rust: String,
+) -> Option<(String, String)> {
+    let literal = |e: &Expr| matches!(e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_));
+    match (gpu_host_expr_is_float16(left), gpu_host_expr_is_float16(right)) {
+        (true, true) => Some((left_rust, right_rust)),
+        (true, false) if literal(right) => Some((left_rust, format!("half::f16::from_f32(({right_rust}) as f32)"))),
+        (false, true) if literal(left) => Some((format!("half::f16::from_f32(({left_rust}) as f32)"), right_rust)),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct HostTypeEnv {
     struct_names: HashSet<String>,
@@ -220,6 +258,46 @@ pub(crate) fn gpu_host_math_builtin(name: &str, arg: &Expr, inner: &str) -> Opti
         "log" => "ln",
         _ => return None,
     };
+    if gpu_host_expr_is_float16(arg) {
+        let result = format!("f32::from({inner}).{method}()");
+        return if matches!(name, "floor" | "ceil" | "round") {
+            Some(result)
+        } else {
+            Some(format!("half::f16::from_f32({result})"))
+        };
+    }
     let recv = if matches!(arg.kind, ExprKind::Float(_)) { format!("({inner} as f64)") } else { format!("({inner})") };
     Some(format!("{recv}.{method}()"))
+}
+
+/// Float16 method calls with numeric arguments in the specialized GPU hosts.
+/// Rust's `half::f16` has no transcendental/power method surface, so operands are
+/// widened to f32 for the calculation and the observable result is rounded to f16.
+pub(crate) fn gpu_host_float16_math_method(
+    name: &str,
+    receiver: &Expr,
+    receiver_rust: &str,
+    args: &[Arg],
+    args_rust: &[String],
+) -> Option<String> {
+    if !gpu_host_expr_is_float16(receiver) { return None; }
+    if args.is_empty() {
+        return gpu_host_math_builtin(name, receiver, receiver_rust);
+    }
+    let operand = |index: usize| {
+        if gpu_host_expr_is_float16(&args[index].value) {
+            format!("f32::from({})", args_rust[index])
+        } else {
+            format!("({} as f32)", args_rust[index])
+        }
+    };
+    let recv = format!("f32::from({receiver_rust})");
+    let result = match name {
+        "pow" | "powf" if !args.is_empty() => format!("{recv}.powf({})", operand(0)),
+        "log" if !args.is_empty() => format!("{recv}.log({})", operand(0)),
+        "atan2" if !args.is_empty() => format!("{recv}.atan2({})", operand(0)),
+        "clamp" if args.len() >= 2 => format!("{recv}.clamp({}, {})", operand(0), operand(1)),
+        _ => return None,
+    };
+    Some(format!("half::f16::from_f32({result})"))
 }
