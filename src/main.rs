@@ -3155,12 +3155,23 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
 
 /// A kernel marked `@only(.gpu)` cannot be built for the CPU target, nor one marked `@only(.cpu)`
 /// for a GPU target: a single-target build has nowhere else to run it.
+/// Can a target that runs on `runs_on` meet `@only(only)`? `Gpu` for a target stands for "a GPU
+/// whose memory model is only known at run time".
+fn runs_on_admits(runs_on: ast::DeviceClass, only: ast::DeviceClass) -> bool {
+    use ast::DeviceClass::*;
+    match (runs_on, only) {
+        (a, b) if a == b => true,
+        (Gpu, Discrete | Integrated) | (Discrete | Integrated, Gpu) => true,
+        _ => false,
+    }
+}
+
 fn check_only_placement(program: &ast::Program, path: &Path, target: &str, runs_on: ast::DeviceClass) {
     let mut failed = false;
     for item in &program.items {
         if let ast::Item::Kernel(kernel) = item {
-            if kernel.only.is_some_and(|only| only != runs_on) {
-                let wants = if kernel.only == Some(ast::DeviceClass::Cpu) { "cpu" } else { "gpu" };
+            if kernel.only.is_some_and(|only| !runs_on_admits(runs_on, only)) {
+                let wants = kernel.only.map_or("gpu", ast::DeviceClass::name);
                 let runs = if runs_on == ast::DeviceClass::Cpu { "the CPU" } else { "a GPU" };
                 eprintln!(
                     "error: {}:{}: kernel `{}` is `@only(.{wants})` but `--target {target}` runs on {runs}",
@@ -3179,7 +3190,7 @@ fn emit_cuda(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
-    check_only_placement(&program, &path, "cuda", ast::DeviceClass::Gpu);
+    check_only_placement(&program, &path, "cuda", ast::DeviceClass::Discrete);
 
     // Kernel-dispatch-qualifier check only -- the four GPU emit_* functions used
     // to skip the checker entirely (only `run`/plain `build` called it), so e.g. a
@@ -3256,7 +3267,7 @@ fn emit_rocm(path: &str, version: &str) {
     install_kernel_target_project_config(Path::new(path));
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
-    check_only_placement(&program, &path, "rocm", ast::DeviceClass::Gpu);
+    check_only_placement(&program, &path, "rocm", ast::DeviceClass::Discrete);
 
     // See `emit_cuda`'s identical check for why this is needed here too.
     let source = std::fs::read_to_string(&path).unwrap_or_default();

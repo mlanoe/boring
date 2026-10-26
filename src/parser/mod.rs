@@ -1771,7 +1771,7 @@ impl Parser {
             };
             let Some(class) = class else {
                 return Err(ParseError::Generic {
-                    msg: format!("`@{}` takes one device class: `.cpu` or `.gpu`", attr.name),
+                    msg: format!("`@{}` takes one device class: `.cpu`, `.gpu`, `.discrete` or `.integrated`", attr.name),
                     line: attr.line, col: attr.col, len: attr.name.len() + 1,
                 });
             };

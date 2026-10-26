@@ -336,7 +336,12 @@ pub struct KernelFieldDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceClass {
     Cpu,
+    /// Any GPU.
     Gpu,
+    /// A GPU with its own memory (a card): CUDA, ROCm, a discrete wgpu adapter.
+    Discrete,
+    /// A GPU sharing the CPU's memory: Apple silicon, an integrated wgpu adapter.
+    Integrated,
 }
 
 impl DeviceClass {
@@ -344,6 +349,8 @@ impl DeviceClass {
         match name {
             "cpu" => Some(DeviceClass::Cpu),
             "gpu" => Some(DeviceClass::Gpu),
+            "discrete" => Some(DeviceClass::Discrete),
+            "integrated" => Some(DeviceClass::Integrated),
             _ => None,
         }
     }
@@ -353,6 +360,18 @@ impl DeviceClass {
         match self {
             DeviceClass::Cpu => "Cpu",
             DeviceClass::Gpu => "Gpu",
+            DeviceClass::Discrete => "Discrete",
+            DeviceClass::Integrated => "Integrated",
+        }
+    }
+
+    /// The source spelling, `.gpu` without the dot.
+    pub fn name(self) -> &'static str {
+        match self {
+            DeviceClass::Cpu => "cpu",
+            DeviceClass::Gpu => "gpu",
+            DeviceClass::Discrete => "discrete",
+            DeviceClass::Integrated => "integrated",
         }
     }
 }

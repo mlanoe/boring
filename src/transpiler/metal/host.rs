@@ -1031,7 +1031,7 @@ impl HostEmitter {
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"metal\".into() }");
-        self.out.push_str(&crate::transpiler::unified::single_backends_fn("metal", "gpu"));
+        self.out.push_str(&crate::transpiler::unified::single_backends_fn("metal", "gpu", "if metal::Device::system_default().is_some_and(|d| d.has_unified_memory()) { \"integrated\" } else { \"discrete\" }"));
         self.line("#[allow(dead_code)]");
         self.line("fn __boring_gpu_copy_d2h<T: Copy>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<T> {");
         self.indent += 1;

@@ -334,8 +334,10 @@ fn module_source(backend: Backend, host_rs: &str, aliases: &[(String, String)]) 
         "\n// ---- multi-target glue ----\n\
          {}\n\
          {}\n\
+         {}\n\
          pub fn __boring_entry() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{ {entry} }}\n",
         crate::multi_bench::device_name_fn(backend),
+        crate::multi_bench::device_class_fn(backend),
         crate::multi_bench::bench_fn(backend),
     ));
     for (key, ident) in aliases {
@@ -363,6 +365,7 @@ fn root_source(backends: &[Backend], routed: &[(Backend, Vec<String>)]) -> Strin
 struct Backend {
     name: &'static str,
     device_name: fn() -> Option<String>,
+    device_class: fn() -> &'static str,
     bench: fn() -> Option<f64>,
     run: fn() -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 }
@@ -376,7 +379,7 @@ fn compiled_backends() -> Vec<Backend> {
     for b in backends {
         let n = b.name();
         s.push_str(&format!(
-            "    #[cfg(feature = \"{n}\")]\n    all.push(Backend {{ name: \"{n}\", device_name: backend_{n}::__boring_device_name, bench: backend_{n}::__boring_bench, run: backend_{n}::__boring_entry }});\n"
+            "    #[cfg(feature = \"{n}\")]\n    all.push(Backend {{ name: \"{n}\", device_name: backend_{n}::__boring_device_name, device_class: backend_{n}::__boring_device_class, bench: backend_{n}::__boring_bench, run: backend_{n}::__boring_entry }});\n"
         ));
     }
     s.push_str(
@@ -529,7 +532,7 @@ fn main() {
         .iter()
         .map(|(b, r)| {
             let cpu = b.name == "simd";
-            unified::BackendInfo { name: if cpu { "cpu" } else { b.name }, kind: if cpu { "cpu" } else { "gpu" }, score: r.score, load: r.load }
+            unified::BackendInfo { name: if cpu { "cpu" } else { b.name }, kind: if cpu { "cpu" } else { "gpu" }, class: if cpu { "cpu" } else { (b.device_class)() }, score: r.score, load: r.load }
         })
         .collect();
     if verbose() {

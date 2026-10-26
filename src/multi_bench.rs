@@ -25,6 +25,20 @@ pub fn device_name_fn(backend: Backend) -> &'static str {
     }
 }
 
+/// `__boring_device_class()`: `"discrete"`, `"integrated"`, `"gpu"` (memory model unknown) or `"cpu"`.
+pub fn device_class_fn(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Cuda | Backend::Rocm => "pub fn __boring_device_class() -> &'static str { \"discrete\" }",
+        Backend::Metal => {
+            "pub fn __boring_device_class() -> &'static str { if metal::Device::system_default().is_some_and(|d| d.has_unified_memory()) { \"integrated\" } else { \"discrete\" } }"
+        }
+        Backend::Wgpu => {
+            "pub fn __boring_device_class() -> &'static str { wgpu::Instance::new(wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map_or(\"gpu\", |a| match a.get_info().device_type { wgpu::DeviceType::DiscreteGpu => \"discrete\", wgpu::DeviceType::IntegratedGpu => \"integrated\", _ => \"gpu\" }) }"
+        }
+        Backend::Simd => "pub fn __boring_device_class() -> &'static str { \"cpu\" }",
+    }
+}
+
 pub fn bench_fn(backend: Backend) -> &'static str {
     match backend {
         Backend::Cuda => CUDA,

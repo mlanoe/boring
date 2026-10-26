@@ -181,9 +181,9 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
     // `kernel.backends()`: the router's ranked backends in a multi-target build, else the CPU.
     if unified {
         e.raw(super::unified::BACKEND_STRUCT);
-        e.raw("#[allow(dead_code)] fn __boring_backends() -> Vec<__BoringBackend> { crate::unified::backends().into_iter().map(|b| __BoringBackend { name: b.name.into(), kind: b.kind.into(), score: b.score, load: b.load as isize }).collect() }\n");
+        e.raw("#[allow(dead_code)] fn __boring_backends() -> Vec<__BoringBackend> { crate::unified::backends().into_iter().map(|b| __BoringBackend { name: b.name.into(), kind: b.kind.into(), class: b.class.into(), score: b.score, load: b.load as isize }).collect() }\n");
     } else {
-        e.raw(&super::unified::single_backends_fn("cpu", "cpu"));
+        e.raw(&super::unified::single_backends_fn("cpu", "cpu", "\"cpu\""));
     }
     let mirrors = device_struct_mirrors(program, &kernels, &mut e.errors);
     e.raw(&mirrors);

@@ -29,7 +29,7 @@ scale(block = 256, grid = 64)
 ## Placement hints
 
 A kernel has no device in its source, but it can say what kind of device it wants. The classes
-are `.cpu` and `.gpu`:
+are `.cpu`, `.gpu`, and the two kinds of GPU, `.discrete` (a card with its own memory: CUDA, ROCm, a discrete wgpu adapter) and `.integrated` (a GPU sharing the CPU's memory: Apple silicon, an integrated adapter). `.discrete` and `.integrated` are narrower than `.gpu`:
 
 ```boring
 @prefer(.gpu)              # wish: skip the small-launch rule, fall back to the CPU if no GPU can
@@ -55,7 +55,10 @@ A launch's `prefer =` wins over the kernel's `@prefer`. `BORING_BACKEND=a,b` ove
 (the user knows this machine) but never an `@only`. `@only` is a requirement a single-target
 build must also meet: `boring build --target simd` rejects an `@only(.gpu)` kernel, and a GPU
 target rejects an `@only(.cpu)` one. `prefer =` and `@prefer` are accepted and ignored by
-single-target builds and by `boring run`. Anything other than `.cpu` or `.gpu` is a compile error.
+single-target builds and by `boring run`. `@prefer(.discrete)` tries the discrete GPUs first and falls back to any backend, while
+`@only(.discrete)` fails the launch when none runs it. A wgpu adapter of an unknown kind counts
+as `.gpu` only. `kernel.backends()` reports each backend's `class` (`discrete`, `integrated`, `gpu` when
+unknown, `cpu`). Anything other than these four is a compile error.
 
 ## Where did it run?
 

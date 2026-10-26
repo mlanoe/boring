@@ -635,7 +635,7 @@ impl HostEmitter {
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Arc<HipContext> { boring_gpu_ctx() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Arc<HipContext> { boring_gpu_ctx() }");
         self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"rocm\".into() }");
-        self.out.push_str(&crate::transpiler::unified::single_backends_fn("rocm", "gpu"));
+        self.out.push_str(&crate::transpiler::unified::single_backends_fn("rocm", "gpu", "\"discrete\""));
         self.line("#[allow(dead_code)]");
         self.line("fn __boring_gpu_copy_d2h<T: Copy + Default>(device: &Arc<HipContext>, _queue: &Arc<HipContext>, buf: &DeviceBuffer<T>) -> Vec<T> {");
         self.indent += 1;

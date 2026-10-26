@@ -314,7 +314,7 @@ impl Checker {
         for arg in args.iter().filter(|a| a.label.as_deref() == Some("prefer")) {
             let valid = matches!(&arg.value.kind, ExprKind::DotIdent(class) if DeviceClass::from_name(class).is_some());
             if !valid {
-                self.error("`prefer` takes a device class: `.cpu` or `.gpu`", arg.value.line, arg.value.col);
+                self.error("`prefer` takes a device class: `.cpu`, `.gpu`, `.discrete` or `.integrated`", arg.value.line, arg.value.col);
             }
         }
     }

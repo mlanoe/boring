@@ -806,6 +806,7 @@ impl Interpreter {
                 return Ok(Value::Array(Rc::new(vec![make_object("Backend".to_string(), vec![
                     ("name".to_string(), Value::Str("cpu".to_string())),
                     ("kind".to_string(), Value::Str("cpu".to_string())),
+                    ("class".to_string(), Value::Str("cpu".to_string())),
                     ("score".to_string(), Value::Float64(0.0)),
                     ("load".to_string(), Value::Int(0)),
                 ])])));

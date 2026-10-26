@@ -31,7 +31,34 @@ pub type BoxError = Box<dyn Error + Send + Sync>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     Cpu,
+    /// Any GPU.
     Gpu,
+    /// A GPU with its own memory.
+    Discrete,
+    /// A GPU sharing the CPU's memory.
+    Integrated,
+}
+
+impl Class {
+    fn name(self) -> &'static str {
+        match self {
+            Class::Cpu => "cpu",
+            Class::Gpu => "gpu",
+            Class::Discrete => "discrete",
+            Class::Integrated => "integrated",
+        }
+    }
+
+    /// Does a backend of class `have` (`"discrete"`, `"integrated"`, `"gpu"` when unknown or
+    /// `"cpu"`) belong to this class?
+    fn admits(self, have: &str) -> bool {
+        match self {
+            Class::Cpu => have == "cpu",
+            Class::Gpu => have != "cpu",
+            Class::Discrete => have == "discrete",
+            Class::Integrated => have == "integrated",
+        }
+    }
 }
 
 /// Where a launch may run. `prefer` is a wish (`@prefer(.gpu)` on the kernel, `prefer = .cpu`
@@ -136,6 +163,8 @@ pub struct BackendInfo {
     pub name: &'static str,
     /// `"gpu"` or `"cpu"`.
     pub kind: &'static str,
+    /// `"discrete"`, `"integrated"`, `"gpu"` when a GPU's memory model is unknown, or `"cpu"`.
+    pub class: &'static str,
     /// The start-up benchmark score, or the prior for a backend that cannot be measured.
     pub score: f64,
     /// How many other programs were using this backend at start-up.
@@ -183,7 +212,7 @@ static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
 pub fn backends() -> Vec<BackendInfo> {
     match STATE.get() {
         Some(state) => state.infos.clone(),
-        None => vec![BackendInfo { name: "cpu", kind: "cpu", score: 0.0, load: 0 }],
+        None => vec![BackendInfo { name: "cpu", kind: "cpu", class: "cpu", score: 0.0, load: 0 }],
     }
 }
 
@@ -232,35 +261,52 @@ pub fn dispatch(spec: &Spec, id: u64, args: &mut [Arg<'_>], grid: [u32; 3], bloc
     let Some(state) = STATE.get() else {
         // Not installed (no backend usable): the CPU runs everything.
         return match hints.only {
-            Some(Class::Gpu) => Some(Err(Box::new(NoBackend::new(kernel)))),
-            _ => None,
+            Some(Class::Cpu) | None => None,
+            Some(class) => Some(Err(Box::new(NoBackend::new(kernel, class)))),
         };
     };
     if hints.only == Some(Class::Cpu) || (hints.prefer == Some(Class::Cpu) && hints.only.is_none() && !state.forced) {
         return state.on_cpu(spec, id, args);
     }
-    let wants_gpu = hints.prefer == Some(Class::Gpu) || hints.only == Some(Class::Gpu);
+    let required = hints.only.filter(|c| *c != Class::Cpu);
+    // `BORING_BACKEND` overrides a wish, not a requirement.
+    let wished = if state.forced { None } else { hints.prefer.filter(|c| *c != Class::Cpu) };
+    let wants_gpu = required.is_some() || wished.is_some();
     let threads: u64 = grid.iter().chain(block.iter()).map(|&d| d.max(1) as u64).product();
     if !state.forced && !wants_gpu && threads < state.min_threads {
         return state.on_cpu(spec, id, args);
     }
-    for routes in &state.order {
-        let Some(route) = routes.kernels.iter().find(|r| r.name == kernel) else { continue };
-        if !state.ensure_init(routes) {
-            continue;
-        }
-        match state.launch_on(routes, route, spec, id, args, grid, block) {
-            Ok(()) => {
-                (state.on_use)(routes.name);
-                state.record(kernel, routes.name);
-                return Some(Ok(()));
+    // A requirement or a wish for one kind of GPU (`.discrete`, `.integrated`) is tried first;
+    // a wish that no backend meets falls back to any backend, a requirement does not.
+    let wanted = required.or(wished);
+    let mut passes = vec![wanted];
+    if wanted.is_some() && required.is_none() && wanted != Some(Class::Gpu) {
+        passes.push(None);
+    }
+    for pass in passes {
+        for routes in &state.order {
+            if let Some(class) = pass {
+                if !class.admits(state.class_of(routes.name)) {
+                    continue;
+                }
             }
-            Err(e) if e.is::<Unsupported>() => continue,
-            Err(e) => return Some(Err(e)),
+            let Some(route) = routes.kernels.iter().find(|r| r.name == kernel) else { continue };
+            if !state.ensure_init(routes) {
+                continue;
+            }
+            match state.launch_on(routes, route, spec, id, args, grid, block) {
+                Ok(()) => {
+                    (state.on_use)(routes.name);
+                    state.record(kernel, routes.name);
+                    return Some(Ok(()));
+                }
+                Err(e) if e.is::<Unsupported>() => continue,
+                Err(e) => return Some(Err(e)),
+            }
         }
     }
-    if hints.only == Some(Class::Gpu) {
-        return Some(Err(Box::new(NoBackend::new(kernel))));
+    if let Some(class) = required {
+        return Some(Err(Box::new(NoBackend::new(kernel, class))));
     }
     state.on_cpu(spec, id, args)
 }
@@ -336,8 +382,8 @@ pub fn release(id: u64) {
 pub struct NoBackend(String);
 
 impl NoBackend {
-    fn new(kernel: &str) -> NoBackend {
-        NoBackend(format!("kernel `{kernel}` is `@only(.gpu)` but no GPU backend could run this launch"))
+    fn new(kernel: &str, class: Class) -> NoBackend {
+        NoBackend(format!("kernel `{kernel}` is `@only(.{})` but no matching backend could run this launch", class.name()))
     }
 }
 
@@ -355,6 +401,11 @@ pub fn last_choice(kernel: &str) -> Option<&'static str> {
 }
 
 impl State {
+    /// The class of the backend called `name` (`"gpu"` when it is not listed).
+    fn class_of(&self, name: &str) -> &'static str {
+        self.infos.iter().find(|i| i.name == name).map_or("gpu", |i| i.class)
+    }
+
     fn ensure_init(&self, routes: &Routes) -> bool {
         let mut done = self.initialized.lock().unwrap();
         *done.entry(routes.name).or_insert_with(|| {
@@ -532,7 +583,7 @@ mod tests {
                 Routes { name: "b", init: up, kernels: vec![KernelRoute { name: "Affine", run: run_b, read: read_b, release: release_b }] },
             ],
             true,
-            vec![BackendInfo { name: "a", kind: "gpu", score: 2.0, load: 0 }, BackendInfo { name: "cpu", kind: "cpu", score: 1.0, load: 1 }],
+            vec![BackendInfo { name: "a", kind: "gpu", class: "discrete", score: 2.0, load: 0 }, BackendInfo { name: "cpu", kind: "cpu", class: "cpu", score: 1.0, load: 1 }],
             Box::new(|_| {}),
         );
         assert_eq!(backends().iter().map(|b| (b.name, b.kind, b.load)).collect::<Vec<_>>(), [("a", "gpu", 0), ("cpu", "cpu", 1)]);

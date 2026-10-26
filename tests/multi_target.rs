@@ -678,3 +678,71 @@ fn backends_lists_what_the_program_can_use() {
     assert!(single.status.success(), "{}", String::from_utf8_lossy(&single.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const GPU_KINDS: &str = r#"
+kernel Bump:
+    mut [float32]'unified buf
+    init([float32]'unified data):
+        buf = data
+    def ():
+        buf[.thread.x] = buf[.thread.x] + 1.0
+
+mut k = Bump([1.0 as float32, 2.0, 3.0, 4.0])
+kernel:
+    k(block = 4, grid = 1)
+for b in kernel.backends():
+    print "{b.name} {b.class}"
+print "{k.buf[3]} on {kernel.lastChoice(k)}"
+"#;
+
+/// `.discrete` and `.integrated` narrow `.gpu`: a requirement for the other kind fails the
+/// launch, a wish for it falls back to whatever runs the kernel.
+#[test]
+fn gpu_kinds_narrow_placement() {
+    let dir = project("gpu_kinds");
+    let interpreted_source = GPU_KINDS.to_string();
+    std::fs::write(source(&dir), &interpreted_source).unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(source(&dir)).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "cpu cpu\n5 on cpu");
+
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+        let class = stdout.lines().next().unwrap().strip_prefix("wgpu ").unwrap().to_string();
+        assert!(["discrete", "integrated", "gpu"].contains(&class.as_str()), "{stdout}");
+        let other = if class == "discrete" { "integrated" } else { "discrete" };
+        let with_hint = |hint: &str| {
+            std::fs::write(source(&dir), GPU_KINDS.replace("kernel Bump:", &format!("{hint}\nkernel Bump:"))).unwrap();
+            let out = build(&dir, "wgpu,simd");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        if class != "gpu" {
+            with_hint(&format!("@only(.{class})"));
+            let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+            assert!(stdout.contains("5 on wgpu"), "{stdout}{stderr}");
+            // A wish for the other kind still gets the kernel run, on the one GPU there is.
+            with_hint(&format!("@prefer(.{other})"));
+            let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BENCH", "off")]);
+            assert!(stdout.contains("5 on "), "{stdout}{stderr}");
+            // A requirement for the other kind fails the launch.
+            with_hint(&format!("@only(.{other})"));
+            let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("multi_target_shared");
+            let run = Command::new("cargo")
+                .args(["run", "--quiet", "--manifest-path"])
+                .arg(root(&dir).join("Cargo.toml"))
+                .arg("--target-dir")
+                .arg(target_dir)
+                .env("BORING_CACHE_DIR", &cache)
+                .env("BORING_BACKEND", "wgpu,simd")
+                .output()
+                .unwrap();
+            assert!(!run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+            assert!(String::from_utf8_lossy(&run.stderr).contains(&format!("`@only(.{other})`")), "{}", String::from_utf8_lossy(&run.stderr));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
