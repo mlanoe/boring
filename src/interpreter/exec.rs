@@ -1199,17 +1199,20 @@ impl Interpreter {
             // check, which does have the source-expression context to distinguish
             // a literal from a resolved value and this function does not.
             Some(Type::Float16) => match val {
-                Value::Int(n) => Value::Float32(half::f16::from_f32(n as f32).to_f32()),
-                Value::Float32(f) => Value::Float32(half::f16::from_f32(f).to_f32()),
-                Value::Float64(f) => Value::Float32(half::f16::from_f32(f as f32).to_f32()),
+                Value::Float16(f) => Value::Float16(f),
+                Value::Int(n) => Value::Float16(half::f16::from_f32(n as f32)),
+                Value::Float32(f) => Value::Float16(half::f16::from_f32(f)),
+                Value::Float64(f) => Value::Float16(half::f16::from_f32(f as f32)),
                 other => other,
             },
             Some(Type::Float32) => match val {
+                Value::Float16(f) => Value::Float32(f.to_f32()),
                 Value::Int(n) => Value::Float32(n as f32),
                 Value::Float64(f) => Value::Float32(f as f32),
                 other => other,
             },
             Some(Type::Float64) => match val {
+                Value::Float16(f) => Value::Float64(f.to_f32() as f64),
                 Value::Int(n) => Value::Float64(n as f64),
                 Value::Float32(f) => Value::Float64(f as f64),
                 other => other,
@@ -1232,6 +1235,7 @@ impl Interpreter {
     /// array fails to typecheck at runtime (see CHANGELOG.md).
     pub(crate) fn coerce_array_elem_literal(val: Value, existing: &Value) -> Value {
         let witness_ty = match existing {
+            Value::Float16(_) => Type::Float16,
             Value::Float32(_) => Type::Float32,
             Value::Float64(_) => Type::Float64,
             Value::Int8(_) => Type::Int8,
@@ -1477,7 +1481,7 @@ impl Interpreter {
             Type::Uint32 => matches!(val, Value::Uint32(_)) || matches!(val, Value::Int(n) if (0..=u32::MAX as i64).contains(n)),
             Type::Uint64 => matches!(val, Value::Uint64(_)) || matches!(val, Value::Int(n) if *n >= 0),
             Type::Uint128 => matches!(val, Value::Uint128(_)) || matches!(val, Value::Int(n) if *n >= 0),
-            Type::Float16  => matches!(val, Value::Float32(_)),
+            Type::Float16  => matches!(val, Value::Float16(_)),
             Type::Float32  => matches!(val, Value::Float32(_)),
             Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),

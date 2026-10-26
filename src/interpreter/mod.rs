@@ -304,6 +304,8 @@ pub enum Value {
     Uint32(u32),
     Uint64(u64),
     Uint128(u128),
+    /// IEEE 754 binary16 value with real 16-bit storage and per-operation rounding.
+    Float16(half::f16),
     /// 32-bit float — genuine `f32` storage/precision, not a label over Float64.
     Float32(f32),
     Float64(f64),
@@ -442,6 +444,7 @@ impl PartialEq for Value {
             (Value::Uint32(a), Value::Uint32(b)) => a == b,
             (Value::Uint64(a), Value::Uint64(b)) => a == b,
             (Value::Uint128(a), Value::Uint128(b)) => a == b,
+            (Value::Float16(a), Value::Float16(b)) => a == b,
             (Value::Float32(a), Value::Float32(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
@@ -499,6 +502,7 @@ impl fmt::Debug for Value {
             Value::Uint32(n) => write!(f, "Uint32({:?})", n),
             Value::Uint64(n) => write!(f, "Uint64({:?})", n),
             Value::Uint128(n) => write!(f, "Uint128({:?})", n),
+            Value::Float16(n) => write!(f, "Float16({:?})", n),
             Value::Float32(n) => write!(f, "Float32({:?})", n),
             Value::Float64(n) => write!(f, "Float64({:?})", n),
             Value::Str(s) => write!(f, "Str({:?})", s),
@@ -569,6 +573,7 @@ impl Value {
             Value::Uint32(_) => "Uint32".into(),
             Value::Uint64(_) => "Uint64".into(),
             Value::Uint128(_) => "Uint128".into(),
+            Value::Float16(_) => "Float16".into(),
             Value::Float32(_) => "Float32".into(),
             // Kept as "Float" (not "Float64") for backward compatibility with
             // existing `catch Float:` clauses, which `exec_try` matches by this
@@ -621,6 +626,7 @@ fn debug_repr(v: &Value) -> String {
         // `{:?}` on a str/f32/f64 is exactly Rust's derived-Debug rendering:
         // `"two"` (quoted, escaped) and `1.0` (trailing `.0` kept).
         Value::Str(s) => format!("{:?}", s),
+        Value::Float16(n) => format!("{:?}", n),
         Value::Float32(n) => format!("{:?}", n),
         Value::Float64(n) => format!("{:?}", n),
         Value::Array(elems) => {
@@ -704,6 +710,7 @@ impl fmt::Display for Value {
             Value::Uint32(n) => write!(f, "{}", n),
             Value::Uint64(n) => write!(f, "{}", n),
             Value::Uint128(n) => write!(f, "{}", n),
+            Value::Float16(n) => write!(f, "{}", n),
             Value::Float32(n) => write!(f, "{}", n),
             Value::Float64(n) => write!(f, "{}", n),
             Value::Str(s) => write!(f, "{}", s),
@@ -1262,6 +1269,14 @@ macro_rules! define_int_conv_builtin {
                             Ok(Value::$variant(*f as $ty))
                         }
                     }
+                    Value::Float16(f) => {
+                        let fw = f.to_f32() as f64;
+                        if fw < (<$ty>::MIN as f64) || fw > (<$ty>::MAX as f64) {
+                            Err(err(format!("cannot convert Float16 to {} (out of range)", $name), line))
+                        } else {
+                            Ok(Value::$variant(f.to_f32() as $ty))
+                        }
+                    }
                     Value::Str(s) => s.trim().parse::<$ty>()
                         .map(Value::$variant)
                         .map_err(|_| err(format!("cannot convert '{}' to {}", s, $name), line)),
@@ -1293,6 +1308,7 @@ macro_rules! define_float_conv_builtin {
                     // (`*f as $ty` is a no-op cast to itself), so no separate
                     // `Value::$variant(f) => Ok(Value::$variant(*f))` arm is needed.
                     Value::Float64(f) => Ok(Value::$variant(*f as $ty)),
+                    Value::Float16(f) => Ok(Value::$variant(f.to_f32() as $ty)),
                     Value::Float32(f) => Ok(Value::$variant(*f as $ty)),
                     Value::Int(n)   => Ok(Value::$variant(*n as $ty)),
                     Value::Uint(n)  => Ok(Value::$variant(*n as $ty)),
@@ -1607,6 +1623,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
             }
             match &args[0] {
                 Value::Float64(f) => Ok(Value::Float64(*f)),
+                Value::Float16(f) => Ok(Value::Float64(f.to_f32() as f64)),
                 Value::Int(n)   => Ok(Value::Float64(*n as f64)),
                 Value::Uint(n)  => Ok(Value::Float64(*n as f64)),
                 Value::Uint8(n) => Ok(Value::Float64(*n as f64)),
@@ -1660,7 +1677,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                     line,
                 )),
             };
-            Ok(Value::Float32(half::f16::from_f32(value).to_f32()))
+            Ok(Value::Float16(half::f16::from_f32(value)))
         },
     });
 }
@@ -1692,6 +1709,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match &args[0] {
                     Value::Array(arr) => Ok(arr.iter().min_by(|a, b| match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
@@ -1704,6 +1722,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x <= y { a } else { b }),
+                    (Value::Float16(x), Value::Float16(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Float64(x), Value::Float64(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Float32(x), Value::Float32(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) <= *y { a } else { b }),
@@ -1722,6 +1741,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match &args[0] {
                     Value::Array(arr) => Ok(arr.iter().max_by(|a, b| match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
@@ -1733,6 +1753,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x >= y { a } else { b }),
+                    (Value::Float16(x), Value::Float16(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Float64(x), Value::Float64(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Float32(x), Value::Float32(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) >= *y { a } else { b }),
@@ -1749,6 +1770,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
             Some(Value::Float64(f)) => Ok(Value::Float64(f.abs())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().abs()))),
             // float32/float64 are distinct runtime types with the same method surface
             // (docs/float-width-types.md §8) — a `float32`-typed value reaching this
             // free-function form (as opposed to `x.abs()`, handled in methods.rs) must
@@ -1761,6 +1783,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "floor".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int(f.floor() as i64)),
+            Some(Value::Float16(f)) => Ok(Value::Int(f.to_f32().floor() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             // Same int-typed no-op family as the Float64/Int arms above (see
             // `validator::kernel`'s doc comment on FLOAT_MATH_FNS) — a float32
@@ -1773,6 +1796,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "ceil".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int(f.ceil() as i64)),
+            Some(Value::Float16(f)) => Ok(Value::Int(f.to_f32().ceil() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             Some(Value::Float32(f)) => Ok(Value::Int(f.ceil() as i64)),
             _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0, file: None })),
@@ -1782,6 +1806,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "round".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Int(f.round() as i64)),
+            Some(Value::Float16(f)) => Ok(Value::Int(f.to_f32().round() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             Some(Value::Float32(f)) => Ok(Value::Int(f.round() as i64)),
             _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0, file: None })),
@@ -1791,6 +1816,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "sqrt".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.sqrt())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().sqrt()))),
             Some(Value::Int(n)) => Ok(Value::Float64((*n as f64).sqrt())),
             // See the `abs` free function above — preserve float32 width instead of
             // rejecting it as "not a number".
@@ -1816,6 +1842,16 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("pow", Value::NativeFn {
         name: "pow".into(),
         func: |args, line| {
+            if let Some(Value::Float16(base)) = args.first() {
+                let exp = match args.get(1) {
+                    Some(Value::Float16(f)) => f.to_f32(),
+                    Some(Value::Float32(f)) => *f,
+                    Some(Value::Float64(f)) => *f as f32,
+                    Some(Value::Int(n)) => *n as f32,
+                    _ => return Err(err("pow: expected numeric exponent", line)),
+                };
+                return Ok(Value::Float16(half::f16::from_f32(base.to_f32().powf(exp))));
+            }
             // See the `abs`/`sqrt` free functions above — preserve float32 width
             // instead of rejecting it as "not a number".
             if let Some(Value::Float32(base)) = args.first() {
@@ -1844,6 +1880,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "log".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.ln())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().ln()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).ln())),
             // See the `abs`/`sin` free functions above — preserve float32 width
             // instead of rejecting it as "not a number".
@@ -1855,6 +1892,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "log2".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.log2())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().log2()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).log2())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.log2())),
             _ => Err(err("log2: expected number", line)),
@@ -1864,6 +1902,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "log10".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.log10())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().log10()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).log10())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.log10())),
             _ => Err(err("log10: expected number", line)),
@@ -1873,6 +1912,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "sin".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.sin())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().sin()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).sin())),
             // See the `abs` free function above — preserve float32 width instead of
             // rejecting it as "not a number".
@@ -1884,6 +1924,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "cos".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.cos())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().cos()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).cos())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.cos())),
             _ => Err(err("cos: expected number", line)),
@@ -1893,6 +1934,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "tan".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.tan())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().tan()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).tan())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.tan())),
             _ => Err(err("tan: expected number", line)),
@@ -1902,6 +1944,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "asin".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.asin())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().asin()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).asin())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.asin())),
             _ => Err(err("asin: expected number", line)),
@@ -1911,6 +1954,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "acos".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.acos())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().acos()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).acos())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.acos())),
             _ => Err(err("acos: expected number", line)),
@@ -1920,6 +1964,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "atan".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.atan())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().atan()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).atan())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.atan())),
             _ => Err(err("atan: expected number", line)),
@@ -1928,6 +1973,19 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("atan2", Value::NativeFn {
         name: "atan2".into(),
         func: |args, line| {
+            let is_f16 = matches!(args.first(), Some(Value::Float16(_))) || matches!(args.get(1), Some(Value::Float16(_)));
+            if is_f16 {
+                let number = |value: Option<&Value>| match value {
+                    Some(Value::Float16(f)) => Some(f.to_f32()),
+                    Some(Value::Float32(f)) => Some(*f),
+                    Some(Value::Float64(f)) => Some(*f as f32),
+                    Some(Value::Int(n)) => Some(*n as f32),
+                    _ => None,
+                };
+                let y = number(args.first()).ok_or_else(|| err("atan2: expected numeric y", line))?;
+                let x = number(args.get(1)).ok_or_else(|| err("atan2: expected numeric x", line))?;
+                return Ok(Value::Float16(half::f16::from_f32(y.atan2(x))));
+            }
             // float32/float64 are distinct runtime types with the same method surface
             // (docs/float-width-types.md §8) — if either argument is a real float32
             // value, keep the whole call at f32 precision instead of always widening
@@ -1965,6 +2023,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "exp".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.exp())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().exp()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).exp())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.exp())),
             _ => Err(err("exp: expected number", line)),
@@ -1974,6 +2033,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "tanh".into(),
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.tanh())),
+            Some(Value::Float16(f)) => Ok(Value::Float16(half::f16::from_f32(f.to_f32().tanh()))),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).tanh())),
             Some(Value::Float32(f)) => Ok(Value::Float32(f.tanh())),
             _ => Err(err("tanh: expected number", line)),
@@ -1995,17 +2055,21 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
                 let mut float32_sum = 0.0f32;
+                let mut float16_sum = half::f16::ZERO;
                 let mut is_float = false;
                 let mut is_float32 = false;
+                let mut is_float16 = false;
                 for v in arr.iter() {
                     match v {
+                        Value::Float16(f) => { float16_sum = float16_sum + *f; is_float16 = true; }
                         Value::Float64(f) => { float_sum += f; is_float = true; }
                         Value::Float32(f) => { float32_sum += f; is_float32 = true; }
                         Value::Int(n)   => { int_sum += n; float_sum += *n as f64; float32_sum += *n as f32; }
                         _ => return Err(err("sum: array must contain numbers", line)),
                     }
                 }
-                if is_float32 { Ok(Value::Float32(float32_sum)) }
+                if is_float16 { Ok(Value::Float16(float16_sum)) }
+                else if is_float32 { Ok(Value::Float32(float32_sum)) }
                 else if is_float { Ok(Value::Float64(float_sum)) }
                 else { Ok(Value::Int(int_sum)) }
             }
@@ -2037,6 +2101,8 @@ fn register_string_and_math_builtins(e: &mut Env) {
             match (args.first(), args.get(1), args.get(2)) {
                 (Some(Value::Float64(x)), Some(Value::Float64(lo)), Some(Value::Float64(hi))) =>
                     Ok(Value::Float64(x.clamp(*lo, *hi))),
+                (Some(Value::Float16(x)), Some(Value::Float16(lo)), Some(Value::Float16(hi))) =>
+                    Ok(Value::Float16((*x).max(*lo).min(*hi))),
                 (Some(Value::Int(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
                     Ok(Value::Int(*x.clamp(lo, hi))),
                 (Some(Value::Float64(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>

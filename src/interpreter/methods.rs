@@ -416,6 +416,78 @@ impl Interpreter {
                 };
                 if let Some(v) = result { return Ok(v); }
             }
+            Value::Float16(f) => {
+                let value = f.to_f32();
+                let result = match method {
+                    "sqrt" => Some(Value::Float16(half::f16::from_f32(value.sqrt()))),
+                    "cbrt" => Some(Value::Float16(half::f16::from_f32(value.cbrt()))),
+                    "abs" => Some(Value::Float16(half::f16::from_f32(value.abs()))),
+                    "floor" => Some(Value::Float16(half::f16::from_f32(value.floor()))),
+                    "ceil" => Some(Value::Float16(half::f16::from_f32(value.ceil()))),
+                    "round" => Some(Value::Float16(half::f16::from_f32(value.round()))),
+                    "exp" => Some(Value::Float16(half::f16::from_f32(value.exp()))),
+                    "exp2" => Some(Value::Float16(half::f16::from_f32(value.exp2()))),
+                    "ln" => Some(Value::Float16(half::f16::from_f32(value.ln()))),
+                    "log2" => Some(Value::Float16(half::f16::from_f32(value.log2()))),
+                    "log10" => Some(Value::Float16(half::f16::from_f32(value.log10()))),
+                    "sin" => Some(Value::Float16(half::f16::from_f32(value.sin()))),
+                    "cos" => Some(Value::Float16(half::f16::from_f32(value.cos()))),
+                    "tan" => Some(Value::Float16(half::f16::from_f32(value.tan()))),
+                    "asin" => Some(Value::Float16(half::f16::from_f32(value.asin()))),
+                    "acos" => Some(Value::Float16(half::f16::from_f32(value.acos()))),
+                    "atan" => Some(Value::Float16(half::f16::from_f32(value.atan()))),
+                    "sinh" => Some(Value::Float16(half::f16::from_f32(value.sinh()))),
+                    "cosh" => Some(Value::Float16(half::f16::from_f32(value.cosh()))),
+                    "tanh" => Some(Value::Float16(half::f16::from_f32(value.tanh()))),
+                    "sign" | "signum" => Some(Value::Float16(half::f16::from_f32(value.signum()))),
+                    "pow" | "powf" => {
+                        let exp = match args.first() {
+                            Some(Value::Float16(e)) => e.to_f32(),
+                            Some(Value::Float32(e)) => *e,
+                            Some(Value::Float64(e)) => *e as f32,
+                            Some(Value::Int(n)) => *n as f32,
+                            _ => return Err(err("pow: argument must be a number", line)),
+                        };
+                        Some(Value::Float16(half::f16::from_f32(value.powf(exp))))
+                    }
+                    "log" => {
+                        let base = match args.first() {
+                            Some(Value::Float16(b)) => b.to_f32(),
+                            Some(Value::Float32(b)) => *b,
+                            Some(Value::Float64(b)) => *b as f32,
+                            Some(Value::Int(n)) => *n as f32,
+                            _ => return Err(err("log: base must be a number", line)),
+                        };
+                        Some(Value::Float16(half::f16::from_f32(value.log(base))))
+                    }
+                    "atan2" => {
+                        let other = match args.first() {
+                            Some(Value::Float16(o)) => o.to_f32(),
+                            Some(Value::Float32(o)) => *o,
+                            Some(Value::Float64(o)) => *o as f32,
+                            Some(Value::Int(n)) => *n as f32,
+                            _ => return Err(err("atan2: argument must be a number", line)),
+                        };
+                        Some(Value::Float16(half::f16::from_f32(value.atan2(other))))
+                    }
+                    "clamp" => {
+                        if args.len() < 2 { return Err(err("clamp: requires two arguments (min, max)", line)); }
+                        let number = |v: &Value| match v {
+                            Value::Float16(n) => Some(n.to_f32()), Value::Float32(n) => Some(*n),
+                            Value::Float64(n) => Some(*n as f32), Value::Int(n) => Some(*n as f32), _ => None,
+                        };
+                        let lo = number(&args[0]).ok_or_else(|| err("clamp: min must be a number", line))?;
+                        let hi = number(&args[1]).ok_or_else(|| err("clamp: max must be a number", line))?;
+                        Some(Value::Float16(half::f16::from_f32(value.clamp(lo, hi))))
+                    }
+                    "isNaN" | "is_nan" => Some(Value::Bool(f.is_nan())),
+                    "isInfinite" | "is_infinite" => Some(Value::Bool(f.is_infinite())),
+                    "isFinite" | "is_finite" => Some(Value::Bool(f.is_finite())),
+                    "toInt" | "int" => Some(Value::Int(value as i64)),
+                    _ => None,
+                };
+                if let Some(v) = result { return Ok(v); }
+            }
             Value::Channel { buf, is_sender, .. }
                 if method == "send" => {
                     if !is_sender {
@@ -1183,7 +1255,7 @@ impl Interpreter {
             Type::Uint32 => matches!(val, Value::Uint32(_)),
             Type::Uint64 => matches!(val, Value::Uint64(_)),
             Type::Uint128 => matches!(val, Value::Uint128(_)),
-            Type::Float16  => matches!(val, Value::Float32(_)),
+            Type::Float16  => matches!(val, Value::Float16(_)),
             Type::Float32  => matches!(val, Value::Float32(_)),
             Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
@@ -1202,7 +1274,7 @@ impl Interpreter {
                 "uint32" => matches!(val, Value::Uint32(_)),
                 "uint64" => matches!(val, Value::Uint64(_)),
                 "uint128" => matches!(val, Value::Uint128(_)),
-                "float16" | "f16" => matches!(val, Value::Float32(_)),
+                "float16" | "f16" => matches!(val, Value::Float16(_)),
                 "float32" | "f32" => matches!(val, Value::Float32(_)),
                 "float" | "float64" | "f64" => matches!(val, Value::Float64(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
@@ -1307,7 +1379,7 @@ impl Interpreter {
             }
             "parseFloat16" => {
                 match s.trim().parse::<f32>() {
-                    Ok(f) => Ok(Some(Value::Float32(half::f16::from_f32(f).to_f32()))),
+                    Ok(f) => Ok(Some(Value::Float16(half::f16::from_f32(f)))),
                     Err(_) => Ok(Some(Value::Nil)),
                 }
             }
@@ -1654,6 +1726,7 @@ impl Interpreter {
             "min" => {
                 let result = arr.iter().min_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                    (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     _ => std::cmp::Ordering::Equal,
@@ -1663,6 +1736,7 @@ impl Interpreter {
             "max" => {
                 let result = arr.iter().max_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                    (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     _ => std::cmp::Ordering::Equal,
@@ -1672,16 +1746,25 @@ impl Interpreter {
             "sum" => {
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
+                let mut float32_sum = 0.0f32;
+                let mut float16_sum = half::f16::ZERO;
                 let mut has_float = false;
+                let mut has_float32 = false;
+                let mut has_float16 = false;
                 for item in arr.iter() {
                     match item {
                         Value::Int(n) => int_sum += n,
                         Value::Float64(f) => { float_sum += f; has_float = true; }
-                        Value::Float32(f) => { float_sum += *f as f64; has_float = true; }
+                        Value::Float32(f) => { float32_sum += f; has_float32 = true; }
+                        Value::Float16(f) => { float16_sum = float16_sum + *f; has_float16 = true; }
                         _ => {}
                     }
                 }
-                if has_float {
+                if has_float16 {
+                    Ok(Some(Value::Float16(float16_sum + half::f16::from_f32(int_sum as f32))))
+                } else if has_float32 {
+                    Ok(Some(Value::Float32(int_sum as f32 + float32_sum)))
+                } else if has_float {
                     Ok(Some(Value::Float64(int_sum as f64 + float_sum)))
                 } else {
                     Ok(Some(Value::Int(int_sum)))
@@ -3079,6 +3162,10 @@ impl Interpreter {
                             Value::Float64(f) => {
                                 if f >= <$ty>::MIN as f64 && f <= <$ty>::MAX as f64 { Value::$Variant(f as $ty) } else { Value::Nil }
                             }
+                            Value::Float16(f) => {
+                                let f = f.to_f32();
+                                if f as f64 >= <$ty>::MIN as f64 && f as f64 <= <$ty>::MAX as f64 { Value::$Variant(f as $ty) } else { Value::Nil }
+                            }
                             Value::Float32(f) => {
                                 if f as f64 >= <$ty>::MIN as f64 && f as f64 <= <$ty>::MAX as f64 { Value::$Variant(f as $ty) } else { Value::Nil }
                             }
@@ -3105,6 +3192,7 @@ impl Interpreter {
                 }
             }
             Type::Float64 => match val {
+                Value::Float16(f) => Ok(Value::Float64(f.to_f32() as f64)),
                 Value::Float64(f) => Ok(Value::Float64(f)),
                 Value::Float32(f) => Ok(Value::Float64(f as f64)),
                 Value::Int(n) => Ok(Value::Float64(n as f64)),
@@ -3127,6 +3215,7 @@ impl Interpreter {
             // docs/float-width-types.md §4, no stricter checked narrowing invented here).
             Type::Float16 => {
                 let f = match val {
+                    Value::Float16(f) => return Ok(Value::Float16(f)),
                     Value::Float32(f) => f,
                     Value::Float64(f) => f as f32,
                     Value::Int(n) => n as f32,
@@ -3143,12 +3232,13 @@ impl Interpreter {
                     Value::Uint128(n) => n as f32,
                     Value::Bool(n) => if n { 1.0 } else { 0.0 },
                     Value::Str(s) => return Ok(s.trim().parse::<f32>().ok()
-                        .map(|v| Value::Float32(half::f16::from_f32(v).to_f32())).unwrap_or(Value::Nil)),
+                        .map(|v| Value::Float16(half::f16::from_f32(v))).unwrap_or(Value::Nil)),
                     _ => return Ok(Value::Nil),
                 };
-                Ok(Value::Float32(half::f16::from_f32(f).to_f32()))
+                Ok(Value::Float16(half::f16::from_f32(f)))
             }
             Type::Float32 => match val {
+                Value::Float16(f) => Ok(Value::Float32(f.to_f32())),
                 Value::Float32(f) => Ok(Value::Float32(f)),
                 Value::Float64(f) => Ok(Value::Float32(f as f32)),
                 Value::Int(n) => Ok(Value::Float32(n as f32)),

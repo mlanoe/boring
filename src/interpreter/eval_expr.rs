@@ -165,6 +165,14 @@ fn is_untyped_numeric_literal(e: &Expr) -> bool {
 /// Y" error for, exactly as two distinct fixed-width int types already do.
 fn coerce_float_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr) -> (Value, Value) {
     match (&l, &r) {
+        (Value::Float16(_), Value::Float64(f)) if is_untyped_numeric_literal(rhs) =>
+            (l, Value::Float16(half::f16::from_f32(*f as f32))),
+        (Value::Float64(f), Value::Float16(_)) if is_untyped_numeric_literal(lhs) =>
+            (Value::Float16(half::f16::from_f32(*f as f32)), r),
+        (Value::Float16(_), Value::Int(n)) if is_untyped_numeric_literal(rhs) =>
+            (l, Value::Float16(half::f16::from_f32(*n as f32))),
+        (Value::Int(n), Value::Float16(_)) if is_untyped_numeric_literal(lhs) =>
+            (Value::Float16(half::f16::from_f32(*n as f32)), r),
         (Value::Float32(_), Value::Float64(f)) if is_untyped_numeric_literal(rhs) =>
             (l, Value::Float32(*f as f32)),
         (Value::Float64(f), Value::Float32(_)) if is_untyped_numeric_literal(lhs) =>
@@ -1566,6 +1574,7 @@ impl Interpreter {
                         Value::Int128(n) => n.checked_neg().map(Value::Int128)
                             .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
                         Value::Float64(f) => Ok(Value::Float64(-f)),
+                        Value::Float16(f) => Ok(Value::Float16(-f)),
                         Value::Float32(f) => Ok(Value::Float32(-f)),
                         Value::Object(ref inner_rc) => {
                             let type_name = inner_rc.borrow().type_name.clone();
@@ -2384,6 +2393,7 @@ impl Interpreter {
             (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_add(b))),
             (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_add(b))),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a + b)),
+            (Value::Float16(a), Value::Float16(b)) => Ok(Value::Float16(a + b)),
             (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 + b)),
             (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a + b as f64)),
             (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a + b)),
@@ -2466,6 +2476,7 @@ impl Interpreter {
                 if b > a { Err(err_span("uint128 subtraction underflow", line, rcol, rlen)) } else { Ok(Value::Uint128(a - b)) }
             }
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
+            (Value::Float16(a), Value::Float16(b)) => Ok(Value::Float16(a - b)),
             (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 - b)),
             (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a - b as f64)),
             (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a - b)),
@@ -2510,6 +2521,7 @@ impl Interpreter {
             (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_mul(b))),
             (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_mul(b))),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
+            (Value::Float16(a), Value::Float16(b)) => Ok(Value::Float16(a * b)),
             (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 * b)),
             (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a * b as f64)),
             (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a * b)),
@@ -2571,6 +2583,7 @@ impl Interpreter {
             (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
             (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a / b)),
+            (Value::Float16(a), Value::Float16(b)) => Ok(Value::Float16(a / b)),
             (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 / b)),
             (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a / b as f64)),
             (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a / b)),
@@ -2644,6 +2657,7 @@ impl Interpreter {
                 if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint128(a % b)) }
             }
             (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a % b)),
+            (Value::Float16(a), Value::Float16(b)) => Ok(Value::Float16(a % b)),
             (Value::Int(a),   Value::Float64(b)) => Ok(Value::Float64((a as f64) % b)),
             (Value::Float64(a), Value::Int(b))   => Ok(Value::Float64(a % (b as f64))),
             (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a % b)),
@@ -2822,6 +2836,8 @@ impl Interpreter {
 
     pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize, col: usize) -> Eval {
         let ord = if let (Value::Float64(a), Value::Float64(b)) = (&l, &r) {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float16(a), Value::Float16(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
         } else if let (Value::Float32(a), Value::Float32(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)

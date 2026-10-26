@@ -3828,6 +3828,27 @@ impl Transpiler {
             }
             self.emit_expr_owned(value)
         });
+        // Array-element assignment has no Rust target annotation to coerce an untyped
+        // numeric literal for us. Preserve a `[float16]` element's width explicitly,
+        // just as a typed `let float16` binding does.
+        let rhs_s = if let ExprKind::Index(array, _) = &target.kind {
+            let elem_is_f16 = self.resolve_expr_type(array).is_some_and(|ty| {
+                matches!(ty.without_mut(), Type::Array(elem)
+                    if matches!(elem.without_mut(), Type::Float16)
+                        || matches!(elem.without_mut(), Type::Named(name) if name == "float16" || name == "f16"))
+            });
+            let value_is_f16 = self.resolve_expr_type(value).is_some_and(|ty| {
+                matches!(ty.without_mut(), Type::Float16)
+                    || matches!(ty.without_mut(), Type::Named(name) if name == "float16" || name == "f16")
+            });
+            if elem_is_f16 && !value_is_f16 {
+                format!("half::f16::from_f32(({}) as f32)", rhs_s)
+            } else {
+                rhs_s
+            }
+        } else {
+            rhs_s
+        };
         // When assigning an actor (Arc<Mutex<T>>) variable into a struct field, auto-clone
         // so the original binding remains usable after the assignment. Arc::clone is cheap.
         let rhs_s = if matches!(&target.kind, ExprKind::Field(..))
