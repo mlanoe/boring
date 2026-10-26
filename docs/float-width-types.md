@@ -638,7 +638,8 @@ pointer-width-style type like `int`/`uint`).
 - **New float constants for `float32`** (`PI` etc. are `Value::Float64`
   today) — no product requirement surfaced for `float32`-native constants;
   `PI as float32` covers the need if it ever arises.
-- **Half-precision (`float16`/`bfloat16`)** — genuinely different hardware
-  support story (only some GPU backends, no native Rust scalar type without
-  a crate dependency); not a corollary of this document's all-native-Rust-type
-  approach and would need its own design work.
+- **Half-precision (`float16`/`bfloat16`)** — this proposal originally left both
+  formats out because they require a different hardware and Rust representation.
+  `float16` was implemented subsequently with `half::f16` on the host and native
+  half storage on supported GPU backends; see [float16.md](float16.md).
+  `bfloat16` remains outside this proposal.

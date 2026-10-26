@@ -107,7 +107,50 @@ fn wgpu_render_loop_state_events_time_and_methods() {
     assert!(rs.contains("self.pace.frame(&mut self.rt, &self.host, 2)"), "{rs}");
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_wgpu_target");
     let out = common::SharedCargo::new("screen_render_loop_state")
-        .args(["check", "--quiet", "--manifest-path"])
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(shared)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn wgpu_render_loop_supports_float16_expressions() {
+    let src = r#"
+let screen = Screen(Dimension(8, 8), title = "half")
+kernel Fill:
+    mut [uint]'surface pixels
+    var float16 value
+
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+        value = float16(0.0)
+
+    def ():
+        pixels[.thread.x] = uint(value as float32)
+
+var mut k = Fill(Dimension(8, 8))
+kernel:
+    loop:
+        let half = float16(1.5)
+        let sum = half + 2.0
+        let mixed = sum + float32(1.0)
+        k.value = mixed as float16
+        k(block = 8)
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (project, rs) = build(src, "float16");
+    let rs = rs.unwrap_or_else(|e| panic!("boring build failed:\n{e}"));
+    assert!(rs.contains("half::f16::from_f32"), "float16 construction/cast was not lowered:\n{rs}");
+    assert!(rs.contains(".to_f32()"), "mixed float16/float32 arithmetic was not promoted:\n{rs}");
+    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_float16_wgpu_target");
+    let out = common::SharedCargo::new("screen_render_loop_float16")
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(shared)
@@ -181,7 +224,7 @@ fn simd_render_loop_assigns_top_level_vars() {
     assert!(!rs.contains("const DIRTY") && !rs.contains("const TICKS"), "{rs}");
     let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_simd_target");
     let out = common::SharedCargo::new("screen_render_loop_state")
-        .args(["check", "--quiet", "--manifest-path"])
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
         .arg(project.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(shared)
@@ -212,7 +255,7 @@ fn metal_render_loop_state_values_and_methods() {
     if cfg!(target_os = "macos") {
         let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_metal_target");
         let out = common::SharedCargo::new("screen_render_loop_state_metal")
-            .args(["check", "--quiet", "--manifest-path"])
+            .args(["check", "--offline", "--quiet", "--manifest-path"])
             .arg(project.join("Cargo.toml"))
             .arg("--target-dir")
             .arg(shared)

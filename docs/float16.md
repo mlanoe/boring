@@ -17,6 +17,10 @@ extension, and requests `wgpu::Features::SHADER_F16` whenever a generated
 shader uses it. Device creation reports a clear capability error if the selected
 adapter lacks `shader-f16`; buffers are never silently widened to `f32`.
 
-The interpreter stores scalar f16 values in its generic numeric value container,
-but rounds them through IEEE binary16 on every explicit conversion. Transpiled
-host arrays and all supported GPU buffers retain real 16-bit storage.
+The interpreter stores scalar values as `half::f16` and preserves binary16
+rounding at every arithmetic and conversion boundary. Transpiled host arrays
+and all supported GPU buffers retain real 16-bit storage. `float16` exposes the
+same conversions, comparisons, collection operations, math functions, tensor
+operations, and quantized tensor paths as `float32` and `float64`; transcendental
+operations use `float32` internally before rounding their result back to
+binary16.

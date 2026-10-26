@@ -1791,7 +1791,11 @@ impl<'a> HostEmitter<'a> {
                 let local_ty = ls.ty.clone()
                     .or_else(|| self.host_arg_type(ls.value.as_ref().unwrap()))
                     .or_else(|| self.host_float_kind(ls.value.as_ref().unwrap())
-                        .map(|k| if k == "f32" { Type::Float32 } else { Type::Float64 }));
+                        .map(|k| match k {
+                            "f16" => Type::Float16,
+                            "f32" => Type::Float32,
+                            _ => Type::Float64,
+                        }));
                 match local_ty {
                     Some(t) => { self.frame_local_types.borrow_mut().insert(ls.name.clone(), t); }
                     None => { self.frame_local_types.borrow_mut().remove(&ls.name); }
@@ -2370,6 +2374,7 @@ impl<'a> HostEmitter<'a> {
             }
             // `screen.mouse.scroll_x as float`: the member's own host type, converted.
             ExprKind::Cast(inner, ty) => match host_cast_type(ty) {
+                Some("half::f16") => format!("half::f16::from_f32(({}) as f32)", self.host_expr(inner)),
                 Some(t) => format!("({} as {t})", self.host_expr(inner)),
                 None => self.host_expr(inner),
             },
@@ -2476,9 +2481,16 @@ impl<'a> HostEmitter<'a> {
                     _ => return self.unsupported_expr(e, "this operator"),
                 };
                 let (mut ls, mut rs) = (self.host_expr(l), self.host_expr(r));
-                // `screen.time` is f32, `as float` values are f64: widen the f32 side so the mix type-checks.
+                // Rust's `half::f16` does not mix directly with primitive floats. Promote the
+                // half side to the wider operand; f16/f16 arithmetic remains native half arithmetic.
                 if !matches!(op, BinOp::And | BinOp::Or) {
                     match (self.host_float_kind(l), self.host_float_kind(r)) {
+                        (Some("f16"), None) => rs = format!("half::f16::from_f32(({rs}) as f32)"),
+                        (None, Some("f16")) => ls = format!("half::f16::from_f32(({ls}) as f32)"),
+                        (Some("f16"), Some("f32")) => ls = format!("({ls}).to_f32()"),
+                        (Some("f32"), Some("f16")) => rs = format!("({rs}).to_f32()"),
+                        (Some("f16"), Some("f64")) => ls = format!("({ls}).to_f64()"),
+                        (Some("f64"), Some("f16")) => rs = format!("({rs}).to_f64()"),
                         (Some("f32"), Some("f64")) => ls = format!("({ls} as f64)"),
                         (Some("f64"), Some("f32")) => rs = format!("({rs} as f64)"),
                         _ => {}
@@ -2500,27 +2512,40 @@ impl<'a> HostEmitter<'a> {
         "()".into()
     }
 
-    /// The float width a host expression evaluates to (`"f32"` or `"f64"`), when it is known.
+    /// The float width a host expression evaluates to, when it is known.
     /// Untyped literals and non-float values are `None`.
     fn host_float_kind(&self, e: &Expr) -> Option<&'static str> {
         match &e.kind {
             ExprKind::Field(o, f) if f == "time" && matches!(&o.kind, ExprKind::Var(n) if n == "screen") => Some("f32"),
-            ExprKind::Cast(_, ty) => match host_cast_type(ty) { Some(t @ ("f32" | "f64")) => Some(t), _ => None },
+            ExprKind::Cast(_, ty) => match host_cast_type(ty) {
+                Some("half::f16") => Some("f16"),
+                Some(t @ ("f32" | "f64")) => Some(t),
+                _ => None,
+            },
+            ExprKind::Call(c, a) if a.len() == 1 && matches!(&c.kind, ExprKind::Var(n) if matches!(n.as_str(), "float16" | "f16")) => Some("f16"),
             ExprKind::Call(c, a) if a.len() == 1 && matches!(&c.kind, ExprKind::Var(n) if matches!(n.as_str(), "float32" | "float" | "float64")) => Some("f32"),
             ExprKind::Var(n) => {
                 let ty = self.frame_local_types.borrow().get(n).cloned()
                     .or_else(|| self.setup_fields.iter().find(|(f, _)| f == n).map(|(_, t)| Type::Named(t.clone())));
                 match ty {
+                    Some(Type::Float16) => Some("f16"),
                     Some(Type::Float32) => Some("f32"),
                     Some(Type::Float64) => Some("f64"),
-                    Some(Type::Named(t)) => match t.as_str() { "f32" | "float32" => Some("f32"), "f64" | "float" | "float64" => Some("f64"), _ => None },
+                    Some(Type::Named(t)) => match t.as_str() {
+                        "f16" | "float16" => Some("f16"),
+                        "f32" | "float32" => Some("f32"),
+                        "f64" | "float" | "float64" => Some("f64"),
+                        _ => None,
+                    },
                     _ => None,
                 }
             }
             ExprKind::UnaryOp(UnaryOp::Neg, i) => self.host_float_kind(i),
             ExprKind::BinOp(op, l, r) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) => {
                 match (self.host_float_kind(l), self.host_float_kind(r)) {
+                    (Some("f16"), Some("f16")) | (Some("f16"), None) | (None, Some("f16")) => Some("f16"),
                     (Some("f32"), Some("f32")) | (Some("f32"), None) | (None, Some("f32")) => Some("f32"),
+                    (Some("f16"), Some("f32")) | (Some("f32"), Some("f16")) => Some("f32"),
                     (Some(_), Some(_)) => Some("f64"),
                     (Some("f64"), None) | (None, Some("f64")) => Some("f64"),
                     _ => None,

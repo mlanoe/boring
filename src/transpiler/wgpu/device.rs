@@ -2396,7 +2396,7 @@ fn wgsl_type(ty: &Type) -> String {
 /// Zero-value literal for a WGSL scalar type.
 fn wgsl_zero(ty: &Type) -> &'static str {
     match ty {
-        Type::Float32 | Type::Float64 | Type::Named(_) => "0.0",
+        Type::Float16 | Type::Float32 | Type::Float64 | Type::Named(_) => "0.0",
         Type::Bool  => "0u",
         _           => "0",
     }
