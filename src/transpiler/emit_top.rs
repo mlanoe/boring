@@ -2835,6 +2835,13 @@ impl Transpiler {
 
     pub(crate) fn emit_body(&mut self, stmts: &[Stmt]) {
         if stmts.is_empty() { return; }
+        let saved = self.nil_tested_vars.clone();
+        collect_nil_tested_vars(stmts, &mut self.nil_tested_vars);
+        self.emit_body_inner(stmts);
+        self.nil_tested_vars = saved;
+    }
+
+    fn emit_body_inner(&mut self, stmts: &[Stmt]) {
         // Priority 5: use-site qualifier inference — runs before size-based decisions, all modes.
         self.infer_qualifiers(stmts);
         self.scan_atomic_promotions(stmts);
@@ -4108,4 +4115,23 @@ impl Transpiler {
 
     // ── Structs ───────────────────────────────────────────────────────────────
 
+}
+
+/// Collects every variable name compared against `nil` (`x == nil`, `x != nil`,
+/// `x is nil`, `x is not nil`) anywhere in `stmts`.
+fn collect_nil_tested_vars(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    let mut owned = stmts.to_vec();
+    let mut on_expr = |e: &mut Expr| {
+        if let ExprKind::BinOp(op, l, r) = &e.kind {
+            if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::IsNot) {
+                let v = if matches!(r.kind, ExprKind::Nil) { Some(l) }
+                    else if matches!(l.kind, ExprKind::Nil) { Some(r) } else { None };
+                if let Some(v) = v {
+                    if let ExprKind::Var(name) = &v.kind { out.insert(name.clone()); }
+                }
+            }
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut owned);
 }

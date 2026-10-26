@@ -6595,6 +6595,7 @@ impl Transpiler {
             ExprKind::Field(_, f) if f == "value"
                 && matches!(self.resolve_expr_type(expr).as_ref().map(|t| t.without_mut()), Some(Type::Dict(..))) => true,
             // Field access: look up the field type in struct_fields
+            ExprKind::Field(..) if matches!(self.actor_subfield_collection(expr), Some((_, _, Type::Dict(..)))) => true,
             ExprKind::Field(obj, field_name) => {
                 let struct_name = match &obj.kind {
                     ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
@@ -6755,6 +6756,23 @@ impl Transpiler {
         if qualified && matches!(cur, Type::Array(_) | Type::Dict(..) | Type::Set(_)) {
             let coll = cur.clone();
             Some((r, coll))
+        } else {
+            None
+        }
+    }
+
+    /// `handle.sub` where `handle` is an `'actor`/`'guard` struct field and `sub` is a plain
+    /// built-in collection field of the struct it holds (`memo.memory.placed`, `memory` being
+    /// `LayoutMemory'actor`): the lock handle, the sub-field name and the collection type.
+    /// The guard of the handle must be taken first and the collection projected from it.
+    pub(crate) fn actor_subfield_collection(&self, obj: &Expr) -> Option<(LockFieldRef, String, Type)> {
+        let ExprKind::Field(inner, sub) = &obj.kind else { return None };
+        let r = self.resolve_lock_field_ref(inner)?;
+        let ty = self.lock_subfield_type(&r, sub)?;
+        let cur = ty.without_mut();
+        if matches!(cur, Type::Array(_) | Type::Dict(..) | Type::Set(_)) {
+            let coll = cur.clone();
+            Some((r, sub.clone(), coll))
         } else {
             None
         }
@@ -6936,6 +6954,7 @@ impl Transpiler {
             enum_variant_fields: self.enum_variant_fields.clone(),
             enum_variant_field_types: self.enum_variant_field_types.clone(),
             optional_vars: self.optional_vars.clone(),
+            nil_tested_vars: self.nil_tested_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),
             generic_struct_names: self.generic_struct_names.clone(),

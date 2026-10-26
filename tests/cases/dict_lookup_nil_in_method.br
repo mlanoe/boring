@@ -1,0 +1,26 @@
+struct Size:
+    int w
+    int h
+
+struct Mem:
+    var mut {string=Size} rows = {=}
+
+    def store(string key, Size s):
+        rows[key] = s
+
+    req bool has(string key):
+        let hit = rows[key]
+        if hit != nil:
+            return true
+        false
+
+    def forgetRow(string key):
+        if rows[key] != nil:
+            rows.remove(key)
+
+def main():
+    var mut Mem m = Mem()
+    m.store("a", Size(1, 2))
+    print "{m.has("a")} {m.has("b")}"
+    m.forgetRow("a")
+    print "{m.has("a")}"

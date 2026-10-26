@@ -500,6 +500,10 @@ struct Transpiler {
     pub(crate) enum_variant_field_types: std::collections::HashMap<String, Vec<Type>>,
     /// Variables declared with an Optional type (e.g. `let int? a = ...`) — never re-wrap in Some().
     pub(crate) optional_vars: std::collections::HashSet<String>,
+    /// Names compared against `nil` (`x == nil`/`x != nil`/`x is nil`) somewhere in the
+    /// function body being emitted; scoped by `emit_body`. Lets an untyped
+    /// `let x = dict[key]` stay an `Option<V>` lookup instead of the panicking read.
+    pub(crate) nil_tested_vars: std::collections::HashSet<String>,
     /// Pre-emitted default values per function param: fn_name → [Option<default_str>].
     pub(crate) fn_defaults: std::collections::HashMap<String, Vec<Option<String>>>,
     /// Struct name → [(field_name, field_type)] for constructor coercion.
@@ -1536,6 +1540,7 @@ impl Transpiler {
             enum_variant_fields: std::collections::HashMap::new(),
             enum_variant_field_types: std::collections::HashMap::new(),
             optional_vars: std::collections::HashSet::new(),
+            nil_tested_vars: std::collections::HashSet::new(),
             fn_defaults: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
             generic_struct_names: std::collections::HashSet::new(),

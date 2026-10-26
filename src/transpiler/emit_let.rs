@@ -1569,7 +1569,24 @@ impl Transpiler {
         false
     }
 
-    pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
+    pub(crate) fn emit_let(&mut self, s: &LetStmt, is_last: bool) {
+        // Untyped `let hit = dict[key]` whose name is later tested against `nil` is an
+        // optional lookup (`HashMap::get(..).cloned()`), not the panicking read.
+        if s.ty.is_none() && self.nil_tested_vars.contains(s.name.as_str()) {
+            if let Some(v) = &s.value {
+                if matches!(&v.kind, ExprKind::Index(d, _) if self.expr_is_dict(d)) {
+                    if let Some(elem) = self.resolve_expr_type(v) {
+                        let mut typed = s.clone();
+                        typed.ty = Some(Type::Optional(Box::new(elem.without_mut().clone())));
+                        return self.emit_let_inner(&typed, is_last);
+                    }
+                }
+            }
+        }
+        self.emit_let_inner(s, is_last)
+    }
+
+    fn emit_let_inner(&mut self, s: &LetStmt, _is_last: bool) {
         self.var_scalar_types.remove(s.name.as_str());
         if s.ty.is_none() {
             if let Some(v) = &s.value {

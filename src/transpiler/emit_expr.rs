@@ -1735,6 +1735,19 @@ impl Transpiler {
             };
             return format!("{}[{}].to_vec()", obj_s, range_s);
         }
+        // `memo.memory.placed[k]`: dict held by the struct behind an `'actor` field.
+        if !self.in_lhs_assign.get() {
+            if let Some((r, sub, Type::Dict(..))) = self.actor_subfield_collection(obj) {
+                let guard = self.lock_field_read(&r);
+                let key_ref = self.emit_dict_key_borrow(idx);
+                let tail = if self.want_raw_dict_get.get() {
+                    format!("__g.{}.get(__k).cloned()", sub)
+                } else {
+                    format!("__g.{}.get(__k).cloned().expect(\"dict key not found\")", sub)
+                };
+                return format!("{{ let __k = {}; let __g = {}; {} }}", key_ref, guard, tail);
+            }
+        }
         // `field[k]` / `field[i]` on a collection behind an `'actor` field: index through the lock
         // (a place — `d[k].method()` / `d[k] += v` — is handled by the assignment/place paths).
         if !self.in_lhs_assign.get() {
@@ -3665,6 +3678,17 @@ impl Transpiler {
                         return format!("{}.insert({}, {})", coll_s, self.emit_dict_key_owned(idx), val_s);
                     }
                     return format!("{}[({}) as usize] = {}", coll_s, self.emit_expr(idx), val_s);
+                }
+            }
+        }
+        // `memo.memory.placed[k] = v`: dict held by the struct behind an `'actor` field.
+        if let ExprKind::Index(coll_obj, key) = &target.kind {
+            if !matches!(key.kind, ExprKind::SliceRange { .. }) {
+                if let Some((r, sub, Type::Dict(..))) = self.actor_subfield_collection(coll_obj) {
+                    let val_s = self.emit_expr_owned(value);
+                    let guard = self.lock_field_write(&r);
+                    let key_owned = self.emit_dict_key_owned(key);
+                    return format!("{{ let __k = {}; let __v = {}; {}.{}.insert(__k, __v); }}", key_owned, val_s, guard, sub);
                 }
             }
         }

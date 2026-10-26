@@ -1,0 +1,19 @@
+struct Entry:
+    int w
+    int h
+
+struct Mem:
+    var mut {string=Entry} placed = {=}
+
+struct Memo:
+    var mut Mem'actor memory
+
+def main():
+    var mut Memo memo = Memo(memory = Mem())
+    memo.memory.placed["a"] = Entry(1, 2)
+    if let hit = memo.memory.placed["a"]:
+        print "{hit.w} {hit.h}"
+    if let miss = memo.memory.placed["b"]:
+        print "bad"
+    else:
+        print "none"
