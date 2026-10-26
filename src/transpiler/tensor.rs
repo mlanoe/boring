@@ -2,7 +2,7 @@
 //! gated by the checker until launch and interpreter integration is complete.
 use crate::{
     ast::*,
-    checker::tensor::{resolve_fields, TileOperation},
+    checker::tensor::{resolve_fields, TensorElement, TileOperation},
 };
 
 #[derive(Clone, Copy)]
@@ -34,10 +34,11 @@ pub(super) fn emit(
             len: call.len,
         })
     });
-    if matches!(dialect, Dialect::CudaTf32) {
+    if matches!(dialect, Dialect::CudaTf32) && op.element == TensorElement::Float32 {
         return cuda_tf32_source(&op, &buffers, &row, &col);
     }
     if matches!(dialect, Dialect::MetalNative)
+        && op.element == TensorElement::Float32
         && op.rows == 8
         && op.cols == 8
         && op.k.is_multiple_of(8)
@@ -220,8 +221,9 @@ fn scalar_source(
     } else {
         access(&buffers[1], format!("{} * {} + {}", v("k"), op.n, v("col")))
     };
+    let half = op.element == TensorElement::Float16;
     let initial = if op.accumulate {
-        dst.clone()
+        if wgsl && half { format!("f32({dst})") } else { dst.clone() }
     } else {
         "0.0".into()
     };
@@ -275,9 +277,15 @@ fn scalar_source(
         format!("float {} = {};", v("sum"), initial)
     });
     lines.push(loop_head("k", "0", op.k, "1"));
+    let (left, right) = if wgsl && half {
+        (format!("f32({left})"), format!("f32({right})"))
+    } else {
+        (left, right)
+    };
     lines.push(format!("{} += {left} * {right};", v("sum")));
     lines.push("}".into());
-    lines.push(format!("{dst} = {};", v("sum")));
+    let result = if wgsl && half { format!("f16({})", v("sum")) } else { v("sum") };
+    lines.push(format!("{dst} = {result};"));
     lines.extend([
         "}".into(),
         "}".into(),
@@ -341,6 +349,23 @@ mod tests {
             "0",
         );
         assert!(source.contains("weights[bp_tensor_col * 5 + bp_tensor_k]"), "{source}");
+    }
+
+    #[test]
+    fn float16_wgsl_fallback_accumulates_in_float32() {
+        let mut op = operation();
+        op.element = TensorElement::Float16;
+        let source = scalar_source(
+            &op,
+            Dialect::Wgsl,
+            &["a".into(), "b".into(), "c".into()],
+            "0",
+            "0",
+        );
+        assert!(source.contains("var bp_tensor_sum: f32 = 0.0;"), "{source}");
+        assert!(source.contains("f32(a["), "{source}");
+        assert!(source.contains("f32(b["), "{source}");
+        assert!(source.contains("= f16(bp_tensor_sum);"), "{source}");
     }
 
     /// Compile the emitted CUDA/HIP-style scalar body as ordinary C++, with

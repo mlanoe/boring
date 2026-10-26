@@ -12,7 +12,8 @@ kernel HalfBuffer:
     def ():
         let i = .thread.x
         let float32 wide = values[i] as float32
-        values[i] = float16(wide * (scale as float32) + (offsets[0] as float32))
+        let float16 adjusted = sqrt(float16(wide * (scale as float32) + (offsets[0] as float32)))
+        values[i] = adjusted.sqrt()
 
 pub req [float16]'kernel'unified increment([float16]'kernel'unified input) throws:
     mut k = HalfBuffer(float16(1.0), [float16(1.0), float16(0.0)], input)
@@ -22,7 +23,8 @@ pub req [float16]'kernel'unified increment([float16]'kernel'unified input) throw
 
 def main():
     let float16 host_value = float16(1.25)
-    print "{host_value as float32}"
+    let host_root = sqrt(float16(4.0))
+    print "{host_value as float32} {host_root as float32}"
 "#;
 
 fn generate(target: &str, case: &str) -> (String, String, String) {
@@ -107,6 +109,44 @@ def main():
 }
 
 #[test]
+fn cpu_generated_rust_preserves_inferred_float16_math_results() {
+    let source_text = r#"
+def main():
+    let root = sqrt(float16(2.0))
+    let method_root = float16(2.0).sqrt()
+    let powered = pow(float16(2.0), float16(3.0))
+    let method_powered = float16(2.0).pow(float16(3.0))
+    let total = root + method_root + powered + method_powered
+    let literal_sum = float16(1.5) + 2.0
+    let signed = sign(float16(-2.0))
+    print "{total as float32}"
+    print "{literal_sum as float32}"
+    print "{floatToBits(float16(1.5))} {signed as float32} {isNaN(float16(0.0))} {isInfinite(float16(0.0))}"
+    print "{float16(1.0) == 1} {float16(1.0) < 2} {float16(1.0) == float32(1.0)}"
+"#;
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu_inferred_math");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, source_text).unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["run"]).arg(&source).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build"]).arg(&source).output().unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(root.join("main_rust/Cargo.toml")).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+    let generated_run = Command::new("cargo")
+        .args(["run", "--quiet", "--offline", "--manifest-path"])
+        .arg(root.join("main_rust/Cargo.toml")).output().unwrap();
+    assert!(generated_run.status.success(), "{}", String::from_utf8_lossy(&generated_run.stderr));
+    assert_eq!(generated_run.stdout, interpreted.stdout);
+}
+
+#[test]
 fn cpu_interpreter_executes_float16_kernel_fields_and_buffers() {
     let source_text = r#"
 kernel HalfScale:
@@ -176,6 +216,7 @@ fn supported_gpu_backends_keep_f16_storage() {
     for (target, spelling) in [("metal", "half*"), ("cuda", "__half*"), ("rocm", "_Float16*")] {
         let (device, host, manifest) = generate(target, target);
         assert!(device.contains(spelling), "{target} widened the buffer:\n{device}");
+        assert!(device.contains("sqrt("), "{target} did not lower float16 sqrt:\n{device}");
         assert!(!device.contains("float16("), "{target} left an unresolved float16 conversion:\n{device}");
         assert!(!host.contains("float16("), "{target} host left an unresolved float16 conversion:\n{host}");
         assert!(host.contains("half::f16"), "{target} host ABI is not f16:\n{host}");
@@ -188,6 +229,7 @@ fn wgpu_enables_shader_f16_and_preserves_two_byte_storage() {
     let (device, host, manifest) = generate("wgpu", "wgpu");
     assert!(device.starts_with("enable f16;"), "missing WGSL f16 directive:\n{device}");
     assert!(device.contains("array<f16>"), "wgpu widened the float16 buffer:\n{device}");
+    assert!(device.contains("sqrt("), "wgpu did not lower float16 sqrt:\n{device}");
     assert!(device.contains("scale: f32") && device.contains("offsets: array<f32, 2>"),
         "wgpu params ABI did not widen float16 values consistently:\n{device}");
     assert!(device.contains("let scale: f16 = f16(") && device.contains("f16(halfbuffer_params.offsets"),
@@ -195,6 +237,7 @@ fn wgpu_enables_shader_f16_and_preserves_two_byte_storage() {
     assert!(!device.contains("float16("), "wgpu left an unresolved float16 conversion:\n{device}");
     assert!(host.contains("wgpu::Features::SHADER_F16"), "host does not request shader-f16:\n{host}");
     assert!(host.contains("Vec<half::f16>"), "host ABI is not f16:\n{host}");
+    assert!(host.contains("half::f16::from_f32"), "host did not lower float16 construction:\n{host}");
     assert!(manifest.contains("half ="), "wgpu manifest lacks half dependency");
 
     let generated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/wgpu/main_wgpu");
@@ -217,6 +260,8 @@ fn simd_kernel_uses_and_compiles_real_f16_storage() {
     let generated = root.join("main_simd");
     let host = fs::read_to_string(generated.join("src/main.rs")).unwrap();
     assert!(host.contains("values: Vec<half::f16>"), "{host}");
+    assert!(host.contains("half::f16::from_f32") && host.contains(".sqrt()"),
+        "simd did not round float16 sqrt back to half precision:\n{host}");
     let checked = Command::new("cargo")
         .args(["check", "--offline", "--manifest-path"])
         .arg(generated.join("Cargo.toml")).output().unwrap();

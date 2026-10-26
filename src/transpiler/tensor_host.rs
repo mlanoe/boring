@@ -1,7 +1,7 @@
 //! Rewrites top-level whole-matrix tensor calls into ordinary private kernels.
 //! This deliberately reuses the existing kernel constructor/dispatch/readback
 //! machinery instead of teaching four host emitters another buffer protocol.
-use crate::ast::*;
+use crate::{ast::*, checker::tensor::TensorElement};
 use std::collections::{HashMap, HashSet};
 
 /// Output rows one Metal SIMD group computes in the native Q4_K single-token
@@ -76,6 +76,7 @@ fn metal_rows_decode_format(config: &TensorLinearConfig, format: Option<&str>) -
 
 fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, usize) {
     if config.native_fixed_matrices
+        && spec.element == TensorElement::Float32
         && spec.m.is_multiple_of(8)
         && spec.n.is_multiple_of(8)
         && spec.k.is_multiple_of(8)
@@ -88,6 +89,7 @@ fn fixed_geometry(spec: &Spec, config: &TensorLinearConfig) -> (usize, usize, us
 
 fn fixed_kernel_prefix(spec: &Spec, config: &TensorLinearConfig) -> &'static str {
     if config.native_fixed_matrices
+        && spec.element == TensorElement::Float32
         && spec.m.is_multiple_of(8)
         && spec.n.is_multiple_of(8)
         && spec.k.is_multiple_of(8)
@@ -324,11 +326,22 @@ fn lower_function_body(
                 index += 1;
                 continue;
             };
+            let Some(element) = dynamic_element_type(&dynamic, types) else {
+                errors.push(super::TranspileError::at_line(
+                    "unable to resolve dynamic kernel.tensors.linear element type",
+                    call.line,
+                ));
+                out.push(stmt.clone());
+                index += 1;
+                continue;
+            };
             let native_packed = tensor_config.native_dynamic_q8_linear
+                && element == TensorElement::Float32
                 && matches!(dynamic.format, Some("q8_0" | "q4_k" | "q6_k"))
                 && matches!(tensor_config.algorithm(dynamic.format, false), "auto" | "native")
                 && !(dynamic.format == Some("q8_0") && tensor_config.algorithm(dynamic.format, true) == "scalar");
-            let prefix = if tensor_config.native_dynamic_float_linear && dynamic.format.is_none() {
+            let prefix = if tensor_config.native_dynamic_float_linear && dynamic.format.is_none()
+                && element == TensorElement::Float32 {
                 "BoringTensorDynamicFloatNative"
             } else if native_packed {
                 let half_prefill = tensor_config.prefill_precision.as_deref() == Some("half");
@@ -361,7 +374,7 @@ fn lower_function_body(
                 let mut failed = false;
                 let mut parsed_kernels = Vec::new();
                 for name in [&decode_name, &prefill_name] {
-                    match parse_dynamic_linear_kernel(name, quals.clone(), dynamic.bias.is_some(), dynamic.format, tensor_config) {
+                    match parse_dynamic_linear_kernel(name, quals.clone(), dynamic.bias.is_some(), dynamic.format, element, tensor_config) {
                         Ok(kernel) => parsed_kernels.push(Item::Kernel(kernel)),
                         Err(message) => {
                             errors.push(super::TranspileError::at_line(message, call.line));
@@ -378,7 +391,7 @@ fn lower_function_body(
                 kernels.extend(parsed_kernels);
                 Some((decode_name, decode_instance, prefill_name, prefill_instance))
             } else {
-                match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, tensor_config) {
+                match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, element, tensor_config) {
                     Ok(kernel) => kernels.push(Item::Kernel(kernel)),
                     Err(message) => {
                         errors.push(super::TranspileError::at_line(message, call.line));
@@ -392,7 +405,7 @@ fn lower_function_body(
             let q8_entrypoint_refs = q8_entrypoints.as_ref().map(|(dn, di, pn, pi)| {
                 (dn.as_str(), di.as_str(), pn.as_str(), pi.as_str())
             });
-            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, tensor_config, q8_entrypoint_refs) {
+            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, element, tensor_config, q8_entrypoint_refs) {
                 Ok(mut replacement) => {
                     let returns_destination = body.get(index + 1).is_some_and(|next| {
                         matches!(next, Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Var(name) if name == dynamic.operands[2]))
@@ -638,6 +651,15 @@ fn resolve_dynamic_quals(names: [&str; 3], types: &HashMap<String, Type>) -> Opt
     }).into_iter().collect::<Option<Vec<_>>>()?.try_into().ok()
 }
 
+fn dynamic_element_type(call: &DynamicLinearCall<'_>, types: &HashMap<String, Type>) -> Option<TensorElement> {
+    let mut ty = types.get(call.operands[0])?;
+    while let Type::Mut(inner) | Type::Qualified(inner, _) = ty { ty = inner; }
+    match ty {
+        Type::Array(element) | Type::LabeledArray(element, _) => TensorElement::from_type(element),
+        _ => None,
+    }
+}
+
 fn allocate_names(
     ordinal: &mut usize,
     used_kernel_names: &mut HashSet<String>,
@@ -663,12 +685,14 @@ struct Spec {
     k: usize,
     quals: [GpuQual; 3],
     transpose_b: bool,
+    element: TensorElement,
 }
 
 fn resolve_spec(method: &str, names: [&str; 3], types: &HashMap<String, Type>) -> Option<Spec> {
     if !matches!(method, "matmul" | "mma" | "linear") { return None; }
     let mut shapes = Vec::new();
     let mut quals = Vec::new();
+    let mut element = None;
     for name in names {
         let mut ty = types.get(name)?;
         while let Type::Mut(inner) = ty { ty = inner; }
@@ -678,7 +702,10 @@ fn resolve_spec(method: &str, names: [&str; 3], types: &HashMap<String, Type>) -
             OwnerQual::GpuUnified => GpuQual::Unified,
             _ => return None,
         });
-        let Type::LabeledArray(_, axes) = inner.without_mut() else { return None };
+        let Type::LabeledArray(operand_element, axes) = inner.without_mut() else { return None };
+        let operand_element = TensorElement::from_type(operand_element)?;
+        if element.is_some() && element != Some(operand_element) { return None; }
+        element = Some(operand_element);
         if axes.len() != 2 { return None; }
         let extent = |i: usize| match &axes[i].size.as_ref()?.0.kind {
             ExprKind::Int(value) => usize::try_from(*value).ok(),
@@ -691,7 +718,7 @@ fn resolve_spec(method: &str, names: [&str; 3], types: &HashMap<String, Type>) -
     let n = if transpose_b { shapes[1][1] } else { shapes[1][0] };
     let right_k = if transpose_b { shapes[1][0] } else { shapes[1][1] };
     if right_k != k || shapes[2] != [n, m] { return None; }
-    Some(Spec { m, n, k, quals: quals.try_into().ok()?, transpose_b })
+    Some(Spec { m, n, k, quals: quals.try_into().ok()?, transpose_b, element: element? })
 }
 
 fn qual_source(qual: &GpuQual) -> &'static str {
@@ -714,8 +741,12 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str, config: &TensorLinearConf
     } else {
         format!("n = {}, k = {}", spec.n, spec.k)
     };
+    let scalar_type = match spec.element {
+        TensorElement::Float16 => "float16",
+        TensorElement::Float32 => "float32",
+    };
     let source = format!(
-        "kernel {name}:\n    let [float32, k = {k}, m = {m}]'{qa} a\n    let [float32, {b_axes}]'{qb} b\n    mut [float32, n = {n}, m = {m}]'{qc} c\n    init([float32, k = {k}, m = {m}]'{qa} input_a, [float32, {b_axes}]'{qb} input_b, [float32, n = {n}, m = {m}]'{qc} input_c):\n        a = input_a\n        b = input_b\n        c = input_c\n    def ():\n        let row = .block.y * {tile_rows}\n        let col = .block.x * {tile_cols}\n        kernel.tensors.{tile_method}(a, b, c, row = row, col = col, rows = {tile_rows}, cols = {tile_cols})\n",
+        "kernel {name}:\n    let [{scalar_type}, k = {k}, m = {m}]'{qa} a\n    let [{scalar_type}, {b_axes}]'{qb} b\n    mut [{scalar_type}, n = {n}, m = {m}]'{qc} c\n    init([{scalar_type}, k = {k}, m = {m}]'{qa} input_a, [{scalar_type}, {b_axes}]'{qb} input_b, [{scalar_type}, n = {n}, m = {m}]'{qc} input_c):\n        a = input_a\n        b = input_b\n        c = input_c\n    def ():\n        let row = .block.y * {tile_rows}\n        let col = .block.x * {tile_cols}\n        kernel.tensors.{tile_method}(a, b, c, row = row, col = col, rows = {tile_rows}, cols = {tile_cols})\n",
         k = spec.k, m = spec.m, n = spec.n,
         qa = qual_source(&spec.quals[0]), qb = qual_source(&spec.quals[1]), qc = qual_source(&spec.quals[2]),
     );
@@ -727,12 +758,13 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str, config: &TensorLinearConf
     }
 }
 
-fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>, tensor_config: &TensorLinearConfig) -> Result<KernelDecl, String> {
-    let bias_field = if has_bias { "    let [float32]'global bias\n" } else { "" };
-    let bias_param = if has_bias { ", [float32]'global input_bias" } else { "" };
+fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>, element: TensorElement, tensor_config: &TensorLinearConfig) -> Result<KernelDecl, String> {
+    let scalar_type = if element == TensorElement::Float16 { "float16" } else { "float32" };
+    let bias_field = if has_bias { format!("    let [{scalar_type}]'global bias\n") } else { String::new() };
+    let bias_param = if has_bias { format!(", [{scalar_type}]'global input_bias") } else { String::new() };
     let bias_assign = if has_bias { "        bias = input_bias\n" } else { "" };
-    let initial = if has_bias { "bias[col]" } else { "0.0" };
-    let weight_type = if quantized_format.is_some() { "uint8" } else { "float32" };
+    let initial = if has_bias && element == TensorElement::Float16 { "bias[col] as float32" } else if has_bias { "bias[col]" } else { "0.0" };
+    let weight_type = if quantized_format.is_some() { "uint8" } else { scalar_type };
     let geometry = quantized_format.and_then(crate::tensor_formats::quantized_linear_geometry);
     let block_bytes = geometry.map_or(0, |geometry| geometry.block_bytes);
     let quantized_value = match quantized_format {
@@ -749,6 +781,8 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     let scale_offset = geometry.map_or(0, |geometry| geometry.scale_offset);
     let product = if quantized_format.is_some() {
         format!("                let flat = col * k + inner\n                let blockByte = (flat / {block_elements}) * {block_bytes}\n                let scaleOffset = blockByte + {scale_offset}\n                let scaleBits = int(b[scaleOffset]) | (int(b[scaleOffset + 1]) << 8)\n                let sign = (scaleBits >> 15) & 1\n                let exponent = (scaleBits >> 10) & 0x1F\n                let fraction = scaleBits & 0x3FF\n                var float32 scale = 0.0\n                if exponent == 0:\n                    scale = (fraction as float32) / 16777216.0\n                elif exponent == 0x1F:\n                    scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (fraction as float32) / 1024.0\n                    var int scaleExponent = exponent - 15\n                    while scaleExponent > 0:\n                        scale *= 2.0\n                        scaleExponent -= 1\n                    while scaleExponent < 0:\n                        scale /= 2.0\n                        scaleExponent += 1\n                if sign == 1:\n                    scale = 0.0 - scale\n                var float32 minimum = 0.0\n{quantized_value}                sum += a[row * k + inner] * ((quantized as float32) * scale - minimum)\n")
+    } else if element == TensorElement::Float16 {
+        "                sum += (a[row * k + inner] as float32) * (b[col * k + inner] as float32)\n".to_string()
     } else {
         "                sum += a[row * k + inner] * b[col * k + inner]\n".to_string()
     };
@@ -914,8 +948,18 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     } else if portable_tiled_quantized {
         "    mut [float32, width = 16, height = 16]'actor aTile\n    mut [float32, width = 16, height = 16]'actor bTile\n"
     } else { "" };
+    if element == TensorElement::Float16 {
+        body = body
+            .replace("a[row * k + inner] *", "(a[row * k + inner] as float32) *")
+            .replace("bias[col]", "(bias[col] as float32)")
+            .replace("c[col] = sum + (bias[col] as float32)", "c[col] = float16(sum + (bias[col] as float32))")
+            .replace("c[col] = sum + 0.0", "c[col] = float16(sum)")
+            .replace("c[row * n + col] = sum + (bias[col] as float32)", "c[row * n + col] = float16(sum + (bias[col] as float32))")
+            .replace("c[row * n + col] = sum + 0.0", "c[row * n + col] = float16(sum)")
+            .replace("c[row * n + col] = sum\n", "c[row * n + col] = float16(sum)\n");
+    }
     let source = format!(
-        "kernel {name}:\n    let [float32]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [float32]'{qc} c\n    let int m\n    let int n\n    let int k\n{tile_fields}    init([float32]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
+        "kernel {name}:\n    let [{scalar_type}]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [{scalar_type}]'{qc} c\n    let int m\n    let int n\n    let int k\n{tile_fields}    init([{scalar_type}]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
         qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]),
     );
     let parsed = crate::parser::parse(
@@ -961,6 +1005,7 @@ fn parse_dynamic_replacement_stmts(
     name: &str,
     instance: &str,
     call: &DynamicLinearCall<'_>,
+    element: TensorElement,
     tensor_config: &TensorLinearConfig,
     q8_entrypoints: Option<(&str, &str, &str, &str)>,
 ) -> Result<Vec<Stmt>, String> {
@@ -990,8 +1035,11 @@ fn parse_dynamic_replacement_stmts(
     } else {
         format!("({m} * {n} + 255) / 256", m = call.m, n = call.n)
     };
-    let native_float = tensor_config.native_dynamic_float_linear && call.format.is_none();
+    let native_float = tensor_config.native_dynamic_float_linear
+        && call.format.is_none()
+        && element == TensorElement::Float32;
     let native_packed = tensor_config.native_dynamic_q8_linear
+        && element == TensorElement::Float32
         && matches!(call.format, Some("q8_0" | "q4_k" | "q6_k"))
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
         && !(call.format == Some("q8_0") && decode_algorithm == "scalar");
@@ -1239,6 +1287,7 @@ run()
             k: 16,
             quals: [GpuQual::Global, GpuQual::Global, GpuQual::Unified],
             transpose_b: false,
+            element: TensorElement::Float32,
         };
         assert_eq!(fixed_geometry(&spec, &config), (8, 8, 32));
         let unaligned = Spec { k: 15, ..spec.clone() };
@@ -1253,7 +1302,7 @@ run()
         let tiled_config = TensorLinearConfig { portable_tiled_dynamic_quantized_linear: true, ..Default::default() };
         for format in ["q8_0", "q5_0", "q4_0", "iq4_nl", "q6_k", "q4_k", "q3_k", "q2_k"] {
             let tiled = parse_dynamic_linear_kernel(
-                &format!("Tiled{format}"), quals.clone(), true, Some(format), &tiled_config,
+                &format!("Tiled{format}"), quals.clone(), true, Some(format), TensorElement::Float32, &tiled_config,
             ).unwrap();
             assert!(tiled.fields.iter().any(|field| field.name == "aTile"), "{format}");
             assert!(tiled.fields.iter().any(|field| field.name == "bTile"), "{format}");
@@ -1266,8 +1315,27 @@ run()
         let mut scalar_config = tiled_config;
         scalar_config.prefill_algorithm = Some("scalar".into());
         let scalar = parse_dynamic_linear_kernel(
-            "ScalarQ8", quals, true, Some("q8_0"), &scalar_config,
+            "ScalarQ8", quals, true, Some("q8_0"), TensorElement::Float32, &scalar_config,
         ).unwrap();
         assert!(!scalar.fields.iter().any(|field| field.name == "aTile" || field.name == "bTile"));
+    }
+
+    #[test]
+    fn quantized_float16_kernel_uses_float32_accumulation() {
+        let kernel = parse_dynamic_linear_kernel(
+            "HalfQ8",
+            [GpuQual::Global, GpuQual::Global, GpuQual::Unified],
+            true,
+            Some("q8_0"),
+            TensorElement::Float16,
+            &TensorLinearConfig::default(),
+        ).unwrap();
+        assert!(matches!(kernel.fields[0].ty.without_mut(), Type::Array(element)
+            if TensorElement::from_type(element) == Some(TensorElement::Float16)));
+        assert!(matches!(kernel.fields[2].ty.without_mut(), Type::Array(element)
+            if TensorElement::from_type(element) == Some(TensorElement::Float16)));
+        let body = format!("{:?}", kernel.methods);
+        assert!(body.contains("float32"), "{body}");
+        assert!(body.contains("float16"), "{body}");
     }
 }

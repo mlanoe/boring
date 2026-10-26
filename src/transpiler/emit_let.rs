@@ -2972,7 +2972,8 @@ impl Transpiler {
         if declared_f16 {
             let value_f16 = self.resolve_expr_type(value).is_some_and(|ty|
                 matches!(ty.without_mut(), Type::Float16)
-                    || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+                    || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")))
+                || self.infer_float_width(value) == Some("f16");
             return if value_f16 { s } else { format!("half::f16::from_f64(({}) as f64)", s) };
         }
         // Implicit clone for 'shared / 'actor / 'guard: cloning an Rc/Arc is just a

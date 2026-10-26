@@ -4606,6 +4606,65 @@ impl Emitter {
                 if is_warp_receiver(o) && is_warp_shuffle(m) {
                     return self.warp_shuffle(e, m, args);
                 }
+                if self.expr_type(o).as_deref() == Some("half::f16") {
+                    let receiver = format!("f32::from({})", self.expr(o));
+                    let unary = match m.as_str() {
+                        "sqrt" | "cbrt" | "abs" | "floor" | "ceil" | "round"
+                        | "exp" | "exp2" | "ln" | "log2" | "log10"
+                        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+                        | "sinh" | "cosh" | "tanh" | "recip" => Some(m.as_str()),
+                        "sign" | "signum" => Some("signum"),
+                        "toRadians" => Some("to_radians"),
+                        "toDegrees" => Some("to_degrees"),
+                        _ => None,
+                    };
+                    if let Some(method) = unary.filter(|_| args.is_empty()) {
+                        return format!("half::f16::from_f32({receiver}.{method}())");
+                    }
+                    if matches!(m.as_str(), "isNaN" | "is_nan") && args.is_empty() {
+                        return format!("{receiver}.is_nan()");
+                    }
+                    if matches!(m.as_str(), "isInfinite" | "is_infinite") && args.is_empty() {
+                        return format!("{receiver}.is_infinite()");
+                    }
+                    if matches!(m.as_str(), "isFinite" | "is_finite") && args.is_empty() {
+                        return format!("{receiver}.is_finite()");
+                    }
+                    if matches!(m.as_str(), "toInt" | "int") && args.is_empty() {
+                        return format!("({receiver} as i32)");
+                    }
+                    if matches!(m.as_str(), "pow" | "powf" | "atan2") && args.len() == 1 {
+                        let argument = self.expr(&args[0].value);
+                        let argument = if self.expr_type(&args[0].value).as_deref() == Some("half::f16") {
+                            format!("f32::from({argument})")
+                        } else {
+                            format!("({argument} as f32)")
+                        };
+                        let method = if m == "pow" { "powf" } else { m.as_str() };
+                        return format!("half::f16::from_f32({receiver}.{method}({argument}))");
+                    }
+                    if m == "log" && args.len() == 1 {
+                        let base = self.expr(&args[0].value);
+                        let base = if self.expr_type(&args[0].value).as_deref() == Some("half::f16") {
+                            format!("f32::from({base})")
+                        } else {
+                            format!("({base} as f32)")
+                        };
+                        return format!("half::f16::from_f32({receiver}.log({base}))");
+                    }
+                    if m == "clamp" && args.len() == 2 {
+                        let mut rendered = Vec::with_capacity(2);
+                        for arg in args {
+                            let value = self.expr(&arg.value);
+                            rendered.push(if self.expr_type(&arg.value).as_deref() == Some("half::f16") {
+                                format!("f32::from({value})")
+                            } else {
+                                format!("({value} as f32)")
+                            });
+                        }
+                        return format!("half::f16::from_f32({receiver}.clamp({}, {}))", rendered[0], rendered[1]);
+                    }
+                }
                 format!(
                     "{}.{}({})",
                     self.expr(o),
@@ -5857,16 +5916,39 @@ impl Emitter {
             "log" | "ln" => "ln", "log2" => "log2", "log10" => "log10",
             _ => "",
         };
+        let is_half = |this: &Self, a: &Expr| this.expr_type(a).as_deref() == Some("half::f16");
+        let half_operand = |this: &mut Self, a: &Expr| {
+            let text = this.expr(a);
+            if is_half(this, a) {
+                format!("f32::from({text})")
+            } else {
+                format!("({text} as f32)")
+            }
+        };
         if !unary.is_empty() && args.len() == 1 {
+            if is_half(self, &args[0].value) {
+                let value = half_operand(self, &args[0].value);
+                return Some(format!("half::f16::from_f32({value}.{unary}())"));
+            }
             let forced = float_ty(self, &args[0].value);
             return Some(format!("{}.{unary}()", operand!(&args[0].value, forced, "f64")));
         }
         match (name, args.len()) {
             ("abs", 1) => {
+                if is_half(self, &args[0].value) {
+                    let value = half_operand(self, &args[0].value);
+                    return Some(format!("half::f16::from_f32({value}.abs())"));
+                }
                 let forced = float_ty(self, &args[0].value);
                 Some(format!("{}.abs()", operand!(&args[0].value, forced, "f64")))
             }
             ("pow", 2) | ("atan2", 2) | ("min", 2) | ("max", 2) => {
+                if is_half(self, &args[0].value) || is_half(self, &args[1].value) {
+                    let method = if name == "pow" { "powf" } else { name };
+                    let a = half_operand(self, &args[0].value);
+                    let b = half_operand(self, &args[1].value);
+                    return Some(format!("half::f16::from_f32({a}.{method}({b}))"));
+                }
                 let forced = float_ty(self, &args[0].value).or_else(|| float_ty(self, &args[1].value));
                 let method = if name == "pow" { "powf" } else { name };
                 let literal = if name == "min" || name == "max" { "" } else { "_" };

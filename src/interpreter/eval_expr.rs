@@ -2818,6 +2818,16 @@ impl Interpreter {
         // require an explicit cast): comparisons already had this precedent for
         // distinct-width integers below (Int8 == Int32 compares numerically, not a
         // type error), and floats simply extend the same existing precedent.
+        if let (Value::Float16(a), Value::Float32(b)) = (l, r) { return a.to_f64() == *b as f64; }
+        if let (Value::Float32(a), Value::Float16(b)) = (l, r) { return *a as f64 == b.to_f64(); }
+        if let (Value::Float16(a), Value::Float64(b)) = (l, r) { return a.to_f64() == *b; }
+        if let (Value::Float64(a), Value::Float16(b)) = (l, r) { return *a == b.to_f64(); }
+        if let Value::Float16(a) = l {
+            if let Some(b) = value_as_i128(r) { return a.to_f64() == b as f64; }
+        }
+        if let Value::Float16(b) = r {
+            if let Some(a) = value_as_i128(l) { return a as f64 == b.to_f64(); }
+        }
         if let (Value::Float32(a), Value::Float64(b)) = (l, r) { return *a as f64 == *b; }
         if let (Value::Float64(a), Value::Float32(b)) = (l, r) { return *a == *b as f64; }
         if let Value::Float64(a) = l {
@@ -2849,6 +2859,24 @@ impl Interpreter {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
         } else if let (Value::Float16(a), Value::Float16(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float16(a), Value::Float32(b)) = (&l, &r) {
+            a.to_f64().partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float32(a), Value::Float16(b)) = (&l, &r) {
+            (*a as f64).partial_cmp(&b.to_f64()).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float16(a), Value::Float64(b)) = (&l, &r) {
+            a.to_f64().partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float64(a), Value::Float16(b)) = (&l, &r) {
+            a.partial_cmp(&b.to_f64()).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let Value::Float16(a) = &l {
+            match value_as_i128(&r) {
+                Some(b) => a.to_f64().partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
+        } else if let Value::Float16(b) = &r {
+            match value_as_i128(&l) {
+                Some(a) => (a as f64).partial_cmp(&b.to_f64()).unwrap_or(std::cmp::Ordering::Equal),
+                None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
         } else if let (Value::Float32(a), Value::Float32(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
         } else if let (Value::Float32(a), Value::Float64(b)) = (&l, &r) {

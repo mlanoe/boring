@@ -1205,6 +1205,30 @@ fn run_kernel_parallel(
 
 // ─── Interpreter impl ─────────────────────────────────────────────────────────
 
+fn tensor_value_as_f32(value: &Value, element: crate::checker::tensor::TensorElement, role: &str, line: usize) -> Result<f32, Signal> {
+    match (element, value) {
+        (crate::checker::tensor::TensorElement::Float16, Value::Float16(value)) => Ok(value.to_f32()),
+        (crate::checker::tensor::TensorElement::Float32, Value::Float32(value)) => Ok(*value),
+        _ => Err(err(format!("tensor {role} contains a value with the wrong floating-point type"), line)),
+    }
+}
+
+fn tensor_value_from_f32(value: f32, element: crate::checker::tensor::TensorElement) -> Value {
+    match element {
+        crate::checker::tensor::TensorElement::Float16 => Value::Float16(half::f16::from_f32(value)),
+        crate::checker::tensor::TensorElement::Float32 => Value::Float32(value),
+    }
+}
+
+fn tensor_element_from_type(ty: &Type) -> Option<crate::checker::tensor::TensorElement> {
+    match ty.without_mut() {
+        Type::Qualified(inner, _) | Type::Array(inner) | Type::LabeledArray(inner, _) => {
+            tensor_element_from_type(inner)
+        }
+        ty => crate::checker::tensor::TensorElement::from_type(ty),
+    }
+}
+
 impl Interpreter {
     pub(crate) fn eval_gpu_tensor_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
         if self.current_kernel_fields.is_empty() {
@@ -1252,28 +1276,22 @@ impl Interpreter {
         for row in row_origin..row_origin.saturating_add(operation.rows).min(operation.m) {
             for col in col_origin..col_origin.saturating_add(operation.cols).min(operation.n) {
                 let mut sum = if operation.accumulate {
-                    match c.get(row * operation.n + col) {
-                        Some(Value::Float32(value)) => *value,
-                        _ => return Err(err("tensor destination contains a non-float32 value", line)),
-                    }
+                    tensor_value_as_f32(c.get(row * operation.n + col)
+                        .ok_or_else(|| err("tensor destination is too short", line))?, operation.element, "destination", line)?
                 } else { 0.0 };
                 for k in 0..operation.k {
-                    let left = match a.get(row * operation.k + k) {
-                        Some(Value::Float32(value)) => *value,
-                        _ => return Err(err("tensor left operand contains a non-float32 value", line)),
-                    };
+                    let left = tensor_value_as_f32(a.get(row * operation.k + k)
+                        .ok_or_else(|| err("tensor left operand is too short", line))?, operation.element, "left operand", line)?;
                     let right_index = if operation.transpose_b {
                         col * operation.k + k
                     } else {
                         k * operation.n + col
                     };
-                    let right = match b.get(right_index) {
-                        Some(Value::Float32(value)) => *value,
-                        _ => return Err(err("tensor right operand contains a non-float32 value", line)),
-                    };
+                    let right = tensor_value_as_f32(b.get(right_index)
+                        .ok_or_else(|| err("tensor right operand is too short", line))?, operation.element, "right operand", line)?;
                     sum = left.mul_add(right, sum);
                 }
-                c[row * operation.n + col] = Value::Float32(sum);
+                c[row * operation.n + col] = tensor_value_from_f32(sum, operation.element);
             }
         }
         env.borrow_mut().force_set(&operation.operands[2], Value::Array(c.into()));
@@ -1282,12 +1300,23 @@ impl Interpreter {
 
     fn eval_gpu_tensor_host_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
         let operand_count = args.iter().position(|arg| arg.label.is_some()).unwrap_or(args.len());
-        let dynamic_linear = method == "linear"
-            && matches!(operand_count, 3 | 4)
-            && ["m", "n", "k"].iter().all(|label| args[operand_count..].iter().any(|arg| arg.label.as_deref() == Some(*label)));
-        if dynamic_linear {
+        let dynamic_tensor = ["m", "n", "k"].iter().all(|label| {
+            args[operand_count..].iter().any(|arg| arg.label.as_deref() == Some(*label))
+        }) && match method {
+            "linear" => matches!(operand_count, 3 | 4),
+            "matmul" | "mma" => operand_count == 3,
+            _ => false,
+        };
+        if dynamic_tensor {
             let output_index = operand_count - 1;
-            let bias_index = (operand_count == 4).then_some(2usize);
+            let bias_index = (method == "linear" && operand_count == 4).then_some(2usize);
+            let ExprKind::Var(left_name) = &args[0].value.kind else {
+                return Err(err("tensor left operand must be a direct variable", line));
+            };
+            let left_type = env.borrow().get_declared_type(left_name)
+                .ok_or_else(|| err("dynamic tensor operands require explicit array types", line))?;
+            let element = tensor_element_from_type(&left_type)
+                .ok_or_else(|| err("dynamic tensor operands require floating-point arrays", line))?;
             let values = self.eval_args(args, Rc::clone(&env))?;
             let array = |index: usize| match &values[index] {
                 Value::Array(values) => Ok(values.clone()),
@@ -1379,15 +1408,15 @@ impl Interpreter {
             }
             for row in 0..m {
                 for col in 0..n {
-                    let mut sum = match bias.as_ref().map(|bias| &bias[col]) {
-                        Some(Value::Float32(value)) => *value,
-                        Some(_) => return Err(err("tensor bias contains a non-float32 value", line)),
-                        None => 0.0f32,
+                    let mut sum = if let Some(bias) = bias.as_ref() {
+                        tensor_value_as_f32(&bias[col], element, "bias", line)?
+                    } else if method == "mma" {
+                        tensor_value_as_f32(&c[row * n + col], element, "destination", line)?
+                    } else {
+                        0.0f32
                     };
                     for inner in 0..k {
-                        let Value::Float32(left) = &a[row * k + inner] else {
-                            return Err(err("tensor left operand contains a non-float32 value", line));
-                        };
+                        let left = tensor_value_as_f32(&a[row * k + inner], element, "left operand", line)?;
                         let right = if let Some(bytes) = packed.as_ref() {
                             let flat = col * k + inner;
                             let block = flat / block_elements;
@@ -1494,14 +1523,16 @@ impl Interpreter {
                             };
                             quantized * scale - minimum
                         } else {
-                            let Value::Float32(right) = &b.as_ref().unwrap()[col * k + inner] else {
-                                return Err(err("tensor weight contains a non-float32 value", line));
+                            let right_index = if method == "linear" {
+                                col * k + inner
+                            } else {
+                                inner * n + col
                             };
-                            *right
+                            tensor_value_as_f32(&b.as_ref().unwrap()[right_index], element, "weight", line)?
                         };
                         sum = left.mul_add(right, sum);
                     }
-                    c[row * n + col] = Value::Float32(sum);
+                    c[row * n + col] = tensor_value_from_f32(sum, element);
                 }
             }
             let ExprKind::Var(output) = &args[output_index].value.kind else {
@@ -1557,28 +1588,19 @@ impl Interpreter {
         for row in 0..operation.m {
             for col in 0..operation.n {
                 let mut sum = if operation.accumulate {
-                    match &c[row * operation.n + col] {
-                        Value::Float32(value) => *value,
-                        _ => return Err(err("tensor destination contains a non-float32 value", line)),
-                    }
+                    tensor_value_as_f32(&c[row * operation.n + col], operation.element, "destination", line)?
                 } else { 0.0 };
                 for k in 0..operation.k {
-                    let left = match &a[row * operation.k + k] {
-                        Value::Float32(value) => *value,
-                        _ => return Err(err("tensor left operand contains a non-float32 value", line)),
-                    };
+                    let left = tensor_value_as_f32(&a[row * operation.k + k], operation.element, "left operand", line)?;
                     let right_index = if operation.transpose_b {
                         col * operation.k + k
                     } else {
                         k * operation.n + col
                     };
-                    let right = match &b[right_index] {
-                        Value::Float32(value) => *value,
-                        _ => return Err(err("tensor right operand contains a non-float32 value", line)),
-                    };
+                    let right = tensor_value_as_f32(&b[right_index], operation.element, "right operand", line)?;
                     sum = left.mul_add(right, sum);
                 }
-                c[row * operation.n + col] = Value::Float32(sum);
+                c[row * operation.n + col] = tensor_value_from_f32(sum, operation.element);
             }
         }
         env.borrow_mut().force_set(&operation.operands[2], Value::Array(c.into()));

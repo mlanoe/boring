@@ -3148,28 +3148,28 @@ impl Transpiler {
         if let Some(&(_, rust_name)) = FLOAT_UNARY_METHODS.iter().find(|&&(n, _)| n == method) {
             let ty = self.math_builtin_float_ty(obj);
             let obj_s = self.emit_math_operand(obj, ty);
-            return Some(format!("{}.{}()", obj_s, rust_name));
+            return Some(self.wrap_math_result(obj, format!("{}.{}()", obj_s, rust_name)));
         }
         if method == "log" {
             let ty = self.math_builtin_float_ty(obj);
             let obj_s = self.emit_math_operand(obj, ty);
             let base = args.first().map(|a| self.emit_math_operand(&a.value, ty))
                 .unwrap_or_else(|| format!("std::{ty}::consts::E"));
-            return Some(format!("{}.log({})", obj_s, base));
+            return Some(self.wrap_math_result(obj, format!("{}.log({})", obj_s, base)));
         }
         if method == "atan2" {
             let ty = self.math_builtin_float_ty(obj);
             let obj_s = self.emit_math_operand(obj, ty);
             let other = args.first().map(|a| self.emit_math_operand(&a.value, ty))
                 .unwrap_or_else(|| format!("0.0 as {ty}"));
-            return Some(format!("{}.atan2({})", obj_s, other));
+            return Some(self.wrap_math_result(obj, format!("{}.atan2({})", obj_s, other)));
         }
         if method == "clamp" && args.len() >= 2 {
             let ty = self.math_builtin_float_ty(obj);
             let obj_s = self.emit_math_operand(obj, ty);
             let lo = self.emit_math_operand(&args[0].value, ty);
             let hi = self.emit_math_operand(&args[1].value, ty);
-            return Some(format!("{}.clamp({}, {})", obj_s, lo, hi));
+            return Some(self.wrap_math_result(obj, format!("{}.clamp({}, {})", obj_s, lo, hi)));
         }
         None
     }
@@ -3184,7 +3184,7 @@ impl Transpiler {
     /// ("float32")`, `Type::Named("int")`, ...) that ordinary `float32 x`/`int x`
     /// declarations actually parse into; mirrors the equivalent int+float match already
     /// used by `is_known_numeric_scalar_type` (`emit_expr.rs`).
-    fn numeric_scalar_is_float(ty: &Type) -> Option<bool> {
+    pub(crate) fn numeric_scalar_is_float(ty: &Type) -> Option<bool> {
         match ty {
             Type::Float16 | Type::Float32 | Type::Float64 => Some(true),
             Type::Int | Type::Uint | Type::Uint8
@@ -3260,7 +3260,7 @@ impl Transpiler {
             let obj_s = self.emit_math_operand(obj, ty);
             let exp = args.first().map(|a| self.emit_math_operand(&a.value, ty))
                 .unwrap_or_else(|| format!("1.0 as {ty}"));
-            return Some(format!("{}.powf({})", obj_s, exp));
+            return Some(self.wrap_math_result(obj, format!("{}.powf({})", obj_s, exp)));
         }
         if method == "pow" && self.is_int_scalar_receiver(obj) {
             let obj_s = self.emit_expr(obj);
@@ -4012,6 +4012,17 @@ impl Transpiler {
                     })
                     .collect();
                 let names = names?;
+                let element_type = |name: &str| -> Option<&Type> {
+                    let mut ty = self.var_types.get(name)
+                        .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))?;
+                    while let Type::Qualified(inner, _) | Type::Mut(inner) = ty { ty = inner; }
+                    match ty {
+                        Type::Array(element) | Type::LabeledArray(element, _) => Some(element.without_mut()),
+                        _ => None,
+                    }
+                };
+                let float16 = matches!(element_type(names[0]), Some(Type::Float16))
+                    || matches!(element_type(names[0]), Some(Type::Named(name)) if matches!(name.as_str(), "float16" | "Float16" | "f16"));
                 let dimension = |label: &str| {
                     args[operand_count..]
                         .iter()
@@ -4019,19 +4030,30 @@ impl Transpiler {
                         .map(|arg| self.emit_expr(&arg.value))
                 };
                 let (m, n, k) = (dimension("m")?, dimension("n")?, dimension("k")?);
-                let (bias_check, bias_ref, initial, c) = if operand_count == 4 {
+                let output = names[operand_count - 1];
+                let a = if float16 { "__boring_tensor_half_a" } else { names[0] };
+                let c = if float16 { "__boring_tensor_half_c" } else { output };
+                let (bias_check, bias_ref, initial) = if operand_count == 4 {
                     (
                         format!("assert_eq!({}.len(), __boring_tensor_n, \"tensor bias length mismatch\");", names[2]),
-                        format!("let __boring_tensor_bias = &{};", names[2]),
+                        format!("let __boring_tensor_bias = &{};", if float16 { "__boring_tensor_half_bias" } else { names[2] }),
                         "__boring_tensor_bias[__boring_tensor_col]",
-                        names[3],
                     )
                 } else {
-                    (String::new(), String::new(), "0.0f32", names[2])
+                    (String::new(), String::new(), "0.0f32")
                 };
+                let half_prefix = if float16 {
+                    let bias = if operand_count == 4 {
+                        format!("let __boring_tensor_half_bias: Vec<f32> = {}.iter().map(|value| value.to_f32()).collect();\n", names[2])
+                    } else { String::new() };
+                    format!("let __boring_tensor_half_a: Vec<f32> = {}.iter().map(|value| value.to_f32()).collect();\n{bias}let mut __boring_tensor_half_c: Vec<f32> = {output}.iter().map(|value| value.to_f32()).collect();\n", names[0])
+                } else { String::new() };
+                let half_suffix = if float16 {
+                    format!("\nfor (__boring_tensor_dst, __boring_tensor_value) in {output}.iter_mut().zip(__boring_tensor_half_c.into_iter()) {{ *__boring_tensor_dst = half::f16::from_f32(__boring_tensor_value); }}")
+                } else { String::new() };
                 return Some(format!(
-                    "{{\nlet (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!(__boring_tensor_k % {block_elements}, 0, \"{format_name} tensor inner dimension must be divisible by {block_elements}\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * (__boring_tensor_k / {block_elements}) * {block_bytes}, \"quantized tensor weight byte length mismatch\");\n{bias_check}\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nlet __boring_tensor_work = __boring_tensor_m.saturating_mul(__boring_tensor_n).saturating_mul(__boring_tensor_k);\nlet __boring_tensor_workers = if __boring_tensor_work < __boring_simd_quant_threshold() {{ 1 }} else {{ __boring_simd_threads().min(__boring_tensor_m * __boring_tensor_n) }};\n// Finer tasks than workers, pulled from a shared queue, keep heterogeneous (P/E) cores busy.\nlet __boring_tensor_pieces = if __boring_tensor_workers == 1 {{ 1 }} else {{ __boring_tensor_workers * 8 }};\nlet __boring_tensor_narrow = __boring_tensor_pieces > __boring_tensor_m;\nlet __boring_tensor_a = &{a};\nlet __boring_tensor_b = &{b};\nlet __boring_tensor_reference = __boring_simd_quant_reference();\nlet __boring_tensor_int8_mode = if __boring_tensor_reference || __boring_tensor_m != 1 {{ 0 }} else {{ __boring_simd_quant_int8() }};\nlet __boring_tensor_int8 = __boring_tensor_int8_mode == 1;\nlet __boring_tensor_rounded = if __boring_tensor_int8_mode == 2 {{ Some(BoringKernelArg::Host(__boring_round_activations(&__boring_tensor_a[0..__boring_tensor_k]))) }} else {{ None }};\nlet __boring_tensor_a = match &__boring_tensor_rounded {{ Some(__boring_tensor_r) => __boring_tensor_r, None => __boring_tensor_a }};\nlet (__boring_tensor_qa, __boring_tensor_act_scales, __boring_tensor_act_sums) = if __boring_tensor_int8 {{ __boring_quantize_activations(&__boring_tensor_a[0..__boring_tensor_k]) }} else {{ (Vec::new(), Vec::new(), Vec::new()) }};\n{bias_ref}\nlet __boring_tensor_task = |(__boring_tensor_row_base, __boring_tensor_col0, __boring_tensor_chunk): (usize, usize, &mut [f32])| {{\n            let __boring_tensor_row0 = __boring_tensor_row_base;\n            let __boring_tensor_cols = if __boring_tensor_narrow {{ __boring_tensor_chunk.len() }} else {{ __boring_tensor_n }};\n            let __boring_tensor_rows = __boring_tensor_chunk.len() / __boring_tensor_cols;\n            let mut __boring_tensor_sums = vec![0f32; __boring_tensor_rows];\n            // Default schedule: sixteen float lanes per row kept across blocks, reduced once per column.\n            let mut __boring_tensor_lanes = vec![[0f32; 16]; __boring_tensor_rows];\n            for __boring_tensor_col in __boring_tensor_col0..__boring_tensor_col0 + __boring_tensor_cols {{\n                for __boring_tensor_sum in __boring_tensor_sums.iter_mut() {{ *__boring_tensor_sum = {initial}; }}\n                for __boring_tensor_lane in __boring_tensor_lanes.iter_mut() {{ *__boring_tensor_lane = [0f32; 16]; }}\n                if __boring_tensor_int8 {{\n                    __boring_tensor_sums[0] += __boring_int8_column::<{block_elements}, {nsub}, {has_min}>(&__boring_tensor_b[..], __boring_tensor_col, __boring_tensor_k / {block_elements}, {block_bytes}, {scale_offset}, __boring_intq_{format_name}, &__boring_tensor_qa, &__boring_tensor_act_scales, &__boring_tensor_act_sums);\n                }} else {{\n                for __boring_tensor_blk in 0usize..(__boring_tensor_k / {block_elements}) {{\n                    let mut __boring_tensor_w = [0f32; {block_elements}];\n                    let __boring_tensor_block = (__boring_tensor_col * (__boring_tensor_k / {block_elements}) + __boring_tensor_blk) * {block_bytes};\n                    let __boring_tensor_scale_at = __boring_tensor_block + {scale_offset};\n                    let __boring_tensor_scale_bits = u16::from(__boring_tensor_b[__boring_tensor_scale_at]) | (u16::from(__boring_tensor_b[__boring_tensor_scale_at + 1]) << 8);\n                    let __boring_tensor_scale = __boring_f16_to_f32(__boring_tensor_scale_bits);\n                    if __boring_tensor_reference {{\n                    for __boring_tensor_pos in 0usize..{block_elements} {{\n                        let __boring_tensor_inner = __boring_tensor_blk * {block_elements} + __boring_tensor_pos;\n                        let __boring_tensor_flat = __boring_tensor_col * __boring_tensor_k + __boring_tensor_inner;\n                        {decode}\n                        __boring_tensor_w[__boring_tensor_pos] = __boring_tensor_weight;\n                    }}\n                    }} else {{\n                        __boring_dequant_{format_name}(&__boring_tensor_b[__boring_tensor_block..__boring_tensor_block + {block_bytes}], __boring_tensor_scale, &mut __boring_tensor_w);\n                    }}\n                    for __boring_tensor_local_row in 0usize..__boring_tensor_rows {{\n                        let __boring_tensor_base = (__boring_tensor_row0 + __boring_tensor_local_row) * __boring_tensor_k + __boring_tensor_blk * {block_elements};\n                        if __boring_tensor_reference {{\n                            __boring_tensor_sums[__boring_tensor_local_row] = __boring_dot(&__boring_tensor_a[__boring_tensor_base..__boring_tensor_base + {block_elements}], &__boring_tensor_w, __boring_tensor_sums[__boring_tensor_local_row]);\n                        }} else {{\n                            __boring_dot_lanes(&__boring_tensor_a[__boring_tensor_base..__boring_tensor_base + {block_elements}], &__boring_tensor_w, &mut __boring_tensor_lanes[__boring_tensor_local_row]);\n                        }}\n                    }}\n                }}\n                }}\n                if !__boring_tensor_reference && !__boring_tensor_int8 {{\n                    for __boring_tensor_local_row in 0usize..__boring_tensor_rows {{\n                        let mut __boring_tensor_total = __boring_tensor_sums[__boring_tensor_local_row];\n                        for __boring_tensor_lane in __boring_tensor_lanes[__boring_tensor_local_row] {{ __boring_tensor_total += __boring_tensor_lane; }}\n                        __boring_tensor_sums[__boring_tensor_local_row] = __boring_tensor_total;\n                    }}\n                }}\n                for __boring_tensor_local_row in 0usize..__boring_tensor_rows {{ __boring_tensor_chunk[__boring_tensor_local_row * __boring_tensor_cols + (__boring_tensor_col - __boring_tensor_col0)] = __boring_tensor_sums[__boring_tensor_local_row]; }}\n            }}\n}};\nlet __boring_tensor_queue = std::sync::Mutex::new(__boring_tensor_tasks(&mut {c}[..], __boring_tensor_m, __boring_tensor_n, __boring_tensor_pieces));\nif __boring_tensor_workers == 1 {{\n    loop {{ let __boring_tensor_next = __boring_tensor_queue.lock().unwrap().pop(); match __boring_tensor_next {{ Some(__boring_tensor_item) => __boring_tensor_task(__boring_tensor_item), None => break }} }}\n}} else {{\n    std::thread::scope(|__boring_tensor_scope| {{\n        for _ in 0..__boring_tensor_workers {{\n            __boring_tensor_scope.spawn(|| loop {{ let __boring_tensor_next = __boring_tensor_queue.lock().unwrap().pop(); match __boring_tensor_next {{ Some(__boring_tensor_item) => __boring_tensor_task(__boring_tensor_item), None => break }} }});\n        }}\n    }});\n}}\n}}",
-                    a = names[0], b = names[1],
+                    "{{\n{half_prefix}let (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!(__boring_tensor_k % {block_elements}, 0, \"{format_name} tensor inner dimension must be divisible by {block_elements}\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * (__boring_tensor_k / {block_elements}) * {block_bytes}, \"quantized tensor weight byte length mismatch\");\n{bias_check}\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nlet __boring_tensor_work = __boring_tensor_m.saturating_mul(__boring_tensor_n).saturating_mul(__boring_tensor_k);\nlet __boring_tensor_workers = if __boring_tensor_work < __boring_simd_quant_threshold() {{ 1 }} else {{ __boring_simd_threads().min(__boring_tensor_m * __boring_tensor_n) }};\n// Finer tasks than workers, pulled from a shared queue, keep heterogeneous (P/E) cores busy.\nlet __boring_tensor_pieces = if __boring_tensor_workers == 1 {{ 1 }} else {{ __boring_tensor_workers * 8 }};\nlet __boring_tensor_narrow = __boring_tensor_pieces > __boring_tensor_m;\nlet __boring_tensor_a = &{a};\nlet __boring_tensor_b = &{b};\nlet __boring_tensor_reference = __boring_simd_quant_reference();\nlet __boring_tensor_int8_mode = if __boring_tensor_reference || __boring_tensor_m != 1 {{ 0 }} else {{ __boring_simd_quant_int8() }};\nlet __boring_tensor_int8 = __boring_tensor_int8_mode == 1;\nlet __boring_tensor_rounded = if __boring_tensor_int8_mode == 2 {{ Some(BoringKernelArg::Host(__boring_round_activations(&__boring_tensor_a[0..__boring_tensor_k]))) }} else {{ None }};\nlet __boring_tensor_a = match &__boring_tensor_rounded {{ Some(__boring_tensor_r) => __boring_tensor_r, None => __boring_tensor_a }};\nlet (__boring_tensor_qa, __boring_tensor_act_scales, __boring_tensor_act_sums) = if __boring_tensor_int8 {{ __boring_quantize_activations(&__boring_tensor_a[0..__boring_tensor_k]) }} else {{ (Vec::new(), Vec::new(), Vec::new()) }};\n{bias_ref}\nlet __boring_tensor_task = |(__boring_tensor_row_base, __boring_tensor_col0, __boring_tensor_chunk): (usize, usize, &mut [f32])| {{\n            let __boring_tensor_row0 = __boring_tensor_row_base;\n            let __boring_tensor_cols = if __boring_tensor_narrow {{ __boring_tensor_chunk.len() }} else {{ __boring_tensor_n }};\n            let __boring_tensor_rows = __boring_tensor_chunk.len() / __boring_tensor_cols;\n            let mut __boring_tensor_sums = vec![0f32; __boring_tensor_rows];\n            // Default schedule: sixteen float lanes per row kept across blocks, reduced once per column.\n            let mut __boring_tensor_lanes = vec![[0f32; 16]; __boring_tensor_rows];\n            for __boring_tensor_col in __boring_tensor_col0..__boring_tensor_col0 + __boring_tensor_cols {{\n                for __boring_tensor_sum in __boring_tensor_sums.iter_mut() {{ *__boring_tensor_sum = {initial}; }}\n                for __boring_tensor_lane in __boring_tensor_lanes.iter_mut() {{ *__boring_tensor_lane = [0f32; 16]; }}\n                if __boring_tensor_int8 {{\n                    __boring_tensor_sums[0] += __boring_int8_column::<{block_elements}, {nsub}, {has_min}>(&__boring_tensor_b[..], __boring_tensor_col, __boring_tensor_k / {block_elements}, {block_bytes}, {scale_offset}, __boring_intq_{format_name}, &__boring_tensor_qa, &__boring_tensor_act_scales, &__boring_tensor_act_sums);\n                }} else {{\n                for __boring_tensor_blk in 0usize..(__boring_tensor_k / {block_elements}) {{\n                    let mut __boring_tensor_w = [0f32; {block_elements}];\n                    let __boring_tensor_block = (__boring_tensor_col * (__boring_tensor_k / {block_elements}) + __boring_tensor_blk) * {block_bytes};\n                    let __boring_tensor_scale_at = __boring_tensor_block + {scale_offset};\n                    let __boring_tensor_scale_bits = u16::from(__boring_tensor_b[__boring_tensor_scale_at]) | (u16::from(__boring_tensor_b[__boring_tensor_scale_at + 1]) << 8);\n                    let __boring_tensor_scale = __boring_f16_to_f32(__boring_tensor_scale_bits);\n                    if __boring_tensor_reference {{\n                    for __boring_tensor_pos in 0usize..{block_elements} {{\n                        let __boring_tensor_inner = __boring_tensor_blk * {block_elements} + __boring_tensor_pos;\n                        let __boring_tensor_flat = __boring_tensor_col * __boring_tensor_k + __boring_tensor_inner;\n                        {decode}\n                        __boring_tensor_w[__boring_tensor_pos] = __boring_tensor_weight;\n                    }}\n                    }} else {{\n                        __boring_dequant_{format_name}(&__boring_tensor_b[__boring_tensor_block..__boring_tensor_block + {block_bytes}], __boring_tensor_scale, &mut __boring_tensor_w);\n                    }}\n                    for __boring_tensor_local_row in 0usize..__boring_tensor_rows {{\n                        let __boring_tensor_base = (__boring_tensor_row0 + __boring_tensor_local_row) * __boring_tensor_k + __boring_tensor_blk * {block_elements};\n                        if __boring_tensor_reference {{\n                            __boring_tensor_sums[__boring_tensor_local_row] = __boring_dot(&__boring_tensor_a[__boring_tensor_base..__boring_tensor_base + {block_elements}], &__boring_tensor_w, __boring_tensor_sums[__boring_tensor_local_row]);\n                        }} else {{\n                            __boring_dot_lanes(&__boring_tensor_a[__boring_tensor_base..__boring_tensor_base + {block_elements}], &__boring_tensor_w, &mut __boring_tensor_lanes[__boring_tensor_local_row]);\n                        }}\n                    }}\n                }}\n                }}\n                if !__boring_tensor_reference && !__boring_tensor_int8 {{\n                    for __boring_tensor_local_row in 0usize..__boring_tensor_rows {{\n                        let mut __boring_tensor_total = __boring_tensor_sums[__boring_tensor_local_row];\n                        for __boring_tensor_lane in __boring_tensor_lanes[__boring_tensor_local_row] {{ __boring_tensor_total += __boring_tensor_lane; }}\n                        __boring_tensor_sums[__boring_tensor_local_row] = __boring_tensor_total;\n                    }}\n                }}\n                for __boring_tensor_local_row in 0usize..__boring_tensor_rows {{ __boring_tensor_chunk[__boring_tensor_local_row * __boring_tensor_cols + (__boring_tensor_col - __boring_tensor_col0)] = __boring_tensor_sums[__boring_tensor_local_row]; }}\n            }}\n}};\nlet __boring_tensor_queue = std::sync::Mutex::new(__boring_tensor_tasks(&mut {c}[..], __boring_tensor_m, __boring_tensor_n, __boring_tensor_pieces));\nif __boring_tensor_workers == 1 {{\n    loop {{ let __boring_tensor_next = __boring_tensor_queue.lock().unwrap().pop(); match __boring_tensor_next {{ Some(__boring_tensor_item) => __boring_tensor_task(__boring_tensor_item), None => break }} }}\n}} else {{\n    std::thread::scope(|__boring_tensor_scope| {{\n        for _ in 0..__boring_tensor_workers {{\n            __boring_tensor_scope.spawn(|| loop {{ let __boring_tensor_next = __boring_tensor_queue.lock().unwrap().pop(); match __boring_tensor_next {{ Some(__boring_tensor_item) => __boring_tensor_task(__boring_tensor_item), None => break }} }});\n        }}\n    }});\n}}{half_suffix}\n}}",
+                    a = a, b = names[1],
                 ));
             }
         }
@@ -4044,21 +4066,34 @@ impl Transpiler {
                 _ => None,
             }).collect();
             let names = names?;
+            let element_type = |name: &str| -> Option<&Type> {
+                let mut ty = self.var_types.get(name)
+                    .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))?;
+                while let Type::Qualified(inner, _) | Type::Mut(inner) = ty { ty = inner; }
+                match ty {
+                    Type::Array(element) | Type::LabeledArray(element, _) => Some(element.without_mut()),
+                    _ => None,
+                }
+            };
+            let float16 = matches!(element_type(names[0]), Some(Type::Float16))
+                || matches!(element_type(names[0]), Some(Type::Named(name)) if matches!(name.as_str(), "float16" | "Float16" | "f16"));
             let dimension = |label: &str| args[operand_count..].iter()
                 .find(|arg| arg.label.as_deref() == Some(label))
                 .map(|arg| self.emit_expr(&arg.value));
             let (m, n, k) = (dimension("m")?, dimension("n")?, dimension("k")?);
             let (bias_check, initial, c) = if method == "linear" && operand_count == 4 {
-                (format!("assert_eq!({}.len(), __boring_tensor_n, \"tensor bias length mismatch\");", names[2]), format!("{}[__boring_tensor_col]", names[2]), names[3])
+                let value = format!("{}[__boring_tensor_col]", names[2]);
+                (format!("assert_eq!({}.len(), __boring_tensor_n, \"tensor bias length mismatch\");", names[2]), if float16 { format!("f32::from({value})") } else { value }, names[3])
             } else if method == "mma" {
-                (String::new(), format!("{}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col]", names[2]), names[2])
+                let value = format!("{}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col]", names[2]);
+                (String::new(), if float16 { format!("f32::from({value})") } else { value }, names[2])
             } else { (String::new(), "0.0f32".into(), names[2]) };
             let right_index = if method == "linear" {
                 "__boring_tensor_col * __boring_tensor_k + __boring_tensor_inner"
             } else {
                 "__boring_tensor_inner * __boring_tensor_n + __boring_tensor_col"
             };
-            if self.config.is_simd_target {
+            if self.config.is_simd_target && !float16 {
                 let bias_ref = if method == "linear" && operand_count == 4 {
                     format!("let __boring_tensor_bias = &{};", names[2])
                 } else {
@@ -4076,8 +4111,15 @@ impl Transpiler {
                     a = names[0], b = names[1],
                 ));
             }
+            let left = format!("{}[__boring_tensor_row * __boring_tensor_k + __boring_tensor_inner]", names[0]);
+            let right = format!("{}[{right_index}]", names[1]);
+            let (left, right, result) = if float16 {
+                (format!("f32::from({left})"), format!("f32::from({right})"), "half::f16::from_f32(__boring_tensor_sum)")
+            } else {
+                (left, right, "__boring_tensor_sum")
+            };
             return Some(format!(
-                "{{\nlet (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * __boring_tensor_k, \"tensor right operand length mismatch\");\n{bias_check}\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nfor __boring_tensor_row in 0usize..__boring_tensor_m {{\n    for __boring_tensor_col in 0usize..__boring_tensor_n {{\n        let mut __boring_tensor_sum = {initial};\n        for __boring_tensor_inner in 0usize..__boring_tensor_k {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * __boring_tensor_k + __boring_tensor_inner].mul_add({b}[{right_index}], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
+                "{{\nlet (__boring_tensor_m, __boring_tensor_n, __boring_tensor_k) = (({m}) as usize, ({n}) as usize, ({k}) as usize);\nassert!(__boring_tensor_m > 0 && __boring_tensor_n > 0 && __boring_tensor_k > 0, \"tensor dimensions must be positive\");\nassert_eq!({a}.len(), __boring_tensor_m * __boring_tensor_k, \"tensor left operand length mismatch\");\nassert_eq!({b}.len(), __boring_tensor_n * __boring_tensor_k, \"tensor right operand length mismatch\");\n{bias_check}\nassert_eq!({c}.len(), __boring_tensor_m * __boring_tensor_n, \"tensor destination length mismatch\");\nfor __boring_tensor_row in 0usize..__boring_tensor_m {{\n    for __boring_tensor_col in 0usize..__boring_tensor_n {{\n        let mut __boring_tensor_sum: f32 = {initial};\n        for __boring_tensor_inner in 0usize..__boring_tensor_k {{\n            __boring_tensor_sum = {left}.mul_add({right}, __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * __boring_tensor_n + __boring_tensor_col] = {result};\n    }}\n}}\n}}",
                 a = names[0], b = names[1],
             ));
         }
@@ -4093,6 +4135,16 @@ impl Transpiler {
             self.var_types.get(name)
                 .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))
         };
+        let element_type = |name: &str| -> Option<&Type> {
+            let mut ty = type_of(name)?;
+            while let Type::Qualified(inner, _) | Type::Mut(inner) = ty { ty = inner; }
+            match ty {
+                Type::LabeledArray(element, _) => Some(element.without_mut()),
+                _ => None,
+            }
+        };
+        let float16 = matches!(element_type(names[0]), Some(Type::Float16))
+            || matches!(element_type(names[0]), Some(Type::Named(name)) if matches!(name.as_str(), "float16" | "Float16" | "f16"));
         let shape = |name: &str| -> Option<[usize; 2]> {
             let mut ty = type_of(name)?;
             while let Type::Qualified(inner, _) | Type::Mut(inner) = ty {
@@ -4115,7 +4167,8 @@ impl Transpiler {
         let right_k = if transpose_b { b_shape[0] } else { b_shape[1] };
         if right_k != k || c_shape != [n, m] { return None; }
         let initial = if method == "mma" {
-            format!("{}[__boring_tensor_row * {n} + __boring_tensor_col]", names[2])
+            let value = format!("{}[__boring_tensor_row * {n} + __boring_tensor_col]", names[2]);
+            if float16 { format!("f32::from({value})") } else { value }
         } else {
             "0.0f32".to_string()
         };
@@ -4124,7 +4177,7 @@ impl Transpiler {
         } else {
             format!("__boring_tensor_k * {n} + __boring_tensor_col")
         };
-        if self.config.is_simd_target {
+        if self.config.is_simd_target && !float16 {
             let chunk_body = if transpose_b {
                 format!("            __boring_linear(__boring_tensor_a, {k}, __boring_tensor_row_base, __boring_tensor_chunk.len() / __boring_tensor_cols, __boring_tensor_b, {k}, __boring_tensor_col0, __boring_tensor_cols, {k}, None, &mut __boring_tensor_chunk[..], __boring_tensor_cols);")
             } else {
@@ -4136,9 +4189,16 @@ impl Transpiler {
                 a = names[0], b = names[1], c = names[2],
             ));
         }
+        let left = format!("{}[__boring_tensor_row * {k} + __boring_tensor_k]", names[0]);
+        let right = format!("{}[{right_index}]", names[1]);
+        let (left, right, result) = if float16 {
+            (format!("f32::from({left})"), format!("f32::from({right})"), "half::f16::from_f32(__boring_tensor_sum)")
+        } else {
+            (left, right, "__boring_tensor_sum")
+        };
         Some(format!(
-            "{{\nfor __boring_tensor_row in 0usize..{m}usize {{\n    for __boring_tensor_col in 0usize..{n}usize {{\n        let mut __boring_tensor_sum: f32 = {initial};\n        for __boring_tensor_k in 0usize..{k}usize {{\n            __boring_tensor_sum = {a}[__boring_tensor_row * {k} + __boring_tensor_k].mul_add({b}[{right_index}], __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * {n} + __boring_tensor_col] = __boring_tensor_sum;\n    }}\n}}\n}}",
-            a = names[0], b = names[1], c = names[2],
+            "{{\nfor __boring_tensor_row in 0usize..{m}usize {{\n    for __boring_tensor_col in 0usize..{n}usize {{\n        let mut __boring_tensor_sum: f32 = {initial};\n        for __boring_tensor_k in 0usize..{k}usize {{\n            __boring_tensor_sum = {left}.mul_add({right}, __boring_tensor_sum);\n        }}\n        {c}[__boring_tensor_row * {n} + __boring_tensor_col] = {result};\n    }}\n}}\n}}",
+            c = names[2],
         ))
     }
 

@@ -1249,7 +1249,8 @@ impl Transpiler {
             || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16"));
         let resolved_is_f16 = |expr: &Expr| self.resolve_expr_type(expr).is_some_and(|t|
             matches!(t.without_mut(), Type::Float16)
-                || matches!(t.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+                || matches!(t.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")))
+            || self.infer_float_width(expr) == Some("f16");
         let src_is_f16 = resolved_is_f16(e)
             || matches!(&e.kind, ExprKind::BinOp(_, left, right) if resolved_is_f16(left) && resolved_is_f16(right));
         if dst_is_f16 {
@@ -2077,6 +2078,42 @@ impl Transpiler {
         // Also handle mixed float-literal/int-literal arithmetic: `7.5 % 2` → `7.5_f64 % 2_f64`.
         if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
             | BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
+            let is_untyped_numeric_literal = |e: &Expr| match &e.kind {
+                ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) => true,
+                ExprKind::UnaryOp(UnaryOp::Neg, inner) => matches!(inner.kind,
+                    ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)),
+                _ => false,
+            };
+            let l_is_f16 = self.infer_float_width(l) == Some("f16");
+            let r_is_f16 = self.infer_float_width(r) == Some("f16");
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
+                && l_is_f16 != r_is_f16
+                && is_untyped_numeric_literal(if l_is_f16 { r } else { l })
+            {
+                let half = |e: &Expr| format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e));
+                let ls = if l_is_f16 { self.emit_expr(l) } else { half(l) };
+                let rs = if r_is_f16 { self.emit_expr(r) } else { half(r) };
+                return format!("({} {} {})", ls, binop_str(op), rs);
+            }
+            // `half::f16` only implements comparisons against itself in Rust,
+            // while Boring numeric comparisons allow the same mixed-width forms
+            // as float32/float64. Compare through f64 when exactly one side is
+            // half precision; arithmetic remains strict and width-preserving.
+            let is_comparison = matches!(op,
+                BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq);
+            if is_comparison && l_is_f16 != r_is_f16 {
+                let is_numeric = |e: &Expr| {
+                    matches!(e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_))
+                        || self.resolve_expr_type(e).as_ref()
+                            .and_then(Self::numeric_scalar_is_float).is_some()
+                        || self.get_expr_rust_type(e).is_some()
+                };
+                if is_numeric(l) && is_numeric(r) {
+                    let ls = self.emit_math_operand(l, "f64");
+                    let rs = self.emit_math_operand(r, "f64");
+                    return format!("({} {} {})", ls, binop_str(op), rs);
+                }
+            }
             let l_is_float_lit = matches!(l.kind, ExprKind::Float(_));
             let r_is_float_lit = matches!(r.kind, ExprKind::Float(_));
             let l_is_int_lit   = matches!(l.kind, ExprKind::Int(_));
@@ -5426,6 +5463,8 @@ impl Transpiler {
     fn infer_float_width_inner(&self, e: &Expr, visiting: &mut std::collections::HashSet<String>) -> Option<&'static str> {
         let width_of = |t: &Type| -> Option<&'static str> {
             match t {
+                Type::Float16 => Some("f16"),
+                Type::Named(n) if n == "float16" || n == "f16" => Some("f16"),
                 Type::Float32 => Some("f32"),
                 // Lowercase source spelling (`let float32 a = ...`) parses as
                 // `Type::Named` — the transpiler has no separate alias-resolution
@@ -5491,6 +5530,17 @@ impl Transpiler {
                 _ => None,
             },
             ExprKind::MethodCall(recv, method, _) => {
+                if matches!(method.as_str(),
+                    "sqrt" | "cbrt" | "abs" | "floor" | "ceil" | "round"
+                    | "exp" | "exp2" | "ln" | "log" | "log2" | "log10"
+                    | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+                    | "atan2" | "sinh" | "cosh" | "tanh" | "sign" | "signum"
+                    | "recip" | "toRadians" | "toDegrees" | "pow" | "powf" | "clamp")
+                {
+                    if let Some(width) = self.infer_float_width_inner(recv, visiting) {
+                        return Some(width);
+                    }
+                }
                 let struct_name = self.resolve_struct_name(recv)?;
                 let key = format!("{}::{}", struct_name, method);
                 self.struct_method_return_types.get(&key).and_then(width_of)
@@ -5498,6 +5548,7 @@ impl Transpiler {
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Var(fname) = &callee.kind {
                     match fname.as_str() {
+                        "float16" => return Some("f16"),
                         "float32" => return Some("f32"),
                         "float" | "float64" => return Some("f64"),
                         // Nested builtin math call: `sqrt(sqrt(x))` etc. lowers to
@@ -5505,7 +5556,7 @@ impl Transpiler {
                         // its argument's inferred width.
                         "sqrt" | "abs" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan"
                             | "asin" | "acos" | "atan" | "atan2" | "exp" | "tanh"
-                            | "log" | "log2" | "log10" | "pow"
+                            | "log" | "log2" | "log10" | "pow" | "sign"
                             if !args.is_empty() => return self.infer_float_width_inner(&args[0].value, visiting),
                         _ => {}
                     }
@@ -5527,7 +5578,21 @@ impl Transpiler {
     /// so the cast target just needs to match the argument's own width instead of
     /// always assuming 64-bit).
     pub(crate) fn math_builtin_float_ty(&self, e: &Expr) -> &'static str {
-        self.infer_float_width(e).unwrap_or("f64")
+        match self.infer_float_width(e) {
+            // Compute half-precision transcendental operations in f32, then
+            // explicitly round their result back to f16 at the call boundary.
+            Some("f16") => "f32",
+            Some(width) => width,
+            None => "f64",
+        }
+    }
+
+    pub(crate) fn wrap_math_result(&self, source: &Expr, result: String) -> String {
+        if self.infer_float_width(source) == Some("f16") {
+            format!("half::f16::from_f32({result})")
+        } else {
+            result
+        }
     }
 
     pub(crate) fn emit_math_operand(&self, e: &Expr, ty: &str) -> String {
@@ -5543,6 +5608,32 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_builtin_call(&self, name: &str, args: &[Arg]) -> String {
+        // Half math is evaluated through f32 because `half::f16` has no native
+        // transcendental methods, but its observable result remains float16.
+        // Round at every builtin boundary, matching the interpreter instead of
+        // accidentally carrying extra f32/f64 precision through later expressions.
+        if let Some(first) = args.first().filter(|a| self.infer_float_width(&a.value) == Some("f16")) {
+            let unary = match name {
+                "sqrt" | "abs" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+                | "exp" | "tanh" | "log2" | "log10" => Some(name),
+                "log" => Some("ln"),
+                _ => None,
+            };
+            if let Some(method) = unary {
+                let operand = self.emit_math_operand(&first.value, "f32");
+                return self.wrap_math_result(&first.value, format!("{operand}.{method}()"));
+            }
+            if name == "atan2" && args.len() >= 2 {
+                let y = self.emit_math_operand(&first.value, "f32");
+                let x = self.emit_math_operand(&args[1].value, "f32");
+                return self.wrap_math_result(&first.value, format!("{y}.atan2({x})"));
+            }
+            if name == "pow" && args.len() >= 2 {
+                let base = self.emit_math_operand(&first.value, "f32");
+                let exp = self.emit_math_operand(&args[1].value, "f32");
+                return self.wrap_math_result(&first.value, format!("{base}.powf({exp})"));
+            }
+        }
         match name {
             // some(x) → Some(x): wrap a value in Option
             "some" if args.len() == 1 => {
@@ -5805,6 +5896,8 @@ impl Transpiler {
                 format!("({}).clamp({}, {})", x, lo, hi)
             }
             "bitsToFloat" => format!("(f32::from_bits({} as u32) as f64)", self.emit_expr(&args[0].value)),
+            "floatToBits" if self.infer_float_width(&args[0].value) == Some("f16") =>
+                format!("(f32::from({}).to_bits() as isize)", self.emit_expr(&args[0].value)),
             "floatToBits" => format!("(({} as f32).to_bits() as isize)", self.emit_expr(&args[0].value)),
             "sign"       => format!("({}).signum()", self.emit_expr(&args[0].value)),
             "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),

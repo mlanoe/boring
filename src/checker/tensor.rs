@@ -5,6 +5,27 @@
 use crate::ast::*;
 use crate::errors::SourceError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TensorElement {
+    Float16,
+    Float32,
+}
+
+impl TensorElement {
+    pub(crate) fn from_type(ty: &Type) -> Option<Self> {
+        match ty.without_mut() {
+            Type::Float16 => Some(Self::Float16),
+            Type::Float32 => Some(Self::Float32),
+            Type::Named(name) => match name.as_str() {
+                "float16" | "Float16" | "f16" => Some(Self::Float16),
+                "float32" | "Float32" | "f32" => Some(Self::Float32),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn is_tensor_call(call: &Expr) -> bool {
     matches!(&call.kind, ExprKind::MethodCall(receiver, _, _)
         if matches!(&receiver.kind, ExprKind::Field(gpu, name)
@@ -109,6 +130,7 @@ impl super::Checker {
                     return;
                 }
             };
+            let mut dynamic_element = None;
             for (index, arg) in args[..operand_count].iter().enumerate() {
                 let ExprKind::Var(name) = &arg.value.kind else {
                     self.not_a_direct_operand(&arg.value, call.line, call.col);
@@ -135,22 +157,29 @@ impl super::Checker {
                 let elem = match ty {
                     Type::Array(elem) | Type::LabeledArray(elem, _) => elem.without_mut(),
                     _ => {
-                        self.error("dynamic tensor operands require float32 arrays", call.line, call.col);
+                        self.error("dynamic tensor operands require floating-point arrays", call.line, call.col);
                         return;
                     }
                 };
-                let float32 = matches!(elem, Type::Float32)
-                    || matches!(elem, Type::Named(name) if name == "float32" || name == "Float32" || name == "f32");
                 let uint8 = matches!(elem, Type::Uint8)
                     || matches!(elem, Type::Named(name) if name == "uint8" || name == "Uint8" || name == "u8");
-                let expected = if quantized && index == 1 { uint8 } else { float32 };
+                let operand_element = TensorElement::from_type(elem);
+                let expected = if quantized && index == 1 {
+                    uint8
+                } else {
+                    operand_element.is_some()
+                        && (dynamic_element.is_none() || dynamic_element == operand_element)
+                };
                 if !expected {
                     self.error(if quantized && index == 1 {
                         "quantized tensor weights require a uint8 array"
                     } else {
-                        "dynamic tensor operands require float32 arrays"
+                        "dynamic tensor operands require matching float16 or float32 arrays"
                     }, call.line, call.col);
                     return;
+                }
+                if !(quantized && index == 1) {
+                    dynamic_element = operand_element;
                 }
             }
             let output_index = operand_count - 1;
@@ -198,9 +227,11 @@ impl super::Checker {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct HostOperation {
     pub accumulate: bool,
     pub transpose_b: bool,
+    pub element: TensorElement,
     pub operands: [String; 3],
     pub m: usize,
     pub n: usize,
@@ -226,6 +257,7 @@ pub(crate) fn resolve_host_types(
         return Err(error("tensor destination must not alias an input"));
     }
     let mut shapes = Vec::with_capacity(3);
+    let mut element = None;
     for (_, ty, _) in &operands {
         let Type::Qualified(inner, qualifier) = ty.without_mut() else {
             return Err(error("host tensor operands require gpu global or unified storage"));
@@ -236,11 +268,14 @@ pub(crate) fn resolve_host_types(
         let Type::LabeledArray(elem, axes) = inner.without_mut() else {
             return Err(error("host tensor operands require labeled rank-two arrays"));
         };
-        let float32 = matches!(elem.without_mut(), Type::Float32)
-            || matches!(elem.without_mut(), Type::Named(name) if name == "float32" || name == "Float32" || name == "f32");
-        if !float32 || axes.len() != 2 {
-            return Err(error("host tensor operands require rank-two float32 arrays"));
+        let operand_element = TensorElement::from_type(elem);
+        if operand_element.is_none() || axes.len() != 2 {
+            return Err(error("host tensor operands require rank-two float16 or float32 arrays"));
         }
+        if element.is_some() && element != operand_element {
+            return Err(error("host tensor operands must use the same floating-point element type"));
+        }
+        element = operand_element;
         let extents: Option<Vec<usize>> = axes
             .iter()
             .map(|axis| axis.size.as_ref().and_then(|size| positive_codegen_literal(&size.0)))
@@ -269,6 +304,7 @@ pub(crate) fn resolve_host_types(
     Ok(HostOperation {
         accumulate,
         transpose_b,
+        element: element.expect("validated tensor element type"),
         operands: std::array::from_fn(|i| operands[i].0.to_string()),
         m,
         n,
@@ -397,6 +433,7 @@ fn uniform_coordinate(expr: &Expr, locals: &std::collections::HashSet<String>) -
 pub(crate) struct TileOperation {
     pub accumulate: bool,
     pub transpose_b: bool,
+    pub element: TensorElement,
     pub operands: [String; 3],
     pub m: usize,
     pub n: usize,
@@ -462,15 +499,19 @@ pub(crate) fn resolve_fields(
         return Err(error("tensor destination must not alias an input"));
     }
     let mut shapes = Vec::new();
+    let mut element = None;
     for field in &fields {
         let Type::LabeledArray(elem, axes) = field.ty.without_mut() else {
             return Err(error("tensor operands require labeled rank-two arrays"));
         };
-        let float32 = matches!(elem.without_mut(), Type::Float32)
-            || matches!(elem.without_mut(), Type::Named(name) if name == "float32");
-        if !float32 || axes.len() != 2 {
-            return Err(error("tensor operands require rank-two float32 arrays"));
+        let operand_element = TensorElement::from_type(elem);
+        if operand_element.is_none() || axes.len() != 2 {
+            return Err(error("tensor operands require rank-two float16 or float32 arrays"));
         }
+        if element.is_some() && element != operand_element {
+            return Err(error("tensor operands must use the same floating-point element type"));
+        }
+        element = operand_element;
         let extents: Option<Vec<usize>> = axes
             .iter()
             .map(|axis| {
@@ -526,6 +567,7 @@ pub(crate) fn resolve_fields(
     Ok(TileOperation {
         accumulate,
         transpose_b,
+        element: element.expect("validated tensor element type"),
         operands: std::array::from_fn(|i| fields[i].name.clone()),
         m,
         n,

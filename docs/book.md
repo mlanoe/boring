@@ -380,12 +380,13 @@ print a            # error: use of moved value 'a': the value was moved
 | `uint32`       | `u32`           | 32-bit unsigned integer             |
 | `uint64`       | `u64`           | 64-bit unsigned integer             |
 | `uint128`      | `u128`          | 128-bit unsigned integer            |
+| `float16`      | `half::f16`     | 16-bit IEEE 754 floating-point      |
 | `float32`      | `f32`           | 32-bit floating-point               |
 | `float64`      | `f64`           | 64-bit floating-point (`float` is a pure alias of this — see below) |
 | `bool`         | `bool`          | `true` / `false`                    |
 | `string`       | `&str` (literal) / `Rc<str>` · `Arc<str>` (stored/computed) | Literals stay `&str`; the transpiler promotes to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it |
 
-The Rust-style spellings `i8`/`i16`/`i32`/`i64`/`i128`/`isize`, `u8`/`u16`/`u32`/`u64`/`u128`/`usize`, and `f32`/`f64` are accepted as aliases for the corresponding Boring name (`i32` ≡ `int32`, `isize` ≡ `int`, `f32` ≡ `float32`, etc.) and transpile identically.
+The Rust-style spellings `i8`/`i16`/`i32`/`i64`/`i128`/`isize`, `u8`/`u16`/`u32`/`u64`/`u128`/`usize`, and `f16`/`f32`/`f64` are accepted as aliases for the corresponding Boring name (`i32` ≡ `int32`, `isize` ≡ `int`, `f16` ≡ `float16`, etc.) and transpile identically.
 
 **`float` is `float64`, not a third type.** Unlike `int`/`uint` (which map to pointer-width `isize`/`usize`, independent of `int64`/`uint64`), `float` has no independent identity — write `float`, get exactly `float64`, indistinguishable at every stage after parsing. This is why the table above lists `float32`/`float64` as the two real members of the family rather than giving `float` its own row.
 
@@ -414,7 +415,7 @@ Scalar types (`int`, `uint`, `float`, `uint8`, …) take no generic arguments, s
 
 ### Fixed-width floats
 
-`float32`/`float64` follow the exact same strict-mixing rule as the fixed-width integers above — two different widths never mix implicitly:
+`float16`/`float32`/`float64` follow the exact same strict-mixing rule as the fixed-width integers above — two different resolved widths never mix implicitly in arithmetic:
 
 ```boring
 let float32 a = 1.0
@@ -428,6 +429,8 @@ An untyped float literal mixes freely with either width, resolved from context �
 ```boring
 let float32 a = 1.0
 let c = a + 3.14   # OK — 3.14 resolves to float32 here
+let float16 h = 1.0
+let d = h + 2.0    # OK — 2.0 resolves to float16 here
 ```
 
 `float` is `float64`'s alias (see "Scalar types" above), so it participates in this rule exactly as `float64` would — `a_float32_var + a_float_var` is exactly as much a type error as mixing two explicit `float32`/`float64` values.
@@ -5318,9 +5321,9 @@ both modes always agree. A text field's caret should step by grapheme (`grapheme
 - I/O: `print(msg)`, `write(msg)` (no trailing newline), `readLine()`, `environment(name) -> string?`, `args()` / `raw_args()` — CLI arguments, argv[0]-style: `args()[0]` is the program name (the `.br` script under `boring run`, the binary's own invoked path in a `boring build` binary — reflects renames/aliases), `args()[1..]` are its real arguments. `environment` returns `nil` for a missing or non-Unicode process variable, so `environment("NAME") else "fallback"` maps directly to Rust's `std::env::var("NAME").ok()`. `raw_args()` is the same today; it exists for symmetry with `boring run`'s own flag parsing (`--gpu`, `--`), which never reaches user code either way.
 - Process: `exit(code)`
 - Characters: `ord(c)`, `chr(code)`
-- Conversion: `int(v)`, `uint(v)`, `float(v)` (alias of `float64`), `float32(v)`, `float64(v)`, `str(v)`
+- Conversion: `int(v)`, `uint(v)`, `float(v)` (alias of `float64`), `float16(v)`, `float32(v)`, `float64(v)`, `str(v)`
 - Collections: `len(coll)`
-- Math: `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `log`/`log2`/`log10`, `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`, `clamp`, `sign`, `isNaN`, `isInfinite`, `min`, `max` — each has a `float32` overload alongside the `float` (=`float64`) one
+- Math: `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `log`/`log2`/`log10`, `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`, `clamp`, `sign`, `isNaN`, `isInfinite`, `min`, `max` — the same surface is available for `float16`, `float32`, and `float64`; half-precision transcendental operations are evaluated through `float32` and rounded back to `float16` at each operation boundary
 - Assertions: `assert(cond, msg?)`, `assert_eq(a, b)`, `assert_neq(a, b)`, `panic(msg)`
 - Ownership: `drop(v)`
 - Result: `Ok(value)`, `Err(error)`
@@ -9596,6 +9599,7 @@ Each GPU backend's own numeric type system limits which widths a `kernel` struct
 | 32-bit | full support (`i32`/`u32`) | full support | full support | full support (`int`/`uint`) |
 | 64-bit | not supported (compile error) | full support | full support | not supported (compile error) |
 | 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | supported via the non-standard `__int128` GCC/HIP-clang extension | not supported (compile error) |
+| 16-bit float (`float16`) | full support when `SHADER_F16` is available (native `f16`) | full support (`__half`) | full support (`_Float16`) | full support (native `half`) |
 | 32-bit float (`float32`) | full support (native `f32`) | full support (`float`) | full support (`float`) | full support (native `float`) |
 | 64-bit float (`float64`/`float`) | not supported (compile error — no `f64` in WGSL at all) | full support (`double`) | full support (`double`) | not supported (compile error — MSL has no native `double`) |
 

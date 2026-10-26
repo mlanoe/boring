@@ -2424,6 +2424,12 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
                 if let ExprKind::Var(n) = &callee.kind {
+                    if (n == "float16" || n == "f16") && args.len() == 1 {
+                        return format!(
+                            "half::f16::from_f32(({}) as f32)",
+                            self.host_expr(&args[0].value)
+                        );
+                    }
                     if (n == "float32" || n == "float" || n == "float64") && args.len() == 1 {
                         return format!("({} as f32)", self.host_expr(&args[0].value));
                     }
