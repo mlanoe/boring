@@ -451,3 +451,9 @@ run, 1.4× → ~0.3×). What is left is linear in the row count: the `Mounted` t
 (`bench_tree` now prints the `rt.root` read). Compiler quirk met: assigning an `'actor` field to another `'actor` field double-wraps
 it in `boring build` (worked around with the constructor form; task_e103f7ca). Still open: cross-frame layout cache of unchanged
 subtrees, per-identity invalidation, accessibility sees stubs without content for off-window rows.
+
+**Windowed `List`, second pass (2026-10-26).** The linear cost left after the windowing was copying: `flatten` clones every row's
+subtree. A windowed list now indexes its rows (`Slots`: child path, id, kind, key per row, no copies) and clones only the rows it
+measures. `bench_tree`, 1000-row `List` (same loaded box, compare with `start`): layout 56 ms → 4.6 ms (4000 rows: 18 ms);
+`rt.root` read 0.3 ms. A `KeyedGroup` inside a `KeyedGroup` falls back to the exact path. Still open: layout is redone on every call
+(no cross-frame cache of unchanged subtrees), per-identity invalidation, `Mounted` copies in `rt.root`.
