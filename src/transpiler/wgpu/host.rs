@@ -2166,9 +2166,12 @@ impl<'a> HostEmitter<'a> {
                         let host_ty = host_scalar_type(&array_inner(&f.ty));
                         let rhs_str = self.host_expr(rhs);
                         let conv = if host_ty == "bool" { "x".to_string() } else { format!("x as {host_ty}") };
-                        // A re-uploaded `'surface` buffer is a new buffer: the swapchain and the
-                        // blit follow it (sized to the window, see `__App::__reblit`).
-                        let reblit = if matches!(f.qual, GpuQual::Surface) && self.in_method { format!(" {pfx}__reblit();") } else { String::new() };
+                        // A re-uploaded presented buffer (`'surface`, or any field the loop hands to
+                        // `screen.present(k.field)`, e.g. a `'unified` one) may be a new buffer: the
+                        // swapchain and the blit follow it (sized to the window, see `__App::__reblit`).
+                        let presented = matches!(f.qual, GpuQual::Surface)
+                            || self.screen_pixels_buf == format!("{obj_name}.{field}_buf");
+                        let reblit = if presented && self.in_method { format!(" {pfx}__reblit();") } else { String::new() };
                         return Some(format!(
                             "{{ let __v = &({rhs_str}); {pfx}{obj_name}.copy_{field}_to_device(&__v.iter().map(|&x| {conv}).collect::<Vec<{host_ty}>>()); }}{reblit}"));
                     }

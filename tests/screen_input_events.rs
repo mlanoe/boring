@@ -187,6 +187,52 @@ fn wgpu_input_events_and_resize_reallocation() {
     cargo_check(&project, "wgpu");
 }
 
+/// A presented `'unified` field re-uploaded at another size (a resize): the blit must be re-pointed at the
+/// reallocated buffer, exactly as for `'surface` (it used to keep showing the old buffer plus blank).
+#[test]
+fn wgpu_reuploaded_unified_present_buffer_repoints_blit() {
+    let src = r#"
+let screen = Screen(Dimension(16, 16), title = "unified")
+
+kernel Fill:
+    mut [uint]'unified out
+    let int width
+    let int height
+
+    init(int w, int h):
+        out = [0xFF101010 for ..<w * h]
+        width = w
+        height = h
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < width and row < height:
+            out[row * width + col] = 0xFF203040
+
+var mut k = Fill(16, 16)
+
+def [uint] blank(int n):
+    [0xFF000000 for ..<n]
+
+kernel:
+    loop:
+        if screen.resized:
+            k.out = blank(screen.width * screen.height)
+            k.width = screen.width
+            k.height = screen.height
+        k(block = (16, 16))
+        screen.present(k.out)
+"#;
+    let (project, rs) = build("wgpu", "unified_reupload", src);
+    let upload = rs.find("self.k.copy_out_to_device(").expect(&rs);
+    let tail = &rs[upload..];
+    let end = tail.find('\n').unwrap_or(tail.len());
+    assert!(tail[..end].contains("self.__reblit();"), "re-upload of the presented buffer must reblit:\n{}", &tail[..end]);
+    assert!(rs.contains("self.k.out_buf.as_entire_binding()"), "{rs}");
+    cargo_check(&project, "wgpu");
+}
+
 #[test]
 fn wgpu_text_members_are_strings() {
     let (project, rs) = build("wgpu", "text", &events(TEXT_LOOP));
