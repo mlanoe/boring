@@ -430,3 +430,10 @@ encode 43 ms, bin 11 ms. A 10-row tree costs ~10 ms per frame. Kernel time per f
   after a re-upload (workaround: rebuild the kernel on resize).
 - Compiler gotchas seen in generated crates: struct names clashing with `boring.ui` views or Rust traits (`Image`, `Frame`,
   `Sized`) — prefix them.
+
+**Frame cost update (2026-10-26, same bench, 1000-row `List`).** Mount 53 s → 0.24 s (`runMountHooks`, bea1e6b). Layout 207 → 51 ms: one `Memo`
+per layout pass (sizes, spans, stack negotiations by node id and proposal; a stack no longer re-negotiates its children once
+per question per level) and the focus/caret/hover/composition marks set in place (8f71aaf). Display list 150 → 7 ms and
+commands 8004 → 196: a `List` paints only the rows within its viewport ± 48 pt (ea4606f; hit testing and semantics still see
+every row). A frame is now ~60 ms on the host at 1000 rows (was ~750 ms). Still open: layout is redone in full on every
+call (no cross-frame cache; a call per input event), and all rows are measured (a virtualized layout needs estimated row heights).
