@@ -1,0 +1,22 @@
+# Regression case for tests/actor_field_alias_assign.rs: `b.f = a.f` where both
+# fields are `'actor` must alias (Arc clone), not re-wrap.
+
+struct LM:
+    var int n = 0
+
+struct Rt:
+    var LM'actor lm = LM()
+
+struct Memo:
+    var LM'actor memory = LM()
+
+def main():
+    let rt = Rt()
+    var mut memo = Memo()
+    memo.memory = rt.lm
+    rt.lm.n = 5
+    print memo.memory.n
+    var mut memo2 = Memo(memory = rt.lm)
+    rt.lm.n = 7
+    print memo2.memory.n
+    print memo.memory.n

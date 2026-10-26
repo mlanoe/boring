@@ -3328,6 +3328,24 @@ impl Transpiler {
                         || self.var_rwlock_types.contains(vn.as_str())
                         || self.var_rwlock_task_types.contains(vn.as_str())
                         || self.observed_locals.contains_key(vn.as_str()));
+                // RHS is itself an actor/guard/observed-qualified *field*
+                // (`memo.memory = rt.layoutMemory`): already the wrapped handle, so
+                // alias it (the fallback `.clone()` bumps the refcount) instead of
+                // wrapping it a second time.
+                let rhs_is_wrapped_field = matches!(&value.kind, ExprKind::Field(vobj, vfield)
+                    if self.resolve_struct_name(vobj).is_some_and(|vsn| {
+                        let vk = format!("{}::{}", vsn, vfield);
+                        self.struct_mutex_fields.contains(&vk)
+                            || self.struct_mutex_task_fields.contains(&vk)
+                            || self.struct_rwlock_fields.contains(&vk)
+                            || self.struct_rwlock_task_fields.contains(&vk)
+                            || self.observed_fields.contains_key(&vk)
+                    }));
+                if rhs_is_wrapped_field {
+                    let obj_s = self.emit_expr(obj);
+                    let rhs = self.emit_expr(value);
+                    return format!("{}.{} = {}", obj_s, field, rhs);
+                }
                 if !rhs_already_wrapped {
                     if let Some((inner_struct_name, base)) = self.observed_fields.get(&key).cloned() {
                         let obj_s = self.emit_expr(obj);
