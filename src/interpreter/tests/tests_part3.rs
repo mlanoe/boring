@@ -1288,6 +1288,45 @@ let _s = format!("{:x}", 255)
     assert_eq!(get_var(&interp, "_s"), Value::Str("ff".to_string()));
 }
 
+#[test]
+fn test_macro_format_float16_scientific() {
+    let src = r#"
+let _s = format!("{:e} {:E}", float16(12.5), float32(12.5))
+"#;
+    let (interp, res) = run(src);
+    res.expect("no error");
+    assert_eq!(get_var(&interp, "_s"), Value::Str("1.25e1 1.25E1".to_string()));
+}
+
+#[test]
+fn test_float_width_overload_dispatch_includes_float16() {
+    let src = r#"
+def int width(float16 value):
+    16
+
+def int width(float32 value):
+    32
+
+def int width(float64 value):
+    64
+
+let _result = width(float16(1.0)) + width(float32(1.0)) + width(float64(1.0))
+"#;
+    assert_eq!(run_src(src), Value::Int(112));
+}
+
+#[test]
+fn test_float16_global_aggregates_accept_untyped_integers() {
+    let src = r#"
+let float16 total = sum([float16(1.0), 2])
+let float16 low = min(float16(2.0), 1)
+let float16 high = max(3, float16(2.0))
+let float16 bounded = clamp(float16(4.0), 0, 3)
+let _result = "{total as float32} {low as float32} {high as float32} {bounded as float32}"
+"#;
+    assert_eq!(run_src(src), Value::Str("3 1 3 3".into()));
+}
+
 // vec![...] produces a boring Array.
 #[test]
 fn test_macro_vec() {

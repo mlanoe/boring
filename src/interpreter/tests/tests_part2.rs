@@ -123,6 +123,26 @@ let _result = "{x:+.2}"
 }
 
 #[test]
+fn test_float16_formatting_and_copy_semantics() {
+    let src = r#"
+let float16 original = float16(12.5)
+let alias = original
+let _result = "{original:+.2} {alias:.1e}"
+"#;
+    assert_eq!(run_src(src), Value::Str("+12.50 1.2e1".into()));
+}
+
+#[test]
+fn test_float16_sorted_copy() {
+    let src = r#"
+let values = [float16(3.0), float16(1.0), float16(2.0)]
+let ordered = values.sorted()
+let _result = "{ordered[0] as float32} {ordered[1] as float32} {ordered[2] as float32} {values[0] as float32}"
+"#;
+    assert_eq!(run_src(src), Value::Str("1 2 3 3".into()));
+}
+
+#[test]
 fn test_format_mixed_string() {
     let src = r#"
 let price = 9.5

@@ -931,8 +931,18 @@ impl Interpreter {
                                     "X"  => if let Value::Int(n) = val { format!("{:X}", n) } else { format!("{}", val) },
                                     "b"  => if let Value::Int(n) = val { format!("{:b}", n) } else { format!("{}", val) },
                                     "o"  => if let Value::Int(n) = val { format!("{:o}", n) } else { format!("{}", val) },
-                                    "e"  => if let Value::Float64(f) = val { format!("{:e}", f) } else { format!("{}", val) },
-                                    "E"  => if let Value::Float64(f) = val { format!("{:E}", f) } else { format!("{}", val) },
+                                    "e"  => match val {
+                                        Value::Float16(f) => format!("{:e}", f.to_f32()),
+                                        Value::Float32(f) => format!("{:e}", f),
+                                        Value::Float64(f) => format!("{:e}", f),
+                                        _ => format!("{}", val),
+                                    },
+                                    "E"  => match val {
+                                        Value::Float16(f) => format!("{:E}", f.to_f32()),
+                                        Value::Float32(f) => format!("{:E}", f),
+                                        Value::Float64(f) => format!("{:E}", f),
+                                        _ => format!("{}", val),
+                                    },
                                     _ => format!("{}", val),   // ignore unknown specifiers
                                 };
                                 result.push_str(&formatted);

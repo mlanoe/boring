@@ -482,7 +482,13 @@ impl Transpiler {
                 // If any element is a string literal, use emit_expr_owned for all
                 // so the vec is typed Vec<Rc<str>> consistently.
                 let has_str_lit = elems.iter().any(|e| matches!(&e.kind, ExprKind::Str(_) | ExprKind::StringInterp(_)));
+                // An untyped numeric literal in an inferred float16 array must be
+                // materialized as `half::f16`; Rust literals cannot infer a crate type.
+                let has_f16 = elems.iter().any(|e| self.infer_float_width(e) == Some("f16"));
                 let es: Vec<String> = elems.iter().map(|e| {
+                    if has_f16 && matches!(&e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
+                        return format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e));
+                    }
                     // A field read (`[self.font]`) is by value: moving a non-Copy field (an
                     // array, dict, struct...) out of `&self` is E0507, so it takes the same
                     // clone `emit_expr_owned` gives every other by-value field read.
@@ -5540,6 +5546,8 @@ impl Transpiler {
             // known the other, if also known, necessarily agrees).
             ExprKind::BinOp(_, l, r) => self.infer_float_width_inner(l, visiting).or_else(|| self.infer_float_width_inner(r, visiting)),
             ExprKind::UnaryOp(_, inner) => self.infer_float_width_inner(inner, visiting),
+            ExprKind::Array(elems) => elems.iter()
+                .find_map(|elem| self.infer_float_width_inner(elem, visiting)),
             ExprKind::Index(base, _) => match &base.kind {
                 ExprKind::Var(v) => match self.var_types.get(v.as_str()).map(Type::without_mut) {
                     Some(Type::Array(elem)) => width_of(elem),
@@ -5576,6 +5584,10 @@ impl Transpiler {
                             | "asin" | "acos" | "atan" | "atan2" | "exp" | "tanh"
                             | "log" | "log2" | "log10" | "pow" | "sign"
                             if !args.is_empty() => return self.infer_float_width_inner(&args[0].value, visiting),
+                        "min" | "max" | "clamp" => return args.iter()
+                            .find_map(|arg| self.infer_float_width_inner(&arg.value, visiting)),
+                        "sum" if !args.is_empty() =>
+                            return self.infer_float_width_inner(&args[0].value, visiting),
                         _ => {}
                     }
                     self.fn_return_types.get(fname.as_str()).and_then(width_of)
@@ -5615,9 +5627,10 @@ impl Transpiler {
 
     pub(crate) fn emit_math_operand(&self, e: &Expr, ty: &str) -> String {
         let value = self.emit_expr(e);
-        let is_f16 = self.resolve_expr_type(e).is_some_and(|t|
-            matches!(t.without_mut(), Type::Float16)
-                || matches!(t.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16")));
+        // Compound expressions often have no direct `resolve_expr_type` entry, but
+        // `infer_float_width` deliberately propagates their operand width. Using the
+        // latter keeps `(a_f16 + b_f16)` on the same conversion path as a bare f16.
+        let is_f16 = self.infer_float_width(e) == Some("f16");
         if is_f16 {
             format!("{ty}::from({value})")
         } else {
@@ -5889,8 +5902,14 @@ impl Transpiler {
                 if args.len() == 1 {
                     format!("{}.iter().cloned().reduce(f64::min).expect(\"cannot compute min of empty collection\")", self.emit_expr(&args[0].value))
                 } else {
-                    let a = self.emit_expr(&args[0].value);
-                    let b = self.emit_expr(&args[1].value);
+                    let half = args.iter().any(|a| self.infer_float_width(&a.value) == Some("f16"));
+                    let render = |e: &Expr| {
+                        if half && matches!(&e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
+                            format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e))
+                        } else { self.emit_expr(e) }
+                    };
+                    let a = render(&args[0].value);
+                    let b = render(&args[1].value);
                     format!("({}).min({})", a, b)
                 }
             }
@@ -5898,8 +5917,14 @@ impl Transpiler {
                 if args.len() == 1 {
                     format!("{}.iter().cloned().reduce(f64::max).expect(\"cannot compute max of empty collection\")", self.emit_expr(&args[0].value))
                 } else {
-                    let a = self.emit_expr(&args[0].value);
-                    let b = self.emit_expr(&args[1].value);
+                    let half = args.iter().any(|a| self.infer_float_width(&a.value) == Some("f16"));
+                    let render = |e: &Expr| {
+                        if half && matches!(&e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
+                            format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e))
+                        } else { self.emit_expr(e) }
+                    };
+                    let a = render(&args[0].value);
+                    let b = render(&args[1].value);
                     format!("({}).max({})", a, b)
                 }
             }
@@ -5908,9 +5933,15 @@ impl Transpiler {
                 format!("{}.iter().copied().reduce(|acc, v| acc + v).unwrap_or_default()", a)
             }
             "clamp"      => {
-                let x  = self.emit_expr(&args[0].value);
-                let lo = self.emit_expr(&args[1].value);
-                let hi = self.emit_expr(&args[2].value);
+                let half = args.iter().any(|a| self.infer_float_width(&a.value) == Some("f16"));
+                let render = |e: &Expr| {
+                    if half && matches!(&e.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
+                        format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e))
+                    } else { self.emit_expr(e) }
+                };
+                let x  = render(&args[0].value);
+                let lo = render(&args[1].value);
+                let hi = render(&args[2].value);
                 format!("({}).clamp({}, {})", x, lo, hi)
             }
             "bitsToFloat" => format!("(f32::from_bits({} as u32) as f64)", self.emit_expr(&args[0].value)),

@@ -5,6 +5,7 @@ kernel HalfBuffer:
     let float16 scale
     let [float16, 2] offsets
     mut [float16]'unified values
+    mut [float16, 2]'actor scratch
     init(float16 factor, [float16, 2] bias, [float16]'unified input):
         scale = factor
         offsets = bias
@@ -13,7 +14,9 @@ kernel HalfBuffer:
         let i = .thread.x
         let float32 wide = values[i] as float32
         let float16 adjusted = sqrt(float16(wide * (scale as float32) + (offsets[0] as float32)))
-        values[i] = adjusted.sqrt()
+        scratch[i] = adjusted
+        sync
+        values[i] = scratch[i].sqrt()
 
 pub req [float16]'kernel'unified increment([float16]'kernel'unified input) throws:
     mut k = HalfBuffer(float16(1.0), [float16(1.0), float16(0.0)], input)
@@ -59,8 +62,50 @@ fn host_half_is_two_bytes_and_roundtrips() {
 }
 
 #[test]
+fn cpu_generated_rust_parses_optional_float16_casts() {
+    let source_text = r#"
+def main():
+    let string valid = "1.5"
+    let string invalid = "nope"
+    let float16? parsed = valid as float16
+    let float16? rejected = invalid as float16
+"#;
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("float16_codegen/cpu_optional_cast");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, source_text).unwrap();
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let host = fs::read_to_string(root.join("main_rust/src/main.rs")).unwrap();
+    assert!(
+        host.contains("parse::<f32>().ok().map(half::f16::from_f32)"),
+        "optional float16 cast did not preserve its width:\n{host}"
+    );
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(root.join("main_rust/Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[test]
 fn cpu_interpreter_and_generated_rust_convert_and_compute_f16() {
-    let source_text = "def main():\n    let float16 a = float16(1.337)\n    let float16 b = float16(\"2.0\")\n    let float16 c = (a + b) as float16\n    let int16 narrow_int = 7\n    let float16 from_int = narrow_int as float16\n    let float16 parsed = \"1.5\".parseFloat16() else float16(0.0)\n    let float16 root = sqrt(float16(4.0))\n    let float16 method_root = float16(9.0).sqrt()\n    let float16 squared = float16(4.0).pow(float16(2.0))\n    mut [float16] values = [float16(1.0), float16(2.0)]\n    let float16 total = values.sum()\n    values[0] = 1.337\n    mut [float16] ordered = [float16(2.0), float16(1.0)]\n    ordered.sort()\n    let float16 bounded = clamp(float16(-2.0), float16(-1.0), float16(1.0))\n    let float32 smallest = min(float16(-2.0), float16(-1.0)) as float32\n    print \"{c as float32} {parsed as float32} {from_int as float32}\"\n    print \"{root as float32}\"\n    print \"{method_root as float32} {squared as float32}\"\n    print \"{total as float32}\"\n    print \"{bounded as float32} {smallest}\"\n    print \"{(float16(2048.0) + float16(1.0)) as float32} {values[0] as float32}\"\n    print \"{int(float16(3.5))} {float16(float16(1.5)) as float32} {float32(float16(1.5))}\"\n    print \"{float16(1.0) < float16(2.0)} {ordered[0] as float32}\"\n    print json(float16(1.5))\n";
+    let source_text = "def main():\n    let float16 a = float16(1.337)\n    let float16 b = float16(\"2.0\")\n    let float16 c = (a + b) as float16\n    let int16 narrow_int = 7\n    let float16 from_int = narrow_int as float16\n    let float16 parsed = \"1.5\".parseFloat16() else float16(0.0)\n    let float16 root = sqrt(float16(4.0))\n    let float16 method_root = float16(9.0).sqrt()\n    let float16 squared = float16(4.0).pow(float16(2.0))\n    mut [float16] values = [float16(1.0), float16(2.0)]\n    let float16 total = values.sum()\n    values[0] = 1.337\n    mut [float16] ordered = [float16(2.0), float16(1.0)]\n    ordered.sort()\n    let float16 bounded = clamp(float16(-2.0), float16(-1.0), float16(1.0))\n    let float32 smallest = min(float16(-2.0), float16(-1.0)) as float32\n    print \"{c as float32} {parsed as float32} {from_int as float32}\"\n    print \"{root as float32}\"\n    print \"{method_root as float32} {squared as float32}\"\n    print \"{total as float32}\"\n    print \"{bounded as float32} {smallest}\"\n    print \"{(float16(2048.0) + float16(1.0)) as float32} {values[0] as float32}\"\n    print \"{int(float16(3.5))} {float16(float16(1.5)) as float32} {float32(float16(1.5))}\"\n    print \"{float16(1.0) < float16(2.0)} {ordered[0] as float32}\"\n    print json(float16(1.5))\n    print \"{float16(12.5):+.2} {float16(12.5):.1e}\"\n    print \"{sum([float16(1.0), 2]) as float32} {min(float16(2.0), 1) as float32} {max(3, float16(2.0)) as float32} {clamp(float16(4.0), 0, 3) as float32}\"\n";
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -69,7 +114,7 @@ fn cpu_interpreter_and_generated_rust_convert_and_compute_f16() {
     let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["run"]).arg(&source).output().unwrap();
     assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
-    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "3.3359375 1.5 7\n2\n3 16\n3\n-1 -2\n2048 1.3369141\n3 1.5 1.5\ntrue 1\n1.5");
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "3.3359375 1.5 7\n2\n3 16\n3\n-1 -2\n2048 1.3369141\n3 1.5 1.5\ntrue 1\n1.5\n+12.50 1.2e1\n3 1 3 3");
     let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["build"]).arg(&source).output().unwrap();
     assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
@@ -116,7 +161,9 @@ def main():
     let method_root = float16(2.0).sqrt()
     let powered = pow(float16(2.0), float16(3.0))
     let method_powered = float16(2.0).pow(float16(3.0))
-    let total = root + method_root + powered + method_powered
+    let compound_root = sqrt(float16(4.0) + float16(5.0))
+    let compound_method_root = (float16(4.0) + float16(5.0)).sqrt()
+    let total = root + method_root + powered + method_powered + compound_root + compound_method_root
     let literal_sum = float16(1.5) + 2.0
     let signed = sign(float16(-2.0))
     print "{total as float32}"
@@ -216,6 +263,7 @@ fn supported_gpu_backends_keep_f16_storage() {
     for (target, spelling) in [("metal", "half*"), ("cuda", "__half*"), ("rocm", "_Float16*")] {
         let (device, host, manifest) = generate(target, target);
         assert!(device.contains(spelling), "{target} widened the buffer:\n{device}");
+        assert!(device.contains("scratch"), "{target} omitted float16 actor storage:\n{device}");
         assert!(device.contains("sqrt("), "{target} did not lower float16 sqrt:\n{device}");
         assert!(!device.contains("float16("), "{target} left an unresolved float16 conversion:\n{device}");
         assert!(!host.contains("float16("), "{target} host left an unresolved float16 conversion:\n{host}");
@@ -229,6 +277,8 @@ fn wgpu_enables_shader_f16_and_preserves_two_byte_storage() {
     let (device, host, manifest) = generate("wgpu", "wgpu");
     assert!(device.starts_with("enable f16;"), "missing WGSL f16 directive:\n{device}");
     assert!(device.contains("array<f16>"), "wgpu widened the float16 buffer:\n{device}");
+    assert!(device.contains("var<workgroup>") && device.contains("array<f16, 2>"),
+        "wgpu did not preserve float16 workgroup storage:\n{device}");
     assert!(device.contains("sqrt("), "wgpu did not lower float16 sqrt:\n{device}");
     assert!(device.contains("scale: f32") && device.contains("offsets: array<f32, 2>"),
         "wgpu params ABI did not widen float16 values consistently:\n{device}");
@@ -269,7 +319,63 @@ fn simd_kernel_uses_and_compiles_real_f16_storage() {
 }
 
 #[test]
+fn simd_float16_aggregates_coerce_untyped_literals() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/simd_aggregates");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, r#"
+def main():
+    let float16 total = sum([float16(1.0), 2])
+    let float16 low = min(float16(2.0), 1)
+    let float16 high = max(3, float16(2.0))
+    let float16 bounded = clamp(float16(4.0), 0, 3)
+    print "{total as float32} {low as float32} {high as float32} {bounded as float32}"
+"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "simd"]).arg(&source).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let generated = root.join("main_simd");
+    let host = fs::read_to_string(generated.join("src/main.rs")).unwrap();
+    assert!(host.contains("half::f16::from_f32"), "SIMD did not coerce aggregate literals:\n{host}");
+    let checked = Command::new("cargo")
+        .args(["check", "--offline", "--manifest-path"])
+        .arg(generated.join("Cargo.toml")).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+}
+
+#[test]
 fn cuda_manifest_enables_cudarc_f16() {
     let (_, _, manifest) = generate("cuda", "cuda_manifest");
     assert!(manifest.contains("\"f16\""), "{manifest}");
+}
+
+#[test]
+fn gpu_host_kernel_constructors_sum_float16_arrays_as_half() {
+    let source_text = r#"
+kernel HalfScalar:
+    let float16 value
+
+    init(float16 input):
+        value = input
+
+    def ():
+        let copy = value
+
+mut k = HalfScalar([float16(1.0), float16(2.0)].sum())
+kernel:
+    k(block = 1)
+"#;
+    for target in ["metal", "cuda", "rocm"] {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen").join(format!("host_sum_{target}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.br");
+        fs::write(&source, source_text).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target]).arg(&source).output().unwrap();
+        assert!(output.status.success(), "{target}: {}", String::from_utf8_lossy(&output.stderr));
+        let host = fs::read_to_string(root.join(format!("main_{target}/src/main.rs"))).unwrap();
+        assert!(host.contains("sum::<half::f16>()"), "{target} widened a float16 host sum:\n{host}");
+    }
 }

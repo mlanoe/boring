@@ -1743,6 +1743,8 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Float16(x), Value::Float16(y)) => Ok(if x <= y { a } else { b }),
+                    (Value::Int(x), Value::Float16(y)) => Ok(if half::f16::from_f32(*x as f32) <= *y { a } else { b }),
+                    (Value::Float16(x), Value::Int(y)) => Ok(if *x <= half::f16::from_f32(*y as f32) { a } else { b }),
                     (Value::Float64(x), Value::Float64(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Float32(x), Value::Float32(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) <= *y { a } else { b }),
@@ -1774,6 +1776,8 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Float16(x), Value::Float16(y)) => Ok(if x >= y { a } else { b }),
+                    (Value::Int(x), Value::Float16(y)) => Ok(if half::f16::from_f32(*x as f32) >= *y { a } else { b }),
+                    (Value::Float16(x), Value::Int(y)) => Ok(if *x >= half::f16::from_f32(*y as f32) { a } else { b }),
                     (Value::Float64(x), Value::Float64(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Float32(x), Value::Float32(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) >= *y { a } else { b }),
@@ -2088,7 +2092,9 @@ fn register_string_and_math_builtins(e: &mut Env) {
                         _ => return Err(err("sum: array must contain numbers", line)),
                     }
                 }
-                if is_float16 { Ok(Value::Float16(float16_sum)) }
+                if is_float16 {
+                    Ok(Value::Float16(float16_sum + half::f16::from_f32(int_sum as f32)))
+                }
                 else if is_float32 { Ok(Value::Float32(float32_sum)) }
                 else if is_float { Ok(Value::Float64(float_sum)) }
                 else { Ok(Value::Int(int_sum)) }
@@ -2125,6 +2131,12 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     Ok(Value::Float64(x.clamp(*lo, *hi))),
                 (Some(Value::Float16(x)), Some(Value::Float16(lo)), Some(Value::Float16(hi))) =>
                     Ok(Value::Float16((*x).max(*lo).min(*hi))),
+                (Some(Value::Float16(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
+                    Ok(Value::Float16((*x)
+                        .max(half::f16::from_f32(*lo as f32))
+                        .min(half::f16::from_f32(*hi as f32)))),
+                (Some(Value::Int(x)), Some(Value::Float16(lo)), Some(Value::Float16(hi))) =>
+                    Ok(Value::Float16(half::f16::from_f32(*x as f32).max(*lo).min(*hi))),
                 (Some(Value::Int(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
                     Ok(Value::Int(*x.clamp(lo, hi))),
                 (Some(Value::Float64(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>

@@ -1635,6 +1635,8 @@ impl Interpreter {
             Type::Int    => matches!(val, Value::Int(_)),
             Type::Uint   => matches!(val, Value::Uint(_)),
             Type::Uint8  => matches!(val, Value::Uint8(_)),
+            Type::Float16  => matches!(val, Value::Float16(_)),
+            Type::Float32  => matches!(val, Value::Float32(_)),
             Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
@@ -1644,7 +1646,9 @@ impl Interpreter {
                 "int"    => matches!(val, Value::Int(_)),
                 "uint"   => matches!(val, Value::Uint(_)),
                 "uint8"  => matches!(val, Value::Uint8(_)),
-                "float"  => matches!(val, Value::Float64(_)),
+                "float16" | "f16" => matches!(val, Value::Float16(_)),
+                "float32" | "f32" => matches!(val, Value::Float32(_)),
+                "float" | "float64" | "f64" => matches!(val, Value::Float64(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
                 "string" => matches!(val, Value::Str(_)),
                 _ => self.value_matches_type(val, ty),
@@ -1834,12 +1838,15 @@ impl Interpreter {
             match v {
                 Value::Int(n)   => Ok(*n),
                 Value::Uint(n)  => Ok(*n as i64),
+                Value::Float16(f) => Ok(f.to_f32() as i64),
+                Value::Float32(f) => Ok(*f as i64),
                 Value::Float64(f) => Ok(*f as i64),
                 _ => Err(err(format!("format '{spec}' requires an integer"), line)),
             }
         };
         let to_float = |v: &Value| -> Result<f64, Signal> {
             match v {
+                Value::Float16(f) => Ok(f.to_f32() as f64),
                 Value::Float64(f) => Ok(*f),
                 Value::Float32(f) => Ok(*f as f64),
                 Value::Int(n)   => Ok(*n as f64),
@@ -1906,6 +1913,8 @@ impl Interpreter {
             match &val {
                 Value::Int(n) if *n >= 0 => format!("+{body}"),
                 Value::Uint(_) => format!("+{body}"),
+                Value::Float16(f) if f.to_f32() >= 0.0 => format!("+{body}"),
+                Value::Float32(f) if *f >= 0.0 => format!("+{body}"),
                 Value::Float64(f) if *f >= 0.0 => format!("+{body}"),
                 _ => body,
             }
@@ -2023,6 +2032,7 @@ impl Interpreter {
                 | Value::Uint32(_)
                 | Value::Uint64(_)
                 | Value::Uint128(_)
+                | Value::Float16(_)
                 | Value::Float32(_)
         )
     }

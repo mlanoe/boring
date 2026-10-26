@@ -1999,10 +1999,26 @@ impl Transpiler {
             // e.g. `let int? v = s as int` → `s.trim().parse::<isize>().ok()`
             if let ExprKind::Cast(src, cast_ty) = &value.kind {
                 let src_s = self.emit_expr(src);
-                let cast_dst = self.emit_type(cast_ty);
-                let parse_ty = if matches!(cast_ty, Type::Float64) || matches!(cast_ty, Type::Named(n) if n == "float" || n == "float64" || n == "f64") {
+                // The parser may propagate the declared optional wrapper onto the cast
+                // itself (`s as float16` in a `float16?` binding becomes a cast to
+                // `float16?`). Select the parser type from the wrapped element, not from
+                // `Option<...>`.
+                let parse_target = match cast_ty.without_mut() {
+                    Type::Optional(inner) => inner.without_mut(),
+                    other => other,
+                };
+                let cast_dst = self.emit_type(parse_target);
+                if matches!(parse_target, Type::Float16)
+                    || matches!(parse_target, Type::Named(n) if n == "float16" || n == "f16")
+                {
+                    return format!(
+                        "{}.trim().parse::<f32>().ok().map(half::f16::from_f32)",
+                        src_s
+                    );
+                }
+                let parse_ty = if matches!(parse_target, Type::Float64) || matches!(parse_target, Type::Named(n) if n == "float" || n == "float64" || n == "f64") {
                     Some("f64".to_string())
-                } else if matches!(cast_ty, Type::Float32) || matches!(cast_ty, Type::Named(n) if n == "float32" || n == "f32") {
+                } else if matches!(parse_target, Type::Float32) || matches!(parse_target, Type::Named(n) if n == "float32" || n == "f32") {
                     Some("f32".to_string())
                 } else if crate::transpiler::helpers::is_specific_numeric_type(&cast_dst) {
                     Some(cast_dst)

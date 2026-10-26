@@ -2315,7 +2315,16 @@ fn resolve_labeled_axis_property(axes: &[crate::ast::LabeledAxis], axis_label: &
 fn zero_value(ty: &crate::ast::Type) -> Value {
     use crate::ast::Type;
     match ty {
+        Type::Float16 => Value::Float16(half::f16::ZERO),
+        Type::Float32 => Value::Float32(0.0),
         Type::Float64 => Value::Float64(0.0),
+        Type::Named(name) if matches!(name.as_str(), "float16" | "f16" | "Float16") =>
+            Value::Float16(half::f16::ZERO),
+        Type::Named(name) if matches!(name.as_str(), "float32" | "f32" | "Float32") =>
+            Value::Float32(0.0),
+        Type::Named(name) if matches!(name.as_str(), "float" | "float64" | "f64" | "Float" | "Float64") =>
+            Value::Float64(0.0),
+        Type::Qualified(inner, _) => zero_value(inner),
         Type::Bool => Value::Bool(false),
         Type::Uint => Value::Uint(0),
         Type::Uint8 => Value::Uint8(0),

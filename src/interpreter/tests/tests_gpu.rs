@@ -697,6 +697,40 @@ let _result = k.out
     );
 }
 
+#[test]
+fn test_unassigned_float16_actor_array_defaults_to_half_zero() {
+    let src = r#"
+kernel HalfTile:
+    mut [float16]'unified input
+    mut [float16]'unified out
+    mut [float16, 3]'actor tile
+
+    init([float16]'unified data):
+        input = data
+        out = [float16(0.0), float16(0.0), float16(0.0)]
+
+    def ():
+        let i = .thread.x
+        out[i] = tile[i] + input[i]
+
+let data = [float16(1.0), float16(2.0), float16(3.0)]
+mut k = HalfTile(data)
+kernel:
+    k(block = 3)
+let _result = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(
+        get_var(&interp, "_result"),
+        Value::Array(vec![
+            Value::Float16(half::f16::from_f32(1.0)),
+            Value::Float16(half::f16::from_f32(2.0)),
+            Value::Float16(half::f16::from_f32(3.0)),
+        ].into())
+    );
+}
+
 // ─── sync is a no-op (for kernels with no `'actor` field) ───────────────────
 //
 // `sync` is a REAL cross-thread barrier when the kernel has an `'actor` field

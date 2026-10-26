@@ -3695,14 +3695,19 @@ impl Emitter {
                 if *inclusive { "=" } else { "" },
                 self.expr(end)
             ),
-            ExprKind::Array(elements) => format!(
-                "vec![{}]",
-                elements
-                    .iter()
-                    .map(|element| self.expr(element))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            ExprKind::Array(elements) => {
+                let has_half = elements.iter()
+                    .any(|element| self.expr_type(element).as_deref() == Some("half::f16"));
+                let values = elements.iter().map(|element| {
+                    let value = self.expr(element);
+                    if has_half && matches!(&element.kind, ExprKind::Int(_) | ExprKind::Float(_)) {
+                        format!("half::f16::from_f32(({value}) as f32)")
+                    } else {
+                        value
+                    }
+                }).collect::<Vec<_>>();
+                format!("vec![{}]", values.join(", "))
+            }
             ExprKind::Dict(entries) => format!(
                 "std::collections::HashMap::from([{}])",
                 entries
@@ -5934,6 +5939,15 @@ impl Emitter {
             return Some(format!("{}.{unary}()", operand!(&args[0].value, forced, "f64")));
         }
         match (name, args.len()) {
+            ("sum", 1) => {
+                let value = self.expr(&args[0].value);
+                let sum_ty = self.expr_type(&args[0].value).unwrap_or_else(|| "i32".into());
+                Some(format!("{value}.iter().cloned().sum::<{sum_ty}>()"))
+            }
+            ("min", 1) | ("max", 1) => {
+                let value = self.expr(&args[0].value);
+                Some(format!("{value}.iter().cloned().reduce(|a, b| a.{name}(b)).unwrap_or_default()"))
+            }
             ("abs", 1) => {
                 if is_half(self, &args[0].value) {
                     let value = half_operand(self, &args[0].value);
@@ -5955,6 +5969,19 @@ impl Emitter {
                 let a = operand!(&args[0].value, forced, if literal.is_empty() { "" } else { "f64" });
                 let b = operand!(&args[1].value, forced, literal);
                 Some(format!("{a}.{method}({b})"))
+            }
+            ("clamp", 3) => {
+                if args.iter().any(|arg| is_half(self, &arg.value)) {
+                    let value = half_operand(self, &args[0].value);
+                    let min = half_operand(self, &args[1].value);
+                    let max = half_operand(self, &args[2].value);
+                    return Some(format!("half::f16::from_f32({value}.clamp({min}, {max}))"));
+                }
+                let forced = args.iter().find_map(|arg| float_ty(self, &arg.value));
+                let value = operand!(&args[0].value, forced, "f64");
+                let min = operand!(&args[1].value, forced, "f64");
+                let max = operand!(&args[2].value, forced, "f64");
+                Some(format!("{value}.clamp({min}, {max})"))
             }
             _ => None,
         }
@@ -5999,7 +6026,9 @@ impl Emitter {
             ExprKind::Float(_) => Some("f64".into()),
             ExprKind::Str(_) | ExprKind::StringInterp(_) => Some("String".into()),
             ExprKind::Bool(_) => Some("bool".into()),
-            ExprKind::Array(values) => values.first().and_then(|value| self.expr_type(value)),
+            ExprKind::Array(values) => values.iter()
+                .find_map(|value| self.expr_type(value).filter(|ty| ty == "half::f16"))
+                .or_else(|| values.first().and_then(|value| self.expr_type(value))),
             ExprKind::Var(name) => self
                 .value_types
                 .get(name)
@@ -6013,8 +6042,14 @@ impl Emitter {
                 }
             }
             ExprKind::Cast(_, value_ty) => Some(ty(value_ty)),
-            ExprKind::Call(callee, _) => match &callee.kind {
-                ExprKind::Var(name) => primitive_cast_type(name).map(str::to_string),
+            ExprKind::Call(callee, args) => match &callee.kind {
+                ExprKind::Var(name) => primitive_cast_type(name).map(str::to_string).or_else(|| {
+                    if matches!(name.as_str(), "sum" | "min" | "max" | "clamp") {
+                        args.iter().find_map(|arg| self.expr_type(&arg.value))
+                    } else {
+                        None
+                    }
+                }),
                 _ => None,
             },
             ExprKind::MethodCall(object, method, _)

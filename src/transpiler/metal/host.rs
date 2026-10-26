@@ -3626,7 +3626,14 @@ impl HostEmitter {
                         format!("{}.iter().cloned().fold({}, {})", o, args_s[0], args_s[1]),
                     // `.sum()` — Metal floats are always f32 (see `rust_type`'s `Float`
                     // case), unlike CUDA/the general pipeline's f64 default.
-                    "sum" if args.is_empty() => format!("{}.iter().cloned().sum::<f32>()", o),
+                    "sum" if args.is_empty() => {
+                        let sum_ty = if literal_array_uses_float16(obj) {
+                            "half::f16"
+                        } else {
+                            "f32"
+                        };
+                        format!("{}.iter().cloned().sum::<{sum_ty}>()", o)
+                    },
                     _ => format!("{}.{}({})", o, method, args_s.join(", ")),
                 }
             }
@@ -3645,7 +3652,14 @@ impl HostEmitter {
                     "map" if args_s.len() == 1 && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
                         format!("{}.iter().cloned().map({}).collect::<Vec<_>>()", l, args_s[0]),
                     // `x |> sum()` — see the identical `MethodCall` case above.
-                    "sum" if args.is_empty() => format!("{}.iter().cloned().sum::<f32>()", l),
+                    "sum" if args.is_empty() => {
+                        let sum_ty = if literal_array_uses_float16(lhs) {
+                            "half::f16"
+                        } else {
+                            "f32"
+                        };
+                        format!("{}.iter().cloned().sum::<{sum_ty}>()", l)
+                    },
                     _ => format!("{}.{}({})", l, method, args_s.join(", ")),
                 }
             }
@@ -4247,6 +4261,19 @@ pub(super) fn rust_type(ty: &Type) -> String {
         }
         _ => "()".into(),
     }
+}
+
+fn literal_array_uses_float16(expr: &Expr) -> bool {
+    fn is_half(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Call(callee, args) if args.len() == 1 =>
+                matches!(&callee.kind, ExprKind::Var(name) if matches!(name.as_str(), "float16" | "f16")),
+            ExprKind::Cast(_, ty) => matches!(ty.without_mut(), Type::Float16)
+                || matches!(ty.without_mut(), Type::Named(name) if matches!(name.as_str(), "float16" | "f16")),
+            _ => false,
+        }
+    }
+    matches!(&expr.kind, ExprKind::Array(elements) if elements.iter().any(is_half))
 }
 
 fn elem_size_bytes(ty: &Type) -> usize {

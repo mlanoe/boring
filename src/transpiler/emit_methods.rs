@@ -3129,9 +3129,11 @@ impl Transpiler {
             ExprKind::Float(_) => true,
             ExprKind::Int(_)   => true,
             ExprKind::Var(_) | ExprKind::Cast(_, _) => self.resolve_expr_type(obj).as_ref()
-                .and_then(Self::numeric_scalar_is_float).is_some(),
+                .and_then(Self::numeric_scalar_is_float).is_some()
+                || self.infer_float_width(obj).is_some(),
             _ => self.resolve_expr_type(obj).as_ref()
-                .and_then(Self::numeric_scalar_is_float).is_some(),
+                .and_then(Self::numeric_scalar_is_float).is_some()
+                || self.infer_float_width(obj).is_some(),
         };
         if !receiver_is_float { return None; }
         const FLOAT_UNARY_METHODS: &[(&str, &str)] = &[
