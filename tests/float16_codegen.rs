@@ -105,7 +105,7 @@ def main():
 
 #[test]
 fn cpu_interpreter_and_generated_rust_convert_and_compute_f16() {
-    let source_text = "def main():\n    let float16 a = float16(1.337)\n    let float16 b = float16(\"2.0\")\n    let float16 c = (a + b) as float16\n    let int16 narrow_int = 7\n    let float16 from_int = narrow_int as float16\n    let float16 parsed = \"1.5\".parseFloat16() else float16(0.0)\n    let float16 root = sqrt(float16(4.0))\n    let float16 method_root = float16(9.0).sqrt()\n    let float16 squared = float16(4.0).pow(float16(2.0))\n    mut [float16] values = [float16(1.0), float16(2.0)]\n    let float16 total = values.sum()\n    values[0] = 1.337\n    mut [float16] ordered = [float16(2.0), float16(1.0)]\n    ordered.sort()\n    let float16 bounded = clamp(float16(-2.0), float16(-1.0), float16(1.0))\n    let float32 smallest = min(float16(-2.0), float16(-1.0)) as float32\n    print \"{c as float32} {parsed as float32} {from_int as float32}\"\n    print \"{root as float32}\"\n    print \"{method_root as float32} {squared as float32}\"\n    print \"{total as float32}\"\n    print \"{bounded as float32} {smallest}\"\n    print \"{(float16(2048.0) + float16(1.0)) as float32} {values[0] as float32}\"\n    print \"{int(float16(3.5))} {float16(float16(1.5)) as float32} {float32(float16(1.5))}\"\n    print \"{float16(1.0) < float16(2.0)} {ordered[0] as float32}\"\n    print json(float16(1.5))\n    print \"{float16(12.5):+.2} {float16(12.5):.1e}\"\n    print \"{sum([float16(1.0), 2]) as float32} {min(float16(2.0), 1) as float32} {max(3, float16(2.0)) as float32} {clamp(float16(4.0), 0, 3) as float32}\"\n";
+    let source_text = "def main():\n    let float16 a = float16(1.337)\n    let float16 b = float16(\"2.0\")\n    let float16 c = (a + b) as float16\n    let int16 narrow_int = 7\n    let float16 from_int = narrow_int as float16\n    let float16 parsed = \"1.5\".parseFloat16() else float16(0.0)\n    let float16 root = sqrt(float16(4.0))\n    let float16 method_root = float16(9.0).sqrt()\n    let float16 squared = float16(4.0).pow(float16(2.0))\n    mut [float16] values = [float16(1.0), float16(2.0)]\n    let float16 total = values.sum()\n    values[0] = 1.337\n    values[1] = float16(1.0) + float16(2.0)\n    mut [float16] ordered = [float16(2.0), float16(1.0)]\n    ordered.sort()\n    let float16 bounded = clamp(float16(-2.0), float16(-1.0), float16(1.0))\n    let float32 smallest = min(float16(-2.0), float16(-1.0)) as float32\n    print \"{c as float32} {parsed as float32} {from_int as float32}\"\n    print \"{root as float32}\"\n    print \"{method_root as float32} {squared as float32}\"\n    print \"{total as float32}\"\n    print \"{bounded as float32} {smallest}\"\n    print \"{(float16(2048.0) + float16(1.0)) as float32} {values[0] as float32}\"\n    print \"{int(float16(3.5))} {float16(float16(1.5)) as float32} {float32(float16(1.5))}\"\n    print \"{float16(1.0) < float16(2.0)} {ordered[0] as float32}\"\n    print json(float16(1.5))\n    print \"{float16(12.5):+.2} {float16(12.5):.1e}\"\n    print \"{sum([float16(1.0), 2]) as float32} {min(float16(2.0), 1) as float32} {max(3, float16(2.0)) as float32} {clamp(float16(4.0), 0, 3) as float32}\"\n";
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -163,6 +163,9 @@ def main():
     let method_powered = float16(2.0).pow(float16(3.0))
     let compound_root = sqrt(float16(4.0) + float16(5.0))
     let compound_method_root = (float16(4.0) + float16(5.0)).sqrt()
+    let compound_wide = float32(float16(1.0) + float16(2.0))
+    let compound_double = float64(float16(1.0) + float16(2.0))
+    let compound_int = int(float16(1.0) + float16(2.0))
     let total = root + method_root + powered + method_powered + compound_root + compound_method_root
     let literal_sum = float16(1.5) + 2.0
     let signed = sign(float16(-2.0))
@@ -170,6 +173,7 @@ def main():
     print "{literal_sum as float32}"
     print "{floatToBits(float16(1.5))} {signed as float32} {isNaN(float16(0.0))} {isInfinite(float16(0.0))}"
     print "{float16(1.0) == 1} {float16(1.0) < 2} {float16(1.0) == float32(1.0)}"
+    print "{compound_wide} {compound_double} {compound_int}"
 "#;
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/cpu_inferred_math");
     let _ = fs::remove_dir_all(&root);

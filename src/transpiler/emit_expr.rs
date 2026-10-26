@@ -3922,10 +3922,7 @@ impl Transpiler {
                     if matches!(elem.without_mut(), Type::Float16)
                         || matches!(elem.without_mut(), Type::Named(name) if name == "float16" || name == "f16"))
             });
-            let value_is_f16 = self.resolve_expr_type(value).is_some_and(|ty| {
-                matches!(ty.without_mut(), Type::Float16)
-                    || matches!(ty.without_mut(), Type::Named(name) if name == "float16" || name == "f16")
-            });
+            let value_is_f16 = self.infer_float_width(value) == Some("f16");
             if elem_is_f16 && !value_is_f16 {
                 format!("half::f16::from_f32(({}) as f32)", rhs_s)
             } else {
@@ -5811,9 +5808,7 @@ impl Transpiler {
             "int" | "uint" | "uint8"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
-                if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
-                    matches!(ty.without_mut(), Type::Float16)
-                        || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16"))) => {
+                if self.infer_float_width(&args[0].value) == Some("f16") => {
                 let rust_ty = normalize_type_name(name, self.use_rc_str());
                 format!("(f32::from({}) as {})", self.emit_expr(&args[0].value), rust_ty)
             }
@@ -5823,15 +5818,13 @@ impl Transpiler {
                 let rust_ty = normalize_type_name(name, self.use_rc_str());
                 format!("({} as {})", self.emit_expr(&args[0].value), rust_ty)
             }
-            "float" | "float64" if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
-                matches!(ty.without_mut(), Type::Float16)) =>
+            "float" | "float64" if self.infer_float_width(&args[0].value) == Some("f16") =>
                 format!("(f32::from({}) as f64)", self.emit_expr(&args[0].value)),
             "float" | "float64" => format!("({} as f64)", self.emit_expr(&args[0].value)),
-            "float16" if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
-                matches!(ty.without_mut(), Type::Float16)) => self.emit_expr(&args[0].value),
+            "float16" if self.infer_float_width(&args[0].value) == Some("f16") =>
+                self.emit_expr(&args[0].value),
             "float16" => format!("half::f16::from_f32(({}) as f32)", self.emit_expr(&args[0].value)),
-            "float32" if self.resolve_expr_type(&args[0].value).is_some_and(|ty|
-                matches!(ty.without_mut(), Type::Float16)) =>
+            "float32" if self.infer_float_width(&args[0].value) == Some("f16") =>
                 format!("f32::from({})", self.emit_expr(&args[0].value)),
             "float32" => format!("({} as f32)", self.emit_expr(&args[0].value)),
             "str"   => {
