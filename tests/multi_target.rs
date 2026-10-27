@@ -207,7 +207,7 @@ fn run_crate(dir: &Path, cache: &Path, envs: &[(&str, &str)]) -> (String, String
     let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("multi_target_shared");
     let mut cmd = Command::new("cargo");
     cmd.args(["run", "--quiet", "--manifest-path"])
-        .arg(root(&dir).join("Cargo.toml"))
+        .arg(root(dir).join("Cargo.toml"))
         .arg("--target-dir")
         .arg(target_dir)
         .env("BORING_CACHE_DIR", cache)

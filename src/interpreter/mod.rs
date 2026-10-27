@@ -2085,7 +2085,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let mut is_float16 = false;
                 for v in arr.iter() {
                     match v {
-                        Value::Float16(f) => { float16_sum = float16_sum + *f; is_float16 = true; }
+                        Value::Float16(f) => { float16_sum += *f; is_float16 = true; }
                         Value::Float64(f) => { float_sum += f; is_float = true; }
                         Value::Float32(f) => { float32_sum += f; is_float32 = true; }
                         Value::Int(n)   => { int_sum += n; float_sum += *n as f64; float32_sum += *n as f32; }

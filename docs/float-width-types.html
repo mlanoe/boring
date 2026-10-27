@@ -275,9 +275,7 @@ numeric_type ::= &quot;i8&quot; | &quot;i16&quot; | &quot;i32&quot; | &quot;i64&
 <p>  today) — no product requirement surfaced for <code>float32</code>-native constants;   <code>PI as float32</code> covers the need if it ever arises.</p>
 <ul><li><strong>Half-precision (<code>float16</code>/<code>bfloat16</code>)</strong> — this proposal originally left both</li></ul>
 <p>  formats out because they require a different hardware and Rust representation.   <code>float16</code> was implemented subsequently with <code>half::f16</code> on the host and native   half storage on supported GPU backends; see <a href="float16.html">float16.md</a>.   <code>bfloat16</code> remains outside this proposal.</p>
-<p>Interpolating a numeric optional (<code>&quot;{d.get(&quot;k&quot;) as float64}&quot;</code>, <code>&quot;{o}&quot;</code> with <code>int? o</code>) prints the value, or <code>nil</code> when absent, under both <code>boring run</code> and <code>boring build</code>. Regression: <code>tests/cases/optional_interp_numeric.br</code>.</p>
-<h3 id="annotated-array-literals">Annotated array literals</h3>
-<p><code>let [float16] a = [1.5, 2, 3]</code> (also <code>float32</code>/<code>float64</code>, bare int literals included): <code>emit_let</code> rewrites untyped numeric literals into casts to the declared element type, same as the dict-literal case, so the transpiler emits <code>half::f16::from_f32(..)</code> instead of uncompilable <code>vec![1.5, 2.0]</code>. Array-typed struct fields / function args are not covered.</p>
+
 </main>
 <script>
 // Build TOC from headings

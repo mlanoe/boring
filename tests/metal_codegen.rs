@@ -381,7 +381,8 @@ fn imported_kernel_touching_fn_preserves_static_fs_call_and_string_abi() {
 
     // GPU targets intentionally only support the thread-safe runtime; `single`
     // is rejected by the CLI. This exercises Metal's one pertinent mode (`multi`).
-    for (threading, string_ty) in [("multi", "std::sync::Arc<str>")] {
+    {
+        let (threading, string_ty) = ("multi", "std::sync::Arc<str>");
         let tmp = root.join(threading);
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();

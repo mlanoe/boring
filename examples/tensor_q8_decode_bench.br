@@ -57,7 +57,7 @@ def benchmark(int n, int k, int calls) throws:
 
     let started = Instant.now()
     var iteration = 1
-    mut result = q8(x, resident, n, k)
+    var mut result = q8(x, resident, n, k)
     while iteration < calls:
         result = q8(x, resident, n, k)
         iteration += 1

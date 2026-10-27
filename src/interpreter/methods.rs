@@ -1758,7 +1758,7 @@ impl Interpreter {
                         Value::Int(n) => int_sum += n,
                         Value::Float64(f) => { float_sum += f; has_float = true; }
                         Value::Float32(f) => { float32_sum += f; has_float32 = true; }
-                        Value::Float16(f) => { float16_sum = float16_sum + *f; has_float16 = true; }
+                        Value::Float16(f) => { float16_sum += *f; has_float16 = true; }
                         _ => {}
                     }
                 }

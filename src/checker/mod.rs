@@ -185,6 +185,9 @@ struct FnArity {
     variadic: Option<String>,
 }
 
+/// `(param name, type)` list of an imported fn/method; `None` when never checked.
+type ImportedSig = Option<Vec<(String, Option<Type>)>>;
+
 struct Checker {
     errors:   Vec<CheckError>,
     warnings: Vec<CheckWarning>,
@@ -240,9 +243,9 @@ struct Checker {
     imported_types: std::collections::HashSet<String>,
     /// Imported free fns: name -> `(param name, type)` list; `None` when ambiguous
     /// (declared twice) or variadic, i.e. never checked.
-    imported_fns: HashMap<String, Option<Vec<(String, Option<Type>)>>>,
+    imported_fns: HashMap<String, ImportedSig>,
     /// Imported struct methods, same encoding keyed by (struct, method).
-    imported_methods: HashMap<(String, String), Option<Vec<(String, Option<Type>)>>>,
+    imported_methods: HashMap<(String, String), ImportedSig>,
     /// Free function name -> arity/labeled-argument info, for `check_call_arity`.
     /// Absent, or present but also listed in `fn_overloaded`, means "don't
     /// check" — see that check's own doc comment for both guards.
@@ -1626,9 +1629,9 @@ impl Checker {
         const PLACEMENT: &str = "the backend and device are chosen at run time (see `BORING_BACKEND` in a multi-target build)";
         match name.as_str() {
             "GPU" | "Device" if !self.struct_field_types.contains_key(name.as_str()) => {
-                self.error(&format!("`{name}(...)` was removed; {PLACEMENT}"), line, col)
+                self.error(format!("`{name}(...)` was removed; {PLACEMENT}"), line, col)
             }
-            "new" => self.error(&format!("`new(device) Kernel(...)` was removed; {PLACEMENT}"), line, col),
+            "new" => self.error(format!("`new(device) Kernel(...)` was removed; {PLACEMENT}"), line, col),
             _ => {}
         }
     }

@@ -96,7 +96,7 @@ def main() throws:
         let warmupSink = warmup[0]
     let started = Instant.now()
     var iteration = 1
-    mut result = run(format, residentX, residentWeights, m, n, k)
+    var mut result = run(format, residentX, residentWeights, m, n, k)
     while iteration < calls:
         result = run(format, residentX, residentWeights, m, n, k)
         iteration += 1

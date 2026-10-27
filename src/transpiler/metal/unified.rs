@@ -68,13 +68,11 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
             s.push_str(&format!("            {}: {},\n", f.name, scalar(i, f)));
         }
     }
-    s.push_str(&format!(
-        "        }};
+    s.push_str("        };
         instances.insert(id, crate::unified::AssertSend(k));
-    }}
+    }
     let k = &mut instances.get_mut(&id).unwrap().0;
-"
-    ));
+");
     for (i, f) in fields.iter().enumerate() {
         if f.array {
             s.push_str(&format!("    if upload[{i}] {{ k.{} = {}; }}\n", f.name, buffer(i, f)));

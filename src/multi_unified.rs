@@ -510,9 +510,10 @@ mod tests {
 
     /// A fake device memory per backend: `data = data * factor + bias[0]`, with `factor == 99`
     /// refused by backend "a".
-    static DEVICE: Mutex<Option<HashMap<(&'static str, u64, usize), Vec<f32>>>> = Mutex::new(None);
+    type DeviceMemory = HashMap<(&'static str, u64, usize), Vec<f32>>;
+    static DEVICE: Mutex<Option<DeviceMemory>> = Mutex::new(None);
 
-    fn with_device<T>(f: impl FnOnce(&mut HashMap<(&'static str, u64, usize), Vec<f32>>) -> T) -> T {
+    fn with_device<T>(f: impl FnOnce(&mut DeviceMemory) -> T) -> T {
         f(DEVICE.lock().unwrap().get_or_insert_with(HashMap::new))
     }
 

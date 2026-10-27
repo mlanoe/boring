@@ -807,7 +807,7 @@ kernel Empty:
 "#;
     let (_wgsl, _emulated, _rs, toml) = run_wgpu("cargo_toml", src);
 
-    assert!(toml.contains("wgpu = \"23\""), "missing wgpu dep");
+    assert!(toml.contains("wgpu = \"25\""), "missing wgpu dep");
     assert!(toml.contains("bytemuck"), "missing bytemuck dep");
     assert!(toml.contains("pollster"), "missing pollster dep");
     assert!(!toml.contains("winit"), "winit should not be present for compute-only");

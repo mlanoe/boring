@@ -48,7 +48,8 @@ alias_decl      ::= "use" IDENT ("as" | "<" IDENT ("," IDENT)* ">" "as") type NE
 #   struct Config:
 
 attr            ::= "@" IDENT ("(" attr_arg ("," attr_arg)* ")")? NEWLINE?
-attr_arg        ::= IDENT ("=" (IDENT | STRING | INT))?
+attr_arg        ::= IDENT ("=" (IDENT | STRING | INT | "." IDENT))?
+                  | "." IDENT                       # placement class: @prefer(.gpu), @only(.cpu)
                   | STRING
                   | INT
 
@@ -387,9 +388,10 @@ ext_member      ::= "pub"? fn_decl
 # compiler lowers the expression to a private kernel struct + synchronous launch.
 #
 # Launch args:
-#   target   = .CUDA | .ROCM | .METAL | .WGPU | .SIMD — optional backend selector
-#   device   = <int> | <string> — optional device selector (index or stable name/address)
-#   kernel(<Device>) Name(args)  — create a named kernel instance on a reusable Device
+#   prefer   = .cpu | .gpu | .discrete | .integrated — optional placement wish for this launch
+#              (multi-target builds only; accepted and ignored elsewhere — see docs/multi-target.md)
+#   A kernel does not name its backend or device: `target =`, `device =` and `kernel(<Device>)`
+#   were removed (the compiler reports a diagnostic for the old forms).
 #   block    = <int>                   — threads per block (1-D); required
 #   grid     = <int>                   — blocks per grid (1-D); optional, auto-inferred from data size
 #   block    = (<int>, <int>, <int>)   — 3-D block dimensions
@@ -459,15 +461,15 @@ kernel_field_decl ::= ("let" | "mut" | "var") type IDENT ("=" expr)? NEWLINE
 inline_kernel_expr ::= "kernel" "(" launch_arg ("," launch_arg)* ")" ":"
                          NEWLINE INDENT stmt* expr NEWLINE DEDENT
 
-kernel_placement ::= "kernel" "(" (expr | "target" "=" expr | "device" "=" expr) ("," (expr | "target" "=" expr | "device" "=" expr))* ")" expr
-
-launch_arg      ::= expr                         # reusable Device positional argument
-                  | "target" "=" expr
-                  | "device" "=" expr
-                  | "block" "=" expr
+launch_arg      ::= "block" "=" expr
                   | "grid" "=" expr
                   | "after" "=" expr
+                  | "prefer" "=" placement_class
                   | "priority" "=" ("high" | "normal" | "low" | STRING)
+
+# Placement classes for `prefer =` and the kernel attributes `@prefer(.class)` / `@only(.class)`
+# (attributes on a `kernel` declaration; see attr_arg for the leading-dot form).
+placement_class ::= "." ("cpu" | "gpu" | "discrete" | "integrated")
 
 # Module grouping — flat scoping at runtime; structure preserved for the transpiler.
 mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
@@ -1197,7 +1199,7 @@ primitive_type  ::= "int" | "uint" | "float" | "bool" | "string" | "nil" | "neve
 # identical Rust type.
 #   Signed:   int8/i8  int16/i16  int32/i32  int64/i64  int128/i128
 #   Unsigned: uint8/u8  uint16/u16  uint32/u32  uint64/u64  uint128/u128
-#   Floats:   float32/f32 (32-bit)   float64/f64 (64-bit, = bare `float`)
+#   Floats:   float16/f16 (16-bit)   float32/f32 (32-bit)   float64/f64 (64-bit, = bare `float`)
 # Mixing two *distinct* fixed-width types directly (`a_uint16 + a_int32`,
 # `a_float32 + a_float64`) is a type error requiring an explicit `as` cast — mirrors
 # Rust's own refusal to implicitly coerce between distinct numeric types. Each
@@ -1213,7 +1215,7 @@ primitive_type  ::= "int" | "uint" | "float" | "bool" | "string" | "nil" | "neve
 # natively (`float` in device code, `double` for `float64`).
 numeric_type    ::= "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
                   | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                  | "f32" | "f64" | "float32" | "float64"
+                  | "f16" | "f32" | "f64" | "float16" | "float32" | "float64"
 
 type_list       ::= type ("," type)*
 

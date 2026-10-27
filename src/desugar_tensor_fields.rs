@@ -528,9 +528,7 @@ fn lower_outside(call: &mut Expr, ctx: &Ctx, counter: &mut usize, out: &mut Fiel
         return None;
     }
     let operand_count = args.iter().position(|a| a.label.is_some()).unwrap_or(args.len());
-    let Some(dest_index) = operand_count.checked_sub(1) else {
-        return None;
-    };
+    let dest_index = operand_count.checked_sub(1)?;
     let ops: Vec<Option<Operand>> = (0..operand_count)
         .map(|i| {
             if args[i].spread || args[i].default_rest {
@@ -576,8 +574,6 @@ fn lower_outside(call: &mut Expr, ctx: &Ctx, counter: &mut usize, out: &mut Fiel
         unreachable!("template is a struct")
     };
     let mut method_decl = st.methods.into_iter().next().expect("template method");
-    let param_template = method_decl.params[0].clone();
-    let arg_template = args[0].clone();
 
     let var = |n: &str| Expr { kind: ExprKind::Var(n.into()), line, col, len };
     let new_param = |name: &str, ty: Type, mutable: bool| Param {
@@ -591,14 +587,12 @@ fn lower_outside(call: &mut Expr, ctx: &Ctx, counter: &mut usize, out: &mut Fiel
         default: None,
         line,
         col,
-        ..param_template.clone()
     };
     let new_arg = |value: Expr| Arg {
         label: None,
         value,
         spread: false,
         default_rest: false,
-        ..arg_template.clone()
     };
 
     let mut params: Vec<Param> = Vec::new();

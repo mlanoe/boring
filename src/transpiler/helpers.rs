@@ -3226,7 +3226,7 @@ pub fn placeholder_errors(code: &str, target: &str, already_failed: bool) -> Vec
 }
 
 thread_local! {
-    static REPORTED: std::cell::RefCell<Vec<TranspileError>> = std::cell::RefCell::new(Vec::new());
+    static REPORTED: std::cell::RefCell<Vec<TranspileError>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Error sink for emitters that have no `errors` field of their own (the CUDA/ROCm/Metal host

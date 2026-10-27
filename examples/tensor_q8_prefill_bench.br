@@ -47,7 +47,7 @@ def main() throws:
         let warmup_sink = warmup[0]
 
     var iteration = 1
-    mut result = q8_linear(x, weights, m, n, k)
+    var mut result = q8_linear(x, weights, m, n, k)
     while iteration < 20:
         result = q8_linear(x, weights, m, n, k)
         iteration += 1

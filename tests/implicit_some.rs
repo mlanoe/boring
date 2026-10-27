@@ -74,6 +74,7 @@ fn fn_run(source: &str) -> String {
 #[test]
 fn explicit_some_still_works_in_the_interpreter_and_std_codegen() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(dir).unwrap();
     let file = dir.join("explicit_some.br");
     std::fs::write(
         &file,

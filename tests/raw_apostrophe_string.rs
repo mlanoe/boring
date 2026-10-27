@@ -29,11 +29,18 @@ fn boring(args: &[&str]) -> (bool, String, String) {
 fn run_keeps_quotes_braces_and_backslashes_literal() {
     let (ok, stdout, stderr) = boring(&["run"]);
     assert!(ok, "{stderr}");
-    // fromJson parsed the JSON written with unescaped quotes/braces; the path
-    // `C:\temp\n {not_a_hole}` is 22 chars (backslashes and `{...}` untouched);
-    // the multiline body is dedented like `"""`: `SELECT * FROM t` (15) + `\n` +
+    // The JSON text keeps its unescaped quotes/braces, the path
+    // `C:\temp\n {not_a_hole}` is 22 chars (backslashes and `{...}` untouched),
+    // and the multiline body is dedented like `"""`: `SELECT * FROM t` (15) + `\n` +
     // `  WHERE data->>'k' = "v"` (24) = 40, closing `'''` at column 0 so no trailing `\n`.
-    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["Paris", "22", "40"], "{stdout}");
+    // The expected output is the case's `.expected` file, shared with the
+    // self-hosted interpreter's functional suite.
+    let expected = std::fs::read_to_string(Path::new(CASE).with_extension("expected")).unwrap();
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        expected.lines().collect::<Vec<_>>(),
+        "{stdout}"
+    );
 }
 
 #[test]

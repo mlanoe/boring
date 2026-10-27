@@ -63,7 +63,7 @@ def main() throws:
         let warmupSink = warmup[0]
 
     var iteration = 1
-    mut result = if format == "q8_0": q8(x, weights, m, n, k) elif format == "q5_0": q5(x, weights, m, n, k) elif format == "q4_0": q4(x, weights, m, n, k) elif format == "iq4_nl": iq4(x, weights, m, n, k) elif format == "q6_k": q6k(x, weights, m, n, k) elif format == "q4_k": q4k(x, weights, m, n, k) elif format == "q3_k": q3k(x, weights, m, n, k) else: q2k(x, weights, m, n, k)
+    var mut result = if format == "q8_0": q8(x, weights, m, n, k) elif format == "q5_0": q5(x, weights, m, n, k) elif format == "q4_0": q4(x, weights, m, n, k) elif format == "iq4_nl": iq4(x, weights, m, n, k) elif format == "q6_k": q6k(x, weights, m, n, k) elif format == "q4_k": q4k(x, weights, m, n, k) elif format == "q3_k": q3k(x, weights, m, n, k) else: q2k(x, weights, m, n, k)
     while iteration < 20:
         result = if format == "q8_0": q8(x, weights, m, n, k) elif format == "q5_0": q5(x, weights, m, n, k) elif format == "q4_0": q4(x, weights, m, n, k) elif format == "iq4_nl": iq4(x, weights, m, n, k) elif format == "q6_k": q6k(x, weights, m, n, k) elif format == "q4_k": q4k(x, weights, m, n, k) elif format == "q3_k": q3k(x, weights, m, n, k) else: q2k(x, weights, m, n, k)
         iteration += 1

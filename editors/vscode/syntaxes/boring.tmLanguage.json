@@ -253,7 +253,7 @@
         },
         {
           "name": "keyword.operator.compound-assign.boring",
-          "match": "[+\\-*/%&|^]=|<<="
+          "match": "[+\\-*/%&|^]=|<<=|>>="
         },
         {
           "name": "keyword.operator.comparison.boring",

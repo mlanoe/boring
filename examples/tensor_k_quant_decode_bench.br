@@ -112,7 +112,7 @@ def main() throws:
 
     let started = Instant.now()
     var iteration = 1
-    mut result = run(format, x, resident, n, k)
+    var mut result = run(format, x, resident, n, k)
     while iteration < calls:
         result = run(format, x, resident, n, k)
         iteration += 1

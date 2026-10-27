@@ -2561,7 +2561,7 @@ impl<'a> HostEmitter<'a> {
                 }
             }
             ExprKind::UnaryOp(UnaryOp::Neg, i) => self.host_float_kind(i),
-            ExprKind::BinOp(op, l, r) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) => {
+            ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, l, r) => {
                 match (self.host_float_kind(l), self.host_float_kind(r)) {
                     (Some("f16"), Some("f16")) | (Some("f16"), None) | (None, Some("f16")) => Some("f16"),
                     (Some("f32"), Some("f32")) | (Some("f32"), None) | (None, Some("f32")) => Some("f32"),

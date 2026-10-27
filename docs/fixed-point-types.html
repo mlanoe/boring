@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — `fixedN_M` / `ufixedN_M`: binary fixed-point scalar types</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="fixedn_m--ufixedn_m-binary-fixed-point-scalar-types"><code>fixedN_M</code> / <code>ufixedN_M</code>: binary fixed-point scalar types</h1>
+<blockquote><strong>Status: Draft — not implemented.</strong> No lexer, parser, checker, interpreter, transpiler, or GPU-backend changes exist yet for anything described here. This document records the design as worked out in discussion, as a basis for implementation. The former open questions are resolved in <a href="#decisions">Decisions</a>.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>Boring has integers (<code>int8</code>..<code>int128</code>, <code>uint8</code>..<code>uint128</code>) and IEEE floats (<code>float16</code>/<code>float32</code>/<code>float64</code>), and nothing in between. The newtype <code>type Q as int</code> gives a distinct type but no fixed-point semantics: no shifted <code>*</code> and <code>/</code>, no <code>1.5</code> literals, no formatting.</p>
+<p>Fixed-point reals are wanted for:</p>
+<ul><li><strong>The kernel target</strong> (Rust-for-Linux, <code>no_std</code>): floating point is not</li></ul>
+<p>  usable in kernel code, so fixed-point is the only way to have fractional values.</p>
+<ul><li><strong>Determinism</strong>: identical bits on CPU, Metal, wgpu and CUDA. Floats are not</li></ul>
+<p>  (FMA contraction, <code>float16</code>, no <code>f64</code> on Metal). Matters for the Whisper /   LLM benchmarks and for simulations (game logic, <code>scratch-boring</code>).</p>
+<ul><li><strong>GPU kernels</strong>: MSL / WGSL / CUDA all have native integers, so a fixed-point</li></ul>
+<p>  value lowers to plain integer operations.</p>
+<p>Out of scope here: <strong>decimal</strong> fixed-point (scale 10⁻ᵈ, for money). That is a separate type family with its own naming; this document is binary only (scale 2⁻ᴹ).</p>
+<h2 id="the-types">The types</h2>
+<p>A fixed-point type has two sizes: the number of <strong>integer bits</strong> <code>N</code> and the number of <strong>fractional bits</strong> <code>M</code>. <code>N + M</code> is the storage width and must be one of <code>8</code>, <code>16</code>, <code>32</code>, <code>64</code>, <code>128</code>.</p>
+<table><thead><tr><th>Form</th><th>Meaning</th></tr></thead><tbody><tr><td><code>fixedN_M</code></td><td>signed; <code>N</code> integer bits <strong>including the sign bit</strong>, <code>M</code> fractional bits</td></tr><tr><td><code>ufixedN_M</code></td><td>unsigned; <code>N</code> integer bits, <code>M</code> fractional bits</td></tr></tbody></table>
+<p>The value of a variable whose raw storage is the integer <code>r</code> is <code>r / 2^M</code>. Range of <code>fixedN_M</code>: <code>-2^(N-1) .. 2^(N-1) - 2^-M</code>; resolution <code>2^-M</code>.</p>
+<h3 id="aliases">Aliases</h3>
+<p>Following the existing <code>iX</code> / <code>uX</code> / <code>fX</code> aliases of <code>intX</code> / <code>uintX</code> / <code>floatX</code>:</p>
+<table><thead><tr><th>Canonical</th><th>Alias</th></tr></thead><tbody><tr><td><code>fixedN_M</code></td><td><code>iN_M</code></td></tr><tr><td><code>ufixedN_M</code></td><td><code>uN_M</code></td></tr></tbody></table>
+<p>The family is told apart by shape alone: one number → integer (<code>i32</code>) or float (<code>f32</code>); <strong>two numbers</strong> joined by <code>_</code> → fixed-point (<code>i16_16</code>).</p>
+<p>Common formats (any <code>N + M</code> in the valid widths is accepted):</p>
+<table><thead><tr><th>Width</th><th>Signed</th><th>Unsigned</th></tr></thead><tbody><tr><td>16</td><td><code>fixed8_8</code> / <code>i8_8</code></td><td><code>ufixed8_8</code> / <code>u8_8</code></td></tr><tr><td>32</td><td><code>fixed16_16</code> / <code>i16_16</code></td><td><code>ufixed16_16</code> / <code>u16_16</code></td></tr><tr><td>32</td><td><code>fixed8_24</code> / <code>i8_24</code></td><td><code>ufixed8_24</code> / <code>u8_24</code></td></tr><tr><td>64</td><td><code>fixed32_32</code> / <code>i32_32</code></td><td><code>ufixed32_32</code> / <code>u32_32</code></td></tr><tr><td>64</td><td><code>fixed24_40</code> / <code>i24_40</code></td><td><code>ufixed24_40</code> / <code>u24_40</code></td></tr><tr><td>128</td><td><code>fixed64_64</code> / <code>i64_64</code></td><td><code>ufixed64_64</code> / <code>u64_64</code></td></tr></tbody></table>
+<p>Constraints:</p>
+<ul><li><code>N + M</code> not in <code>{8, 16, 32, 64, 128}</code> → checker error.</li><li><code>fixedN_M</code> needs <code>N &gt;= 1</code> (sign bit). <code>ufixedN_M</code> allows <code>N = 0</code></li></ul>
+<p>  (<code>ufixed0_16</code>: values in <code>[0, 1)</code>). <code>M = 0</code> is legal but degenerate   (identical to the integer type); the checker accepts it with no warning.</p>
+<ul><li>The names <code>fixedN_M</code>, <code>ufixedN_M</code>, <code>iN_M</code>, <code>uN_M</code> (with valid <code>N</code>, <code>M</code>) are</li></ul>
+<p>  reserved type names, exactly as <code>i32</code> is today.</p>
+<ul><li>There is <strong>no</strong> <code>fixed</code> / <code>real</code> bare alias to a default format. A bare name</li></ul>
+<p>  would hide the precision, which is the whole point of the type.</p>
+<p>Why not <code>real…</code>: <code>real32</code> (float) and <code>real16_16</code> (fixed) would both be 32 bits yet behave very differently (NaN/inf and relative precision vs. exact absolute resolution and overflow). <code>float</code> already carries that distinction.</p>
+<h2 id="literals">Literals</h2>
+<p>Float literals are already contextual (<code>let float32 a = 1.0; a + 3.14</code> resolves <code>3.14</code> to <code>float32</code>). The same rule applies:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> fixed16_16 x = <span class="nb">1.5</span>
+<span class="kw">let</span> y = x + <span class="nb">0.25</span>            <span class="co"># 0.25 resolves to fixed16_16</span>
+<span class="kw">let</span> ufixed8_8 z = <span class="nb">200.5</span>     <span class="co"># ok</span>
+<span class="kw">let</span> fixed8_8 w = <span class="nb">200.5</span>      <span class="co"># ERROR — out of range [-128, 127.99609375]</span></code></pre></div>
+<ul><li>A float literal not exactly representable is <strong>rounded to nearest</strong> (ties</li></ul>
+<p>  away from zero) at compile time. No warning is emitted for an inexact   literal (<code>0.1</code> in <code>fixed16_16</code>): it would fire on nearly every literal.</p>
+<ul><li>Out-of-range literals are a compile error, same as <code>300 as uint8</code>.</li><li>An integer literal (<code>3</code>) also resolves to the fixed type from context</li></ul>
+<p>  (<code>let fixed16_16 n = 3</code>).</p>
+<ul><li>Digit separators work as everywhere (<code>0.000_015</code>).</li></ul>
+<h2 id="mixing-and-casts">Mixing and casts</h2>
+<p>Same strict rule as fixed-width integers and floats: two <em>different</em> fixed-point formats never mix implicitly, nor do fixed-point and int/float.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> fixed16_16 a = <span class="nb">1.5</span>
+<span class="kw">let</span> fixed8_24  b = <span class="nb">0.5</span>
+<span class="kw">let</span> c = a + b                     <span class="co"># ERROR — cannot mix fixed16_16 and fixed8_24</span>
+<span class="kw">let</span> c = a + (b <span class="kw">as</span> fixed16_16)     <span class="co"># OK</span>
+<span class="kw">let</span> d = a * <span class="nb">2</span>                     <span class="co"># OK — `2` is an untyped literal</span>
+<span class="kw">let</span> n = <span class="nb">3</span>
+<span class="kw">let</span> e = a * n                     <span class="co"># ERROR — int and fixed16_16 do not mix; cast</span>
+<span class="kw">let</span> e = a * (n <span class="kw">as</span> fixed16_16)     <span class="co"># OK</span></code></pre></div>
+<p><code>as</code> conversions (all <strong>runtime</strong> conversions truncate toward zero; only <em>literals</em> round to nearest, since they are a decimal value the author wrote rather than a computation):</p>
+<table><thead><tr><th>From → to</th><th>Behaviour</th></tr></thead><tbody><tr><td>fixed → fixed (other format)</td><td>shift by the difference of <code>M</code>; narrowing the integer part is range-checked, <code>nil</code> / error if it doesn&#x27;t fit (same as integer narrowing); dropping fractional bits <strong>truncates toward zero</strong></td></tr><tr><td>int → fixed</td><td>exact, range-checked</td></tr><tr><td>fixed → int</td><td>truncates toward zero</td></tr><tr><td>float → fixed</td><td>truncates toward zero (like Rust&#x27;s <code>as</code>), range-checked; <code>NaN</code>/<code>inf</code> → out of range</td></tr><tr><td>fixed → float</td><td>nearest representable float (exact whenever the float mantissa is wide enough)</td></tr><tr><td>fixed → <code>string</code></td><td>via interpolation only, as everywhere (no <code>string(x)</code>)</td></tr></tbody></table>
+<h2 id="arithmetic-semantics">Arithmetic semantics</h2>
+<p>For <code>fixedN_M</code> stored in <code>intW</code> (<code>W = N + M</code>), with raw values <code>ra</code>, <code>rb</code>:</p>
+<table><thead><tr><th>Op</th><th>Definition</th><th>Result type</th></tr></thead><tbody><tr><td><code>a + b</code>, <code>a - b</code></td><td><code>ra ± rb</code></td><td>same format</td></tr><tr><td><code>-a</code></td><td><code>-ra</code> (signed only)</td><td>same format</td></tr><tr><td><code>a * b</code></td><td><code>(ra * rb) &gt;&gt; M</code>, computed in a 2W-bit intermediate</td><td>same format</td></tr><tr><td><code>a / b</code></td><td><code>(ra &lt;&lt; M) / rb</code>, computed in a 2W-bit intermediate</td><td>same format</td></tr><tr><td><code>a % b</code></td><td><code>ra % rb</code></td><td>same format</td></tr><tr><td><code>a &lt; b</code>, <code>==</code>, …</td><td><code>ra &lt; rb</code></td><td><code>bool</code></td></tr><tr><td><code>&lt;&lt;</code>, <code>&gt;&gt;</code>, <code>&amp;</code>, <code>|</code>, <code>^</code></td><td>not defined on fixed-point (use <code>.raw</code>)</td><td></td></tr></tbody></table>
+<ul><li><strong>Result is never widened</strong>: <code>fixed16_16 * fixed16_16</code> is <code>fixed16_16</code>.</li></ul>
+<p>  Callers who want headroom cast first.</p>
+<ul><li><strong>Rounding</strong> of <code>*</code> and <code>/</code>: truncate toward zero, consistent with integer</li></ul>
+<p>  <code>/</code> and with <code>fixed → int</code>, and symmetric (<code>(-a) * b == -(a * b)</code>). An   arithmetic shift (floor) is cheaper but asymmetric; round-to-nearest is   more accurate (see <code>mulRound</code>/<code>divRound</code> in Phasing).</p>
+<ul><li><strong>Overflow</strong> follows the integer policy: panic in debug, wrap in release.</li></ul>
+<p>  Explicit variants, mirroring whatever the integer types expose:   <code>a.wrappingMul(b)</code>, <code>a.saturatingMul(b)</code>, <code>a.checkedMul(b)</code> (→ <code>T?</code>).</p>
+<ul><li>Division by zero: panic, as for integers.</li><li>The 2W-bit intermediate for <code>W = 128</code> (<code>fixed64_64</code>, …) does not exist</li></ul>
+<p>  natively. See <a href="#phasing">Phasing</a>: 128-bit formats are not in the first cut.</p>
+<h3 id="members">Members</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> x = <span class="nb">1.75</span> <span class="kw">as</span> fixed16_16
+x.raw                       <span class="co"># int32 — the underlying integer (0x0001_C000)</span>
+fixed16_16.<span class="fn">fromRaw</span>(<span class="nb">0</span>x1_C000)
+x.<span class="fn">floor</span>()   x.<span class="fn">ceil</span>()   x.<span class="fn">round</span>()   x.<span class="fn">trunc</span>()   x.<span class="fn">fract</span>()    <span class="co"># same format</span>
+x.<span class="fn">abs</span>()     x.<span class="fn">signum</span>()  x.<span class="fn">min</span>(y)    x.<span class="fn">max</span>(y)   x.<span class="fn">clamp</span>(lo, hi)
+fixed16_16.epsilon          <span class="co"># 2^-16, the resolution</span>
+fixed16_16.min   fixed16_16.max</code></pre></div>
+<p><code>sqrt</code>, trigonometry, <code>ln</code>/<code>exp</code> are <strong>not</strong> in the first cut (see Phasing).</p>
+<h3 id="formatting">Formatting</h3>
+<ul><li><code>&quot;{x}&quot;</code> prints the exact value as a decimal with trailing zeros trimmed.</li></ul>
+<p>  This is always finite (denominator is a power of two): <code>fixed16_16</code> of   <code>1.5</code> prints <code>1.5</code>, of raw <code>1</code> prints <code>0.0000152587890625</code>.</p>
+<ul><li><code>&quot;{x:.3f}&quot;</code> rounds to nearest to 3 places, same spec as floats.</li></ul>
+<h2 id="rust-mapping-transpiler">Rust mapping (transpiler)</h2>
+<p>Generated newtype, <strong>no external dependency</strong> (works in <code>no_std</code> and in the Linux kernel target). Emitted once per format actually used, into the generated project&#x27;s prelude module:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]</span>
+<span class="at">#[repr(transparent)]</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="fn">Fixed16_16</span>(<span class="kw">pub</span> i32);
+
+<span class="kw">impl</span> <span class="kt">Fixed16_16</span> {
+    <span class="kw">pub</span> <span class="kw">const</span> <span class="kt">FRAC_BITS</span>: u32 = <span class="nb">16</span>;
+    <span class="kw">pub</span> <span class="kw">const</span> <span class="kt">EPSILON</span>: <span class="kw">Self</span> = <span class="kw">Self</span>(<span class="nb">1</span>);
+    <span class="kw">pub</span> <span class="kw">const</span> <span class="kw">fn</span> <span class="fn">from_raw</span>(r: i32) -&gt; <span class="kw">Self</span> { <span class="kw">Self</span>(r) }
+    <span class="kw">pub</span> <span class="kw">const</span> <span class="kw">fn</span> <span class="fn">raw</span>(<span class="kw">self</span>) -&gt; i32 { <span class="kw">self</span>.<span class="nb">0</span> }
+}
+
+<span class="kw">impl</span> core::ops::<span class="kt">Add</span> <span class="kw">for</span> <span class="kt">Fixed16_16</span> { <span class="kw">type</span> <span class="kt">Output</span> = <span class="kw">Self</span>; <span class="kw">fn</span> <span class="fn">add</span>(<span class="kw">self</span>, o: <span class="kw">Self</span>) -&gt; <span class="kw">Self</span> { <span class="kw">Self</span>(<span class="kw">self</span>.<span class="nb">0</span> + o.<span class="nb">0</span>) } }
+<span class="kw">impl</span> core::ops::<span class="kt">Mul</span> <span class="kw">for</span> <span class="kt">Fixed16_16</span> {
+    <span class="kw">type</span> <span class="kt">Output</span> = <span class="kw">Self</span>;
+    <span class="kw">fn</span> <span class="fn">mul</span>(<span class="kw">self</span>, o: <span class="kw">Self</span>) -&gt; <span class="kw">Self</span> { <span class="kw">Self</span>(((<span class="kw">self</span>.<span class="nb">0</span> <span class="kw">as</span> i64 * o.<span class="nb">0</span> <span class="kw">as</span> i64) / (<span class="nb">1i64</span> &lt;&lt; <span class="nb">16</span>)) <span class="kw">as</span> i32) }
+}
+<span class="co">// Sub, Neg, Div, Rem, the *Assign variants, Display, Debug, …</span></code></pre></div>
+<p><code>i64 / (1 &lt;&lt; 16)</code> truncates toward zero, matching the stated semantics (an arithmetic <code>&gt;&gt;</code> would floor). Overflow checks go through the same <code>debug_assert</code>/<code>wrapping_*</code> policy the transpiler already uses for integers.</p>
+<p>Formats are emitted by a small generator keyed on <code>(signed, N, M)</code>, not hand-written per format. Literals are folded to their raw integer at transpile time (<code>1.5</code> in <code>fixed16_16</code> → <code>Fixed16_16(98304)</code>).</p>
+<h2 id="interpreter-boring-run-and-self-hosted-interpreter">Interpreter (<code>boring run</code>) and self-hosted interpreter</h2>
+<p>New runtime variant <code>Value::Fixed { raw: i128, signed, n, m }</code> with a matching <code>Type::Fixed { signed, n, m }</code>. The interpreter implements exactly the semantics table above using <code>i128</code> math (hence no 2W-bit problem for any format ≤ 64 bits). This is the reference semantics; the transpiled Rust, the self-hosted interpreter (<code>boring/interpreter/</code>) and GPU lowerings must agree with it, and the shared test-case corpus (<code>tests/cases/*.br</code> + <code>.expected</code>) gets fixed-point cases so all four builds are checked against one answer.</p>
+<h2 id="gpu-backends">GPU backends</h2>
+<p>Fixed-point values in a <code>kernel</code> struct lower to their raw integer type; <code>+</code>, <code>-</code>, compares are plain integer ops; <code>*</code> and <code>/</code> lower to a widening multiply/shift.</p>
+<table><thead><tr><th>Backend</th><th>Support</th></tr></thead><tbody><tr><td>CUDA</td><td>any <code>W ≤ 64</code> (native <code>long long</code> for the intermediate)</td></tr><tr><td>Metal (MSL)</td><td><code>W ≤ 32</code> with a <code>long</code> intermediate; <code>W = 64</code> needs <code>mulhi</code>-based emulation</td></tr><tr><td>wgpu (WGSL)</td><td>no 64-bit integers: <code>W ≤ 16</code> direct in <code>i32</code>; <code>W = 32</code> needs 16-bit-limb emulation of the 64-bit product</td></tr><tr><td>ROCm</td><td>as CUDA</td></tr></tbody></table>
+<p>First cut: formats not supported by a backend are a <strong>compile error on that target</strong> (same stance as <code>float64</code> on Metal in <a href="float-width-types.html">float-width-types.md</a>), never a silent narrowing. Buffer fields use the existing integer buffer packing (see wgpu <code>uint8</code>/<code>int16</code> packing) on the raw type.</p>
+<h2 id="checker--grammar-changes">Checker / grammar changes</h2>
+<ul><li><code>spec/grammar.bnf</code>: extend <code>numeric_type</code> with</li></ul>
+<p>  <code>(&quot;fixed&quot; | &quot;ufixed&quot;) INT &quot;_&quot; INT</code> and the aliases</p>
+<p>  <code>(&quot;i&quot; | &quot;u&quot;) INT &quot;_&quot; INT</code>. They are plain identifiers to the lexer; the   checker recognises the shape (a digits-underscore-digits suffix after a   reserved prefix), so no lexer change is needed — and no <code>.</code> in a type name   (<code>real16.16</code> would collide with <code>t.0</code> tuple access and <code>a as T.16</code>).</p>
+<ul><li>Scalar rules apply: <code>mut</code> on a fixed-point is an error (use <code>var</code>), no</li></ul>
+<p>  generic arguments, <code>&lt;</code> after <code>as fixedN_M</code> is always an operator.</p>
+<ul><li><code>type Alias as fixed16_16</code> newtypes work like any numeric newtype</li></ul>
+<p>  (<code>Copy</code> derived).</p>
+<h2 id="phasing">Phasing</h2>
+<ol><li><strong>Core</strong>: parser/checker names + validity rules, literals, strict mixing,</li></ol>
+<p>   <code>as</code> casts, <code>+ - * / %</code> and comparisons, formatting, interpreter, Rust    newtype for <code>W ∈ {8, 16, 32, 64}</code>, tests in the shared corpus. 2. <strong>Members</strong>: <code>floor/ceil/round/fract/abs/min/max/clamp</code>, <code>wrapping*</code>/    <code>saturating*</code>/<code>checked*</code>, and <code>mulRound</code>/<code>divRound</code> (round to nearest). 3. <strong>GPU</strong>: CUDA first, then Metal, then wgpu (with the limb emulation). 4. <strong>128-bit formats</strong> (<code>fixed64_64</code>, …): needs a 256-bit intermediate for    <code>*</code>/<code>/</code> (limb decomposition). Deferred. 5. <strong>Math functions</strong> (<code>sqrt</code>, <code>sin</code>/<code>cos</code>, <code>ln</code>/<code>exp</code>) written in Boring    itself (CORDIC / Newton), kept out of the compiler.</p>
+<h2 id="decisions">Decisions</h2>
+<p>Questions raised while drafting, and how they were resolved:</p>
+<ol><li><strong>Rounding of <code>*</code> / <code>/</code></strong>: truncate toward zero. Round-to-nearest is</li></ol>
+<p>   available as <code>mulRound</code>/<code>divRound</code> (Phase 2); the default is unchanged. 2. <strong>Inexact literals</strong> (<code>0.1</code>): rounded to nearest, <strong>no warning</strong>. Only an    out-of-range literal is an error. 3. <strong><code>fixed</code> mixed with <code>int</code></strong>: an error in the first cut (cast    explicitly); only untyped literals are exempt. Possible later extension:    allow <code>fixed * int</code>, <code>int * fixed</code>, <code>fixed / int</code> as exact scaling, if    the cast proves too noisy in practice (then <code>+</code>, <code>-</code> and comparisons with    <code>int</code> must be decided too). 4. <strong>Narrowing casts</strong>: bare <code>as</code> is allowed and every runtime conversion    truncates toward zero (consistent with <code>float → int</code>); only literals    round to nearest. 5. <strong><code>fixed</code> crate backend</strong>: dropped. The generated newtype is the only    backend; revisit only if Phase 5&#x27;s math functions show a real need.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

@@ -412,8 +412,8 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             # Untyped numeric literals adopt the width of a typed float32
             # element (`[a, 2.0, 0.5]` with `float32 a`), same rule as binary
             # operators (`coerce_float_literal_pair`). float16 likewise.
-            mut has_f16 = false
-            mut has_f32 = false
+            var has_f16 = false
+            var has_f32 = false
             for i in 0..<elems.len():
                 match vals[i]:
                     Value.Float16(_):

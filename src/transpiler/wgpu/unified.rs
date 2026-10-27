@@ -41,7 +41,7 @@ fn init_fn(needs_subgroups: bool, needs_f16: bool) -> String {
     if __BORING_GPU_DEVICE.get().is_some() {{ return true; }}
     pollster::block_on(async {{
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let Some(adapter) = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await else {{ return false }};
+        let Ok(adapter) = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await else {{ return false }};
 {features}        let Ok((device, queue)) = adapter.request_device(&wgpu::DeviceDescriptor {{
             required_features,
             required_limits: adapter.limits(),

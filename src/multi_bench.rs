@@ -19,7 +19,7 @@ pub fn device_name_fn(backend: Backend) -> &'static str {
         Backend::Rocm => "pub fn __boring_device_name() -> Option<String> { HipContext::new(0).ok()?.name().ok() }",
         Backend::Metal => "pub fn __boring_device_name() -> Option<String> { Some(metal::Device::system_default()?.name().to_string()) }",
         Backend::Wgpu => {
-            "pub fn __boring_device_name() -> Option<String> { wgpu::Instance::new(wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map(|a| a.get_info().name) }"
+            "pub fn __boring_device_name() -> Option<String> { wgpu::Instance::new(&wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map(|a| a.get_info().name) }"
         }
         Backend::Simd => "pub fn __boring_device_name() -> Option<String> { Some(\"cpu\".to_string()) }",
     }
@@ -33,7 +33,7 @@ pub fn device_class_fn(backend: Backend) -> &'static str {
             "pub fn __boring_device_class() -> &'static str { if metal::Device::system_default().is_some_and(|d| d.has_unified_memory()) { \"integrated\" } else { \"discrete\" } }"
         }
         Backend::Wgpu => {
-            "pub fn __boring_device_class() -> &'static str { wgpu::Instance::new(wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map_or(\"gpu\", |a| match a.get_info().device_type { wgpu::DeviceType::DiscreteGpu => \"discrete\", wgpu::DeviceType::IntegratedGpu => \"integrated\", _ => \"gpu\" }) }"
+            "pub fn __boring_device_class() -> &'static str { wgpu::Instance::new(&wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map_or(\"gpu\", |a| match a.get_info().device_type { wgpu::DeviceType::DiscreteGpu => \"discrete\", wgpu::DeviceType::IntegratedGpu => \"integrated\", _ => \"gpu\" }) }"
         }
         Backend::Simd => "pub fn __boring_device_class() -> &'static str { \"cpu\" }",
     }
@@ -117,9 +117,9 @@ const METAL: &str = r##"pub fn __boring_bench() -> Option<f64> {
 const WGPU: &str = r##"pub fn __boring_bench() -> Option<f64> {
     pollster::block_on(async {
         let n: u64 = 1 << 20;
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await?;
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await.ok()?;
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.ok()?;
+        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.ok()?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(
@@ -130,7 +130,7 @@ const WGPU: &str = r##"pub fn __boring_bench() -> Option<f64> {
             label: None,
             layout: None,
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
@@ -153,7 +153,7 @@ const WGPU: &str = r##"pub fn __boring_bench() -> Option<f64> {
                 pass.dispatch_workgroups((n / 256) as u32, 1, 1);
             }
             queue.submit(Some(encoder.finish()));
-            device.poll(wgpu::Maintain::Wait);
+            let _ = device.poll(wgpu::MaintainBase::Wait);
         };
         run(1);
         let reps = 64;

@@ -2043,7 +2043,6 @@ print "w {w.inner.final} {w.priv}"
 let c = Box2(final = 7, move = 8)
 print "c {c.final} {c.move}"
 "#;
-const KEYWORD_FIELDS_OUTPUT: &str = "b 7 9 16\nw 9 10\nc 7 8";
 
 fn assert_keyword_fields_escaped(rs: &str) {
     for needle in ["r#final: ", "r#move: ", "self.r#final", "b.r#final = ", "w.inner.r#final = ", "Box2 { r#final: 7, r#move: 8 }", "w.r#priv = "] {

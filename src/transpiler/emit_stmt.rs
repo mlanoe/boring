@@ -362,6 +362,13 @@ impl Transpiler {
                         // see `wrap_return_for_qualifier`'s doc, this is `emit_return`'s
                         // twin for the no-explicit-`return` tail-expression shape.
                         wrapped
+                    } else if matches!(&self.fn_return_ty,
+                            Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)))
+                        && matches!(&e.kind, ExprKind::Var(_))
+                    {
+                        // `T& f(T& b): b` — hand the borrow back as-is; `.clone()` would
+                        // produce an owned `T` where the signature says `&T`.
+                        self.emit_expr(e)
                     } else {
                         self.emit_int_return_expr(e)
                     };
