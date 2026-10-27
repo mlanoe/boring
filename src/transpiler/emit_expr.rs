@@ -10,7 +10,7 @@ use super::helpers::*;
 /// `src_is_numeric_index`) both need the exact same "is this already a number"
 /// test so an `as` cast on either emits a plain `as T` widen, not the
 /// string-parsing codegen (`.trim().parse::<T>()`) meant for `string` sources.
-fn is_known_numeric_scalar_type(ty: &Type) -> bool {
+pub(crate) fn is_known_numeric_scalar_type(ty: &Type) -> bool {
     matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64
         | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
         | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
@@ -564,8 +564,16 @@ impl Transpiler {
                 } else {
                     // Use emit_expr_owned for both keys and values so string literals
                     // become Arc<str> (string dicts are HashMap<Arc<str>, Arc<str>>).
+                    // Untyped numeric literal values in a dict with a float16 value must be
+                    // materialized as `half::f16` (Rust literals can't infer a crate type).
+                    let has_f16 = pairs.iter().any(|(_, v)| self.infer_float_width(v) == Some("f16"));
                     let ps: Vec<String> = pairs.iter()
-                        .map(|(k, v)| format!("({}, {})", self.emit_expr_owned(k), self.emit_expr_owned(v)))
+                        .map(|(k, v)| {
+                            let vs = if has_f16 && matches!(&v.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
+                                format!("half::f16::from_f32(({}) as f32)", self.emit_expr(v))
+                            } else { self.emit_expr_owned(v) };
+                            format!("({}, {})", self.emit_expr_owned(k), vs)
+                        })
                         .collect();
                     format!("HashMap::from([{}])", ps.join(", "))
                 }

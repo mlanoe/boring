@@ -9,10 +9,12 @@ def bool value_lt(Value a, Value b):
     let a_is_float = match a:
         Value.Float64(_): true
         Value.Float32(_): true
+        Value.Float16(_): true
         _: false
     let b_is_float = match b:
         Value.Float64(_): true
         Value.Float32(_): true
+        Value.Float16(_): true
         _: false
     if a_is_float or b_is_float:
         guard let af = value_as_float64_widened(a) else: return false
@@ -45,6 +47,7 @@ def string val_type_name(Value v):
         Value.Uint128(_): "uint128"
         Value.Float64(_): "float"
         Value.Float32(_): "float32"
+        Value.Float16(_): "float16"
         Value.Str(_): "string"
         Value.Bool(_): "bool"
         Value.Array(_): "array"
@@ -83,6 +86,8 @@ def bool value_matches_named_type_static(Value val, string name):
         "uint32": vt == "uint32"
         "uint64": vt == "uint64"
         "uint128": vt == "uint128"
+        "float16": vt == "float16"
+        "f16": vt == "float16"
         "float32": vt == "float32"
         "f32": vt == "float32"
         "float": vt == "float"
@@ -107,6 +112,7 @@ def bool value_matches_type_static(Value val, Type ty):
         Type.Uint32: vt == "uint32"
         Type.Uint64: vt == "uint64"
         Type.Uint128: vt == "uint128"
+        Type.Float16: vt == "float16"
         Type.Float32: vt == "float32"
         Type.Float64: vt == "float"
         Type.Str: vt == "string"
@@ -125,6 +131,8 @@ def bool value_matches_type_static(Value val, Type ty):
 # value_matches_named_type_static (above) and type_overload_keyword (below).
 def string normalize_overload_float_alias(string name):
     match name:
+        "f16": "float16"
+        "float16": "float16"
         "f32": "float32"
         "float32": "float32"
         "f64": "float"
@@ -154,6 +162,7 @@ def string? type_overload_keyword(Type ty):
         Type.Uint32: "uint32"
         Type.Uint64: "uint64"
         Type.Uint128: "uint128"
+        Type.Float16: "float16"
         Type.Float32: "float32"
         Type.Float64: "float"
         Type.Str: "string"
@@ -818,6 +827,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                     Value.Int(n): parts.push("{n}")
                                     Value.Float64(f): parts.push("{f}")
                                     Value.Float32(f): parts.push("{f}")
+                                    Value.Float16(f): parts.push("{f}")
                                     Value.Bool(b): parts.push("{b}")
                                     _: parts.push("nil")
                                 i = i + 1
@@ -827,6 +837,9 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var int_sum = 0
                     var float_sum = 0.0
                     var has_float = false
+                    var all_f32 = true
+                    var has_f16 = false
+                    var has_f64 = false
                     var i = 0
                     while i < arr.length:
                         match arr[i]:
@@ -834,12 +847,22 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             Value.Float64(f):
                                 float_sum = float_sum + f
                                 has_float = true
+                                all_f32 = false
+                                has_f64 = true
+                            Value.Float16(f):
+                                float_sum = float_sum + (f as float64)
+                                has_float = true
+                                has_f16 = true
                             Value.Float32(f):
                                 float_sum = float_sum + (f as float64)
                                 has_float = true
                             _: throw "sum: non-numeric element"
                         i = i + 1
-                    if has_float:
+                    if has_float and has_f16 and not has_f64:
+                        Value.Float16((float_sum + int_sum as float64) as float16)
+                    else if has_float and all_f32:
+                        Value.Float32((float_sum + int_sum as float64) as float32)
+                    else if has_float:
                         Value.Float64(float_sum + int_sum as float64)
                     else:
                         Value.Int(int_sum)
@@ -860,6 +883,12 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                 Value.Float64(f):
                                     match min_val:
                                         Value.Float64(m):
+                                            if f < m:
+                                                min_val = arr[i]
+                                        _: throw "min: mixed types"
+                                Value.Float16(f):
+                                    match min_val:
+                                        Value.Float16(m):
                                             if f < m:
                                                 min_val = arr[i]
                                         _: throw "min: mixed types"
@@ -889,6 +918,12 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                 Value.Float64(f):
                                     match max_val:
                                         Value.Float64(m):
+                                            if f > m:
+                                                max_val = arr[i]
+                                        _: throw "max: mixed types"
+                                Value.Float16(f):
+                                    match max_val:
+                                        Value.Float16(m):
                                             if f > m:
                                                 max_val = arr[i]
                                         _: throw "max: mixed types"
@@ -1440,6 +1475,36 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 "toHex":
                     let fi = f.floor() as int
                     Value.Str("{fi:x}")
+                _:
+                    throw "unknown method {method_name} on {recv_type}"
+
+        # float16 sibling — transcendental/rounding ops go through f32 and
+        # round back to binary16 (docs/float16.md).
+        Value.Float16(h):
+            let f = h as float32
+            match method_name:
+                "pow" | "powf":
+                    if args.length != 1:
+                        throw "pow: expected one numeric exponent"
+                    let exponent = match args[0]:
+                        Value.Float64(e): e as float32
+                        Value.Float32(e): e as float32
+                        Value.Float16(e): e as float32
+                        Value.Int(e): e as float32
+                        _: throw "pow: argument must be a number"
+                    Value.Float16(f.powf(exponent) as float16)
+                "abs":
+                    Value.Float16(f.abs() as float16)
+                "sqrt":
+                    Value.Float16(f.sqrt() as float16)
+                "floor":
+                    Value.Int(f.floor() as int)
+                "ceil":
+                    Value.Int(f.ceil() as int)
+                "round":
+                    Value.Int(f.round() as int)
+                "toStr":
+                    Value.Str("{h}")
                 _:
                     throw "unknown method {method_name} on {recv_type}"
 

@@ -389,6 +389,11 @@ interp_test!(float32_local_var_math);
 interp_test!(float16_array_literal_width_and_cast);
 interp_test!(float32_array_literal_width_and_cast);
 interp_test!(float64_array_literal_width_and_cast);
+interp_test!(float16_dict_literal_width);
+interp_test!(float32_dict_literal_width);
+interp_test!(float64_dict_literal_width);
+interp_test!(float16_array_annotated_literal);
+interp_test!(optional_interp_numeric);
 // Generic METHOD call via turbofish (`obj.method<T>(...)`, V1 monomorphization
 // extension -- src/transpiler/monomorphize.rs's module doc comment). The
 // interpreter erases type args for every generic call (see

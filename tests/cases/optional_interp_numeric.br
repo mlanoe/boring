@@ -1,0 +1,13 @@
+# Regression test: a numeric `T?` in a string interpolation prints the value, or `nil`
+# when absent, identically under `boring run` and `boring build` (Option<T> has no Display).
+def main():
+    let {string=float64} d = {"k" = 2.5 as float64}
+    print "a {d.get("k") as float64}"
+    print "b {d.get("z") as float64}"
+    let int? o = 3
+    let int? n = nil
+    print "c {o} {n}"
+    let float32? f = 1.5
+    print "e {f}"
+    let s = "x {o} y {d.get("k") as float64}"
+    print s

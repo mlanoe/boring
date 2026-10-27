@@ -1127,6 +1127,15 @@ impl Interpreter {
                     elems.iter().cloned().map(|e| Self::coerce_to_type(e, elem_ty)).collect(),
                 ));
             }
+            // `{string=float32}`-typed dict literal: untyped numeric literals adopt the
+            // declared key/value width (same rule as the array arm above).
+            (Type::Dict(kt, vt), Value::Dict(pairs)) => {
+                return Value::Dict(
+                    pairs.iter().cloned()
+                        .map(|(k, v)| (Self::coerce_to_type(k, kt), Self::coerce_to_type(v, vt)))
+                        .collect(),
+                );
+            }
             (Type::Set(elem_ty), Value::Set(elems)) => {
                 return Value::Set(elems.iter().cloned().map(|e| Self::coerce_to_type(e, elem_ty)).collect());
             }

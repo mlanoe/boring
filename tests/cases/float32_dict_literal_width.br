@@ -1,0 +1,13 @@
+# Regression test: untyped numeric literals in a dict literal adopt the width of the
+# declared value type (`let {string=float32} d = {"k" = 2.5}`) or of a typed float
+# value in the same literal (`{"a" = x, "b" = 2.0}` with `float32 x`).
+def main():
+    let {string=float32} d = {"k" = 2.5, "j" = 1}
+    print "{d["k"] as float64} {d["j"] as float64}"
+    let float32 x = 1.5
+    let m = {"a" = x, "b" = 2.0}
+    print "{m["a"] + m["b"]}"
+    var float32 total = 0.0
+    for k in ["a", "b"]:
+        total += m[k]
+    print "{total as float64}"

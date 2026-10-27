@@ -155,6 +155,8 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                             Value.Int(0 - n)
                         Value.Float64(f):
                             Value.Float64(0.0 - f)
+                        Value.Float16(f):
+                            Value.Float16((0.0 as float16) - f)
                         Value.Float32(f):
                             Value.Float32(0.0 - f)
                         Value.Object(neg_inner):
@@ -407,6 +409,34 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             mut vals = []
             for item in elems:
                 vals.push(eval_expr(interp, item))
+            # Untyped numeric literals adopt the width of a typed float32
+            # element (`[a, 2.0, 0.5]` with `float32 a`), same rule as binary
+            # operators (`coerce_float_literal_pair`). float16 likewise.
+            mut has_f16 = false
+            mut has_f32 = false
+            for i in 0..<elems.len():
+                match vals[i]:
+                    Value.Float16(_):
+                        if !is_untyped_numeric_literal(elems[i]):
+                            has_f16 = true
+                    Value.Float32(_):
+                        if !is_untyped_numeric_literal(elems[i]):
+                            has_f32 = true
+                    _: nil
+            if has_f16:
+                for i in 0..<elems.len():
+                    if is_untyped_numeric_literal(elems[i]):
+                        match vals[i]:
+                            Value.Float64(f): vals[i] = Value.Float16(f as float16)
+                            Value.Int(n): vals[i] = Value.Float16(n as float16)
+                            _: nil
+            if has_f32:
+                for i in 0..<elems.len():
+                    if is_untyped_numeric_literal(elems[i]):
+                        match vals[i]:
+                            Value.Float64(f): vals[i] = Value.Float32(f as float32)
+                            Value.Int(n): vals[i] = Value.Float32(n as float32)
+                            _: nil
             Value.Array(vals)
 
         ExprKind.ArrayFill(value_expr, count_expr):
@@ -1227,6 +1257,11 @@ Value? cast_numeric_generic(Value val, string type_name):
                 i128_to_kind(tk, 0)
             else:
                 i128_to_kind(tk, f as int128)
+        Value.Float16(f):
+            if not num_kind_signed(tk) and f < (0.0 as float16):
+                i128_to_kind(tk, 0)
+            else:
+                i128_to_kind(tk, f as int128)
         Value.Float32(f):
             if not num_kind_signed(tk) and f < 0.0:
                 i128_to_kind(tk, 0)
@@ -1299,6 +1334,15 @@ float64? value_as_float_numeric(Value v):
             else:
                 nil
 
+float16? value_as_f16_numeric(Value v):
+    match v:
+        Value.Float16(f): f
+        _:
+            if let iv = value_as_i128(v):
+                iv as float16
+            else:
+                nil
+
 float32? value_as_f32_numeric(Value v):
     match v:
         Value.Float32(f): f
@@ -1314,6 +1358,7 @@ float32? value_as_f32_numeric(Value v):
 float64? value_as_float64_widened(Value v):
     match v:
         Value.Float32(f): f as float64
+        Value.Float16(f): f as float64
         _: value_as_float_numeric(v)
 
 # Narrow an int128 staging value back into `k`'s native Value (truncating,
@@ -1396,6 +1441,14 @@ bool is_untyped_numeric_literal(Expr e):
 
 (Value, Value) coerce_float_literal_pair(Value l, Value r, Expr lhs, Expr rhs):
     match l:
+        Value.Float16(_):
+            match r:
+                Value.Float64(f):
+                    if is_untyped_numeric_literal(rhs):
+                        return (l, Value.Float16(f as float16))
+                    else:
+                        return (l, r)
+                _: nil
         Value.Float32(_):
             match r:
                 Value.Float64(f):
@@ -1406,6 +1459,11 @@ bool is_untyped_numeric_literal(Expr e):
                 _: nil
         Value.Float64(f):
             match r:
+                Value.Float16(_):
+                    if is_untyped_numeric_literal(lhs):
+                        return (Value.Float16(f as float16), r)
+                    else:
+                        return (l, r)
                 Value.Float32(_):
                     if is_untyped_numeric_literal(lhs):
                         return (Value.Float32(f as float32), r)
@@ -1441,9 +1499,32 @@ Value? apply_binop_float_mixed(BinOp op, Value l, Value r):
         BinOp.Rem: Value.Float64(lf % rf)
         _: nil
 
+# float16 sibling — binary16 rounding at every step (half::f16 ops). Mixing
+# with float32/float64 values is rejected (value_as_f16_numeric is nil for them).
+Value? apply_binop_f16_mixed(BinOp op, Value l, Value r):
+    let l_is_f16 = match l:
+        Value.Float16(_): true
+        _: false
+    let r_is_f16 = match r:
+        Value.Float16(_): true
+        _: false
+    if not (l_is_f16 or r_is_f16):
+        return nil
+    guard let lf = value_as_f16_numeric(l) else: return nil
+    guard let rf = value_as_f16_numeric(r) else: return nil
+    match op:
+        BinOp.Add: Value.Float16(lf + rf)
+        BinOp.Sub: Value.Float16(lf - rf)
+        BinOp.Mul: Value.Float16(lf * rf)
+        BinOp.Div: Value.Float16(lf / rf)
+        BinOp.Rem: Value.Float16(lf % rf)
+        _: nil
+
 # float32 sibling of `apply_binop_float_mixed` — same shape, f32 precision
 # throughout. Bare `int`/`uint` values mix in freely here too.
 Value? apply_binop_f32_mixed(BinOp op, Value l, Value r):
+    if let r16 = apply_binop_f16_mixed(op, l, r):
+        return r16
     let l_is_f32 = match l:
         Value.Float32(_): true
         _: false
@@ -1693,10 +1774,12 @@ req int compare_values(Value l, Value r):
     let l_is_float = match l:
         Value.Float64(_): true
         Value.Float32(_): true
+        Value.Float16(_): true
         _: false
     let r_is_float = match r:
         Value.Float64(_): true
         Value.Float32(_): true
+        Value.Float16(_): true
         _: false
     if l_is_float or r_is_float:
         guard let lf = value_as_float64_widened(l) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
@@ -1943,7 +2026,7 @@ def Value coerce_declared_value(mut Interpreter interp, Value val, Type ty):
         Type.Optional(inner): coerce_declared_value(interp, val, inner)
         Type.Array(inner): coerce_array_elements(interp, val, inner)
         Type.ArrayN(inner, _): coerce_array_elements(interp, val, inner)
-        Type.Float32 | Type.Float64:
+        Type.Float16 | Type.Float32 | Type.Float64:
             cast_value(interp, val, ty)
         _:
             if let kind = type_to_num_kind(ty):
@@ -1952,7 +2035,7 @@ def Value coerce_declared_value(mut Interpreter interp, Value val, Type ty):
                         return cast_value(interp, val, ty)
                 else:
                     match val:
-                        Value.Float32(_) | Value.Float64(_): return cast_value(interp, val, ty)
+                        Value.Float16(_) | Value.Float32(_) | Value.Float64(_): return cast_value(interp, val, ty)
                         _: nil
             val
 
@@ -1971,6 +2054,7 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
     let type_name = match ty:
         Type.Named(name): name
         Type.Int: "int"
+        Type.Float16: "float16"
         Type.Float32: "float32"
         Type.Float64: "float64"
         Type.Bool: "bool"
@@ -1995,6 +2079,7 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Uint8(n): Value.Int(n as int)
                 Value.Float64(f): Value.Int(f as int)
                 Value.Float32(f): Value.Int(f as int)
+                Value.Float16(f): Value.Int(f as int)
                 Value.Bool(b): if b: Value.Int(1) else: Value.Int(0)
                 Value.Str(s):
                     let n = s.parse_int()
@@ -2011,6 +2096,7 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
             match val:
                 Value.Float64(f): Value.Float64(f)
                 Value.Float32(f): Value.Float64(f as float64)
+                Value.Float16(f): Value.Float64(f as float64)
                 Value.Int(n): Value.Float64(n as float64)
                 Value.Uint(n): Value.Float64(n as float64)
                 Value.Uint8(n): Value.Float64(n as float64)
@@ -2041,12 +2127,30 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                         g
                     else:
                         Value.Nil
+        # float16 sibling — real binary16 rounding (half::f16).
+        "float16":
+            match val:
+                Value.Float16(f): Value.Float16(f)
+                Value.Float32(f): Value.Float16(f as float16)
+                Value.Float64(f): Value.Float16(f as float16)
+                Value.Str(s):
+                    let f = s.parse_float()
+                    if let v = f:
+                        Value.Float16(v as float16)
+                    else:
+                        Value.Nil
+                _:
+                    if let iv = value_as_i128(val):
+                        Value.Float16(iv as float16)
+                    else:
+                        Value.Nil
         # float32 sibling of the float64 branch above — real f32 narrowing
         # (Rust `as f32` semantics, silent precision loss, inherited unchanged
         # per docs/float-width-types.md §4), not a label over float64.
         "float32":
             match val:
                 Value.Float32(f): Value.Float32(f)
+                Value.Float16(f): Value.Float32(f as float32)
                 Value.Float64(f): Value.Float32(f as float32)
                 Value.Int(n): Value.Float32(n as float32)
                 Value.Uint(n): Value.Float32(n as float32)
@@ -2145,6 +2249,7 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Int(n): Value.Uint(n as uint)
                 Value.Float64(f): Value.Uint(f as uint)
                 Value.Float32(f): Value.Uint(f as uint)
+                Value.Float16(f): Value.Uint(f as uint)
                 Value.Object(uint_inner):
                     let uv_opt = uint_inner.get_field("value")
                     if let uv = uv_opt:
@@ -2163,6 +2268,7 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Int(n): Value.Uint8(n as uint8)
                 Value.Float64(f): Value.Uint8(f as uint8)
                 Value.Float32(f): Value.Uint8(f as uint8)
+                Value.Float16(f): Value.Uint8(f as uint8)
                 Value.Object(uint8_inner):
                     let u8v_opt = uint8_inner.get_field("value")
                     if let u8v = u8v_opt:
@@ -2270,6 +2376,18 @@ req string format_value(Interpreter interp, Value val, string spec):
                 raw = float_to_fixed(fv, precision)
             else:
                 raw = "{fv}"
+            if flag_plus and fv >= 0.0:
+                raw = "+" + raw
+        Value.Float16(fv16):
+            let fv = fv16 as float64
+            if type_char == "e":
+                raw = float_to_scientific(fv, precision)
+            elif type_char == "?":
+                raw = float_debug_str(fv)
+            elif precision >= 0:
+                raw = float_to_fixed(fv, precision)
+            else:
+                raw = "{fv16}"
             if flag_plus and fv >= 0.0:
                 raw = "+" + raw
         Value.Float32(fv32):
@@ -2410,6 +2528,7 @@ req string display_value(Interpreter interp, Value val):
         Value.Uint64(n): "{n}"
         Value.Uint128(n): "{n}"
         Value.Float64(f): "{f}"
+        Value.Float16(f): "{f}"
         Value.Float32(f): "{f}"
         Value.Str(s): s
         Value.Array(items):
@@ -2952,6 +3071,7 @@ def Value default_value_for_type(Type ty):
         Type.Uint32: Value.Uint32(0)
         Type.Uint64: Value.Uint64(0)
         Type.Uint128: Value.Uint128(0)
+        Type.Float16: Value.Float16(0.0 as float16)
         Type.Float32: Value.Float32(0.0)
         Type.Float64: Value.Float64(0.0)
         Type.Bool: Value.Bool(false)

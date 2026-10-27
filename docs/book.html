@@ -410,6 +410,20 @@ print <span class="s">"Next year: <span class="si">{age + 1}</span>"</span></cod
 <p><strong>Rust equivalent</strong> — triple strings are expanded at lex time; the emitted Rust uses a regular string with <code>\n</code> for newlines and <code>format!</code> for interpolation:</p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> sql = <span class="fm">format!</span>(<span class="s">&quot;SELECT *\nFROM users\nWHERE age &gt; 18\n&quot;</span>);
 <span class="kw">let</span> query = <span class="fm">format!</span>(<span class="s">&quot;SELECT *\nFROM {}\nLIMIT {}\n&quot;</span>, table, limit);</code></pre></div>
+<h3 id="raw-strings">Raw strings — <code>&#x27;&#x27;&#x27;...&#x27;&#x27;&#x27;</code></h3>
+<p><code>&#x27;&#x27;&#x27;...&#x27;&#x27;&#x27;</code> is a <strong>raw</strong> string: nothing inside is interpreted. No <code>{expr}</code> interpolation, no <code>{{</code>/<code>}}</code> doubling, no <code>\n</code>/<code>\t</code> escapes — every character up to the next <code>&#x27;&#x27;&#x27;</code> is literal, including <code>&quot;</code>, <code>{</code>, <code>}</code> and <code>\</code>. It exists for text that is full of those characters (JSON, SQL, regexes, Windows paths):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> body = <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;{<span class="s">"name"</span>: <span class="s">"Alice"</span>, <span class="s">"tags"</span>: [<span class="s">"a"</span>, <span class="s">"b"</span>]}<span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
+
+<span class="kw">let</span> query = <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
+    SELECT * FROM t
+    WHERE data-&gt;&gt;<span class="lf">&#x27;k</span>&#x27; = <span class="s">"<span class="si">{not_a_hole}</span>"</span>
+    <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
+
+<span class="kw">let</span> path = <span class="lf">&#x27;</span><span class="lf">&#x27;</span><span class="lf">&#x27;C</span>:\temp\<span class="kw">new</span><span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;     <span class="co"># backslashes stay backslashes</span></code></pre></div>
+<p>Multiline raw strings follow the same dedent and first/last-newline rules as <code>&quot;&quot;&quot;</code> (the indentation of the closing delimiter is stripped from every line). A raw string has no escape for <code>&#x27;&#x27;&#x27;</code> itself: text that contains three consecutive apostrophes can&#x27;t be written this way.</p>
+<p>Use <code>&quot;&quot;&quot;</code> when you want interpolation, <code>&#x27;&#x27;&#x27;</code> when you don&#x27;t. A lone <code>&#x27;</code> or <code>&#x27;&#x27;</code> is not a string literal — <code>&#x27;</code> is otherwise only used by ownership qualifiers (<code>T&#x27;actor&#x27;task</code>), and three consecutive apostrophes never occur there, so <code>&#x27;&#x27;&#x27;</code> needs no surrounding context to be recognised.</p>
+<p><strong>Rust equivalent</strong> — an ordinary string literal with the content escaped (no <code>format!</code>), identical to what a <code>&quot;...&quot;</code> literal with no holes produces:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> body: <span class="kw">Arc</span>&lt;str&gt; = <span class="kw">Arc</span>::&lt;str&gt;::<span class="fn">from</span>(<span class="s">&quot;{\&quot;name\&quot;: \&quot;Alice\&quot;, \&quot;tags\&quot;: [\&quot;a\&quot;, \&quot;b\&quot;]}&quot;</span>);</code></pre></div>
 <h3 id="print-and-write"><code>print</code> and <code>write</code></h3>
 <p><code>print</code> outputs with a trailing newline; <code>write</code> outputs without one.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>print <span class="s">"hello, <span class="si">{name}</span>!"</span>    <span class="co"># with newline → println!</span>

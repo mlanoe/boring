@@ -64,6 +64,7 @@ enum Value:
     Uint32(uint32 n)
     Uint64(uint64 n)
     Uint128(uint128 n)
+    Float16(float16 f)
     Float32(float32 f)
     Float64(float64 f)
     Str(string s)
@@ -115,6 +116,7 @@ enum Value:
             Value.Uint32(_): "uint32"
             Value.Uint64(_): "uint64"
             Value.Uint128(_): "uint128"
+            Value.Float16(_): "float16"
             Value.Float32(_): "float32"
             Value.Float64(_): "float64"
             Value.Str(_): "string"

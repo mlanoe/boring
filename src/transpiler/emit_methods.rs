@@ -6426,6 +6426,28 @@ impl Transpiler {
         }
     }
 
+    /// An interpolation hole whose resolved type is `T?` (e.g. `d.get("k") as float64`,
+    /// `int? o`): `Option<T>` has no `Display`, so render `nil` or the value like the interpreter.
+    /// Collection-bearing optionals are left to `typed_collection_fmt`.
+    fn optional_hole_fmt(&self, e: &Expr, expr_s: &str) -> Option<String> {
+        // `opt as <numeric>` is emitted as `.map(|v| v as U)` (emit_expr_cast), still an `Option`.
+        let cast_opt = match &e.kind {
+            ExprKind::Cast(inner, cty) if super::emit_expr::is_known_numeric_scalar_type(cty.without_mut()) =>
+                matches!(self.resolve_expr_type(inner).as_ref().map(Type::without_mut),
+                    Some(Type::Optional(t)) if super::emit_expr::is_known_numeric_scalar_type(t.without_mut())),
+            _ => false,
+        };
+        if cast_opt {
+            return Some(format!("({}).as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", expr_s));
+        }
+        let ty = self.resolve_expr_type(e)?;
+        let ty = ty.without_mut();
+        let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
+        let Type::Optional(el) = ty else { return None };
+        if is_collection_type(Some(el.without_mut())) || Self::needs_deep_show(ty) { return None; }
+        Some(format!("({}).as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", expr_s))
+    }
+
     pub(crate) fn emit_interp(&self, segs: &[StringSegment]) -> String {
         let (fmt, args) = self.build_format_string(segs);
         let str_ty = match self.config.threading {
@@ -6472,6 +6494,7 @@ impl Transpiler {
                         || matches!(&e.kind, ExprKind::Array(_))
                         || self.expr_returns_collection(e);
                     let (expr_s, spec) = self.typed_collection_fmt(e, &expr_s)
+                        .or_else(|| self.optional_hole_fmt(e, &expr_s).map(|s| (s, "{}")))
                         .unwrap_or_else(|| boring_vec_fmt(expr_s, is_col, is_vec_var));
                     fmt.push_str(spec);
                     args.push(expr_s);
@@ -6510,7 +6533,8 @@ impl Transpiler {
                 StringSegment::Expr(e) => {
                     // Boring interpolation inside a macro format string → keep as {}
                     fmt.push_str("{}");
-                    args.push(self.emit_display_arg(e));
+                    let a = self.emit_display_arg(e);
+                    args.push(self.optional_hole_fmt(e, &a).unwrap_or(a));
                 }
                 StringSegment::FormattedExpr(e, spec) => {
                     let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);

@@ -594,6 +594,11 @@ transpile_test!(float32_local_var_math);
 transpile_test!(float16_array_literal_width_and_cast);
 transpile_test!(float32_array_literal_width_and_cast);
 transpile_test!(float64_array_literal_width_and_cast);
+transpile_test!(float16_dict_literal_width);
+transpile_test!(float32_dict_literal_width);
+transpile_test!(float64_dict_literal_width);
+transpile_test!(float16_array_annotated_literal);
+transpile_test!(optional_interp_numeric);
 // Top-level `let` constants referenced from a free function, a struct method, AND an
 // enum method — regression test for the transpiler silently dropping the `const`
 // declaration for a module-scope `let` whenever nothing but a function/method body

@@ -556,6 +556,7 @@ enum Type:
     Uint32
     Uint64
     Uint128
+    Float16
     Float32
     Float64
     Str

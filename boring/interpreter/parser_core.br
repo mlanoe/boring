@@ -721,6 +721,7 @@ def Type parse_type_base(mut Parser p) throws:
                 "uint32":  Type.Uint32
                 "uint64":  Type.Uint64
                 "uint128": Type.Uint128
+                "float16": Type.Float16
                 "float32": Type.Float32
                 "float": Type.Float64
                 "float64": Type.Float64
@@ -2810,6 +2811,16 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
                 if let iv = value_as_i128(v):
                     return Value.Float64(iv as float)
                 return Value.Nil
+    if name == "float16":
+        let v = args[0] else Value.Nil
+        match v:
+            Value.Float16(f): return Value.Float16(f)
+            Value.Float32(f): return Value.Float16(f as float16)
+            Value.Float64(f): return Value.Float16(f as float16)
+            _:
+                if let iv = value_as_i128(v):
+                    return Value.Float16(iv as float16)
+                return Value.Nil
     # float32 sibling of the float/float64 conversion above — real f32
     # narrowing, not a label over float64 (docs/float-width-types.md §8-9).
     if name == "float32":
@@ -2855,6 +2866,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.sqrt())
             Value.Float32(f): return Value.Float32(f.sqrt())
+            Value.Float16(h): return Value.Float16((h as float32).sqrt() as float16)
             Value.Int(n): return Value.Float64(float(n).sqrt())
             _: throw "sqrt: expected number"
     if name == "abs":
@@ -2862,6 +2874,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.abs())
             Value.Float32(f): return Value.Float32(f.abs())
+            Value.Float16(h): return Value.Float16((h as float32).abs() as float16)
             Value.Int(n): return Value.Int(if n < 0: -n else n)
             _: throw "abs: expected number"
     if name == "min":
@@ -2938,6 +2951,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.sin())
             Value.Float32(f): return Value.Float32(f.sin())
+            Value.Float16(h): return Value.Float16((h as float32).sin() as float16)
             Value.Int(n): return Value.Float64(float(n).sin())
             _: throw "sin: expected number"
     if name == "cos":
@@ -2945,6 +2959,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.cos())
             Value.Float32(f): return Value.Float32(f.cos())
+            Value.Float16(h): return Value.Float16((h as float32).cos() as float16)
             Value.Int(n): return Value.Float64(float(n).cos())
             _: throw "cos: expected number"
     if name == "tan":
@@ -2952,6 +2967,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.tan())
             Value.Float32(f): return Value.Float32(f.tan())
+            Value.Float16(h): return Value.Float16((h as float32).tan() as float16)
             Value.Int(n): return Value.Float64(float(n).tan())
             _: throw "tan: expected number"
     if name == "round":
@@ -2959,6 +2975,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Int(int(f.round()))
             Value.Float32(f): return Value.Int(int(f.round()))
+            Value.Float16(h): return Value.Int(int((h as float32).round()))
             Value.Int(n): return Value.Int(n)
             _: throw "round: expected number"
     if name == "floor":
@@ -2966,6 +2983,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Int(int(f.floor()))
             Value.Float32(f): return Value.Int(int(f.floor()))
+            Value.Float16(h): return Value.Int(int((h as float32).floor()))
             Value.Int(n): return Value.Int(n)
             _: throw "floor: expected number"
     if name == "ceil":
@@ -2973,6 +2991,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Int(int(f.ceil()))
             Value.Float32(f): return Value.Int(int(f.ceil()))
+            Value.Float16(h): return Value.Int(int((h as float32).ceil()))
             Value.Int(n): return Value.Int(n)
             _: throw "ceil: expected number"
     if name == "pow":
@@ -3001,6 +3020,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.ln())
             Value.Float32(f): return Value.Float32(f.ln())
+            Value.Float16(h): return Value.Float16((h as float32).ln() as float16)
             Value.Int(n): return Value.Float64(float(n).ln())
             _: throw "{name}: expected number"
     if name == "log2":
@@ -3008,6 +3028,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.log2())
             Value.Float32(f): return Value.Float32(f.log2())
+            Value.Float16(h): return Value.Float16((h as float32).log2() as float16)
             Value.Int(n): return Value.Float64(float(n).log2())
             _: throw "log2: expected number"
     if name == "log10":
@@ -3015,6 +3036,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.log10())
             Value.Float32(f): return Value.Float32(f.log10())
+            Value.Float16(h): return Value.Float16((h as float32).log10() as float16)
             Value.Int(n): return Value.Float64(float(n).log10())
             _: throw "log10: expected number"
     if name == "exp":
@@ -3022,6 +3044,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         match v:
             Value.Float64(f): return Value.Float64(f.exp())
             Value.Float32(f): return Value.Float32(f.exp())
+            Value.Float16(h): return Value.Float16((h as float32).exp() as float16)
             Value.Int(n): return Value.Float64(float(n).exp())
             _: throw "exp: expected number"
     if name == "type":

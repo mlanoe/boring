@@ -331,8 +331,8 @@ device.<span class="fn">create_compute_pipeline</span>(&amp;wgpu::<span class="k
 <div class="code-block"><pre><code>&lt;stem&gt;_wgpu/
   src/main.rs        # Rust host code (wgpu crate)
   shaders/main.wgsl  # WGSL compute shader
-  Cargo.toml         # wgpu = &quot;22&quot;, no build.rs</code></pre></div>
-<p>Requires wgpu 22+ and a DirectX 12, Vulkan, or Metal-capable GPU. No external GPU toolkit needed.</p>
+  Cargo.toml         # wgpu = &quot;23&quot;, no build.rs</code></pre></div>
+<p>Requires wgpu 23+ and a DirectX 12, Vulkan, or Metal-capable GPU. No external GPU toolkit needed.</p>
 <div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target wgpu main.br
 cd main_wgpu &amp;&amp; cargo build</code></pre></div>
 <p><strong>Multi-file projects</strong>: <code>use &lt;file&gt;.br</code> in the entry file is resolved and inlined before transpilation — first relative to the importing file&#x27;s own directory, then against each path in the <code>BORING_PATH</code> environment variable (same search order as <code>boring run</code>). Circular and duplicate imports are merged once. A <code>use</code> that doesn&#x27;t resolve to a <code>.br</code> file on disk (e.g. <code>use std.collections</code>) is left as an ordinary import for the general transpiler to handle.</p>

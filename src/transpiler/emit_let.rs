@@ -1582,6 +1582,57 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, is_last: bool) {
+        // `let {string=float16|32|64} d = {"k" = 2.5}` / `let [float16] a = [1.5, 2]`: Rust literals can't infer `half::f16`,
+        // so materialize each untyped numeric value literal as an explicit f16 cast.
+        if let (Some(ty), Some(v)) = (&s.ty, &s.value) {
+            let mut dty = ty.without_mut();
+            while let Type::Qualified(inner, _) = dty { dty = inner.without_mut(); }
+            let elem_ty = match (dty, &v.kind) {
+                (Type::Dict(_, vt), ExprKind::Dict(_)) => Some(&**vt),
+                (Type::Array(et), ExprKind::Array(_)) => Some(&**et),
+                _ => None,
+            };
+            if let Some(vt) = elem_ty {
+                let mut vt_ty = vt.without_mut();
+                while let Type::Qualified(inner, _) = vt_ty { vt_ty = inner.without_mut(); }
+                let float_ty = match vt_ty {
+                    Type::Float16 => Some(Type::Float16),
+                    Type::Float32 => Some(Type::Float32),
+                    Type::Float64 => Some(Type::Float64),
+                    Type::Named(n) if n == "float16" => Some(Type::Float16),
+                    Type::Named(n) if n == "float32" => Some(Type::Float32),
+                    Type::Named(n) if n == "float64" || n == "float" => Some(Type::Float64),
+                    _ => None,
+                };
+                if let Some(float_ty) = float_ty {
+                    let is_lit = |e: &Expr| match &e.kind {
+                        ExprKind::Int(_) | ExprKind::Float(_) => true,
+                        ExprKind::UnaryOp(UnaryOp::Neg, i) => matches!(i.kind, ExprKind::Int(_) | ExprKind::Float(_)),
+                        _ => false,
+                    };
+                    let has_lit = match &v.kind {
+                        ExprKind::Dict(ps) => ps.iter().any(|(_, e)| is_lit(e)),
+                        ExprKind::Array(es) => es.iter().any(|e| is_lit(e)),
+                        _ => false,
+                    };
+                    if has_lit {
+                        let mut typed = s.clone();
+                        let mut nv = v.clone();
+                        let wrap = |e: &mut Expr| if is_lit(e) {
+                            let inner = e.clone();
+                            *e = Expr { kind: ExprKind::Cast(Box::new(inner), float_ty.clone()), ..e.clone() };
+                        };
+                        match &mut nv.kind {
+                            ExprKind::Dict(ps) => ps.iter_mut().for_each(|(_, e)| wrap(e)),
+                            ExprKind::Array(es) => es.iter_mut().for_each(|e| wrap(e)),
+                            _ => {}
+                        }
+                        typed.value = Some(nv);
+                        return self.emit_let_inner(&typed, is_last);
+                    }
+                }
+            }
+        }
         // Untyped `let hit = dict[key]` whose name is later tested against `nil` is an
         // optional lookup (`HashMap::get(..).cloned()`), not the panicking read.
         if s.ty.is_none() && self.nil_tested_vars.contains(s.name.as_str()) {

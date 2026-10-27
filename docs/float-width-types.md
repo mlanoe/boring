@@ -1,9 +1,11 @@
 # `float32` / `float64`: real fixed-width float types, `float` as a pure alias
 
-> **Status: Draft — not implemented.** No lexer, parser, checker, interpreter,
-> transpiler, or GPU-backend changes exist yet for anything described here.
-> This document records the design as worked out in discussion, as a basis
-> for implementation.
+> **Status: Implemented.** `float32`/`float64` (and `float16`, see
+> [float16.md](float16.md)) are real, distinct `Type`/`Value` variants in the
+> interpreter and transpiler. This document is kept as the original design
+> record; the "Problem Statement" below describes the state *before* that
+> work, and is no longer the current behavior. For current behavior see the
+> "Fixed-width floats" section of [book.md](book.md).
 
 ## Problem Statement
 
@@ -191,6 +193,11 @@ the typed float elements (`[a, 2.0, 0.5]` with `float32 a` is a `[float32]`; sam
 result (`sorted[0] as float64`, `arr.min() as float64`, `d.get("k") as float64`) is a
 numeric conversion, never a string parse; `d.get(k)` yields a numeric `T?`, so
 `(d.get(k) as float64) else 0.0` is the unwrapped form.
+
+Dict literals follow the same rule: untyped numeric literal values adopt the declared
+value type's width (`let {string=float32} d = {"k" = 2.5}`) or the width of a typed
+float value in the same literal (`{"a" = x, "b" = 2.0}` with `float32 x`); `float64`
+is unchanged.
 
 `float` participates in this rule as `float64` — since it *is* `float64`
 after alias resolution, `float_var + float32_var` is exactly as much an
@@ -650,3 +657,14 @@ pointer-width-style type like `int`/`uint`).
   `float16` was implemented subsequently with `half::f16` on the host and native
   half storage on supported GPU backends; see [float16.md](float16.md).
   `bfloat16` remains outside this proposal.
+
+Interpolating a numeric optional (`"{d.get("k") as float64}"`, `"{o}"` with `int? o`) prints the
+value, or `nil` when absent, under both `boring run` and `boring build`. Regression:
+`tests/cases/optional_interp_numeric.br`.
+
+### Annotated array literals
+
+`let [float16] a = [1.5, 2, 3]` (also `float32`/`float64`, bare int literals included): `emit_let` rewrites
+untyped numeric literals into casts to the declared element type, same as the dict-literal case, so the
+transpiler emits `half::f16::from_f32(..)` instead of uncompilable `vec![1.5, 2.0]`.
+Array-typed struct fields / function args are not covered.

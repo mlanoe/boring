@@ -211,6 +211,10 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                         # the same narrowing coercion int8..int128 above get, keyed
                         # directly off the Value variant instead of NumKind (which
                         # floats deliberately aren't part of).
+                        Type.Float16:
+                            match val:
+                                Value.Float16(_): nil
+                                _: val = cast_value(interp, val, Type.Float16)
                         Type.Float32:
                             match val:
                                 Value.Float32(_): nil
@@ -219,6 +223,23 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                             match val:
                                 Value.Float64(_): nil
                                 _: val = cast_value(interp, val, Type.Float64)
+                        # `var float32 x = 0.0` parses as Qualified(Float32, BorrowMut)
+                        # (apply_var_to_borrow) — unwrap so it gets the same narrowing.
+                        Type.Qualified(inner_ty, _):
+                            match inner_ty:
+                                Type.Float16:
+                                    match val:
+                                        Value.Float16(_): nil
+                                        _: val = cast_value(interp, val, Type.Float16)
+                                Type.Float32:
+                                    match val:
+                                        Value.Float32(_): nil
+                                        _: val = cast_value(interp, val, Type.Float32)
+                                Type.Float64:
+                                    match val:
+                                        Value.Float64(_): nil
+                                        _: val = cast_value(interp, val, Type.Float64)
+                                _: nil
                         # A fixed-shape `let [T, width = W, height = H] a = [...]`
                         # annotation is the only place a labeled array's shape can
                         # come from a bare array literal (a comprehension or
@@ -846,6 +867,7 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env, Interpreter in
                 LitPattern.Float(f):
                     match val:
                         Value.Float64(v): v == f
+                        Value.Float16(v): (v as float64) == f
                         Value.Float32(v): (v as float64) == f
                         _: false
                 LitPattern.Str(s):
@@ -1280,6 +1302,7 @@ def string normalize_type_name(string name):
     else if name == "Uint32": "uint32"
     else if name == "Uint64": "uint64"
     else if name == "Uint128": "uint128"
+    else if name == "Float16": "float16"
     else if name == "Float32": "float32"
     # `Float64`/`float64` are accepted spellings of `Float`/`float` here too —
     # `value_type_name` reports "float" for a Value.Float64 (`float` is
@@ -1315,6 +1338,7 @@ def string value_type_name(Value val):
         Uint32(_): "uint32"
         Uint64(_): "uint64"
         Uint128(_): "uint128"
+        Float16(_): "float16"
         Float32(_): "float32"
         Float64(_): "float"
         Str(_): "string"
@@ -1359,11 +1383,19 @@ def bool value_equals(Value a, Value b):
             match b:
                 Float64(y): x == y
                 Float32(y): x == (y as float64)
+                Float16(y): x == (y as float64)
+                _: false
+        Float16(x):
+            match b:
+                Float16(y): x == y
+                Float32(y): (x as float64) == (y as float64)
+                Float64(y): (x as float64) == y
                 _: false
         Float32(x):
             match b:
                 Float32(y): x == y
                 Float64(y): (x as float64) == y
+                Float16(y): (x as float64) == (y as float64)
                 _: false
         Str(x):
             match b:

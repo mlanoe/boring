@@ -1874,6 +1874,23 @@ impl Interpreter {
                     let vv = self.eval_expr(v, Rc::clone(&env))?;
                     result.push((kv, vv));
                 }
+                // Untyped numeric literal values adopt the width of the dict's typed
+                // float values (`{"a" = x, "b" = 2.0}` with `float32 x`), same rule as
+                // the array literal above.
+                let typed_width = result.iter().zip(pairs).find_map(|((_, v), (_, e))| match v {
+                    Value::Float16(_) | Value::Float32(_) if !is_untyped_numeric_literal(e) => Some(v.clone()),
+                    _ => None,
+                });
+                if let Some(proto) = typed_width {
+                    for ((_, v), (_, e)) in result.iter_mut().zip(pairs) {
+                        if !is_untyped_numeric_literal(e) { continue; }
+                        let f = match v { Value::Float64(f) => *f, Value::Int(n) => *n as f64, _ => continue };
+                        *v = match proto {
+                            Value::Float16(_) => Value::Float16(half::f16::from_f32(f as f32)),
+                            _ => Value::Float32(f as f32),
+                        };
+                    }
+                }
                 Ok(Value::Dict(result))
             }
 
