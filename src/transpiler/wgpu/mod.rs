@@ -437,7 +437,7 @@ name = "{stem}"
 path = "src/main.rs"
 
 [dependencies]
-wgpu = "22"
+wgpu = "23"
 bytemuck = {{ version = "1", features = ["derive"] }}
 half = {{ version = "2", features = ["bytemuck", "serde"] }}
 pollster = "0.3"

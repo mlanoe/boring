@@ -194,6 +194,12 @@ impl Transpiler {
                 // the binding itself go through the lock.
                 if Self::is_copy_type(inner) {
                     self.var_lock_scalar.insert(s.name.clone());
+                    if matches!(inner.without_mut(), Type::Float16)
+                        || matches!(inner.without_mut(), Type::Named(name)
+                            if name == "float16" || name == "f16")
+                    {
+                        self.var_types.insert(s.name.clone(), inner.clone());
+                    }
                 }
                 self.arc_vars.insert(s.name.clone());
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
@@ -247,6 +253,12 @@ impl Transpiler {
                 // Scalar `T'guard` — see `var_lock_scalar`'s doc comment.
                 if Self::is_copy_type(inner) {
                     self.var_lock_scalar.insert(s.name.clone());
+                    if matches!(inner.without_mut(), Type::Float16)
+                        || matches!(inner.without_mut(), Type::Named(name)
+                            if name == "float16" || name == "f16")
+                    {
+                        self.var_types.insert(s.name.clone(), inner.clone());
+                    }
                 }
                 self.arc_vars.insert(s.name.clone());
                 if let Some(type_name) = constructor_type_name(s_value) {

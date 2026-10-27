@@ -159,8 +159,13 @@ fn cpu_generated_rust_coerces_float16_reassignments() {
 struct HalfBox:
     var float16 value
 
+var float16 globalHalf = float16(0.0)
+
 def reset(var float16 value):
     value = 1.75
+
+def resetGlobal():
+    globalHalf = 2.25
 
 def main():
     var float16 scalar = float16(0.0)
@@ -168,7 +173,10 @@ def main():
     reset(scalar)
     mut box = HalfBox(value = float16(0.0))
     box.value = 1.5
-    print "{scalar as float32} {box.value as float32}"
+    var float16'guard guarded = float16(0.0)
+    guarded = 2.5
+    resetGlobal()
+    print "{scalar as float32} {box.value as float32} {globalHalf as float32} {guarded as float32}"
 "#;
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("float16_codegen/cpu_reassignments");
@@ -179,7 +187,7 @@ def main():
     let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["run"]).arg(&source).output().unwrap();
     assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
-    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "1.75 1.5");
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), "1.75 1.5 2.25 2.5");
     let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
         .args(["build"]).arg(&source).output().unwrap();
     assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
@@ -187,6 +195,8 @@ def main():
     assert!(host.contains("scalar = half::f16::from_f32((1.25) as f32)"), "{host}");
     assert!(host.contains("*value = half::f16::from_f32((1.75) as f32)"), "{host}");
     assert!(host.contains("r#box.value = half::f16::from_f32((1.5) as f32)"), "{host}");
+    assert!(host.contains("half::f16::from_f32((2.25) as f32)"), "{host}");
+    assert!(host.contains("half::f16::from_f32((2.5) as f32)"), "{host}");
     let checked = Command::new("cargo")
         .args(["check", "--offline", "--manifest-path"])
         .arg(root.join("main_rust/Cargo.toml")).output().unwrap();
@@ -332,6 +342,7 @@ fn wgpu_enables_shader_f16_and_preserves_two_byte_storage() {
     assert!(host.contains("wgpu::Features::SHADER_F16"), "host does not request shader-f16:\n{host}");
     assert!(host.contains("Vec<half::f16>"), "host ABI is not f16:\n{host}");
     assert!(host.contains("half::f16::from_f32"), "host did not lower float16 construction:\n{host}");
+    assert!(manifest.contains("wgpu = \"23\""), "wgpu backend was not upgraded for WGSL f16:\n{manifest}");
     assert!(manifest.contains("half ="), "wgpu manifest lacks half dependency");
 
     let generated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/wgpu/main_wgpu");

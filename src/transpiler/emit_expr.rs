@@ -3109,6 +3109,17 @@ impl Transpiler {
             if self.global_vars_used_in_fns.contains(var_name.as_str()) {
                 let static_name = var_name.to_uppercase();
                 let val_s = self.emit_expr_owned(value);
+                let global_is_f16 = self.global_var_types.get(var_name.as_str())
+                    .and_then(Option::as_ref).is_some_and(|ty| {
+                    matches!(ty.without_mut(), Type::Float16)
+                        || matches!(ty.without_mut(), Type::Named(name)
+                            if name == "float16" || name == "f16")
+                });
+                let val_s = if global_is_f16 && self.infer_float_width(value) != Some("f16") {
+                    format!("half::f16::from_f32(({val_s}) as f32)")
+                } else {
+                    val_s
+                };
                 // Evaluate the RHS before taking the write lock: the RHS may read
                 // (lock) the same non-reentrant Mutex, which would deadlock.
                 return format!("{{ let __gv = {}; *{}.lock().unwrap_or_else(|e| e.into_inner()) = __gv; }}", val_s, static_name);
@@ -3177,11 +3188,27 @@ impl Transpiler {
             // the `Arc<Mutex<T>>`/`Arc<RwLock<T>>` handle (doesn't compile: no
             // `AddAssign`/plain-assign target on the handle type itself).
             if self.var_lock_scalar.contains(var_name.as_str()) {
+                let lock_is_f16 = self.var_types.get(var_name.as_str()).is_some_and(|ty| {
+                    let inner = match ty.without_mut() {
+                        Type::Qualified(inner, _) => inner.without_mut(),
+                        ty => ty,
+                    };
+                    matches!(inner, Type::Float16)
+                        || matches!(inner, Type::Named(name)
+                            if name == "float16" || name == "f16")
+                });
+                let coerce_value = |rendered: String| {
+                    if lock_is_f16 && self.infer_float_width(value) != Some("f16") {
+                        format!("half::f16::from_f32(({rendered}) as f32)")
+                    } else {
+                        rendered
+                    }
+                };
                 // Inside an open `with` block the guard is already held for the
                 // block's duration (`emit_stmt.rs`'s `emit_with` shadows
                 // `var_name` to it) — just assign through the deref, no new lock.
                 if self.with_open_names.contains(var_name.as_str()) {
-                    let val_s = self.emit_expr_owned(value);
+                    let val_s = coerce_value(self.emit_expr_owned(value));
                     return format!("*{} = {}", var_name, val_s);
                 }
                 if self.var_mutex_types.contains(var_name.as_str()) || self.var_mutex_task_types.contains(var_name.as_str()) {
@@ -3190,12 +3217,12 @@ impl Transpiler {
                     // non-reentrant Mutex self-deadlocks if that read tries to lock
                     // while the write guard above it is still held in the same
                     // statement (same reasoning as the `Field`-target branches below).
-                    let val_s = self.emit_expr_owned(value);
+                    let val_s = coerce_value(self.emit_expr_owned(value));
                     let guard = self.mutex_var_write(var_name, var_name);
                     return format!("{{ let __v = {}; let mut __g = {}; *__g = __v; }}", val_s, guard);
                 }
                 if self.var_rwlock_types.contains(var_name.as_str()) || self.var_rwlock_task_types.contains(var_name.as_str()) {
-                    let val_s = self.emit_expr_owned(value);
+                    let val_s = coerce_value(self.emit_expr_owned(value));
                     let guard = if self.var_rwlock_task_types.contains(var_name.as_str()) {
                         self.guard_task_write_guard(var_name)
                     } else {

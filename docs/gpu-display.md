@@ -308,7 +308,7 @@ k(block = (16, 16))
 - Pixel format: `BGRA8Unorm` — same packing as Metal (`0xAARRGGBB`). Requested explicitly so pixel code is portable across `--target metal` and `--target wgpu`.
 - Present: a full-screen-quad render pipeline whose fragment shader reads the `'surface` storage buffer directly and writes to the swapchain texture — no CPU readback, no `copy_buffer_to_texture`.
 - Swapchain size: the presented buffer's dimensions (reconfigured when the kernel is reallocated, see [Resizing](#resizing)).
-- Dependencies: `wgpu = "22"`, `winit = "0.30"` (added to the generated `Cargo.toml` only when the program uses `Screen`).
+- Dependencies: `wgpu = "23"`, `winit = "0.30"` (added to the generated `Cargo.toml` only when the program uses `Screen`).
 - Requires a DX12 (Windows), Vulkan (Windows / Linux), or Metal (macOS) capable GPU.
 
 ---

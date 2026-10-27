@@ -549,7 +549,7 @@ impl<'a> HostEmitter<'a> {
         self.line("                label: None,");
         self.line("                layout: None,");
         self.line("                module: shader,");
-        self.line(&format!("                entry_point: \"{}_main\",", name));
+        self.line(&format!("                entry_point: Some(\"{}_main\"),", name));
         self.line("                compilation_options: wgpu::PipelineCompilationOptions::default(),");
         self.line("                cache: None,");
         self.line("            }))");
@@ -1393,9 +1393,9 @@ impl<'a> HostEmitter<'a> {
         self.line("        });");
         self.line("        let blit_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {");
         self.line("            label: None, layout: Some(&blit_pl),");
-        self.line("            vertex: wgpu::VertexState { module: &blit_shader, entry_point: \"blit_vs\", buffers: &[],");
+        self.line("            vertex: wgpu::VertexState { module: &blit_shader, entry_point: Some(\"blit_vs\"), buffers: &[],");
         self.line("                compilation_options: wgpu::PipelineCompilationOptions::default() },");
-        self.line("            fragment: Some(wgpu::FragmentState { module: &blit_shader, entry_point: \"blit_fs\",");
+        self.line("            fragment: Some(wgpu::FragmentState { module: &blit_shader, entry_point: Some(\"blit_fs\"),");
         self.line("                targets: &[Some(wgpu::ColorTargetState { format: fmt, blend: None,");
         self.line("                    write_mask: wgpu::ColorWrites::ALL })],");
         self.line("                compilation_options: wgpu::PipelineCompilationOptions::default() }),");

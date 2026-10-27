@@ -517,10 +517,10 @@ See [`gpu-display.md`](gpu-display.html) for the full display reference. wgpu-sp
 <stem>_wgpu/
   src/main.rs        # Rust host code (wgpu crate)
   shaders/main.wgsl  # WGSL compute shader
-  Cargo.toml         # wgpu = "22", no build.rs
+  Cargo.toml         # wgpu = "23", no build.rs
 ```
 
-Requires wgpu 22+ and a DirectX 12, Vulkan, or Metal-capable GPU. No external GPU toolkit needed.
+Requires wgpu 23+ and a DirectX 12, Vulkan, or Metal-capable GPU. No external GPU toolkit needed.
 
 ```sh
 boring build --target wgpu main.br
