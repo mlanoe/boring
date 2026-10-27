@@ -386,6 +386,9 @@ interp_test!(float32_struct_method_math);
 // variable computed from an unannotated arithmetic expression, in an ordinary
 // (non-method) function — see tests/cases/float32_local_var_math.br's doc comment.
 interp_test!(float32_local_var_math);
+interp_test!(float16_array_literal_width_and_cast);
+interp_test!(float32_array_literal_width_and_cast);
+interp_test!(float64_array_literal_width_and_cast);
 // Generic METHOD call via turbofish (`obj.method<T>(...)`, V1 monomorphization
 // extension -- src/transpiler/monomorphize.rs's module doc comment). The
 // interpreter erases type args for every generic call (see

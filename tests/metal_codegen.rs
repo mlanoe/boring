@@ -29,8 +29,8 @@ pub req [float32]'kernel'unified scale([float32]'kernel'global src, int n) throw
             dst[i] = src[i] * 2.0
         dst
 "#);
-    assert!(msl.contains("kernel void __InlineKernel_3_1_kernel"), "{msl}");
-    assert!(rs.contains("__InlineKernel_3_1::new"), "{rs}");
+    assert!(msl.contains("kernel void BoringInlineKernel_3_1_kernel"), "{msl}");
+    assert!(rs.contains("BoringInlineKernel_3_1::new"), "{rs}");
     assert!(rs.contains("__inline_kernel_3_1.__boring_launch"), "{rs}");
     assert!(rs.contains("BoringKernelArg::Resident(__inline_kernel_3_1.dst.clone()"), "{rs}");
 }

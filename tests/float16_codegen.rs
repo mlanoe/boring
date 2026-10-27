@@ -154,6 +154,49 @@ def main():
 }
 
 #[test]
+fn cpu_generated_rust_float16_compound_assign_and_unwrapped_optional_casts() {
+    let source_text = r#"
+struct P:
+    let float16 x
+    let float16? maybe
+
+def main():
+    let float16 a = 1.5
+    let float16 b = 2.25
+    var float16 c = a + b * a - b / a
+    c += 1.0
+    c *= 2.0
+    c -= 0.5
+    c /= 2.0
+    print "arith {c as float64}"
+    let p = P(x = a, maybe = b)
+    let pm = p.maybe else a
+    print "unwrapped {pm as float64}"
+    let parsed = "3.5".parseFloat16() else a
+    print "parsed {parsed as float64}"
+"#;
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("float16_codegen/cpu_compound_else");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("main.br");
+    fs::write(&source, source_text).unwrap();
+    let interpreted = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["run"]).arg(&source).output().unwrap();
+    assert!(interpreted.status.success(), "{}", String::from_utf8_lossy(&interpreted.stderr));
+    let expected = "arith 4.125\nunwrapped 2.25\nparsed 3.5";
+    assert_eq!(String::from_utf8_lossy(&interpreted.stdout).trim(), expected);
+    let generated = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build"]).arg(&source).output().unwrap();
+    assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--offline", "-q", "--manifest-path"])
+        .arg(root.join("main_rust/Cargo.toml")).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), expected);
+}
+
+#[test]
 fn cpu_generated_rust_coerces_float16_reassignments() {
     let source_text = r#"
 struct HalfBox:
@@ -342,7 +385,9 @@ fn wgpu_enables_shader_f16_and_preserves_two_byte_storage() {
     assert!(host.contains("wgpu::Features::SHADER_F16"), "host does not request shader-f16:\n{host}");
     assert!(host.contains("Vec<half::f16>"), "host ABI is not f16:\n{host}");
     assert!(host.contains("half::f16::from_f32"), "host did not lower float16 construction:\n{host}");
-    assert!(manifest.contains("wgpu = \"23\""), "wgpu backend was not upgraded for WGSL f16:\n{manifest}");
+    assert!(host.contains("size.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)"),
+        "wgpu uploads do not align odd-sized f16 buffers:\n{host}");
+    assert!(manifest.contains("wgpu = \"25\""), "wgpu backend does not use a Naga version with WGSL f16 support:\n{manifest}");
     assert!(manifest.contains("half ="), "wgpu manifest lacks half dependency");
 
     let generated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("float16_codegen/wgpu/main_wgpu");

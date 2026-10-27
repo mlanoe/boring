@@ -1,0 +1,19 @@
+# Regression test: (1) untyped numeric literals in an array literal adopt the width of
+# the typed float elements (`[a, 2.0, 0.5]` with `float64 a`), so sum/sorted/min/+=
+# work; (2) `x as float64` on an index / dict / method-call result of float64
+# elements is a numeric cast, never a string `.trim().parse()`.
+def main():
+    let float64 a = 1.5
+    let arr = [a, 2.0, 0.5]
+    let float64 total0 = arr.sum()
+    print "{total0 as float64}"
+    var float64 total = 0.0
+    for v in arr:
+        total += v
+    print "{total as float64}"
+    let sorted = arr.sorted()
+    print "{sorted[0] as float64} {sorted[2] as float64}"
+    print "{arr.min() as float64} {arr.max() as float64}"
+    let {string=float64} d = {"k" = 2.5 as float64}
+    print "{d["k"] as float64}"
+    print "{(d.get("k") as float64) else -1.0}"

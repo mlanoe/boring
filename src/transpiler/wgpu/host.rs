@@ -219,7 +219,7 @@ impl<'a> HostEmitter<'a> {
         self.line("fn __boring_gpu_device() -> std::sync::Arc<wgpu::Device> { std::sync::Arc::clone(__BORING_GPU_DEVICE.get().expect(\"GPU device not initialized\")) }");
         self.line("fn __boring_gpu_queue() -> std::sync::Arc<wgpu::Queue> { std::sync::Arc::clone(__BORING_GPU_QUEUE.get().expect(\"GPU queue not initialized\")) }");
         self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"wgpu\".into() }");
-        self.out.push_str(&crate::transpiler::unified::single_backends_fn("wgpu", "gpu", "wgpu::Instance::new(wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map_or(\"gpu\", |a| match a.get_info().device_type { wgpu::DeviceType::DiscreteGpu => \"discrete\", wgpu::DeviceType::IntegratedGpu => \"integrated\", _ => \"gpu\" })"));
+        self.out.push_str(&crate::transpiler::unified::single_backends_fn("wgpu", "gpu", "wgpu::Instance::new(&wgpu::InstanceDescriptor::default()).enumerate_adapters(wgpu::Backends::all()).first().map_or(\"gpu\", |a| match a.get_info().device_type { wgpu::DeviceType::DiscreteGpu => \"discrete\", wgpu::DeviceType::IntegratedGpu => \"integrated\", _ => \"gpu\" })"));
         self.blank();
     }
 
@@ -913,11 +913,11 @@ impl<'a> HostEmitter<'a> {
         self.line("    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });");
         self.line("    encoder.copy_buffer_to_buffer(src, 0, &staging, 0, size);");
         self.line("    queue.submit(std::iter::once(encoder.finish()));");
-        self.line("    device.poll(wgpu::MaintainBase::Wait);");
+        self.line("    let _ = device.poll(wgpu::MaintainBase::Wait);");
         self.line("    let slice = staging.slice(..);");
         self.line("    let (tx, rx) = std::sync::mpsc::channel();");
         self.line("    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });");
-        self.line("    device.poll(wgpu::MaintainBase::Wait);");
+        self.line("    let _ = device.poll(wgpu::MaintainBase::Wait);");
         self.line("    rx.recv().unwrap().unwrap();");
         self.line("    let data = bytemuck::cast_slice(&staging.slice(..).get_mapped_range()).to_vec();");
         self.line("    staging.unmap();");
@@ -929,16 +929,20 @@ impl<'a> HostEmitter<'a> {
         // H2D helper.
         self.line("fn __boring_gpu_copy_h2d(device: &wgpu::Device, queue: &wgpu::Queue, src: &[u8], dst: &wgpu::Buffer) {");
         self.line("    let size = src.len() as u64;");
+        self.line("    let staging_size = size.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);");
         self.line("    let staging = device.create_buffer(&wgpu::BufferDescriptor {");
         self.line("        label: None,");
-        self.line("        size,");
+        self.line("        size: staging_size,");
         self.line("        usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,");
         self.line("        mapped_at_creation: true,");
         self.line("    });");
-        self.line("    staging.slice(..).get_mapped_range_mut().copy_from_slice(src);");
+        self.line("    {");
+        self.line("        let mut mapped = staging.slice(..).get_mapped_range_mut();");
+        self.line("        mapped[..src.len()].copy_from_slice(src);");
+        self.line("    }");
         self.line("    staging.unmap();");
         self.line("    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });");
-        self.line("    encoder.copy_buffer_to_buffer(&staging, 0, dst, 0, size);");
+        self.line("    encoder.copy_buffer_to_buffer(&staging, 0, dst, 0, staging_size);");
         self.line("    queue.submit(std::iter::once(encoder.finish()));");
         self.line("}");
         self.blank();
@@ -1073,7 +1077,7 @@ impl<'a> HostEmitter<'a> {
             self.line("}");
             self.blank();
             self.line("async fn async_main() {");
-            self.line("    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
+            self.line("    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());");
             self.line("    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.expect(\"No GPU adapter found\");");
             self.line("    let mut __boring_required_features = wgpu::Features::empty();");
             if self.has_emulated_shader {
@@ -1092,12 +1096,12 @@ impl<'a> HostEmitter<'a> {
             self.line("        required_features: __boring_required_features,");
             self.line("        required_limits: adapter.limits(),");
             self.line("        ..Default::default()");
-            self.line("    }, None).await.expect(\"Failed to create device\");");
+            self.line("    }).await.expect(\"Failed to create device\");");
             // Defensive: make sure the device is fully settled before any real
             // dispatch work begins. There's nothing queued yet, so this returns
             // essentially immediately -- it's here only to rule out adapter/device
             // warm-up timing as a source of flaky early-kernel behavior.
-            self.line("    device.poll(wgpu::MaintainBase::Wait);");
+            self.line("    let _ = device.poll(wgpu::MaintainBase::Wait);");
             // Without this, a validation error NOT already inside an explicit
             // push/pop_error_scope pair (e.g. pipeline creation at kernel `new()`
             // time — see `emit_kernel_new`, no error scope wraps it there) hits
@@ -1542,7 +1546,7 @@ impl<'a> HostEmitter<'a> {
         // ── fn main() ─────────────────────────────────────────────────────────
         self.line("fn main() {");
         self.line("    let (instance, adapter, device, queue) = pollster::block_on(async {");
-        self.line("        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
+        self.line("        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());");
         self.line("        let adapter  = instance.request_adapter(&wgpu::RequestAdapterOptions::default())");
         self.line("            .await.expect(\"No GPU adapter found\");");
         self.line("        let mut __boring_required_features = wgpu::Features::empty();");
@@ -1558,12 +1562,12 @@ impl<'a> HostEmitter<'a> {
         self.line("                required_features: __boring_required_features,");
         self.line("                required_limits: adapter.limits(),");
         self.line("                ..Default::default()");
-        self.line("            }, None)");
+        self.line("            })");
         self.line("            .await.expect(\"Failed to create device\");");
         self.line("        (instance, adapter, device, queue)");
         self.line("    });");
         // Defensive: see the non-Screen async_main path for why.
-        self.line("    device.poll(wgpu::MaintainBase::Wait);");
+        self.line("    let _ = device.poll(wgpu::MaintainBase::Wait);");
         // See the non-Screen async_main path's identical call for why: reports
         // (instead of panicking on) a validation error not already inside an
         // explicit error scope, e.g. pipeline creation at kernel `new()` time.

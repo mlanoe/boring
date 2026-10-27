@@ -326,6 +326,15 @@ impl Transpiler {
             ExprKind::Else(e, default) => {
                 // `x as T else default` — cast with fallback: always use unwrap_or (never ?)
                 if let ExprKind::Cast(inner, ty) = &e.kind {
+                    // A numeric (or numeric-optional) source is converted, not parsed:
+                    // `d.get(k) as float64 else 0.0` → `.map(|v| v as f64).unwrap_or(0.0)`.
+                    if is_known_numeric_scalar_type(ty.without_mut()) {
+                        match self.resolve_expr_type(inner).as_ref().map(Type::without_mut) {
+                            Some(Type::Optional(t)) if is_known_numeric_scalar_type(t.without_mut()) =>
+                                return format!("{}.unwrap_or({})", self.emit_expr(e), self.emit_expr_owned(default)),
+                            _ => {}
+                        }
+                    }
                     let src = self.emit_expr(inner);
                     let dv = self.emit_expr_owned(default);
                     let dst_ty = self.emit_type(ty);
@@ -1251,6 +1260,22 @@ impl Transpiler {
             return code;
         }
         let dst = self.emit_type(ty);
+        // A numeric `T?` source (`dict.get(k)`, `arr.first`) cast to a numeric type maps
+        // over the optional, giving a numeric `U?` — never a string parse.
+        if let Some(Type::Optional(inner)) = self.resolve_expr_type(e).as_ref().map(Type::without_mut).cloned() {
+            let dst_numeric = is_known_numeric_scalar_type(ty.without_mut());
+            if dst_numeric && is_known_numeric_scalar_type(inner.without_mut()) {
+                let is_f16 = |t: &Type| matches!(t.without_mut(), Type::Float16)
+                    || matches!(t.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16"));
+                let conv = match (is_f16(&inner), is_f16(ty)) {
+                    (true, true) => "v".to_string(),
+                    (true, false) => format!("f32::from(v) as {}", dst),
+                    (false, true) => "half::f16::from_f32(v as f32)".to_string(),
+                    (false, false) => format!("v as {}", dst),
+                };
+                return format!("{}.map(|v| {})", src, conv);
+            }
+        }
         let dst_is_f16 = matches!(ty.without_mut(), Type::Float16)
             || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float16" | "f16"));
         let resolved_is_f16 = |expr: &Expr| self.resolve_expr_type(expr).is_some_and(|t|
@@ -3617,7 +3642,16 @@ impl Transpiler {
                     let lhs_s    = self.emit_expr(lhs_copy);
                     self.in_lhs_assign.set(false);
                     if target_s == lhs_s {
-                        let rhs_s = self.emit_expr_owned(rhs);
+                        let mut rhs_s = self.emit_expr_owned(rhs);
+                        // `half::f16` has no `+= {float}`: an untyped numeric literal on the
+                        // right of a float16 compound assignment must be materialized as f16.
+                        if self.infer_float_width(lhs_copy) == Some("f16")
+                            && (matches!(&rhs.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_))
+                                || matches!(&rhs.kind, ExprKind::UnaryOp(UnaryOp::Neg, inner)
+                                    if matches!(inner.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_))))
+                        {
+                            rhs_s = format!("half::f16::from_f32(({}) as f32)", rhs_s);
+                        }
                         return format!("{} {} {}", target_s, op_str, rhs_s);
                     }
                 }
@@ -5646,6 +5680,10 @@ impl Transpiler {
             // known the other, if also known, necessarily agrees).
             ExprKind::BinOp(_, l, r) => self.infer_float_width_inner(l, visiting).or_else(|| self.infer_float_width_inner(r, visiting)),
             ExprKind::UnaryOp(_, inner) => self.infer_float_width_inner(inner, visiting),
+            // `<T? expr> else default` yields the unwrapped `T`: use the default's width,
+            // or the optional's own resolved element type.
+            ExprKind::Else(_, default) => self.infer_float_width_inner(default, visiting)
+                .or_else(|| self.resolve_expr_type(e).as_ref().and_then(width_of)),
             ExprKind::Array(elems) => elems.iter()
                 .find_map(|elem| self.infer_float_width_inner(elem, visiting)),
             ExprKind::Index(base, _) => match &base.kind {

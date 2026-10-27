@@ -1775,6 +1775,23 @@ impl Interpreter {
                 for e in elems {
                     vals.push(self.eval_expr(e, Rc::clone(&env))?);
                 }
+                // Untyped numeric literals adopt the width of the array's typed
+                // float elements (`[a, 2.0, 0.5]` with `float32 a`), same rule as
+                // binary operators (`coerce_float_literal_pair`).
+                let typed_width = vals.iter().zip(elems).find_map(|(v, e)| match v {
+                    Value::Float16(_) | Value::Float32(_) if !is_untyped_numeric_literal(e) => Some(v.clone()),
+                    _ => None,
+                });
+                if let Some(proto) = typed_width {
+                    for (v, e) in vals.iter_mut().zip(elems) {
+                        if !is_untyped_numeric_literal(e) { continue; }
+                        let f = match v { Value::Float64(f) => *f, Value::Int(n) => *n as f64, _ => continue };
+                        *v = match proto {
+                            Value::Float16(_) => Value::Float16(half::f16::from_f32(f as f32)),
+                            _ => Value::Float32(f as f32),
+                        };
+                    }
+                }
                 Ok(Value::Array(vals.into()))
             }
 

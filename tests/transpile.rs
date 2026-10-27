@@ -591,6 +591,9 @@ transpile_test!(float32_struct_method_math);
 // variable computed from an unannotated arithmetic expression, in an ordinary
 // (non-method) function — see tests/cases/float32_local_var_math.br's doc comment.
 transpile_test!(float32_local_var_math);
+transpile_test!(float16_array_literal_width_and_cast);
+transpile_test!(float32_array_literal_width_and_cast);
+transpile_test!(float64_array_literal_width_and_cast);
 // Top-level `let` constants referenced from a free function, a struct method, AND an
 // enum method — regression test for the transpiler silently dropping the `const`
 // declaration for a module-scope `let` whenever nothing but a function/method body

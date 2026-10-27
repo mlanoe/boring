@@ -149,7 +149,10 @@ fn lower_expr(
     captures.sort_by(|a, b| a.0.cmp(&b.0));
 
     *serial += 1;
-    let kernel_name = format!("__InlineKernel_{}_{}", expr.line, serial);
+    // WGSL reserves identifiers beginning with `__` (enforced by Naga 25+).
+    // Use a backend-neutral generated name so inline kernels remain valid on
+    // every target without making the wgpu device/host names diverge.
+    let kernel_name = format!("BoringInlineKernel_{}_{}", expr.line, serial);
     let instance_name = format!("__inline_kernel_{}_{}", expr.line, serial);
 
     let mut fields = Vec::new();

@@ -185,6 +185,13 @@ float32 a = 1.0
 let c = a + 3.14        # OK — 3.14 resolves to float32 in this context
 ```
 
+The same holds inside an array literal: untyped numeric literals adopt the width of
+the typed float elements (`[a, 2.0, 0.5]` with `float32 a` is a `[float32]`; same for
+`float16`; `float64` is unchanged). Casting an indexed, dict-lookup or method-call
+result (`sorted[0] as float64`, `arr.min() as float64`, `d.get("k") as float64`) is a
+numeric conversion, never a string parse; `d.get(k)` yields a numeric `T?`, so
+`(d.get(k) as float64) else 0.0` is the unwrapped form.
+
 `float` participates in this rule as `float64` — since it *is* `float64`
 after alias resolution, `float_var + float32_var` is exactly as much an
 error as `float64_var + float32_var`, with no special case needed: the

@@ -40,14 +40,14 @@ fn init_fn(needs_subgroups: bool, needs_f16: bool) -> String {
         "pub fn __boring_unified_init() -> bool {{
     if __BORING_GPU_DEVICE.get().is_some() {{ return true; }}
     pollster::block_on(async {{
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let Some(adapter) = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await else {{ return false }};
 {features}        let Ok((device, queue)) = adapter.request_device(&wgpu::DeviceDescriptor {{
             required_features,
             required_limits: adapter.limits(),
             ..Default::default()
-        }}, None).await else {{ return false }};
-        device.poll(wgpu::MaintainBase::Wait);
+        }}).await else {{ return false }};
+        let _ = device.poll(wgpu::MaintainBase::Wait);
         device.on_uncaptured_error(Box::new(|e| eprintln!(\"boring: uncaptured GPU error: {{}}\", e)));
         let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::new(device));
         let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::new(queue));

@@ -373,6 +373,24 @@ impl Transpiler {
                     _ => None,
                 }
             }
+            // Element-preserving array methods keep the receiver's array type, so
+            // `let sorted = arr.sorted()` then `sorted[0] as float64` resolves its element.
+            ExprKind::MethodCall(recv, method, _)
+                if matches!(method.as_str(), "sorted" | "reversed" | "clone")
+                    && matches!(self.resolve_expr_type(recv).as_ref().map(Type::without_mut),
+                        Some(Type::Array(_) | Type::ArrayN(..) | Type::ArrayNExpr(..))) =>
+            {
+                self.resolve_expr_type(recv).map(|t| t.without_mut().clone())
+            }
+            // `dict.get(k)` is the (possibly missing) value type `V?`.
+            ExprKind::MethodCall(recv, method, _) if method == "get"
+                && matches!(self.resolve_expr_type(recv).as_ref().map(Type::without_mut), Some(Type::Dict(..))) =>
+            {
+                match self.resolve_expr_type(recv)?.without_mut() {
+                    Type::Dict(_, v) => Some(Type::Optional(Box::new(v.without_mut().clone()))),
+                    _ => None,
+                }
+            }
             ExprKind::MethodCall(recv, method, _) => {
                 // A call through a trait object (a trait-typed local/param/field) is typed by the
                 // trait's own declaration.
