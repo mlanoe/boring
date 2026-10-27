@@ -470,3 +470,12 @@ caret) that `layout` adds afterwards must not reach the cache (hover_test caught
 `rt.root` copy (~2.4 ms) and the clone. Compiler quirks met in `boring build` (worked around with methods on `LayoutMemory`): indexing
 or assigning a dict field of an `'actor` field directly (`memo.memory.placed[key]`), and `!= nil` on a dict lookup inside a struct
 method. Still open: accessibility for off-window stub rows, `rt.root` copies, cache of nodes inside non-windowed trees.
+
+**Window-level layout cache (2026-10-27, `layout`, `Runtime.rootStamp`).** Reading `rt.root` deep-copies the mounted tree, which was
+the cost left on an unchanged frame. `layout` now asks `rt.rootStamp()` (`id.generation.rev` read through optional chaining, no copy),
+and with the epoch and the window size looks the whole placed window up in the layout memory; the live marks (focus, hover, caret,
+sheets) are applied afterwards by `finishLayout` on a copy. `bench_tree`, 1000 rows, lightly loaded box: layout of an unchanged tree
+6.5 ms → 2.7 ms (4000 rows: 28 → 12.5 ms); what is left is cloning the cached `Placed`. Two traps met in `boring build`: an `if let`
+on a dict behind an `'actor` field holds the lock for the whole block (a later read of the same memory deadlocks: read through a
+`LayoutMemory` method that returns), and `let x = dict[key]` is typed as the value, not an Option. The interpreter shares the cached
+entry, so the copy before `finishLayout` stays explicit.
