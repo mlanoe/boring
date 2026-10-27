@@ -1612,7 +1612,7 @@ impl Transpiler {
                     };
                     let has_lit = match &v.kind {
                         ExprKind::Dict(ps) => ps.iter().any(|(_, e)| is_lit(e)),
-                        ExprKind::Array(es) => es.iter().any(|e| is_lit(e)),
+                        ExprKind::Array(es) => es.iter().any(is_lit),
                         _ => false,
                     };
                     if has_lit {
@@ -1624,7 +1624,7 @@ impl Transpiler {
                         };
                         match &mut nv.kind {
                             ExprKind::Dict(ps) => ps.iter_mut().for_each(|(_, e)| wrap(e)),
-                            ExprKind::Array(es) => es.iter_mut().for_each(|e| wrap(e)),
+                            ExprKind::Array(es) => es.iter_mut().for_each(wrap),
                             _ => {}
                         }
                         typed.value = Some(nv);

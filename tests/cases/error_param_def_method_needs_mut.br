@@ -1,0 +1,12 @@
+struct Counter:
+    var int n
+
+    def void bump():
+        self.n = self.n + 1
+
+def void touch(Counter c):
+    c.bump()
+
+def main():
+    let c = Counter(n=0)
+    touch(c)

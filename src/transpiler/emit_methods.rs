@@ -2427,6 +2427,17 @@ impl Transpiler {
         None
     }
 
+    /// A string-method pattern argument (`s.contains(x)`, `split`, `startsWith`, ...) is an
+    /// `Rc<str>`/`Arc<str>` that must be coerced with `.as_ref()`, unless it is a literal (already
+    /// `&str`) or the source already wrote the coercion itself (`x.asRef()`), which stays as is.
+    fn string_pattern_needs_as_ref(arg: &Expr) -> bool {
+        match &arg.kind {
+            ExprKind::Str(_) => false,
+            ExprKind::MethodCall(_, m, margs) => !(margs.is_empty() && (m == "asRef" || m == "as_ref")),
+            _ => true,
+        }
+    }
+
     /// Emit an argument for an external call whose Rust signature is unknown to Boring.
     /// Literals already are `&str`; non-literal Boring strings need dereferencing from
     /// their `Arc<str>`/`Rc<str>` representation. Explicit `[external_fns]` metadata
@@ -2663,7 +2674,7 @@ impl Transpiler {
             // For &str literals, no coercion needed (already &str which implements Pattern).
             "split" => {
                 let sep_arg = args.first();
-                let needs_coerce = sep_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let needs_coerce = sep_arg.map(|a| Self::string_pattern_needs_as_ref(&a.value)).unwrap_or(false);
                 let sep_s = sep_arg.map(|a| self.emit_expr(&a.value))
                     .unwrap_or_else(|| "\"\"".to_string());
                 let sep_s = if needs_coerce { format!("{}.as_ref()", sep_s) } else { sep_s };
@@ -2676,21 +2687,21 @@ impl Transpiler {
             }
             "startsWith" | "hasPrefix" => {
                 let arg = args.first();
-                let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let needs_coerce = arg.map(|a| Self::string_pattern_needs_as_ref(&a.value)).unwrap_or(false);
                 let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
                 let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
                 return Some(format!("{}.starts_with({})", obj_s, arg_s));
             }
             "endsWith" | "hasSuffix" => {
                 let arg = args.first();
-                let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let needs_coerce = arg.map(|a| Self::string_pattern_needs_as_ref(&a.value)).unwrap_or(false);
                 let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
                 let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
                 return Some(format!("{}.ends_with({})", obj_s, arg_s));
             }
             "contains" => {
                 let arg = args.first();
-                let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let needs_coerce = arg.map(|a| Self::string_pattern_needs_as_ref(&a.value)).unwrap_or(false);
                 let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
                 let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
                 return Some(format!("{}.contains({})", obj_s, arg_s));
@@ -4762,7 +4773,7 @@ impl Transpiler {
                 }
                 self.emit_expr_owned(&a.value)
             }).collect()
-        } else if (rust_method == "push" || rust_method == "extend") && {
+        } else if (rust_method == "push" || rust_method == "extend" || (rust_method == "insert" && args.len() == 2)) && {
             // Use emit_expr_owned for any vec push so non-Copy values (e.g. Value enum) are cloned.
             match &obj.kind {
                 ExprKind::Var(v) => self.vec_vars.contains(v.as_str()) || self.str_vec_vars.contains(v.as_str())
@@ -7191,6 +7202,7 @@ impl Transpiler {
             struct_method_return_types: self.struct_method_return_types.clone(),
             struct_method_throws: self.struct_method_throws.clone(),
             struct_method_names: self.struct_method_names.clone(),
+            pending_pre_infer: Vec::new(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             observed_locals: self.observed_locals.clone(),
             observed_fields: self.observed_fields.clone(),

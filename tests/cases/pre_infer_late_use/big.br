@@ -1,0 +1,5 @@
+struct Big:
+    var int v
+
+    req Big add(Big o):
+        return Big(v=self.v + o.v)

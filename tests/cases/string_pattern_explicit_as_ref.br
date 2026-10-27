@@ -1,0 +1,13 @@
+def bool has(string a, string b):
+    let hay = "{a}".toLower()
+    let needle = "{b}".toLower()
+    hay.contains(needle.asRef())
+
+def bool has2(string a, string b):
+    let hay = "{a}".toLower()
+    let needle = "{b}".toLower()
+    hay.contains(needle)
+
+def main():
+    print(has("A", "a"))
+    print(has2("A", "a"))

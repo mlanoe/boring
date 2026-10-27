@@ -1,0 +1,13 @@
+struct Num:
+    var int n
+
+    req (Big, Big) pair():
+        return (Big(v=self.n), Big(v=2))
+
+    req int run(Num other):
+        let (p, q) = self.pair()
+        let (r, s) = other.pair()
+        tier(p, q, r, s)
+
+int tier(Big a, Big b, Big c, Big d):
+    return a.add(b).v + c.add(d).v

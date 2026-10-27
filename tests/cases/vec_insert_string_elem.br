@@ -1,0 +1,15 @@
+struct L:
+    var {string=int} table = {=}
+
+    def void go(string target_id, int delta):
+        mut ids = []
+        mut orders = []
+        for id, v in table:
+            ids.push(id)
+            orders.push(v)
+        ids.remove(0)
+        ids.insert(1, target_id)
+
+def main():
+    mut l = L()
+    l.go("a", 1)

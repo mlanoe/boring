@@ -846,6 +846,15 @@ impl Transpiler {
                             // that actually decides whether transpilation fails — already knew
                             // better; this call keeps both checks in sync.
                             self.method_is_req_or_task(struct_name, method)
+                                // `.clone()` is a built-in, read-only pass-through, not a user
+                                // `def` (unless the struct declares its own `clone`): it neither
+                                // needs `mut` nor pins the param to an owned qualifier.
+                                || (method == "clone"
+                                    && args.is_empty()
+                                    && !self
+                                        .struct_method_names
+                                        .get(struct_name.as_str())
+                                        .is_some_and(|ms| ms.contains("clone")))
                         } else {
                             // Not a user struct — check whether it's a bare array/dict/set
                             // param. Built-in collection methods are read-only unless listed

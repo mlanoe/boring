@@ -1287,6 +1287,8 @@ struct Transpiler {
     /// implicit `self` covers fields only, so emitting the bare call would produce Rust that
     /// fails with E0425.
     pub(crate) struct_method_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Files whose speculative qualifier pre-inference waits for the whole scan (see `deep_pre_scan`).
+    pub(crate) pending_pre_infer: Vec<crate::ast::Program>,
     /// Use-site qualifier inference (priority 5).
     /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
     /// function body before emission. Cleared between function bodies.
@@ -1792,6 +1794,7 @@ impl Transpiler {
             ]),
             struct_method_throws: std::collections::HashSet::new(),
             struct_method_names: std::collections::HashMap::new(),
+            pending_pre_infer: Vec::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
             observed_locals: std::collections::HashMap::new(),
             observed_fields: std::collections::HashMap::new(),
@@ -2201,6 +2204,7 @@ impl Transpiler {
                 let prev_dir = self.source_dir.clone();
                 self.dyn_fact_pass = true;
                 self.deep_pre_scan(program, &mut visited);
+                self.run_pending_pre_infer();
                 self.dyn_fact_pass = false;
                 self.source_dir = prev_dir;
                 self.shared_dyn_traits = self.dyn_facts.targets();
@@ -2208,6 +2212,7 @@ impl Transpiler {
             let mut visited = std::collections::HashSet::new();
             let prev_dir = self.source_dir.clone();
             self.deep_pre_scan(program, &mut visited);
+            self.run_pending_pre_infer();
             self.source_dir = prev_dir;
             self.resolve_trait_borrow_params();
             self.trait_borrow_resolved = true;

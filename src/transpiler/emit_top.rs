@@ -515,7 +515,18 @@ impl Transpiler {
         // those declared in the files it `use`s (their fields decide whether a loop variable
         // over `m.children` is a known struct, i.e. whether a recursive call passes `&c`) —
         // so it runs after the imported files have been pre-scanned, not before.
-        self.pre_infer_fn_qualifiers(program);
+        // Deferred to the end of the whole scan (`run_pending_pre_infer`): a file can mention
+        // a struct that a *later* `use` in the entry file registers (e.g. `use values` before
+        // `use numlib.big_num.*`), which this per-file pass would not know yet.
+        self.pending_pre_infer.push(program.clone());
+    }
+
+    /// Run the speculative qualifier pre-inference for every file queued by `deep_pre_scan`,
+    /// now that every struct of every reachable file is registered.
+    pub(crate) fn run_pending_pre_infer(&mut self) {
+        for program in std::mem::take(&mut self.pending_pre_infer) {
+            self.pre_infer_fn_qualifiers(&program);
+        }
     }
 
     /// The recursion half of `deep_pre_scan`: visit every file `program` `use`s.

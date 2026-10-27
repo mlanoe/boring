@@ -1,0 +1,14 @@
+@derive(Clone)
+struct Big:
+    int v
+
+def int take(Big b):
+    return b.v
+
+def int usek(Big d):
+    let c = d.clone()
+    return take(c)
+
+def main():
+    let x = Big(v=1)
+    print(usek(x))

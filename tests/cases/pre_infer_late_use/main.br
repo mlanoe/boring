@@ -1,0 +1,5 @@
+use values
+use big
+
+def main():
+    print(Num(n=1).run(Num(n=2)))
