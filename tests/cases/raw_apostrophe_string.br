@@ -1,0 +1,14 @@
+# '''...''' is raw: no interpolation, no escapes, `"`/`{`/`}`/`\` all literal.
+let json = '''{"name": "Alice", "age": 30, "addr": {"city": "Paris"}}'''
+print json
+
+let path = '''C:\temp\n {not_a_hole}'''
+print path
+print path.length
+
+let sql = '''
+    SELECT * FROM t
+      WHERE data->>'k' = "v"
+'''
+print sql
+print sql.length

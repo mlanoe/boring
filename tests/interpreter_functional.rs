@@ -228,6 +228,7 @@ itest!(fixed_array);
 itest!(labeled_array);
 itest!(collections2);
 itest!(triple_string);
+itest!(raw_apostrophe_string);
 itest!(pipe);
 itest!(supertraits);
 itest!(type_cast);
@@ -451,6 +452,8 @@ itest!(typed_catch_match_error);
 itest!(float32_struct_method_math);
 itest!(float32_math_builtins);
 itest!(float32_local_var_math);
+itest!(float32_array_literal_width_and_cast);
+itest!(float64_array_literal_width_and_cast);
 itest!(if_else_cast_numeric);
 itest!(unresolved_field_cast_numeric);
 

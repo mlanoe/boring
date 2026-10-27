@@ -80,6 +80,64 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
             continue;
         }
 
+        // ── Raw triple-apostrophe string ────────────────────────────────────
+        // `'''...'''`: no interpolation, no escape processing — every character
+        // up to the next `'''` is literal. Three consecutive `'` never occur in a
+        // valid program otherwise (an ownership qualifier is always `'` followed
+        // by an identifier: `T'actor'task`), so no context is needed to tell
+        // this apart from qualifiers.
+        if ch == '\'' && chars.get(i + 1) == Some(&'\'') && chars.get(i + 2) == Some(&'\'') {
+            let start_line = line;
+            i += 3; // consume opening '''
+
+            let mut raw = String::new();
+            let mut newlines_consumed = 0usize;
+            let mut closed = false;
+
+            while i < n {
+                if chars[i] == '\''
+                    && chars.get(i + 1) == Some(&'\'')
+                    && chars.get(i + 2) == Some(&'\'')
+                {
+                    i += 3;
+                    closed = true;
+                    break;
+                }
+                if chars[i] == '\n' {
+                    newlines_consumed += 1;
+                    line += 1;
+                }
+                raw.push(chars[i]);
+                i += 1;
+            }
+
+            if !closed {
+                return Err(LexError::UnterminatedString { line: start_line, col: 1 });
+            }
+
+            // Same dedent as `"""`, then encode as a regular string token whose
+            // own escape/interpolation processing is a no-op on this content:
+            // `{`/`}` doubled (literal brace), `\` and `"` escaped.
+            let content = dedent_triple(&raw);
+            result.push('"');
+            for c in content.chars() {
+                match c {
+                    '"'  => { result.push('\\'); result.push('"'); }
+                    '\n' => { result.push('\\'); result.push('n'); }
+                    '\\' => { result.push('\\'); result.push('\\'); }
+                    '{'  => result.push_str("{{"),
+                    '}'  => result.push_str("}}"),
+                    other => result.push(other),
+                }
+            }
+            result.push('"');
+
+            for _ in 0..newlines_consumed {
+                result.push('\n');
+            }
+            continue;
+        }
+
         if ch == '"' {
             // ── Triple-quoted string ────────────────────────────────────────
             if chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"') {
@@ -1478,14 +1536,68 @@ mod tests {
 }
 
 #[cfg(test)]
-mod _tmp_verify {
+mod raw_apostrophe_strings {
     use super::*;
-    #[test]
-    fn tmp_check_triple_backslash() {
-        let src = "\"\"\"\nC:\\Users\\name\n\"\"\"";
-        let toks = lex(src).unwrap();
-        for t in &toks {
-            println!("{:?}", t);
+
+    fn kinds(src: &str) -> Vec<TokenKind> {
+        lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+    }
+
+    fn first_str(src: &str) -> String {
+        match &kinds(src)[3] {
+            TokenKind::Str(s) => s.clone(),
+            other => panic!("expected Str, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn json_with_quotes_and_braces_is_literal() {
+        // `let x = '''...'''` → tokens: Let, Ident, Eq, Str
+        assert_eq!(
+            first_str("let x = '''{\"a\": [1, 2], \"b\": {}}'''"),
+            "{\"a\": [1, 2], \"b\": {}}"
+        );
+    }
+
+    #[test]
+    fn no_escape_processing_and_no_interpolation() {
+        assert_eq!(first_str("let x = '''C:\\temp\\n {name}'''"), "C:\\temp\\n {name}");
+    }
+
+    #[test]
+    fn multiline_is_dedented_like_triple_double_quote() {
+        // Same dedent/newline rules as `"""` (including the trailing `\n` left by
+        // an indented closing delimiter) — compared directly, brace-free content.
+        let body = "\n    first \"q\"\n      second\n    ";
+        assert_eq!(
+            first_str(&format!("let x = '''{body}'''")),
+            first_str(&format!("let x = \"\"\"{body}\"\"\""))
+        );
+        assert_eq!(first_str(&format!("let x = '''{body}'''")), "first \"q\"\n  second\n");
+    }
+
+    #[test]
+    fn line_numbers_after_multiline_are_preserved() {
+        let toks = lex("let x = '''\na\nb\n'''\nlet y = 1").unwrap();
+        let y = toks.iter().find(|t| matches!(&t.kind, TokenKind::Ident(s) if s == "y")).unwrap();
+        assert_eq!(y.line, 5);
+    }
+
+    #[test]
+    fn stacked_qualifiers_are_not_mistaken_for_a_raw_string() {
+        let ks = kinds("let T'actor'task x = 1");
+        assert!(ks.iter().filter(|k| matches!(k, TokenKind::Tick)).count() == 2);
+        assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))));
+    }
+
+    #[test]
+    fn apostrophes_inside_comments_and_strings_are_ignored() {
+        assert!(!kinds("# '''not a string\nlet x = 1").iter().any(|k| matches!(k, TokenKind::Str(_))));
+        assert_eq!(first_str("let x = \"it'''s\""), "it'''s");
+    }
+
+    #[test]
+    fn unterminated_raw_string_is_an_error() {
+        assert!(matches!(lex("let x = '''abc"), Err(LexError::UnterminatedString { .. })));
     }
 }

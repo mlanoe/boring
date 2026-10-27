@@ -569,6 +569,31 @@ let sql = format!("SELECT *\nFROM users\nWHERE age > 18\n");
 let query = format!("SELECT *\nFROM {}\nLIMIT {}\n", table, limit);
 ```
 
+### Raw strings — `'''...'''`
+
+`'''...'''` is a **raw** string: nothing inside is interpreted. No `{expr}` interpolation, no `{{`/`}}` doubling, no `\n`/`\t` escapes — every character up to the next `'''` is literal, including `"`, `{`, `}` and `\`. It exists for text that is full of those characters (JSON, SQL, regexes, Windows paths):
+
+```boring
+let body = '''{"name": "Alice", "tags": ["a", "b"]}'''
+
+let query = '''
+    SELECT * FROM t
+    WHERE data->>'k' = "{not_a_hole}"
+    '''
+
+let path = '''C:\temp\new'''     # backslashes stay backslashes
+```
+
+Multiline raw strings follow the same dedent and first/last-newline rules as `"""` (the indentation of the closing delimiter is stripped from every line). A raw string has no escape for `'''` itself: text that contains three consecutive apostrophes can't be written this way.
+
+Use `"""` when you want interpolation, `'''` when you don't. A lone `'` or `''` is not a string literal — `'` is otherwise only used by ownership qualifiers (`T'actor'task`), and three consecutive apostrophes never occur there, so `'''` needs no surrounding context to be recognised.
+
+**Rust equivalent** — an ordinary string literal with the content escaped (no `format!`), identical to what a `"..."` literal with no holes produces:
+
+```rust
+let body: Arc<str> = Arc::<str>::from("{\"name\": \"Alice\", \"tags\": [\"a\", \"b\"]}");
+```
+
 ### `print` and `write`
 
 `print` outputs with a trailing newline; `write` outputs without one.

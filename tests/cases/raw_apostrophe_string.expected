@@ -1,0 +1,6 @@
+{"name": "Alice", "age": 30, "addr": {"city": "Paris"}}
+C:\temp\n {not_a_hole}
+22
+SELECT * FROM t
+  WHERE data->>'k' = "v"
+40

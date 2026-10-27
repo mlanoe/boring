@@ -130,6 +130,47 @@ def string preprocess_triple_strings(string source):
                 result = result + chars[i]
                 i += 1
             continue
+        if ch == "'" and i + 2 < n and chars[i + 1] == "'" and chars[i + 2] == "'":
+            # Raw '''...''': no interpolation, no escapes. Re-emitted as a regular
+            # string token with `"`, newline, `\` escaped and braces doubled.
+            let start_line = line
+            i += 3
+            var raw = ""
+            var newlines_consumed = 0
+            var closed = false
+            while i < n:
+                if i + 2 < n and chars[i] == "'" and chars[i + 1] == "'" and chars[i + 2] == "'":
+                    i += 3
+                    closed = true
+                    break
+                if chars[i] == "\n":
+                    newlines_consumed += 1
+                    line += 1
+                raw = raw + chars[i]
+                i += 1
+            if not closed:
+                throw "line {start_line}: unterminated string"
+            let content = dedent_triple(raw)
+            result = result + "\""
+            for c in content.chars():
+                if c == "\"":
+                    result = result + "\\\""
+                elif c == "\n":
+                    result = result + "\\n"
+                elif c == "\\":
+                    result = result + "\\\\"
+                elif c == "{{":
+                    result = result + "{{{{"
+                elif c == "}}":
+                    result = result + "}}}}"
+                else:
+                    result = result + c
+            result = result + "\""
+            var nl = 0
+            while nl < newlines_consumed:
+                result = result + "\n"
+                nl += 1
+            continue
         if ch == "\"":
             if i + 2 < n and chars[i + 1] == "\"" and chars[i + 2] == "\"":
                 let start_line = line

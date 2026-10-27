@@ -1,0 +1,5 @@
+print "{{}}"
+print "a {{x}} b"
+let x = 5
+print "v={x} {{lit}}"
+print '''{}'''

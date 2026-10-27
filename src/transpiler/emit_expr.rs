@@ -6208,7 +6208,8 @@ impl Transpiler {
                 };
             }
             if let ExprKind::Str(s) = &args[0].value.kind {
-                return format!("{}!(\"{}\")", macro_name, escape_str(s));
+                // Hole-free literal becomes the format string: re-double literal braces.
+                return format!("{}!(\"{}\")", macro_name, escape_str(s).replace('{', "{{").replace('}', "}}"));
             }
         }
         // General case: println!("{}", arg) or println!("{} {}", a, b)
