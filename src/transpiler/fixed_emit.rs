@@ -90,6 +90,62 @@ impl Transpiler {
         self.emit_fixed_literal(e, fmt).unwrap_or_else(|| self.emit_expr(e))
     }
 
+    /// `x.floor()`, `x.min(y)`, `fixed16_16.fromRaw(n)`, ... on a fixed-point receiver
+    /// (or the fixed-point type name itself).
+    pub(crate) fn try_emit_fixed_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if let ExprKind::Var(v) = &obj.kind {
+            if let Some(fmt) = FixedFmt::from_name(v) {
+                return match (method, args) {
+                    ("fromRaw", [a]) => Some(format!("{}::from_raw(({}) as {})", fmt.rust_name(), self.emit_expr(&a.value), fmt.rust_int())),
+                    _ => None,
+                };
+            }
+        }
+        let rust_method = match method {
+            "floor" | "ceil" | "round" | "trunc" | "fract" | "abs" | "signum" | "min" | "max" | "clamp" => method.to_string(),
+            "mulRound" => "mul_round".to_string(),
+            "divRound" => "div_round".to_string(),
+            // wrappingAdd -> wrapping_add, checkedDiv -> checked_div, ...
+            m => {
+                let (policy, op) = ["wrapping", "saturating", "checked"].iter()
+                    .find_map(|p| m.strip_prefix(p).map(|r| (*p, r)))?;
+                if !matches!(op, "Add" | "Sub" | "Mul" | "Div") {
+                    return None;
+                }
+                format!("{}_{}", policy, op.to_lowercase())
+            }
+        };
+        let fmt = self.fixed_fmt_of_expr(obj)?;
+        let args_s: Vec<String> = args.iter().map(|a| self.emit_fixed_operand(&a.value, &fmt)).collect();
+        Some(format!("{}.{}({})", self.emit_expr(obj), rust_method, args_s.join(", ")))
+    }
+
+    /// `<fixed>.checkedOp(y) else default` -> `.unwrap_or(default)` with a literal
+    /// default folded to the receiver's format.
+    pub(crate) fn try_emit_fixed_else(&self, e: &Expr, default: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, _) = &e.kind else { return None };
+        if !method.starts_with("checked") {
+            return None;
+        }
+        let fmt = self.fixed_fmt_of_expr(obj)?;
+        let call = self.try_emit_fixed_method(obj, method, match &e.kind { ExprKind::MethodCall(_, _, a) => a, _ => return None })?;
+        Some(format!("{}.unwrap_or({})", call, self.emit_fixed_operand(default, &fmt)))
+    }
+
+    /// `x.raw`, `fixed16_16.epsilon` / `.min` / `.max`.
+    pub(crate) fn try_emit_fixed_field(&self, obj: &Expr, field: &str) -> Option<String> {
+        if let ExprKind::Var(v) = &obj.kind {
+            if let Some(fmt) = FixedFmt::from_name(v) {
+                let c = match field { "epsilon" => "EPSILON", "min" => "MIN", "max" => "MAX", _ => return None };
+                return Some(format!("{}::{}", fmt.rust_name(), c));
+            }
+        }
+        if field == "raw" && self.fixed_fmt_of_expr(obj).is_some() {
+            return Some(format!("{}.raw()", self.emit_expr(obj)));
+        }
+        None
+    }
+
     /// `l op r` where at least one side is statically fixed-point.
     pub(crate) fn try_emit_fixed_binop(&self, op: &BinOp, l: &Expr, r: &Expr) -> Option<String> {
         let sym = match op {

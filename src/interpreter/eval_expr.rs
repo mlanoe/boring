@@ -861,6 +861,13 @@ impl Interpreter {
                 return result;
             }
         }
+        // `fixed16_16.fromRaw(n)`: a fixed-point type name is a reserved namespace.
+        if let ExprKind::Var(v) = &obj_expr.kind {
+            if let Some(fmt) = crate::fixed::FixedFmt::from_name(v) {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                return Self::fixed_static_call(&fmt, method, &arg_vals, line);
+            }
+        }
         // Built-in `fs` module namespace — intercept before evaluating the receiver
         // so that `fs` does not need to be defined as a variable.
         if let ExprKind::Var(v) = &obj_expr.kind {
@@ -1743,6 +1750,13 @@ impl Interpreter {
             }
 
             ExprKind::Field(obj_expr, field) => {
+                // `fixed16_16.epsilon` / `.min` / `.max`
+                if let ExprKind::Var(type_name) = &obj_expr.kind {
+                    if let Some(fmt) = crate::fixed::FixedFmt::from_name(type_name) {
+                        return Self::fixed_constant(&fmt, field)
+                            .ok_or_else(|| err(format!("{} has no member '{}'", fmt.name(), field), line));
+                    }
+                }
                 // Type-level access: `Counter.MAX` or `Counter.count`
                 if let ExprKind::Var(type_name) = &obj_expr.kind {
                     if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {

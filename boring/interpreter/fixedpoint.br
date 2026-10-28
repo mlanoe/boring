@@ -298,3 +298,98 @@ string fixed_format(FixedFmt f, int128 raw, int places):
         for d in digits:
             out = out + fixed_digit_str(d)
     out
+
+# ---- rounding / sign helpers (docs: Members); nil = not representable ----
+
+int128? fixed_trunc(FixedFmt f, int128 raw):
+    fixed_checked(f, fixed_to_int(f, raw) * fixed_pow2(f.m))
+
+int128? fixed_floor(FixedFmt f, int128 raw):
+    guard let t = fixed_trunc(f, raw) else: return nil
+    if raw < t:
+        fixed_checked(f, t - fixed_pow2(f.m))
+    else:
+        t
+
+int128? fixed_ceil(FixedFmt f, int128 raw):
+    guard let t = fixed_trunc(f, raw) else: return nil
+    if raw > t:
+        fixed_checked(f, t + fixed_pow2(f.m))
+    else:
+        t
+
+# Nearest integer, ties away from zero.
+int128? fixed_round(FixedFmt f, int128 raw):
+    if f.m == 0:
+        return raw
+    let mag = fixed_abs(raw)
+    let mask = (fixed_pow2(f.m) - fixed_one()) as uint128
+    var ip = mag >> f.m
+    if (mag & mask) >= (fixed_pow2(f.m - 1) as uint128):
+        ip = ip + (1 as uint128)
+    fixed_apply_sign(f, ip << f.m, raw < 0)
+
+int128? fixed_fract(FixedFmt f, int128 raw):
+    guard let t = fixed_trunc(f, raw) else: return nil
+    fixed_checked(f, raw - t)
+
+int128? fixed_abs_checked(FixedFmt f, int128 raw):
+    if raw < 0:
+        fixed_checked(f, 0 - raw)
+    else:
+        raw
+
+int128? fixed_signum(FixedFmt f, int128 raw):
+    if raw < 0:
+        fixed_from_int(f, -1 as int128)
+    elif raw == 0:
+        0 as int128
+    else:
+        fixed_from_int(f, 1 as int128)
+
+# ---- overflow policies: wrapping / saturating / checked, mulRound / divRound ----
+
+# Exact `a op b` as (magnitude, negative), truncated toward zero or rounded to
+# nearest (ties away from zero) when `round`. op: 0 add, 1 sub, 2 mul, 3 div.
+(uint128, bool) fixed_exact(FixedFmt f, int op, int128 a, int128 b, bool round):
+    if op == 0:
+        let v = a + b
+        return (fixed_abs(v), v < 0)
+    if op == 1:
+        let v = a - b
+        return (fixed_abs(v), v < 0)
+    let neg = (a < 0) != (b < 0)
+    if op == 2:
+        let prod = fixed_abs(a) * fixed_abs(b)
+        var q = prod >> f.m
+        let mask = (fixed_pow2(f.m) - fixed_one()) as uint128
+        if round and f.m > 0 and (prod & mask) >= (fixed_pow2(f.m - 1) as uint128):
+            q = q + (1 as uint128)
+        return (q, neg)
+    let den = fixed_abs(b)
+    let num = fixed_abs(a) << f.m
+    var q = num / den
+    if round and (num % den) * (2 as uint128) >= den:
+        q = q + (1 as uint128)
+    (q, neg)
+
+# Two's-complement truncation to the storage width.
+int128 fixed_wrapping_from(FixedFmt f, uint128 mag, bool neg):
+    let w = f.width()
+    let modulus = fixed_pow2(w) as uint128
+    let mask = modulus - (1 as uint128)
+    var low = mag & mask
+    if neg:
+        low = (modulus - low) & mask
+    var out = low as int128
+    if f.signed and low >= (fixed_pow2(w - 1) as uint128):
+        out = out - fixed_pow2(w)
+    out
+
+int128 fixed_saturating_from(FixedFmt f, uint128 mag, bool neg):
+    if let v = fixed_apply_sign(f, mag, neg):
+        v
+    elif neg:
+        fixed_min_raw(f)
+    else:
+        fixed_max_raw(f)

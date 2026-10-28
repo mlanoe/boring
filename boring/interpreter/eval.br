@@ -252,6 +252,12 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Method call
         ExprKind.MethodCall(recv_expr, method, args):
+            # `fixed16_16.fromRaw(n)`: a fixed-point type name is a reserved namespace.
+            match recv_expr.kind:
+                ExprKind.Var(fixed_tname):
+                    if let sfmt = fixed_fmt_of_name(fixed_tname):
+                        return fixed_static_call(sfmt, method, eval_args_with_hints(interp, args, []))
+                _: nil
             let recv = eval_expr(interp, recv_expr)
             check_mutating_method_call(interp, recv_expr, recv, method)
             let hints = method_hint_types(interp, recv, method, args.length)
@@ -331,6 +337,14 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Field access
         ExprKind.Field(obj_expr, field_name):
+            # `fixed16_16.epsilon` / `.min` / `.max`
+            match obj_expr.kind:
+                ExprKind.Var(fixed_tname):
+                    if let cfmt = fixed_fmt_of_name(fixed_tname):
+                        if let cv = fixed_constant(cfmt, field_name):
+                            return cv
+                        throw "{cfmt.name()} has no member '{field_name}'"
+                _: nil
             let obj = eval_expr(interp, obj_expr)
             # A failed `throws` task: the throw surfaces at `.value`/`.wait`, not at the spawn.
             if task_obj_type_name(obj) == "__Task__" and (field_name == "value" or field_name == "wait"):
@@ -1542,6 +1556,130 @@ Value? fixed_literal_for_cast_type(Type ty, Value val):
             nil
         _: nil
 
+# `x.raw`: the storage integer at its natural width and signedness.
+Value fixed_raw_value(FixedFmt f, int128 raw):
+    let w = f.width()
+    if f.signed:
+        if w == 8: Value.Int8(raw as int8)
+        elif w == 16: Value.Int16(raw as int16)
+        elif w == 32: Value.Int32(raw as int32)
+        else: Value.Int64(raw as int64)
+    else:
+        if w == 8: Value.Uint8(raw as uint8)
+        elif w == 16: Value.Uint16(raw as uint16)
+        elif w == 32: Value.Uint32(raw as uint32)
+        else: Value.Uint64(raw as uint64)
+
+Value fixed_make(FixedFmt f, int128 raw):
+    Value.Fixed(raw, f.signed, f.n, f.m)
+
+# `fixed16_16.epsilon` / `.min` / `.max`
+Value? fixed_constant(FixedFmt f, string name):
+    if name == "epsilon": fixed_make(f, 1 as int128)
+    elif name == "min": fixed_make(f, fixed_min_raw(f))
+    elif name == "max": fixed_make(f, fixed_max_raw(f))
+    else: nil
+
+# `fixed16_16.fromRaw(n)`
+Value fixed_static_call(FixedFmt f, string method, [Value] args):
+    if method == "fromRaw" and args.length == 1:
+        if let iv = value_as_i128(args[0]):
+            if iv < fixed_min_raw(f) or iv > fixed_max_raw(f):
+                throw "{f.name()}.fromRaw: {iv} does not fit the {f.width()}-bit storage"
+            return fixed_make(f, iv)
+        throw "{f.name()}.fromRaw: expected an integer, got {args[0].type_name()}"
+    throw "{f.name()} has no function '{method}'"
+
+# A method argument of a fixed receiver: same format, or an untyped literal.
+int128 fixed_operand(FixedFmt f, string method, Value v):
+    match v:
+        Value.Fixed(r, sg, n, m):
+            if sg != f.signed or n != f.n or m != f.m:
+                throw "cannot mix {f.name()} and {fixed_type_name(sg, n, m)}; cast one with `as`"
+            r
+        _:
+            if let lit = fixed_literal_value(f, v):
+                match lit:
+                    Value.Fixed(r2, _, _, _): return r2
+                    _: nil
+            throw "{f.name()}.{method}: expected {f.name()}, got {v.type_name()}"
+
+# Instance methods of a fixed value; nil when `method` is not one.
+Value? fixed_method(int128 raw, FixedFmt f, string method, [Value] args):
+    var int128? res = nil
+    if args.length == 0:
+        if method == "floor": res = fixed_floor(f, raw)
+        elif method == "ceil": res = fixed_ceil(f, raw)
+        elif method == "round": res = fixed_round(f, raw)
+        elif method == "trunc": res = fixed_trunc(f, raw)
+        elif method == "fract": res = fixed_fract(f, raw)
+        elif method == "abs": res = fixed_abs_checked(f, raw)
+        elif method == "signum": res = fixed_signum(f, raw)
+        else: return nil
+        if let out = res:
+            return fixed_make(f, out)
+        throw "fixed-point overflow in {f.name()}.{method}()"
+    if args.length == 1 and (method == "min" or method == "max"):
+        let b = fixed_operand(f, method, args[0])
+        if method == "min":
+            return fixed_make(f, if raw < b: raw else b)
+        return fixed_make(f, if raw > b: raw else b)
+    # wrappingAdd / saturatingMul / checkedDiv ... and mulRound / divRound
+    if args.length == 1:
+        var policy = ""
+        var opname = ""
+        if method.startsWith("wrapping"):
+            policy = "wrapping"
+            opname = method.slice(8, method.length)
+        elif method.startsWith("saturating"):
+            policy = "saturating"
+            opname = method.slice(10, method.length)
+        elif method.startsWith("checked"):
+            policy = "checked"
+            opname = method.slice(7, method.length)
+        var code = -1
+        var round = false
+        if policy != "":
+            if opname == "Add": code = 0
+            elif opname == "Sub": code = 1
+            elif opname == "Mul": code = 2
+            elif opname == "Div": code = 3
+        elif method == "mulRound":
+            code = 2
+            round = true
+        elif method == "divRound":
+            code = 3
+            round = true
+        if code >= 0:
+            let b = fixed_operand(f, method, args[0])
+            if code == 3 and b == 0:
+                if policy == "checked":
+                    return Value.Nil
+                throw "division by zero"
+            if not fixed_supported(f):
+                throw "{f.name()} `{method}` is not supported for 128-bit fixed-point formats"
+            let ex = fixed_exact(f, code, raw, b, round)
+            if policy == "wrapping":
+                return fixed_make(f, fixed_wrapping_from(f, ex.0, ex.1))
+            if policy == "saturating":
+                return fixed_make(f, fixed_saturating_from(f, ex.0, ex.1))
+            if let v = fixed_apply_sign(f, ex.0, ex.1):
+                return fixed_make(f, v)
+            if policy == "checked":
+                return Value.Nil
+            throw "fixed-point overflow in {f.name()}.{method}()"
+    if args.length == 2 and method == "clamp":
+        let lo = fixed_operand(f, method, args[0])
+        let hi = fixed_operand(f, method, args[1])
+        if lo > hi:
+            throw "{f.name()}.clamp: min is greater than max"
+        if raw < lo:
+            return fixed_make(f, lo)
+        if raw > hi:
+            return fixed_make(f, hi)
+        return fixed_make(f, raw)
+    nil
+
 bool value_is_fixed(Value v):
     match v:
         Value.Fixed(_, _, _, _): true
@@ -1995,6 +2133,12 @@ def Value get_tuple_field([Value] elems, string field_name):
     throw "no field '{field_name}' on tuple"
 
 def Value get_field(mut Interpreter interp, Value obj, string field_name):
+    match obj:
+        Value.Fixed(fraw, fsg, fn_, fm):
+            if field_name == "raw":
+                return fixed_raw_value(FixedFmt(signed = fsg, n = fn_, m = fm), fraw)
+            throw "{fixed_type_name(fsg, fn_, fm)} has no member '{field_name}'"
+        _: nil
     match obj:
         Value.Object(inner):
             let val_opt = inner.get_field(field_name)

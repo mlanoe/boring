@@ -265,6 +265,11 @@ def Value clone_value(mut Interpreter interp, Value v):
             return v
 
 def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
+    match recv:
+        Value.Fixed(fraw, fsg, fn_, fm):
+            if let fres = fixed_method(fraw, FixedFmt(signed = fsg, n = fn_, m = fm), method_name, args):
+                return fres
+        _: nil
     if method_name == "clone" and args.length == 0:
         return clone_value(interp, recv)
     let recv_type = recv.type_name()

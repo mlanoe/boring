@@ -4,6 +4,11 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
+        if let Value::Fixed(raw, fmt) = &obj {
+            if let Some(res) = Self::fixed_method(*raw, fmt, method, &args, line) {
+                return res;
+            }
+        }
         // Integer powers retain their width and never round through a float.
         // The transpiler converts the exponent to Rust's u32 as well.
         if method == "pow" && matches!(&obj,
@@ -2178,6 +2183,11 @@ impl Interpreter {
     }
 
     pub(crate) fn get_field(&mut self, obj: Value, field: &str, line: usize) -> Eval {
+        if let Value::Fixed(raw, fmt) = &obj {
+            if field == "raw" {
+                return Ok(super::fixed_ops::raw_as_value(*raw, fmt));
+            }
+        }
         match obj {
             // Screen property access.
             Value::Screen { ref width, ref height, ref frame, ref resized, ref created_at, .. } => {

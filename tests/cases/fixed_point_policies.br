@@ -1,0 +1,11 @@
+let fixed8_8 a = 100.0
+let fixed8_8 b = 2.0
+print "{a.wrappingMul(b)} {a.saturatingMul(b)} {a.saturatingMul(-2.0)}"
+print "{a.checkedMul(b) else -1.0} {a.checkedAdd(1.5) else 0.0} {a.wrappingAdd(100.0)}"
+let ufixed8_8 u = 1.0
+print "{u.wrappingSub(2.0)} {u.saturatingSub(2.0)} {u.checkedSub(2.0) else 0.0}"
+let fixed8_8 one = 1.0
+let fixed8_8 three = 3.0
+print "{one / three} {one.divRound(three)} {(2.0 as fixed8_8).divRound(three)} {(2.0 as fixed8_8) / three}"
+let fixed8_8 tiny = fixed8_8.epsilon
+print "{tiny * 0.5} {tiny.mulRound(0.5)} {a.checkedDiv(0.0) else -9.0}"

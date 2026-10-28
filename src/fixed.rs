@@ -12,6 +12,10 @@
 /// checker but not implemented by any backend yet (docs, Phasing §4).
 pub const VALID_WIDTHS: [u32; 5] = [8, 16, 32, 64, 128];
 
+/// The four arithmetic operations the overflow-policy variants exist for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FxOp { Add, Sub, Mul, Div }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FixedFmt {
     pub signed: bool,
@@ -356,6 +360,47 @@ impl __FixedCast for f64 {
 impl __FixedCast for f32 {
     fn __to_fixed<F: __FixedFormat>(self) -> Option<F> { F::__from_f64(self as f64) }
 }
+#[allow(dead_code)]
+fn __fx_exact(op: u8, a: i128, b: i128, m: u32, round: bool) -> (u128, bool) {
+    match op {
+        0 => { let v = a + b; (v.unsigned_abs(), v < 0) }
+        1 => { let v = a - b; (v.unsigned_abs(), v < 0) }
+        2 => {
+            let prod = a.unsigned_abs() * b.unsigned_abs();
+            let mut q = prod >> m;
+            if round && m > 0 && (prod & ((1u128 << m) - 1)) >= (1u128 << (m - 1)) { q += 1; }
+            (q, (a < 0) != (b < 0))
+        }
+        _ => {
+            let den = b.unsigned_abs();
+            let num = a.unsigned_abs() << m;
+            let mut q = num / den;
+            if round && (num % den) * 2 >= den { q += 1; }
+            (q, (a < 0) != (b < 0))
+        }
+    }
+}
+#[allow(dead_code)]
+fn __fx_chk(mag: u128, neg: bool, min: i128, max: i128) -> Option<i128> {
+    let v = if neg {
+        if mag > (i128::MAX as u128) + 1 { return None; }
+        (mag as i128).wrapping_neg()
+    } else {
+        i128::try_from(mag).ok()?
+    };
+    if v < min || v > max { None } else { Some(v) }
+}
+#[allow(dead_code)]
+fn __fx_sat(mag: u128, neg: bool, min: i128, max: i128) -> i128 {
+    match __fx_chk(mag, neg, min, max) { Some(v) => v, None if neg => min, None => max }
+}
+#[allow(dead_code)]
+fn __fx_wrap(mag: u128, neg: bool, w: u32, signed: bool) -> i128 {
+    let mask: u128 = (1u128 << w) - 1;
+    let mut low = mag & mask;
+    if neg { low = low.wrapping_neg() & mask; }
+    if signed && (low >> (w - 1)) == 1 { (low as i128).wrapping_sub(1i128 << w) } else { low as i128 }
+}
 /// Exact decimal expansion of `mag / 2^m` (trailing zeros trimmed), or rounded to
 /// `{:.N}` places (ties away from zero) when a precision is given.
 #[allow(dead_code)]
@@ -437,6 +482,33 @@ impl FixedFmt {
         } else {
             String::new()
         };
+
+        let round_body = if m == 0 {
+            "self".to_string()
+        } else {
+            format!("{{ let r = self.0 as i128; let mag = r.unsigned_abs(); let mut ip = mag >> {m}; \
+                      if (mag & ((1u128 << {m}) - 1)) >= (1u128 << ({m} - 1)) {{ ip += 1; }} \
+                      let v = (ip << {m}) as i128; Self(Self::__narrow128(if r < 0 {{ -v }} else {{ v }})) }}")
+        };
+        let abs_body = if self.signed { "Self(self.0.abs())" } else { "self" };
+        let (w, sg, minr, maxr) = (self.width(), self.signed, self.min_raw(), self.max_raw());
+        let mut policy = format!(
+            "    fn __ex(self, op: u8, o: Self, round: bool) -> (u128, bool) {{ __fx_exact(op, self.0 as i128, o.0 as i128, {m}, round) }}\n\
+                 fn __round_result(m: u128, n: bool) -> Self {{\n\
+                     match __fx_chk(m, n, {minr}i128, {maxr}i128) {{\n\
+                         Some(v) => Self(v as {s}),\n\
+                         None => if cfg!(debug_assertions) {{ panic!(\"fixed-point overflow\") }} else {{ Self(__fx_wrap(m, n, {w}, {sg}) as {s}) }},\n\
+                     }}\n\
+                 }}\n\
+                 pub fn mul_round(self, o: Self) -> Self {{ let (m, n) = self.__ex(2, o, true); Self::__round_result(m, n) }}\n\
+                 pub fn div_round(self, o: Self) -> Self {{ let (m, n) = self.__ex(3, o, true); Self::__round_result(m, n) }}\n");
+        for (opn, code) in [("add", 0), ("sub", 1), ("mul", 2), ("div", 3)] {
+            policy.push_str(&format!(
+                "    pub fn wrapping_{opn}(self, o: Self) -> Self {{ let (m, n) = self.__ex({code}, o, false); Self(__fx_wrap(m, n, {w}, {sg}) as {s}) }}\n\
+                     pub fn saturating_{opn}(self, o: Self) -> Self {{ let (m, n) = self.__ex({code}, o, false); Self(__fx_sat(m, n, {minr}i128, {maxr}i128) as {s}) }}\n\
+                     pub fn checked_{opn}(self, o: Self) -> Option<Self> {{ {zero_guard}let (m, n) = self.__ex({code}, o, false); __fx_chk(m, n, {minr}i128, {maxr}i128).map(|v| Self(v as {s})) }}\n",
+                zero_guard = if code == 3 { "if o.0 == 0 { return None; } " } else { "" }));
+        }
         let mut out = format!(
 r#"
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -453,7 +525,28 @@ impl {name} {{
     fn __narrow(w: {wd}) -> {s} {{
         if cfg!(debug_assertions) {{ <{s}>::try_from(w).expect("fixed-point overflow") }} else {{ w as {s} }}
     }}
-}}
+    fn __narrow128(w: i128) -> {s} {{
+        if cfg!(debug_assertions) {{ <{s}>::try_from(w).expect("fixed-point overflow") }} else {{ w as {s} }}
+    }}
+    pub fn trunc(self) -> Self {{ let one = 1i128 << {m}; Self((((self.0 as i128) / one) * one) as {s}) }}
+    pub fn floor(self) -> Self {{
+        let one = 1i128 << {m}; let r = self.0 as i128; let t = (r / one) * one;
+        Self(Self::__narrow128(if r < t {{ t - one }} else {{ t }}))
+    }}
+    pub fn ceil(self) -> Self {{
+        let one = 1i128 << {m}; let r = self.0 as i128; let t = (r / one) * one;
+        Self(Self::__narrow128(if r > t {{ t + one }} else {{ t }}))
+    }}
+    pub fn round(self) -> Self {{ {round_body} }}
+    pub fn fract(self) -> Self {{ Self(self.0 - self.trunc().0) }}
+    pub fn abs(self) -> Self {{ {abs_body} }}
+    pub fn signum(self) -> Self {{
+        <Self as __FixedFormat>::__from_i128((self.0 as i128).signum()).expect("fixed-point overflow")
+    }}
+    pub fn min(self, o: Self) -> Self {{ core::cmp::Ord::min(self, o) }}
+    pub fn max(self, o: Self) -> Self {{ core::cmp::Ord::max(self, o) }}
+    pub fn clamp(self, lo: Self, hi: Self) -> Self {{ core::cmp::Ord::clamp(self, lo, hi) }}
+{policy}}}
 impl core::ops::Add for {name} {{ type Output = Self; fn add(self, o: Self) -> Self {{ Self(self.0 + o.0) }} }}
 impl core::ops::Sub for {name} {{ type Output = Self; fn sub(self, o: Self) -> Self {{ Self(self.0 - o.0) }} }}
 impl core::ops::Mul for {name} {{
@@ -503,6 +596,125 @@ impl __FixedCast for {name} {{
 "#);
         out.push_str(&neg);
         out
+    }
+
+    // ---- rounding / sign helpers (docs: Members). `None` = not representable ----
+
+    fn one_raw(&self) -> Option<i128> {
+        1i128.checked_shl(self.m)
+    }
+
+    /// Toward zero.
+    pub fn trunc(&self, raw: i128) -> Option<i128> {
+        self.checked(self.to_int(raw).checked_mul(self.one_raw()?)?)
+    }
+
+    pub fn floor(&self, raw: i128) -> Option<i128> {
+        let t = self.trunc(raw)?;
+        if raw < t { self.checked(t.checked_sub(self.one_raw()?)?) } else { Some(t) }
+    }
+
+    pub fn ceil(&self, raw: i128) -> Option<i128> {
+        let t = self.trunc(raw)?;
+        if raw > t { self.checked(t.checked_add(self.one_raw()?)?) } else { Some(t) }
+    }
+
+    /// Nearest integer, ties away from zero.
+    pub fn round(&self, raw: i128) -> Option<i128> {
+        if self.m == 0 {
+            return Some(raw);
+        }
+        let neg = raw < 0;
+        let mag = raw.unsigned_abs();
+        let mut ip = mag >> self.m;
+        if mag & ((1u128 << self.m) - 1) >= (1u128 << (self.m - 1)) {
+            ip += 1;
+        }
+        self.checked(Self::apply_sign(ip.checked_shl(self.m)?, neg)?)
+    }
+
+    /// `x - trunc(x)`: carries the sign of `x`.
+    pub fn fract(&self, raw: i128) -> Option<i128> {
+        self.checked(raw - self.trunc(raw)?)
+    }
+
+    pub fn abs(&self, raw: i128) -> Option<i128> {
+        self.checked(raw.checked_abs()?)
+    }
+
+    /// -1, 0 or 1 as a fixed value (`None` when 1 is not representable, e.g. `ufixed0_16`).
+    pub fn signum(&self, raw: i128) -> Option<i128> {
+        match raw.cmp(&0) {
+            std::cmp::Ordering::Less => self.from_int(-1),
+            std::cmp::Ordering::Equal => Some(0),
+            std::cmp::Ordering::Greater => self.from_int(1),
+        }
+    }
+
+    // ---- overflow policies (docs: Phase 2): wrapping / saturating / checked, and
+    // round-to-nearest `*` and `/`. All start from the exact result of the
+    // operation as (magnitude, negative), before any range check. ----
+
+    /// Exact `a op b` (truncated toward zero, or rounded to nearest with ties away
+    /// from zero when `round`) as magnitude + sign. `None` for width > 64 or a
+    /// zero divisor.
+    pub fn exact(&self, op: FxOp, a: i128, b: i128, round: bool) -> Option<(u128, bool)> {
+        if self.width() > 64 {
+            return None;
+        }
+        Some(match op {
+            FxOp::Add => ((a + b).unsigned_abs(), a + b < 0),
+            FxOp::Sub => ((a - b).unsigned_abs(), a - b < 0),
+            FxOp::Mul => {
+                let prod = a.unsigned_abs() * b.unsigned_abs();
+                let mut q = prod >> self.m;
+                if round && self.m > 0 && prod & ((1u128 << self.m) - 1) >= (1u128 << (self.m - 1)) {
+                    q += 1;
+                }
+                (q, (a < 0) != (b < 0))
+            }
+            FxOp::Div => {
+                if b == 0 {
+                    return None;
+                }
+                let den = b.unsigned_abs();
+                let num = a.unsigned_abs() << self.m;
+                let mut q = num / den;
+                if round && (num % den) * 2 >= den {
+                    q += 1;
+                }
+                (q, (a < 0) != (b < 0))
+            }
+        })
+    }
+
+    /// In-range result, or `None` (the `checked*` policy).
+    pub fn checked_from(&self, mag: u128, neg: bool) -> Option<i128> {
+        self.checked(Self::apply_sign(mag, neg)?)
+    }
+
+    /// Two's-complement truncation to the storage width (the `wrapping*` policy).
+    pub fn wrapping_from(&self, mag: u128, neg: bool) -> i128 {
+        let w = self.width();
+        let mask = if w >= 128 { u128::MAX } else { (1u128 << w) - 1 };
+        let mut low = mag & mask;
+        if neg {
+            low = low.wrapping_neg() & mask;
+        }
+        if self.signed && low >> (w - 1) == 1 {
+            (low as i128).wrapping_sub(1i128 << w)
+        } else {
+            low as i128
+        }
+    }
+
+    /// Clamped to the representable range (the `saturating*` policy).
+    pub fn saturating_from(&self, mag: u128, neg: bool) -> i128 {
+        match self.checked_from(mag, neg) {
+            Some(v) => v,
+            None if neg => self.min_raw(),
+            None => self.max_raw(),
+        }
     }
 
     /// An untyped `f64` literal as the author wrote it: Rust's `{:?}` is the
@@ -602,6 +814,59 @@ mod tests {
         assert_eq!(t.format_places(t.from_decimal("1.0625").unwrap(), 3), "1.063");
         assert_eq!(t.format_places(t.from_decimal("-1.5").unwrap(), 0), "-2");
         assert_eq!(t.format_places(t.from_decimal("0.001").unwrap(), 1), "0.0");
+    }
+
+    #[test]
+    fn rounding_helpers() {
+        let t = f("fixed16_16");
+        let r = |s: &str| t.from_decimal(s).unwrap();
+        let show = |v: Option<i128>| t.format_exact(v.unwrap());
+        assert_eq!(show(t.floor(r("-1.25"))), "-2");
+        assert_eq!(show(t.floor(r("1.75"))), "1");
+        assert_eq!(show(t.ceil(r("-1.25"))), "-1");
+        assert_eq!(show(t.ceil(r("1.25"))), "2");
+        assert_eq!(show(t.trunc(r("-1.75"))), "-1");
+        assert_eq!(show(t.round(r("2.5"))), "3");
+        assert_eq!(show(t.round(r("-2.5"))), "-3");
+        assert_eq!(show(t.round(r("2.4"))), "2");
+        assert_eq!(show(t.fract(r("-1.25"))), "-0.25");
+        assert_eq!(show(t.abs(r("-1.25"))), "1.25");
+        assert_eq!(show(t.signum(r("-9"))), "-1");
+        assert_eq!(t.ceil(t.max_raw()), None); // 32767.99998 -> 32768 overflows
+        assert_eq!(f("ufixed0_16").signum(5), None);
+    }
+
+    #[test]
+    fn overflow_policies() {
+        let t = f("fixed8_8"); // range [-128, 127.99609375]
+        let r = |s: &str| t.from_decimal(s).unwrap();
+        let show = |v: i128| t.format_exact(v);
+        let (a, b) = (r("100"), r("2"));
+        let (m, n) = t.exact(FxOp::Mul, a, b, false).unwrap();
+        assert_eq!(t.checked_from(m, n), None);
+        assert_eq!(show(t.saturating_from(m, n)), "127.99609375");
+        assert_eq!(show(t.wrapping_from(m, n)), "-56"); // 200 - 256
+        let (m, n) = t.exact(FxOp::Mul, a, -b, false).unwrap();
+        assert_eq!(show(t.saturating_from(m, n)), "-128");
+        let (m, n) = t.exact(FxOp::Add, r("1.5"), r("2.25"), false).unwrap();
+        assert_eq!(show(t.checked_from(m, n).unwrap()), "3.75");
+        assert_eq!(t.exact(FxOp::Div, 1, 0, false), None);
+        // rounding: 1 lsb * 0.5 = half an lsb -> truncates to 0, rounds to 1
+        let half = r("0.5");
+        let (m, n) = t.exact(FxOp::Mul, 1, half, false).unwrap();
+        assert_eq!(t.checked_from(m, n), Some(0));
+        let (m, n) = t.exact(FxOp::Mul, 1, half, true).unwrap();
+        assert_eq!(t.checked_from(m, n), Some(1));
+        let (m, n) = t.exact(FxOp::Div, r("1"), r("3"), true).unwrap();
+        assert_eq!(t.checked_from(m, n), Some(85)); // 0.33203125 (truncation gives 85 too); 2/3 below
+        let (m, n) = t.exact(FxOp::Div, r("2"), r("3"), true).unwrap();
+        assert_eq!(t.checked_from(m, n), Some(171)); // 170.67 rounds up
+        let (m, n) = t.exact(FxOp::Div, r("2"), r("3"), false).unwrap();
+        assert_eq!(t.checked_from(m, n), Some(170));
+        let u = f("ufixed8_8");
+        let (m, n) = u.exact(FxOp::Sub, 1, 2, false).unwrap();
+        assert_eq!(u.wrapping_from(m, n), 65535);
+        assert_eq!(u.saturating_from(m, n), 0);
     }
 
     #[test]

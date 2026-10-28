@@ -19,6 +19,7 @@ use crate::ast::*;
 
 pub(crate) mod exec;
 pub(crate) mod eval_expr;
+pub(crate) mod fixed_ops;
 pub(crate) mod call;
 pub(crate) mod methods;
 pub(crate) mod json;

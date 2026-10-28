@@ -1,0 +1,10 @@
+let x = 1.75 as fixed16_16
+print "raw {x.raw} {x.raw as int}"
+print "fromRaw {fixed16_16.fromRaw(0x1_C000)}"
+print "consts {fixed16_16.epsilon} {fixed8_8.min} {fixed8_8.max} {ufixed8_8.max}"
+let n = -1.25 as fixed16_16
+print "{n.floor()} {n.ceil()} {n.round()} {n.trunc()} {n.fract()} {n.abs()} {n.signum()}"
+print "{(2.5 as fixed16_16).round()} {(-2.5 as fixed16_16).round()}"
+print "{x.min(1.0)} {x.max(2)} {x.clamp(0.0, 1.5)}"
+let u = 3.5 as ufixed8_8
+print "{u.raw} {u.floor()} {u.round()}"

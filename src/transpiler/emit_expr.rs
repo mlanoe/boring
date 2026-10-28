@@ -324,6 +324,10 @@ impl Transpiler {
             }
 
             ExprKind::Else(e, default) => {
+                // `a.checkedMul(b) else -1.0`: the literal default takes the fixed-point format.
+                if let Some(code) = self.try_emit_fixed_else(e, default) {
+                    return code;
+                }
                 // `x as T else default` — cast with fallback: always use unwrap_or (never ?)
                 if let ExprKind::Cast(inner, ty) = &e.kind {
                     // A numeric (or numeric-optional) source is converted, not parsed:
@@ -2455,6 +2459,9 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        if let Some(code) = self.try_emit_fixed_field(obj, field) {
+            return code;
+        }
         // `screen.clipboard` (simd): read lazily through `Screen::clipboard()`, not a per-frame field.
         if self.config.is_simd_target
             && field == "clipboard"

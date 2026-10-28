@@ -3859,6 +3859,9 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        if let Some(code) = self.try_emit_fixed_method(obj, method, args) {
+            return code;
+        }
         // A closure / plain fn passed to a `throws` fn-typed parameter of a user method.
         if let Some(sn) = self.resolve_struct_name(obj) {
             if let Some(m) = self.struct_decls.get(&sn).and_then(|d| d.methods.iter().find(|m| m.name == method)) {

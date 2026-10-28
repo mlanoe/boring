@@ -1,11 +1,15 @@
 # `fixedN_M` / `ufixedN_M`: binary fixed-point scalar types
 
-> **Status: Phase 1 (core) implemented** in the Rust interpreter, the
+> **Status: Phases 1 and 2 implemented** in the Rust interpreter, the
 > transpiler (generated newtype, `W ∈ {8, 16, 32, 64}`) and the self-hosted
 > interpreter, with a shared test corpus (`tests/cases/fixed_point_*.br`).
-> Not implemented yet: [Members](#members), `wrapping*`/`saturating*`/
-> `checked*`/`mulRound`/`divRound` (Phase 2), GPU backends (Phase 3),
-> 128-bit formats (Phase 4), math functions (Phase 5). The former open
+> Implemented: the core types, [Members](#members) (`raw`, `fromRaw`,
+> `epsilon`/`min`/`max`, `floor`/`ceil`/`round`/`trunc`/`fract`/`abs`/
+> `signum`/`min`/`max`/`clamp`), and the overflow-policy and rounding
+> variants `wrappingAdd/Sub/Mul/Div`, `saturating…`, `checked…` (returning
+> `T?`) and `mulRound`/`divRound`.
+> Not implemented yet: GPU backends (Phase 3), 128-bit formats (Phase 4),
+> math functions (Phase 5). The former open
 > questions are resolved in [Decisions](#decisions).
 >
 > **Implementation notes** (where the code differs from, or narrows, the text):
