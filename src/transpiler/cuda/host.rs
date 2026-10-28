@@ -1394,6 +1394,39 @@ impl HostEmitter {
         }
     }
 
+    /// Whether kernel-field reference `e` (`obj.field`) is a `let` field, stored
+    /// `Arc`-wrapped (see `host_field_type`) rather than as a bare buffer.
+    fn kernel_field_is_let(&self, e: &Expr) -> bool {
+        let ExprKind::Field(obj, field) = &e.kind else { return false };
+        let ExprKind::Var(v) = &obj.kind else { return false };
+        self.var_kernel_type.get(v.as_str())
+            .and_then(|k| self.kernel_decls.get(k))
+            .and_then(|d| d.fields.iter().find(|f| f.name == *field))
+            .is_some_and(|f| f.binding == FieldBinding::Let)
+    }
+
+    /// `a.x = b.y` (or the tuple form): a buffer handoff that converts between
+    /// the bare (`mut`/`var`) and `Arc`-wrapped (`let`) field representations.
+    fn emit_kernel_field_copy(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        match (&lhs.kind, &rhs.kind) {
+            (ExprKind::Tuple(ls), ExprKind::Tuple(rs)) if ls.len() == rs.len() => {
+                let parts: Vec<String> = ls.iter().zip(rs).map(|(l, r)| self.emit_kernel_field_copy(l, r)).collect();
+                format!("({})", parts.join(", "))
+            }
+            (ExprKind::Field(..), ExprKind::Field(_, _)) => {
+                let (lhs_let, rhs_let) = (self.kernel_field_is_let(lhs), self.kernel_field_is_let(rhs));
+                let value = self.emit_kernel_field_value(rhs);
+                match (lhs_let, rhs_let) {
+                    (true, true) => value.strip_suffix(".clone()").map_or(value.clone(), |v| format!("Arc::clone(&{v})")),
+                    (true, false) => format!("Arc::new({value})"),
+                    (false, true) => value.strip_suffix(".clone()").map_or(value.clone(), |v| format!("(*{v}).clone()")),
+                    (false, false) => value,
+                }
+            }
+            _ => self.emit_kernel_field_value(rhs),
+        }
+    }
+
     /// Shared RHS-emission decision for an assignment whose LHS is a kernel
     /// field/tuple-of-fields (`emit_assign_target`'s domain) — see
     /// `emit_kernel_field_value`'s doc for why a mirroring kernel-field RHS
@@ -1427,7 +1460,7 @@ impl HostEmitter {
             }
         }
         if self.is_kernel_field_ref(lhs) && self.is_kernel_field_ref(rhs) {
-            self.emit_kernel_field_value(rhs)
+            self.emit_kernel_field_copy(lhs, rhs)
         } else {
             self.expr(rhs)
         }
@@ -1857,9 +1890,8 @@ impl HostEmitter {
                                                 // narrowing-to-u32 comment for why that's a
                                                 // presentation-boundary concern, not a storage one).
                                                 self.line(&format!("let __seed: Vec<{elem}> = (0..__n).map(|_| {{ __rng ^= __rng << 13; __rng ^= __rng >> 7; __rng ^= __rng << 17; if __rng % 10 < 3 {{ 1 }} else {{ 0 }} }}).collect();"));
-                                                self.line(&format!(
-                                                    "boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{elem}, _>(&__seed)?"
-                                                ));
+                                                let __up = format!("boring_new_stream_with_priority(&__ctx, 0)?.clone_htod::<{elem}, _>(&__seed)?");
+                                                self.line(&if field.binding == FieldBinding::Let { format!("Arc::new({__up})") } else { __up });
                                                 self.indent -= 1;
                                                 self.line("};");
                                             } else {

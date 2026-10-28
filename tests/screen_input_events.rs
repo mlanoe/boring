@@ -384,6 +384,17 @@ fn rocm_text_members_and_event_loops() {
     cargo_check(&project, "rocm");
 }
 
+/// `examples/game_of_life.br`: a `let [uint]'surface` field (`Render.cells`) must be built
+/// `Arc`-wrapped and accept the `render.cells = step.cells_in` kernel-to-kernel buffer copy.
+#[test]
+fn cuda_rocm_game_of_life_let_surface_field_is_arc_wrapped() {
+    let src = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/game_of_life.br")).unwrap();
+    for target in ["cuda", "rocm"] {
+        let (project, _) = build(target, "game_of_life", &src);
+        cargo_check(&project, target);
+    }
+}
+
 // ── Key events, IME area, string hand-off, setup-kernel rebuild ──────────────────────────────
 
 /// A `string` function called from the loop with `screen.text`, a literal and the loop variable of
