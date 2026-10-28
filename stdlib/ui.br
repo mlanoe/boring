@@ -495,6 +495,15 @@ pub view Sheet:
     [View] children
     body(): native
 
+# Popover: a non-modal floating panel anchored to its first child. `children[0]` is the anchor (laid out in place, it gives the popover
+# its size); `children[1]`, mounted only while `isPresented`, is the panel: placed below the anchor, or above it when the window has
+# more room there, painted over everything and found first by pointer hit testing. A press outside the anchor and the panel, or
+# Escape, dismisses it (writes `false`); focus is not trapped.
+pub view Popover:
+    bind bool isPresented
+    [View] children
+    body(): native
+
 pub view DefaultFocus:
     bool enabled = true
     [View] children
