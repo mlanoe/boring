@@ -671,6 +671,33 @@ def Type parse_type(mut Parser p) throws:
     else:
         parse_type_qualifier(p, base)
 
+def Type parse_fn_type(mut Parser p) throws:
+    var is_task = p.eat(TokenKind.Task)
+    var is_req = false
+    if p.eat(TokenKind.Req):
+        is_req = true
+        if p.eat(TokenKind.Task):
+            is_task = true
+    elif p.eat(TokenKind.Def):
+        if p.eat(TokenKind.Task):
+            is_task = true
+    let ignored_return_ty = parse_type(p)
+    p.expect(TokenKind.LParen)
+    mut [Type] params = []
+    while p.peek() != TokenKind.RParen:
+        params.push(parse_type(p))
+        if p.peek() != TokenKind.RParen:
+            p.expect(TokenKind.Comma)
+    p.expect(TokenKind.RParen)
+    let can_throw = p.eat(TokenKind.Throws)
+    if can_throw and parser_check(p, "Ident"):
+        p.advance()
+    # Runtime execution is dynamically typed: consuming this signature is
+    # sufficient. Constructing Type.Fn here currently exposes the transpiler's
+    # Box<Option<T>> versus Option<Box<T>> mismatch for its recursive optional
+    # return field, so retain an opaque marker until that representation is fixed.
+    Type.Named("__fn")
+
 # Labeled multi-dim array axes (docs/array-multidim-types.md), called right
 # after the comma in `[T, ...]` once the next token is a bare `Ident` — the
 # ONLY thing that slot could mean here, since the plain `[T, N]` case just
@@ -706,6 +733,12 @@ def [LabeledAxis] parse_labeled_axes(mut Parser p) throws:
 
 def Type parse_type_base(mut Parser p) throws:
     match p.peek():
+        TokenKind.Def:
+            parse_fn_type(p)
+        TokenKind.Req:
+            parse_fn_type(p)
+        TokenKind.Task:
+            parse_fn_type(p)
         TokenKind.Ident(s):
             p.advance()
             match s:
@@ -774,14 +807,19 @@ def Type parse_type_base(mut Parser p) throws:
         TokenKind.LParen:
             p.advance()
             mut types = [Type]{}
+            var had_comma = false
             if p.peek() != TokenKind.RParen:
                 types.push(parse_type(p))
                 while p.eat(TokenKind.Comma):
+                    had_comma = true
                     if p.peek() == TokenKind.RParen:
                         break
                     types.push(parse_type(p))
             p.expect(TokenKind.RParen)
-            Type.Tuple(types)
+            if types.length == 1 and not had_comma:
+                types[0]
+            else:
+                Type.Tuple(types)
         _:
             # Release the actor lock between reads, including on diagnostic paths.
             let unexpected = token_kind_name(p.peek())
@@ -1541,9 +1579,8 @@ def Item parse_item(mut Parser p) throws:
             # `use Name as Type` → alias; otherwise skip the line
             let use_is_alias = parser_token_at_offset_is(p, 1, "As")
             if use_is_alias:
-                # Only parse as simple named-type alias (Ident after `as`), not func-type aliases (req/task/def)
                 let k_after_as = token_kind_name(parser_peek_token_at(p, 2).kind)
-                if k_after_as == "Ident":
+                if k_after_as == "Ident" or k_after_as == "Def" or k_after_as == "Req" or k_after_as == "Task":
                     let alias_decl = parse_alias_decl(p)
                     Item.Alias(alias_decl)
                 else:
