@@ -2761,7 +2761,13 @@ impl Transpiler {
         // "`IdentityKey` and `Identifiable`"): every owned `Clone + Eq + Hash` type is a key,
         // so applications never write `as IdentityKey` themselves.
         if t.name == "IdentityKey" && t.signatures.is_empty() && t.type_params.is_empty() {
-            self.line("impl<T: Clone + Eq + std::hash::Hash> IdentityKey for T {}");
+            // Multi-thread mode adds `Send + Sync` supertraits (above), so the blanket impl
+            // must require them too.
+            if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
+                self.line("impl<T: Clone + Eq + std::hash::Hash + Send + Sync> IdentityKey for T {}");
+            } else {
+                self.line("impl<T: Clone + Eq + std::hash::Hash> IdentityKey for T {}");
+            }
         }
     }
 
