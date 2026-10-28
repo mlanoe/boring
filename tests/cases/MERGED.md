@@ -47,3 +47,7 @@ with its top-level items prefixed by that name, and prints a `== name ==` header
 | qualified_scenarios | qualified_ctor_positional_args, qualified_struct_literal_positional_args |
 | misc_scenarios_10 | mem_borrow_builtins, monomorphize_fn |
 | misc_scenarios_11 | try_else_nil_if_let, uint_int_cross_eq |
+| width_scenarios | float16_dict_literal_width, float32_dict_literal_width, float64_dict_literal_width, float16_array_annotated_literal |
+| cast_scenarios_2 | cast_bare_field_index, cast_followed_by_operator |
+| index_scenarios | index_by_call, nested_index_write_targets, print_mut_array_field |
+| throws_scenarios | throws_optional_return, throws_optional_else_interp, try_wrap_double_handling, throws_untyped_enum_catch |

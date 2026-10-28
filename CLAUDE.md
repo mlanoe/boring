@@ -305,4 +305,8 @@ Tests generate Cargo projects with their own build dirs (`target/tmp`, `target/t
 - `tools/test-transpile.sh` — transpiler suite (forces `--test-threads=1`).
 - `tools/clean-build.sh` — manual purge of those regenerable artifacts (aborts if cargo is running).
 
+`BORING_FULL_CONFIGS=1` runs all four strict/managed × single/multi configs per transpile case; by default (`tests/transpile.rs`'s `config_enabled`) only `strict+multi` and `managed+single` run, which together cover each axis once and halve the number of generated cargo builds. A skipped config returns early and is reported as `ok`, not `ignored`, so a default `cargo test` pass proves only those two. CI sets the variable (`.github/workflows/ci.yml`).
+
+**Cutting a version** (adding a `## [x.y.z]` section to `CHANGELOG.md`, i.e. renaming `[Unreleased]`) requires a full run first: `BORING_FULL_CONFIGS=1 tools/test.sh` (plus the self-hosted interpreter suites, see above), and the pass count recorded in the version header comes from that run, not from a default one.
+
 `BORING_TEST_KEEP=1` keeps the artifacts for faster re-runs. A bare `cargo test` cleans nothing (CI does this on purpose, to keep its cache). Prefer the wrappers over bare `cargo test` for suites that build generated projects (`transpile`, `*_codegen`, `interpreter_build`, `interpreter_functional`, `screen_*`).

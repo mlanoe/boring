@@ -1,0 +1,73 @@
+# ---- index_by_call ----
+# Regression fixture: indexing (read and write) by a function-call result.
+
+def int index_by_call_find([int] xs, int v):
+    var int r = -1
+    for i in 0..<3:
+        if xs[i] == v:
+            r = i
+    r
+
+def run_index_by_call():
+    mut [int] xs = [10, 20, 30]
+    mut [int] ys = [0, 0, 0]
+    ys[index_by_call_find(xs, 20)] = 5
+    ys[index_by_call_find(xs, 30)] += 2
+    print "{xs[index_by_call_find(xs, 30)]} {ys}"
+
+# ---- nested_index_write_targets ----
+# Regression: a nested index (an index read from another array) used as the
+# outer index of an assignment OR compound-assignment target:
+# `count[lengths[start + i]] += 1`, `lengths[order[i]] = v`,
+# `a[b[c[i]]] += 1`, `self.a[b[i]] = v`.
+
+struct NestedIndexWriteTargetsTable:
+    var mut [int] slots = [0, 0, 0, 0]
+    var mut [int] map = [3, 2, 1, 0]
+
+    def put(int i, int v):
+        slots[map[i]] = v
+        slots[map[i]] += 10
+
+def run_nested_index_write_targets():
+    mut [int] lengths = [1, 2, 1, 0]
+    mut [int] count = [0, 0, 0, 0]
+    mut [int] order = [3, 2, 1, 0]
+    mut [int] offs = [0, 1, 2, 3]
+    mut [int] symbol = [0, 0, 0, 0]
+    let start = 1
+    for i in 0..<2:
+        count[lengths[start + i]] += 1
+        lengths[order[i]] = i
+        symbol[offs[i + 1]] = i
+    mut [int] deep = [0, 0, 0, 0]
+    deep[order[offs[1]]] += 5
+    deep[order[offs[order[3]]]] = 7
+    mut t = NestedIndexWriteTargetsTable()
+    t.put(0, 4)
+    let [int] slots = t.slots
+    print "{count} {lengths} {symbol} {deep} {slots}"
+
+# ---- print_mut_array_field ----
+# Regression: printing/interpolating an array field declared `var mut [T]`
+# (`Type::Mut(Array)`), directly or via an unannotated `let` — both used to emit
+# a bare `println!("{}", v)` with no `BoringFmt`, which doesn't compile.
+
+struct PrintMutArrayFieldTable:
+    var mut [int] slots = [1, 2]
+    mut [string] names = ["a", "b"]
+
+def run_print_mut_array_field():
+    mut t = PrintMutArrayFieldTable()
+    print "{t.slots}"
+    print t.names
+    let q = t.slots
+    print "{q}"
+
+def main() throws:
+    print "== index_by_call =="
+    run_index_by_call()
+    print "== nested_index_write_targets =="
+    run_nested_index_write_targets()
+    print "== print_mut_array_field =="
+    run_print_mut_array_field()

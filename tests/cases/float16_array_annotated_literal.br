@@ -1,9 +1,0 @@
-# Regression test: untyped numeric literals (incl. bare ints) in an array literal with a
-# declared float element type adopt that width: `let [float16] a = [1.5, 2]`.
-def main():
-    let [float16] a = [1.5, 2.0, 3]
-    print "{a[0] as float64} {a[1] as float64} {a[2] as float64}"
-    let [float32] b = [1, 2, -3]
-    print "{b[0] as float64} {b[2] as float64}"
-    let [float64] c = [1, 2.5]
-    print "{c[0]} {c[1]}"

@@ -55,7 +55,7 @@ jobs:
       # test's stdout came back containing a different test's output) and can degrade
       # into a multi-hour+ stall from piled-up build-lock contention.
       - name: Run integration tests (transpiler)
-        run: cargo test --test transpile -- --test-threads=1
+        run: BORING_FULL_CONFIGS=1 cargo test --test transpile -- --test-threads=1
 
   clippy:
     name: Clippy

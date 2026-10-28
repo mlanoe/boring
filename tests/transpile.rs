@@ -86,9 +86,21 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+// By default only two of the four configs run per case -- `strict+multi` and `managed+single`
+// together cover each axis (mode, threading) at least once, and halve the number of generated
+// cargo builds. Set `BORING_FULL_CONFIGS=1` (CI does) to run all four. A skipped config returns
+// before taking `TRANSPILE_TEST_LOCK`, so it costs nothing.
+fn config_enabled(mode_str: &str, threading_str: &str) -> bool {
+    std::env::var_os("BORING_FULL_CONFIGS").is_some()
+        || matches!((mode_str, threading_str), ("strict", "multi") | ("managed", "single"))
+}
+
 static TRANSPILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &str) {
+    if !config_enabled(mode_str, threading_str) {
+        return;
+    }
     // Held for this whole function -- see `TRANSPILE_TEST_LOCK`'s doc comment above for why
     // the `cargo` step alone isn't enough to lock.
     let _guard = TRANSPILE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -255,6 +267,9 @@ fn _keep_run_transpile_case(name: &str) { run_transpile_case(name); }
 // into an external/opaque type (tests/cases/fixtures/ext_geom stands in for something
 // like `bevy`/`glam`) -- has to go through that path instead.
 fn run_transpile_project_case(name: &str, mode_str: &str, threading_str: &str) {
+    if !config_enabled(mode_str, threading_str) {
+        return;
+    }
     // Held for this whole function -- see `TRANSPILE_TEST_LOCK`'s doc comment above for why
     // the `cargo` step alone isn't enough to lock.
     let _guard = TRANSPILE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -366,7 +381,6 @@ transpile_test!(fn_field_struct);
 transpile_test!(structs);
 transpile_test!(collections);
 transpile_test!(error_handling);
-transpile_test!(throws_untyped_enum_catch);
 transpile_test!(protocols);
 transpile_test!(optionals);
 transpile_test!(enums);
@@ -406,12 +420,8 @@ transpile_test!(trait_scenarios);
 transpile_test!(self_scenarios);
 transpile_test!(trait_scenarios_2);
 transpile_test!(trait_scenarios_3);
-transpile_test!(trait_borrow_contract_impls);
 transpile_test!(struct_scenarios);
-transpile_test!(trait_downcast);
-transpile_test!(trait_downcast_build);
 transpile_test!(trait_scenarios_4);
-transpile_test!(trait_default_string_forward);
 
 // `do: ...` used as a value (`let x = do: ...`) whose body contains a `for`
 // loop must evaluate to its tail expression, not silently degrade to `()`
@@ -549,10 +559,7 @@ transpile_test!(supertraits);
 transpile_test!(type_cast);
 transpile_test!(int_literal_overflow_cast);
 transpile_test!(array_index_as_cast);
-transpile_test!(index_by_call);
 transpile_test!(index_cast_expr);
-transpile_test!(nested_index_write_targets);
-transpile_test!(print_mut_array_field);
 transpile_test!(builtin_error_enum);
 transpile_test!(typed_catch_match_error);
 // A type-level method's (`type def`/`type req`/`type set`) `throws` was previously
@@ -596,10 +603,6 @@ transpile_test!(float32_local_var_math);
 transpile_test!(float16_array_literal_width_and_cast);
 transpile_test!(float32_array_literal_width_and_cast);
 transpile_test!(float64_array_literal_width_and_cast);
-transpile_test!(float16_dict_literal_width);
-transpile_test!(float32_dict_literal_width);
-transpile_test!(float64_dict_literal_width);
-transpile_test!(float16_array_annotated_literal);
 transpile_test!(optional_interp_numeric);
 // Top-level `let` constants referenced from a free function, a struct method, AND an
 // enum method — regression test for the transpiler silently dropping the `const`
@@ -777,7 +780,6 @@ transpile_test!(top_level_call_inferred_qualifier_leak);
 // via a real compile+run (the interpreter's object model has no such
 // clone-before-mutate step to get wrong). See tests/cases/
 // var_struct_param_mutation.br's own doc comment.
-transpile_test!(var_struct_param_mutation);
 // A user-declared method/field whose name collides with a builtin Rust Iterator/Vec
 // adapter (`position`, `count`) must dispatch to the user's own declaration, on both
 // a struct AND an enum -- see the file's own doc comment for the full writeup of the
@@ -812,14 +814,12 @@ transpile_test!(option_owned_methods);
 // even when the field/element type is statically known to be numeric —
 // `error[E0599]: no method named 'trim' found for type 'f32'` and friends.
 // `(expr * struct.field) as T` already worked; only the bare form was broken.
-transpile_test!(cast_bare_field_index);
 // Explicit `T&` parameters used to hide the pointee struct from nested
 // field/index/method-result type resolution, making numeric casts emit string
 // parsing (`f32.trim().parse()`). Covers immutable/mutable/rebindable borrows
 // and an explicitly borrowed local alias.
 // Regression: `ord(c) < 32` / `ord(c) << 1` — see tests/cases/cast_lhs_of_lt.br.
 transpile_test!(cast_scenarios);
-transpile_test!(cast_followed_by_operator);
 // Regression: `(if cond: a else: b) as T`, where every branch is an ordinary
 // numeric expression — the if/else's own branches weren't recognized by any
 // of emit_expr_cast's numeric-source checks, so the cast fell through to the
@@ -985,11 +985,9 @@ transpile_test!(mut_scenarios_2);
 // Last-use analysis (`src/transpiler/last_use.rs`): a by-value read that is provably the variable's
 // last use is a Rust move, every other read (loop body, other branch, later closure/defer, same
 // statement as a borrow, ...) must still clone -- compile+run in all four configs.
-transpile_test!(last_use_move);
 transpile_test!(misc_scenarios_8);
 transpile_test!(misc_scenarios);
 transpile_test!(destructured_slice_by_value_reuse);
-transpile_test!(lend_and_read_same_local);
 transpile_test!(lend_and_read_same_local_lock_wrapper);
 
 
@@ -1030,10 +1028,7 @@ transpile_test!(json_scenarios);
 // tests/cases/try_wrap_double_handling.br's own doc comment for the full breakdown.
 // Now registered in tests/run.rs too (it never used `json()`, only `fromJson`, so a
 // real interpreter-side `fromJson` makes both backends agree byte-for-byte).
-transpile_test!(try_wrap_double_handling);
 transpile_test!(throws_call_else_default);
-transpile_test!(throws_optional_return);
-transpile_test!(throws_optional_else_interp);
 transpile_test!(collection_interp);
 
 // docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and `boring build`
@@ -1506,9 +1501,20 @@ transpile_test!(closure_scenarios);
 
 // `[self.field] as [[uint8]]` clones the byte-array field (was E0507), and a method's array param
 // used in several calls compiles. See the fixture's header.
-transpile_test!(bytes_array_field_and_param_reuse);
 transpile_test!(len_int_return);
 transpile_test!(inline_ctor_field_method_call);
+transpile_test!(width_scenarios);
+transpile_test!(cast_scenarios_2);
+transpile_test!(index_scenarios);
+transpile_test!(trait_downcast);
+transpile_test!(trait_downcast_build);
+transpile_test!(trait_default_string_forward);
+transpile_test!(trait_borrow_contract_impls);
+transpile_test!(throws_scenarios);
+transpile_test!(lend_and_read_same_local);
+transpile_test!(last_use_move);
+transpile_test!(var_struct_param_mutation);
+transpile_test!(bytes_array_field_and_param_reuse);
 
 // See tests/cases/closure_pass_body_struct_arg.br (`pass` emitted as a `//` comment).
 transpile_test!(closure_pass_body_struct_arg);

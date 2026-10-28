@@ -1,0 +1,195 @@
+# ---- throws_optional_return ----
+# `throws` fn returning `T?`: implicit and explicit return wrap non-nil values in `some`.
+def string? throws_optional_return_implicit_name() throws:
+    "ada"
+
+def string? throws_optional_return_implicit_nil() throws:
+    nil
+
+def int? throws_optional_return_implicit_int(int a) throws:
+    a + 1
+
+def string? throws_optional_return_explicit_name() throws:
+    return "bob"
+
+def int? throws_optional_return_explicit_int(int a) throws:
+    return a * 2
+
+def int? throws_optional_return_explicit_nil() throws:
+    return nil
+
+def int? throws_optional_return_branchy(int a) throws:
+    if a > 0:
+        return a
+    if a < -5:
+        throw "too small"
+    nil
+
+def run_throws_optional_return():
+    let a = throws_optional_return_implicit_name() else (nil)
+    let b = throws_optional_return_implicit_nil() else (nil)
+    let c = throws_optional_return_implicit_int(4) else (nil)
+    let d = throws_optional_return_explicit_name() else (nil)
+    let e = throws_optional_return_explicit_int(4) else (nil)
+    let f = throws_optional_return_explicit_nil() else (nil)
+    print "{a else ("none")} {b else ("none")} {c else (-1)}"
+    print "{d else ("none")} {e else (-1)} {f else (-1)}"
+    let g = throws_optional_return_branchy(3) else (nil)
+    let h = throws_optional_return_branchy(0) else (nil)
+    let i = throws_optional_return_branchy(-7) else (nil)
+    print "{g else (-9)} {h else (-9)} {i else (-9)}"
+
+# ---- throws_optional_else_interp ----
+# `f() else (d)` on a `throws` fn returning `T?`: the default covers the error and nil.
+def string? throws_optional_else_interp_some_name() throws:
+    "ada"
+
+def string? throws_optional_else_interp_nil_name() throws:
+    nil
+
+def string? throws_optional_else_interp_err_name() throws:
+    throw "boom"
+
+def int? throws_optional_else_interp_some_int(int a) throws:
+    a + 1
+
+def int? throws_optional_else_interp_err_int() throws:
+    throw "boom"
+
+def run_throws_optional_else_interp():
+    print "{throws_optional_else_interp_some_name() else ("x")} {throws_optional_else_interp_nil_name() else ("x")} {throws_optional_else_interp_err_name() else ("x")}"
+    print "{throws_optional_else_interp_some_int(4) else (-1)} {throws_optional_else_interp_err_int() else (-1)}"
+    let a = throws_optional_else_interp_some_name() else ("y")
+    let b = throws_optional_else_interp_nil_name() else ("y")
+    let c = throws_optional_else_interp_err_name() else ("y")
+    print "{a} {b} {c}"
+
+# ---- try_wrap_double_handling ----
+# Regression test for docs/try-wrap-double-handling-bug.md.
+#
+# `fromJson<T>(s)` and `fs.read`/`fs.readLines`/`fs.readBytes` already do their own
+# Result->Option (or, for the fs.* trio, panic-on-error `.unwrap()`) handling in a
+# plain (non-throws) context -- book.md's own tables document `try? fromJson<T>(s)`
+# as *identical* to the plain form. Wrapping such a call in `try? ...` used to add a
+# second, incompatible layer of handling on top of the first:
+#   - `try? fromJson<T>(s)` transpiled to `....ok().ok()` -- doesn't compile
+#     (`.ok()` called twice on what starts as a `Result`, ending as an `Option`).
+#   - `try? fs.read(path)` transpiled to a block ending in a bare (non-Result)
+#     `Arc<str>` with an inner `.unwrap()` (panics on a real read failure) plus a
+#     trailing `.ok()` that then also failed to compile on that non-Result value.
+#   - Separately (found while fixing the above): a `try? EXPR` used as a `T?`-typed
+#     function's tail return expression got wrapped in an extra `Some(...)` on top,
+#     since `try?` wasn't recognized as already producing `Option<T>` --
+#     `Option<Option<T>>` doesn't type-check against a declared `Option<T>` return.
+#
+# All three are covered here, success and failure paths, plus `fs.readLines`/
+# `fs.readBytes` (same "self-handling builtin" shape as `fs.read`). The mutating
+# `fs.*` builtins (`write`/`append`/`mkdir`/`remove`/`rename`/`copy`/`list`) share
+# the exact same fix (see emit_methods.rs's `emit_fs_call_bare`) but aren't exercised
+# by this checked-in, read-only test to avoid filesystem side effects/races across
+# the four mode/threading variants this case runs under -- verified manually instead
+# (build + cargo run against real temp files, both outcomes, sync and async).
+#
+# Reads a fixture file (tests/cases/fixtures/try_wrap_fixture.txt) that ships in the
+# repo -- read-only, so all four mode/threading variants can run concurrently.
+
+@derive(Serialize, Deserialize)
+struct TryWrapDoubleHandlingThing:
+    string name
+
+# Tail-return form -- exactly docs/try-wrap-double-handling-bug.md's repro 1.
+def TryWrapDoubleHandlingThing? try_wrap_double_handling_parse(string s):
+    try? fromJson<TryWrapDoubleHandlingThing>(s)
+
+def run_try_wrap_double_handling():
+    let good = try_wrap_double_handling_parse("{{\"name\": \"ok\"}}")
+    guard let g = good else:
+        print "fromJson: unexpected none"
+        return
+    print "fromJson ok: {g.name}"
+
+    let bad = try? fromJson<TryWrapDoubleHandlingThing>("not json")
+    if let _ = bad:
+        print "fromJson bad: unexpected some"
+    else:
+        print "fromJson bad: none"
+
+    let content = try? fs.read("tests/cases/fixtures/try_wrap_fixture.txt")
+    guard let c = content else:
+        print "fs.read: unexpected none"
+        return
+    print "fs.read ok: {c.length > 0}"
+
+    let missing = try? fs.read("tests/cases/fixtures/does_not_exist.txt")
+    if let _ = missing:
+        print "fs.read missing: unexpected some"
+    else:
+        print "fs.read missing: none"
+
+    let lines = try? fs.readLines("tests/cases/fixtures/try_wrap_fixture.txt")
+    guard let ls = lines else:
+        print "fs.readLines: unexpected none"
+        return
+    print "fs.readLines ok: {ls.length}"
+
+    let lines_missing = try? fs.readLines("tests/cases/fixtures/does_not_exist.txt")
+    if let _ = lines_missing:
+        print "fs.readLines missing: unexpected some"
+    else:
+        print "fs.readLines missing: none"
+
+    let bytes = try? fs.readBytes("tests/cases/fixtures/try_wrap_fixture.txt")
+    guard let bs = bytes else:
+        print "fs.readBytes: unexpected none"
+        return
+    print "fs.readBytes ok: {bs.length}"
+
+    let bytes_missing = try? fs.readBytes("tests/cases/fixtures/does_not_exist.txt")
+    if let _ = bytes_missing:
+        print "fs.readBytes missing: unexpected some"
+    else:
+        print "fs.readBytes missing: none"
+
+# ---- throws_untyped_enum_catch ----
+# Regression test: an enum thrown ONLY from an UNTYPED `throws:` function (no
+# `throws EnumName:` declared anywhere in the program) must still route
+# through `BoringError::Other` with real type information preserved, not get
+# stringified via `Display` into `BoringError::String` — which would make ANY
+# `catch EnumName.Variant:` elsewhere silently never match at runtime. See
+# docs/book.md's "Enum error types are always typed, even from untyped
+# `throws`" (Advanced — Error handling internals).
+#
+# Before the fix: this either failed to compile (rustc E0277 — a plain enum
+# has no `Display` impl unless it's registered as a typed error type) or, once
+# a hand-written `as string:` papered over that, compiled cleanly but
+# `catch StopSignal.Stop:` below never fired — the error surfaced instead as
+# an unhandled-error panic (discovered implementing scratch-boring's
+# `control_stop`).
+
+enum ThrowsUntypedEnumCatchStopSignal:
+    Stop
+
+def throws_untyped_enum_catch_maybe_stop(int n) throws:
+    if n > 0:
+        throw ThrowsUntypedEnumCatchStopSignal.Stop
+    print "continuing: {n}"
+
+def throws_untyped_enum_catch_run(int n):
+    try:
+        throws_untyped_enum_catch_maybe_stop(n)
+    catch ThrowsUntypedEnumCatchStopSignal.Stop:
+        print "caught stop signal"
+
+def run_throws_untyped_enum_catch() throws:
+    throws_untyped_enum_catch_run(1)
+    throws_untyped_enum_catch_run(0)
+
+def main() throws:
+    print "== throws_optional_return =="
+    run_throws_optional_return()
+    print "== throws_optional_else_interp =="
+    run_throws_optional_else_interp()
+    print "== try_wrap_double_handling =="
+    run_try_wrap_double_handling()
+    print "== throws_untyped_enum_catch =="
+    run_throws_untyped_enum_catch()

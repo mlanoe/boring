@@ -168,7 +168,6 @@ interp_test!(fn_field_struct);
 interp_test!(structs);
 interp_test!(collections);
 interp_test!(error_handling);
-interp_test!(throws_untyped_enum_catch);
 interp_test!(tasks);
 interp_test!(channels);
 interp_test!(protocols);
@@ -205,14 +204,10 @@ interp_test!(trait_scenarios);
 interp_test!(self_scenarios);
 interp_test!(trait_scenarios_2);
 interp_test!(trait_scenarios_3);
-interp_test!(trait_borrow_contract_impls);
 interp_test!(var_scenarios);
 interp_test!(var_rebind_owned);
 interp_test!(struct_scenarios);
-interp_test!(trait_downcast);
-interp_test!(trait_downcast_build);
 interp_test!(trait_scenarios_4);
-interp_test!(trait_default_string_forward);
 interp_test!(trait_enum_param);
 interp_test!(numeric);
 interp_test!(float_width_cross_eq);
@@ -349,8 +344,6 @@ interp_test!(numeric_separators);
 interp_test!(task_timeout);
 interp_test!(try_else_block);
 interp_test!(throws_call_else_default);
-interp_test!(throws_optional_return);
-interp_test!(throws_optional_else_interp);
 interp_test!(collection_interp);
 interp_test!(error_match);
 interp_test!(fn_shorthand);
@@ -389,10 +382,6 @@ interp_test!(float32_local_var_math);
 interp_test!(float16_array_literal_width_and_cast);
 interp_test!(float32_array_literal_width_and_cast);
 interp_test!(float64_array_literal_width_and_cast);
-interp_test!(float16_dict_literal_width);
-interp_test!(float32_dict_literal_width);
-interp_test!(float64_dict_literal_width);
-interp_test!(float16_array_annotated_literal);
 interp_test!(optional_interp_numeric);
 // Generic METHOD call via turbofish (`obj.method<T>(...)`, V1 monomorphization
 // extension -- src/transpiler/monomorphize.rs's module doc comment). The
@@ -502,7 +491,6 @@ interp_test!(top_level_call_inferred_qualifier_leak);
 // clone of it. The interpreter (this test) never caught this either -- it
 // was a `--emit-rust`-only codegen bug (see tests/transpile.rs). See
 // tests/cases/var_struct_param_mutation.br's own doc comment.
-interp_test!(var_struct_param_mutation);
 
 // `type def`/`type req` must
 // parse inside an `enum` body, not just a `struct` body. Now registered in
@@ -558,7 +546,6 @@ interp_test!(json_scenarios);
 // the interpreter matches the compiled output byte-for-byte, so the same .expected
 // file is pinned for both backends. (Its sibling tests/cases/json_serde_rename.br
 // stays transpiler-only: the interpreter's `json(v)` *serializer* is still a stub.)
-interp_test!(try_wrap_double_handling);
 
 // docs/self-field-loop-match-borrow-bug.md -- transpiler-only bug (the interpreter
 // never had a borrow-checker to violate: bare/implicit self-field reads always just
@@ -570,9 +557,7 @@ interp_test!(self_field_loop_match_borrow);
 // parameter -- see tests/cases/qualifier_group_param.br's doc comment and the
 // matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
 interp_test!(qualifier_group_param);
-interp_test!(cast_bare_field_index);
 interp_test!(cast_scenarios);
-interp_test!(cast_followed_by_operator);
 interp_test!(if_else_cast_numeric);
 interp_test!(unresolved_field_cast_numeric);
 
@@ -611,12 +596,10 @@ interp_test!(shared_dyn_def_trait_stays_boxed);
 // never invalidated for the caller) -- the interpreter must print the identical output.
 
 // Same case as the transpile_test of the same name (last-use move analysis) -- identical output.
-interp_test!(last_use_move);
 interp_test!(misc_scenarios_8);
 interp_test!(misc_scenarios);
 interp_test!(destructured_slice_by_value_reuse);
 interp_test!(assert_eq_call_field_length);
-interp_test!(lend_and_read_same_local);
 interp_test!(lend_and_read_same_local_lock_wrapper);
 // Interpreter side of tests/actor_field_arg_no_deadlock.rs (the compiled binaries run under a
 // timeout there, since a regression is a hang) -- identical output.
@@ -891,8 +874,19 @@ interp_test!(fn_handle_pass_and_str_arg);
 interp_test!(fn_scenarios);
 interp_test!(optional_scenarios);
 interp_test!(closure_scenarios);
-interp_test!(bytes_array_field_and_param_reuse);
 interp_test!(len_int_return);
+interp_test!(width_scenarios);
+interp_test!(cast_scenarios_2);
+interp_test!(index_scenarios);
+interp_test!(trait_downcast);
+interp_test!(trait_downcast_build);
+interp_test!(trait_default_string_forward);
+interp_test!(trait_borrow_contract_impls);
+interp_test!(throws_scenarios);
+interp_test!(lend_and_read_same_local);
+interp_test!(last_use_move);
+interp_test!(var_struct_param_mutation);
+interp_test!(bytes_array_field_and_param_reuse);
 
 // Multi-line closure whose body is only `pass`, as a struct-ctor argument: `// pass` used to
 // swallow the closing delimiters on the flattened closure line.
