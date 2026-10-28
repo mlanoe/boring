@@ -935,6 +935,10 @@ def Signal? exec_try(mut Interpreter interp, TryStmt s):
         exc_val_opt = interp.take_pending_throw()
     if let exc_val = exc_val_opt:
         let exc_type = value_type_name(exc_val)
+        var string? exc_variant = nil
+        match exc_val.clone():
+            Value.EnumVariant(_, variant, _): exc_variant = variant
+            _: nil
         var handled = false
         var clause_idx = 0
         while not handled and clause_idx < s.catch_clauses.length:
@@ -946,7 +950,12 @@ def Signal? exec_try(mut Interpreter interp, TryStmt s):
             for ct in catch_types:
                 if ct == exc_type or normalize_type_name(ct) == exc_type:
                     type_matches = true
-            let matches = num_types == 0 or type_matches
+            var variant_matches = true
+            if let wanted_variant = clause.variant:
+                variant_matches = false
+                if let actual_variant = exc_variant.clone():
+                    variant_matches = actual_variant == wanted_variant
+            let matches = (num_types == 0 or type_matches) and variant_matches
             if matches:
                 handled = true
                 mut cenv = new_env(interp.current_env)

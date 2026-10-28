@@ -211,6 +211,7 @@ itest!(let_pattern);
 itest!(environment_builtin);
 itest!(result_compat);
 itest!(multi_catch);
+itest!(multi_variant_catch_dispatch);
 itest!(implicit_self);
 itest!(shadowing);
 itest!(struct_spread);
