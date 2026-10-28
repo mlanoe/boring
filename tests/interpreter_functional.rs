@@ -245,6 +245,7 @@ itest!(inline_match);
 itest!(ref_identity);
 itest!(qualifiers_actor);
 itest!(join_handle);
+itest!(join_returns_string);
 itest!(select);
 itest!(task_timeout);
 itest!(error_match);

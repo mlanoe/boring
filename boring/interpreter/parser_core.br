@@ -185,6 +185,9 @@ def string parser_expect_ident(mut Parser p) throws:
 def string parser_expect_ident_or_keyword(mut Parser p) throws:
     let k = p.peek()
     let name = token_kind_name(k)
+    if name == "Join":
+        p.advance()
+        return "join"
     if name == "Ident" or name == "Let" or name == "Var" or name == "Def" or name == "Return" or name == "If" or name == "For" or name == "While" or name == "Match" or name == "Type" or name == "Set" or name == "Get" or name == "In" or name == "Is" or name == "As" or name == "Mod" or name == "Nil" or name == "Wait" or name == "Task" or name == "Use":
         return p.advance().text()
     throw "expected identifier or keyword, got {name}"
