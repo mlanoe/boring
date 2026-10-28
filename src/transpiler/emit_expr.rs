@@ -3461,6 +3461,31 @@ impl Transpiler {
         if let ExprKind::Field(obj, field) = &target.kind {
             if let Some(sn) = self.resolve_struct_name(obj) {
                 let key = format!("{}::{}", sn, field);
+        // Implicit-self whole-field reassignment (`kept = p` inside a method): same as
+        // `self.kept = p`, so the actor/guard/observed wrapping below applies too.
+        if let ExprKind::Var(n) = &target.kind {
+            if n != "self" && !self.known_local_vars.contains(n.as_str())
+                && !self.fn_current_params.contains_key(n.as_str())
+            {
+                if let Some(st) = self.self_type.as_deref() {
+                    let key = format!("{}::{}", st, n);
+                    if self.struct_mutex_fields.contains(&key)
+                        || self.struct_mutex_task_fields.contains(&key)
+                        || self.struct_rwlock_fields.contains(&key)
+                        || self.struct_rwlock_task_fields.contains(&key)
+                        || self.observed_fields.contains_key(&key)
+                    {
+                        let self_target = Expr {
+                            kind: ExprKind::Field(
+                                Box::new(Expr { kind: ExprKind::Var("self".into()), line: target.line, col: target.col, len: 0 }),
+                                n.clone()),
+                            line: target.line, col: target.col, len: target.len,
+                        };
+                        return self.emit_expr_assign(&self_target, value);
+                    }
+                }
+            }
+        }
                 let rhs_already_wrapped = matches!(&value.kind, ExprKind::Var(vn)
                     if self.var_mutex_types.contains(vn.as_str())
                         || self.var_mutex_task_types.contains(vn.as_str())

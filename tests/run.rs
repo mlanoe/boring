@@ -649,6 +649,7 @@ error_test_exact!(error_immutable_let);
 // `all.push(p)`): the interpreter aliased, the transpiled Rust silently cloned. `.clone()` is explicit.
 error_test!(error_mut_param_store);
 interp_test!(mut_param_store_clone);
+interp_test!(mut_param_store_actor);
 // A bare `var` collection (local or parameter) is rebindable only: `.push()`/`v[i] = x`/`d[k] = x`/
 // `s.add()` need `mut`/`var mut` — same content-mutation rule user structs follow.
 error_test_exact!(error_var_collection_content_mutation);

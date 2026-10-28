@@ -1723,7 +1723,9 @@ impl Interpreter {
                         }
                     }
                 }
-                if matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
+                // Implicit-self field write (`kept = p` in a method) stores by value like `self.kept = p`.
+                let implicit_self_field = matches!(&target.kind, ExprKind::Var(n) if env.borrow().resolves_to_self_field(n));
+                if implicit_self_field || matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
                     val = self.stored_copy(value, val, &env);
                 }
                 // The write-back of a host tensor destination field (`desugar_tensor_fields`)
